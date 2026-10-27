@@ -39,8 +39,12 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 | Prefix | Type | Where it may live | Can do |
 | --- | --- | --- | --- |
-| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `artifacts`, and opt-in organization/workspace management |
-| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search` only, and only from your allowed websites |
+| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `chat`, `artifacts`, and opt-in organization/workspace management |
+| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search` by default, and only from your allowed websites. Add `chat` for an answer widget; `web`, `ingest` and `artifacts` need an explicit opt-in and a workspace allowlist |
+
+`search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
+
+Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them by default: grant the `web` scope only to a key limited to specific workspaces, because anyone can copy a browser key from your page source.
 
 A key's type is fixed when you create it; to switch, create a new key. Keys issued before typed prefixes (`dslp_<hex>`) keep working. Create and rotate keys on the [API keys](https://docslurp.io/app/api-keys) page.
 
@@ -175,8 +179,9 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 
 | Operation | HTTP endpoint | SDK | CLI |
 | --- | --- | --- | --- |
-| Upload files | `POST /v1/uploads/bulk` (multipart `files`, up to `MAX_MULTIPART_UPLOAD_BYTES`, 25 MB by default) or a direct upload session (`POST /v1/uploads/direct/sessions`, presigned PUTs, `.../confirm`) for larger files | `upload` (direct session above 20 MB) | `upload` (direct session above 20 MB) |
+| Upload files | `POST /v1/uploads/direct/sessions`, storage PUTs, then poll the session; `POST /v1/uploads/bulk` is the size-limited HTTP fallback | `upload` (direct storage by default) | `upload` (uses the SDK) |
 | Ingest URLs | `POST /v1/uploads/url` | `upload({ urls })` | Use SDK/HTTP |
+| Extract (upload, auto-deleted after retention) | `POST /v1/extracts/{bulk,url,direct/sessions}`; `GET`/`DELETE /v1/extracts/:id`, `GET /v1/extracts/:id/download` ([extract.md](extract.md)) | `extract`, `getExtract`, `getExtractDownloadUrl` | `extract`, `extract-status`, `extract-download` |
 | Full run progress | `GET /v1/runs/:runId/progress` | `getRunProgress`; `getRun` returns only `run` | `status`, `status --watch` |
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
 | Raw run/stage/document events | `GET /v1/runs/:runId/events/stream` | `streamRun` | Use SDK/HTTP |
@@ -192,11 +197,12 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
+| Export as a zip | `POST /v1/exports`, poll `GET /v1/exports/:id`, then `GET /v1/exports/:id/download` | Use HTTP | Use HTTP |
 | Retention | `PATCH /v1/organizations/:orgId` or `/v1/workspaces/:workspace` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
 | Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
 | Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
-| Read / update organization | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
+| Read / update organization (name, slug, retention, `allowChinaProviders`) | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
 | Organization details / access | `GET /v1/organizations/:orgId/details` / `access` | `getOrganizationDetails` / `getOrganizationAccess` | Use SDK/HTTP |
 | List members | `GET /v1/organizations/:orgId/members` | `listOrganizationMembers` | Use SDK/HTTP |
 | Invite / list / revoke invites | `POST` / `GET /v1/organizations/:orgId/invites`, `DELETE …/invites/:inviteId` | `inviteOrganizationMember` / `listOrganizationInvites` / `revokeOrganizationInvite` | Use SDK/HTTP |
@@ -205,6 +211,98 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | List / revoke organization keys | `GET` / `DELETE /v1/organizations/:orgId/api-keys` | `listOrganizationApiKeys` / `revokeOrganizationApiKeys` | Use SDK/HTTP |
 
 Guides: [document versions and retention](document-versions.md) and [config-change jobs and estimates](config-change-jobs.md).
+
+## Upload completion
+
+A successful storage PUT means the bytes reached storage. It does not mean the
+document has been processed. Direct uploads have three milestones:
+
+| Milestone | Evidence | Next step |
+| --- | --- | --- |
+| Bytes stored | Each storage PUT succeeds | Wait for the session result |
+| Ingestion accepted | The session has a non-null `result` containing `run.id` | Follow that run |
+| Processing finished | The run reaches `completed` | Read the extracted content or search it |
+
+### Known-size files
+
+1. Create a session with `POST /v1/uploads/direct/sessions`. For each file, send
+   `filename`, `mimeType` and the exact `sizeBytes`. Save the returned `sessionId`.
+2. Transfer each file using its returned `mode`. For `single`, PUT the bytes to
+   `putUrl` with the supplied `headers`. For `multipart`, PUT each byte range to
+   its `pendingParts[].url`; the range starts at
+   `(partNumber - 1) * partSize` and contains that part's `sizeBytes`.
+3. Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` until
+   `result` is non-null, or the session becomes `failed` or `aborted`.
+4. Follow `result.run.id` through the run status or progress endpoints.
+
+The server uses a single PUT below 32 MiB and multipart at or above 32 MiB,
+with 8 MiB parts. Use the returned descriptors rather than hard-coding those
+values. The reconciler reads storage's part list, checks the part numbers and
+sizes, assembles the object, and verifies the stored file. It starts ingestion
+after all files in the session are ready. Clients do not need to call
+`/files/complete` or `/confirm` for known-size files.
+
+The API checks pending sessions every 15 seconds in bounded batches, with
+backoff between attempts. This is not a completion-time guarantee. A Tigris
+object notification makes a session eligible for the next check; polling still
+works without notifications. A webhook does not replace multipart assembly or
+prove that an unknown-size stream has ended.
+
+### Streams without a known size
+
+`client.upload(stream, { filename, mimeType })` handles multipart transfer and
+completion. At EOF, it waits for every part PUT to succeed, sends the final byte
+count and ordered part manifest, then waits for the accepted ingestion response.
+You do not call a completion method yourself when using `upload()`.
+
+For a custom HTTP client:
+
+1. Omit `sizeBytes` when creating the file's session entry.
+2. Request signed part URLs from
+   `POST /v1/uploads/direct/sessions/:sessionId/files/:fileId/parts/sign` with
+   `{ "partNumbers": [1, 2] }`. Upload parts using the returned `partSize` from
+   session creation; only the final part may be shorter.
+3. After EOF and successful PUTs, send
+   `POST /v1/uploads/direct/sessions/:sessionId/files/complete` with
+   `{ "fileId": "FILE_ID", "sizeBytes": 12345, "parts": [{ "partNumber": 1, "etag": "STORAGE_ETAG" }] }`.
+   Use the actual final byte count and the ETag returned by each PUT.
+4. Poll the session for `result`, then follow `result.run.id`.
+
+The server verifies the stored parts. It cannot infer EOF from an idle stream
+or from its current byte total. The `/confirm` endpoint remains available as an
+explicit fallback, but automatic ingestion does not require it.
+
+### Timeouts, retries and abandoned uploads
+
+Keep the session ID when implementing your own transfer. A polling timeout is
+not proof that ingestion failed: check the same session before creating another
+upload. Repeated status reads and duplicate notifications reuse that session's
+accepted result. A new session is a new upload, not a retry of the old one. Direct sessions do
+not support `Idempotency-Key`; that key applies to HTTP bulk and URL ingestion.
+
+Signed URLs expire after 15 minutes. A session GET without `statusOnly=true`
+returns fresh transfer URLs for pending files; use `statusOnly=true` when you only
+need status. Treat signed URLs as credentials. Send your DocSlurp bearer key to
+the API, never to storage.
+
+`failed` and `aborted` sessions are terminal. Read the session's `error` field;
+a retry message on a pending session is not a terminal failure. To abandon a
+session, POST to its `/abort` endpoint. Aborting after ingestion has started
+returns 409; follow the run instead. Unfinished transfers expire after 24 hours
+and are marked `aborted`; sessions already starting ingestion continue recovery.
+
+The SDK attempts to abort its session on transfer or acceptance-wait errors.
+That cleanup can lose a race with ingestion, so an SDK timeout alone does not
+prove that no run was created. Use the low-level session methods when you need
+to retain a session ID and control recovery yourself.
+
+`POST /v1/uploads/bulk` remains available for multipart/form-data through the
+API, with a default 25 MB limit (`MAX_MULTIPART_UPLOAD_BYTES`). This is a separate
+transport from object-storage multipart. In the SDK, select it with
+`directUpload: false`.
+
+Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
+for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
@@ -454,18 +552,48 @@ Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `w
 | `files`, `pages`, `bytes` | Files by type and status, page totals, bytes per file and per page, and a file-size histogram. |
 | `text.perPage` | Plain-text bytes of each page's native text layer (whitespace collapsed), as a histogram with p50/p95. `zeroTextPages` and `nearZeroTextPages` (under 64 bytes) count pages with no usable text layer. |
 | `text.indexedPerPage` | Bytes of indexed chunk text per page, after vision and chunking. |
-| `images` | Embedded images per page, pages with images, and `scannedLookingPages` (images and almost no text layer: scans and photos of text). |
+| `images` | Embedded images per page, pages with images, and `scannedLookingPages` (images and almost no text layer: scans and photos of text). Pages of failed files are excluded: a crash during extraction says nothing about page triage. |
 | `extraction` | Pages read with vision versus the native text layer, and pages vision skipped: not selected by page triage, past the per-file vision page limit, failed, or stopped by the run cost cap. |
 | `searchability` | Searchable pages (a page with chunks), unsearchable pages grouped by reason, pages still processing, and up to 20 example pages. |
+| `failures` | Files that failed: `total`, counts `byReason` and up to 20 `examples`, each with the failed `stage`, a classified `reason` (`ocr_unavailable`, `extractor_failed`, `unsupported_format`, `unreadable_file`, `timeout`, `provider_failed`, `policy_blocked`, `cancelled`, `unknown`), reviewed `message`, whether `retryable` and a short sanitized `detail` (first line of the recorded error with paths, URLs, e-mail addresses and credential-looking values removed). The raw error stays in the database and logs. |
 | `stages`, `languages`, `media`, `tables` | Failed and skipped stages, detected languages, audio and video files (and minutes), and table-heavy pages. |
 | `performance` | Cost (`costCents`, the same figure as the run records: billed spend plus the flagged unbilled compute estimate, `computeEstimated`), `billedCostCents` (billed spend only, what the run cost cap is enforced against), pages per minute, minutes per 100 pages and pages per $1, from run wall time including queueing. |
 | `coverage` | Per-page text and image facts exist for files processed from 2026-10-14; older files report them as not recorded. |
 | `config` | The pipeline settings that shaped what was observed (vision, vision page limit, playbook, OCR language, tables, embeddings, chunking, video, cost cap, privacy mode), each with why it matters here. |
 | `recommendations` | Deterministic rules with the evidence, the expected effect, `cost.centsPer100Pages` for future uploads, `cost.reprocessCents` for re-running the affected files, and the pipeline `patch` an editor can apply. |
 
-Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `vision.forceAllPages` and a page limit of up to 32); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
+Video frame reading defaults to enabled for new workspaces and configurations that omit `mediaVideo.enabled`. Explicit `false` disables frame reading even for silent video, and bills the file as audio (see below). Every organization gets the same video limits (up to 2 hours per file); only credits and budgets bound what a video costs. This workspace policy still requires the worker's `MEDIA_VIDEO_ENABLED=true`, remote-media support, privacy permission and available budget. The report shows workspace policy, not proof that frames were processed. Changing the default does not reprocess existing uploads; reprocessing remains explicit.
 
-In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`, session only) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings.
+Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `vision.forceAllPages` and a page limit of up to 32); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. A failed file never produces a vision recommendation; `retry-failed-files` names the cause and says when retrying will fail the same way (for example `ocr_unavailable`). Singular and plural wording follows the counts. Every recommendation id is classified in `INGEST_RECOMMENDATION_CATALOG`: those with a `patch` (`turn-on-vision`, `vision-all-pages`, `preserve-tables`, `turn-on-embeddings`, `turn-on-video`) can be prepared in chat with `proposeWorkspaceSettings` as `{changes: {pipeline: <patch>}}`; the rest are reprocess-only, informational or outside the proposal allowlist, and a test enforces that. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
+
+In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`; API keys need a server key with `workspaces:manage`) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings (server keys need `ingest`). The report's `permissions.canEdit` tells you whether the caller may do either.
+
+## Keep workspace content current
+
+A server key with the `ingest` scope can keep the documents it uploads current without a dashboard session. Use it from CI to reindex a docs site, drop pages you removed, or pick up extraction improvements.
+
+| Operation | HTTP endpoint | SDK |
+| --- | --- | --- |
+| Reprocess a run's documents as new versions | `POST /v1/runs/:runId/reprocess` with optional `stageFrom` or `stages` | `reprocessRun` |
+| Price it first | `POST /v1/runs/:runId/reprocess/estimate` | `reprocessEstimate` |
+| Delete a document | `DELETE /v1/documents/:docId` | `deleteDocument` |
+| Replace a document's tags | `PUT /v1/documents/:docId/tags` with `{ tags }` | `setDocumentTags` |
+| Reprocess, retag or delete many documents | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
+| Act on an ingest report recommendation | `POST /v1/workspaces/:workspace/ingest-report/reprocess` (`ingest`) or `…/apply` (`workspaces:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
+
+- Browser keys never get these, whatever their scopes.
+- A key never exceeds its user's role: the user must be able to edit the workspace. Keys restricted to specific workspaces reach only documents and runs in those workspaces. A request naming anything outside them answers 404 before any change, including bulk requests where only one document is out of scope.
+- The bulk `export-artifacts` action is a read and needs `artifacts` instead.
+- Reprocessing and recommendations spend credits; budgets and spend caps apply as for uploads. The audit log records the key that made each change.
+- Uploading identical bytes again reuses the earlier extraction, so a re-upload doesn't pick up extraction improvements. Reprocess the run (`stageFrom: "extract-markdown"` re-extracts and reindexes) instead.
+
+```ts
+const client = createDocSlurpClient({ apiKey: process.env.DOCSLURP_API_KEY });
+// Re-extract a docs ingestion with the current worker.
+const { job } = await client.reprocessRun(runId, { stageFrom: "extract-markdown" });
+// Drop documents for pages the site no longer has.
+await client.bulkDocuments({ action: "delete", documentIds: removedIds });
+```
 
 ## Organization access and management
 
@@ -779,34 +907,32 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-The table comes from the organization's billing state, never from the key: an organization that has only its starter credits is a *starter* organization and gets the `free` table; once it buys credits (a top-up, an auto top-up, or credits added by DocSlurp) it is *funded* and gets the `paid` table, for good. An API key gets its organization's table, and a signed-in user gets the paid table when any organization they belong to is funded. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits, so a high value on a starter organization does not unlock funded limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Funding takes effect within a minute. Default per-minute limits on docslurp.io:
+Every account gets the same table, whatever its billing state: buying credits does not change it. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Default per-minute limits on docslurp.io:
 
-| Category | Starter (`free`) | Funded (`paid`) | Per client IP |
-| --- | ---: | ---: | ---: |
-| `upload` | 60 | 120 | 90 |
-| `search` | 240 | 600 | 240 |
-| `chat-ai` | 60 | 120 | 90 |
-| `read` | 600 | 1,500 | 1,200 |
-| `write` | 300 | 600 | 300 |
-| `webhook` | 120 | 600 | 600 |
+| Category | Per account | Per client IP |
+| --- | ---: | ---: |
+| `upload` | 120 | 90 |
+| `search` | 600 | 240 |
+| `chat-ai` | 120 | 90 |
+| `read` | 1,500 | 1,200 |
+| `write` | 600 | 300 |
+| `webhook` | 600 | 600 |
 
-These are abuse protection, not a spending control: credits and budgets bound what you spend. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
+These are abuse protection, not a spending control: credits and budgets bound what you spend. No feature, model, media type, setting or rate limit depends on whether an organization has bought credits. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_ACCOUNT_SEARCH_MAX`) or `API_RATE_LIMIT_<CATEGORY>_MAX`.
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.account`: `starter`, `funded` or `ip`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing and buying credits, `rel="help"` for these docs), and the message says where to go. A starter organization's limit says that buying credits raises it:
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`, which names the table: `account-*`, `ip-*` or `self-hosted-*`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
 
 ```json
 {
   "error": {
     "code": "rate_limited",
-    "message": "Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at https://docslurp.io/app/billing#bl-topup, or wait for Retry-After and try again.",
+    "message": "Please wait a moment before trying again. Rate limits: https://docslurp.io/docs/http#rate-limits-and-headers",
     "details": {
       "category": "chat-ai",
-      "policy": "free-chat-ai",
-      "account": "starter",
+      "policy": "account-chat-ai",
       "retryAfterSeconds": 12,
       "links": {
         "billing": "https://docslurp.io/app/billing",
-        "buyCredits": "https://docslurp.io/app/billing#bl-topup",
         "docs": "https://docslurp.io/docs/http#rate-limits-and-headers"
       }
     },
@@ -829,15 +955,15 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 | Video (frames read) | 3 Rich pages per minute |
 | Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
 | Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
-| Chat answer | 2.5 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
+| Chat answer | 1 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
 | Document summary (`summarize`) | 0.5 per document |
 | Structured fields (`outputSchema`) | 1 per started 10 pages per document |
 | Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
 | Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
 
-Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
+Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
 
-Organizations that have bought credits (funded) run up to 250 workers at once and get the higher rate limits; starter organizations run up to 50. Larger ceilings and dedicated (private) machines are sold by sales.
+Organizations that have bought credits (funded) run up to 250 workers at once; starter organizations run up to 50. Rate limits are the same for both. Larger ceilings and dedicated (private) machines are sold by sales.
 
 Auto top-up is off by default. Turn it on from the billing page with a threshold in credits, a refill amount (a pack or a custom amount of at least $10) and a required monthly cap; every charge emails a receipt and appears in the credit ledger, and it pauses after two failed charges. `GET /v1/billing/overview` returns the balance, funding, worker ceiling, auto top-up settings, this month's spend by category and a monthly forecast built from what you store and the last 30 days of searches, chat answers and pages.
 
@@ -853,7 +979,7 @@ On docslurp.io the message names the page to visit (for example "Your organizati
 
 ## Authentication and integration boundaries
 
-- Create and revoke keys on the [API keys](https://docslurp.io/app/api-keys) page, or with the session key API above. `ingest` allows uploads and URL ingestion, `search` allows search and chat, and `artifacts` allows document reads. Run progress accepts any of these scopes. Workspace state also requires a server key.
+- Create and revoke keys on the [API keys](https://docslurp.io/app/api-keys) page, or with the session key API above. `ingest` allows uploads and URL ingestion and, on server keys, [keeping that content current](#keep-workspace-content-current) (reprocess, retag, delete). `search` allows search, `chat` generated answers, and `artifacts` document reads. Run progress accepts any of these scopes. Workspace state also requires a server key.
 - Organization scopes are opt-in. `organizations:manage` also allows organization reads, but doesn't bypass role, organization, personal-membership or last-owner checks.
 - Send `Authorization: Bearer <key>`. Keep server keys on the server. Route frontend requests through your own authenticated backend and enforce your application's access rules there.
 - Allowed websites restrict where a browser key works. They don't make a server key safe to use in a browser.
@@ -861,13 +987,7 @@ On docslurp.io the message names the page to visit (for example "Your organizati
 - `formatSearchContext` formats search results as evidence for any LLM. Keep document text separate from your instructions, and keep the structured citations.
 - The Node SDK and CLI need Node.js 20+ and are ESM. From other languages, use HTTP; there is no Python SDK.
 
-## Primary sponsor
-
-[![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
-
-[17th Street Labs](https://17thstreetlabs.com) is DocSlurp's primary sponsor.
-
-### Document tags
+## Document tags
 
 Apply tags to every accepted document in an upload, including streamed, URL, and direct-to-storage uploads:
 
@@ -883,4 +1003,46 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 
 `GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
 
-Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. Existing dashboard-session endpoints `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access. Tag changes take effect without re-ingestion.
+Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
+
+## Export documents as a zip
+
+Export one document or a workspace's current documents as an organized zip. The worker builds the archive in the background and stages it in object storage; the API never holds it in memory.
+
+```bash
+curl -X POST "$DOCSLURP_URL/v1/exports" -H "Authorization: Bearer $KEY" \
+  -H "content-type: application/json" -d '{"workspaceId":"default","content":"markdown"}'
+# 202 { "export": { "id": "exp_…", "status": "queued", "notifyEmail": false, "expiresAt": "…" } }
+curl "$DOCSLURP_URL/v1/exports/exp_…" -H "Authorization: Bearer $KEY"     # status: queued → running → ready
+curl -L -o export.zip "$DOCSLURP_URL/v1/exports/exp_…/download" -H "Authorization: Bearer $KEY"
+```
+
+Pass `documentId` for one document, or `workspaceId` (UUID, slug or `default`) for a workspace; omit both to export the organization's default workspace. `content` is `markdown` (default) or `all`:
+
+```text
+Finance/                      one folder per document (a document export is just its folder)
+  Q3 plan/
+    Q3 plan.md                extracted Markdown for the whole document
+    pages/page-0001.md        the same text page by page (documents with more than one page)
+    structured.json           schema fields, when the workspace has a schema
+    metadata.json             filename, type, status, page count, version, tags
+    original/Q3 plan.pdf      "all" only: the uploaded file
+    images/page-0001.png      "all" only: rendered page images
+    outputs/html.html         "all" only: readable pipeline outputs (HTML, canonical document, …)
+  README.md                   the layout, a document table, and any file that could not be included
+```
+
+Workspace exports hold current versions only (no superseded, archived or purged documents), up to 5,000 documents; a document still processing contributes its `metadata.json`. Files the PII policy withholds are never exported, and the README lists them. Deleting or purging a document in an export withdraws the export. Limits:
+
+- **Size:** exports estimated over **3 GB** are refused with `413 payload_too_large`; export Markdown only or one document at a time. The worker also stops adding files at that size and lists the rest in `README.md`.
+- **Email:** exports estimated over **250 MB** are emailed to the requester when ready (`notifyEmail: true`), so nobody has to keep a tab open.
+- **Lifetime:** every link works for **7 days** from when the export is ready (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, workspace access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
+- **Limits:** three unfinished exports per user, and 20 exports or 20 GB (estimated) per user per day (`429 rate_limited`). Asking for the same export again within an hour returns the one already in flight or finished. A single document must have finished processing (`409` otherwise).
+
+Sessions and server keys with `artifacts` can export; keys stay within their organization and workspace restrictions. Objects live in the private bucket under `exports/<orgId>/<workspaceId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
+
+## Primary sponsor
+
+[![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
+
+[17th Street Labs](https://17thstreetlabs.com) is DocSlurp's primary sponsor.

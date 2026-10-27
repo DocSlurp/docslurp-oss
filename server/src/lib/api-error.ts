@@ -4,7 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
 
-type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504;
+type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
@@ -85,7 +85,9 @@ const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-enco
 export function envelopeForError(c: Context, error: unknown, status: number, originalHeaders?: Headers): Response {
   const { code: named } = error as { code?: unknown };
   const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
-  const thrown = error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined;
+  const spendDetails = (error as { spendDetails?: unknown } | null)?.spendDetails;
+  const thrown = { ...(spendDetails && typeof spendDetails === "object" ? spendDetails : {}),
+    ...(error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined) };
   // A blocked spend knows whether the org's auto top-up is on (no "turn on auto top-up" link then).
   const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
   const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);

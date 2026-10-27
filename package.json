@@ -18,7 +18,7 @@
     "test": "pnpm test:packages && pnpm --filter @docslurp/worker test && pnpm --filter @docslurp/server test",
     "test:packages": "pnpm -r --filter @docslurp/cli --filter @docslurp/contrib-astro --filter @docslurp/contrib-search-compat --filter @docslurp/sdk --filter @docslurp/shared test && pnpm test:scripts",
     "test:mcp": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/server exec vitest run src/lib/mcp-http.test.ts src/lib/mcp-pi.test.ts src/__tests__/mcp-oauth.test.ts src/__tests__/mcp-routes.test.ts src/__tests__/mcp-oauth-client.db.test.ts src/__tests__/mcp-pi-agent.db.test.ts src/__tests__/chat-completions.test.ts src/__tests__/chat-completions-openai-sdk.test.ts",
-    "test:scripts": "node scripts/node-test.mjs scripts/*.test.mjs scripts/lib/*.test.mjs packages/contrib-astro/*.test.mjs",
+    "test:scripts": "node scripts/node-test.mjs scripts/*.test.mjs scripts/lib/*.test.mjs scripts/multisearch-quality/*.test.mjs packages/contrib-astro/*.test.mjs",
     "dev:api": "pnpm --filter @docslurp/server dev",
     "start:api": "pnpm --filter @docslurp/server start",
     "dev": "pnpm dev:api",
@@ -71,7 +71,10 @@
       "prisma",
       "protobufjs",
       "sharp"
-    ]
+    ],
+    "patchedDependencies": {
+      "postgres@3.4.9": "patches/postgres@3.4.9.patch"
+    }
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.1154.0",

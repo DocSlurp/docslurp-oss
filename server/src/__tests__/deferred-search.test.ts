@@ -26,7 +26,7 @@ const { materializeForQuery, estimatedPageMaterializeCredits } = await import(".
 const { runDeferredPageSearch } = await import("../search/deferred/deferred-search.js");
 const { buildSearchSessionMetadata } = await import("../search/session.js");
 const { getDeferredContext } = await import("../search/deferred/deferred-context.js");
-const { searchRoutes } = await import("../routes/search.js");
+const { searchRoutes, workspaceChatRoutes } = await import("../routes/search.js");
 type Deps = import("../search/deferred/materialize-client.js").MaterializeDeps;
 type PageState = import("../search/deferred/materialize-client.js").PageState;
 
@@ -468,7 +468,7 @@ describe("out-of-credit search over HTTP", () => {
   });
 });
 
-describe("GET /chat/stream deferred events", () => {
+describe("GET /v1/chat/stream deferred events", () => {
   function buildApp() {
     const app = new Hono();
     app.use("*", async (c, next) => {
@@ -476,6 +476,7 @@ describe("GET /chat/stream deferred events", () => {
       await next();
     });
     app.route("/search", searchRoutes);
+    app.route("/chat", workspaceChatRoutes);
     return app;
   }
 
@@ -487,7 +488,7 @@ describe("GET /chat/stream deferred events", () => {
       sink?.({ type: "page-ready", documentId: "d1", pages: [4, 5] });
       return { id: "m1", sessionId: "chat-1", searchSessionId: "s-1", answer: "ok" };
     });
-    const response = await buildApp().request("/search/chat/stream?q=hello&workspace=ws-1");
+    const response = await buildApp().request("/chat/stream?q=hello&workspace=ws-1");
     expect(response.status).toBe(200);
     const text = await response.text();
     const events = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);

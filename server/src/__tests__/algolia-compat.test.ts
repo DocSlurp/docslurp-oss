@@ -44,7 +44,12 @@ vi.mock("../services/search.js", () => ({
 
 vi.mock("../services/search-controls.js", () => ({
   getWorkspaceSearchSettings: getWorkspaceSearchSettingsMock,
-  upsertWorkspaceSearchSettings: upsertWorkspaceSearchSettingsMock,
+  mutateWorkspaceSearchSettingsForUser: async (args: { workspaceId: string; userId: string; mutate: (current: unknown) => unknown }) => {
+    const current = await getWorkspaceSearchSettingsMock(args.workspaceId, args.userId);
+    const next = args.mutate(current);
+    await upsertWorkspaceSearchSettingsMock(next);
+    return next;
+  },
   userCanEditWorkspaceSettings: userCanEditWorkspaceSettingsMock
 }));
 

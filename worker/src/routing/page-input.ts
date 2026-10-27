@@ -15,6 +15,7 @@ import {
 } from "@docslurp/shared";
 
 import { loadProbeBinding } from "./probe/binding.js";
+import type { Recogniser } from "./probe/ocr-layer.js";
 import { NativeProbeOpenError, looksEncrypted, lockedRow, probeNativePdf } from "./probe/probe.js";
 
 export interface ProbeRow {
@@ -71,16 +72,18 @@ export type ProbeRunner = (args: {
   thumbPx?: number;
   /** Re-OCR a band of pages whose text lies over a page image and report how well the layer agrees (needs tesseract). */
   verifyOcrLayer?: boolean;
+  /** Sandboxed OCR for the layer check (`sandboxedTesseract`); absent leaves OCR layers unverified. */
+  recognise?: Recogniser;
   signal?: AbortSignal;
 }) => Promise<string>;
 
 /** Native runner: probes in-process through the native-pdf binding and emits the same JSON lines. Throws when the binding is absent. */
 export function createNativeProbeRunner(): ProbeRunner {
-  return async ({ pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, signal }) => {
+  return async ({ pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, recognise, signal }) => {
     const loaded = loadProbeBinding();
     if (!loaded.ok) throw new NativeProbeOpenError("NATIVE_PDF_UNAVAILABLE", `native-pdf probe unavailable: ${loaded.reason}`);
     const lines: string[] = [];
-    for await (const row of probeNativePdf(loaded.binding, { pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, signal })) lines.push(JSON.stringify(row));
+    for await (const row of probeNativePdf(loaded.binding, { pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, recognise, signal })) lines.push(JSON.stringify(row));
     return lines.join("\n") + "\n";
   };
 }
@@ -129,6 +132,8 @@ export interface BuildPageInputsOptions {
   thumbPx?: number;
   /** Verify OCR layers against the page image (default true; costs ~1 s CPU per OCR-layer page only). */
   verifyOcrLayer?: boolean;
+  /** Sandboxed OCR for that check; without it OCR layers stay unverified. */
+  recognise?: Recogniser;
   /** classify-route artifact for the document, when it already ran. */
   routing?: AdaptiveRoutingArtifact | null;
   documentFormat?: string;
@@ -234,6 +239,7 @@ export async function buildPageInputs(options: BuildPageInputsOptions): Promise<
     thumbDir: options.thumbDir,
     thumbPx: options.thumbPx,
     verifyOcrLayer: options.verifyOcrLayer ?? true,
+    recognise: options.recognise,
     signal: options.signal,
   });
   const rows = parseProbeOutput(stdout);

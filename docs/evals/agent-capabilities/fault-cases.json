@@ -1,0 +1,6 @@
+[
+  {"id":"required-tool-server-failure-v1","execution":"scripted-fault-injection","question":"Read the uploaded evidence and answer its question.","scenario":"Required tool returns a native 503 error; real SDK mock model attempts a confident final answer."},
+  {"id":"required-tool-timeout-v1","execution":"scripted-fault-injection","question":"Read the uploaded evidence and answer its question.","scenario":"Required tool exceeds its time budget."},
+  {"id":"required-tool-access-denied-v1","execution":"scripted-fault-injection","question":"Read the uploaded evidence and answer its question.","scenario":"Required tool denies access; this must not become an empty-result success."},
+  {"id":"model-deadline-without-answer-v1","execution":"scripted-fault-injection","question":"Read the uploaded evidence and answer its question.","scenario":"Model exceeds the turn deadline before producing an answer."}
+]

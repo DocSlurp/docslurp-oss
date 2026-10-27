@@ -7,13 +7,13 @@ Choose a tool based on the result you need:
 | Tool | Result | AI generation |
 | --- | --- | --- |
 | `listWorkspaces` | Authorized workspaces, slugs, default, document/page counts and processing status | None |
-| `upload` | Up to 10 presigned file PUT URLs, or start ingestion from remote URLs | Workspace ingestion settings |
-| `completeUpload` | Verify uploaded files and start ingestion | Workspace ingestion settings |
+| `upload` | Storage transfer descriptors for up to 10 files, small inline files, or direct server-side ingestion from remote URLs | Workspace ingestion settings |
+| `completeUpload` | Optional single-PUT completion fallback; normal uploads finalize automatically | Workspace ingestion settings |
 | `suggestQueries` | Prior queries and suggestions | None |
 | `search` | Portable text passages with document/page citation metadata | None |
 | `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
 | `openUploader` | MCP Apps upload widget; only listed when `DOCSLURP_MCP_APPS_UI_ENABLED=true` ([details](#mcp-apps-uploader-openuploader)) | None |
-| `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations. With a `runId` the report also has `files.items` (up to 50 files, newest first: `documentId`, `filename`, `mimeType`, `status`, `pages`, `searchablePages`, and `error` as `Failed during <stage>` or `Processing failed`) and `run` (`id`, `status`, `durationMs` once terminal) | None |
+| `getUploadStatus` | Session acceptance with `sessionId`, or how the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
 
 Search and chat need only a question:
 
@@ -23,7 +23,7 @@ Search and chat need only a question:
 
 Without `workspace`, tools use the organization default workspace. Add `"workspace":"legal-contracts"` (a workspace ID, slug or name: `"Legal Contracts"` finds the same workspace) to target another one. The `upload` tool creates the workspace when a name matches none of yours, so agents should pass a new name only when the user asks for a new workspace; every other tool answers `workspace_not_found`. See [Workspaces](https://docslurp.io/docs/http#workspaces).
 
-Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. These tools require `search` scope and check workspace access against the authenticated organization.
+Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check workspace access against the authenticated organization. OAuth clients get both unless they request narrower scopes (`search`, `chat`, `read`, `ingest`).
 
 Run multiple retrieval queries in one call:
 
@@ -47,7 +47,7 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 }
 ```
 
-Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, and `searchSettingsEstimate` and `reprocessEstimate` are available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
+Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, `reprocessEstimate` needs `ingest` on a server key, and `searchSettingsEstimate` is available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
@@ -61,7 +61,7 @@ What it does:
 
 - `openUploader` is read-only. It resolves an existing workspace (default if omitted), lists up to 50 workspaces the caller may upload to and returns the limits (10 files per batch, 5 GiB per file). It never creates a workspace and never returns upload URLs. An unknown workspace name fails with `Workspace not found`.
 - The workspace list and the resolved workspace follow the same rule as the upload route: members who can write to a workspace, and viewers of the default workspace, may upload. Viewers of other read-only shares may not, and those workspaces are not listed.
-- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. MCP `upload` always requests single-part uploads (`singlePart: true`), so every file is one PUT and the 32 MiB multipart threshold does not apply. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
+- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. The widget requests single-part uploads (`singlePart: true`), so every file is one PUT and the 32 MiB multipart threshold does not apply. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
 - Presigned URLs live 15 minutes (900 s). The widget does not send file bytes through DocSlurp or the MCP endpoint.
 - Widget tool calls carry `_meta` `docslurp/origin: "mcp-app-upload"` and `docslurp/widgetVersion`. The server records both values in the MCP request log and span, so widget traffic can be told apart from model traffic. Only these two whitelisted values are recorded, never tool arguments. Hosts may strip `_meta`; a missing tag means the origin is unknown, not that the call came from the model.
 
@@ -88,6 +88,7 @@ The server returns `_meta.ui.csp.connectDomains` on the `ui://docslurp/upload` r
 
 - With an `endpoint` parameter, the endpoint's origin. If `pathStyle=false`, also the bucket virtual-host origin (`https://<bucket>.<endpoint host>`).
 - AWS S3 without `endpoint`: the regional origin (`https://s3.<region>.amazonaws.com`) and the virtual-hosted origin (`https://<bucket>.s3.<region>.amazonaws.com`).
+- With `DOCSLURP_STORAGE_PUBLIC_BUCKET_URL`, also the HTTPS bucket-alias origin. The alias takes precedence over `STORAGE_PUBLIC_ENDPOINT` when signing both single PUTs and multipart parts.
 - Plus every origin in `MCP_UI_CONNECT_DOMAINS`.
 - If `STORAGE_URI` has an `endpoint` that is not a valid URL, the server logs it once and derives no storage domains; it does not fail other MCP requests.
 
@@ -183,6 +184,49 @@ Self-hosted MinIO caveat: the Compose stack signs URLs against `http://minio:900
 
 Every widget tool call is one POST to `/v1/mcp`. The limiter classifies by URL path, and every `/v1/mcp` path falls in the `search` bucket (`classifyRateLimitCategory`), so widget calls share the limit with the model's own searches. The widget polls `getUploadStatus` every 2 s at first, backing off to 5 s, pauses while the widget is hidden, and stops after 30 minutes or when the run finishes. One open widget uses roughly 12 to 30 calls per minute while polling. A 429, or a run paused for credits, slows polling to every 30 s; other transient errors back off up to 15 s. Uploads themselves go to the bucket and do not touch the limiter. Moving status polling into the `read` bucket is a planned follow-up.
 
+## Upload files and follow completion
+
+Call `upload` with file metadata, including the exact `sizeBytes`. Save its
+`sessionId` and transfer bytes using the returned descriptors: one PUT for
+`mode: "single"`, or the listed part URLs and byte ranges for `mode: "multipart"`.
+Never send your DocSlurp API key or OAuth token to storage.
+
+Call `getUploadStatus({ sessionId: "UPLOAD_SESSION_ID" })` until the session has
+an accepted `result`, or reports `failed` or `aborted`. The server assembles
+known-size multipart files and starts ingestion automatically. `completeUpload`
+is an optional fallback for single-PUT sessions; it is not a required next step.
+
+Acceptance means a run exists, not that extraction has finished. Follow the
+returned run ID for processing progress. If a status request times out, check
+the same session before starting another upload. For unknown-size streams, use
+the SDK's `upload()` or the [HTTP stream completion flow](https://docslurp.io/docs/http#streams-without-a-known-size).
+
+### Public URLs and clients without network access
+
+For a file that is already public, call `upload({ urls: ["https://…/report.pdf"] })`.
+DocSlurp's server downloads each URL itself with an SSRF-checked direct fetch. It
+does not use the web search or crawl tools, and the agent needs no network access.
+Redirects are refused, so pass the final URL.
+
+Some hosted agents run code in a sandbox whose firewall blocks storage hosts, so
+signed PUTs fail even though every other tool works. Allowing the upload host
+(`f.docslurp.io` on hosted DocSlurp) in the client's network settings fixes the
+PUT path. Without that, send small files inline:
+
+```json
+{ "inlineFiles": [
+  { "filename": "notes.md", "text": "# Meeting notes\n…" },
+  { "filename": "scan.pdf", "contentBase64": "JVBERi0xLjcK…" }
+] }
+```
+
+Each item carries exactly one of `text` (UTF-8) or `contentBase64` (standard or
+URL-safe). Up to 10 files and 512 KiB of decoded bytes per call fit the 1 MiB MCP
+request limit. `mimeType` is optional; the extension decides when it is omitted.
+Inline files go through the same intake as multipart uploads, so ingestion starts
+immediately. The response carries workspace and run IDs for `getUploadStatus`;
+there is no `sessionId`. Reuse `idempotencyKey` when you retry.
+
 ## Testing with real clients
 
 `pnpm test:mcp` runs the MCP and OpenAI-compatible client tests. None of them needs
@@ -251,7 +295,7 @@ for authentication boundaries, feature flags and the API parity roadmap.
 
 ## Protocol and file-handling conventions
 
-These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. A completion call verifies the whole batch; it does not trust an agent's claim that PUT succeeded.
+These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage, except for small `inlineFiles` from clients that cannot reach it. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. The server verifies stored files before starting ingestion; it does not trust an agent's claim that PUT succeeded.
 
 The catalog uses valid case-sensitive tool names, deterministic scope-filtered discovery, JSON Schema inputs, mutation annotations, structured results with text fallback, and `isError` for execution failures. Authorization remains enforced server-side independently of annotations; OAuth tokens are not forwarded to storage.
 

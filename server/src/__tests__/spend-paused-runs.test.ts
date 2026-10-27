@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const sqlMock = vi.fn();
+const sqlMock = Object.assign(vi.fn(), { begin: vi.fn() });
 vi.mock("../db.js", () => ({ sql: sqlMock }));
 vi.mock("../lib/temporal.js", () => ({ signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn() }));
 
@@ -17,6 +17,7 @@ describe("spend-paused run sweep", () => {
 
   beforeEach(() => {
     sqlMock.mockReset();
+    sqlMock.begin.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(sqlMock));
     signals.pause.mockClear();
     signals.resume.mockClear();
   });
@@ -31,6 +32,11 @@ describe("spend-paused run sweep", () => {
           { id: "run-blocked", org_id: "org-blocked", workspace_id: "ws-b", user_id: "u1", pause_reason: "credit_exhausted" },
         ]);
       }
+      if (query.includes("select id, org_id, workspace_id, user_id, pause_reason from workspace_runs")) {
+        const id = values[0] as string;
+        return Promise.resolve([{ id, org_id: id === "run-ok" ? "org-ok" : "org-blocked", workspace_id: "ws", user_id: "u1", pause_reason: "credit_exhausted" }]);
+      }
+      if (query.includes("from grant_credit_lease(")) return Promise.resolve([{ lease_remaining: 0.5, available_credits: 10, outstanding_credits: 0.5, block_reason: null }]);
       if (query.includes("org_spend_status")) return Promise.resolve([status(available[values[0] as string] ?? 0)]);
       if (query.includes("update workspace_runs")) {
         updates.push(values.find((value) => typeof value === "string" && value.startsWith("run-")) as string);

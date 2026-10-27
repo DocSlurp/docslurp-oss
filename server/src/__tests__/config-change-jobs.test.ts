@@ -126,12 +126,43 @@ describe("config-change jobs", () => {
       [indexConfigHash(before)]: before,
       [indexConfigHash(indexConfigOf(embeddingChange().pipeline))]: indexConfigOf(embeddingChange().pipeline),
     });
-    const [run] = await sql<{ job_id: string }[]>`select job_id from workspace_runs where id = ${applied!.job!.id}`;
+    const [run] = await sql<{ job_id: string; ready: boolean }[]>`select job_id, creation_ready_at is not null as ready from workspace_runs where id = ${applied!.job!.id}`;
     expect(run!.job_id).toBe(applied!.job!.id);
+    // Published for processing: run start and run-start recovery only pick up runs with creation_ready_at.
+    expect(run!.ready).toBe(true);
     const [child] = await sql<{ reindex_of: string }[]>`select reindex_of from documents where run_id = ${applied!.job!.id} order by id limit 1`;
     expect(child!.reindex_of).toMatch(/^d\d$/);
     const [count] = await sql<{ n: number }[]>`select count(*)::int as n from documents where run_id = ${applied!.job!.id}`;
     expect(count!.n).toBe(2);
+  });
+
+  it("never re-indexes an extract document into a kept run (council finding: extract content outliving its extract)", async () => {
+    await seed({ credits: 10_000 });
+    const extractId = "ext_" + "e".repeat(32);
+    const prefix = `extracts/o1/${extractId}`;
+    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, expires_at)
+      values (${extractId}, 'o1', 'w', 'u1', ${prefix}, 48, now() + interval '2 days')`;
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, extract_id, storage_prefix)
+      values ('ext-run', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, 1, ${extractId}, ${prefix})`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('dx', 'o1', 'u1', 'w', 'ext-run', 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'completed', 5, ${`docslurp:extract:${extractId}:dx`})`;
+
+    const { applied } = await patch(embeddingChange());
+    const copies = await sql<{ reindex_of: string; source_key: string }[]>`select reindex_of, source_key from documents where run_id = ${applied!.job!.id}`;
+    expect(copies.map((copy) => copy.reindex_of).sort()).toEqual(["d0", "d1"]);
+    expect(copies.some((copy) => copy.source_key.startsWith("extracts/"))).toBe(false);
+
+    // The database refuses an extract source outside its own extract run, whatever path tries it.
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
+      values ('dx-copy', 'o1', 'u1', 'w', ${applied!.job!.id}, 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'queued', 5, 'dx', 'dx')`).rejects.toThrow(/extract source outside its own extract run/);
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('dx-other', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', ${`extracts/o1/ext_${"f".repeat(32)}/raw/x.pdf`}, 'queued', 1)`).rejects.toThrow(/extract source/);
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('dx-wrong', 'o1', 'u1', 'w', 'ext-run', 'x.pdf', 'application/pdf', 'u1/raw/x.pdf', 'queued', 1)`).rejects.toThrow(/outside the extract prefix/);
+    // Nor may a kept document take an extract's version key.
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('dx-key', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', 'u1/raw/k.pdf', 'queued', 1, ${`docslurp:extract:${extractId}:dx`})`).rejects.toThrow(/extract version key/);
+    await sql`delete from extracts`;
   });
 
   it("creates no job for a search-only or new-uploads change", async () => {
@@ -168,8 +199,8 @@ describe("config-change jobs", () => {
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
     await sql`update organizations set credit_balance_cents = 10000 where id = 'o1'`;
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(applied!.job!.runIds.length);
-    const [run] = await sql<{ status: string; blocked_reason: string | null }[]>`select status, blocked_reason from workspace_runs where id = ${applied!.job!.id}`;
-    expect(run).toEqual({ status: "queued", blocked_reason: null });
+    const [run] = await sql<{ status: string; blocked_reason: string | null; ready: boolean }[]>`select status, blocked_reason, creation_ready_at is not null as ready from workspace_runs where id = ${applied!.job!.id}`;
+    expect(run).toEqual({ status: "queued", blocked_reason: null, ready: true });
   });
 
   it("A to B then B to C mid-flight: cancels the B job, re-queues every document for C, ends with only C", async () => {

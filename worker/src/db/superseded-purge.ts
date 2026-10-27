@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
@@ -14,7 +15,8 @@ import { lockWorkspaceGraph, refreshGraphElements } from "../graph/graph-store.j
 import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
-import { lanceDbMaintenanceSettings, requestLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
+import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
+import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
 /**
  * Superseded-version purge.
@@ -75,7 +77,17 @@ export interface PurgeStorage {
 }
 
 /** Deletes the rows of the given documents from one LanceDB table (one commit). */
-export type DeleteVectorRows = (args: { uri: string; table: string; documentIds: string[] }) => Promise<void>;
+export type DeleteVectorRows = (args: {
+  uri: string;
+  table: string;
+  documentIds: string[];
+  /**
+   * Also compact the table and prune every older version now (cleanupOlderThan: now), so the
+   * deleted rows' text and vectors leave the bucket instead of lingering in old fragments for
+   * the version-retention window. Set for expired extracts.
+   */
+  purgeHistory?: boolean;
+}) => Promise<void>;
 
 /** Drops a whole LanceDB table (org deletion). Missing tables are not an error. */
 export type DropVectorTable = (args: { uri: string; table: string }) => Promise<void>;
@@ -227,6 +239,11 @@ type ClaimedDocument = {
   replacement_run_id: string | null;
   replacement_user_id: string | null;
   shared_with_dedup_copies: boolean;
+  /**
+   * A live dedup copy in the same workspace still serves this version's LanceDB
+   * rows. Copies in other workspaces have their own rows in their own database.
+   */
+  vectors_shared: boolean;
   /** A partial reprocess still reads this version's storage artifacts. */
   artifacts_reused: boolean;
   source_shared: boolean;
@@ -250,7 +267,7 @@ export function purgeConfig(): SupersededPurgeOptions & { intervalMs: number } {
 }
 
 /** Deletes documents' rows from a LanceDB table, retrying commit conflicts with concurrent writers. */
-export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: tableName, documentIds }) => {
+export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: tableName, documentIds, purgeHistory }) => {
   if (documentIds.length === 0) return;
   for (const documentId of documentIds) {
     if (!SAFE_DOCUMENT_ID.test(documentId)) throw new Error(`Unsafe document id for LanceDB delete: ${documentId}`);
@@ -268,7 +285,12 @@ export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: 
           await table.delete(`"documentId" IN (${ids})`);
         }
         const maintenance = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
-        if (maintenance.enabled) await requestLanceDbMaintenance(uri, tableName, maintenance);
+        if (purgeHistory) {
+          // Keep the durable cleanup row unless compaction and history pruning actually succeed.
+          await requireLanceDbMaintenance(uri, tableName, { ...maintenance, versionRetentionMs: 0 });
+        } else if (maintenance.enabled) {
+          await requestLanceDbMaintenance(uri, tableName, maintenance);
+        }
         return;
       } catch (error) {
         if (attempt >= 4 || !/incompatible transaction|commit conflict/i.test(String(error))) throw error;
@@ -318,13 +340,24 @@ export async function forgetEmbeddingReuseRefsForKeys(
 }
 
 /** Purge storage whose deletes also forget embedding reuse refs into the deleted artifacts. */
-function forgettingEmbeddingReuseRefs(sql: Sql<Record<string, unknown>>, storage: PurgeStorage): PurgeStorage {
+function forgettingEmbeddingReuseRefs(sql: Sql<Record<string, unknown>>, storage: PurgeStorage, purgingDocumentId: string | null = null): PurgeStorage {
   return {
     bucket: storage.bucket,
     listKeys: (options) => storage.listKeys(options),
     deleteKeys: async (keys) => {
-      await forgetEmbeddingReuseRefsForKeys(sql, storage.bucket, keys);
-      await storage.deleteKeys(keys);
+      // A recovered upload may reuse its raw key in a new document after the
+      // old run's cleanup was queued. Recheck ownership at deletion time.
+      const sources = keys.filter(key => key.includes("/raw/"));
+      const retained = new Set(sources.length ? (await sql<{ source_key: string }[]>`
+        select source_key from documents where source_key = any(${sql.array(sources)})
+          and purged_at is null and id is distinct from ${purgingDocumentId}
+        union
+        select f.source_key from upload_session_files f join upload_sessions s on s.id = f.session_id
+        where f.source_key = any(${sql.array(sources)}) and s.status in ('initializing', 'pending', 'uploading', 'ingesting')
+      `).map(row => row.source_key) : []);
+      const deletable = keys.filter(key => !retained.has(key));
+      await forgetEmbeddingReuseRefsForKeys(sql, storage.bucket, deletable);
+      await storage.deleteKeys(deletable);
     },
   };
 }
@@ -365,7 +398,7 @@ export async function purgeSupersededDocuments(
       await sql.begin(async (tx) => {
         const client = tx as unknown as Sql<Record<string, unknown>>;
         // Deletes in this transaction also drop embedding reuse refs into deleted artifacts.
-        const txStorage = forgettingEmbeddingReuseRefs(client, storage);
+        const txStorage = forgettingEmbeddingReuseRefs(client, storage, candidateId);
         const [doc] = await client<ClaimedDocument[]>`
           select d.id, d.workspace_id, d.org_id, d.user_id, d.run_id, d.source_key, d.superseded_by_document_id,
             replacement.run_id as replacement_run_id,
@@ -374,6 +407,11 @@ export async function purgeSupersededDocuments(
               select 1 from documents copy
               where copy.deduped_from_document_id = d.id and copy.purged_at is null
             ) as shared_with_dedup_copies,
+            exists (
+              select 1 from documents copy
+              where copy.deduped_from_document_id = d.id and copy.purged_at is null
+                and copy.workspace_id = d.workspace_id
+            ) as vectors_shared,
             exists (
               select 1 from documents copy
               where copy.reused_from_document_id = d.id and copy.purged_at is null
@@ -405,26 +443,15 @@ export async function purgeSupersededDocuments(
           return;
         }
 
-        // Dedup copies reuse this version's artifacts and vectors; keep those
-        // until the last copy is gone. Its own derived rows are still removed.
-        if (!doc.shared_with_dedup_copies) {
-          const vectors = await client<VectorIndexRow[]>`
-            select distinct backend, embedding_model, dimension
-            from vector_indexes where document_id = ${doc.id}
-          `;
-          for (const vector of vectors) {
-            if (vector.backend !== "lancedb") continue;
-            const location = VectorNamespaceManager.getEmbeddingLocation(
-              options.lancedbRoot, doc.org_id, vector.embedding_model, vector.dimension,
-            );
-            await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
-          }
-          // Partial reprocesses copy stage outputs but point at this version's
-          // storage artifacts; their vectors are their own, so only the
-          // artifacts stay.
-          if (!doc.artifacts_reused) {
-            await txStorage.deleteKeys(await artifactKeys(client, txStorage, doc, options.deleteSources));
-          }
+        // Dedup copies reuse this version's artifacts (any workspace) and, in
+        // its own workspace, its vectors; keep those until the last such copy
+        // is gone. Its own derived rows are still removed.
+        if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
+        // Partial reprocesses copy stage outputs but point at this version's
+        // storage artifacts; their vectors are their own, so only the
+        // artifacts stay.
+        if (!doc.shared_with_dedup_copies && !doc.artifacts_reused) {
+          await txStorage.deleteKeys(await artifactKeys(client, txStorage, doc, options.deleteSources));
         }
 
         const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
@@ -475,11 +502,30 @@ export async function purgeSupersededDocuments(
   return result;
 }
 
+/** Deletes a document's rows from its workspace's LanceDB database(s). */
+async function deleteDocumentVectors(
+  client: Sql<Record<string, unknown>>,
+  doc: ClaimedDocument,
+  options: SupersededPurgeOptions,
+  deleteVectorRows: DeleteVectorRows,
+): Promise<void> {
+  const vectors = await client<VectorIndexRow[]>`
+    select distinct backend, embedding_model, dimension from vector_indexes where document_id = ${doc.id}
+  `;
+  for (const vector of vectors) {
+    if (vector.backend !== "lancedb") continue;
+    const location = VectorNamespaceManager.getEmbeddingLocation(
+      options.lancedbRoot, doc.org_id, doc.workspace_id, vector.embedding_model, vector.dimension,
+    );
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+  }
+}
+
 /**
  * Archives a retained superseded version: removes everything search reads
  * (chunks, vectors, graph evidence, staleness, deferred page vectors/maps)
  * and keeps pages, artifacts and page images for browsing. Vector rows shared
- * with live dedup copies stay until the last copy is gone.
+ * with live dedup copies in the same workspace stay until the last copy is gone.
  */
 async function archiveDocument(
   client: Sql<Record<string, unknown>>,
@@ -488,18 +534,7 @@ async function archiveDocument(
   deleteVectorRows: DeleteVectorRows,
   archiveTables: readonly string[],
 ): Promise<void> {
-  if (!doc.shared_with_dedup_copies) {
-    const vectors = await client<VectorIndexRow[]>`
-      select distinct backend, embedding_model, dimension from vector_indexes where document_id = ${doc.id}
-    `;
-    for (const vector of vectors) {
-      if (vector.backend !== "lancedb") continue;
-      const location = VectorNamespaceManager.getEmbeddingLocation(
-        options.lancedbRoot, doc.org_id, vector.embedding_model, vector.dimension,
-      );
-      await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
-    }
-  }
+  if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
   const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
   for (const table of archiveTables) {
     await client`delete from ${client(table)} where document_id = ${doc.id}`;
@@ -633,13 +668,30 @@ type CleanupRow = {
 
 type VectorLocation = { uri: string; table: string };
 
-const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
+const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 
-function resolveVectorLocation(lancedbRoot: string, orgId: string, target: VectorTarget): VectorLocation | null {
+/** A queued vector target in its workspace's LanceDB database; null when it cannot be resolved safely. */
+function resolveVectorLocation(lancedbRoot: string, orgId: string, workspaceId: string, target: VectorTarget): VectorLocation | null {
   if (target.backend !== "lancedb") return null;
   if ("uri" in target && target.uri && target.table) return { uri: target.uri, table: target.table };
-  if (!("embeddingModel" in target) || !SAFE_ORG_ID.test(orgId)) return null;
-  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, target.embeddingModel, target.dimension);
+  if (!("embeddingModel" in target) || !SAFE_ID.test(orgId) || !SAFE_ID.test(workspaceId)) return null;
+  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, workspaceId, target.embeddingModel, target.dimension);
+}
+
+function legacyLocationsFor(lancedbRoot: string, orgId: string, payload: Record<string, unknown>): VectorLocation[] {
+  if (!orgId.trim()) return [];
+  const model = typeof payload.embeddingModel === "string" ? payload.embeddingModel : null;
+  const dimension = typeof payload.dimension === "number" ? payload.dimension : null;
+  return [
+    ...(model && dimension ? legacyEmbeddingLocations(lancedbRoot, orgId, model, dimension) : []),
+    legacyOrgTable(lancedbRoot, orgId),
+  ];
+}
+
+/** vector_table queue payloads name the workspace whose database holds the table. */
+function payloadWorkspaceId(payload: object): string {
+  const workspaceId = (payload as { workspaceId?: unknown }).workspaceId;
+  return typeof workspaceId === "string" ? workspaceId : "";
 }
 
 const locationKey = (location: VectorLocation) => `${location.uri}#${location.table}`;
@@ -765,8 +817,8 @@ async function cleanDeletedDocuments(
   // Deletes in this transaction also drop embedding reuse refs into deleted artifacts.
   const storage = forgettingEmbeddingReuseRefs(client, rawStorage);
   const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
-  // Dedup copies share vectors and artifacts; a partial reprocess shares only
-  // artifacts (its vectors are its own).
+  // Dedup copies share artifacts, and in the same workspace vectors too; a
+  // partial reprocess shares only artifacts (its vectors are its own).
   const vectorOwners = rows.filter((row) => !row.shares_vectors);
   const owned = rows.filter((row) => !row.keep_shared_artifacts);
 
@@ -777,22 +829,24 @@ async function cleanDeletedDocuments(
       select payload, org_id from storage_cleanup_queue
       where kind = 'vector_table' and org_id = any(${client.array(orgIds)})
     `).flatMap((row) => {
-      const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", { ...row.payload, backend: "lancedb" });
+      const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), { ...row.payload, backend: "lancedb" });
       return location ? [locationKey(location)] : [];
     }),
   );
-  const byTable = new Map<string, { location: VectorLocation; documentIds: Set<string> }>();
+  const byTable = new Map<string, { location: VectorLocation; documentIds: Set<string>; purgeHistory: boolean }>();
   for (const row of vectorOwners) {
     for (const target of row.vector_targets) {
-      const location = resolveVectorLocation(options.lancedbRoot, row.org_id, target);
+      const location = resolveVectorLocation(options.lancedbRoot, row.org_id, row.workspace_id, target);
       if (!location || droppedTables.has(locationKey(location))) continue;
-      const group = byTable.get(locationKey(location)) ?? { location, documentIds: new Set<string>() };
+      const group = byTable.get(locationKey(location)) ?? { location, documentIds: new Set<string>(), purgeHistory: false };
       group.documentIds.add(row.document_id);
+      // An expired extract's text must not survive in the table's older versions.
+      if (row.source_key?.startsWith("extracts/")) group.purgeHistory = true;
       byTable.set(locationKey(location), group);
     }
   }
-  for (const { location, documentIds } of byTable.values()) {
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds] });
+  for (const { location, documentIds, purgeHistory } of byTable.values()) {
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
   }
 
   const keys = new Set<string>();
@@ -851,8 +905,19 @@ async function cleanDeletedDocuments(
   await client`delete from document_cleanup_queue where document_id = any(${client.array(rows.map((row) => row.document_id))})`;
 }
 
-/** The document a run artifact key belongs to: `<user>/<run>/<kind>/<documentId>[./]...`. */
-function artifactOwner(key: string): { prefix: string; documentId: string } | null {
+/**
+ * The document a run artifact key belongs to: `<user>/<run>/<kind>/<documentId>[./]...`,
+ * or `extracts/<org>/<extract>/<kind>/<documentId>[./]...` for an extract run, whose
+ * root is three segments (read as two, `extracts/<org>/` would span every extract of the org).
+ */
+export function artifactOwner(key: string): { prefix: string; documentId: string } | null {
+  if (key.startsWith("extracts/")) {
+    const [, org, extract, , file] = key.split("/");
+    const documentId = file?.split(".")[0];
+    if (!org || !/^[A-Za-z0-9_-]{1,128}$/.test(org) || !extract || !/^ext_[0-9a-f]{32}$/.test(extract)) return null;
+    if (!documentId || !SAFE_DOCUMENT_ID.test(documentId)) return null;
+    return { prefix: `extracts/${org}/${extract}/`, documentId };
+  }
   const [user, run, , file] = key.split("/");
   const documentId = file?.split(".")[0];
   if (!user || !run || !documentId || !SAFE_DOCUMENT_ID.test(documentId)) return null;
@@ -952,7 +1017,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix";
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -965,7 +1030,7 @@ const SAFE_RUN_PREFIX = /^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_-]+\/$/;
 /**
  * Drains storage_cleanup_queue: whole run prefixes (every artifact of a deleted
  * run in one listing loop, instead of one listing per document) and whole
- * LanceDB tables (an org's vector tables after org deletion). Entries for runs
+ * LanceDB tables (a workspace's vector tables after workspace or org deletion). Entries for runs
  * that were still in flight wait out `not_before` so late writes are caught.
  */
 export async function drainStorageCleanupQueue(
@@ -998,6 +1063,22 @@ export async function drainStorageCleanupQueue(
         claimed = row;
         if (row.kind === "storage_prefix") {
           if (!SAFE_RUN_PREFIX.test(row.target)) throw new Error(`Refusing unsafe storage prefix: ${row.target}`);
+          // Direct-upload recovery deliberately reuses the session ID as its
+          // run ID. An old cleanup record must not remove the recovered run's
+          // new artifacts, or sources while intake is between attempts.
+          const runId = row.target.split("/")[1]!;
+          const [owner] = await client`
+            select 1 from workspace_runs where id = ${runId}
+            union all
+            select 1 from upload_sessions where id = ${runId}
+              and status in ('initializing', 'pending', 'uploading', 'ingesting')
+            limit 1
+          `;
+          if (owner) {
+            await client`update storage_cleanup_queue set not_before = now() + interval '1 day' where id = ${row.id}`;
+            result.purged += 1;
+            return;
+          }
           const workspaceId = typeof row.payload.workspaceId === "string" ? row.payload.workspaceId : null;
           const kept = await referencedDocumentsUnderPrefix(client, txStorage, workspaceId, row.target);
           const keep = (key: string) => [...kept].some((documentId) => belongsToDocument(key, documentId));
@@ -1013,15 +1094,23 @@ export async function drainStorageCleanupQueue(
             result.purged += 1;
             return;
           }
+        } else if (row.kind === "vector_prefix") {
+          await purgeWorkspaceVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload));
         } else {
-          const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", {
-            ...(row.payload as VectorTarget),
-            backend: "lancedb",
-          });
-          if (!location) throw new Error(`Unresolvable vector table: ${row.target}`);
-          await dropVectorTable(location);
-          await client`delete from vector_index_outbox where table_key = ${locationKey(location)}`;
-          await client`delete from vector_index_tables where table_key = ${locationKey(location)}`;
+          // Queued before workspaces had their own databases (migration 0082 marks them):
+          // a deleted org's org-level tables, dropped with their legacy names.
+          const locations = row.payload.legacyLayout === true
+            ? legacyLocationsFor(options.lancedbRoot, row.org_id ?? "", row.payload)
+            : [resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), {
+                ...(row.payload as VectorTarget),
+                backend: "lancedb",
+              })];
+          if (locations.length === 0 || locations.some((location) => !location)) throw new Error(`Unresolvable vector table: ${row.target}`);
+          for (const location of locations as VectorLocation[]) {
+            await dropVectorTable(location);
+            await client`delete from vector_index_outbox where table_key = ${locationKey(location)}`;
+            await client`delete from vector_index_tables where table_key = ${locationKey(location)}`;
+          }
         }
         await client`delete from storage_cleanup_queue where id = ${row.id}`;
         result.purged += 1;
@@ -1047,6 +1136,55 @@ export async function drainStorageCleanupQueue(
     console.log(`[storage-cleanup] cleaned=${result.purged} failed=${result.failed}`);
   }
   return result;
+}
+
+/**
+ * Removes everything under a deleted workspace's LanceDB root
+ * (`<root>/<orgId>/<workspaceId>/`): the vector_table drops before it cover the
+ * tables Postgres knew about; this also takes tables of models no document
+ * indexes any more and the directories. Object-storage roots must live in the
+ * artifact bucket (the sweep has no client for another one); other roots are
+ * left to their table drops with a warning.
+ */
+async function purgeWorkspaceVectorPrefix(
+  client: Sql<Record<string, unknown>>,
+  storage: PurgeStorage,
+  lancedbRoot: string,
+  orgId: string,
+  workspaceId: string,
+): Promise<void> {
+  const root = VectorNamespaceManager.getWorkspaceRoot(lancedbRoot, orgId, workspaceId);
+  const target = workspaceVectorPrefixTarget(root, storage.bucket);
+  if (target.kind === "local") {
+    await rm(target.path, { recursive: true, force: true });
+  } else if (target.kind === "bucket") {
+    await purgePrefix(storage, target.prefix, () => false);
+  } else {
+    console.warn(`[storage-cleanup] cannot purge ${root}: not a local path or the artifact bucket; known tables were dropped`);
+  }
+  // Their write and maintenance bookkeeping go with them.
+  await client`delete from vector_index_outbox where lance_uri like ${`${root}/%`}`;
+  await client`delete from vector_index_tables where lance_uri like ${`${root}/%`} or table_key like ${`${root}/%`}`;
+}
+
+/** Where a workspace root lives: a local directory, a key prefix in the artifact bucket, or elsewhere. */
+export function workspaceVectorPrefixTarget(
+  root: string,
+  bucket: string,
+): { kind: "local"; path: string } | { kind: "bucket"; prefix: string } | { kind: "unsupported" } {
+  const scheme = /^([a-z0-9+]+):\/\//i.exec(root)?.[1]?.toLowerCase();
+  if (!scheme) return { kind: "local", path: root };
+  if (scheme === "file") return { kind: "local", path: decodeURIComponent(new URL(root).pathname) };
+  if (scheme === "s3" || scheme === "s3a" || scheme === "s3+ddb") {
+    const rest = root.slice(scheme.length + 3);
+    const slash = rest.indexOf("/");
+    const rootBucket = slash < 0 ? rest : rest.slice(0, slash);
+    const key = slash < 0 ? "" : rest.slice(slash + 1).replace(/\/+$/, "");
+    // Two safe segments at least (<org>/<workspace>), never a bucket root.
+    if (rootBucket !== bucket || key.split("/").length < 2) return { kind: "unsupported" };
+    return { kind: "bucket", prefix: `${key}/` };
+  }
+  return { kind: "unsupported" };
 }
 
 /** Lists and deletes every key under a prefix, except kept ones, until none remain. */

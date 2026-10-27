@@ -491,6 +491,139 @@
       "when": 1792706400000,
       "tag": "0069_default_document_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1792792800000,
+      "tag": "0070_admin_credit_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1792792800001,
+      "tag": "0071_stripe_credit_grant_terminal_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1792792800002,
+      "tag": "0072_document_text_byte_counters",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1792792800003,
+      "tag": "0073_retire_superseded_pending_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1792792800004,
+      "tag": "0074_document_page_renders",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1792792800005,
+      "tag": "0075_backfill_verified_upload_source_bytes",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1792792800006,
+      "tag": "0076_retire_replaced_pending_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1792792800007,
+      "tag": "0077_page_render_quality",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1792792800008,
+      "tag": "0078_automatic_upload_finalization",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1792792800009,
+      "tag": "0079_page_render_dpi",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1792792800010,
+      "tag": "0080_workspace_web_tools",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1792792800020,
+      "tag": "0081_api_key_chat_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1792792800030,
+      "tag": "0082_workspace_vector_databases",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1792792800040,
+      "tag": "0083_lancedb_workspace_followups",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1792792800050,
+      "tag": "0084_documents_workspace_failed_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1792792800100,
+      "tag": "0085_document_exports",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1792792800200,
+      "tag": "0086_org_china_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1792792800250,
+      "tag": "0087_search_sessions_workspace_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1792792800300,
+      "tag": "0088_extract_mode",
+      "breakpoints": true
     }
   ]
 }

@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -25,6 +25,7 @@ import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
+import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import {
   type ArtifactStore,
   cleanupTempFile,
@@ -815,7 +816,7 @@ async function embedLocalChunks(args: {
           : new Error("aborted");
       }
 
-      const runner = await localEmbeddingBatchRunner(args.profile.model, args.profile.normalize, args.signal);
+      const runner = await localEmbeddingBatchRunner(args.profile.model, args.profile.normalize, args.signal, localEmbeddingPooling(args.profile.modelUri));
       let runMsTotal = 0;
       const inferenceStartedAt = Date.now();
       const minBatchSize = Math.max(
@@ -831,7 +832,12 @@ async function embedLocalChunks(args: {
         minBatchSize,
         maxBatchSize,
       );
-      const vectors: number[][] = [];
+      const vectors: number[][] = new Array(args.chunks.length);
+      // Batches are padded to their longest text, so mixing short and long chunks wastes
+      // compute on padding. Embedding in length order (and restoring input order
+      // below) packs similar lengths together; vectors are unchanged up to float noise.
+      const order = args.chunks.map((_, i) => i);
+      if (sortByLengthEnabled()) order.sort((a, b) => args.chunks[a]!.length - args.chunks[b]!.length);
 
       for (let index = 0; index < args.chunks.length;) {
         if (args.signal?.aborted) {
@@ -840,14 +846,13 @@ async function embedLocalChunks(args: {
             : new Error("aborted");
         }
 
-        const batch = args.chunks.slice(index, index + batchSize);
+        const ids = order.slice(index, index + batchSize);
+        const batch = ids.map((i) => args.chunks[i]!);
         const output = await runner.run(batch);
         runMsTotal += output.runMs;
-        vectors.push(
-          ...readEmbeddingVectors(output, batch.length).map((vector) =>
-            fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize),
-          ),
-        );
+        readEmbeddingVectors(output, batch.length).forEach((vector, k) => {
+          vectors[ids[k]!] = fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize);
+        });
         index += batch.length;
 
         // The thread's own inference time: wall time here would also count queueing behind
@@ -894,6 +899,11 @@ async function embedLocalChunks(args: {
       };
     },
   );
+}
+
+/** DOCSLURP_EMBED_SORT_BY_LENGTH=on embeds local batches in length order (opt-in: q8 vectors shift up to ~1.4% cosine with batch composition, so enabling it needs a retrieval-quality check). */
+function sortByLengthEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ["on", "true", "1", "yes"].includes((env.DOCSLURP_EMBED_SORT_BY_LENGTH ?? "off").trim().toLowerCase());
 }
 
 function clampBatchSize(value: number, min: number, max: number): number {
@@ -980,6 +990,7 @@ async function localEmbeddingBatchRunner(
   model: string,
   normalize: boolean,
   signal?: AbortSignal,
+  pooling: EmbeddingPooling = "mean",
 ): Promise<LocalEmbeddingBatchRunner> {
   const thread = localEmbeddingThreadEnabled() ? sharedLocalEmbeddingPool() : null;
   if (thread && !thread.unusable) {
@@ -988,7 +999,7 @@ async function localEmbeddingBatchRunner(
     // (which drives batch-size tuning) and cache_hit is known up front.
     let loaded: { dtype: string; cacheHit: boolean; loadMs: number };
     try {
-      loaded = await thread.embed({ model, dtypes, cacheDir, texts: [], normalize }, signal);
+      loaded = await thread.embed({ model, dtypes, cacheDir, texts: [], normalize, pooling }, signal);
     } catch (error) {
       if (!thread.unusable) throw error;
       if (!localEmbeddingThreadFallbackLogged) {
@@ -997,7 +1008,7 @@ async function localEmbeddingBatchRunner(
           `[embed] local embedding thread unavailable, running in-process: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      return await inProcessBatchRunner(model, normalize);
+      return await inProcessBatchRunner(model, normalize, pooling);
     }
     const stats = { loadMs: loaded.loadMs };
     return {
@@ -1006,17 +1017,17 @@ async function localEmbeddingBatchRunner(
       dtype: () => loaded.dtype,
       stats,
       run: async (batch) => {
-        const result = await thread.embed({ model, dtypes, cacheDir, texts: batch, normalize }, signal);
+        const result = await thread.embed({ model, dtypes, cacheDir, texts: batch, normalize, pooling }, signal);
         // A batch routed to a thread without the model loads it there; count that as load, not inference.
         stats.loadMs += result.loadMs;
         return { data: result.data, dims: result.dims, runMs: result.runMs };
       },
     };
   }
-  return await inProcessBatchRunner(model, normalize);
+  return await inProcessBatchRunner(model, normalize, pooling);
 }
 
-async function inProcessBatchRunner(model: string, normalize: boolean): Promise<LocalEmbeddingBatchRunner> {
+async function inProcessBatchRunner(model: string, normalize: boolean, pooling: EmbeddingPooling): Promise<LocalEmbeddingBatchRunner> {
   const loadStartedAt = Date.now();
   const { pipeline, cacheHit, dtype } = await getLocalEmbeddingPipeline(model);
   return {
@@ -1026,7 +1037,7 @@ async function inProcessBatchRunner(model: string, normalize: boolean): Promise<
     stats: { loadMs: Date.now() - loadStartedAt },
     run: async (batch) => {
       const startedAt = Date.now();
-      const output = await pipeline(batch, { pooling: "mean", normalize });
+      const output = await pipeline(batch, { pooling, normalize });
       return Object.assign(output, { runMs: Date.now() - startedAt });
     },
   };
@@ -1205,7 +1216,7 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
     case "openrouter": {
       const route = openRouterEmbeddingRoute(profile.model);
       if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
-      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) }).embedding(profile.model) as any;
     }
     case "openai":
       return (
@@ -1303,7 +1314,7 @@ async function buildDocumentContextSummary(args: {
 
   try {
     const sourceExcerpt = truncateText(
-      normalizeWhitespace(args.documentText),
+      normalizeWhitespace(stripLeadingFrontmatter(args.documentText).markdown),
       CONTEXTUAL_SOURCE_LIMIT,
     );
     const task = buildTrustedDocumentTaskPrompt({
@@ -1364,11 +1375,23 @@ async function buildDocumentContextSummary(args: {
   }
 }
 
-function buildHeuristicDocumentSummary(
+/**
+ * Body text for a heuristic summary: no metadata block and no heading lines
+ * (the preamble already names the document and section), so the first
+ * sentence is prose rather than `--- ## title: … # Heading`.
+ */
+function summarySourceText(documentText: string): string {
+  return stripLeadingFrontmatter(documentText).markdown
+    .split("\n")
+    .filter((line) => !/^#{1,6}\s/.test(line))
+    .join("\n");
+}
+
+export function buildHeuristicDocumentSummary(
   documentTitle: string,
   documentText: string,
 ): string {
-  const normalized = normalizeWhitespace(documentText);
+  const normalized = normalizeWhitespace(summarySourceText(documentText));
   if (!normalized) {
     return `Content from ${documentTitle}`;
   }

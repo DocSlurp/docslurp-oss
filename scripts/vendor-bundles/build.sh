@@ -20,7 +20,6 @@ NAME="${1:?bundle name}"
 OUT="${2:?output dir}"
 REPO="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BASE_VENV="${DOCSLURP_BUNDLE_BASE_VENV:-/app/.venv}"
-UV_VERSION="${DOCSLURP_BUNDLE_UV_VERSION:-0.13.0}"
 REQUIREMENTS="${REPO}/worker/requirements-bundle-${NAME}.txt"
 # Fixed build path: bytecode records its source path, so a random temp dir would
 # make every build's archive differ.
@@ -40,9 +39,9 @@ PY_MINOR="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_i
 PLATFORM="linux-${ARCH}-py${PY_MINOR}"
 mkdir -p "${OUT}" "${SITE}" "${ROOT}/bin" "${ROOT}/models"
 
-# Pinned uv in a throwaway venv (not shipped).
+# Pinned, hash-checked uv (scripts/uv-installer.lock.txt) in a throwaway venv (not shipped).
 python3 -m venv /tmp/uv-venv
-/tmp/uv-venv/bin/pip install --quiet --no-cache-dir --only-binary=:all: "uv==${UV_VERSION}"
+/tmp/uv-venv/bin/pip install --quiet --no-cache-dir --only-binary=:all: --require-hashes -r "${REPO}/scripts/uv-installer.lock.txt"
 UV=/tmp/uv-venv/bin/uv
 
 # Drop the GUI OpenCV build (needs libGL); the headless wheel provides the same cv2 module.

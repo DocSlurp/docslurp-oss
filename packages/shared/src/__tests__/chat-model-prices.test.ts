@@ -23,7 +23,7 @@ describe("chat model prices", () => {
     }
   });
   it("converts to USD per token", () => {
-    expect(chatModelPricePerToken("z-ai/glm-5.3-flash")).toEqual({ input: 0.048 / 1e6, output: 0.16 / 1e6 });
+    expect(chatModelPricePerToken("z-ai/glm-5.3-flash")).toEqual({ input: 0.15 / 1e6, output: 0.5 / 1e6 });
     expect(chatModelPricePerToken("unknown/model")).toBeUndefined();
   });
 });

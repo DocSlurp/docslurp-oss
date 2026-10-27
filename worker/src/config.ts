@@ -82,7 +82,7 @@ export interface Config {
   lancedbReindexPages: number;
   /** Run optimize/index maintenance after LanceDB writes. LANCEDB_URI ?maintenance=false disables. */
   lancedbMaintenanceEnabled: boolean;
-  /** Minimum table rows before maintenance builds the first ANN vector index. LANCEDB_URI ?vectorIndexMinRows= (default 5000). */
+  /** Minimum table rows before maintenance builds the first ANN vector index. LANCEDB_URI ?vectorIndexMinRows= (default 1000: with one database per workspace most tables are small, and an HNSW index over 1,000 rows keeps about 98% top-10 recall of a flat scan while reading a fraction of the vectors). */
   lancedbVectorIndexMinRows: number;
   workerLeaseTtlMs: number;
   workerMaxRuntimeMs: number;
@@ -270,7 +270,7 @@ export function fromEnv(): Config {
       "standard",
     ) as InferenceLane,
     vectorBackends: readList(process.env.VECTOR_BACKENDS, ["lancedb"]),
-    // Maintenance tuning rides on LANCEDB_URI, e.g. s3://bucket/lancedb?reindexPages=20&vectorIndexMinRows=5000.
+    // Maintenance tuning rides on LANCEDB_URI, e.g. s3://bucket/lancedb?reindexPages=20&vectorIndexMinRows=1000.
     lancedbReindexPages: maintenance.reindexPages,
     lancedbMaintenanceEnabled: maintenance.enabled,
     lancedbVectorIndexMinRows: maintenance.vectorIndexMinRows,

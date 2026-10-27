@@ -50,3 +50,23 @@ it("does not label successful routing diagnostics as processing failures", () =>
   });
   expect(raw.stats.message).toContain("secret");
 });
+
+
+it("preserves only the approved blocked-chat copy through browser sanitization", () => {
+  expect(friendlyErrorMessage(PUBLIC_ERROR_MESSAGES.chatToolFailed)).toBe(PUBLIC_ERROR_MESSAGES.chatToolFailed);
+  expect(friendlyErrorMessage(PUBLIC_ERROR_MESSAGES.chatDeadline)).toBe(PUBLIC_ERROR_MESSAGES.chatDeadline);
+  expect(friendlyErrorMessage("A required tool failed: private upstream response and secret")).toBe(PUBLIC_ERROR_MESSAGES.unexpected);
+});
+
+it("keeps internal extractor routing and engine details operator-only", () => {
+  expect(publicDiagnostics({
+    strategy: "kreuzberg-solo",
+    extractor: "kreuzberg",
+    extractionMs: 120,
+    nativePdf: { engine: "loaded", engineVersion: "0.13.0+abc", shadow: { status: "ran", agreement: 0.98 } },
+    extractorOrder: ["kreuzberg", "native-pdf"],
+    extractorAttempts: { attempted: ["kreuzberg"], unavailable: [] },
+    secondaryExtractor: null,
+    retryStrategy: "default",
+  })).toEqual({ strategy: "kreuzberg-solo", extractor: "kreuzberg", extractionMs: 120 });
+});

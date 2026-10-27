@@ -36,7 +36,7 @@ vi.mock("../lib/auth.js", () => ({ auth: {}, appDbPool: {} }));
 const API_KEY = "dslp_live_test_key";
 const contracts = { id: "11111111-1111-4111-8111-111111111111", orgId: "org-1", name: "Contracts", slug: "contracts", createdAt: "2026-10-01T00:00:00Z" };
 const manuals = { id: "22222222-2222-4222-8222-222222222222", orgId: "org-1", name: "Manuals", slug: "manuals", createdAt: "2026-10-02T00:00:00Z" };
-const key = { userId: "user-1", orgId: "org-1", scopes: ["search"], keyType: "server", keyId: "key-1", workspaceIds: [] };
+const key = { userId: "user-1", orgId: "org-1", scopes: ["search", "chat"], keyType: "server", keyId: "key-1", workspaceIds: [] };
 const answer = {
   answer: "Renewal is annual [1].",
   citations: [{ text: "annual", score: 1, citation: { filename: "contract.pdf", documentId: "doc-1", pageNumber: 2 } }],
@@ -156,6 +156,22 @@ describe("OpenAI-compatible chat with the official openai SDK", () => {
       tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
     }).catch((caught: unknown) => caught);
     expect(tools).toBeInstanceOf(OpenAI.BadRequestError);
+    expect(tools).toMatchObject({ param: "tools", code: "unsupported_parameter" });
+    const required = await client().chat.completions.create({ model: "workspace:default", messages: [{ role: "user", content: "hi" }], tool_choice: "required" }).catch((caught: unknown) => caught);
+    expect(required).toBeInstanceOf(OpenAI.BadRequestError);
+    expect(required).toMatchObject({ param: "tool_choice" });
     expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("streams a direct answer for tool_choice none with docslurp retrieval overrides from extra body", async () => {
+    chatWorkspace.mockImplementationOnce(async (args: { onTextDelta: (text: string) => Promise<void> }) => { await args.onTextDelta("Renewal is annual [1]."); return answer; });
+    // The DocSlurp request extension rides along as an extra body field.
+    const body = { model: "workspace:default", messages: [{ role: "user", content: "When does it renew?" }], stream: true, tool_choice: "none",
+      docslurp: { retrieval: { parentRetrieval: false } } } as OpenAI.ChatCompletionCreateParamsStreaming;
+    const stream = await client().chat.completions.create(body);
+    let text = "";
+    for await (const chunk of stream) text += chunk.choices[0]?.delta.content ?? "";
+    expect(text).toContain("Renewal is annual [1].");
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false, retrieval: { parentRetrieval: false } }));
   });
 });

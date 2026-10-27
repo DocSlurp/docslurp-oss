@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
+
 /**
  * Ingest report: what DocSlurp observed about a workspace's files (pages,
  * bytes, text layer, images, vision, searchability, cost) plus the pipeline
@@ -63,7 +65,110 @@ export const ingestReportPageSchema = z.object({
 });
 export type IngestReportPage = z.infer<typeof ingestReportPageSchema>;
 
-export const ingestReportConfigItemSchema = z.object({
+/**
+ * Why a file failed, classified from the worker's stored error. The raw error
+ * text stays in the database and logs; the report carries only this reason,
+ * reviewed copy and a short sanitized detail.
+ */
+export const ingestReportFailureReasonSchema = z.enum([
+  "ocr_unavailable",
+  "extractor_failed",
+  "unsupported_format",
+  "unreadable_file",
+  "timeout",
+  "provider_failed",
+  "policy_blocked",
+  "cancelled",
+  "unknown",
+]);
+export type IngestReportFailureReason = z.infer<typeof ingestReportFailureReasonSchema>;
+
+export const ingestReportFailureSchema = z.object({
+  documentId: z.string(),
+  filename: z.string(),
+  /** The pipeline stage that failed, when a failed stage was recorded. */
+  stage: z.string().nullable(),
+  reason: ingestReportFailureReasonSchema,
+  /** Reviewed, user-facing explanation of the reason. */
+  message: z.string(),
+  /** Short sanitized excerpt of the recorded error (no paths, URLs, secrets or stack frames); null when none was recorded. */
+  detail: z.string().nullable(),
+  /** False when running the same file again fails the same way until something else is fixed. */
+  retryable: z.boolean(),
+});
+export type IngestReportFailure = z.infer<typeof ingestReportFailureSchema>;
+
+export const ingestReportFailuresSchema = z.object({
+  total: count,
+  byReason: z.array(z.object({ reason: ingestReportFailureReasonSchema, documents: count })),
+  /** Up to 20 failed files, newest first. */
+  examples: z.array(ingestReportFailureSchema),
+});
+export type IngestReportFailures = z.infer<typeof ingestReportFailuresSchema>;
+
+export const INGEST_REPORT_FAILURE_DETAIL_MAX = 160;
+
+const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryable: boolean }> = {
+  ocr_unavailable: {
+    message: "Text recognition (OCR) is not working on the processing server, so this file's text could not be read. Retrying fails the same way until an operator fixes the OCR setup.",
+    retryable: false,
+  },
+  extractor_failed: { message: "None of the text extractors could read this file.", retryable: true },
+  unsupported_format: { message: PUBLIC_ERROR_MESSAGES.unsupportedType, retryable: false },
+  unreadable_file: { message: PUBLIC_ERROR_MESSAGES.unreadableSource, retryable: false },
+  timeout: { message: "Processing timed out before this file finished.", retryable: true },
+  provider_failed: { message: "An AI provider call failed or was rate-limited while processing this file.", retryable: true },
+  policy_blocked: { message: "Workspace or server policy (privacy mode, spend cap or PII rules) stopped processing this file.", retryable: false },
+  cancelled: { message: "Processing of this file was cancelled.", retryable: true },
+  unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
+};
+
+/** Most specific, least recoverable causes first: an OCR crash arrives wrapped in "no extractor produced output". */
+const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
+  ["ocr_unavailable", /tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|not (?:installed|found|available)|failed to (?:init|load))/i],
+  ["unsupported_format", /unsupported (?:file|format|media|mime|content)|(?:unknown|unrecognized|unrecognised) (?:file )?(?:format|type)|no (?:parser|handler) (?:for|available for)/i],
+  ["unreadable_file", /password|encrypted|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
+  ["timeout", /timed? ?out|timeout|deadline exceeded|ETIMEDOUT/i],
+  ["policy_blocked", /privacy mode|local-only|strict-privacy|cost cap|spend cap|maxCostCents|budget|\bpii\b|policy/i],
+  ["provider_failed", /rate.?limit|\b429\b|\bprovider\b|openrouter|upstream|overloaded|quota|\b50[0234]\b/i],
+  ["extractor_failed", /no extractor produced output|extractor/i],
+];
+
+/** Maps a stored worker error (and the document status) to a reason and reviewed copy. Never echoes the raw text. */
+export function classifyIngestFailure(error: string | null | undefined, documentStatus?: string): { reason: IngestReportFailureReason; message: string; retryable: boolean } {
+  const text = error ?? "";
+  const marker = Object.entries(DOCUMENT_FAILURE_MARKERS).find(([, value]) => text.includes(value));
+  const reason: IngestReportFailureReason = documentStatus === "cancelled" ? "cancelled"
+    : documentStatus === "pii_blocked" || marker ? "policy_blocked"
+      : FAILURE_PATTERNS.find(([, pattern]) => pattern.test(text))?.[0] ?? "unknown";
+  const copy = FAILURE_COPY[reason];
+  // Conditions the uploader can act on keep their own reviewed copy (for example a silent video).
+  return { reason, message: marker ? PUBLIC_ERROR_MESSAGES[marker[0] as keyof typeof DOCUMENT_FAILURE_MARKERS] : copy.message, retryable: copy.retryable };
+}
+
+/**
+ * A short excerpt of a stored error that is safe to show: first line only, no
+ * stack frames, filesystem paths, URLs (including connection strings), e-mail
+ * addresses or credential-looking values. Null when nothing remains.
+ */
+export function sanitizeFailureDetail(error: string | null | undefined): string | null {
+  if (!error) return null;
+  const line = error.split(/\r?\n/).find((entry) => entry.trim() && !/^\s*at\s/.test(entry)) ?? "";
+  const cleaned = line
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
+    .replace(/(?<![\w.:/-])(?:[A-Za-z]:\\|~\/|\.{0,2}\/)[^\s'"`<>|,;)\]]*/g, "<path>")
+    .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\b(?:authorization|api[_-]?key|token|secret|password|passwd|credential)s?\s*[=:]\s*(?!<)\S+(?:\s+<redacted>)?/gi, (match) => `${match.split(/[=:]/)[0]}=<redacted>`)
+    .replace(/\b(?:sk|pk|rk|ghp|gho|xox[a-z])[-_][A-Za-z0-9_-]{8,}/g, "<redacted>")
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "<email>")
+    .replace(/[A-Za-z0-9+/_=-]{32,}/g, "<redacted>")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.length > INGEST_REPORT_FAILURE_DETAIL_MAX ? `${cleaned.slice(0, INGEST_REPORT_FAILURE_DETAIL_MAX - 1)}…` : cleaned;
+}
+
+export const ingestReportConfigItemSchema =z.object({
   key: z.string(),
   label: z.string(),
   value: z.string(),
@@ -162,7 +267,7 @@ export const ingestReportSchema = z.object({
     recordedPages: count,
     avgPerPage: nullableCount,
     pagesWithImages: count,
-    /** Pages with images and almost no text layer: scans or pictures of text. */
+    /** Pages with images and almost no text layer: scans or pictures of text. Pages of failed files are excluded (see `failures`). */
     scannedLookingPages: count,
   }),
   extraction: z.object({
@@ -184,6 +289,8 @@ export const ingestReportSchema = z.object({
     /** Up to 20 unsearchable pages with their reason. */
     examples: z.array(ingestReportPageSchema),
   }),
+  /** Files that failed, why, and at which stage. Defaults to none for reports stored before this field existed. */
+  failures: ingestReportFailuresSchema.default({ total: 0, byReason: [], examples: [] }),
   focus: ingestReportPageSchema.array().nullable(),
   languages: z.array(z.object({ code: z.string(), documents: count })),
   stages: z.object({

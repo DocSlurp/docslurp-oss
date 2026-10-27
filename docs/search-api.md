@@ -80,10 +80,11 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`, `chat_deadline_exceeded` (HTTP 504: a search-agent turn reached its deadline before it had any answer text).
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Workspaces and runs: `workspace_forbidden`, `workspace_scope_forbidden` (a key limited to specific workspaces tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
 - Anything else: `unavailable` and `internal`.
 
@@ -101,15 +102,56 @@ Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any workspace chat catal
 
 Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose workspace is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The workspace's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
 
+### Direct answers
+
+By default a `/v1/chat` turn runs the search agent: the model decides which workspace tools to call (search, web, settings) before it answers. That is the most thorough path, but it costs extra model steps before the first answer token. For a quick cited answer, such as an "Ask" box in a docs search palette, turn the agent off for the request:
+
+- `/v1/chat`: send `agent: {tools: false}`. The turn does one retrieval and one model call, the same path a request with type, tag or date `filters` takes. The step and tool-call limits do not apply, and the response has no agent `debug` fields.
+- `/v1/chat/completions`: send the standard `tool_choice: "none"`. `"auto"` (the default) keeps the agent. Streaming works the same either way. DocSlurp runs its own workspace tools, so client-defined `tools` and other `tool_choice` forms (`"required"`, a named function, `allowed_tools`) are rejected with HTTP 400 and `error.param` naming the field.
+
+Retrieval overrides also shrink the prompt. `retrieval.parentRetrieval: false` cites the matched chunks without attaching each hit's whole parent page text. That cuts prompt tokens and retrieval time on long pages, at the cost of less surrounding context. `/v1/chat` takes `retrieval` directly. `/v1/chat/completions` takes the same object under the `docslurp` request extension (`extra_body` in the OpenAI SDKs):
+
+```bash
+curl -N https://docslurp.io/v1/chat/completions \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "workspace:default", "stream": true, "tool_choice": "none",
+       "docslurp": {"retrieval": {"parentRetrieval": false, "resultCount": 6}},
+       "messages": [{"role": "user", "content": "How do I rotate an API key?"}]}'
+```
+
+`retrieval` accepts `candidateDepth`, `resultOrder`, `resultCount` (1–12), `useHyDE`, `useRerank`, `useMmr`, `mmrLambda`, `iterativeMultiHop`, `enableGraphExpansion`, `enableCommunityExpansion`, `graphHops` and `parentRetrieval`. Any retrieval override answers from retrieved passages rather than the workspace's whole-corpus chat mode. Workspace defaults stay as they are.
+
 ### Agent limits
 
 When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on and no document, type, tag or date filters), `agent` bounds that turn:
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. Unless you set it, the agent gets 4 calls and continues past them, up to 8, only while each search adds new evidence and the turn has used under 150,000 input tokens; set `maxSteps` for a fixed budget. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
 | `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+| `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
+| `web` | workspace setting | boolean | `false` removes `webSearch` and `webFetch` from the turn. Omitted or `true` offers them only when the deployment (`WEB_TOOLS_ENABLED`, `WEB_TOOLS_CHAT_ENABLED`), the workspace's `pipeline.webTools`, its privacy mode and the key's scopes allow them; a request cannot turn them on past those. |
+| `suggestions` | `false` | boolean | Suggestions mode, described below. |
+
+#### Suggestions mode
+
+With `agent: {suggestions: true}` the agent watches the turn's own tool results for ingestion and search problems: a search with no results or only unrelated passages for something the workspace should contain, files reported as failed or still processing (current versions only) when the question's evidence is missing and that file could plausibly hold it, and passage text that is garbled, cut off or missing the table or page the question needs. When it sees one, it adds a short section after the answer that names the likely cause and the evidence, and can prepare up to two specific changes with `proposeWorkspaceSettings` (see [Workspace settings from chat](agent-workspace-settings.md)). A turn with no such signal gets no suggestions section: a question the results fully answer never mentions failed or processing files, the agent never guesses a file's contents or type, and it names a file only after `getUploadStatus` shows it. A proposal never changes anything by itself: a person applies it with **Apply** in the app, or the authenticated apply endpoint. A proposal that cannot be prepared never fails the turn; the answer stands and says so.
+
+Without suggestions mode the agent still prepares a proposal when the user asks to change a setting, but never volunteers one.
+
+#### Search settings asked for in chat
+
+A chat message such as "turn on reranking" can change the retrieval settings that appear in `retrievalDefaults` (result count, reranking, diversification) for **that chat thread only**; workspace defaults never change from a message. The agent is told exactly what changed (for example `useRerank false→true`, this thread only) and says so, rather than reporting the setting as "already enabled". A message that asks for the whole workspace ("for this workspace", "for everyone", "by default") changes nothing: the agent prepares a workspace-wide `proposeWorkspaceSettings` proposal for the user to **Apply**, and offers a thread-only change on request. Settings are configuration, not document evidence, so the agent never attaches a `[n]` citation to a statement about them. Answers also never include visible self-corrections: the agent works calculations out before it writes.
+
+A caller who stops a turn (Stop in the app, or a client disconnect) is recorded as a cancelled outcome, not a failure: telemetry logs it at INFO and the spans carry `docslurp.outcome=cancelled` (the agent span's `docslurp.chat.stop_reason` is `cancelled`) instead of an `ERROR` status. Timeouts and deadline stops remain errors.
+
+Suggestions mode and `agent.web` are set per request on `POST /v1/chat` (and the SDK's `chat`). They are not available on `GET /v1/chat/stream`, the MCP `chat` tool or `/v1/chat/completions`, which always run with suggestions off and the workspace's web setting. The DocSlurp web app turns suggestions on by default and has **Web** (default off) and **Suggestions** toggles in the composer.
+
+```bash
+curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"q": "Why can'"'"'t I find the Q3 renewal terms?", "agent": {"suggestions": true, "web": false}}'
+```
 
 The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
 
@@ -128,8 +170,9 @@ Agent responses add these `debug` fields (other turns omit them):
 | `zeroHitSearchCount` | Search calls that returned no results |
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
-| `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
-| `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), `from_evidence` (a model step ran out of time and one extra no-tools call answered from the evidence already gathered) or `partial` (the deadline cut the answer off; the text so far is returned with `finishReason: "length"`). See [Turn deadline](#turn-deadline). |
+| `limits` | `{maxSteps, baseSteps, maxToolCalls, searchConcurrency, clamped}` as applied; `baseSteps` is the dynamic step budget |
+| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
+| `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 
 On agent turns, `usage.costCents` is the **provider cost** in USD cents of the agent's own model calls (the OpenRouter receipt, or an estimate from verified list prices when the receipt is missing; `usage.costSource` says `provider`, `estimate` or `mixed`). It is not customer credits: a delivered answer is billed per answer by its model tier (`GET /v1/billing/prices`), and provider cost is recorded only for our own accounting. It excludes tool work: the provider cost the tools report for their own work (query embeddings, rewrites, HyDE, reranking, nested answers) is in `usage.toolCostCents` and per call in `debug.toolCalls[].costCents`, and is recorded as separate usage events. A turn's total provider cost is `costCents + toolCostCents`; cached search responses report 0.
@@ -138,9 +181,9 @@ A turn that fails on our side is not charged. When `/v1/chat` fails with an erro
 
 `stopReason` is chosen deterministically, without reading the answer's meaning. The first rule that matches wins:
 
-1. `timeout` (the turn reached its deadline with no answer text at all; HTTP 504 `chat_deadline_exceeded`) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
-2. `deadline`: the turn's time budget ran low, so tools were disabled and the answer was forced from the evidence gathered so far, or the deadline cut the answer off. The response is a normal HTTP 200; `debug.timeBudget.finalAnswer` says which.
-3. `tool_call_limit`: at least one tool call was refused.
+1. `timeout` (the turn or model step reached its deadline; HTTP 424 `chat_deadline_exceeded`) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
+2. `deadline`: the turn's time budget ran low, so tools were disabled and the answer was forced from the evidence gathered so far, without any failed tool or model call. The response is HTTP 200 only if the forced answer completes before the deadline.
+3. `tool_call_limit`: historical successful-turn classification; refused calls now block the turn with `chat_tool_failed`.
 4. `step_limit`: the loop ended mid tool call, or the last step ran with tools disabled right after a tool-calling step. With `maxSteps: 1`, tools are disabled from the start, so that does not count as a limit hit.
 5. `no_evidence`: the agent searched and every search returned zero results.
 6. `answered_without_citations`: the agent searched, but the answer has no `[n]` citation.
@@ -148,16 +191,16 @@ A turn that fails on our side is not charged. When `/v1/chat` fails with an erro
 
 #### Turn deadline
 
-An agent turn has a deadline below the ~120-second timeout of common edge proxies (Cloudflare answers 524 there), so a slow turn still returns its answer instead of an error. The deadline counts from when the request reaches chat, and the last part of it is kept for the answer:
+An agent turn has a deadline below the ~120-second timeout of common edge proxies (Cloudflare answers 524 there), so failures can be reported before the edge connection expires. The deadline counts from when the request reaches chat, and the last part of it is kept for the answer:
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Hard stop for the whole turn. Everything the turn started (model calls, tools, nested searches and their SQL, nested answers) is cancelled at it. |
 | `CHAT_AGENT_STEP_TIMEOUT_MS` | `45000` | Longest model call for a step that may still call tools, further capped to end before the final reserve. The final answer step may use all the time left. |
-| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest tool call, also capped to end before the final reserve. A tool over budget is cancelled and the model gets `{error, code: "tool_timeout"}`; the turn continues. |
-| `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Time kept for the answer (at most half the deadline). Inside it, tools are disabled; a tool call there gets `{error, code: "deadline"}` without running. |
+| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest tool call, also capped to end before the final reserve. A tool over budget is cancelled and blocks the turn with HTTP 424 `chat_tool_failed`. |
+| `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Time kept for the answer (at most half the deadline). Inside it, tools are disabled; a late tool call is refused and blocks the turn without running. |
 
-If a model step runs out of time while it can still call tools, the agent makes one more call without tools that answers from the evidence listed so far. Steps cancelled mid-flight still record their provider usage: from the stream's usage receipt when the model call had finished, from OpenRouter's generation receipt by id, or as an estimate from the prompt and streamed characters, marked `usageEstimated: true`. These usage events carry `turnOutcome: "aborted"` and `abortReason` (`deadline`, `step_timeout`, `client_disconnect` or `error`). When the client disconnects, the turn stops at once and returns nothing.
+Any failed tool (including an HTTP-200 batch with failed items), invalid tool call, exhausted tool budget, permission denial or timeout blocks the task. Concurrent tools are cancelled and no follow-up model answer or automatic retry runs. A successful zero-hit search is not a failure. Model/turn timeouts also block; streamed partial text is not a completed answer. Steps cancelled mid-flight still record their provider usage: from the stream's usage receipt when the model call had finished, from OpenRouter's generation receipt by id, or as an estimate from the prompt and streamed characters, marked `usageEstimated: true`. These usage events carry `turnOutcome: "aborted"` and `abortReason` (`deadline`, `step_timeout`, `client_disconnect` or `error`). When the client disconnects, the turn stops at once and returns nothing.
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
@@ -179,7 +222,7 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
       {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
       {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
     ],
-    "limits": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
+    "limits": {"maxSteps": 4, "baseSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
   }
 }
 ```
@@ -222,7 +265,7 @@ The TypeScript SDK supports direct `for await (const hit of client.search(input)
 Two in-process caches cut repeated-query latency. Both are per server process and per organization; an entry is never visible to another organization.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Workspaces in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
-- **Vector-result cache** (off by default). Keyed by organization, each LanceDB table's version, the query-vector hash, document scope, `limit` and ANN tuning, so a write to a table produces a new key. Results from a partially failed search are not cached. Enable with `SEARCH_RESULT_CACHE_MAX_ENTRIES` (default 0) and tune `SEARCH_RESULT_CACHE_TTL_SECONDS` (default 30). A hit can be as stale as the LanceDB read-consistency interval (`LANCEDB_READ_CONSISTENCY_SECONDS`, default 30 s) plus the TTL.
+- **Vector-result cache** (off by default). Keyed by organization, the workspace database's location and table version, the query-vector hash, document scope, `limit` and ANN tuning, so a write to a table produces a new key. Results from a partially failed search are not cached. Enable with `SEARCH_RESULT_CACHE_MAX_ENTRIES` (default 0) and tune `SEARCH_RESULT_CACHE_TTL_SECONDS` (default 30). A hit can be as stale as the LanceDB read-consistency interval (`LANCEDB_READ_CONSISTENCY_SECONDS`, default 30 s) plus the TTL.
 - **Privacy and tracing.** `strict-privacy` never reads or writes either cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
 
 Hits and misses appear as `embedCacheHit`/`embedCacheMiss` and `resultCacheHit`/`resultCacheMiss` counters in search timings, in the session diagnostics (`embeddingCache`), as `[search-cache]` log lines, and as `embed.cache` and `lancedb.result_cache` spans (`docslurp.cache.hit`).
@@ -315,3 +358,5 @@ credit-blocked and outsider requests make no provider calls. No deployment or
 provider corpus evaluation follows from enabling the implementation in source.
 
 Workspaces that index on demand (page map or page images) add a `deferred` stats block to search results; see [Deferred indexing modes](deferred-indexing.md).
+
+Application-level blocked chat turns and application deadlines use HTTP 424 with stable `chat_tool_failed` / `chat_deadline_exceeded` codes. They are distinct from actual origin/proxy failures, whose 5xx statuses remain unchanged. An already-started SSE response retains its HTTP status and emits its error event instead of a successful completion; retain the request ID header for correlation. This avoids labeling a valid application error envelope as an origin gateway failure; edge delivery must still be verified after rollout.

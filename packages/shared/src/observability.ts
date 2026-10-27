@@ -2,6 +2,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { performance } from "node:perf_hooks";
+import { isCancellation } from "./cancellation.js";
 import { initializeObservability, observationTelemetry, mapsObservationAiUsage, withDependencyScope } from "./telemetry.js";
 export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, exportsOtlpLogs, withHttpSpan, withBackgroundSpan, recordMediaTelemetry, startTelemetrySpan, recordChatAgentTelemetry, evalBaggageAttributes, activeTraceparent, EVAL_BAGGAGE_KEYS, type TelemetrySpan } from "./telemetry.js";
 import {
@@ -111,7 +112,7 @@ export async function withObservation<T>(
   const execute = (observation: Observation) =>
     metadataContext.run(metadata, async () => {
       const started = performance.now();
-      let failed = false;
+      let outcome: "ok" | "error" | "cancelled" = "ok";
       contextObservations.set(metadata, observation);
       safeUpdate(observation, {
         model: options.model,
@@ -146,8 +147,15 @@ export async function withObservation<T>(
         }
         return savedOutcome;
       } catch (error) {
-        failed = true;
         savedOutcome = { ok: false, error };
+        if (isCancellation(error)) {
+          // The caller gave up (Stop, disconnect): a distinct outcome, not an ERROR span.
+          outcome = "cancelled";
+          safeUpdate(observation, { level: "WARNING", statusMessage: "cancelled", metadata: sanitizeTraceValue(metadata) as Metadata });
+          try { observation.otelSpan?.setAttribute("docslurp.outcome", "cancelled"); } catch { /* Best effort metadata. */ }
+          return savedOutcome;
+        }
+        outcome = "error";
         safeUpdate(observation, {
           level: "ERROR",
           statusMessage: capture
@@ -165,7 +173,7 @@ export async function withObservation<T>(
         // overwrite our content policy with a raw provider error body.
         return savedOutcome;
       } finally {
-        observationTelemetry(options.name, options.type ?? "span", (performance.now() - started) / 1000, failed, metadata);
+        observationTelemetry(options.name, options.type ?? "span", (performance.now() - started) / 1000, outcome, metadata);
       }
     });
   let outcome;
@@ -218,7 +226,7 @@ export function aiResultDetails(result: {
 }
 
 export { instrumentPostgres, type PostgresQueryHooks } from "./dependency-postgres.js";
-export { startDependencySpan, withDependencySpan } from "./telemetry.js";
+export { isTracingActive, startDependencySpan, withDependencySpan, setActiveSpanAttributes } from "./telemetry.js";
 export { instrumentFetch } from "./dependency-fetch.js";
 export { instrumentS3Client } from "./dependency-s3.js";
 export { recordUsageReceipt, usageTraceContext } from "./dependency-usage.js";

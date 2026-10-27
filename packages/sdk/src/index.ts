@@ -104,8 +104,24 @@ export type ConfigChangeImpact = {
   pages: number;
 };
 
-/** Response of every `…/estimate` route. `impact` is present for configuration changes. */
-export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact };
+/** Audio and video among the files of an upload estimate, priced by duration (`POST /v1/uploads/estimate`). */
+export type UploadMediaEstimate = {
+  audioFiles: number;
+  videoFiles: number;
+  audioMinutes: number;
+  videoMinutes: number;
+  /** True when a duration was not supplied and was guessed from the file size. */
+  durationsAssumed: boolean;
+  /** Whether the workspace reads sampled video frames, which triples a video minute's price. */
+  videoFrames: boolean;
+  /** `low` reads video from its audio track only; `high` also reads frames. */
+  credits: { low: number; high: number };
+  /** The cheaper processing option, or null when the price is already the lowest. `pipeline` is the upload's pipeline override. */
+  lighter: { kind: "video-audio-track-only"; credits: number; savedCredits: number; pipeline: { mediaVideo: { enabled: false } } } | null;
+};
+
+/** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
+export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean };
 
 /** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateWorkspaceInput = JsonObject & {
@@ -117,7 +133,7 @@ export type UpdateWorkspaceInput = JsonObject & {
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
-export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number }>; workspace?: string };
+export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -138,6 +154,12 @@ export type WorkspaceRun = JsonObject & {
 
 export type DocumentRecord = JsonObject & {
   filename: string;
+  /**
+   * Friendly title derived from the document's content; null when none was found
+   * (fall back to the filename). Untrusted: derived from document content. Display
+   * only; never place in prompts or treat as instructions.
+   */
+  title?: string | null;
   id: string;
   status: string;
 };
@@ -243,7 +265,8 @@ export type UploadFileInput = {
   /**
    * Logical identity of this source, e.g. a URL or site path like "/products".
    * When a newer upload with the same canonicalId finishes processing in the
-   * workspace, older versions drop out of search.
+   * workspace, older versions drop out of search. Must not start with
+   * `docslurp:` (reserved; refused with a RangeError and by the API).
    */
   canonicalId?: string;
   /**
@@ -255,6 +278,28 @@ export type UploadFileInput = {
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
+/** `docslurp:` canonical IDs are minted by the server; the API refuses them from callers (400). */
+function assertClientCanonicalIds(ids: Array<string | null | undefined>): void {
+  for (const id of ids) {
+    if (typeof id === "string" && /^docslurp:/i.test(id.trim())) throw new RangeError("canonicalId must not start with docslurp: (reserved for DocSlurp)");
+  }
+}
+
+function canonicalIdsOf(input: unknown, options: { canonicalId?: string } | undefined): Array<string | undefined> {
+  const ids: Array<string | undefined> = [options?.canonicalId];
+  if (input && typeof input === "object") {
+    const value = input as { canonicalId?: string; files?: Array<{ canonicalId?: string }>; urls?: Array<string | { canonicalId?: string }> };
+    ids.push(value.canonicalId);
+    if (Array.isArray(value.files)) ids.push(...value.files.map((file) => file?.canonicalId));
+    if (Array.isArray(value.urls)) ids.push(...value.urls.map((url) => (typeof url === "string" ? undefined : url?.canonicalId)));
+    if (Array.isArray(input)) ids.push(...(input as Array<{ canonicalId?: string }>).map((file) => file?.canonicalId));
+  }
+  return ids;
+}
+
+/** Marks the options of an extract() call so the shared upload transports target /v1/extracts. */
+const EXTRACT_MODE: unique symbol = Symbol("docslurp.extract");
+
 export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
   path?: string | Uint8Array | URL;
   destroy?: (error?: Error) => unknown;
@@ -269,12 +314,10 @@ export type UploadOptions = RequestOptions & {
   path?: string;
   indexingMode?: IndexingMode;
   /**
-   * How files reach storage. "auto" (default) sends uploads larger than
-   * DIRECT_UPLOAD_THRESHOLD_BYTES through a direct upload session (presigned
-   * PUTs straight to object storage); smaller ones use one multipart request
-   * to /v1/uploads/bulk, which the server caps at MAX_MULTIPART_UPLOAD_BYTES
-   * (25 MB by default). Streams always use multipart. Direct sessions ignore
-   * idempotencyKey.
+   * "auto" (default) uses presigned storage PUTs: single PUT for small files,
+   * multipart for large files and unknown-size streams. The server starts
+   * ingestion automatically. false uses the size-limited /v1/uploads/bulk
+   * compatibility transport. Direct sessions ignore idempotencyKey.
    */
   directUpload?: "auto" | boolean;
   filename?: string;
@@ -320,6 +363,39 @@ export type UploadResponse = {
   /** Set when the upload queued background work (for example a config-change re-index). */
   job?: JobStatus;
 };
+
+/** Extract mode options, on top of every upload option (see extract()). */
+export type ExtractOptions = {
+  /** Days to keep the files and results. Omit for the free window (48 hours by default); longer windows are charged as storage, up to the deployment's cap (30 days by default). */
+  retentionDays?: number;
+  /** Email a sign-in download link when the extract finishes (default true). */
+  notifyEmail?: boolean;
+  /** What the download zip holds: "markdown" (default) or "all" (adds originals and page images). */
+  download?: "markdown" | "all";
+};
+
+export type ExtractStatus = "pending" | "processing" | "completed" | "failed" | "expired";
+
+/** An extract: an upload whose files and outputs are deleted at expiresAt. */
+export type ExtractRecord = {
+  id: string;
+  status: ExtractStatus;
+  workspaceId: string;
+  runId: string | null;
+  retentionHours: number;
+  paidRetention: boolean;
+  expiresAt: string;
+  retentionCredits: number | null;
+  notifyEmail: boolean;
+  download: { content: "markdown" | "all"; status: "pending" | "preparing" | "ready" | "failed" | "expired"; url: string | null };
+  pages: number | null;
+  storedBytes: number | null;
+  createdAt: string;
+  completedAt: string | null;
+  deletedAt: string | null;
+};
+
+export type ExtractResponse = UploadResponse & { extract: ExtractRecord };
 
 export type UploadUrlsInput = {
   /** Labels applied to every accepted document in this upload. */
@@ -415,7 +491,7 @@ export type ChatInput = {
    * refused with HTTP 400 `model_not_allowed`, never replaced by the default.
    */
   model?: string;
-  /** Search-agent budgets for this turn; non-admin callers can only lower the defaults. */
+  /** Search-agent budgets and modes for this turn (`chat()` only; `chatStream` ignores them); non-admin callers can only lower the budgets. */
   agent?: {
     /** Model steps, 1-12 (default 8). The last step always answers. */
     maxSteps?: number;
@@ -423,6 +499,23 @@ export type ChatInput = {
     maxToolCalls?: number;
     /** Cap on parallel search queries, 1-8 (default 6). */
     searchConcurrency?: number;
+    /** false: a direct answer from one retrieval and one model call, without the agent's tools. */
+    tools?: boolean;
+    /** false: no web tools this turn. Omitted or true: offered only when the deployment, workspace and key allow them. */
+    web?: boolean;
+    /** Suggestions mode (default false): flag ingest and search problems and propose settings changes for a person to apply. */
+    suggestions?: boolean;
+  };
+  /** Retrieval overrides for this request only; workspace defaults stay as they are. */
+  retrieval?: {
+    /** Passages retrieved for the answer, 1-12. */
+    resultCount?: number;
+    useHyDE?: boolean;
+    useRerank?: boolean;
+    useMmr?: boolean;
+    mmrLambda?: number;
+    /** false: cite matched chunks without attaching whole parent page text (smaller, faster prompts). */
+    parentRetrieval?: boolean;
   };
 };
 
@@ -436,6 +529,11 @@ export type ChatResponse = {
   availability: SearchAvailability | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number; costCents?: number; costSource?: string };
   runtime: { startedAt: string; completedAt: string; totalMs: number };
+  /** Diagnostics. Search-agent turns report the modes they ran with; other fields may change between releases. */
+  debug?: {
+    modes?: { web: "on" | "off" | "unavailable"; suggestions: boolean };
+    [key: string]: unknown;
+  };
 };
 
 /** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */
@@ -460,6 +558,22 @@ export type DeletedDocument = JsonObject & {
   runId?: string | null;
   sourceKey?: string;
 };
+
+/** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
+export type ReprocessRunInput = { stageFrom?: string; stages?: string[] };
+/** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
+export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
+export type BulkDocumentsInput = {
+  action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
+  documentIds: string[];
+  tags?: string[];
+};
+/** Per action: `{ runs, failed, warnings, job? }` (reprocess), `{ updated, documentIds }` (tags), `{ deleted, documentIds }` or `{ artifacts }`. */
+export type BulkDocumentsResult = JsonObject;
+/** Names an ingest report recommendation, optionally scoped like the report it came from. */
+export type IngestRecommendationInput = { recommendationId: string; runId?: string; documentIds?: string[] };
+export type IngestRecommendationReprocessResult = JsonObject & { runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null };
+export type IngestRecommendationApplyResult = JsonObject & { recommendationId: string; patch: JsonObject | null; pipeline: JsonObject };
 
 export type RequestOptions = {
   signal?: AbortSignal;
@@ -632,8 +746,8 @@ function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; l
 }
 
 /**
- * Uploads above this total size go through a direct upload session instead of
- * multipart /v1/uploads/bulk (server cap: MAX_MULTIPART_UPLOAD_BYTES, 25 MB).
+ * Legacy bulk-transport cutoff retained for callers that use this constant.
+ * Automatic uploads now use direct sessions for every known-size file.
  */
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
@@ -652,10 +766,10 @@ export type DirectUploadDescriptor = {
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
-  files: Array<{ filename: string; mimeType: string; sizeBytes: number; canonicalId?: string; singlePart?: boolean }>;
+  files: Array<{ filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
 };
-export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[] };
-export type CompleteUploadFileInput = { fileId: string; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
+export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[]; result?: UploadResponse | null };
+export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -1108,10 +1222,27 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return { ...input, workspace: input.workspace?.trim() || clientWorkspace };
   }
 
+  /** "/v1/extracts" for extract() calls (marked with EXTRACT_MODE on the options), else "/v1/uploads". */
+  function intakeBase(options: object | undefined): string {
+    return options && (options as { [EXTRACT_MODE]?: ExtractOptions })[EXTRACT_MODE] ? "/v1/extracts" : "/v1/uploads";
+  }
+
+  /** The extract options an extract() call adds to the intake request. */
+  function extractFields(options: object | undefined): Record<string, string | number | boolean> {
+    const extract = options ? (options as { [EXTRACT_MODE]?: ExtractOptions })[EXTRACT_MODE] : undefined;
+    if (!extract) return {};
+    return {
+      ...(extract.retentionDays !== undefined ? { retentionDays: extract.retentionDays } : {}),
+      ...(extract.notifyEmail !== undefined ? { notifyEmail: extract.notifyEmail } : {}),
+      ...(extract.download ? { download: extract.download } : {}),
+    };
+  }
+
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
+    assertClientCanonicalIds(canonicalIdsOf(input, undefined));
     const { idempotencyKey, urls, orgId, templateKey } = input;
-    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input) };
-    return request("/v1/uploads/url", {
+    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input), ...extractFields(input) };
+    return request(`${intakeBase(input)}/url`, {
       ...jsonRequest("POST", body),
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
     }, options, Boolean(idempotencyKey));
@@ -1135,9 +1266,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions): Promise<UploadResponse>;
   async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+    assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
     const metadata = "files" in input ? { ...input, ...options } : options;
+    if ("data" in input && input.data instanceof ReadableStream && options.directUpload !== false) {
+      const reader = input.data.getReader();
+      const source: UploadByteStream = {
+        async *[Symbol.asyncIterator]() {
+          try { while (true) { const next = await reader.read(); if (next.done) break; yield next.value; } }
+          finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+        },
+        destroy() { void reader.cancel().catch(() => {}); },
+      };
+      return uploadStreamDirect(source, metadata, { ...options, filename: options.filename ?? input.filename, canonicalId: options.canonicalId ?? input.canonicalId, path: options.path ?? input.path });
+    }
     const fields: Record<string, string> = {};
     if (metadata.orgId) fields.orgId = metadata.orgId;
     if (metadata.tags) fields.tags = JSON.stringify(metadata.tags);
@@ -1148,25 +1291,34 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
+    for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
+    if (Symbol.asyncIterator in input && options.directUpload !== false) {
+      return uploadStreamDirect(input, metadata, options);
+    }
     if (Symbol.asyncIterator in input) {
       const stream = multipartStream(input, options.filename ?? streamFilename(input), fields);
       try {
         headers.set("Content-Type", `multipart/form-data; boundary=${stream.boundary}`);
         const init: RequestInit & { duplex: "half" } = { body: stream.body, headers, method: "POST", duplex: "half" };
         // A consumed source cannot be replayed, even with an idempotency key.
-        return await request<UploadResponse>("/v1/uploads/bulk", init, options, false, stream.dispose);
+        return await request<UploadResponse>(`${intakeBase(options)}/bulk`, init, options, false, stream.dispose);
       } finally { stream.dispose(); }
     }
     const files = "files" in input ? input.files : [input];
+    if (files.length === 1 && "data" in files[0] && files[0].data instanceof ReadableStream && options.directUpload !== false) {
+      return upload(files[0], { ...metadata, ...options });
+    }
+    if (options.directUpload !== false && files.some((file) => "data" in file && file.data instanceof ReadableStream)) {
+      throw new TypeError("Upload ReadableStream files individually to keep transfers bounded in memory.");
+    }
     const blobs = await Promise.all(files.map((file) => fileDataFor(file)));
     const names = files.map((file, index) => options.filename ?? fileNameFor(file, index));
     const canonicalIds = files.map((file) => ("data" in file && file.canonicalId) || null);
     const paths = files.map((file, index) => ("data" in file && file.path) || (index === 0 && files.length === 1 ? options.path ?? "" : ""));
-    const totalBytes = blobs.reduce((sum, blob) => sum + blob.size, 0);
     const mode = options.directUpload ?? "auto";
-    if (mode === true || (mode === "auto" && totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES)) {
+    if (mode !== false) {
       return uploadDirect({ blobs, names, canonicalIds: canonicalIds.map((id, index) => id || (index === 0 && files.length === 1 ? options.canonicalId ?? null : null)), paths, metadata, target }, options);
     }
     const form = new FormData();
@@ -1175,23 +1327,145 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (paths.some(Boolean)) fields.paths = JSON.stringify(paths);
     if (!fields.canonicalId && canonicalIds.some(Boolean)) fields.canonicalIds = JSON.stringify(canonicalIds);
     for (const [name, value] of Object.entries(fields)) form.set(name, value);
-    return request<UploadResponse>("/v1/uploads/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+    return request<UploadResponse>(`${intakeBase(options)}/bulk`, { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+  }
+
+  /**
+   * Extract: exactly like upload (files, streams, URLs, direct storage
+   * transfer; the same workspace rules and partial success), except the files
+   * and every output are deleted when the retention window ends. The response
+   * adds `extract` (id, expiresAt, download state).
+   */
+  function extract(input: Array<Blob | File | UploadFileInput>, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  function extract(input: UploadUrlsInput, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  function extract(input: UploadInput, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  function extract(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  async function extract(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions & ExtractOptions = {}): Promise<ExtractResponse> {
+    const { retentionDays, notifyEmail, download, ...rest } = options;
+    if (retentionDays !== undefined && (!Number.isInteger(retentionDays) || retentionDays < 1)) throw new RangeError("retentionDays must be a positive whole number of days.");
+    const marked = { ...rest, [EXTRACT_MODE]: { retentionDays, notifyEmail, download } } as UploadOptions;
+    return await upload(input as UploadInput, marked) as ExtractResponse;
+  }
+
+  async function waitUploadSession(path: string, options: UploadOptions): Promise<UploadResponse> {
+    const bound = deadline(options.timeoutMs ?? 30 * 60_000, options.signal);
+    try {
+      while (true) {
+        const session = await request<UploadSession>(`${path}?statusOnly=true`, {}, { ...options, signal: bound.signal }, true);
+        if (session.result) return session.result;
+        if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
+        await sleep(250, bound.signal);
+      }
+    } finally { bound.dispose(); }
+  }
+
+  async function uploadStreamDirect(source: UploadByteStream, metadata: UploadOptions, options: UploadOptions): Promise<UploadResponse> {
+    const bound = deadline(options.timeoutMs ?? 30 * 60_000, options.signal);
+    const stopped = new AbortController();
+    const signal = AbortSignal.any([bound.signal, stopped.signal]);
+    const transferOptions = { ...options, signal };
+    const iterator = source[Symbol.asyncIterator]();
+    const close = () => { source.destroy?.(); void iterator.return?.().catch(() => {}); };
+    signal.addEventListener("abort", close, { once: true });
+    const observable = source as UploadByteStream & { on?: (event: string, listener: (error: Error) => void) => unknown; off?: (event: string, listener: (error: Error) => void) => unknown };
+    const onSourceError = (error: Error) => stopped.abort(error);
+    observable.on?.("error", onSourceError);
+    let sessionPath: string | undefined;
+    const active = new Set<Promise<void>>();
+    let failure: unknown;
+    try {
+      signal.throwIfAborted();
+      const session = await request<UploadSession>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+        ...intakeTarget(metadata), ...extractFields(options), orgId: metadata.orgId, tags: metadata.tags,
+        templateKey: metadata.templateKey, indexingMode: metadata.indexingMode,
+        files: [{ filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
+          canonicalId: options.canonicalId, path: options.path }],
+      }), transferOptions);
+      sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+      const descriptor = session.files[0];
+      if (!descriptor || descriptor.mode !== "multipart") throw new Error("Stream upload requires a multipart session");
+      const partSize = descriptor.partSize ?? 8 * 1024 * 1024;
+      if (!Number.isSafeInteger(partSize) || partSize < 1) throw new Error("Invalid upload part size");
+      const parts: Array<{ partNumber: number; etag: string }> = [];
+      let buffer = new Uint8Array(partSize);
+      let used = 0;
+      let sizeBytes = 0;
+      let partNumber = 0;
+      const send = async (bytes: Uint8Array) => {
+        if (failure) throw failure;
+        signal.throwIfAborted();
+        const number = ++partNumber;
+        if (number > 10_000) throw new RangeError("Stream exceeds the multipart upload part limit");
+        const signed = await request<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
+        const url = signed.parts.find((part) => part.partNumber === number)?.url;
+        if (!url) throw new Error(`No upload URL for part ${number}`);
+        const task = putToStorage(url, new Blob([bytes as Uint8Array<ArrayBuffer>]), undefined, transferOptions).then((etag) => {
+          if (!etag) throw new Error(`Storage returned no ETag for part ${number}`);
+          parts.push({ partNumber: number, etag });
+        }).catch((error) => { failure ??= error; }).finally(() => { active.delete(task); });
+        active.add(task);
+        if (active.size >= 3) await Promise.race(active);
+        if (failure) throw failure;
+      };
+      while (true) {
+        // Abort even when a custom source's next() never resolves.
+        const next = await new Promise<IteratorResult<Uint8Array | string>>((resolve, reject) => {
+          const abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+          else Promise.resolve(iterator.next()).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+        });
+        if (next.done) break;
+        if (typeof next.value !== "string" && !(next.value instanceof Uint8Array)) throw new TypeError("Upload stream must yield strings or Uint8Array chunks.");
+        const bytes = typeof next.value === "string" ? new TextEncoder().encode(next.value) : next.value;
+        for (let offset = 0; offset < bytes.length;) {
+          const count = Math.min(partSize - used, bytes.length - offset);
+          buffer.set(bytes.subarray(offset, offset + count), used);
+          used += count; offset += count; sizeBytes += count;
+          if (used === partSize) { await send(buffer); buffer = new Uint8Array(partSize); used = 0; }
+        }
+      }
+      if (used || !partNumber) await send(buffer.subarray(0, used));
+      await Promise.all(active);
+      if (failure) throw failure;
+      parts.sort((a, b) => a.partNumber - b.partNumber);
+      await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
+      return await waitUploadSession(sessionPath, transferOptions);
+    } catch (error) {
+      stopped.abort(error);
+      close();
+      await Promise.all(active);
+      if (sessionPath) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      throw error;
+    } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
 
   /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
   async function putToStorage(url: string, body: Blob, contentType: string | undefined, options: UploadOptions): Promise<string | null> {
     const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs"), options.signal);
     try {
-      const response = await fetchImpl(url, {
-        method: "PUT",
-        body,
-        credentials: "omit",
-        headers: contentType ? { "Content-Type": contentType } : undefined,
-        signal: bound.signal,
-      });
-      if (!response.ok) throw new DocSlurpApiError(publicHttpError(response.status), response.status, await response.text().catch(() => ""));
-      await response.body?.cancel().catch(() => {});
-      return response.headers.get("etag");
+      for (let attempt = 0; ; attempt++) {
+        let response: Response;
+        try { response = await fetchImpl(url, {
+          method: "PUT",
+          body,
+          credentials: "omit",
+          headers: contentType ? { "Content-Type": contentType } : undefined,
+          signal: bound.signal,
+        }); } catch (error) {
+          if (attempt >= 2 || bound.signal.aborted) throw error;
+          await sleep(250 * 2 ** attempt, bound.signal);
+          continue;
+        }
+        if (attempt < 2 && [408, 429, 500, 502, 503, 504].includes(response.status)) {
+          await response.body?.cancel().catch(() => {});
+          await sleep(250 * 2 ** attempt, bound.signal);
+          continue;
+        }
+        if (!response.ok) throw new DocSlurpApiError(publicHttpError(response.status), response.status, await response.text().catch(() => ""));
+        await response.body?.cancel().catch(() => {});
+        return response.headers.get("etag");
+      }
     } catch (error) {
       if (bound.signal.aborted) throw bound.signal.reason;
       throw error;
@@ -1200,7 +1474,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  /** Large uploads: create a session, PUT each file (or its parts) to storage, then confirm. */
+  /** Transfer known-size files; the server reconciles storage and starts ingestion. */
   async function uploadDirect(args: {
     blobs: Blob[];
     names: string[];
@@ -1210,9 +1484,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newWorkspace: boolean; workspace?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
-    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
+    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+      ...extractFields(options),
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
+      ...(metadata.indexingMode ? { indexingMode: metadata.indexingMode } : {}),
       ...(args.target.workspace ? { workspace: args.target.workspace } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),
@@ -1232,20 +1508,16 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         const source = at < 0 ? undefined : remaining.splice(at, 1)[0];
         if (!source) throw new Error(`Direct upload session returned an unknown file: ${descriptor.filename}`);
         if (descriptor.mode === "single") {
-          const etag = await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType, options);
-          await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, ...(etag ? { etag } : {}) }), options);
+          await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType, options);
           continue;
         }
-        const parts: Array<{ partNumber: number; etag: string }> = [];
         for (const part of descriptor.pendingParts ?? []) {
           const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          const etag = await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes), undefined, options);
-          if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
-          parts.push({ partNumber: part.partNumber, etag });
+          await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes), undefined, options);
         }
-        await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, parts }), options);
+
       }
-      return await request<UploadResponse>(`${sessionPath}/confirm`, { method: "POST" }, options);
+      return await waitUploadSession(sessionPath, options);
     } catch (error) {
       await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
@@ -1284,7 +1556,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     updateSearchSettingsEstimate(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/search-settings/estimate`, input, requestOptions);
     },
-    /** What re-running a run (optionally from given stages) would cost. Session-only: the reprocess mutation accepts no API key. */
+    /**
+     * Re-runs a run's documents as new versions (all stages, `stageFrom` on, or only `stages`). Server keys need
+     * `ingest`. Re-extracts files whose bytes did not change, which a re-upload would not (identical bytes reuse
+     * the earlier extraction). Spends credits; price it with {@link reprocessEstimate}.
+     */
+    async reprocessRun(runId: string, input: ReprocessRunInput = {}, requestOptions?: RequestOptions): Promise<ReprocessRunResult> {
+      const body = await request<WorkspaceRun & { run?: WorkspaceRun; job?: JobStatus; warnings?: string[] }>(
+        `/v1/runs/${encodeURIComponent(runId)}/reprocess`, jsonRequest("POST", input), requestOptions,
+      );
+      // A deferred start answers { run, warnings, job }; a started one answers the run itself plus job.
+      if (body.run) return { run: body.run, job: body.job, warnings: body.warnings ?? [] };
+      const { job, warnings: _warnings, ...run } = body;
+      return { run: run as WorkspaceRun, job, warnings: [] };
+    },
+    /** What {@link reprocessRun} would cost, without starting it. Server keys need `ingest`. */
     reprocessEstimate(runId: string, input: JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
@@ -1325,6 +1611,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * cost for the workspace (default workspace when none is configured), plus
      * the settings that shaped it and recommendations. No model call.
      */
+    /** Re-runs a recommendation's affected files (up to 100) with the workspace's current settings. Server keys need `ingest`. */
+    reprocessIngestRecommendation(id: string | undefined, input: IngestRecommendationInput, options?: RequestOptions): Promise<IngestRecommendationReprocessResult> {
+      return request(`/v1/workspaces/${encodeURIComponent(id?.trim() || clientWorkspace)}/ingest-report/reprocess`, jsonRequest("POST", input), options);
+    },
+    /** Applies a recommendation's own settings patch to the workspace. Server keys need `workspaces:manage`. */
+    applyIngestRecommendation(id: string | undefined, input: IngestRecommendationInput, options?: RequestOptions): Promise<IngestRecommendationApplyResult> {
+      return request(`/v1/workspaces/${encodeURIComponent(id?.trim() || clientWorkspace)}/ingest-report/apply`, jsonRequest("POST", input), options);
+    },
     getIngestReport(id: string | undefined = clientWorkspace, options: IngestReportOptions = {}): Promise<IngestReport> {
       const params = new URLSearchParams();
       if (options.runId) params.set("runId", options.runId);
@@ -1395,8 +1689,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
      * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
      * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. This targets the legacy SSE endpoint; for
-     * the canonical stream use POST /v1/chat/completions with stream: true.
+     * is never mistaken for success. Reads GET /v1/chat/stream; for OpenAI-style
+     * token streaming use POST /v1/chat/completions with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
@@ -1404,7 +1698,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       let completed = false;
-      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {
+      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
@@ -1434,11 +1728,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /**
      * Delete a document and return the identities of the removed record.
-     * Requires a signed-in session: documents accept API-key authentication for
-     * reads only, so key-authenticated calls to this method receive 403.
+     * Server keys need `ingest`; browser keys can't delete. 409 while a run is still processing the document.
      */
     deleteDocument(documentId: string, requestOptions?: RequestOptions): Promise<DeletedDocument> {
       return request<DeletedDocument>(`/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, requestOptions);
+    },
+    /** Replaces a document's tags (no re-ingestion). Server keys need `ingest`. */
+    setDocumentTags(documentId: string, tags: string[], requestOptions?: RequestOptions): Promise<{ documentId: string; tags: string[] }> {
+      return request(`/v1/documents/${encodeURIComponent(documentId)}/tags`, jsonRequest("PUT", { tags }), requestOptions);
+    },
+    /**
+     * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
+     * `export-artifacts`), and every document must be in a workspace the key can use (404 before any change otherwise).
+     */
+    bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
+      return request(`/v1/documents/bulk`, jsonRequest("POST", input), requestOptions);
     },
 
     uploadUrls,
@@ -1454,6 +1758,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
     },
     createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+      assertClientCanonicalIds(canonicalIdsOf(input, undefined));
       return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
@@ -1461,6 +1766,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
     completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
     },
     completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
@@ -1472,6 +1780,38 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     search,
 
     upload,
+
+    extract,
+    /** An extract's status, retention and download state. Throws DocSlurpApiError 410 (extract_expired) once it was deleted. */
+    getExtract(extractId: string, options?: RequestOptions): Promise<ExtractRecord> {
+      return request<{ extract: ExtractRecord }>(`/v1/extracts/${encodeURIComponent(extractId)}`, {}, options, true).then((body) => body.extract);
+    },
+    async listExtracts(options?: RequestOptions & { limit?: number }): Promise<ExtractRecord[]> {
+      const query = options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
+      return (await request<{ extracts: ExtractRecord[] }>(`/v1/extracts${query}`, {}, options, true)).extracts;
+    },
+    /** Delete an extract now: it expires immediately and its files and outputs are removed shortly after. */
+    deleteExtract(extractId: string, options?: RequestOptions): Promise<{ extract: ExtractRecord }> {
+      return request(`/v1/extracts/${encodeURIComponent(extractId)}`, { method: "DELETE" }, options);
+    },
+    /**
+     * A two-minute signed URL for the extract's zip (server keys with `artifacts`). Fetch it without
+     * DocSlurp credentials; ask again once it expires.
+     */
+    async getExtractDownloadUrl(extractId: string, options: RequestOptions = {}): Promise<string> {
+      const headers = new Headers();
+      if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
+      const bound = deadline(positiveDuration(options.timeoutMs ?? defaultTimeoutMs, "timeoutMs"), options.signal);
+      try {
+        const response = await fetchImpl(`${apiUrl}/v1/extracts/${encodeURIComponent(extractId)}/download`, {
+          headers, redirect: "manual", credentials: apiKey ? "omit" : "include", signal: bound.signal,
+        });
+        const location = response.headers.get("location");
+        await response.body?.cancel().catch(() => {});
+        if (response.status >= 300 && response.status < 400 && location) return location;
+        throw new DocSlurpApiError(publicHttpError(response.status), response.status, null);
+      } finally { bound.dispose(); }
+    },
 
     /** Mints a sealed `X-DocSlurp-Capability` token a browser can use; needs a server key. */
     createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {

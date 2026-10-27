@@ -150,6 +150,9 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | --- | --- | --- |
 | `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace <id|slug|name>` (created if no workspace matches), or `--new-workspace`; `--template`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
 | `ingest-url <urls...>` | Fetch and ingest URLs, then print the workspace and run IDs | Same workspace options as `upload`, `--watch` |
+| `extract <files...|urls...>` | Upload files or ingest URLs (not both) whose files and outputs are deleted when the retention window ends; prints the extract ID and deletion time | Same options as `upload`; `--retention-days <n>` (longer than the free 48 hours is charged as storage), `--no-email`, `--download <markdown|all>` |
+| `extract-status <extract-id>` | Print an extract's status, pages, download state and deletion time | `--json` |
+| `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (server key with `artifacts`) | None |
 | `full-index` | Index every remaining page of a workspace (or one document) | `--workspace`, `--document`, `--estimate`, `--watch` |
 | `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
@@ -163,7 +166,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `import-search-compat <export.json>` | Normalize and import Algolia, Elastic or legacy search configuration | `--workspace`, `--source`, `--out` |
 | `--license` | Print the license and notice | None |
 
-- Only **search and chat** support `--json`; upload, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
+- Only **search, chat and extract-status** support `--json`; upload, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
 - `--context` and `--json` can't be combined.
 - Search is scoped to a workspace (the default one unless you set another). `--run` is not supported.
 

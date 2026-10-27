@@ -37,7 +37,12 @@ describe("public HTTP error boundary", () => {
   it("reports the original exception with correlation before returning safe copy", () => {
     const original = new Error("provider credits depleted");
     expect(reportPublicError(original)).toBe(PUBLIC_ERROR_MESSAGES.unexpected);
-    expect(report).toHaveBeenLastCalledWith(original, { requestId: "req-test", userId: "user-test" });
+    expect(report).toHaveBeenLastCalledWith(original, { requestId: "req-test", userId: "user-test" }, undefined);
+  });
+  it("hands the caller's request signal to the reporter so a disconnect is not reported as a failure", () => {
+    const controller = new AbortController();
+    reportPublicError("Client connection prematurely closed.", { operation: "chat" }, controller.signal);
+    expect(report).toHaveBeenLastCalledWith("Client connection prematurely closed.", { requestId: "req-test", userId: "user-test", operation: "chat" }, controller.signal);
   });
 });
 

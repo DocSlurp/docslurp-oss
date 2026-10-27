@@ -5,9 +5,14 @@ import {
   CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
+  ListMultipartUploadsCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
+  paginateListParts,
   S3Client,
   UploadPartCommand
 } from "@aws-sdk/client-s3";
@@ -15,7 +20,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
-import { resolveS3ClientTuning, s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
+import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
+import { uploadSigningTarget } from "./upload-signing-target.js";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
 
@@ -24,9 +30,13 @@ export function presignStorageConfig(storage: ObjectStorageConfig, publicEndpoin
   return publicEndpoint ? { ...storage, endpoint: publicEndpoint } : storage;
 }
 
-// Signing is local (no request is sent), so this client never needs to reach the public endpoint.
-const presignClient = env.storagePublicEndpoint
-  ? new S3Client(s3ClientConfig(presignStorageConfig(env.storage, env.storagePublicEndpoint)))
+// Signing is local; the bucket alias takes precedence over the public endpoint.
+const uploadTarget = uploadSigningTarget(
+  presignStorageConfig(env.storage, env.storagePublicEndpoint),
+  process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL,
+);
+const presignClient = env.storagePublicEndpoint || process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL
+  ? new S3Client(uploadTarget.config)
   : s3Client;
 
 let bucketReadyPromise: Promise<void> | null = null;
@@ -197,7 +207,7 @@ export async function signMultipartUploadPart(args: {
   return await getSignedUrl(
     presignClient,
     new UploadPartCommand({
-      Bucket: env.s3Bucket,
+      Bucket: uploadTarget.bucket,
       Key: args.key,
       UploadId: args.uploadId,
       PartNumber: args.partNumber
@@ -215,11 +225,36 @@ export async function signSingleUploadPut(args: {
   return await getSignedUrl(
     presignClient,
     new PutObjectCommand({
-      Bucket: env.s3Bucket,
+      Bucket: uploadTarget.bucket,
       Key: args.key,
       ContentType: args.contentType
     }),
     { expiresIn: args.expiresInSeconds ?? 900 }
+  );
+}
+
+/** Longest life of a presigned download link; the request is authorized just before signing. */
+export const DOWNLOAD_LINK_MAX_SECONDS = 300;
+
+/**
+ * A short-lived GET link straight to storage, saving the object as `filename`.
+ * Only for large downloads that should not stream through the API (zip
+ * exports); every other read goes through the file proxy (routes/files.ts).
+ * Callers authorize the request immediately before calling this.
+ */
+export async function signDownloadGet(args: { key: string; filename: string; expiresInSeconds?: number }): Promise<string> {
+  const ascii = args.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return await getSignedUrl(
+    presignClient,
+    new GetObjectCommand({
+      Bucket: uploadTarget.bucket,
+      Key: args.key,
+      ResponseContentType: "application/zip",
+      ResponseContentDisposition: `attachment; filename="${ascii}"; filename*=UTF-8''${rfc5987Encode(args.filename)}`,
+      // Never kept by browser or proxy caches once the link's minutes are up.
+      ResponseCacheControl: "private, no-store"
+    }),
+    { expiresIn: Math.min(args.expiresInSeconds ?? 120, DOWNLOAD_LINK_MAX_SECONDS) }
   );
 }
 
@@ -290,4 +325,56 @@ export async function abortMultipartUpload(args: { key: string; uploadId: string
 /** Readiness probe (`/ready`): HEAD the bucket without creating it. */
 export async function headStorageBucket(signal?: AbortSignal): Promise<void> {
   await s3Client.send(new HeadBucketCommand({ Bucket: env.s3Bucket }), { abortSignal: signal });
+}
+
+/** Consume every provider page; multipart sessions can contain up to 10,000 parts. */
+export async function listMultipartUploadParts(args: { key: string; uploadId: string }) {
+  const parts: Array<{ partNumber: number; etag: string; sizeBytes: number }> = [];
+  for await (const page of paginateListParts({ client: s3Client }, {
+    Bucket: env.s3Bucket, Key: args.key, UploadId: args.uploadId,
+  })) {
+    for (const part of page.Parts ?? []) {
+      if (part.PartNumber === undefined || !part.ETag || part.Size === undefined) {
+        throw new Error("Storage returned incomplete multipart metadata");
+      }
+      parts.push({ partNumber: part.PartNumber, etag: part.ETag, sizeBytes: part.Size });
+    }
+  }
+  return parts;
+}
+
+/**
+ * Deletes one page (at most 1,000 keys) of objects under `prefix` and reports
+ * what it removed, for sweeps that must empty a prefix across several passes.
+ * The prefix must be a non-empty directory path ending in "/": a bare or
+ * partial prefix is refused rather than risk deleting a neighbour's objects.
+ * Also aborts unfinished multipart uploads there once the prefix lists empty.
+ */
+export async function deleteObjectsUnderPrefix(prefix: string): Promise<{ objects: number; bytes: number; failed: number; done: boolean }> {
+  if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)+\/$/.test(prefix)) throw new Error("Refusing unsafe storage prefix");
+  await ensureBucketExists();
+  const page = await s3Client.send(new ListObjectsV2Command({ Bucket: env.s3Bucket, Prefix: prefix, MaxKeys: 1000 }));
+  const listed = (page.Contents ?? []).filter((item): item is typeof item & { Key: string } => typeof item.Key === "string" && item.Key.startsWith(prefix));
+  if (listed.length > 0) {
+    const response = await s3Client.send(new DeleteObjectsCommand({
+      Bucket: env.s3Bucket,
+      Delete: { Objects: listed.map((item) => ({ Key: item.Key })), Quiet: true },
+    }));
+    // Report what was and was not deleted; the caller persists both and retries the rest.
+    const refused = new Set((response.Errors ?? []).map((error) => error.Key).filter((key): key is string => typeof key === "string"));
+    const failed = Math.max(refused.size, response.Errors?.length ?? 0);
+    const removed = listed.filter((item) => !refused.has(item.Key));
+    const bytes = removed.reduce((sum, item) => sum + (typeof item.Size === "number" ? item.Size : 0), 0);
+    return { objects: listed.length - failed, bytes, failed, done: false };
+  }
+  // Nothing left to list: drop unfinished multipart uploads (parts are not listed as objects).
+  for (;;) {
+    const uploads = await s3Client.send(new ListMultipartUploadsCommand({ Bucket: env.s3Bucket, Prefix: prefix, MaxUploads: 1000 }));
+    const open = (uploads.Uploads ?? []).filter((upload) => upload.Key?.startsWith(prefix) && upload.UploadId);
+    for (const upload of open) {
+      await s3Client.send(new AbortMultipartUploadCommand({ Bucket: env.s3Bucket, Key: upload.Key!, UploadId: upload.UploadId! }));
+    }
+    if (!uploads.IsTruncated || open.length === 0) break;
+  }
+  return { objects: 0, bytes: 0, failed: 0, done: true };
 }

@@ -3,6 +3,8 @@ import { runAutoRecharge } from "./billing/auto-recharge.js";
 import { syncMeteringEnforcement } from "./billing/metering.js";
 import { runStorageMeter } from "./billing/storage-meter.js";
 import { sweepInterruptedConnectorSyncs } from "./connector-sync-recovery.js";
+import { sweepDocumentExports } from "./document-exports.js";
+import { sweepExtracts } from "./extracts.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -42,6 +44,10 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["credit-lease-expiry", () => sweepExpiredCreditLeases()],
   // Finish organization deletions interrupted after their tombstone was written.
   ["tenant-offboarding", () => resumeOrganizationDeletions()],
+  // Zip exports: email finished large ones, delete objects past their 7-day link.
+  ["document-exports", () => sweepDocumentExports()],
+  // Extract mode: settle finished extracts (charge, download, email) and delete expired ones.
+  ["extracts", () => sweepExtracts()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -55,15 +61,23 @@ export function isMaintenanceSweepEnabled(): boolean {
   return MAINTENANCE_SWEEP_INTERVAL_MS > 0;
 }
 
-export function startMaintenanceSweeper(): void {
-  if (timer || MAINTENANCE_SWEEP_INTERVAL_MS === 0) return;
-  timer = setInterval(() => {
-    for (const [name, run] of sweeps) {
-      withBackgroundSpan(`maintenance.${name}`, run).catch((error) => {
+/**
+ * One pass over every sweep. Each sweep is isolated: a rejection (ECONNRESET) or a
+ * synchronous throw in one neither skips the others nor stops the next tick.
+ */
+export function runMaintenanceSweepsOnce(list: ReadonlyArray<[name: string, run: () => Promise<unknown>]> = sweeps): void {
+  for (const [name, run] of list) {
+    Promise.resolve()
+      .then(() => withBackgroundSpan(`maintenance.${name}`, run))
+      .catch((error) => {
         console.error(`[${name}] sweep failed: ${error instanceof Error ? error.message : String(error)}`);
       });
-    }
-  }, MAINTENANCE_SWEEP_INTERVAL_MS);
+  }
+}
+
+export function startMaintenanceSweeper(): void {
+  if (timer || MAINTENANCE_SWEEP_INTERVAL_MS === 0) return;
+  timer = setInterval(runMaintenanceSweepsOnce, MAINTENANCE_SWEEP_INTERVAL_MS);
   timer.unref?.();
 }
 

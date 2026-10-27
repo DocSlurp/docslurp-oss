@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { ObjectStorageConfig } from "@docslurp/shared";
 
 import { env } from "../config.js";
+import { publicUploadBucketOrigin } from "./upload-signing-target.js";
 import { UPLOAD_HTML, UPLOAD_HTML_SHA256 } from "../mcp-ui/upload-bundle.generated.js";
 
 /** MCP Apps (SEP-1865): the upload widget is a single self-contained HTML resource. */
@@ -60,6 +61,7 @@ export function uploadUiConnectDomains(
   storage: Pick<ObjectStorageConfig, "bucket" | "endpoint" | "region" | "forcePathStyle"> =
     env.storagePublicEndpoint ? { ...env.storage, endpoint: env.storagePublicEndpoint } : env.storage,
   extra: string = env.mcpUiConnectDomains,
+  publicBucketUrl: string | undefined = process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL,
 ): string[] {
   const origins: string[] = [];
   if (storage.endpoint) {
@@ -73,6 +75,11 @@ export function uploadUiConnectDomains(
   } else {
     const host = `s3.${storage.region}.amazonaws.com`;
     origins.push(`https://${host}`, `https://${storage.bucket}.${host}`);
+  }
+  if (publicBucketUrl) {
+    // Share the signer's strict validation: a bucket alias identifies the bucket
+    // itself and takes precedence over endpoint-based signing.
+    origins.push(publicUploadBucketOrigin(publicBucketUrl));
   }
   for (const entry of extra.split(",")) {
     if (!entry.trim()) continue;

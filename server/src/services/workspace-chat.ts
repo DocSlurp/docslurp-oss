@@ -8,6 +8,8 @@ import type { RequestActor } from "../lib/request-actor.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
   configureSearchFromChat,
+  describeSearchSettingsForAgent,
+  type SearchConfigurationOutcome,
   loadChatSessionSearchOverrides,
   requestsSearchConfiguration,
   withThreadRetrieval,
@@ -42,6 +44,7 @@ import { assertCanSpend, type SpendKind } from "./billing/spend-guard.js";
 import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billing.js";
 import { claimChatTurnAnswerId, currentChatTurn } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
+import { loadChatWorkspaceInventory } from "./chat-workspace-inventory.js";
 import { reviewUntrustedEvidenceText } from "./prompt-injection.js";
 import {
   hybridSearch,
@@ -1196,8 +1199,10 @@ async function chatWorkspaceTurn(
     threadOverrides,
     args.retrieval,
   );
+  let searchConfiguration: SearchConfigurationOutcome | undefined;
   if (workspace && args.allowConfiguration !== false && requestsSearchConfiguration(args.query)) {
-    searchSettings = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
+    searchConfiguration = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
+    searchSettings = searchConfiguration.settings;
   }
   const filterDocumentIds = args.filters?.documentIds?.length ? args.filters.documentIds : undefined;
   // Type, tag and date filters only exist in retrieval; whole-corpus and stored-summary paths can't honour them.
@@ -1207,18 +1212,28 @@ async function chatWorkspaceTurn(
   const history = args.history ?? await listRecentTurns(sessionId, 20);
   if (workspace && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
-  if (args.allowAgentTools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
+  // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
+  if (args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
-    const { runChatMcpAgent } = await import("./chat-mcp-agent.js");
+    const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
+      import("./chat-mcp-agent.js"),
+      // The inventory is a prompt hint: without it the agent still runs, just without counts.
+      loadChatWorkspaceInventory(args.workspaceId, args.agent?.suggestions === true).catch((error: unknown) => {
+        console.warn("[chat-agent] workspace inventory unavailable:", error instanceof Error ? error.message : String(error));
+        return undefined;
+      }),
+    ]);
     const generated = await runChatMcpAgent({
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
-      retrievalDefaults: searchSettings.retrievalDefaults,
+      workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
+      web: args.agent?.web, suggestions: args.agent?.suggestions,
+      retrievalDefaults: searchSettings.retrievalDefaults, workspaceInventory,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",
         searchSettings.chat.searchInstructions ? `Workspace search instruction: ${searchSettings.chat.searchInstructions}` : "",
         `Answer style: ${searchSettings.chat.answerStyle}. ${searchSettings.chat.citations ? "Use inline evidence citations." : "Do not force citation markers into every sentence."}`,
-        `Current search settings: ${JSON.stringify(searchSettings.retrievalDefaults)}. Explicit search configuration requests have already been processed; explain these current values rather than applying the change again.`,
+        describeSearchSettingsForAgent(searchSettings, searchConfiguration),
       ].filter(Boolean).join("\n"),
       maxOutputTokens: args.maxOutputTokens ?? 2048, signal: args.signal, startedAtMs,
       requestedModel: policy.requestedModel, limits: policy.limits, requestId: currentRequestId(),

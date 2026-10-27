@@ -10,10 +10,19 @@ import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
  */
 export const API_ERROR_CODES = [
   "invalid_request",
+  "credit_request_rejected",
+  "credit_reconciliation_required",
+  "idempotency_conflict",
   "unauthorized",
   "forbidden",
+  "web_scope_required",
   "not_found",
   "workspace_not_found",
+  "workspace_forbidden",
+  "workspace_scope_forbidden",
+  "no_stages_to_run",
+  "source_not_reusable",
+  "missing_stage_artifacts",
   "organization_not_found",
   "organization_forbidden",
   "organization_conflict",
@@ -44,7 +53,16 @@ export const API_ERROR_CODES = [
   "chat_disabled",
   "model_not_allowed",
   "chat_deadline_exceeded",
+  "chat_tool_failed",
   "invalid_search_scope",
+  "web_disabled",
+  "url_blocked",
+  "privacy_mode_blocked",
+  "extract_not_found",
+  "extract_expired",
+  "retention_exceeds_cap",
+  "download_not_ready",
+  "download_failed",
   "unavailable",
   "internal",
 ] as const;
@@ -58,7 +76,7 @@ export function isApiErrorCode(value: unknown): value is ApiErrorCode {
 /**
  * Optional structured context. The boundary only forwards validation `issues`
  * (field paths), limit metadata (`retryAfterSeconds`, `category`, `policy`,
- * `account` (`starter` | `funded`), ...), `links` and a failed chat turn's `usage`.
+ * `spendKind`, ...), `links` and a failed chat turn's `usage`.
  */
 export type ApiErrorDetails = Record<string, unknown>;
 
@@ -82,12 +100,21 @@ export const apiErrorEnvelopeSchema = z.object({
 /** Reviewed copy per code. The boundary sends this instead of route-authored text. */
 export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   invalid_request: PUBLIC_ERROR_MESSAGES.invalid,
+  credit_request_rejected: "Credit request rejected before issuance. Correct the recipient or request and try again.",
+  credit_reconciliation_required: "Credit outcome requires operator reconciliation. Preserve this request ID; do not create a replacement.",
+  idempotency_conflict: "This credit request ID belongs to different parameters or an administrator. Reconcile the original request.",
   unauthorized: PUBLIC_ERROR_MESSAGES.unauthorized,
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
   workspace_not_found: PUBLIC_ERROR_MESSAGES.workspaceMissing,
+  workspace_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  workspace_scope_forbidden: "This API key is limited to specific workspaces, so it can't create a new one. Name a workspace the key can use.",
+  no_stages_to_run: "None of the requested stages runs in this pipeline. Choose stages the workspace has turned on.",
+  source_not_reusable: "This run's earlier output can't be reused for a partial reprocess. Reprocess every stage instead.",
+  missing_stage_artifacts: "This run is missing the earlier stage output needed to reprocess from there. Reprocess from an earlier stage or upload again.",
   organization_not_found: PUBLIC_ERROR_MESSAGES.organizationMissing,
   organization_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  web_scope_required: PUBLIC_ERROR_MESSAGES.forbidden,
   organization_conflict: PUBLIC_ERROR_MESSAGES.conflict,
   personal_organization: PUBLIC_ERROR_MESSAGES.personalOrganization,
   membership_exists: PUBLIC_ERROR_MESSAGES.conflict,
@@ -116,7 +143,16 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   chat_disabled: PUBLIC_ERROR_MESSAGES.chatDisabled,
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
+  chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,
+  web_disabled: "Web tools are turned off for this server or workspace.",
+  url_blocked: "This URL can't be fetched. Use a public HTTP or HTTPS address.",
+  privacy_mode_blocked: "This workspace's privacy mode doesn't allow web tools.",
+  extract_not_found: "Extract not found.",
+  extract_expired: "This extract has expired and its files and outputs were deleted. Run the extract again to get new results.",
+  retention_exceeds_cap: "retentionDays is longer than this deployment keeps extracts. Ask for fewer days; details.maxRetentionDays is the limit.",
+  download_not_ready: "This extract's download isn't ready yet. Try again once the extract completes.",
+  download_failed: "This extract's download couldn't be built. Contact support if this keeps happening.",
   unavailable: PUBLIC_ERROR_MESSAGES.unavailable,
   internal: PUBLIC_ERROR_MESSAGES.unexpected,
 };
@@ -136,8 +172,8 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   return "internal";
 }
 
-const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "account"] as const;
+const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits", "maxRetentionDays", "requiredCredits"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):
@@ -168,8 +204,8 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
 
 /**
  * Public copy for `code`, plus where to go next when the details carry links:
- * a starter-account rate limit points at buying credits, credit errors at
- * buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
+ * a rate limit points at the docs (every account shares one table), credit
+ * errors at buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
  * no billing) it is the reviewed copy alone.
  */
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
@@ -179,12 +215,9 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
   }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
-  const account = typeof details?.account === "string" ? details.account : undefined;
   switch (code) {
+    // Every account shares one rate-limit table, so the message never suggests buying credits to raise it.
     case "rate_limited":
-      if (account === "starter" && links.buyCredits) {
-        return `Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at ${links.buyCredits}, or wait for Retry-After and try again.`;
-      }
       return links.docs ? `${base} Rate limits: ${links.docs}` : base;
     case "ip_temporarily_blocked":
       return links.docs ? `${base} Rate limits: ${links.docs}` : base;

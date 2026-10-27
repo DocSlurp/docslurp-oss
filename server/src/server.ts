@@ -1,3 +1,6 @@
+import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
+import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
+import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
 import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
@@ -15,13 +18,14 @@ import { Hono } from "hono";
 import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
-import { requestContextMiddleware } from "./lib/request-context.js";
+import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
+import { exportsRoutes } from "./routes/exports.js";
 import { extractorRoutes } from "./routes/extractors.js";
 import { docsRoutes } from "./routes/docs.js";
 import { healthRoutes } from "./routes/health.js";
@@ -33,7 +37,7 @@ import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
-import { indexStalenessRoutes } from "./routes/index-staleness.js";
+import { webRoutes } from "./routes/web.js";
 import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
@@ -47,17 +51,20 @@ import { algoliaCompatRoutes } from "./routes/algolia-compat.js";
 import { authRoutes } from "./routes/auth.js";
 import { samlCallbackRoutes, ssoRoutes } from "./routes/sso.js";
 import { connectorsRoutes } from "./routes/connectors.js";
+import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { billingRoutes } from "./routes/billing.js";
 import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
 import { userSettingsRoutes } from "./routes/user-settings.js";
 import { accountRoutes } from "./routes/account.js";
+import { extractsRoutes } from "./routes/extracts.js";
 import { startCreditDebitFlusher, stopCreditDebitFlusher } from "./services/billing/credit-debit-flusher.js";
 import { syncMeteringEnforcement } from "./services/billing/metering.js";
 import { startMaintenanceSweeper, stopMaintenanceSweeper } from "./services/maintenance-sweeper.js";
 import { startAlertEvaluator, stopAlertEvaluator } from "./services/alerts/alert-evaluator.js";
 import { startWorkerFleetRefresher, stopWorkerFleetRefresher } from "./services/worker-fleet.js";
 import { startRunStartRecovery, stopRunStartRecovery } from "./services/run-start-recovery.js";
+import { startWithRetry, type StartWithRetry } from "./lib/start-with-retry.js";
 import { startWebhookOutboxListener, stopWebhookOutboxListener } from "./services/webhooks.js";
 import { startOrgSpendChangedListener, stopOrgSpendChangedListener } from "./services/spend-paused-runs.js";
 import { replaceProcessTask } from "./lib/process-singleton.js";
@@ -67,6 +74,10 @@ import { spendAwareErrorHandler } from "./services/billing/spend-guard.js";
 import { UnreadableSourceError } from "./services/source-metadata.js";
 import { warmDefaultLocalEmbedding } from "./lib/ai.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
+import { registerProviderPolicy } from "./lib/provider-policy.js";
+
+// OpenRouter requests made while serving a request follow its org's China-provider setting.
+registerProviderPolicy();
 
 const execFileAsync = promisify(execFile);
 
@@ -97,9 +108,13 @@ export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.
   // Native paths answer thrown errors in the error envelope; protocol surfaces keep their shapes.
-  app.onError(nativeErrorHandler((error, c) => error instanceof UnreadableSourceError
-    ? c.json({ error: error.message, code: error.code }, error.statusCode)
-    : spendAwareErrorHandler(error, c)));
+  app.onError(nativeErrorHandler((error, c) => {
+    // The request span records it (message, stack) once the response is sent.
+    setCurrentRequestError(error);
+    return error instanceof UnreadableSourceError
+      ? c.json({ error: error.message, code: error.code }, error.statusCode)
+      : spendAwareErrorHandler(error, c);
+  }));
 
   // Authentication is served first, ahead of the global middleware below: these
   // paths never ran the API IP limit, request context or widget CORS.
@@ -118,7 +133,7 @@ export function createApiApp(): Hono {
   // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
   app.use("/v1/*", async (c, next) => {
     if (c.req.path === "/v1/mcp") return next(); // protocol-specific cap above
-    const upload = /^\/v1\/(?:uploads|ingest)(?:\/|$)/.test(c.req.path);
+    const upload = /^\/v1\/(?:uploads|ingest|extracts)(?:\/|$)/.test(c.req.path);
     const json = /\bjson\b/i.test(c.req.header("content-type") ?? "");
     if (upload && !json) {
       if (/\/bulk\/?$/.test(c.req.path)) return multipartBodyLimit(env.maxMultipartUploadBytes)(c, next);
@@ -131,6 +146,7 @@ export function createApiApp(): Hono {
     "/webhooks/stripe",
     nativeBodyLimit(1024 * 1024)
   );
+  app.use("/webhooks/tigris/uploads", nativeBodyLimit(1024 * 1024));
   app.use("*", rejectNulBytes);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
   const workspaceRefs = workspaceRefPath([workspacesRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
@@ -151,10 +167,13 @@ export function createApiApp(): Hono {
   app.route("/v1/jobs", jobsRoutes);
   app.route("/v1/workspaces", workspacesRoutes);
   app.route("/v1/documents", documentsRoutes);
+  app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
+  // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
+  app.route("/v1/extracts", extractsRoutes);
   app.route("/v1/webhooks", webhooksRoutes);
   app.route("/v1/artifacts", artifactsRoutes);
   app.route("/v1/files", filesRoutes);
@@ -162,11 +181,11 @@ export function createApiApp(): Hono {
   app.route("/v1/capabilities", capabilitiesRoutes);
   app.route("/v1/notifications", notificationsRoutes);
   app.route("/v1/search", searchRoutes);
+  app.route("/v1/web", webRoutes);
   app.route("/v1/searches", searchesRoutes);
   app.route("/v1/chat", workspaceChatRoutes);
   app.route("/v1", chatCompletionsRoutes);
   app.route("/v1", suggestRoutes);
-  app.route("/v1/runs", indexStalenessRoutes);
   app.route("/v1/mcp", mcpRoutes);
   app.route("/v1/session-tools", sessionToolRoutes);
   app.route("/compat/algolia", algoliaCompatRoutes);
@@ -174,11 +193,13 @@ export function createApiApp(): Hono {
   app.route("/v1/auth", samlCallbackRoutes);
   app.route("/v1/workspaces", connectorsRoutes);
   app.route("/v1/billing", billingRoutes);
+  app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/workspaces", secretsRoutes);
   app.route("/v1/workspaces", workspaceGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
   app.route("/webhooks", stripeWebhookRoutes);
+  app.route("/webhooks", tigrisUploadWebhookRoutes);
 
   return app;
 }
@@ -206,10 +227,16 @@ function shouldRunStartupMigrations(): boolean {
 }
 
 let startupPromise: Promise<void> | null = null;
+// LISTEN subscriptions retry until their dependency returns (lib/start-with-retry.ts).
+let listenerStarts: StartWithRetry[] = [];
 
 /** Stops this module instance's timers and LISTEN subscription. */
 async function stopApiBackgroundTasks(): Promise<void> {
+  for (const pending of listenerStarts) pending.stop();
+  listenerStarts = [];
   stopMaintenanceSweeper();
+  await stopDirectUploadReconciler();
+  await closeDirectUploadLockPool();
   stopAlertEvaluator();
   stopCreditDebitFlusher();
   stopRunStartRecovery();
@@ -241,6 +268,7 @@ export function ensureApiStartup(): Promise<void> {
       // they would keep running (and querying) alongside the new ones.
       await replaceProcessTask("api-background-tasks", stopApiBackgroundTasks)?.();
       startMaintenanceSweeper();
+      startDirectUploadReconciler();
       // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.
       startAlertEvaluator();
       // Apply workers' pending credit debits to org pools every few seconds.
@@ -249,14 +277,12 @@ export function ensureApiStartup(): Promise<void> {
       startRunStartRecovery();
       // Worker capability handshake: keep the fleet view warm for gated flags (services/worker-fleet.ts).
       startWorkerFleetRefresher();
-      await startWebhookOutboxListener().catch((error: unknown) => {
-        console.error(`[webhook-outbox] listener failed; relying on the maintenance sweep: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      // Not awaited: a database that is down at boot must not block startup, and the
+      // listener keeps retrying with backoff while the maintenance sweep covers the gap.
+      listenerStarts.push(startWithRetry("webhook-outbox", startWebhookOutboxListener));
       // Top-ups, auto-recharge, budget/plan changes and released leases resume
       // spend-paused runs at once (the maintenance sweep is the fallback).
-      await startOrgSpendChangedListener().catch((error: unknown) => {
-        console.error(`[spend-paused-runs] listener failed; relying on the maintenance sweep: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      listenerStarts.push(startWithRetry("spend-paused-runs", startOrgSpendChangedListener));
 
       // Restart the machine when the DB pool hangs on dead sockets (services/db-watchdog.ts).
       if (process.env.NODE_ENV === "production") startDbWatchdog();
@@ -281,7 +307,12 @@ export function ensureApiStartup(): Promise<void> {
           startup_migrations_enabled: shouldRunStartupMigrations(),
         },
       });
-    })();
+    })().catch((error: unknown) => {
+      // A transient failure (database restarting during migrations or seeding) must not
+      // wedge every later call on one rejected promise: let the next caller retry.
+      startupPromise = null;
+      throw error;
+    });
   }
 
   return startupPromise;

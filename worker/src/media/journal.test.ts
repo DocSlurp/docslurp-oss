@@ -83,15 +83,16 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     expect(Number(rows[0].cost_cents)).toBe(0);
     expect(Number(rows[0].provider_cost)).toBeCloseTo(.5);
   });
-  it("reserves starter video quotas atomically and does not count a retry twice", async () => {
+  it("admits video without a daily organization quota and does not count a retry twice", async () => {
     await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
       values ('media-doc-2','media-u','media-ws','media-run','second.mp4','video/mp4','second','uploaded') on conflict do nothing`;
-    const results=await Promise.allSettled([journal.admitVideo(scope,400,40),journal.admitVideo({...scope,documentId:"media-doc-2"},400,40)]);
-    expect(results.filter(r=>r.status==="fulfilled")).toHaveLength(1);
-    const [admission]=await sql`select * from media_video_admissions`;
-    await journal.admitVideo({...scope,documentId:admission.document_id},400,40);
-    expect(await sql`select * from media_video_admissions`).toHaveLength(1);
-    await expect(journal.admitVideo(scope,601,60)).rejects.toThrow("tier");
+    // 800 s of video was the whole former starter day (600 s); both admissions now succeed for any organization.
+    await Promise.all([journal.admitVideo(scope,400,40),journal.admitVideo({...scope,documentId:"media-doc-2"},400,40)]);
+    expect(await sql`select * from media_video_admissions`).toHaveLength(2);
+    await journal.admitVideo(scope,400,40);
+    expect(await sql`select * from media_video_admissions`).toHaveLength(2);
+    await expect(journal.admitVideo(scope,400,41)).rejects.toThrow("changed on retry");
+    await expect(journal.admitVideo({...scope,documentId:"media-doc-2"},7201,60)).rejects.toThrow("2 hour");
   });
   it("reconciles matching request evidence idempotently without a second usage debit",async()=>{
     const admission=await journal.admit(args);

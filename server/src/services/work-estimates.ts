@@ -1,6 +1,10 @@
 import {
   compilePipelinePlan,
   effectiveIndexingMode,
+  estimateUploadMedia,
+  uploadMediaKind,
+  type UploadMediaEstimate,
+  type UploadMediaFile,
   withoutStageSelection,
   type CostEstimate,
   type PipelineFeatures,
@@ -86,24 +90,43 @@ export async function estimateDocumentReprocess(args: {
 /** Pages assumed for a file whose page count the client does not know (about 75 KB of source per page). */
 export const ASSUMED_BYTES_PER_PAGE = 75 * 1024;
 
-/** `POST /v1/uploads/estimate`: ingesting new files with the target workspace's pipeline. */
+/**
+ * `POST /v1/uploads/estimate`: ingesting new files with the target workspace's pipeline. Audio and video are priced
+ * by duration (`media`, also included in `estimate.credits`); everything else by page.
+ */
 export async function estimateUpload(args: {
-  files: Array<{ name: string; size: number; pages?: number }>;
+  files: Array<UploadMediaFile & { pages?: number }>;
   workspace: { pipeline: PipelineFeatures; orgId: string };
   env?: EstimateEnv;
-}): Promise<CostEstimate> {
-  const pages = args.files.reduce(
+}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null }> {
+  const paged = args.files.filter((file) => !uploadMediaKind(file));
+  const pages = paged.reduce(
     (sum, file) => sum + Math.max(1, Math.round(file.pages ?? Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE))),
     0,
   );
-  return await estimateWork({
+  const media = estimateUploadMedia(args.files, { videoFrames: args.workspace.pipeline.mediaVideo?.enabled !== false });
+  const documents = estimateWork({
     features: args.workspace.pipeline,
     stages: compilePipelinePlan(args.workspace.pipeline).stageOrder,
-    documents: args.files.length,
+    documents: paged.length,
     pages,
     orgId: args.workspace.orgId,
     env: args.env,
   });
+  const estimate = await documents;
+  if (!media) return { estimate, media };
+  // Media files add their own price; the page estimate already covers any other files in the batch.
+  return {
+    media,
+    estimate: {
+      ...estimate,
+      documents: estimate.documents + media.audioFiles + media.videoFiles,
+      credits: estimate.credits
+        ? { low: estimate.credits.low + media.credits.low, high: estimate.credits.high + media.credits.high }
+        : null,
+      basis: `${estimate.basis}; audio and video priced by duration`,
+    },
+  };
 }
 
 /** The one workspace the (editable) documents belong to, or null when they span several or none are found. */

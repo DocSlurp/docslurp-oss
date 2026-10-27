@@ -298,7 +298,15 @@ describe("retention-aware superseded purge", () => {
     await insertVersion("child", "cancelled", "2026-01-03", { reindexOf: "v2" });
     await insertVersion("v4", "queued", "2026-01-04");
     await sql`update documents set status = 'completed' where id = 'v4'`;
-    await sql`update documents set superseded_at = now(), superseded_by_document_id = 'v4' where id = 'child'`;
+    await sql.begin(async tx => {
+      const client = tx as unknown as postgres.Sql<Record<string, unknown>>;
+      await client`update documents set superseded_at = now(), superseded_by_document_id = 'v4' where id = 'child'`;
+      // now() is fixed within this transaction. Equality is not past the
+      // strict grace cutoff, even when graceSeconds is zero.
+      expect(await retentionActions(client, 0, 50)).not.toContainEqual({ id: "child", action: "purge" });
+      await client`update documents set superseded_at = now() - interval '1 second' where id = 'child'`;
+      expect(await retentionActions(client, 0, 50)).toContainEqual({ id: "child", action: "purge" });
+    });
     await sweep();
     const s = await states();
     expect(s.child).toMatchObject({ purged: true, archived: false });

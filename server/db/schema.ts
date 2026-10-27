@@ -76,6 +76,8 @@ export const organizations = pgTable(
   {
     id: text().primaryKey().notNull(),
     retainDocumentVersions: integer("retain_document_versions"),
+    /** False keeps China-based model providers out of the org's OpenRouter requests (migration 0086). */
+    allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
     retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
     retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
     name: text().notNull(),
@@ -329,6 +331,9 @@ export const documents = pgTable(
     chunkCount: integer("chunk_count").default(0).notNull(),
     /** document_pages rows; trigger-maintained (migration 0063). */
     storedPageCount: integer("stored_page_count").default(0).notNull(),
+    /** Exact indexed text bytes; statement-trigger-maintained (migration 0072). */
+    chunkTextBytes: bigint("chunk_text_bytes", { mode: "number" }).default(0).notNull(),
+    storedPageTextBytes: bigint("stored_page_text_bytes", { mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -367,6 +372,9 @@ export const documents = pgTable(
     index("documents_workspace_in_flight_idx")
       .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
       .where(sql`status NOT IN ('completed', 'failed', 'cancelled')`),
+    index("documents_workspace_failed_idx")
+      .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
+      .where(sql`status = 'failed' AND superseded_at IS NULL AND archived_at IS NULL AND purged_at IS NULL`),
     index("documents_workspace_canonical_idx")
       .using(
         "btree",
@@ -2085,6 +2093,13 @@ export const parserEvalResults = pgTable(
 export const uploadSessions = pgTable(
   "upload_sessions",
   {
+    apiKeyId: text("api_key_id"),
+    allowedWorkspaceIds: text("allowed_workspace_ids").array(),
+    result: jsonb(),
+    lastError: text("last_error"),
+    reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
+    nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
@@ -2133,6 +2148,7 @@ export const uploadSessions = pgTable(
 export const uploadSessionFiles = pgTable(
   "upload_session_files",
   {
+    unknownSize: boolean("unknown_size").default(false).notNull(),
     id: text().primaryKey().notNull(),
     sessionId: text("session_id").notNull(),
     filename: text().notNull(),

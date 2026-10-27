@@ -114,17 +114,41 @@ if [[ ! -x "${VENV_PYTHON}" ]]; then
   exit 1
 fi
 
+# Lock files (*.lock.txt) carry sha256 hashes from `uv pip compile
+# --generate-hashes`; install them in hash-checking mode so a tampered or
+# substituted artifact fails the install. Loose requirement files (non-x86_64
+# hosts, DOCSLURP_WORKER_REQUIREMENTS_MODE=loose) have no pins to check.
+hash_args_for() {
+  local file="$1"
+  if grep -q -- '--hash=sha256:' "${file}"; then
+    printf '%s\n' --require-hashes
+  elif [[ "${file}" == *.lock.txt ]]; then
+    echo "Locked requirements ${file} have no --hash entries; regenerate them with uv pip compile --generate-hashes." >&2
+    return 1
+  fi
+}
+
 install_with_uv() {
-  uv pip install --no-cache --python "${VENV_PYTHON}" -r "$1"
+  local hash_args
+  hash_args="$(hash_args_for "$1")" || return 1
+  # shellcheck disable=SC2086 # hash_args is empty or one flag.
+  uv pip install --no-cache --python "${VENV_PYTHON}" ${hash_args} -r "$1"
 }
 
 install_with_pip() {
-  "${VENV_PYTHON}" -m pip install --no-cache-dir --upgrade pip setuptools wheel
+  local hash_args
+  hash_args="$(hash_args_for "$1")" || return 1
+  # Locked installs keep the venv's seeded pip: upgrading it from the index
+  # would be the one download without a hash check.
+  if [[ -z "${hash_args}" ]]; then
+    "${VENV_PYTHON}" -m pip install --no-cache-dir --upgrade pip setuptools wheel
+  fi
   local index_args=()
   if [[ "${UV_TORCH_BACKEND}" == "cpu" ]]; then
     index_args=(--extra-index-url https://download.pytorch.org/whl/cpu)
   fi
-  "${VENV_PYTHON}" -m pip install --no-cache-dir "${index_args[@]}" -r "$1"
+  # shellcheck disable=SC2086 # hash_args is empty or one flag.
+  "${VENV_PYTHON}" -m pip install --no-cache-dir "${index_args[@]}" ${hash_args} -r "$1"
 }
 
 install_requirements() {

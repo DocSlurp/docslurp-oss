@@ -26,6 +26,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
+import { setOpenRouterProviderPolicyResolver } from "@docslurp/shared";
 
 import { pushPerfMetric } from "./perf-context.js";
 import { ProviderRetryableError, backoffDelayMs } from "./provider-retry.js";
@@ -545,12 +546,24 @@ export function createProviderRateStoreFromEnv(env: NodeJS.ProcessEnv = process.
 // Limiter
 // ---------------------------------------------------------------------------
 
-const scopeStorage = new AsyncLocalStorage<{ orgId: string | null }>();
+const scopeStorage = new AsyncLocalStorage<{ orgId: string | null; allowChinaProviders: boolean }>();
 
-/** Attributes provider calls inside `fn` to an org for the fair-share buckets. */
-export function runWithProviderRateScope<T>(scope: { orgId: string | null | undefined }, fn: () => Promise<T>): Promise<T> {
-  return scopeStorage.run({ orgId: scope.orgId ?? null }, fn);
+/**
+ * Attributes provider calls inside `fn` to an org for the fair-share buckets,
+ * and carries the org's China-provider policy to OpenRouter requests.
+ */
+export function runWithProviderRateScope<T>(scope: { orgId: string | null | undefined; allowChinaProviders?: boolean }, fn: () => Promise<T>): Promise<T> {
+  return scopeStorage.run({ orgId: scope.orgId ?? null, allowChinaProviders: scope.allowChinaProviders !== false }, fn);
 }
+
+/** The current job's provider policy; undefined outside a job scope. */
+export function currentProviderPolicy(): { allowChinaProviders: boolean } | undefined {
+  const scope = scopeStorage.getStore();
+  return scope ? { allowChinaProviders: scope.allowChinaProviders } : undefined;
+}
+
+// Worker OpenRouter requests (text, vision, embeddings) read the job's policy.
+setOpenRouterProviderPolicyResolver(currentProviderPolicy);
 
 export function currentProviderRateOrg(): string | null {
   return scopeStorage.getStore()?.orgId ?? null;

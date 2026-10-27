@@ -1,9 +1,10 @@
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, UploadPartCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { presignStorageConfig } from "../lib/storage.js";
+import { uploadSigningTarget } from "../lib/upload-signing-target.js";
 import { uploadUiConnectDomains } from "../lib/mcp-ui-resources.js";
 
 const internal: ObjectStorageConfig = {
@@ -29,6 +30,35 @@ describe("STORAGE_PUBLIC_ENDPOINT signing", () => {
     expect(url.pathname).toBe("/docslurp-files/uploads/a.pdf");
     expect(url.searchParams.get("X-Amz-SignedHeaders")).toContain("host");
   });
+
+  it("allows the actual signed bucket alias when both public overrides are configured", async () => {
+    const publicStorage = presignStorageConfig(internal, "https://storage.example.com");
+    const alias = "https://files.example.com";
+    const target = uploadSigningTarget(publicStorage, alias);
+    const domains = uploadUiConnectDomains(publicStorage, "", alias);
+    const client = new S3Client(target.config);
+    try {
+      for (const command of [
+        new PutObjectCommand({ Bucket: target.bucket, Key: "uploads/a.pdf", ContentType: "application/pdf" }),
+        new UploadPartCommand({ Bucket: target.bucket, Key: "uploads/a.pdf", UploadId: "upload-one", PartNumber: 1 }),
+      ]) {
+        const signed = new URL(command instanceof UploadPartCommand
+          ? await getSignedUrl(client, command, { expiresIn: 900 })
+          : await getSignedUrl(client, command, { expiresIn: 900 }));
+        expect(signed.origin).toBe(alias);
+        expect(signed.pathname).toBe("/uploads/a.pdf");
+        expect(domains).toContain(signed.origin);
+      }
+      expect(domains).toContain("https://storage.example.com");
+      expect(domains).not.toContain("http://minio:9000");
+    } finally { client.destroy(); }
+  });
+
+  it.each(["http://files.example.com", "https://files.example.com/bucket", "https://secret@files.example.com", "https://files.example.com?token=x"])(
+    "refuses a CSP bucket alias the signer would reject: %s", alias => {
+      expect(() => uploadUiConnectDomains(internal, "", alias)).toThrow(/DOCSLURP_STORAGE_PUBLIC_BUCKET_URL/);
+    },
+  );
 
   it("leaves the storage config untouched when unset", () => {
     expect(presignStorageConfig(internal, null)).toBe(internal);

@@ -25,6 +25,8 @@ import {
   dailyStorageCredits,
   daysInUtcMonth,
   estimateIngest,
+  PIPELINE_PROFILES,
+  PIPELINE_PROFILE_BASIS,
   isUnitChargeEvent,
   mediaRichPages,
   pageCredits,
@@ -36,6 +38,7 @@ import {
   unitChargeMetadata,
   workerSlotsFor,
 } from "../billing.js";
+import { WORKSPACE_CHAT_MODELS } from "../workspace-chat-models.js";
 
 const GB = 1024 ** 3;
 
@@ -48,7 +51,7 @@ describe("price card", () => {
       videoMinuteRichPages: 3,
       storageGbMonth: 25,
       searchPer1k: 10,
-      chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
+      chatAnswerTiers: { standard: 1, advanced: 7.5, premium: 50 },
       richIncludedOutputTokens: 1_000,
       richExtraPageOutputTokens: 1_000,
       llmSearchMultiplier: 10,
@@ -92,6 +95,13 @@ describe("price card", () => {
     expect(searchCredits(1, { llmStrategies: true })).toBeCloseTo(0.1);
   });
 
+  it("maps every catalog chat model to an explicit tier, so none falls through to premium by omission", () => {
+    const bare = (id: string) => id.slice(id.lastIndexOf("/") + 1);
+    expect(WORKSPACE_CHAT_MODELS.filter(({ id }) => !Object.keys(CHAT_MODEL_TIERS).some((key) =>
+      key.endsWith("*") ? bare(id).startsWith(key.slice(0, -1)) : key === bare(id))).map(({ id }) => id)).toEqual([]);
+    expect(chatModelTier("openai/gpt-6-luna")).toBe("standard");
+  });
+
   it("prices chat answers by model tier, with unmapped models premium and a 100k token block", () => {
     expect(chatModelTier("z-ai/glm-5.3-flash")).toBe("standard");
     expect(chatModelTier("minimax/minimax-m3.1-flash:free")).toBe("standard");
@@ -100,21 +110,23 @@ describe("price card", () => {
     expect(chatModelTier("openai/gpt-6.1-sol")).toBe("premium");
     expect(chatModelTier("some/new-model")).toBe("premium");
     expect(chatModelTier(null)).toBe("premium");
-    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash" })).toBe(2.5);
-    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 100_000 })).toBe(2.5);
-    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 250_000 })).toBe(7.5);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash" })).toBe(1);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 100_000 })).toBe(1);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 250_000 })).toBe(3);
     expect(chatAnswerCredits({ model: "deepseek/deepseek-v4.1-flash" })).toBe(7.5);
     expect(chatAnswerCredits({ model: "qwen/qwen3.8-max-prime", totalTokens: 580_000 })).toBe(300);
     expect(Object.values(CHAT_MODEL_TIERS).every((tier) => tier in PRICE_CARD.chatAnswerTiers)).toBe(true);
   });
 
   it("keeps every mapped chat model above its measured mean cost per answer", () => {
-    // SigNoz production traces 2026-10-13..22, [mean, p90] USD per answer.
+    // [mean or p50, p90] USD per answer. Catalog models: production /v1/chat after the
+    // chat cost cuts (2026-10-25, 88 turns each). Others: SigNoz traces 2026-10-13..22.
     const costUsd: Record<string, [number, number]> = {
-      "z-ai/glm-5.3-flash": [0.0043, 0.0092],
+      "z-ai/glm-5.3-flash": [0.0037, 0.0041],
+      "openai/gpt-6-luna": [0.0019, 0.0039],
       "inception/mercury-3": [0.0064, 0.018],
       "liquid/lfm-2.5-24b-a2b": [0.0037, 0.01],
-      "anthropic/claude-haiku-5.5": [0.0091, 0.011],
+      "anthropic/claude-haiku-5.5": [0.0027, 0.0039],
       "xiaomi/mimo-v2.6-flash": [0.0086, 0.023],
       "deepseek/deepseek-v4.1-flash": [0.0177, 0.042],
       "reflection/beam-1.0-501b-a23b": [0.0349, 0.085],
@@ -274,6 +286,19 @@ describe("ingest estimator", () => {
     );
     expect(fast).toBeLessThanOrEqual(standard!);
     expect(standard).toBeLessThan(deep!);
+  });
+
+  it("keeps profile worker seconds ordered and on the production slot basis", () => {
+    expect(PIPELINE_PROFILE_BASIS).toMatchObject({ slotsPerHost: 2, slotTuner: "resource" });
+    for (const pageClass of ["text", "complex", "scanned"] as const) {
+      const [fast, standard, deep] = (["fast", "standard", "deep"] as const).map((id) => PIPELINE_PROFILES[id].pages[pageClass].workerSeconds);
+      expect(fast, pageClass).toBeLessThanOrEqual(standard!);
+      expect(standard, pageClass).toBeLessThanOrEqual(deep!);
+    }
+    // Measured 2026-10: text pages hold a slot for roughly 0.2-0.4 s, a model-read page for about 4 s.
+    expect(PIPELINE_PROFILES.standard.pages.text.workerSeconds).toBeGreaterThanOrEqual(0.22);
+    expect(PIPELINE_PROFILES.standard.pages.text.workerSeconds).toBeLessThanOrEqual(0.4);
+    expect(PIPELINE_PROFILES.standard.pages.scanned.workerSeconds).toBeGreaterThanOrEqual(4);
   });
 
   it("handles empty input", () => {

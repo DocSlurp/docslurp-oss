@@ -149,13 +149,11 @@ const files = await Promise.all(["handbook.pdf", "benefits.pdf"].map(async (file
 const accepted = await client.upload({
   files,
   workspace: "Legal contracts", // Optional ID, slug or name (created if none matches); omit for the default workspace.
-  // One key per upload job. Reuse it only to retry the same files, so a retry can't upload twice.
-  idempotencyKey: "handbook-import-2026-10-v1",
 });
 await client.waitForRun(accepted.run.id);
 ```
 
-A `createReadStream()` upload streams with backpressure and is sent once, so it can't be retried. File-backed blobs from `openAsBlob()` can be re-sent, which is what lets an `idempotencyKey` upload retry; keep the files unchanged until the upload finishes. For an unnamed `Blob` or a generic async iterable, pass `{ filename: "handbook.pdf" }` as the second argument.
+A `createReadStream()` upload reads with backpressure and retries individual buffered storage parts when needed. It cannot replay the whole source after an error. File-backed blobs from `openAsBlob()` avoid loading all files into memory; keep those files unchanged until the upload finishes. Direct sessions ignore `idempotencyKey`: starting another session creates another upload. Use the session methods below when you need to retain the session ID for recovery. For an unnamed `Blob` or a generic async iterable, pass `{ filename: "handbook.pdf" }` as the second argument.
 
 ### Ingest public URLs
 
@@ -167,6 +165,19 @@ await client.waitForRun(accepted.run.id);
 ```
 
 DocSlurp must be able to reach the URLs. URL ingestion is retried only when you supply an `idempotencyKey`. Use the same `upload()` method for local files or public URLs.
+
+### Extract and auto-delete
+
+`extract()` takes everything `upload()` takes, but the files and every output are deleted when the retention window ends: 48 hours free by default, or `retentionDays` (charged as storage, up to 30 days by default). The response adds `extract` with its `id`, `expiresAt` and download state, and the requester is emailed a sign-in download link when it finishes unless `notifyEmail: false`.
+
+```ts
+const { run, extract } = await client.extract([await openAsBlob("report.pdf")], { retentionDays: 7, download: "markdown" });
+await client.waitForRun(run.id);
+const status = await client.getExtract(extract.id); // DocSlurpApiError 410 once it has expired
+const zipUrl = await client.getExtractDownloadUrl(extract.id); // two-minute signed URL; server key with artifacts
+```
+
+See [Extract mode](https://docslurp.io/docs/extract) for retention, pricing and deletion.
 
 ### Search several questions in one request
 
@@ -267,7 +278,7 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey`, and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
+Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; chat and the embed widget also need `chat`), and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
 
 For `ViewerEmbed`, pass `apiUrl=""` for the same-origin API and `documentId`, with no `clientKey`. On your own site, authenticate users in a backend proxy and authorize each requested document there. Keep the server key in that backend. Proxy both document metadata and artifact URLs (rewrite artifact URLs to same-origin authenticated routes): the viewer iframe uses cookies and cannot attach a bearer header. Never put server credentials into an embed or an artifact URL.
 
@@ -405,9 +416,10 @@ Environment variables are read once, when the client is created, and only on the
 | `listWorkspaces(options?)` | Accessible workspace records | `ingest`, `search`, `artifacts` or `workspaces:manage` |
 | `getWorkspace(id, options?)` | Workspace record | Same as listing |
 | `createUploadSession(input, options?)` | Session ID, status and signed transfer descriptors | `ingest` |
-| `getUploadSession(id, options?)` | Session status and refreshed transfer URLs | `ingest` |
-| `completeUploadFile(id, input, options?)` | Stored-file verification result | `ingest` |
-| `completeUploadSession(id, options?)` | Accepted ingestion response | `ingest` |
+| `getUploadSession(id, options?)` | Session status, accepted `result` and refreshed transfer URLs | `ingest` |
+| `signUploadParts(id, fileId, partNumbers, options?)` | Signed URLs for requested multipart parts | `ingest` |
+| `completeUploadFile(id, input, options?)` | Stored-file verification; required at EOF for custom unknown-size transfers | `ingest` |
+| `completeUploadSession(id, options?)` | Explicit fallback for ingestion acceptance; normal uploads finalize automatically | `ingest` |
 | `abortUploadSession(id, options?)` | Cleanup confirmation | `ingest` |
 | `getRun(runId, request?)` | Run record (not the progress envelope) | Any of `ingest`, `search`, `artifacts` |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
@@ -425,7 +437,11 @@ Environment variables are read once, when the client is created, and only on the
 | `updateWorkspaceEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `workspaces:manage` |
 | `fullIndexEstimate({ documentId } or { workspace?, documentIds? }, request?)` / `uploadEstimate({ files, workspace? }, request?)` | `{ estimate, billing }` | `ingest` |
 | `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `workspaces:manage` |
-| `updateSearchSettingsEstimate(id, input, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutations accept no API key, so neither do these |
+| `updateSearchSettingsEstimate(id, input, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutation accepts no API key |
+| `reprocessRun(runId, { stageFrom?, stages? }?, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ run, job?, warnings }` / `{ estimate, billing }`. Reprocessing re-extracts files a re-upload of identical bytes would not | Server key with `ingest` |
+| `deleteDocument(documentId, request?)` / `setDocumentTags(documentId, tags, request?)` | Removed identities / `{ documentId, tags }` | Server key with `ingest` |
+| `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`) | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's workspaces |
+| `reprocessIngestRecommendation(workspace?, { recommendationId, runId?, documentIds? })` / `applyIngestRecommendation(...)` | Created runs / applied settings patch | Server key with `ingest` / `workspaces:manage` |
 | `setRetention({ orgId } or { workspace? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
 | `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |
@@ -444,7 +460,7 @@ Environment variables are read once, when the client is created, and only on the
 | `buildDocumentPreviewPages({ documentId, artifacts, manifest })` | Page images for a document viewer, by page number (after 0.2.0) | None (no request) |
 
 - **`SearchInput`:** `q` (required); optional `workspace` (ID, slug, former slug, name or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains` and `tags` (a string). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
-- **Upload metadata:** `workspace` (ID, slug or name; created when none matches), `newWorkspace`, `orgId`, `templateKey`, `idempotencyKey`, and `canonicalId` (in upload options for one file, or on each `{ data, filename, canonicalId }` entry). URL ingestion takes the same metadata except `idempotencyKey`; set canonical IDs per URL.
+- **Upload metadata:** `workspace` (ID, slug or name; created when none matches), `newWorkspace`, `orgId`, `templateKey`, `idempotencyKey`, and `canonicalId` (in upload options for one file, or on each `{ data, filename, canonicalId }` entry). Direct sessions ignore `idempotencyKey`; HTTP bulk and URL ingestion support it. Set canonical IDs per URL for URL ingestion.
 - **Template keys:** `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - **Citations:** `documentId`, `filename`, `pageNumber`, `pageNumbers`, `headingPath`, `chunkIndex`, `blockIds` and `source`. Some formats have no meaningful page numbers; when the list is empty, don't invent a page.
 - **Locators:** `citation.locator` says exactly where the evidence is, keyed by `kind`: `page` (`pageNumber`, `charStart`/`charEnd`, normalized `boxes`), `slide` (`slideNumber`, `notes`, `boxes`), `sheet` (`sheetName`, A1 `range`, `headerRow`), `media` (`startSeconds`, `endSeconds`, `mode` of `said` or `shown`, `speaker`, `timing` of `word`, `segment` or `chunk`) and `image` (`boxes`). It is `null` or absent for content indexed before locators existed (re-index to get them); for recordings, decks and sheets branch on `kind` rather than `pageNumber`. The `CitationLocator` type is exported.
@@ -1105,7 +1121,7 @@ Complete illustrative result when there are no active keys:
 
 When keys are revoked, `keys` lists them in the shape above with `revokedAt` set, and `revokedCount` is how many. Revoking needs an owner or admin, and keys need `organizations:manage`. It also revokes the key making the request.
 
-Organization scopes are opt-in and never part of the default `ingest`, `search` and `artifacts` set. To grant one, create or update a server key on the [API keys](https://docslurp.io/app/api-keys) page, or from a signed-in session with `POST /v1/api-keys` or `PATCH /v1/api-keys/:id`. Use `scopes: ["organizations:read"]` to read, or `["organizations:manage"]` to read and make changes. Only owners and admins can grant `organizations:manage`, and browser keys can't have organization scopes. The SDK has no methods for creating keys; see the [HTTP reference](https://docslurp.io/docs/http).
+Organization scopes are opt-in and never part of the default `ingest`, `search`, `chat` and `artifacts` set. To grant one, create or update a server key on the [API keys](https://docslurp.io/app/api-keys) page, or from a signed-in session with `POST /v1/api-keys` or `PATCH /v1/api-keys/:id`. Use `scopes: ["organizations:read"]` to read, or `["organizations:manage"]` to read and make changes. Only owners and admins can grant `organizations:manage`, and browser keys can't have organization scopes. The SDK has no methods for creating keys; see the [HTTP reference](https://docslurp.io/docs/http).
 
 ## Timeouts, cancellation, and errors
 
@@ -1131,12 +1147,53 @@ try {
 | Operation | Automatic retries |
 | --- | --- |
 | Every SDK read: `getRun`, `getRunProgress`, `getWorkspaceState`, `getDocument`, and organization, member and key reads | Up to 2 retries on HTTP 429, 502, 503 or 504 |
-| Blob or File upload **with** an `idempotencyKey` | Same as reads |
-| Stream upload, upload without an `idempotencyKey`, URL ingestion | None |
+| HTTP bulk Blob or File upload (`directUpload: false`) **with** an `idempotencyKey` | Same as reads |
+| URL ingestion with an `idempotencyKey` | Same as reads |
+| Direct session creation, stream HTTP requests, bulk upload or URL ingestion without an `idempotencyKey` | None |
 | Search, batch search, chat, organization writes, raw event streams | None |
 | `streamProgress` in `auto` mode | Switches to polling if the stream fails; each poll retries like a read |
 
-Retries honor `Retry-After`, wait at most five seconds each, and stay within the original request deadline. Network errors aren't retried, though `streamProgress` in `auto` mode can fall back to polling. When you abort with a signal, the SDK rejects with the signal's reason.
+Retries honor `Retry-After`, wait at most five seconds each, and stay within the original request deadline. These rules apply to API requests. Replayable storage PUTs have separate retries: up to two retries for network errors or HTTP 408, 429, 500, 502, 503 and 504. API network errors aren't retried, though `streamProgress` in `auto` mode can fall back to polling. When you abort with a signal, the SDK rejects with the signal's reason.
+
+## Workspace discovery and signed uploads
+
+`listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspace: "Product manuals" })` or `upload({ urls, workspace: "Product manuals" })` uploads into the workspace with that name, creating it on first use.
+
+`upload()` transfers known-size files with presigned storage PUTs (a single PUT for small files, multipart for large files). The server verifies stored bytes and starts ingestion automatically; the SDK waits for the accepted run response. You do not call a completion method yourself. Acceptance returns a run ID; use `waitForRun()` or `streamProgress()` to follow processing. `directUpload: false` selects the size-limited multipart HTTP compatibility transport.
+
+Unknown-size Node streams, async byte iterables and single `{ data: readableStream, filename }` inputs use multipart storage uploads. The SDK fills a part buffer and keeps at most three PUTs active, retries transient storage failures with replayable part bytes, and sends the ordered end-of-stream manifest only after every PUT succeeds. On source errors, cancellation or timeouts, the SDK attempts to abort the session. Ingestion may already have started; a timeout does not prove that no run exists. Upload browser `ReadableStream` files individually; batches containing unknown-size streams are rejected before transfer. `timeoutMs` bounds the stream transfer and acceptance wait; it defaults to 30 minutes.
+
+Agents that transfer bytes separately can use:
+
+```js
+const session = await client.createUploadSession({
+  workspace: "Product manuals",
+  files: [{ filename: "manual.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength, singlePart: true }],
+});
+const file = session.files[0];
+const stored = await fetch(file.putUrl, { method: "PUT", headers: file.headers, body: bytes });
+if (!stored.ok) throw new Error("Storage upload failed");
+const deadline = Date.now() + 10 * 60_000;
+let accepted;
+while (Date.now() < deadline) {
+  const current = await client.getUploadSession(session.sessionId);
+  if (current.result) { accepted = current.result; break; }
+  if (["failed", "aborted"].includes(current.status)) {
+    throw new Error(`Upload ${session.sessionId}: ${current.status}`);
+  }
+  await new Promise(resolve => setTimeout(resolve, 1_000));
+}
+if (!accepted) {
+  throw new Error(`Still waiting for upload ${session.sessionId}; check it before retrying`);
+}
+await client.waitForRun(accepted.run.id);
+```
+
+Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Known-size sessions reconcile automatically. For an unknown-size file, omit `sizeBytes` at creation, use `signUploadParts(sessionId, fileId, partNumbers)` as bytes arrive, and call `completeUploadFile(sessionId, { fileId, sizeBytes, parts })` at end of stream. `parts` contains ordered `{ partNumber, etag }` entries. Poll `getUploadSession()` for its persisted `result`. Use `abortUploadSession(sessionId)` to clean up an abandoned session.
+
+The HTTP upload prefix is `/v1/uploads`. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. Use `search` for retrieval and `upload` for files or public URLs.
+
+For the state transitions, HTTP endpoints, timeout recovery and self-host setup, see [upload completion](https://docslurp.io/docs/http#upload-completion).
 
 ## Next steps
 
@@ -1152,26 +1209,3 @@ Pre-release: APIs may change, so pin the version you validate in production. MIT
 [![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
 
 [17th Street Labs](https://17thstreetlabs.com) is DocSlurp’s primary sponsor.
-
-### Workspace discovery and signed uploads
-
-`listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspace: "Product manuals" })` or `upload({ urls, workspace: "Product manuals" })` uploads into the workspace with that name, creating it on first use.
-
-For normal file uploads, `upload()` handles storage transfer and ingestion automatically. Agents that transfer bytes separately can use:
-
-```js
-const session = await client.createUploadSession({
-  workspace: "Product manuals",
-  files: [{ filename: "manual.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength, singlePart: true }],
-});
-const file = session.files[0];
-const stored = await fetch(file.putUrl, { method: "PUT", headers: file.headers, body: bytes });
-if (!stored.ok) throw new Error("Storage upload failed");
-await client.completeUploadFile(session.sessionId, { fileId: file.id });
-const accepted = await client.completeUploadSession(session.sessionId);
-await client.waitForRun(accepted.run.id);
-```
-
-Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Complete every file before completing the session; the server checks stored sizes before starting ingestion. Use `abortUploadSession(sessionId)` to clean up an abandoned session. Session completion is not retry-idempotent.
-
-The HTTP upload prefix is `/v1/uploads`. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. Use `search` for retrieval and `upload` for files or public URLs.

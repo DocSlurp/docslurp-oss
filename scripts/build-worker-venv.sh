@@ -4,18 +4,25 @@
 #   bash scripts/build-worker-venv.sh /app/.venv worker/requirements-base.lock.txt worker/requirements-base.txt
 #
 # Wheels only (no sdists, so no compiler and no setup.py runs at build time),
-# no pip cache, then trimmed: pip/setuptools removed from the venv (runtime
-# pip installs are disabled in images), test suites deleted, and bytecode
-# precompiled because the non-root runtime user cannot write __pycache__ under
-# /app and every parser call is a fresh interpreter.
+# hash-checked against the lock (--require-hashes: every distribution must
+# match a sha256 recorded by `uv pip compile --generate-hashes`), no pip cache,
+# then trimmed: pip/setuptools removed from the venv (runtime pip installs are
+# disabled in images), test suites deleted, and bytecode precompiled because
+# the non-root runtime user cannot write __pycache__ under /app and every
+# parser call is a fresh interpreter.
 set -euo pipefail
 
 VENV="${1:?venv path}"
 LOCK="${2:?lock file}"
 CONSTRAINTS="${3:-}"
 
+if ! grep -q -- '--hash=sha256:' "${LOCK}"; then
+  echo "[build-worker-venv] ${LOCK} has no --hash entries; regenerate it with uv pip compile --generate-hashes" >&2
+  exit 1
+fi
+
 python3 -m venv "${VENV}"
-pip_args=(install --no-cache-dir --disable-pip-version-check --only-binary=:all: -r "${LOCK}")
+pip_args=(install --no-cache-dir --disable-pip-version-check --only-binary=:all: --require-hashes -r "${LOCK}")
 if [[ -n "${CONSTRAINTS}" ]]; then pip_args+=(-c "${CONSTRAINTS}"); fi
 "${VENV}/bin/python" -m pip "${pip_args[@]}"
 

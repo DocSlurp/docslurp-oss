@@ -70,6 +70,17 @@ export function loadMigrationJournal(starts: string[] = [process.cwd(), dirname(
   return null;
 }
 
+/** Expired extracts not yet deleted; extract-deletion-stuck fires on errors or long overdue rows. */
+async function readExtractDeletionSnapshot(): Promise<QueueSnapshot["extractDeletion"]> {
+  const [row] = await sql<{ failing: number; overdue: number; oldest: number | null }[]>`
+    select count(*) filter (where last_error is not null)::int as failing, count(*)::int as overdue,
+      extract(epoch from now() - min(expires_at))::double precision as oldest
+    from extracts where state <> 'deleted' and expires_at <= now()
+  `.catch(() => [] as never[]);
+  if (!row) return undefined;
+  return { failing: Number(row.failing ?? 0), overdue: Number(row.overdue ?? 0), oldestOverdueSeconds: row.oldest === null ? null : Number(row.oldest) };
+}
+
 async function readQueueSnapshot(): Promise<QueueSnapshot> {
   const [row] = await sql<{
     queue_depth: number;
@@ -99,6 +110,7 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
     oldestQueuedRunAgeSeconds: row?.oldest_queued_run_age_seconds === null || row?.oldest_queued_run_age_seconds === undefined
       ? null
       : Number(row.oldest_queued_run_age_seconds),
+    extractDeletion: await readExtractDeletionSnapshot(),
   };
 }
 
@@ -196,6 +208,7 @@ export class AlertEvaluator {
   private readonly workerHistory = new WorkerIdentityHistory();
   private leader = false;
   private running = false;
+  private readonly pendingDeliveries = new Map<string, Parameters<typeof deliverAlert>[0]>();
   lastChecks: AlertCheck[] = [];
   lastEvaluatedAt: number | null = null;
 
@@ -227,7 +240,10 @@ export class AlertEvaluator {
       if (leader !== this.leader && database === null) {
         console.log(`[alert] evaluator_leader=${leader} instance=${this.options.instance}`);
         // The new leader owns fleet alerts now; forget ours without a resolved notice.
-        if (!leader) this.tracker.drop((id) => id !== "http-5xx-rate" && id !== "database-unreachable");
+        if (!leader) {
+          this.tracker.drop((id) => id !== "http-5xx-rate" && id !== "database-unreachable");
+          for (const id of this.pendingDeliveries.keys()) if (id !== "http-5xx-rate" && id !== "database-unreachable") this.pendingDeliveries.delete(id);
+        }
       }
       this.leader = leader;
       // The lease query answered, so the database is reachable even when another instance leads.
@@ -253,8 +269,16 @@ export class AlertEvaluator {
       const checks = evaluateAlertRules(observation, this.options.thresholds, leader ? this.workerHistory : undefined);
       this.lastChecks = checks;
       this.lastEvaluatedAt = now;
-      for (const notification of this.tracker.update(checks, now)) {
-        await this.deps.deliver(notification, this.options.delivery);
+      for (const notification of this.tracker.update(checks, now)) this.pendingDeliveries.set(notification.id, notification);
+      // Failed Telegram sends retry at most once per evaluation, including
+      // recovery messages; a new transition replaces any obsolete pending one.
+      for (const notification of [...this.pendingDeliveries.values()]) {
+        try {
+          await this.deps.deliver(notification, this.options.delivery);
+          this.pendingDeliveries.delete(notification.id);
+        } catch {
+          console.error(`[alert] delivery_pending=true id=${notification.id} status=${notification.status}`);
+        }
       }
       if (leader && this.deps.workerFloor) {
         await this.deps.workerFloor(checks).catch(() => null);
@@ -280,7 +304,7 @@ export function startAlertEvaluator(env: NodeJS.ProcessEnv = process.env): Alert
   const instance = evaluator;
   console.log(
     `[alert] evaluator started intervalMs=${options.intervalMs} webhook=${options.delivery.webhookUrl ? options.delivery.format : "none"} ` +
-    `env=${options.delivery.environment} instance=${options.instance}`,
+    `telegram=${options.delivery.telegram ? "configured" : "unavailable"} env=${options.delivery.environment} instance=${options.instance}`,
   );
   timer = setInterval(() => {
     withBackgroundSpan("api.alert-evaluation", () => instance.tick()).catch((error) => console.error(`[alert] evaluation failed: ${errorMessage(error)}`));

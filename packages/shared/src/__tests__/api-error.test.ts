@@ -89,12 +89,12 @@ describe("publicApiErrorDetails", () => {
     expect(publicApiErrorDetails({
       issues: [{ path: ["a", 1], message: "echoes secret input" }],
       retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
-      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5, secret: "x" },
+      directUpload: { createSession: "/v1/uploads/direct/sessions", maxFileBytes: 5, secret: "x" },
       sql: "select secret", stack: "private",
     })).toEqual({
       issues: [{ path: "a.1", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }],
       retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
-      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5 },
+      directUpload: { createSession: "/v1/uploads/direct/sessions", maxFileBytes: 5 },
     });
   });
   it("drops labels that are not plain identifiers and non-finite numbers", () => {
@@ -139,11 +139,13 @@ describe("limit links", () => {
   it("keeps only known keys with absolute http(s) URLs and never an upgrade link", () => {
     expect(publicApiErrorLinks({ ...links, upgrade: "https://docslurp.io/pricing", evil: "https://x", apiKeys: "javascript:alert(1)" })).toEqual(links);
     expect(publicApiErrorLinks({ billing: "https://a b" })).toBeUndefined();
-    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links, account: "starter" });
+    // Plan labels (account, plan) are never public detail fields.
+    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links });
   });
 
-  it("points starter rate limits at buying credits, credit errors at buying credits and auto top-up", () => {
-    expect(publicApiErrorMessage("rate_limited", { account: "starter", links })).toContain("buy credits at https://docslurp.io/app/billing#buy-credits");
+  it("never tells a rate-limited caller to buy credits; points credit errors at buying credits and auto top-up", () => {
+    expect(publicApiErrorMessage("rate_limited", { account: "account", links })).not.toContain("buy credits");
+    expect(publicApiErrorMessage("rate_limited", { account: "starter", links })).not.toContain("buy credits");
     expect(publicApiErrorMessage("credit_exhausted", { links })).toBe(
       "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#buy-credits, or turn on auto top-up at https://docslurp.io/app/billing#auto-top-up.",
     );
@@ -152,6 +154,16 @@ describe("limit links", () => {
     );
     for (const code of ["rate_limited", "credit_exhausted", "org_budget_paused"] as const) {
       expect(publicApiErrorMessage(code)).toBe(API_ERROR_PUBLIC_MESSAGES[code]);
+    }
+  });
+});
+
+describe("domain error codes", () => {
+  it("every code a route can surface has reviewed public copy", async () => {
+    const { API_ERROR_CODES, API_ERROR_PUBLIC_MESSAGES } = await import("../api-error.js");
+    for (const code of API_ERROR_CODES) expect(API_ERROR_PUBLIC_MESSAGES[code], code).toMatch(/\S/);
+    for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "source_not_reusable", "missing_stage_artifacts", "workspace_forbidden"]) {
+      expect(API_ERROR_CODES).toContain(code);
     }
   });
 });

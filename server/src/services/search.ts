@@ -35,7 +35,7 @@ import { recordUnitCharge } from "../lib/ai-usage.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
-import { lanceDbFullTextSearch, lanceDbVectorSearch, type LanceDbSearchHit } from "../search/lancedb.js";
+import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
 import {
   loadEligibleDocuments,
@@ -761,11 +761,12 @@ async function vectorSearch(
   if (!access) return [];
 
   const embedding = resolveEmbeddingRoute(serving?.embedding ?? (await loadWorkspacePipeline(workspaceId)).embedding);
-  // Persisted model/dimension metadata prevents legacy tables from mixing vector spaces.
-  // Dedup copies (same content re-ingested) own no LanceDB rows: their vectors
-  // stay keyed by the document that was embedded. Walk deduped_from to that
-  // owner so copies are searchable, then map hits to the copy's chunk with the
-  // same chunk index.
+  // Persisted model/dimension metadata keeps vector spaces apart.
+  // Dedup copies (same content re-ingested) in the owner's workspace own no
+  // LanceDB rows: their vectors stay keyed by the document that was embedded.
+  // Walk deduped_from to that owner so copies are searchable, then map hits to
+  // the copy's chunk with the same chunk index. A copy in another workspace
+  // has its own rows in this workspace's database and is hit directly.
   const docRows = await sql<{ id: string; owner_id: string }[]>`
     with recursive current_docs as (
       select distinct d.id from documents d
@@ -783,7 +784,8 @@ async function vectorSearch(
       union all
       select chain.id, d.id, d.deduped_from_document_id, chain.depth + 1
       from chain join documents d on d.id = chain.next
-      where chain.depth < 8
+      -- Stop at the workspace boundary: only this workspace's database is searched.
+      where chain.depth < 8 and d.workspace_id = ${workspaceId}
     )
     select distinct on (chain.id) chain.id, chain.node as owner_id
     from chain
@@ -807,11 +809,11 @@ async function vectorSearch(
 
   const limit = options.limit ?? 20;
 
-  // ANN search across LanceDB shard tables
+  // ANN search in this workspace's LanceDB database
   const hits = await lanceDbVectorSearch({
     orgId: access.orgId,
+    workspaceId,
     embeddingModel: embedding.model,
-    legacyDocumentIds: searchDocumentIds,
     queryVector,
     documentIds: searchDocumentIds,
     limit,
@@ -957,23 +959,23 @@ async function nativeVectorSearch(
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
   const embedding = resolveEmbeddingRoute(serving?.embedding ?? context.pipeline.embedding);
-  const set = await loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: queryVector.length });
+  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: queryVector.length }));
   const documents = scopeEligibleDocuments(set, options.filters, options.runId)
     .filter((document) => document.vectorReady && matchesServingHash(document, serving?.hash));
   if (documents.length === 0) return [];
   const scope = nativeSearchScope(documents);
-  const hits = await lanceDbVectorSearch({
+  const hits = await timePhase("vecLance", () => lanceDbVectorSearch({
     orgId: context.orgId,
+    workspaceId: context.workspaceId,
     embeddingModel: embedding.model,
-    legacyDocumentIds: scope.searchDocumentIds,
     queryVector,
     documentIds: scope.searchDocumentIds,
     limit: options.limit ?? 20,
     privacyMode: context.privacyMode,
     hydrate: true,
-  });
-  return await hydrateNativeHits({ hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
-    workspaceId: context.workspaceId, options, score: (hit) => hit.score });
+  }));
+  return await timePhase("vecHydrate", () => hydrateNativeHits({ hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
+    workspaceId: context.workspaceId, options, score: (hit) => hit.score }));
 }
 
 const NATIVE_FALLBACK_LOG_INTERVAL_MS = 10 * 60_000;
@@ -1037,8 +1039,8 @@ async function nativeTextSearch(
     let result: Awaited<ReturnType<typeof lanceDbFullTextSearch>>;
     try {
       result = await lanceDbFullTextSearch({
-        orgId: context.orgId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
-        documentIds: scope.searchDocumentIds, legacyDocumentIds: scope.searchDocumentIds, limit,
+        orgId: context.orgId, workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
+        documentIds: scope.searchDocumentIds, limit,
       });
     } catch (error) {
       if (isSearchAborted(error)) throw error;
@@ -1665,6 +1667,10 @@ async function executeHybridSearch(
     setup,
     adapters: {
       parallelRetrieval: Boolean(native),
+      warmVectorIndex: native && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
+        const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
+        void warmLanceDbSearch({ orgId: native.orgId, workspaceId: native.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
+      } : undefined,
       buildAvailability: (chunks, effectiveOptions) =>
         buildSearchAvailability(
           setup.availabilityRow,

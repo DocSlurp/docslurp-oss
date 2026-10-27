@@ -1,5 +1,5 @@
 import { withBackgroundSpan } from "@docslurp/shared/observability";
-import { sql as defaultSql, type SqlClient } from "../db.js";
+import { apiPool, sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
 import { loadSpendStatus, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
@@ -37,6 +37,8 @@ export async function resumeSpendPausedRun(runId: string, deps: SpendPausedRunsD
 
 export type SpendResumeOutcome =
   | { status: "resumed" }
+  /** Signal delivery failed; the transaction rolls back and the next sweep retries. */
+  | { status: "deferred" }
   /** The run is not paused for spend (an operator pause, or not paused at all). */
   | { status: "not-spend-paused" }
   /** Spend-paused and still no credits for it: the pause stays. */
@@ -50,63 +52,67 @@ export type SpendResumeOutcome =
 export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPausedRunsDeps = {}): Promise<SpendResumeOutcome> {
   const sql = deps.sql ?? defaultSql;
   const signals = deps.signals ?? { pause: signalPipelinePause, resume: signalPipelineResume };
-  const [row] = await sql<{ id: string; user_id: string; pause_reason: string; org_id?: string; workspace_id?: string }[]>`
-    with prev as (select pause_reason from workspace_runs where id = ${runId})
-    update workspace_runs
-    set control_state = null,
-        control_requested_at = null,
-        pause_reason = null,
-        spend_unchecked_pages = 0,
-        spend_unchecked_credits = 0,
-        -- Give the resumed workflow a fresh lease before its next heartbeat.
-        last_heartbeat_at = now(),
-        lease_expires_at = now() + interval '5 minutes',
-        updated_at = now()
-    where id = ${runId}
-      and pause_reason is not null
-      and control_state = 'paused'
-    returning id, user_id, org_id, workspace_id, (select pause_reason from prev) as pause_reason
+  // Resolve fleet capability before reserving a transaction connection: it may
+  // query the same pool (including one-connection test/self-hosted pools).
+  const [candidate] = await sql<PausedRunRow[]>`
+    select id, org_id, workspace_id, user_id, pause_reason from workspace_runs
+    where id = ${runId} and status = 'processing' and control_state = 'paused' and pause_reason is not null
   `;
-  if (!row) return { status: "not-spend-paused" };
-  if (
-    row.org_id && !spendGuardsSkipped() && creditLeasesEnabled()
-    && await fleetSupports("billing.credit-leases", taskQueueForOrgKey(row.org_id).taskQueue)
-  ) {
-    const grant = await grantRunCreditLease(sql, { runId, orgId: row.org_id, workspaceId: row.workspace_id ?? null })
-      .catch((error: unknown) => {
-        // Fail open, like the worker: its first checkpoint grants the lease.
-        console.warn(`[spend-paused-runs] run=${runId} lease grant failed: ${error instanceof Error ? error.message : String(error)}`);
-        return null;
-      });
-    if (grant && grant.remaining <= 0) {
-      // Nothing left for this run: put the pause back and keep waiting.
-      const reason = grant.blockReason ?? row.pause_reason ?? "credit_exhausted";
-      await sql`
-        update workspace_runs
-        set control_state = 'paused', control_requested_at = now(),
-            pause_reason = ${reason}, updated_at = now()
-        where id = ${runId} and control_state is null and pause_reason is null and status = 'processing'
+  if (!candidate) return { status: "not-spend-paused" };
+  const leases = !spendGuardsSkipped() && creditLeasesEnabled()
+    && await fleetSupports("billing.credit-leases", taskQueueForOrgKey(candidate.org_id).taskQueue);
+  let blockedReason: string | null = null;
+  try {
+    return await sql.begin(async tx => {
+      const client = tx as unknown as SqlClient;
+      await tx`select pg_advisory_xact_lock(90105, hashtext(${runId}))`;
+      const [row] = await tx<PausedRunRow[]>`
+        select id, org_id, workspace_id, user_id, pause_reason from workspace_runs
+        where id = ${runId} and status = 'processing' and control_state = 'paused'
+          and pause_reason in ('credit_exhausted', 'workspace_budget_paused', 'org_budget_paused', 'plan_not_entitled')
+        for no key update
       `;
-      return { status: "blocked", reason };
-    }
+      if (!row) return { status: "not-spend-paused" } as const;
+      if (!spendGuardsSkipped()) {
+        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.workspace_id, { client }));
+        if (reason) return { status: "blocked", reason: reason.code } as const;
+      }
+      await tx`
+        update workspace_runs set control_state = null, control_requested_at = null,
+          pause_reason = null, spend_unchecked_pages = 0, spend_unchecked_credits = 0,
+          last_heartbeat_at = now(), lease_expires_at = now() + interval '5 minutes', updated_at = now()
+        where id = ${runId}
+      `;
+      if (leases) {
+        // Fail closed on lease errors: retain the pause and retry the sweep.
+        const grant = await grantRunCreditLease(client, { runId, orgId: row.org_id, workspaceId: row.workspace_id });
+        if (!grant) throw new Error("Credit lease response missing");
+        if (grant.remaining <= 0) {
+          blockedReason = grant.blockReason ?? row.pause_reason;
+          throw new Error("Resume lease refused");
+        }
+      }
+
+      // A failed signal rolls back the pause, lease and event together. The
+      // listener/fallback sweep retries; no successful resume is claimed.
+      await signals.resume(runId);
+      await tx`
+        with inserted as (
+          insert into workspace_run_events (id, user_id, run_id, event_type, status, message, payload)
+          values (gen_random_uuid()::text, ${row.user_id}, ${runId}, 'run.progress', 'processing',
+            'Resumed: the organization can spend again.',
+            ${JSON.stringify({ spendResume: { previousReason: row.pause_reason } })}::text::jsonb)
+          returning run_id
+        )
+        select pg_notify(${RUN_EVENTS_CHANNEL}, json_build_object('runIds', json_build_array(inserted.run_id))::text) from inserted
+      `;
+      return { status: "resumed" } as const;
+    });
+  } catch {
+    if (blockedReason) return { status: "blocked", reason: blockedReason };
+    console.error(`[spend-paused-runs] run=${runId} resume_delivery_deferred=true pause_preserved=true`);
+    return { status: "deferred" };
   }
-  await signals.resume(runId).catch((error) => {
-    console.warn(`[spend-paused-runs] run=${runId} resume signal failed: ${error instanceof Error ? error.message : String(error)}`);
-  });
-  await sql`
-    with inserted as (
-      insert into workspace_run_events (id, user_id, run_id, event_type, status, message, payload)
-      values (
-        gen_random_uuid()::text, ${row.user_id}, ${runId}, 'run.progress', 'processing',
-        'Resumed: the organization can spend again.',
-        ${JSON.stringify({ spendResume: { previousReason: row.pause_reason } })}::text::jsonb
-      )
-      returning run_id
-    )
-    select pg_notify(${RUN_EVENTS_CHANNEL}, json_build_object('runIds', json_build_array(inserted.run_id))::text)
-    from inserted
-  `;
-  return { status: "resumed" };
 }
 
 /** One sweep over spend-paused runs: resume those whose org may spend again. */
@@ -132,6 +138,7 @@ export async function sweepSpendPausedRuns(
       || spendBlockReason(await loadSpendStatus(row.org_id, row.workspace_id, { client: sql })) === null;
     if (allowed) {
       if (await resumeSpendPausedRun(row.id, { sql, signals })) resumed += 1;
+      else stillBlocked += 1;
     } else {
       stillBlocked += 1;
       // Idempotent: covers a pause signal the worker could not deliver.
@@ -179,9 +186,14 @@ export function orgIdFromSpendChangedPayload(payload: string): string | null {
 /** LISTEN org_spend_changed and resume the org's spend-paused runs as soon as it may spend. */
 export async function startOrgSpendChangedListener(): Promise<void> {
   if (orgSpendListener) return;
-  orgSpendListener = await defaultSql.listen(ORG_SPEND_CHANGED_CHANNEL, (payload) => {
+  orgSpendListener = await apiPool.listen(ORG_SPEND_CHANGED_CHANNEL, (payload) => {
     const orgId = orgIdFromSpendChangedPayload(payload);
     if (orgId) requestOrgSpendSweep(orgId);
+  }, () => {
+    // Re-subscribed after a suspend/resume: sweep everything, since notifications may have been missed.
+    void sweepSpendPausedRuns().catch((error: unknown) => {
+      console.error(`[spend-paused-runs] catch-up sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   });
 }
 

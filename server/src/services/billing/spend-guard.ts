@@ -1,6 +1,6 @@
 import { reportPublicError } from "../../lib/public-errors.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../../lib/upgrade-links.js";
-import { publicErrorForStatus } from "@docslurp/shared";
+import { publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { TransactionSql } from "postgres";
@@ -73,6 +73,7 @@ export class SpendBlockedError extends Error {
     readonly code: SpendBlockedCode,
     /** Whether the org's auto top-up is on, so the 402 omits the "turn on auto top-up" link. */
     readonly autoTopUpOn = false,
+    readonly spendDetails: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "SpendBlockedError";
@@ -275,7 +276,7 @@ export async function assertCanSpend(
 ): Promise<void> {
   if (spendGuardsSkipped()) return;
   const reason = await spendDecision(orgId, workspaceId, options);
-  if (reason) throw new SpendBlockedError(reason.message, reason.code, reason.autoTopUpOn === true);
+  if (reason) throw new SpendBlockedError(reason.message, reason.code, reason.autoTopUpOn === true, reason.details);
 }
 
 /** Non-throwing form, for paths that degrade instead of failing (search strategies). */
@@ -292,13 +293,16 @@ async function spendDecision(
   orgId: string | null | undefined,
   workspaceId: string | null | undefined,
   options: SpendCheckOptions,
-): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean } | null> {
+): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean; details?: Record<string, unknown> } | null> {
   const kind = options.kind ?? "job";
   const config = resolveChatCreditReserveConfig();
   const status = await loadSpendStatus(orgId, workspaceId, { client: options.client });
   const reason = spendBlockReason(status, kind, config)
     ?? (kind === "interactive" && status ? await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config) : null);
-  return reason ? { ...reason, autoTopUpOn: status?.autoTopUpOn === true } : null;
+  return reason ? { ...reason, autoTopUpOn: status?.autoTopUpOn === true,
+    details: { spendKind: kind,
+      availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
+      chatReserveCredits: status ? chatCreditReserve(status.funded, config) : 0 } } : null;
 }
 
 /**
@@ -328,7 +332,9 @@ export async function admitRunSpend<T>(
         runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
       });
       const reason = spendBlockReason(status);
-      if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true);
+      if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { spendKind: "job",
+        availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
+        chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
     }
     const admitted = await admit(tx);
     // The run's first lease, under the same advisory lock (re-entrant).
@@ -379,7 +385,8 @@ export function spendBlockedResponse(c: Context, error: SpendBlockedError) {
   const links = upgradeLinksFor(error.code, { autoTopUpOn: error.autoTopUpOn });
   const header = upgradeLinkHeader(links);
   if (header) c.header("Link", header);
-  return c.json({ error: publicErrorForStatus(402), code: error.code, ...(links ? { links } : {}) }, 402);
+  const details = publicApiErrorDetails(error.spendDetails);
+  return c.json({ error: publicErrorForStatus(402), code: error.code, ...(details ? { details } : {}), ...(links ? { links } : {}) }, 402);
 }
 
 /** Hono onError: 402 for blocked spend, Hono's defaults otherwise. */

@@ -146,9 +146,8 @@ export async function listWorkspaceBoardSummaries(
     chunk_bytes as (
       select
         docs.workspace_id,
-        coalesce(sum(octet_length(c.text)), 0)::bigint as chunk_bytes
+        coalesce(sum(docs.chunk_text_bytes), 0)::bigint as chunk_bytes
       from documents docs
-      join document_chunks c on c.document_id = docs.id
       where docs.workspace_id in (select id from requested_workspaces)
         and docs.status = 'completed'
         and docs.superseded_at is null
@@ -157,9 +156,8 @@ export async function listWorkspaceBoardSummaries(
     page_bytes as (
       select
         docs.workspace_id,
-        coalesce(sum(octet_length(p.text)), 0)::bigint as page_bytes
+        coalesce(sum(docs.stored_page_text_bytes), 0)::bigint as page_bytes
       from documents docs
-      join document_pages p on p.document_id = docs.id
       where docs.workspace_id in (select id from requested_workspaces)
         and docs.status = 'completed'
         and docs.superseded_at is null

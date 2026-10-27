@@ -57,7 +57,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   };
   const server = new Server(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "In hosts that render MCP Apps, call openUploader when the user wants to upload local files you cannot read. Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
+    instructions: "In hosts that render MCP Apps, call openUploader when the user wants to upload local files you cannot read. Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. If you cannot reach those URLs, send small files as upload inlineFiles. For a public file, pass its URL so DocSlurp downloads it directly. Follow getUploadStatus with the returned sessionId, then workspace and run IDs. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
   // The uploader exists only when the manifest offers it and the widget bundle is built.
   const uploader = manifest.capabilities.some((item) => item.id === UPLOADER_TOOL_ID) ? uploadUiResource(ui) : null;
@@ -113,7 +113,10 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
 export async function handleMcpHttp(request: Request, manifest: McpManifest, dispatch: McpDispatch, ui: UploadUiOptions = {}): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
   const controller = new AbortController();
-  const signal = AbortSignal.any([request.signal, controller.signal]);
+  const signal = controller.signal;
+  const onRequestAbort = () => controller.abort(request.signal.reason);
+  if (request.signal.aborted) onRequestAbort();
+  else request.signal.addEventListener("abort", onRequestAbort, { once: true });
   const timeout = setTimeout(() => controller.abort(new Error("MCP request timeout")), REQUEST_TIMEOUT_MS);
   let handler: ReturnType<typeof createMcpHandler> | undefined;
   let responseReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -123,6 +126,7 @@ export async function handleMcpHttp(request: Request, manifest: McpManifest, dis
     closed = true;
     clearTimeout(timeout);
     signal.removeEventListener("abort", onAbort);
+    request.signal.removeEventListener("abort", onRequestAbort);
     controller.abort();
     await responseReader?.cancel().catch(() => {});
     await handler?.close();

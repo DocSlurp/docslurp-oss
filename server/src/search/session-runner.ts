@@ -2,7 +2,7 @@ import { parseSelfQuerySyntax } from "./self-query.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
-import { resolveEmbeddingRoute, type DeferredSearchStats, type SearchResult } from "@docslurp/shared";
+import { localEmbeddingPooling, resolveEmbeddingRoute, type DeferredSearchStats, type SearchResult } from "@docslurp/shared";
 
 import {
   createEvidenceRetrievalAdapters,
@@ -29,6 +29,8 @@ import { timePhase } from "./timings.js";
 import { acquisitionDepth, validateRetrievalControls } from "./retrieval-controls.js";
 
 export interface SearchSessionRunnerAdapters {
+  /** Start warming the vector index tables; called before query rewrite/embedding so they overlap it. Must not throw. */
+  warmVectorIndex?(): void;
   /** Run the retrieval adapters concurrently (native search: they no longer share one database). */
   parallelRetrieval?: boolean;
   buildAvailability(
@@ -96,6 +98,7 @@ function embeddingPipelineOf(setup: SearchSetup): string | null {
     return embeddingPipelineId({
       provider: route.provider,
       model: route.model,
+      pooling: route.provider === "transformers.js" ? localEmbeddingPooling(route.modelUri) : undefined,
       requestedDimensions: route.requestedDimensions,
       normalize: embedding.normalize,
     });
@@ -166,6 +169,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         },
       };
 
+      adapters.warmVectorIndex?.();
       const recursivePlan = await timePhase("plan", () => planRecursiveSearchMode({
         query: retrievalQuery,
         userId,
@@ -242,13 +246,13 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
           // Runs alongside normal retrieval, not before it: the hot path adds no
           // latency, and a cold one overlaps materialization with retrieval.
           const deferredPromise = adapters.deferredPageSearch
-            ? adapters.deferredPageSearch({
+            ? Promise.resolve(queryVector).then((resolvedVector) => adapters.deferredPageSearch!({
                 query,
                 textQuery,
-                queryVector,
+                queryVector: resolvedVector,
                 userId,
                 options: { ...effectiveOptions, limit: options.limit ?? 20 },
-              }).catch(() => null)
+              })).catch(() => null)
             : Promise.resolve(null);
           const evidenceResults = await timePhase("retrieve", () => retrieveEvidence(
             createEvidenceRetrievalAdapters({

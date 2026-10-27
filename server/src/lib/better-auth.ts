@@ -11,6 +11,45 @@ import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
+import { ssoEnforcementPlugin } from "./sso-enforcement.js";
+
+/**
+ * pg's idle timer freezes with a suspended Fly Machine, leaving idle clients whose
+ * sockets the network reset. After an idle gap, destroy the idle clients before
+ * handing one out (public API only: connect() pops an idle client, release(true) destroys it).
+ */
+function guardPoolAgainstResume(
+  target: Pool,
+  gapMs = Number(process.env.DATABASE_RESUME_GAP_MS ?? 30_000),
+  resumeLogGapMs = Number(process.env.DATABASE_RESUME_LOG_GAP_MS ?? 5 * 60_000),
+): void {
+  if (!(gapMs > 0)) return;
+  const raw = target as unknown as Record<"connect" | "query", (...args: unknown[]) => unknown>;
+  if (typeof raw.connect !== "function" || typeof raw.query !== "function") return; // partial pg mocks in tests
+  const connect = raw.connect.bind(target);
+  const query = raw.query.bind(target);
+  let lastSeen = Date.now();
+  let discarding: Promise<void> | null = null;
+  const gate = (): Promise<void> => {
+    if (discarding) return discarding;
+    const at = Date.now();
+    const gap = at - lastSeen;
+    lastSeen = at;
+    if (gap < gapMs) return Promise.resolve();
+    if (gap >= resumeLogGapMs) console.info(`[db-pool] auth pool idle for ${Math.round(gap / 1000)}s (likely a suspend); discarding ${target.idleCount} idle connections`);
+    return discarding = (async () => {
+      for (let idle = target.idleCount; idle > 0; idle -= 1) {
+        ((await connect()) as { release(destroy?: boolean): void }).release(true);
+      }
+    })().catch(() => undefined).finally(() => { discarding = null; });
+  };
+  // Callback-style connect() is pg's own internal path (query() uses it); only promise-style callers and query() are gated.
+  raw.connect = (...args) => (args.length > 0 ? connect(...args) : gate().then(() => connect()));
+  raw.query = (...args) => {
+    const gated = gate();
+    return typeof args.at(-1) === "function" ? void gated.then(() => query(...args)) : gated.then(() => query(...args));
+  };
+}
 
 const globalPool = globalThis as typeof globalThis & { __docslurpAuthPool?: Pool };
 
@@ -18,7 +57,8 @@ const connectionString =
   process.env.DATABASE_URL ??
   "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
-const pool = globalPool.__docslurpAuthPool ?? new Pool({ connectionString });
+const pool = globalPool.__docslurpAuthPool ?? new Pool({ connectionString, keepAlive: true, idleTimeoutMillis: 20_000, maxLifetimeSeconds: 900 });
+guardPoolAgainstResume(pool);
 if (process.env.NODE_ENV !== "production") {
   globalPool.__docslurpAuthPool = pool;
 }
@@ -128,6 +168,7 @@ export function getDevSeedAccountCredential(id: DevSeedAccountKey): DevSeedAccou
 }
 
 const securityOptions = createBetterAuthSecurityOptions(process.env);
+const emailOptions = createAuthEmailOptions(process.env);
 export const auth = betterAuth({
   onAPIError: { onError: (error) => { reportPublicError(error, { surface: "auth" }); } },
   database: pool,
@@ -136,7 +177,10 @@ export const auth = betterAuth({
   ...securityOptions,
   trustedOrigins: (request) => developmentTrustedOrigins(securityOptions.trustedOrigins, request),
   baseURL: resolveBetterAuthBaseUrl(process.env),
-  ...createAuthEmailOptions(process.env),
+  ...emailOptions,
+  // Company SSO enforcement refuses every other first factor server-side and
+  // revokes non-SSO sessions of enforced addresses (see sso-enforcement.ts).
+  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool })],
   databaseHooks: {
     session: {
       create: {

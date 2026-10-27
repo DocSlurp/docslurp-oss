@@ -39,7 +39,7 @@ describe("thrown errors inside a native router", () => {
       .get("/forbidden", () => { throw new WorkspaceAccessError(403, "workspace_forbidden", "Default workspace is not accessible"); });
     const app = guarded(router);
     expect((await (await app.request("/org")).json()).error.code).toBe("organization_not_found");
-    expect((await (await app.request("/forbidden")).json()).error.code).toBe("forbidden");
+    expect((await (await app.request("/forbidden")).json()).error.code).toBe("workspace_forbidden");
   });
 
   it("keeps the headers of the error response (Retry-After, WWW-Authenticate)", async () => {
@@ -78,6 +78,17 @@ describe("app-level error handler", () => {
     hono.get("/v1/chat/completions", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
     return hono;
   }
+
+  it("keeps structured reserve facts while stripping arbitrary provider details", async () => {
+    const hono = app().get("/v1/reserve", () => {
+      throw new SpendBlockedError("provider-private-text", "credit_exhausted", false, { account: "starter", spendKind: "job", availableCredits: 80, chatReserveCredits: 100, secret: "private" });
+    });
+    const body = await (await hono.request("/v1/reserve")).json();
+    expect(body.error.details).toMatchObject({ spendKind: "job", availableCredits: 80, chatReserveCredits: 100 });
+    // Plan labels never reach callers, even if a producer passes one.
+    expect(body.error.details.account).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("private");
+  });
 
   it("answers blocked spend, access errors and crashes in the envelope on native paths", async () => {
     const hono = app();

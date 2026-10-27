@@ -1,0 +1,2 @@
+{"label":"expA-r1","status":"completed","pages":49,"wallS":113.922,"pagesPerMin":25.81,"cpuS":46.1,"xacts":1403,"rssMb":2725}
+quarantine:0.75s(sum 1.26)  format-detect:1.78s(sum 0.59)  to-canonical:1.67s(sum 0.59)  format-tooling:0.52s(sum 0.96)  normalize:0.38s(sum 0.45)  pdf-tooling:0.64s(sum 1.32)  split-pages:0.9s(sum 2.11)  extract-markdown:11.65s(sum 16.87)  classify-route:5.19s(sum 1.45)  render-images:1.87s(sum 2.83)  embed:29.41s(sum 92.52)  index:5.52s(sum 16.79)

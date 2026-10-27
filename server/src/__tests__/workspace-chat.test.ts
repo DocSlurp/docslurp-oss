@@ -147,7 +147,7 @@ describe("chatWorkspace", () => {
     generateAnthropicText.mockReset();
     generateAnthropicDocumentText.mockReset();
     configureSearchFromChat.mockReset();
-    configureSearchFromChat.mockResolvedValue(buildSearchSettings());
+    configureSearchFromChat.mockResolvedValue({ settings: buildSearchSettings(), changes: [], unchanged: [], workspaceScopeRequested: false });
     refineWorkspaceNames.mockReset();
     refineWorkspaceNames.mockResolvedValue(undefined);
     getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
@@ -226,6 +226,28 @@ describe("chatWorkspace", () => {
     },
   );
 
+  it("tells the agent exactly which search setting the message changed, and that it is thread-only", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    const settings = buildSearchSettings();
+    configureSearchFromChat.mockResolvedValue({
+      settings: { ...settings, retrievalDefaults: { ...settings.retrievalDefaults, useRerank: true } },
+      changes: [{ field: "useRerank", before: false, after: true }], unchanged: [], workspaceScopeRequested: false,
+    });
+    runChatMcpAgent.mockResolvedValue({ answer: "I turned reranking on for this chat.", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Please turn on search reranking for this workspace", history: [],
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      const { workspaceInstructions } = runChatMcpAgent.mock.calls[0]![0] as { workspaceInstructions: string };
+      expect(workspaceInstructions).toContain("useRerank false→true (this thread only; workspace defaults unchanged)");
+      expect(workspaceInstructions).not.toContain("already been processed");
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
   it.each([false, true])("honors the trusted agent entrypoint permission (%s) with a verified actor and key", async (allowAgentTools) => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
@@ -244,6 +266,26 @@ describe("chatWorkspace", () => {
         expect(runChatMcpAgent).not.toHaveBeenCalled();
         expect(hybridSearch).toHaveBeenCalledOnce();
       }
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
+  it("answers directly with agent.tools false and passes parentRetrieval through to retrieval", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, results: [], reason: "empty-workspace", stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowAgentTools: true, allowConfiguration: false,
+        agent: { tools: false }, retrieval: { parentRetrieval: false },
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      expect(runChatMcpAgent).not.toHaveBeenCalled();
+      expect(hybridSearch).toHaveBeenCalledOnce();
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ parentRetrieval: false }));
     } finally {
       if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
     }
@@ -280,7 +322,7 @@ describe("chatWorkspace", () => {
         model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
         actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
       expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
-        limits: { maxSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
+        limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
       expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
     } finally {
       if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
@@ -309,12 +351,12 @@ describe("chatWorkspace", () => {
       if (allowed) {
         await turn("inception/mercury-3");
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "inception/mercury-3",
-          limits: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
+          limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
       } else {
         await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
         await turn();
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
-          limits: { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
+          limits: { maxSteps: 8, baseSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
       }
     } finally {
       for (const [name, value] of [["OPENROUTER_API_KEY", previous.key], ["DOCSLURP_CHAT_EVAL_MODELS", previous.models], ["DOCSLURP_CHAT_EVAL_ORG_IDS", previous.orgs]] as const) {

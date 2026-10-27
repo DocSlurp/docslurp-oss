@@ -130,7 +130,7 @@ describe("hosted MCP transport", () => {
     }), manifest, pendingDispatch);
     await vi.waitFor(() => expect(downstream).toBeDefined());
     abort.abort();
-    expect(downstream?.aborted).toBe(true);
+    await vi.waitFor(() => expect(downstream?.aborted).toBe(true));
     const response = await pending;
     await response.body?.cancel();
   });

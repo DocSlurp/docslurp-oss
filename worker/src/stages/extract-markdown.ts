@@ -3,21 +3,26 @@ import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
 import {
+  DOCUMENT_FAILURE_MARKERS,
   defaultDocumentExtractionConfig,
+  isProviderCallAllowed,
   resolveVisionRoute,
   splitTextIntoPages,
   parserPlaybookCatalog,
+  deriveDocumentTitle,
+  htmlDocumentTitle,
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
 import { readJsonFile } from "../tools/storage.js";
+import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
 
@@ -67,7 +72,11 @@ import { buildNativeParserPayload } from "../native-pdf/parser-payload.js";
 import { buildNativePdfRegions } from "../native-pdf/regions.js";
 import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mode.js";
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
-import { documentExtractorRegistry, serializeExtractorOptions, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
+import { nativePdfEngineState } from "../native-pdf/loader.js";
+import { logNativePdfFallback } from "../native-pdf/types.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
+import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -168,7 +177,7 @@ export class ExtractMarkdownStage implements Stage {
       healthyDocuments(state),
       state.docConcurrency,
       async (document) => {
-        const manifestKey = `${document.userId}/${state.run.id}/markdown/${document.id}.json`;
+        const manifestKey = `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.json`;
         const artifactSlot = `${document.id}:markdown`;
         const playbook =
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
@@ -201,6 +210,8 @@ export class ExtractMarkdownStage implements Stage {
         );
 
         const attemptLedger = new ExtractorAttemptLedger();
+        // native-pdf as an extraction candidate, kept across the stage's retry attempts.
+        let nativeExtraction: NativePdfStageStats["extraction"] = { status: "not-planned", code: null, reason: null };
         let lastUsableResult: DocumentStageResult | null = null;
 
         // Page facts for the ingest report run beside extraction (poppler, no pixels) and never fail it.
@@ -255,13 +266,23 @@ export class ExtractMarkdownStage implements Stage {
                   console.log(
                     `[extract-debug] document=${document.id} deduplicated=true existingUri=${existingUri}`,
                   );
+                  reportExtractionDecision({
+                    documentId: document.id,
+                    format,
+                    extractor: "dedup",
+                    strategy: "deduplicated",
+                    extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                    attempted: [],
+                    unavailable: [],
+                    nativePdf: null,
+                  });
                   return {
                     artifactUri: existingUri,
-                    stats: { deduplicated: true },
+                    stats: { deduplicated: true, extractor: "dedup" },
                   };
                 }
 
-                const plannedExtractors = await this.planExtractors({
+                let plannedExtractors = await this.planExtractors({
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -270,9 +291,19 @@ export class ExtractMarkdownStage implements Stage {
                   options: extractionConfig.options,
                   attemptLedger,
                 });
+                // Why an image continues without extracted text (reported in the manifest and stats).
+                let textlessFallback: string | null = null;
                 if (!plannedExtractors) {
                   if (lastUsableResult) return lastUsableResult;
-                  throw new Error(`no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`);
+                  const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
+                  if (format !== "image") throw new Error(cause);
+                  // OCR is unavailable here (e.g. an image built without Tesseract data): vision reads the pixels.
+                  textlessFallback = `OCR unavailable; ${cause}`;
+                  plannedExtractors = {
+                    primary: this.textlessImageExtractor(state, document, textlessFallback),
+                    secondary: null,
+                    tableAware: false,
+                  };
                 }
                 const tableAware = plannedExtractors.tableAware;
                 console.log(
@@ -280,9 +311,9 @@ export class ExtractMarkdownStage implements Stage {
                     `secondary=${plannedExtractors.secondary?.label ?? "none"} tableAware=${tableAware}`,
                 );
 
-                const candidateAKey = `${document.userId}/${state.run.id}/markdown/${document.id}.${plannedExtractors.primary.label}.md`;
+                const candidateAKey = `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.${plannedExtractors.primary.label}.md`;
                 const candidateBKey = plannedExtractors.secondary
-                  ? `${document.userId}/${state.run.id}/markdown/${document.id}.${plannedExtractors.secondary.label}.md`
+                  ? `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.${plannedExtractors.secondary.label}.md`
                   : null;
 
                 attemptLedger.reserve(plannedExtractors.primary.label);
@@ -297,7 +328,20 @@ export class ExtractMarkdownStage implements Stage {
                   signal,
                 });
 
-                const candidateA =
+                for (const [planned, result] of [
+                  [plannedExtractors.primary, resultA],
+                  [plannedExtractors.secondary, resultB],
+                ] as const) {
+                  if (planned?.label !== "native-pdf" || !result) continue;
+                  if (result.status === "fulfilled") {
+                    nativeExtraction = { status: "lost-vote", code: null, reason: null };
+                  } else {
+                    const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+                    const code = (result.reason as { code?: unknown } | null)?.code;
+                    nativeExtraction = { status: "failed", code: typeof code === "string" ? code : null, reason: reason.slice(0, 4000) };
+                  }
+                }
+                let candidateA =
                   resultA.status === "fulfilled" ? resultA.value : null;
                 const candidateB =
                   resultB.status === "fulfilled" ? resultB.value : null;
@@ -327,8 +371,22 @@ export class ExtractMarkdownStage implements Stage {
                       ? resultB.reason
                       : "unavailable"
                     : "skipped";
-                  throw new Error(
-                    `no extractor produced output: ${plannedExtractors.primary.label}=${errA}, ${secondaryLabel}=${errB}`,
+                  const failure = `${plannedExtractors.primary.label}=${errA}, ${secondaryLabel}=${errB}`;
+                  // A crashing OCR is the same as an absent one for an image, but only once every configured
+                  // extractor has had its turn (the stage's retry strategies run them one per attempt).
+                  const untried = this.tryResolveExtractorOrder(format, extractionConfig.order)
+                    .some((id) => attemptLedger.canAttempt(id));
+                  if (format !== "image" || untried) {
+                    throw new Error(`no extractor produced output: ${failure}`);
+                  }
+                  textlessFallback = `OCR failed; ${failure}`;
+                  const textless = this.textlessImageExtractor(state, document, textlessFallback);
+                  plannedExtractors = { primary: textless, secondary: null, tableAware: false };
+                  candidateA = await textless.execute(
+                    this.candidateExecutors(),
+                    candidateAKey,
+                    tempFile,
+                    signal,
                   );
                 }
 
@@ -361,7 +419,7 @@ export class ExtractMarkdownStage implements Stage {
                       : policyDecision.strategy
                   }`;
                   const similarity = policyDecision.similarity;
-                  const needsVision = policyDecision.needsEscalation;
+                  const needsVision = policyDecision.needsEscalation || textlessFallback !== null;
 
                   // Winning text is our first usable partial artifact
                   partialArtifactUri = winningCandidate.textUri;
@@ -389,7 +447,7 @@ export class ExtractMarkdownStage implements Stage {
                     document.pageCount,
                     strategy,
                   );
-                  const heatmapKey = `${document.userId}/${state.run.id}/heatmap/${document.id}.json`;
+                  const heatmapKey = `${runArtifactRoot(state.run, document.userId)}/heatmap/${document.id}.json`;
                   const critique = await this.runSelfCritique({
                     state,
                     document,
@@ -453,13 +511,41 @@ export class ExtractMarkdownStage implements Stage {
                       `[extract-debug] document=${document.id} normalizedMarkdown=true preserveTables=${state.run.pipeline.preserveTables}`,
                     );
                   }
-                  if (isPdf && winningCandidate.label !== "native-pdf" && resolveNativePdfMode() === "shadow") {
+                  const nativePdfMode = resolveNativePdfMode();
+                  const nativeEngineState = isPdf ? await nativePdfEngineState() : null;
+                  const nativePdfStats: NativePdfStageStats | null = nativeEngineState
+                    ? {
+                        mode: nativePdfMode,
+                        engine: nativeEngineState.status,
+                        engineSource: nativeEngineState.status === "unavailable" ? null : nativeEngineState.source,
+                        engineVersion: nativeEngineState.status === "unavailable" ? null : nativeEngineState.version,
+                        engineUnavailableReason: nativeEngineState.status === "loaded" ? null : nativeEngineState.reason.slice(0, 4000),
+                        extraction: winningCandidate.label === "native-pdf"
+                          ? { status: "served", code: null, reason: null }
+                          : nativeExtraction.status === "not-planned" && attemptLedger.snapshot().unavailable.includes("native-pdf")
+                            ? { status: "unavailable", code: null, reason: "native-pdf planned but unavailable" }
+                            : nativeExtraction,
+                        shadow: {
+                          status: "not-applicable",
+                          reason: winningCandidate.label === "native-pdf"
+                            ? "native-pdf served the document"
+                            : nativePdfMode === "off"
+                              ? "DOCSLURP_PDF_ENGINE=off (extraction role only; the parser payload can still use the engine)"
+                              : null,
+                          agreement: null,
+                          nativeMs: null,
+                        },
+                        parserPayload: { status: "none", reason: null },
+                      }
+                    : null;
+                  if (isPdf && winningCandidate.label !== "native-pdf" && nativePdfMode === "shadow") {
                     // Shadow mode records agreement and timing only; the primary output is untouched.
                     const nativeEngine = await resolveNativePdfEngine(this.runner).catch(() => null);
-                    if (nativeEngine) {
+                    if (!nativeEngine) {
+                      nativePdfStats!.shadow = { status: "skipped", reason: nativePdfStats!.engineUnavailableReason ?? "engine unavailable", agreement: null, nativeMs: null };
+                    } else {
                       const referencePages = winningText.split("\f");
-                      state.pendingPerformance.push(
-                        ...(await runNativePdfShadow({
+                      const shadowRows = await runNativePdfShadow({
                           engine: nativeEngine,
                           sourcePath: tempFile,
                           documentId: document.id,
@@ -469,8 +555,9 @@ export class ExtractMarkdownStage implements Stage {
                           referenceExtractor: winningCandidate.label,
                           signal: withTimeoutSignal(signal, Math.max(30_000, this.cfg.parserArtifactTimeoutMs)),
                           emphasis: nativePdfEmphasisEnabled(),
-                        })),
-                      );
+                        });
+                      state.pendingPerformance.push(...shadowRows);
+                      nativePdfStats!.shadow = summarizeNativePdfShadow(shadowRows);
                     }
                   }
                   const sourceArtifactUri =
@@ -499,9 +586,12 @@ export class ExtractMarkdownStage implements Stage {
                         document,
                         tempFile,
                         state,
-                        { hasTablePages },
+                        { hasTablePages, nativePayloadOutcome: nativePdfStats?.parserPayload },
                         signal,
                       );
+                  if (nativePdfStats && winningCandidate.structuredResult) {
+                    nativePdfStats.parserPayload = { status: "none", reason: `structured result from ${winningCandidate.label}` };
+                  }
                   const parserEnrichedCanonicalDocument =
                     parserArtifacts.length > 0
                       ? enrichCanonicalDocumentWithBestParser(
@@ -543,8 +633,8 @@ export class ExtractMarkdownStage implements Stage {
                         signal,
                       })
                     : null;
-                  const canonicalKey = `${document.userId}/${state.run.id}/canonical/${document.id}.json`;
-                  const parserEvalKey = `${document.userId}/${state.run.id}/parser-eval/${document.id}.json`;
+                  const canonicalKey = `${runArtifactRoot(state.run, document.userId)}/canonical/${document.id}.json`;
+                  const parserEvalKey = `${runArtifactRoot(state.run, document.userId)}/parser-eval/${document.id}.json`;
 
                   await this.storage.putJson(manifestKey, {
                     documentId: document.id,
@@ -553,6 +643,7 @@ export class ExtractMarkdownStage implements Stage {
                     strategy,
                     similarity,
                     needsVision,
+                    textlessFallback,
                     textArtifactUri: winningCandidate.textUri,
                     candidates: [
                       candidateA
@@ -627,13 +718,13 @@ export class ExtractMarkdownStage implements Stage {
                     pageCount: document.pageCount,
                     canonicalDocument: parserAwareCanonicalDocument,
                   });
-                  const contractKey = `${document.userId}/${state.run.id}/extraction/${document.id}.contract.json`;
+                  const contractKey = `${runArtifactRoot(state.run, document.userId)}/extraction/${document.id}.contract.json`;
                   await this.storage.putJson(contractKey, contract);
 
                   const artifactUri =
                     critique?.correctedTextUri ?? winningCandidate.textUri;
                   if (state.run.pipeline.summarize) {
-                    const evidenceKey = `${document.userId}/${state.run.id}/summary-evidence/${document.id}.json`;
+                    const evidenceKey = `${runArtifactRoot(state.run, document.userId)}/summary-evidence/${document.id}.json`;
                     await this.storage.putJson(evidenceKey, buildSummaryEvidence({
                       text: winningText, pageCount: document.pageCount,
                       documentId: document.id, sourceUri: artifactUri,
@@ -681,6 +772,7 @@ export class ExtractMarkdownStage implements Stage {
                   if (parserEvalUri) {
                     state.artifactLedger.recordDocument(document.id, "parser-eval", parserEvalUri);
                   }
+                  await this.recordDocumentTitle(state, document, format, tempFile, winningText);
 
                   state.pendingPerformance.push({
                     documentId: document.id,
@@ -810,6 +902,7 @@ export class ExtractMarkdownStage implements Stage {
                       strategy,
                       similarity,
                       needsVision,
+                      textlessFallback,
                       plausibilityScore,
                       manifestUri,
                       artifactGraphUri: graph?.manifestUri ?? null,
@@ -829,8 +922,28 @@ export class ExtractMarkdownStage implements Stage {
                       preserveCode: state.run.pipeline.preserveCode,
                       skippedPages: completedPages.size,
                       processedPages: remaining.length,
+                      // Which extractor served the document, what else was planned or tried, and how the
+                      // native PDF engine took part: queryable from stage stats without fetching the manifest.
+                      extractor: winningCandidate.label,
+                      secondaryExtractor: plannedExtractors.secondary?.label ?? null,
+                      extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                      extractorAttempts: attemptLedger.snapshot(),
+                      retryStrategy: retryStrategy ?? "default",
+                      extractionMs: Date.now() - extractionStartedAt,
+                      nativePdf: nativePdfStats,
                     },
                   };
+                  const attemptsSnapshot = attemptLedger.snapshot();
+                  reportExtractionDecision({
+                    documentId: document.id,
+                    format,
+                    extractor: winningCandidate.label,
+                    strategy,
+                    extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                    attempted: attemptsSnapshot.attempted,
+                    unavailable: attemptsSnapshot.unavailable,
+                    nativePdf: nativePdfStats,
+                  });
                   lastUsableResult = completedResult;
                   return completedResult;
                 } finally {
@@ -847,10 +960,42 @@ export class ExtractMarkdownStage implements Stage {
                     `partialStats=${JSON.stringify(partialStats)}`,
                 );
                 // Rethrow interruptions untouched so they keep their AbortError/cancellation identity.
+                if (!partialArtifactUri && !signal?.aborted && isDocumentLevelFailure(error, signal)) {
+                  // Every extractor failed: keep what was planned and tried, and say so in telemetry.
+                  const attempts = attemptLedger.snapshot();
+                  reportExtractionDecision({
+                    documentId: document.id,
+                    format,
+                    extractor: "none",
+                    strategy: "failed",
+                    extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                    attempted: attempts.attempted,
+                    unavailable: attempts.unavailable,
+                    nativePdf: null,
+                  });
+                  const stageError = new DocumentStageError(message, {
+                    stats: {
+                      failedAt: "extract-markdown",
+                      error: message,
+                      extractor: "none",
+                      extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                      extractorAttempts: attempts,
+                      nativePdfExtraction: format === "pdf" ? nativeExtraction : null,
+                    },
+                  });
+                  (stageError as Error & { cause?: unknown }).cause = error;
+                  throw stageError;
+                }
                 if (partialArtifactUri && !signal?.aborted) {
                   throw new DocumentStageError(message, {
                     artifactUri: partialArtifactUri,
-                    stats: { ...partialStats, failedAt: "extract-markdown", error: message },
+                    stats: {
+                      ...partialStats,
+                      failedAt: "extract-markdown",
+                      error: message,
+                      extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                      extractorAttempts: attemptLedger.snapshot(),
+                    },
                   });
                 }
                 throw error;
@@ -867,6 +1012,35 @@ export class ExtractMarkdownStage implements Stage {
         }
       },
     );
+  }
+
+  /**
+   * Derives the display title from the extracted Markdown (plus the HTML <title>/og:title,
+   * read from the local source without a subprocess) and stores it once per document.
+   * The title is untrusted document content for display only; it is never fed to a model.
+   * Best effort: a failure is logged and never fails extraction.
+   */
+  private async recordDocumentTitle(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    format: string,
+    sourcePath: string,
+    markdown: string,
+  ): Promise<void> {
+    if (!state.store?.setDocumentTitleIfAbsent) return;
+    try {
+      const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
+      const derived = deriveDocumentTitle({
+        metadataTitles,
+        pages: splitTextIntoPages(markdown, document.pageCount).slice(0, 2),
+        filename: document.filename,
+      });
+      if (!derived) return;
+      const written = await state.store.setDocumentTitleIfAbsent(document.id, derived);
+      console.log(`[extract-debug] document=${document.id} title-source=${derived.source} title-written=${written}`);
+    } catch (error) {
+      console.warn(`[extract-markdown] title derivation failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** Pending `pdfimages -list` runs from page facts, per run and document, shared with page triage. */
@@ -908,7 +1082,7 @@ export class ExtractMarkdownStage implements Stage {
         sparsePageWords: SPARSE_PAGE_WORDS,
         pages,
       };
-      const key = `${document.userId}/${state.run.id}/page-image-evidence/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
       await this.storage.putJson(key, artifact);
       console.log(
         `[extract-debug] document=${document.id} pageImageEvidence sparsePages=${pages.length} ` +
@@ -967,13 +1141,65 @@ export class ExtractMarkdownStage implements Stage {
     signal?: AbortSignal,
     graphContext?: { sourceHash: string; pageCount: number; documentId: string },
   ): Promise<ExtractedCandidate> {
-    return extractor.execute({
+    return extractor.execute(this.candidateExecutors(graphContext), textKey, sourceTempFile, signal);
+  }
+
+  private candidateExecutors(
+    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+  ): CandidateExecutors {
+    return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
       file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort),
       liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
-    }, textKey, sourceTempFile, signal);
+    };
+  }
+
+  /**
+   * An image has no text layer, so when OCR cannot read it (no Tesseract data on this worker, or
+   * Kreuzberg's bundled OCR crashing) vision is the only reader left. Returns a stand-in extractor whose empty
+   * Markdown lets page triage and the vision stage read the pixels. When the workspace cannot use vision
+   * (turned off, or privacy mode forbids the route) the image is unreadable: fail naming that cause. The raw
+   * diagnostic stays in the stored error and logs; `publicDocumentError` never shows it to users.
+   */
+  private textlessImageExtractor(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    cause: string,
+  ): PreparedExtractor {
+    const pipeline = state.run.pipeline;
+    const visionAllowed =
+      pipeline.visionFallback &&
+      isProviderCallAllowed(pipeline.privacyMode, visionCall(resolveVisionRoute(pipeline.vision)));
+    if (!visionAllowed) {
+      console.error(
+        `[extract-error] stage=${this.name} document=${document.id} image-unreadable ` +
+          `visionFallback=${pipeline.visionFallback} privacyMode=${pipeline.privacyMode} cause=${cause}`,
+      );
+      throw new Error(`${DOCUMENT_FAILURE_MARKERS.imageNeedsVision} (${cause})`);
+    }
+    console.warn(
+      `[extract-debug] stage=${this.name} document=${document.id} textless-image-to-vision cause=${cause}`,
+    );
+    const plan: CommandPlan = { binary: "in-process:image-textless", args: [], available: true };
+    return {
+      label: "image-textless",
+      plan,
+      tableAware: false,
+      execute: async (_executors, textKey) => {
+        const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-"));
+        const tempTextPath = path.join(scratchDir, "image-textless.md");
+        try {
+          await writeFile(tempTextPath, "", "utf8");
+          await this.storage.putBytes(textKey, new Uint8Array(0), "text/markdown; charset=utf-8");
+        } catch (error) {
+          await rm(scratchDir, { recursive: true, force: true });
+          throw error;
+        }
+        return { label: "image-textless", plan, textKey, textUri: this.storage.uri(textKey), tempTextPath };
+      },
+    };
   }
 
   /** Upload Markdown an in-process extractor (e.g. JSON/JSONL) already wrote locally. */
@@ -1136,7 +1362,7 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<string> {
     const original = await readFile(candidate.tempTextPath, "utf8");
     const sanitized = sanitizeExtractedMarkdown(original);
-    if (sanitized.strippedDataUriCount === 0) {
+    if (sanitized.strippedDataUriCount === 0 && sanitized.strippedFrontmatterLines === 0) {
       return original;
     }
 
@@ -1148,7 +1374,8 @@ export class ExtractMarkdownStage implements Stage {
     );
     console.log(
       `[extract-sanitize] extractor=${candidate.label} ` +
-        `dataUris=${sanitized.strippedDataUriCount} bytes=${sanitized.strippedDataUriBytes}`,
+        `dataUris=${sanitized.strippedDataUriCount} bytes=${sanitized.strippedDataUriBytes} ` +
+        `frontmatterLines=${sanitized.strippedFrontmatterLines}`,
     );
     return sanitized.markdown;
   }
@@ -1256,8 +1483,8 @@ export class ExtractMarkdownStage implements Stage {
       Math.max(1, args.document.pageCount),
     );
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-critique-"));
-    const critiqueArtifactKey = `${args.document.userId}/${args.state.run.id}/critique/${args.document.id}.json`;
-    const correctedTextKey = `${args.document.userId}/${args.state.run.id}/markdown/${args.document.id}.critique.md`;
+    const critiqueArtifactKey = `${runArtifactRoot(args.state.run, args.document.userId)}/critique/${args.document.id}.json`;
+    const correctedTextKey = `${runArtifactRoot(args.state.run, args.document.userId)}/markdown/${args.document.id}.critique.md`;
     const renderManifestUri =
       args.state.artifactLedger.readDocument(args.document.id, "images") ?? null;
 
@@ -1291,7 +1518,6 @@ export class ExtractMarkdownStage implements Stage {
             imagePath,
             outputPath: `${imagePath}.json`,
             privacyMode: args.state.run.pipeline.privacyMode,
-            funded: args.state.run.orgFunded,
             vision: {
               ...args.state.run.pipeline.vision,
               prompt: buildCritiquePrompt(
@@ -1527,6 +1753,8 @@ export class ExtractMarkdownStage implements Stage {
     state: import("../pipeline/pipeline.js").WorkflowState,
     options: {
       hasTablePages?: boolean;
+      /** Filled with whether the native engine supplied the block payload, and why not. */
+      nativePayloadOutcome?: { status: "native" | "none"; reason: string | null };
     } = {},
     signal?: AbortSignal,
   ): Promise<
@@ -1534,6 +1762,7 @@ export class ExtractMarkdownStage implements Stage {
   > {
     const isPdf = this.isPdfDocument(document);
     if (!isPdf) {
+      if (options.nativePayloadOutcome) options.nativePayloadOutcome.reason = "filename and MIME type are not PDF";
       return [];
     }
 
@@ -1551,12 +1780,17 @@ export class ExtractMarkdownStage implements Stage {
 
     // Block payload (bbox, font size) from the in-process engine, whichever extractor won; absent when the private
     // engine is not installed, in which case the canonical document keeps its Markdown-derived blocks.
-    const nativePayload = await this.buildNativeParserPayloadOrNull(
+    const nativeOutcome = await this.buildNativeParserPayloadOrNull(
       sourceTempFile,
       withTimeoutSignal(signal, Math.min(this.cfg.parserArtifactTimeoutMs, 15_000)),
     );
+    const nativePayload = nativeOutcome.payload;
+    if (options.nativePayloadOutcome) {
+      options.nativePayloadOutcome.status = nativePayload ? "native" : "none";
+      options.nativePayloadOutcome.reason = nativeOutcome.reason;
+    }
     if (nativePayload) {
-      const key = `${document.userId}/${document.runId}/parser/${document.id}.native-pdf.json`;
+      const key = `${documentArtifactRoot(document)}/parser/${document.id}.native-pdf.json`;
       await this.storage.putJson(key, nativePayload);
       artifacts.push({ parser: "native-pdf", uri: this.storage.uri(key), payload: nativePayload });
     }
@@ -1594,7 +1828,7 @@ export class ExtractMarkdownStage implements Stage {
         if (!payload) {
           continue;
         }
-        const key = `${document.userId}/${document.runId}/parser/${document.id}.${job.parser}.json`;
+        const key = `${documentArtifactRoot(document)}/parser/${document.id}.${job.parser}.json`;
         await this.storage.putJson(key, payload);
         artifacts.push({
           parser: job.parser,
@@ -1619,7 +1853,7 @@ export class ExtractMarkdownStage implements Stage {
           withTimeoutSignal(signal, Math.min(this.cfg.parserArtifactTimeoutMs, 20_000)),
         );
         if (regionsPayload) {
-          const regionsKey = `${document.userId}/${document.runId}/parser/${document.id}.regions.json`;
+          const regionsKey = `${documentArtifactRoot(document)}/parser/${document.id}.regions.json`;
           await this.storage.putJson(regionsKey, regionsPayload);
           state.artifactLedger.recordDocument(document.id, "pdf-regions", this.storage.uri(regionsKey));
           const totalRegions = regionsPayload.pages.reduce((sum, p) => sum + p.regionCount, 0);
@@ -1670,20 +1904,23 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /** Block payload from the in-process native engine; null (not an error) when it cannot serve it. */
-  private async buildNativeParserPayloadOrNull(sourceTempFile: string, signal?: AbortSignal): Promise<unknown | null> {
+  private async buildNativeParserPayloadOrNull(
+    sourceTempFile: string,
+    signal?: AbortSignal,
+  ): Promise<{ payload: unknown | null; reason: string | null }> {
     try {
       const engine = await resolveNativePdfEngine(this.runner);
-      if (!engine) return null;
+      if (!engine) return { payload: null, reason: "engine unavailable" };
       const doc = await engine.openPath(sourceTempFile, { signal });
       try {
         const payload = await buildNativeParserPayload(doc, signal);
-        return payload.pages.length > 0 ? payload : null;
+        return payload.pages.length > 0 ? { payload, reason: null } : { payload: null, reason: "engine returned no pages" };
       } finally {
         await doc.close().catch(() => undefined);
       }
     } catch (error) {
-      console.warn(`[native-pdf] parser payload unavailable, using fallback: ${toError(error).message}`);
-      return null;
+      const failure = logNativePdfFallback("parser-payload", error, "markdown-derived blocks");
+      return { payload: null, reason: `${failure.code}: ${failure.message}`.slice(0, 4000) };
     }
   }
 
@@ -2026,7 +2263,7 @@ export class ExtractMarkdownStage implements Stage {
       if (!source || source.kind !== "source/pdf") {
         throw new Error("local PDF graph returned no source artifact");
       }
-      const baseKey = `${args.document.userId}/${args.runId}/artifact-graph/${args.document.id}`;
+      const baseKey = `${documentArtifactRoot(args.document, args.runId)}/artifact-graph/${args.document.id}`;
       const persisted: ExtractionArtifactRef[] = [
         { ...source, uri: this.storage.uri(args.document.sourceKey) },
       ];
@@ -2116,6 +2353,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, id),
+          { format: args.format },
         ),
       ),
     );
@@ -2139,6 +2377,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, args.secondaryId),
+          { format: args.format },
         );
         if (!explicit.plan.available) args.attemptLedger.markUnavailable(explicit.label);
         secondary = explicit.plan.available ? explicit : null;
@@ -2364,6 +2603,18 @@ class FanoutWritable extends Writable {
       destination.destroy(error ?? undefined);
     }
     callback(error);
+  }
+}
+
+/** The first `maxBytes` of a file as UTF-8 (a split trailing character is dropped). */
+async function readFileHead(filePath: string, maxBytes: number): Promise<string> {
+  const handle = await open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
   }
 }
 

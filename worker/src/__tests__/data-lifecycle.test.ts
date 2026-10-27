@@ -1,10 +1,16 @@
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import postgres from "postgres";
+import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
 import {
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
+  workspaceVectorPrefixTarget,
   type DeleteVectorRows,
   type DropVectorTable,
   type SupersededPurgeOptions,
@@ -38,6 +44,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await sql`delete from upload_sessions`;
   await sql`delete from workspaces`;
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
@@ -46,7 +53,9 @@ beforeEach(async () => {
 });
 
 const MODEL = { backend: "lancedb", embeddingModel: "model/x", dimension: 4 };
-const TABLE_URI = "/tmp/lance/o1/vectors/model%2Fx/4";
+/** Workspace w's database for MODEL; every workspace has its own. */
+const TABLE_URI = "/tmp/lance/o1/w/vectors-model%2Fx-4";
+const KEEP_TABLE_URI = "/tmp/lance/o1/keep/vectors-model%2Fx-4";
 
 async function seedRun(id: string, workspaceId = "w", status = "completed") {
   await sql`
@@ -107,6 +116,40 @@ async function drainAll(stores: ReturnType<typeof fakeExternalStores>) {
 }
 
 describe("delete triggers enqueue external cleanup", () => {
+  it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {
+    const source = "u1/upload/raw/source.pdf";
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('recover', 'u1', 'o1', 'ingesting')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
+      values ('recover-file', 'recover', 'source.pdf', 'application/pdf', ${source}, 'single')`;
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, artifact_uris, reason)
+      values ('storage_prefix', 'o1', 'u1/recover/', ${sql.array([source])}, 'run_creation')`;
+    const stores = fakeExternalStores([source, 'u1/recover/markdown/new.md'], {});
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([source, 'u1/recover/markdown/new.md']);
+    await seedRun('recover');
+    await sql`update upload_sessions set status = 'confirmed' where id = 'recover'`;
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([source, 'u1/recover/markdown/new.md']);
+    await sql`delete from workspace_runs where id = 'recover'`;
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([]);
+  });
+
+  it("keeps registered upload bytes when an old partial document is cleaned", async () => {
+    await seedRun('partial');
+    await seedDocument('partial-doc', 'partial');
+    const source = 'u1/up-partial-doc/raw/partial-doc.pdf';
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('retry', 'u1', 'o1', 'ingesting')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
+      values ('retry-file', 'retry', 'source.pdf', 'application/pdf', ${source}, 'single')`;
+    const stores = fakeExternalStores([source], {});
+    await sql`delete from documents where id = 'partial-doc'`;
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([source]);
+  });
+
   it("records a deleted document's vectors, artifacts, source and graph nodes before cascades remove them", async () => {
     await seedRun("r1");
     await seedDocument("d1", "r1");
@@ -241,14 +284,15 @@ describe("cleanup sweep", () => {
         "u1/up-d1/raw/d1.pdf", "u1/up-d2/raw/d2.pdf", "u1/up-d3/raw/d3.pdf",
         "u1/rk/markdown/dk.md", "u1/up-dk/raw/dk.pdf",
       ],
-      { [`${TABLE_URI}#chunks`]: ["d1", "d2", "d3", "dk"] },
+      { [`${TABLE_URI}#chunks`]: ["d1", "d2", "d3"], [`${KEEP_TABLE_URI}#chunks`]: ["dk"] },
     );
 
     await sql`delete from workspaces where id = 'w'`;
     await drainAll(stores);
 
     expect([...stores.objects].sort()).toEqual(["u1/rk/markdown/dk.md", "u1/up-dk/raw/dk.pdf"]);
-    expect([...stores.tables.get(`${TABLE_URI}#chunks`)!]).toEqual(["dk"]);
+    expect([...stores.tables.get(`${TABLE_URI}#chunks`)!]).toEqual([]);
+    expect([...stores.tables.get(`${KEEP_TABLE_URI}#chunks`)!]).toEqual(["dk"]);
     expect(stores.vectorDeleteCalls).toEqual([{ table: `${TABLE_URI}#chunks`, documentIds: ["d1", "d2", "d3"] }]);
     expect(await sql`select count(*)::int as count from document_cleanup_queue`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
@@ -279,20 +323,67 @@ describe("cleanup sweep", () => {
     expect([...stores.objects]).toEqual([]);
   });
 
-  it("drops a whole org vector table instead of deleting its documents row by row", async () => {
+  it("drops a whole workspace vector table instead of deleting its documents row by row", async () => {
     await seedRun("r1");
     await seedDocument("d1", "r1");
+    await seedRun("rk", "keep");
+    await seedDocument("dk", "rk", "keep");
     await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
-      values ('vector_table', 'o1', 'o1|model/x|4', ${sql.json({ embeddingModel: "model/x", dimension: 4 })}, 'org_deleted')`;
+      values ('vector_table', 'o1', 'o1|w|model/x|4', ${sql.json({ workspaceId: "w", embeddingModel: "model/x", dimension: 4 })}, 'workspace_deleted')`;
     await sql`insert into vector_index_tables (table_key) values (${`${TABLE_URI}#chunks`})`;
-    const stores = fakeExternalStores([], { [`${TABLE_URI}#chunks`]: ["d1"] });
+    const stores = fakeExternalStores([], { [`${TABLE_URI}#chunks`]: ["d1"], [`${KEEP_TABLE_URI}#chunks`]: ["dk"] });
 
     await sql`delete from workspaces where id = 'w'`;
     await drainAll(stores);
 
     expect(stores.vectorDeleteCalls).toEqual([]);
-    expect(stores.tables.size).toBe(0);
+    expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
     expect(await sql`select table_key from vector_index_tables`).toEqual([]);
+  });
+
+  it("drops a deleted org's legacy org-level tables from cleanup rows queued before workspace databases", async () => {
+    const legacy = [...legacyEmbeddingLocations("/tmp/lance", "o1", "model/x", 4), legacyOrgTable("/tmp/lance", "o1")];
+    // Migration 0082 marks rows queued with the old payload shape.
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+      values ('vector_table', 'o1', 'o1|model/x|4', ${sql.json({ embeddingModel: "model/x", dimension: 4, legacyLayout: true })}, 'org_deleted')`;
+    const stores = fakeExternalStores([], Object.fromEntries([...legacy.map((location) => [`${location.uri}#${location.table}`, ["d1"]]), [`${KEEP_TABLE_URI}#chunks`, ["dk"]]]));
+
+    await drainAll(stores);
+
+    expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
+    expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
+  });
+
+  it("purges everything under a deleted workspace's LanceDB root, and only that workspace's", async () => {
+    const root = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "lance-prefix-"));
+    try {
+      for (const file of ["o1/w/vectors-old%2Fmodel-8/chunks.lance/data.lance", "o1/w/vectors-model%2Fx-4/chunks.lance/x", "o1/keep/vectors-model%2Fx-4/chunks.lance/x"]) {
+        await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+        await writeFile(path.join(root, file), "x");
+      }
+      const tableUri = `${root}/o1/w/vectors-model%2Fx-4`;
+      await sql`insert into vector_index_tables (table_key, lance_uri, lance_table) values (${`${tableUri}#chunks`}, ${tableUri}, 'chunks')`;
+      await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+        values ('vector_prefix', 'o1', 'o1|w', ${sql.json({ workspaceId: "w" })}, 'workspace_deleted')`;
+      const stores = fakeExternalStores([], {});
+      await drainStorageCleanupQueue(sql, stores.storage, { ...stores.options, lancedbRoot: root });
+
+      expect(await readdir(path.join(root, "o1"))).toEqual(["keep"]);
+      expect(await sql`select count(*)::int as count from vector_index_tables`).toEqual([{ count: 0 }]);
+      expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a workspace root to a local directory or a prefix in the artifact bucket only", () => {
+    expect(workspaceVectorPrefixTarget("/data/lance/o1/w", "b")).toEqual({ kind: "local", path: "/data/lance/o1/w" });
+    expect(workspaceVectorPrefixTarget("file:///data/lance/o1/w", "b")).toEqual({ kind: "local", path: "/data/lance/o1/w" });
+    expect(workspaceVectorPrefixTarget("s3://b/lancedb/o1/w", "b")).toEqual({ kind: "bucket", prefix: "lancedb/o1/w/" });
+    expect(workspaceVectorPrefixTarget("s3+ddb://b/o1/w", "b")).toEqual({ kind: "bucket", prefix: "o1/w/" });
+    expect(workspaceVectorPrefixTarget("s3://other/lancedb/o1/w", "b")).toEqual({ kind: "unsupported" });
+    expect(workspaceVectorPrefixTarget("s3://b/w", "b")).toEqual({ kind: "unsupported" });
+    expect(workspaceVectorPrefixTarget("gs://b/lancedb/o1/w", "b")).toEqual({ kind: "unsupported" });
   });
 
   it("keeps artifacts a partial reprocess still reuses, then reclaims them with the last reference", async () => {

@@ -665,7 +665,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     S.phase = 'uploading';
     S.error = null; S.status = null; S.asked = null; S.pendingComplete = null;
     render();
-    var args = { files: files.map(function (f) { return { filename: f.name, mimeType: f.mime, sizeBytes: f.size }; }) };
+    var args = { files: files.map(function (f) { return { filename: f.name, mimeType: f.mime, sizeBytes: f.size, singlePart: true }; }) };
     if (S.workspaceId) args.workspace = S.workspaceId;
 
     callTool('upload', args).then(function (data) {

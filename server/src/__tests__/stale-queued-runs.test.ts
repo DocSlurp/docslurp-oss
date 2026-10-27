@@ -32,12 +32,15 @@ describe("stale queued run sweeper", () => {
     // One query each for the stale-run sweep, connector-sync recovery, webhook
     // outbox drain, metering-enforcement sync and the interrupted org-deletion
     // resume (no past-due sweep: there are no subscriptions), plus three for the credit-lease expiry
-    // sweep (expire + prune leases + prune interactive chat holds).
+    // sweep (expire + prune leases + prune interactive chat holds), and five (six on the first tick) for the
+    // document-export sweep (claim due emails and its column fragment, fail stalled,
+    // find expired, prune old expired rows) plus the hourly orphan scan on the first tick, and six for
+    // the extract sweep (settle, charge, queue downloads, claim emails, claim expired extracts, re-list deleted ones).
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sqlMock).toHaveBeenCalledTimes(8);
+    expect(sqlMock).toHaveBeenCalledTimes(20);
 
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sqlMock).toHaveBeenCalledTimes(16);
+    expect(sqlMock).toHaveBeenCalledTimes(39);
     vi.unstubAllEnvs();
   });
 

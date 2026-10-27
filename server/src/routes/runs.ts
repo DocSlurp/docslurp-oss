@@ -16,11 +16,9 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { isApiKeyLive } from "../services/api-key-liveness.js";
 import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
-import { getRunForensics } from "../services/run-forensics.js";
 import { type RunStartOutcome } from "../services/run-lifecycle.js";
 import {
   controlRun,
-  exportRun,
   getRun,
   getRunProcessingPreview,
   getRunProgress,
@@ -37,6 +35,17 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
+import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+
+/** A server key with `ingest` may reprocess runs in the workspaces it can use; null when the actor may proceed. */
+async function denyRunContentUpdate(c: Context, runId: string): Promise<Response | null> {
+  const actor = getRequestActor(c);
+  if (actor.type !== "apiKey") return null;
+  if (!apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
+  const run = await getRun(runId, actor.userId, { cost: false });
+  if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) return apiStatusError(c, 404, "Run not found");
+  return null;
+}
 
 /**
  * Runs and run telemetry are operator surfaces. A browser/client API key is
@@ -192,26 +201,6 @@ export const runsRoutes = new Hono()
     response.headers.set("Cache-Control", "no-cache, no-transform");
     return response;
   })
-  .get("/:runId/export", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const manifest = await exportRun(c.req.param("runId"), userId);
-
-    if (!manifest) {
-      return apiStatusError(c, 404, "Run not found");
-    }
-
-    return c.json(manifest);
-  })
-  .get("/:runId/forensics", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const forensics = await getRunForensics(c.req.param("runId"), userId);
-
-    if (!forensics) {
-      return apiStatusError(c, 404, "Run not found");
-    }
-
-    return c.json(forensics);
-  })
   .get("/:runId/events", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
@@ -302,12 +291,8 @@ export const runsRoutes = new Hono()
     }
   })
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
-    // The MCP in-process forward bypasses sessionAuth, so key-to-workspace scoping is enforced here.
-    const actor = getRequestActor(c);
-    if (actor.type === "apiKey") {
-      const run = await getRun(c.req.param("runId"), c.get("sessionUser").id, { cost: false });
-      if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) return apiStatusError(c, 404, "Run not found");
-    }
+    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    if (denied) return denied;
     const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId: c.get("sessionUser").id, options: c.req.valid("json") });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
     return c.json({ estimate, billing: billingState() });
@@ -315,6 +300,9 @@ export const runsRoutes = new Hono()
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
+    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    if (denied) return denied;
+    const actor = getRequestActor(c);
     const inline = await inlineEstimate(
       () => estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body }),
       `/v1/runs/${c.req.param("runId")}/reprocess/estimate`,
@@ -346,6 +334,7 @@ export const runsRoutes = new Hono()
       userId,
       workspaceId: run.workspaceId,
       runId: run.id,
+      apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
       action: "run.reprocessed",
       resourceType: "run",
       resourceId: run.id,
@@ -430,6 +419,8 @@ export const runsRoutes = new Hono()
   });
 
 acceptApiKeys(runsRoutes, [
+  "POST /:runId/reprocess",
+  "POST /:runId/reprocess/estimate",
   "GET /",
   "GET /activity/stream",
   "GET /:runId/progress",

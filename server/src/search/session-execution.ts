@@ -9,6 +9,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
+import { recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelect } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
@@ -268,6 +269,7 @@ export async function executeSearchSessionRetrieval(
 ): Promise<SearchResponse> {
   validateRetrievalControls(input.options);
   const candidateLists = await input.retrieveCandidateLists();
+  const fuseStarted = performance.now();
   // Fusion keeps one copy per chunk and re-scores by rank, so the raw relevance
   // measured on each branch is carried over before the floor and rerank run.
   const fusedCandidates = withBestRelevance(reciprocalRankFusion(candidateLists) ?? [], candidateLists);
@@ -314,7 +316,8 @@ export async function executeSearchSessionRetrieval(
         .slice(0, input.limit)
         .map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }));
 
-  return finalizeSearchSessionExecution({
+  recordSearchPhase("fuse", performance.now() - fuseStarted);
+  return timePhase("finalize", () => finalizeSearchSessionExecution({
     query: input.query,
     retrievalQuery: input.retrievalQuery,
     userId: input.userId,
@@ -331,7 +334,7 @@ export async function executeSearchSessionRetrieval(
     retrievalChain: input.retrievalChain,
     wholeCorpusFallback: input.wholeCorpusFallback,
     relevanceFloor: { minScore: floor.minScore, dropped: floor.dropped },
-  });
+  }));
 }
 
 /**
@@ -415,7 +418,7 @@ export async function finalizeSearchSessionExecution(
     calibratedResults.length === 0 && !input.options.suppressSessionLog;
 
   if (!input.options.suppressSessionLog) {
-    await input.session.persist({
+    await timePhase("persist", () => input.session.persist({
       userId: input.userId,
       query: input.query,
       variant: input.variant,
@@ -440,7 +443,7 @@ export async function finalizeSearchSessionExecution(
         },
         diagnostics: input.session.diagnostics(),
       },
-    });
+    }));
   }
 
   if (recordedZeroResultDiagnostics) {

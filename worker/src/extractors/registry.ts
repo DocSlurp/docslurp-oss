@@ -11,6 +11,7 @@ import { extractNativePdf } from "../native-pdf/extract.js";
 import { nativePdfAdapterVersion } from "../native-pdf/loader.js";
 import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mode.js";
 import { NativePdfError, logNativePdfFallback } from "../native-pdf/types.js";
+import { ocrAvailable } from "./ocr-capability.js";
 
 export interface ExtractedCandidate {
   label: string;
@@ -41,7 +42,15 @@ export interface PreparedExtractor {
   execute(executors: CandidateExecutors, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
 }
 
-type Preparation = (runner: CommandRunner, sourcePath: string, configJson?: string) => Promise<CommandPlan>;
+/** What the planner knows about the document beyond its path. */
+export interface PrepareContext {
+  /** Canonical input format ID, such as pdf or image. */
+  format?: string;
+  /** Environment used for capability probes; defaults to the worker's. */
+  env?: NodeJS.ProcessEnv;
+}
+
+type Preparation = (runner: CommandRunner, sourcePath: string, configJson?: string, context?: PrepareContext) => Promise<CommandPlan>;
 type Execution = (candidate: PreparedExtractor, executors: CandidateExecutors, textKey: string, sourcePath: string, signal?: AbortSignal) => Promise<ExtractedCandidate>;
 
 interface WorkerExtractor {
@@ -116,7 +125,16 @@ function definition(args: {
 
 const registered = [
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
-    prepare: (runner, source, config) => runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config) }),
+    prepare: async (runner, source, config, context) => {
+      const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
+      // An image has no text layer, so Kreuzberg can only OCR it. Without Tesseract language data (an image or
+      // local setup built without it) that fails on every image, so report it unavailable and let the stage
+      // route the image to vision. Text-layer formats never invoke OCR.
+      if (context?.format === "image" && !ocrAvailable({ env: context.env, language: kreuzbergOcrLanguage(config) })) {
+        return { ...plan, available: false };
+      }
+      return plan;
+    } }),
   definition({ id: "native-pdf", outputSuffix: ".native-pdf.md", tableAware: true, execute: nativePdf,
     prepare: async (runner) => {
       const engine = await resolveNativePdfEngine(runner);
@@ -206,10 +224,10 @@ export class ExtractorRegistry {
     return [...new Set(ids)];
   }
 
-  async prepare(id: string, runner: CommandRunner, sourcePath: string, configJson?: string): Promise<PreparedExtractor> {
+  async prepare(id: string, runner: CommandRunner, sourcePath: string, configJson?: string, context?: PrepareContext): Promise<PreparedExtractor> {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`unknown extractor ${id}; registered: ${[...this.entries.keys()].join(", ")}`);
-    const plan = await entry.prepare(runner, sourcePath, configJson);
+    const plan = await entry.prepare(runner, sourcePath, configJson, context);
     const candidate: PreparedExtractor = {
       label: id,
       plan,
@@ -219,6 +237,16 @@ export class ExtractorRegistry {
       execute: (executors, key, source, signal) => entry.execute(candidate, executors, key, source, signal),
     };
     return candidate;
+  }
+}
+
+function kreuzbergOcrLanguage(configJson?: string): string | undefined {
+  if (!configJson) return undefined;
+  try {
+    const language = (JSON.parse(configJson) as { ocr?: { language?: unknown } }).ocr?.language;
+    return typeof language === "string" && language.trim() ? language : undefined;
+  } catch {
+    return undefined;
   }
 }
 

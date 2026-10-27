@@ -30,6 +30,10 @@
       "types": "./dist/observability.d.ts",
       "import": "./dist/observability.js"
     },
+    "./cancellation": {
+      "types": "./dist/cancellation.d.ts",
+      "import": "./dist/cancellation.js"
+    },
     "./error-reporting": {
       "types": "./dist/error-reporting.d.ts",
       "import": "./dist/error-reporting.js"

@@ -298,8 +298,8 @@ describe("upload widget with a fake MCP Apps host", () => {
     expect(upload.params.arguments).toEqual({
       workspace: "ws_1",
       files: [
-        { filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 300_000 },
-        { filename: "b.pdf", mimeType: "application/pdf", sizeBytes: 450_000 },
+        { filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 300_000, singlePart: true },
+        { filename: "b.pdf", mimeType: "application/pdf", sizeBytes: 450_000, singlePart: true },
       ],
     });
     expect(api.text()).toContain("Uploading");

@@ -41,7 +41,7 @@ Every route that can create work has a `POST …/estimate` twin with the same bo
 | Rebuild graph | `POST /v1/workspaces/:id/graph/jobs/estimate` | `rebuildGraphEstimate` | Use SDK/HTTP | `graphRebuildEstimate` |
 | Upload | `POST /v1/uploads/estimate` `{ files: [{ name, size, pages? }] }` | `uploadEstimate` | `upload <files> --estimate` | `uploadEstimate` |
 
-An estimate accepts exactly the callers that may perform the operation it prices. With an API key: workspace update, indexing mode and graph rebuild estimates need a server key with `workspaces:manage`; full-index and upload estimates need `ingest`; search-settings and reprocess estimates are signed-in-session only (their mutations accept no API key). The MCP tools follow the same rule and are listed only to keys that may use them. Keys restricted to workspaces can only price work in those workspaces.
+An estimate accepts exactly the callers that may perform the operation it prices. With an API key: workspace update, indexing mode and graph rebuild estimates need a server key with `workspaces:manage`; full-index and upload estimates need `ingest`; reprocess estimates need a server key with `ingest`; search-settings estimates are signed-in-session only (the mutation accepts no API key). The MCP tools follow the same rule and are listed only to keys that may use them. Keys restricted to workspaces can only price work in those workspaces.
 
 Config estimates return `{ impact, estimate, billing }`; the others return `{ estimate, billing }`. A `CostEstimate` is:
 
