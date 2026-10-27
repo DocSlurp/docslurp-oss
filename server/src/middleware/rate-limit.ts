@@ -1069,11 +1069,12 @@ export const apiRateLimit = apiIpRateLimit;
 /**
  * A fixed-window limit for one feature and subject (for example
  * `chat-instructions-improve`, `user:<id>`), outside the per-request category
- * limits. Returns the seconds to wait when refused, else null. Fails closed:
- * a limit of 0, a store error, and (with `requireShared`) an answer from the
- * per-process limiter, including a Redis outage fallback, all refuse.
- * `requireShared` is waived only outside production, or when
- * `RATE_LIMIT_ALLOW_PROCESS_FEATURE_LIMITS=true` accepts per-instance limits.
+ * limits. Returns the seconds to wait when refused, else null.
+ *
+ * Fails closed on a limit of 0 and on store errors. With `requireShared`, a
+ * configured Redis that is unavailable (the per-process fallback answered)
+ * refuses. With no Redis configured at all, per-process limits are the
+ * accepted stopgap (N instances allow N times the limit; the startup log warns).
  */
 export async function consumeFeatureRateLimit(args: {
   feature: string;
@@ -1087,7 +1088,7 @@ export async function consumeFeatureRateLimit(args: {
   const now = args.now ?? Date.now();
   const retry = Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
   if (args.limit <= 0) return retry;
-  if (!rateLimitEnabled()) return args.requireShared && sharedLimitRequired() ? retry : null;
+  if (!rateLimitEnabled()) return null;
   const base = `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:feature:${safeIdentityPart(args.feature)}:{${safeIdentityPart(args.subject)}}`;
   try {
     const result = await (args.store ?? getDefaultStore()).consume({
@@ -1096,8 +1097,8 @@ export async function consumeFeatureRateLimit(args: {
       now,
       countDenied: false,
     });
-    if (args.requireShared && result.shared !== true && sharedLimitRequired()) {
-      console.error(`[rate-limit] feature=${args.feature} refused: no shared rate-limit store answered (per-process limits only)`);
+    if (args.requireShared && sharedStoreConfigured() && result.shared !== true) {
+      console.error(`[rate-limit] feature=${args.feature} refused: Redis is configured but unavailable (per-process fallback answered)`);
       return retry;
     }
     if (result.blockedMs > 0) return Math.max(1, Math.ceil(result.blockedMs / 1000));
@@ -1108,7 +1109,8 @@ export async function consumeFeatureRateLimit(args: {
   return retry;
 }
 
-function sharedLimitRequired(): boolean {
-  if (process.env.RATE_LIMIT_ALLOW_PROCESS_FEATURE_LIMITS?.trim().toLowerCase() === "true") return false;
-  return process.env.NODE_ENV === "production";
+/** Whether a shared (Redis or Upstash) limiter is configured; without one, per-process limits are expected. */
+function sharedStoreConfigured(): boolean {
+  const backend = rateLimitBackend();
+  return backend === "redis" || backend === "upstash-rest";
 }

@@ -152,17 +152,30 @@ describe("POST /v1/workspaces/:id/chat-instructions/improve", () => {
     expect(mocks.improve).not.toHaveBeenCalled();
   });
 
-  it("refuses in production when only the per-process limiter answers, unless per-instance limits are accepted", async () => {
+  it("works in production with no Redis configured (per-instance limits are the accepted stopgap)", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("API_RATE_LIMIT_REDIS_URL", "");
     vi.stubEnv("REDIS_URL", "");
-    mocks.session.mockResolvedValue(sessionActor);
-    expect((await improve(app())).status).toBe(429);
-    expect(mocks.improve).not.toHaveBeenCalled();
-    vi.stubEnv("RATE_LIMIT_ALLOW_PROCESS_FEATURE_LIMITS", "true");
+    vi.stubEnv("API_RATE_LIMIT_REDIS_REST_URL", "");
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
     resetApiRateLimitBuckets();
+    mocks.session.mockResolvedValue(sessionActor);
     expect((await improve(app())).status).toBe(200);
+    expect(mocks.improve).toHaveBeenCalledOnce();
   });
+
+  it("refuses when Redis is configured but unavailable (the per-process fallback answered)", async () => {
+    vi.stubEnv("API_RATE_LIMIT_REDIS_REST_URL", "");
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
+    vi.stubEnv("API_RATE_LIMIT_REDIS_URL", "redis://127.0.0.1:1");
+    resetApiRateLimitBuckets();
+    mocks.session.mockResolvedValue(sessionActor);
+    const response = await improve(app());
+    expect(response.status).toBe(429);
+    expect(mocks.improve).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+    resetApiRateLimitBuckets();
+  }, 20_000);
 
   it("passes the request signal so a disconnect cancels the model call", async () => {
     mocks.session.mockResolvedValue(sessionActor);
