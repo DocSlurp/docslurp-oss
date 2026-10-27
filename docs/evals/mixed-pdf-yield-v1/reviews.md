@@ -523,3 +523,19 @@ four rotations, and two 150-DPI OCR outcomes agreed. A correct quotation elsewhe
 could not repair the corrupted operative expression. The first runner omitted
 its required cache directory; that failure remains retained alongside successful
 control revision 2. These controls are exploratory and not corpus acceptance.
+
+### Attempt 6 stopped; attempt 7 preparation
+
+Attempt 6 exhausted four formal rounds and remains unaccepted. Fourteen of the
+fifteen E families failed joint authoring constraints before complete export.
+Family 1 reached ten frozen pages and implemented positive ReportLab checks, but
+its original whole Writer export contains duplicate glyph paints at identical
+origins on all ten pages. No complete class/layout/producer pair is verified
+(0 of 30), and no stream rewrite, pilot or full corpus is authorized by this result.
+
+The failed implementation is archived under a6 with its stopped-state README;
+worlds, PDFs, labels, receipts and failed images remain in external eval storage.
+A fresh source-visible Sol Describer is diagnosing build limitations versus actual
+contract contradictions for attempt 7. Its clean handoff must preserve difficulty
+targets and passed P ancestry, with no failed E content or source-visible witnesses
+sent to the next Builder. The user's total cap remains twenty attempts.
