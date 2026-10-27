@@ -48,7 +48,7 @@ vi.mock("../services/extracts.js", async (importOriginal) => {
       return await mocks.sign();
     }),
     expireExtractNow: mocks.expire,
-    actorMayDownload: vi.fn(async (actor: { userId: string }, row: { user_id?: string }) => row.user_id === actor.userId || mocks.orgAdmin),
+    actorMayDownload: actual.actorMayDownload,
     extractHasRun: vi.fn(async () => mocks.hasRun),
     chargeExtractRetention: vi.fn(async () => 0),
   };
@@ -226,12 +226,12 @@ describe("API key scope on /v1/extracts", () => {
 });
 
 describe("download authorization and failures after the run exists", () => {
-  it("lets the requester or an org owner/admin download, not other workspace readers", async () => {
+  it("lets only the requester download, as with exports", async () => {
     const { app } = setup();
     mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "someone-else", expired: false };
     expect((await app.request("/extracts/ext_1/download")).status).toBe(403);
     expect(mocks.sign).not.toHaveBeenCalled();
-    mocks.orgAdmin = true;
+    mocks.extractRow = { ...mocks.extractRow, user_id: "user-1" };
     expect((await app.request("/extracts/ext_1/download")).status).toBe(302);
   });
 
@@ -247,6 +247,25 @@ describe("download authorization and failures after the run exists", () => {
     expect(mocks.abandoned).toEqual([]);
     expect(fakes.discardedWorkspaces).toEqual([]);
     spy.mockRestore();
+  });
+});
+
+describe("reserved canonical IDs", () => {
+  it("refuses a client canonicalId that could join an extract's version chain, on every intake path", async () => {
+    const reserved = "docslurp:extract:ext_00000000000000000000000000000001:doc";
+    const { app, fakes } = setup();
+    const bulkResponse = await app.request("/extracts/bulk", bulk([text("a.txt")], { canonicalId: reserved }));
+    expect(bulkResponse.status).toBe(400);
+    const uploads = (await import("../routes/uploads.js")).createUploadsRoutes(fakes.ports);
+    const plain = new Hono().use("*", async (c, next) => { c.set("sessionUser", { id: "user-1" } as never); await next(); }).route("/uploads", uploads);
+    expect((await plain.request("/uploads/bulk", bulk([text("a.txt")], { canonicalId: "DocSlurp:document:x" }))).status).toBe(400);
+    // JSON bodies fail schema validation (422, field-level issues).
+    expect([400, 422]).toContain((await plain.request("/uploads/url", json({ urls: [{ url: "https://example.com/a.pdf", canonicalId: reserved }] }))).status);
+    // JSON bodies fail schema validation (422, field-level issues).
+    expect([400, 422]).toContain((await plain.request("/uploads/direct/sessions", json({ files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 3, canonicalId: reserved }] }))).status);
+    expect([400, 422]).toContain((await app.request("/extracts/url", json({ urls: [{ url: "https://example.com/a.pdf", canonicalId: reserved }] }))).status);
+    expect(fakes.runs).toEqual([]);
+    expect(fakes.objects.size).toBe(0);
   });
 });
 

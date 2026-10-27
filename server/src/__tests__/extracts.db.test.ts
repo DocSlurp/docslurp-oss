@@ -380,6 +380,48 @@ describe("extract sweep", () => {
     expect(await getOrgStorage("o2", sql as never, { excludeExtracts: true })).toMatchObject({ sourceBytes: 0, pages: 0 });
   });
 
+  it("removes chat evidence spans quoting an extract's documents, and keeps the chat turn", async () => {
+    const extract = await newExtract();
+    const runId = await seedRun(extract);
+    await sql`insert into chat_sessions (id, workspace_id, user_id) values ('chat-1', 'w', 'u')`;
+    await sql`insert into chat_turns (id, session_id, role, content) values ('turn-1', 'chat-1', 'user', 'what does the report say?')`;
+    await sql`insert into chat_answer_evidence_spans (id, answer_id, session_id, user_id, workspace_id, citation_index, answer_start, answer_end, answer_text, source_text, source_start, source_end, citation)
+      values ('span-x', 'a1', 'chat-1', 'u', 'w', 1, 0, 5, 'It is', 'CONFIDENTIAL extract text', 0, 25, ${sql.json({ documentId: `${runId}-d1` })}),
+             ('span-kept', 'a1', 'chat-1', 'u', 'w', 2, 0, 5, 'It is', 'kept document text', 0, 18, ${sql.json({ documentId: "kept-doc" })})`;
+    await sql`update extracts set expires_at = now() - interval '1 minute' where id = ${extract.id}`;
+    await extracts.sweepExtracts();
+    expect((await sql`select id from chat_answer_evidence_spans order by id`).map((row) => row.id)).toEqual(["span-kept"]);
+    expect((await sql`select id from chat_turns`).length).toBe(1);
+    await sql`delete from chat_sessions`;
+  });
+
+  it("never creates a run for an expired or deleted extract", async () => {
+    const extract = await newExtract();
+    await sql`update extracts set state = 'deleted', expires_at = now() - interval '1 hour' where id = ${extract.id}`;
+    vi.stubEnv("NODE_ENV", "development");
+    try {
+      const { createRunCreation } = await import("../services/run-creation.js");
+      const creation = createRunCreation({ sql: sql as never, start: async () => ({ status: "started" }) as never });
+      await expect(creation.create({
+        userId: "u", workspaceId: "w", kind: "direct-upload", pipeline: {} as never, extract,
+        sources: { kind: "files", files: [{ filename: "r.pdf", mimeType: "application/pdf", sourceKey: `${extract.storagePrefix}/raw/r.pdf` }] },
+      })).rejects.toMatchObject({ status: 410, code: "extract_expired" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect((await sql`select id from workspace_runs where extract_id = ${extract.id}`).length).toBe(0);
+  });
+
+  it("refuses to reprocess an extract run or its documents with 409, single and bulk", async () => {
+    const extract = await newExtract();
+    const runId = await seedRun(extract);
+    const { reprocessRun } = await import("../services/runs.js");
+    await expect(reprocessRun(runId, "u")).rejects.toMatchObject({ statusCode: 409, code: "extract_not_reprocessable" });
+    const { bulkReprocessDocuments } = await import("../services/documents.js");
+    await expect(bulkReprocessDocuments([`${runId}-d1`], "u")).rejects.toMatchObject({ statusCode: 409, code: "extract_not_reprocessable" });
+    expect((await sql`select id from workspace_runs`).map((row) => row.id)).toEqual([runId]);
+  });
+
   it("resumes a deletion that failed part-way", async () => {
     const extract = await newExtract();
     await seedRun(extract);

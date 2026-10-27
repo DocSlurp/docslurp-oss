@@ -10,7 +10,7 @@ Use it for one-off conversions, like turning a PDF into Markdown, when you don't
 | Kept | until you delete them | `retentionDays`, or the free window (48 hours by default) |
 | Storage | `<user>/<run>/…` | `extracts/<org>/<extract>/…` |
 | Daily storage meter | yes | no (free window, or prepaid extended retention) |
-| Versions, dedup, reprocess | yes | no: extract documents never supersede, deduplicate against or get reprocessed into kept documents |
+| Versions, dedup, reprocess | yes | no: extract documents never supersede, deduplicate against or get reprocessed into kept documents (reprocess answers `409 extract_not_reprocessable`). Client `canonicalId`s starting with `docslurp:` are refused everywhere, so no upload can join an extract's version chain |
 | Completion email | no | a sign-in download link, unless `notifyEmail: false` |
 
 ## Requests
@@ -61,7 +61,7 @@ Follow progress with the run (`GET /v1/runs/{runId}/progress`) or the extract:
 | --- | --- | --- |
 | `GET /v1/extracts` | `ingest` or `artifacts` | Recent extracts you can see |
 | `GET /v1/extracts/{id}` | `ingest` or `artifacts` | Status, retention and download state; `410 extract_expired` after expiry |
-| `GET /v1/extracts/{id}/download` | `artifacts`, server keys | `302` to a two-minute signed URL for the zip. The requester, or an owner or admin of the organization (as for exports); other workspace readers get `403` |
+| `GET /v1/extracts/{id}/download` | `artifacts`, server keys | `302` to a two-minute signed URL for the zip. The requester only, as for exports; other workspace readers get `403` |
 | `DELETE /v1/extracts/{id}` | `ingest` | Expire now (the requester only); the next sweep deletes everything |
 
 `status` moves from `pending` (no run yet) to `processing`, then `completed` or `failed`, then `expired`. `download.status` moves from `pending` to `preparing`, then `ready` (`download.url` set) or `failed`, then `expired`.
@@ -76,6 +76,8 @@ The emailed link is not a credential. It opens the app's download page (`/app?ex
 
 ## Retention and deletion
 
+No run is ever created for an extract that has expired or been deleted: run creation re-checks the extract inside its admission transaction and answers `410 extract_expired`.
+
 Retention counts from `createdAt`, so an extract that is still processing when its window ends is cancelled and deleted. The maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`, one minute by default, on every API instance; rows are claimed with `for update skip locked` and a ten-minute lease) handles each expired extract in this order:
 
 1. If a run is still in flight, cancels it (and any zip still being built) and stops. Nothing is deleted until 15 minutes later, so late writes of the cancelled run are not orphaned.
@@ -85,12 +87,12 @@ Retention counts from `createdAt`, so an extract that is still processing when i
 5. Deletes every object under `extracts/<org>/<extract>/`, 1,000 keys per page and 20 pages per pass, and aborts unfinished multipart uploads there. An extract with direct upload sessions waits 30 minutes first, longer than a presigned PUT stays valid (15 minutes). A failure in step 4 doesn't stop this step.
 6. Marks the extract `deleted` with `deleted_objects`, `deleted_bytes`, `failed_objects` and `deleted_at`, then lists the prefix once more six hours later and deletes anything that arrived after the purge.
 
-Each step can be repeated safely. A failure records `last_error` (internal only; public responses never show it) and backs off 2^attempts minutes, up to six hours. Claims go least-failed first, so one failing extract never holds up the others. The `extract-deletion-stuck` alert (critical) fires while any expired extract has `last_error`, or one is more than an hour past expiry. The row remains as a tombstone, so `GET` keeps answering `410` and the extract's usage stays reportable.
+Each step can be repeated safely. A failure records `last_error` (internal only; public responses never show it) and backs off 2^failures minutes (`deletion_failures`; `deletion_attempts` counts every pass), up to six hours. Claims go least-failed first, so one failing extract never holds up the others. The `extract-deletion-stuck` alert (critical) fires while any expired extract has `last_error`, or one is more than an hour past expiry. The row remains as a tombstone, so `GET` keeps answering `410` and the extract's usage stays reportable.
 
 What remains after deletion:
 
-- **LanceDB:** deleted rows leave the table when the worker's cleanup drain runs (every sweep, normally within a minute, after a 15-minute grace for documents that were in flight). Until then they are already invisible to search (deletion vectors).
-- **Chat history:** conversations that cited an extract's documents keep their messages; their citations stop resolving. Chat history is the user's own record of a conversation, and scrubbing quoted text out of answers would rewrite it. Delete the conversation to remove it.
+- **LanceDB:** deleted rows are invisible to search at once (deletion vectors). They leave the table files when the worker's cleanup drain runs (every sweep, normally within a minute; 15 minutes later for documents that were in flight) and queues a maintenance pass on the table that compacts it and prunes every prior version. If a routine pass is already queued for that table, the extract's pass runs right after it.
+- **Chat:** chat evidence spans (`chat_answer_evidence_spans`, which quote document text verbatim) that cite the extract's documents are deleted with them. The chat turns themselves stay: they are the user's own conversation, and their citations stop resolving. Delete the conversation to remove it. Workspace overviews use per-document summaries, which go with their documents. The `grounded_summaries` table was dropped in migration 0060.
 - **Audit and usage:** audit entries and usage events keep IDs, counts and costs, but no document content.
 
 Logs: `[extract-retention] deleted extract=… objects=… bytes=… lag_s=…` per extract, and one `settled= charged= exports= emailed= deleted= deleted_objects= deleted_bytes= max_lag_s= failed=` line per sweep that did anything. `lag_s` is the time from expiry to the last object deleted. Each sweep runs in a `maintenance.extracts` span.

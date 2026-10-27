@@ -159,6 +159,9 @@ describe("config-change jobs", () => {
       values ('dx-other', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', ${`extracts/o1/ext_${"f".repeat(32)}/raw/x.pdf`}, 'queued', 1)`).rejects.toThrow(/extract source/);
     await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('dx-wrong', 'o1', 'u1', 'w', 'ext-run', 'x.pdf', 'application/pdf', 'u1/raw/x.pdf', 'queued', 1)`).rejects.toThrow(/outside the extract prefix/);
+    // Nor may a kept document take an extract's version key.
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('dx-key', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', 'u1/raw/k.pdf', 'queued', 1, ${`docslurp:extract:${extractId}:dx`})`).rejects.toThrow(/extract version key/);
     await sql`delete from extracts`;
   });
 

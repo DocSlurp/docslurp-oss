@@ -387,16 +387,12 @@ export async function expireExtractNow(row: ExtractRow): Promise<void> {
 }
 
 /**
- * The download is for the requester, or an owner or admin of the extract's
- * organization (as other members cannot read other people's exports). Other
- * readers of the workspace can see the extract's status but not mint its link.
+ * The download is the requester's alone, as with exports (whose download is
+ * requester-only too). Other readers of the workspace see the extract's
+ * status but cannot mint its link.
  */
-export async function actorMayDownload(actor: RequestActor, row: Pick<ExtractRow, "user_id" | "org_id">): Promise<boolean> {
-  if (row.user_id === actor.userId) return true;
-  const [membership] = await sql<{ role: string }[]>`
-    select role from org_memberships where org_id = ${row.org_id} and user_id = ${actor.userId}
-  `;
-  return membership?.role === "owner" || membership?.role === "admin";
+export async function actorMayDownload(actor: RequestActor, row: Pick<ExtractRow, "user_id">): Promise<boolean> {
+  return row.user_id === actor.userId;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +471,12 @@ async function settleFinishedExtracts(result: ExtractSweepResult): Promise<void>
  * finished) charge any rise in the measured size and close the charge. Each
  * phase has its own event ID, so a retry never charges twice; no phase refunds.
  */
-export async function chargeExtractRetention(extractId: string, phase: "admission" | "settle" | "expiry"): Promise<number> {
+export async function chargeExtractRetention(
+  extractId: string,
+  phase: "admission" | "settle" | "expiry",
+  /** The settled stored size, when known: expiry charges it instead of re-measuring rows that may be half-deleted. */
+  storedBytes?: number,
+): Promise<number> {
   const policy = extractRetentionPolicy();
   return await sql.begin(async (tx) => {
     const client = tx as unknown as typeof sql;
@@ -490,7 +491,7 @@ export async function chargeExtractRetention(extractId: string, phase: "admissio
       where r.extract_id = ${row.id} and d.org_id = ${row.org_id} and d.purged_at is null
     `;
     const pages = measured?.pages ?? 0;
-    const bytes = estimatedExtractStoredBytes({ sourceBytes: Number(measured?.source_bytes ?? 0), pages });
+    const bytes = storedBytes ?? estimatedExtractStoredBytes({ sourceBytes: Number(measured?.source_bytes ?? 0), pages });
     const total = isStorageBillingEnabled() ? extractRetentionCredits({ bytes, retentionHours: row.retention_hours, freeHours: policy.freeHours }) : 0;
     const already = Number(row.retention_credits ?? 0);
     const delta = total - already;
@@ -679,7 +680,8 @@ interface DeletionClaim {
   paid_retention: boolean;
   charged_at: string | null;
   rows_deleted_at: string | null;
-  deletion_attempts: number;
+  deletion_failures: number;
+  stored_bytes: string | number | null;
 }
 
 /** Upper bound on a presigned direct-upload PUT (direct-upload-session.ts SIGNED_UPLOAD_TTL_SECONDS) plus a margin. */
@@ -701,14 +703,14 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
       where state <> 'deleted' and expires_at <= now()
         and (lease_expires_at is null or lease_expires_at <= now())
         and (purge_after is null or purge_after <= now() or state = 'active')
-      order by deletion_attempts, expires_at limit ${DELETE_BATCH}
+      order by deletion_failures, expires_at limit ${DELETE_BATCH}
       for update skip locked
     )
     returning e.id, e.org_id, e.workspace_id, e.storage_prefix, e.expires_at::text, e.paid_retention, e.charged_at::text,
-      e.rows_deleted_at::text, e.deletion_attempts
+      e.rows_deleted_at::text, e.deletion_failures, e.stored_bytes
   `;
   // UPDATE ... RETURNING has no order: work the claimed rows least-failed, longest-expired first.
-  claimed.sort((a, b) => a.deletion_attempts - b.deletion_attempts || a.expires_at.localeCompare(b.expires_at));
+  claimed.sort((a, b) => a.deletion_failures - b.deletion_failures || a.expires_at.localeCompare(b.expires_at));
   for (const row of claimed) {
     try {
       const outcome = await deleteExtract(row);
@@ -722,9 +724,12 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
       result.failed += 1;
       const message = error instanceof Error ? error.message : String(error);
       // An alert (extract-deletion-stuck) fires on any expired extract with last_error; raw detail stays internal.
-      console.error(`[extract-retention] ALERT delete failed extract=${row.id} attempt=${row.deletion_attempts}: ${message}`);
-      const backoff = Math.min(MAX_BACKOFF_MINUTES, 2 ** Math.min(row.deletion_attempts, 9));
-      await sql`update extracts set last_error = ${message.slice(0, 1000)}, lease_expires_at = now() + make_interval(mins => ${backoff}), updated_at = now() where id = ${row.id}`.catch(() => undefined);
+      const failures = row.deletion_failures + 1;
+      console.error(`[extract-retention] ALERT delete failed extract=${row.id} failure=${failures}: ${message}`);
+      // deletion_attempts counts passes; only failures back off (2^failures minutes, capped).
+      const backoff = Math.min(MAX_BACKOFF_MINUTES, 2 ** Math.min(failures, 9));
+      await sql`update extracts set deletion_failures = deletion_failures + 1, last_error = ${message.slice(0, 1000)},
+        lease_expires_at = now() + make_interval(mins => ${backoff}), updated_at = now() where id = ${row.id}`.catch(() => undefined);
     }
   }
   await relistDeletedExtracts(result);
@@ -735,22 +740,33 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
  * anything whose source sits under its prefix, and every copy made from them
  * (versions, re-indexes, reused or deduplicated copies), scoped to the org.
  */
-async function extractDocumentIds(row: Pick<DeletionClaim, "id" | "org_id" | "storage_prefix">): Promise<string[]> {
+async function extractDocumentIds(row: Pick<DeletionClaim, "id" | "org_id" | "workspace_id" | "storage_prefix">): Promise<string[]> {
   const prefix = `${row.storage_prefix}/`;
-  const ids = await sql<{ id: string }[]>`
-    with recursive tainted(id) as (
-      select d.id from documents d
-      where d.org_id = ${row.org_id}
-        and (d.run_id in (select r.id from workspace_runs r where r.extract_id = ${row.id})
-          or left(d.source_key, ${prefix.length}) = ${prefix})
-      union
-      select c.id from documents c join tainted t
-        on c.previous_version_id = t.id or c.reindex_of = t.id or c.reused_from_document_id = t.id or c.deduped_from_document_id = t.id
-      where c.org_id = ${row.org_id}
-    )
-    select id from tainted
+  // The extract's runs' documents (documents_run_id_idx), plus documents in its workspace whose source is under
+  // the prefix (a run deletion detaches them; documents_workspace_id_idx bounds the scan to one workspace).
+  const base = await sql<{ id: string }[]>`
+    select d.id from documents d
+    where d.run_id in (select r.id from workspace_runs r where r.extract_id = ${row.id}) and d.org_id = ${row.org_id}
+    union
+    select d.id from documents d
+    where d.workspace_id = ${row.workspace_id} and d.run_id is null and left(d.source_key, ${prefix.length}) = ${prefix}
   `;
-  return ids.map((item) => item.id);
+  const found = new Set(base.map((item) => item.id));
+  // Copies made from them, breadth-first: they stay in the workspace (extract documents are never dedup
+  // sources across workspaces), and the chain columns are indexed (migration 0088).
+  let frontier = [...found];
+  for (let depth = 0; frontier.length > 0 && depth < 20; depth += 1) {
+    const ids = sql.array(frontier);
+    const next = await sql<{ id: string }[]>`
+      select id from documents where workspace_id = ${row.workspace_id} and previous_version_id = any(${ids})
+      union select id from documents where workspace_id = ${row.workspace_id} and reindex_of = any(${ids})
+      union select id from documents where workspace_id = ${row.workspace_id} and reused_from_document_id = any(${ids})
+      union select id from documents where deduped_from_document_id = any(${ids}) and org_id = ${row.org_id}
+    `;
+    frontier = next.map((item) => item.id).filter((id) => !found.has(id));
+    for (const id of frontier) found.add(id);
+  }
+  return [...found];
 }
 
 /**
@@ -798,7 +814,7 @@ export async function deleteExtract(row: DeletionClaim): Promise<{ objects: numb
   `;
 
   if (row.paid_retention && !row.charged_at) {
-    await chargeExtractRetention(row.id, "expiry").catch((error: unknown) => {
+    await chargeExtractRetention(row.id, "expiry", row.stored_bytes === null ? undefined : Number(row.stored_bytes)).catch((error: unknown) => {
       console.error(`[extract-retention] expiry charge failed extract=${row.id}: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
@@ -871,6 +887,12 @@ async function deleteExtractRows(row: DeletionClaim, runIds: string[]): Promise<
     for (const item of exported) {
       if (!item.object_key.endsWith("/") && !item.object_key.startsWith(`${row.storage_prefix}/`)) await deleteUploadedObject(item.object_key);
       await sql`delete from document_exports where id = ${item.id}`;
+    }
+    // Chat evidence spans quote document text verbatim (source_text): those citing the extract's
+    // documents go. The chat turns stay; they are the user's own conversation.
+    for (let index = 0; index < documentIds.length; index += DOCUMENT_DELETE_BATCH) {
+      await sql`delete from chat_answer_evidence_spans
+        where workspace_id = ${row.workspace_id} and citation ->> 'documentId' = any(${sql.array(documentIds.slice(index, index + DOCUMENT_DELETE_BATCH))})`;
     }
     for (let index = 0; index < documentIds.length; index += DOCUMENT_DELETE_BATCH) {
       await sql`delete from documents where id = any(${sql.array(documentIds.slice(index, index + DOCUMENT_DELETE_BATCH))}) and org_id = ${row.org_id}`;

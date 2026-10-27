@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS extracts (
   failed_objects bigint NOT NULL DEFAULT 0,
   deleted_objects bigint NOT NULL DEFAULT 0,
   deleted_bytes bigint NOT NULL DEFAULT 0,
+  -- Passes over an expired extract, and the failed ones (backoff and claim order use failures only).
   deletion_attempts integer NOT NULL DEFAULT 0,
+  deletion_failures integer NOT NULL DEFAULT 0,
   -- One sweeper instance works on an extract at a time; a crashed one's lease runs out.
   lease_expires_at timestamp with time zone,
   last_error text,
@@ -103,6 +105,10 @@ BEGIN
     RETURN NEW;
   END IF;
   SELECT r.storage_prefix INTO run_prefix FROM workspace_runs r WHERE r.id = NEW.run_id;
+  -- Extract version keys are minted for extract documents only; nothing else may join that chain.
+  IF left(coalesce(NEW.canonical_id, ''), 17) = 'docslurp:extract:' AND run_prefix IS NULL THEN
+    RAISE EXCEPTION 'document % uses an extract version key outside an extract run', NEW.id USING ERRCODE = 'check_violation';
+  END IF;
   IF left(NEW.source_key, 9) = 'extracts/' THEN
     IF run_prefix IS NULL OR left(NEW.source_key, length(run_prefix) + 1) <> run_prefix || '/' THEN
       RAISE EXCEPTION 'document % has an extract source outside its own extract run', NEW.id USING ERRCODE = 'check_violation';
@@ -117,7 +123,7 @@ $$;
 DROP TRIGGER IF EXISTS documents_extract_scope ON documents;
 --> statement-breakpoint
 CREATE TRIGGER documents_extract_scope
-BEFORE INSERT OR UPDATE OF source_key, run_id ON documents
+BEFORE INSERT OR UPDATE OF source_key, run_id, canonical_id ON documents
 FOR EACH ROW
 EXECUTE FUNCTION enforce_extract_document_scope();
 --> statement-breakpoint
@@ -153,6 +159,16 @@ CREATE INDEX IF NOT EXISTS extracts_charge_idx ON extracts (completed_at) WHERE 
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS extracts_download_idx ON extracts (completed_at) WHERE state = 'active' AND completed_at IS NOT NULL AND export_id IS NULL AND NOT export_skipped;
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS extracts_deletion_idx ON extracts (deletion_attempts, expires_at) WHERE state <> 'deleted';
+CREATE INDEX IF NOT EXISTS extracts_deletion_idx ON extracts (deletion_failures, expires_at) WHERE state <> 'deleted';
+--> statement-breakpoint
+-- Chat evidence spans citing a document (extract deletion removes their quoted text).
+CREATE INDEX IF NOT EXISTS chat_answer_evidence_spans_document_idx ON chat_answer_evidence_spans (workspace_id, (citation ->> 'documentId'));
+--> statement-breakpoint
+-- Copy chains from a document (extract deletion follows them).
+CREATE INDEX IF NOT EXISTS documents_previous_version_idx ON documents (previous_version_id) WHERE previous_version_id IS NOT NULL;
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS documents_reindex_of_idx ON documents (reindex_of) WHERE reindex_of IS NOT NULL;
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS documents_deduped_from_idx ON documents (deduped_from_document_id) WHERE deduped_from_document_id IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS extracts_relist_idx ON extracts (relist_after) WHERE state = 'deleted' AND relist_after IS NOT NULL;
