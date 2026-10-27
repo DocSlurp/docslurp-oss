@@ -572,3 +572,30 @@ nonfinite, negative or inconsistent component/total durations, missing execution
 metadata, unzoned timestamps and invalid worker counts. All 68 focused tests pass,
 including the retained cache, malformed TSV and coordinate negatives. No
 normalization certificate, formula acceptance or savings follows from these fixes.
+
+### Attempt 7 prelaunch correction and first preview
+
+The source-visible methods audit found that the blanket zero-eight-token
+intra-candidate gate rejected ordinary repeated table structure. All thirty source
+tables had different raw rows, yet digit-folded headers/identifier stems created
+18 within-family and 49 cross-family conflicting pairs. This is evidence of a
+false-positive diversity heuristic, not permission to reproduce the sources'
+repetitive prose or a proof that all enriched documents are feasible.
+
+The coordinator authorized a separate prelaunch revision under the user's stronger
+quality objective. The source-versus-candidate checker and denylist remain unchanged;
+all six checks pass. Internal eight-token matches and five-gram flags remain retained
+for independent adjudication. Exact substantive-paragraph duplication, semantic
+template rewriting and empty or interchangeable reasoning remain hard failures.
+Within-family fixed notation, headers and necessary definitions require explicit
+fixed-meaning declarations; cross-family matches have no automatic exemption.
+Physical/numeric budgets, fonts, schemas, difficulty, splits and pass targets remain
+unchanged. Both original handoffs and exact differences are preserved externally.
+
+A fresh source-blind Sol Builder received the eleven-file a7-clean-r2 packet,
+whose hashes and six isolated mechanism imports the coordinator verified. Its
+offline ordinary-package runtime is frozen before authoring; the generic parser
+that rounded float constants was omitted. It may produce formal-round-one previews
+only: dense E1-B prose, E2-C merged-table/weighted analysis and E3-A plotted comparison,
+through both native production paths. Editorial/visual review precedes bulk exports;
+no candidate, full-family, fixture, policy or savings acceptance is implied by launch.
