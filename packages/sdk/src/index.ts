@@ -241,9 +241,26 @@ export type SearchResult = JsonObject & {
 /** Reserved workspace ID for the organization's default workspace. */
 export const DEFAULT_WORKSPACE = "default";
 
+/**
+ * Supplies a bearer access token per request, for credentials that expire and
+ * refresh (an OAuth access token from `docslurp login`). Called before every
+ * request; `forceRefresh` is true once after a 401, so a provider can refresh
+ * a token the server already refused. Return a cached token otherwise.
+ */
+export type DocSlurpTokenProvider = (context: { forceRefresh: boolean }) => string | Promise<string>;
+
 export type DocSlurpClientOptions = {
-  /** Defaults to DOCSLURP_API_KEY in server environments. Use an empty string for cookie sessions. */
+  /**
+   * Defaults to DOCSLURP_API_KEY in server environments. Use an empty string for cookie sessions.
+   * Takes precedence over `accessToken` and DOCSLURP_TOKEN.
+   */
   apiKey?: string;
+  /**
+   * A short-lived OAuth bearer token, or a provider that returns a fresh one.
+   * Used when no API key is set; defaults to DOCSLURP_TOKEN in server
+   * environments (for example `export DOCSLURP_TOKEN=$(docslurp auth token)`).
+   */
+  accessToken?: string | DocSlurpTokenProvider;
   /** Service origin. Defaults to DOCSLURP_URL, then https://docslurp.io. */
   apiUrl?: string;
   /**
@@ -855,12 +872,43 @@ function multipartStream(source: UploadByteStream, filename: string, fields: Rec
   return { body, boundary, dispose };
 }
 
+function isStreamBody(body: unknown): boolean {
+  return typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
+}
+
 export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   // Read server configuration at construction time; never import it into browser bundles.
   const env = typeof window === "undefined" && typeof process !== "undefined" ? process.env : undefined;
   const apiUrl = normalizeApiUrl(options.apiUrl ?? (env?.DOCSLURP_URL?.trim() || "https://docslurp.io"));
-  const apiKey = options.apiKey ?? env?.DOCSLURP_API_KEY;
+  // Precedence: apiKey option > accessToken option > DOCSLURP_API_KEY > DOCSLURP_TOKEN.
+  // An explicit empty apiKey means a cookie session and disables every bearer source.
+  let apiKey: string | undefined;
+  let tokenSource: string | DocSlurpTokenProvider | undefined;
+  if (options.apiKey !== undefined) apiKey = options.apiKey;
+  else if (options.accessToken !== undefined) tokenSource = options.accessToken;
+  else if (env?.DOCSLURP_API_KEY) apiKey = env.DOCSLURP_API_KEY;
+  else tokenSource = env?.DOCSLURP_TOKEN?.trim() || undefined;
   assertBrowserSafeApiKey(apiKey);
+  if (typeof tokenSource === "string") assertBrowserSafeApiKey(tokenSource);
+  const hasBearer = Boolean(apiKey || tokenSource);
+  /** The Authorization value for one request; never logged or included in errors. */
+  // Concurrent 401s share one forced refresh, so a provider never rotates twice at once.
+  let forcedRefresh: Promise<string> | null = null;
+  async function bearer(forceRefresh = false): Promise<string | null> {
+    if (apiKey) return apiKey;
+    if (!tokenSource) return null;
+    if (typeof tokenSource === "string") return tokenSource;
+    const provider = tokenSource;
+    const fetchToken = async (force: boolean) => {
+      const value = await provider({ forceRefresh: force });
+      if (typeof value !== "string" || !value) throw new Error("DocSlurp access token provider returned no token");
+      assertBrowserSafeApiKey(value);
+      return value;
+    };
+    if (!forceRefresh) return await fetchToken(false);
+    forcedRefresh ??= fetchToken(true).finally(() => { forcedRefresh = null; });
+    return await forcedRefresh;
+  }
   assertSecureApiOrigin(apiUrl);
   const clientWorkspace = options.workspace?.trim() || env?.DOCSLURP_WORKSPACE?.trim() || DEFAULT_WORKSPACE;
   const fetchImpl = options.fetch ?? fetch;
@@ -875,7 +923,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     onAbort?: () => void,
   ): Promise<T> {
     const headers = new Headers(init.headers);
-    if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
+    const credential = await bearer();
+    if (credential) headers.set("Authorization", `Bearer ${credential}`);
+    // A provider gets one forced refresh after a 401, when the body can be sent again.
+    let refreshedAfter401 = typeof tokenSource !== "function" || isStreamBody(init.body);
     const bound = deadline(positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs"), requestOptions.signal);
     if (onAbort) {
       if (bound.signal.aborted) onAbort();
@@ -887,10 +938,17 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         bound.signal.throwIfAborted();
         const response = await fetchImpl(`${apiUrl}${path}`, {
           ...init,
-          credentials: init.credentials ?? (apiKey ? "omit" : "include"),
+          credentials: init.credentials ?? (hasBearer ? "omit" : "include"),
           headers,
           signal: bound.signal,
         });
+        if (response.status === 401 && !refreshedAfter401) {
+          refreshedAfter401 = true;
+          await response.body?.cancel();
+          headers.set("Authorization", `Bearer ${await bearer(true)}`);
+          attempt--; // The token refresh is not one of the 429/5xx retries.
+          continue;
+        }
         if (retryable && attempt < 2 && [429, 502, 503, 504].includes(response.status)) {
           const retryAfter = response.headers.get("retry-after");
           const seconds = retryAfter === null ? NaN : Number(retryAfter);
@@ -970,10 +1028,17 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     try {
       bound.signal.throwIfAborted();
       const headers = new Headers({ Accept: "text/event-stream" });
-      if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
-      const response = await fetchImpl(`${apiUrl}${path}`, {
-        headers, credentials: apiKey ? "omit" : "include", signal: bound.signal,
+      const credential = await bearer();
+      if (credential) headers.set("Authorization", `Bearer ${credential}`);
+      let response = await fetchImpl(`${apiUrl}${path}`, {
+        headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
       });
+      // A refused token before the stream opens: refresh once and reconnect (GET, nothing to replay).
+      if (response.status === 401 && typeof tokenSource === "function") {
+        await response.body?.cancel();
+        headers.set("Authorization", `Bearer ${await bearer(true)}`);
+        response = await fetchImpl(`${apiUrl}${path}`, { headers, credentials: "omit", signal: bound.signal });
+      }
       if (!response.ok) {
         const body = await readErrorBody(response);
         const message = publicHttpError(response.status);

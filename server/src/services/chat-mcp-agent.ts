@@ -287,7 +287,7 @@ export async function runChatMcpAgent(args: {
     ...evalBaggageAttributes(),
   });
   const context = createChatMcpTools({
-    manifest: mcpManifest("http://mcp.internal", args.actor.type === "apiKey" ? args.actor.apiKey.scopes : undefined, args.actor.type === "apiKey" ? args.actor.apiKey.keyType : undefined),
+    manifest: mcpManifest("http://mcp.internal", args.actor.type === "apiKey" ? args.actor.apiKey.scopes : undefined, args.actor.type === "apiKey" ? args.actor.apiKey.keyType : undefined, args.actor.type === "apiKey" ? args.actor.apiKey.oauth : undefined),
     dispatch: createMcpDispatcher(args.actor), workspaceId: args.workspaceId, signal,
     retrievalDefaults: args.retrievalDefaults,
     maxToolCalls: limits.maxToolCalls, searchConcurrency: limits.searchConcurrency,
