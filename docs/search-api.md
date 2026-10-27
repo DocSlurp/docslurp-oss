@@ -281,14 +281,14 @@ The `api.search` retrieval spans those calls create carry `docslurp.chat.session
 
 ### Conversations
 
-With a browser (publishable) key, every visitor shares the key, so a `sessionId` alone can't continue a conversation. Each answer also returns a `sessionToken`: a sealed grant for that key, workspace and session, valid for 24 hours. Send it back with `sessionId`: `sessionToken` in the body of `POST /v1/chat`, or the `X-DocSlurp-Chat-Session-Token` header on `GET /v1/search/chat/stream` (the SDK does this; the grant is never read from the URL).
+With a browser (publishable) key, every visitor shares the key, so a `sessionId` alone can't continue a conversation. Each answer also returns a `sessionToken`: a sealed grant for that key, workspace and session, valid for 24 hours. Send it back with `sessionId`: `sessionToken` in the body of `POST /v1/chat`, or the `X-DocSlurp-Chat-Session-Token` header on `GET /v1/chat/stream` (the SDK does this; the grant is never read from the URL).
 
 - A `sessionId` with no token, or with an expired one, starts a **fresh session**. This is what widgets deployed before grants send. The old conversation is never looked up or read, and the answer carries a new `sessionId` and `sessionToken`.
 - A token that was tampered with, or issued for another key, workspace or session, gets 403 `chat_session_forbidden` before anything is read.
 
 Keep the token in the visitor's own page state, not in shared storage. Server keys and the app don't need it.
 
-`GET /v1/search/chat/stream` with a signed-in cookie session (not an API key) must be same-origin. The browser has to send `Sec-Fetch-Site: same-origin`, or an `Origin` of the app itself. A request with neither header is refused with 403, which stops a link or `<img>` on another site from starting a paid turn. Safari before 16.4 sends no Fetch Metadata on these requests, so it can't use the stream with a cookie session; use `POST /v1/chat`, or an API key from your server.
+`GET /v1/chat/stream` with a signed-in cookie session (not an API key) must be same-origin. The browser has to send `Sec-Fetch-Site: same-origin`, or an `Origin` of the app itself. A request with neither header is refused with 403, which stops a link or `<img>` on another site from starting a paid turn. Safari before 16.4 sends no Fetch Metadata on these requests, so it can't use the stream with a cookie session; use `POST /v1/chat`, or an API key from your server.
 
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 

@@ -1,13 +1,13 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { createOrganizationInviteSchema, createOrganizationSchema, updateOrganizationSchema, type OrganizationAccess } from "@docslurp/shared";
+import { createOrganizationInviteSchema, createOrganizationSchema, updateOrganizationMfaPolicySchema, updateOrganizationSchema, type OrganizationAccess } from "@docslurp/shared";
 import { getRequestActor } from "../lib/request-actor.js";
 import { inviteAcceptUrl } from "../services/notifications.js";
 import { listOrganizationApiKeys, revokeOrganizationApiKeys } from "../services/api-keys.js";
 import { acceptOrganizationInvite, createOrganization, getOrganization, getOrganizationAccess, getOrganizationDetails, inviteOrganizationMember,
   listOrganizationInvites, listOrganizationMembers, listOrganizations, removeOrganizationMember, revokeOrganizationInvite, updateOrganization,
-  updateOrganizationMemberRole, OrganizationError } from "../services/organizations.js";
+  updateOrganizationMemberRole, OrganizationError, getOrganizationMfaPolicy, updateOrganizationMfaPolicy } from "../services/organizations.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { deleteOrganization, OffboardingError } from "../services/tenant-offboarding.js";
 import { apiStatusError } from "../lib/api-error.js";
@@ -81,6 +81,13 @@ export const organizationsRoutes = new Hono()
   })
   .patch("/:orgId", zValidator("json", updateOrganizationSchema, validationHook), async c =>
     c.json(await updateOrganization(c.req.param("orgId"), getRequestActor(c).userId, c.req.valid("json"))))
+  .get("/:orgId/security-policy", async c => c.json(await getOrganizationMfaPolicy(c.req.param("orgId"), getRequestActor(c).userId)))
+  // Session only: changing who must use MFA needs an MFA-verified admin session, which an API key can't show.
+  .put("/:orgId/security-policy", zValidator("json", updateOrganizationMfaPolicySchema, validationHook), async c => {
+    const actor = getRequestActor(c);
+    if (actor.type !== "session") return apiStatusError(c, 403, "Change the MFA policy while signed in", { code: "session_required" });
+    return c.json(await updateOrganizationMfaPolicy(c.req.param("orgId"), actor.userId, c.req.valid("json"), { mfaVerified: actor.mfaVerified === true }));
+  })
   .get("/:orgId/members", async c => c.json({ memberships: await listOrganizationMembers(c.req.param("orgId"), getRequestActor(c).userId) }))
   .get("/:orgId/api-keys", async c => c.json({ keys: await listOrganizationApiKeys(c.req.param("orgId"), getRequestActor(c).userId) }))
   .post("/", zValidator("json", createOrganizationSchema, validationHook), async c =>
