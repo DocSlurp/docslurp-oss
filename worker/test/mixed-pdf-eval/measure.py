@@ -114,12 +114,12 @@ def forced_token_matches(gold, actual, protected):
 
 
 def printed_formula_recall(reference,text):
-    """Jointly attribute every formula mention with unambiguous gold contexts.
+    """Measure textual formula mentions with reference-derived contexts.
 
-    Reference contexts distinguish repetitions. Protected tokens must also be
-    forced and contiguous in every optimal alignment, preventing copied contexts
-    from borrowing attribution. All mentions, including prose, survive in order;
-    compensating duplicates cannot separately repair counts and attribution.
+    Counts, order and forced token alignments are diagnostics only. A unique
+    alignment can still select a quotation after operative text changes; this
+    function does not establish semantic ownership or spatial preservation.
+    Formula-bearing pages need independent region grounding for acceptance.
     """
     expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
     if not expected:return None
