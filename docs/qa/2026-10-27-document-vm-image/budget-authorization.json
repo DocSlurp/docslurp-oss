@@ -19,12 +19,14 @@
     "imageRebuildAuthorized": false
   },
   "admission": {
-    "status": "Coordinator authorized one useful QA VM under $20; two independent runner reviews and parent registry/signing readiness pending",
+    "status": "One coordinator-executed live QA attempt passed and terminated; no retry or deployment",
     "revisedBoundEstablished": false,
-    "vmLaunched": false,
+    "vmLaunched": true,
     "historical005AdmissionFailurePreserved": true,
     "sharedSpendLimitInvestigationWaived": true,
-    "unknownWorkspaceBudgetIsStopCondition": false
+    "unknownWorkspaceBudgetIsStopCondition": false,
+    "terminationVerified": true,
+    "liveReceipt": "live-modal-smoke-069eb2de/receipt.json"
   },
   "delegation": {
     "thisImplementationAgent": "Runner preparation and local mock testing only; no credential access or paid calls",

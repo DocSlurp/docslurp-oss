@@ -1,0 +1,5 @@
+{
+  "outboundConnectionFailed": true,
+  "errorClass": "OSError",
+  "errno": 101
+}

@@ -1,5 +1,14 @@
 # Dedicated CPU document VM image — local preparation, 2026-10-27
 
+Latest live result: the coordinator executed **one** authorized VM attempt, run
+`069eb2de141c445794b754546e2c079e`. All **36 steps matched expectations** (18
+successes, 18 intended refusals); termination returned 137 and a separate parent
+read-only poll also returned 137. No retry or deployment occurred. Actual billing
+is unknown; signing run 40551595607 failed before signing and remains a release
+gate. See [the durable live receipt and actual output](live-modal-smoke-069eb2de/README.md).
+Earlier preparation/budget snapshots below are historical. The one-shot attempt
+is consumed: do not rerun it.
+
 This image packages the actual WebP program and layout guest from campaign `03aa2c4` (including `cfd32f3`). **Containers validate packaging only; no production VM, isolation proof, registry publication, deployment or paid resource was used.** The campaign remains subject to council review and human merge approval.
 
 Current publication status: the parent successfully copied the exact reviewed

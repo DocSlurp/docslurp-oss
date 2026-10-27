@@ -1,5 +1,14 @@
 # Publication and one-VM smoke — authorized, operationally blocked
 
+Latest live result: the coordinator executed **one** authorized VM attempt, run
+`069eb2de141c445794b754546e2c079e`. All **36 steps matched expectations** (18
+successes, 18 intended refusals); termination returned 137 and a separate parent
+read-only poll also returned 137. No retry or deployment occurred. Actual billing
+is unknown; signing run 40551595607 failed before signing and remains a release
+gate. See [the durable live receipt and actual output](live-modal-smoke-069eb2de/README.md).
+Earlier preparation/budget snapshots below are historical. The one-shot attempt
+is consumed: do not rerun it.
+
 Current status: exact-image GHCR publication succeeded after the user completed
 OAuth package-scope consent and the parent verified `write:packages`. Raw remote
 image/index bytes match the reviewed local archive; the original SPDX/SLSA index
