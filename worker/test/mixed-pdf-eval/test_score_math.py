@@ -72,6 +72,19 @@ class MathScorerTests(unittest.TestCase):
         self.assertEqual(result['score'], 1)
         self.assertFalse(result['acceptanceEvidenceComplete'])
 
+    def test_omml_scientific_notation_remains_unscorable(self):
+        for literal in ('6E-4', '6e+4', '6e4', '6.25E-04'):
+            candidate = (
+                '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+                '<m:r><m:rPr><m:nor/></m:rPr>'
+                f'<m:t>{literal}</m:t></m:r></m:oMath>'
+            )
+            with self.subTest(literal=literal):
+                result = score_request({'reference': r'6*\mathrm{E}-4', 'candidate': candidate})
+                self.assertIsNone(result['score'])
+                self.assertFalse(result['encodingEvidenceComplete'])
+                self.assertFalse(result['acceptanceEvidenceComplete'])
+
 
 if __name__ == "__main__":
     unittest.main()

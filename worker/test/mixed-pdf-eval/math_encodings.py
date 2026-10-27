@@ -22,8 +22,11 @@ Nested XML/grouped script bases stay nested; only adjacent linear script slots
 share a base. Compatible adjacent OMML runs join before lexical analysis. OMML
 and MathML presentation text cannot stand in for structural script elements.
 MathML mtext defaults to normal, honoring inherited/explicit mathvariant.
-Non-normal MathML numeric/operator variants and relation chains are unscorable.
+Non-normal MathML numeric/operator variants and relation chains are unscorable;
+unary signs cannot hide a relation-valued comparison operand.
 Empty OMML runs are inert; default/normal ASCII decimal spans are compatible.
+Scientific-looking text is refused across whole adjacent OMML run sequences,
+before numeric/style segmentation; explicit arithmetic operators stay explicit.
 Unsupported combined alphabets (including double-struck italic) are refused.
 All inputs are decoded strings containing XML 1.0 Char code points; NUL-shaped
 UTF-16/32 byte strings are never re-decoded by the XML parser.
@@ -40,7 +43,7 @@ import re
 import unicodedata
 import xml.etree.ElementTree as ET
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 MAX_LENGTH = 32768
 MAX_DEPTH = 48
 MAX_NODES = 2048
@@ -166,8 +169,26 @@ def _script(base, sub=None, sup=None):
     return ("script", base, sub, sup)
 
 
+def _relation_operand(node):
+    # Only sign wrappers preserve a relation-valued comparison operand here.
+    # Do not recursively inspect unrelated scripts, roots or arithmetic trees.
+    for _ in range(MAX_DEPTH):
+        if node[0] != "unary":
+            return node[0] == "binary" and node[1] in _RELATIONS
+        node = node[2]
+    _fail("relation operand unary depth limit exceeded")
+
+
+def _refuse_scientific_notation(text):
+    # Fixed-width decimal suffix matching keeps this scan linear in input size.
+    # Inspect the full lexical neighborhood before OMML style-span splitting.
+    if re.search(r"[0-9](?:\.)?[eE][+\-−]?[0-9]", text):
+        _fail("scientific notation requires an explicit supported structure")
+
+
 def _lex(text, tex=False, identifier_style=None):
     """Tokenize only explicit syntax; AST operands can also come from XML."""
+    _refuse_scientific_notation(text)
     tokens = []
     sized_delimiters = []
     i = 0
@@ -231,9 +252,6 @@ def _lex(text, tex=False, identifier_style=None):
             match = re.match(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", text[i:])
             if not match:
                 _fail("invalid decimal")
-            remaining = text[i + len(match.group(0)):]
-            if re.match(r"[eE][+-]?[0-9]", remaining):
-                _fail("scientific notation requires an explicit supported structure")
             tokens.append(("numeric-token", match.group(0)))
             i += len(match.group(0))
             continue
@@ -342,8 +360,7 @@ class _Parser:
                 if token != "implicit":
                     self.take()
                 right = self.expression(precedence + 1)
-                if token in _RELATIONS and any(
-                        node[0] == "binary" and node[1] in _RELATIONS for node in (left, right)):
+                if token in _RELATIONS and any(_relation_operand(node) for node in (left, right)):
                     _fail("relation chains and relation-valued comparison operands are unsupported")
                 left = ("binary", "*" if token == "implicit" else token, left, right)
                 script_base, script_sub, script_sup = left, None, None
@@ -618,20 +635,24 @@ class _XMLMath:
 
     def _omml_children(self, children, style=None):
         tokens = []
-        pending = []
-        pending_style = None
+        runs = []
 
-        def flush():
-            if pending:
-                tokens.extend(self._omml_text("".join(pending), pending_style))
-                pending.clear()
+        def flush_runs():
+            if not runs:
+                return
+            # Keep the original contiguous context even when a numeric style
+            # transition will later require separate lexical spans. Empty runs
+            # cannot hide an exponent-shaped sequence or insert an operator.
+            _refuse_scientific_notation("".join(text for text, _ in runs))
+            pending = []
+            pending_style = None
 
-        for child in children:
-            if _split_tag(child.tag)[1] == "r":
-                text, run_style = self._omml_run(child, style)
-                # Empty, already-validated runs carry no visible style change.
-                if not text:
-                    continue
+            def flush():
+                if pending:
+                    tokens.extend(self._omml_text("".join(pending), pending_style))
+                    pending.clear()
+
+            for text, run_style in runs:
                 for piece in re.findall(r"[0-9.]+|[^0-9.]+", text):
                     # Ordinary ASCII decimal glyphs have the same supported
                     # numeric semantics in default and normal OMML runs. Only
@@ -642,10 +663,19 @@ class _XMLMath:
                         flush()
                     pending_style = piece_style
                     pending.append(piece)
+            flush()
+            runs.clear()
+
+        for child in children:
+            if _split_tag(child.tag)[1] == "r":
+                text, run_style = self._omml_run(child, style)
+                # Empty, already-validated runs carry no visible style change.
+                if text:
+                    runs.append((text, run_style))
             else:
-                flush()
+                flush_runs()
                 tokens.extend(self.omml(child, style))
-        flush()
+        flush_runs()
         return tokens
 
     def omml(self, element, style=None):

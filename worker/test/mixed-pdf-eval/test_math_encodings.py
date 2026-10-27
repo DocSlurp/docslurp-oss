@@ -709,6 +709,74 @@ class MathEncodingsTest(unittest.TestCase):
         self.equivalent('v', at_node_limit)
         self.equivalent('v', '<m:oMath xmlns:m="' + O + '"' + ' ' * 17000 + '>' + run('v') + '</m:oMath>')
 
+    def test_omml_scientific_refusal_keeps_full_run_context(self):
+        controls = [
+            ('6E-4', r'6*\mathrm{E}-4'), ('6e4', r'6*\mathrm{e}*4'),
+            ('6e+4', r'6*\mathrm{e}+4'), ('6.25E-04', r'6.25*\mathrm{E}-4'),
+            ('6e-2', r'6*\mathrm{e}-2'), ('6e2', r'6*\mathrm{e}*2'),
+            ('6e+2', r'6*\mathrm{e}+2'), ('6E-2', r'6*\mathrm{E}-2'),
+            ('6.E+2', r'6*\mathrm{E}+2'), ('.75e−03', r'.75*\mathrm{e}-3'),
+        ]
+        for value, reference in controls:
+            for normal in (False, True):
+                with self.subTest(single=value, normal=normal):
+                    candidate = omml(run(value, normal))
+                    self.unsupported(candidate)
+                    result = compare_math(reference, candidate)
+                    self.assertIsNone(result['equivalent'], result)
+                    self.assertIsNone(result['score'], result)
+            for cut, first_normal, second_normal in itertools.product(
+                    range(len(value) + 1), (False, True), (False, True)):
+                with self.subTest(split=value, cut=cut, styles=(first_normal, second_normal)):
+                    candidate = omml(run(value[:cut], first_normal) + run('', not first_normal) +
+                                     run(value[cut:], second_normal))
+                    self.unsupported(candidate)
+                    self.assertIn('scientific notation', normalize_math(candidate)['issues'][0])
+            alternating = ''.join(run(char, bool(index % 2)) + run('', bool(index % 3))
+                                  for index, char in enumerate(value))
+            for index, body in enumerate((alternating, fraction(alternating, run('3')),
+                                          fraction(run('3'), alternating),
+                                          script(run('q'), sub=alternating), script(run('q'), sup=alternating))):
+                with self.subTest(wrapped=value, context=index):
+                    self.unsupported(omml(body))
+            with self.subTest(other_encodings=value):
+                self.unsupported(value)
+                self.unsupported(mathml('<mn>' + value + '</mn>'))
+
+    def test_omml_explicit_products_decimals_and_named_identifiers_remain_supported(self):
+        for value, reference in [
+                ('6*E-4', r'6*\mathrm{E}-4'), ('6*e*4', r'6*\mathrm{e}*4'),
+                ('6*e+4', r'6*\mathrm{e}+4'), ('6.25*E-04', r'6.25*\mathrm{E}-4'),
+                ('23.75*mol', r'23.75*\mathrm{mol}'), ('23.75mol', r'23.75*\mathrm{mol}')]:
+            for cut in range(len(value) + 1):
+                with self.subTest(value=value, cut=cut):
+                    self.equivalent(reference, omml(run(value[:cut], True) + run('') + run(value[cut:], True)))
+        for name in ('mol', 'rate', 'eE', 'E', 'e'):
+            for cut in range(len(name) + 1):
+                with self.subTest(identifier=name, cut=cut):
+                    self.equivalent(r'\mathrm{' + name + '}',
+                                    omml(run(name[:cut], True) + run('') + run(name[cut:], True)))
+        self.different(r'\mathrm{eE}', r'\mathrm{e}*\mathrm{E}')
+        self.different(r'\mathrm{rate}', r'\mathrm{Rate}')
+        self.unsupported(omml(run('mol2', True)))
+        self.equivalent(r'23.75*\mathrm{mol}', omml(run('23.') + run('75*mol', True)))
+        self.equivalent(r'6*\mathrm{E}^{4}', omml(run('6') + script(run('E', True), sup=run('4'))))
+
+    def test_unary_signs_cannot_hide_relation_valued_operands(self):
+        for signs in ('+', '-', '+-', '-+', '--', '±', '∓'):
+            for expression in ('p<' + signs + '(q<r)', signs + '(p<q)<r',
+                               'p<(' + signs + '(q<r))'):
+                with self.subTest(expression=expression):
+                    self.unsupported(expression)
+            left = '<mi>p</mi><mo>≥</mo>' + ''.join('<mo>' + sign + '</mo>' for sign in signs)
+            right = '<mo>(</mo><mi>q</mi><mo>≥</mo><mi>r</mi><mo>)</mo>'
+            with self.subTest(xml_signs=signs):
+                self.unsupported(mathml(left + right))
+                self.unsupported(omml(run('p≥' + signs + '(q≥r)')))
+        for expression in ('-p<q', 'p<-(q+r)', '-p^2<q^3', 'p<x^{q<r}', 'q_{p<r}'):
+            with self.subTest(unchanged_context=expression):
+                self.equivalent(expression, expression)
+
 
 if __name__ == '__main__':
     unittest.main()
