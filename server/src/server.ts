@@ -57,6 +57,7 @@ import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
 import { userSettingsRoutes } from "./routes/user-settings.js";
 import { accountRoutes } from "./routes/account.js";
+import { whoamiRoutes } from "./routes/whoami.js";
 import { extractsRoutes } from "./routes/extracts.js";
 import { startCreditDebitFlusher, stopCreditDebitFlusher } from "./services/billing/credit-debit-flusher.js";
 import { syncMeteringEnforcement } from "./services/billing/metering.js";
@@ -198,6 +199,7 @@ export function createApiApp(): Hono {
   app.route("/v1/workspaces", workspaceGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
+  app.route("/v1/whoami", whoamiRoutes);
   app.route("/webhooks", stripeWebhookRoutes);
   app.route("/webhooks", tigrisUploadWebhookRoutes);
 
