@@ -171,7 +171,7 @@ export interface RasterPageArtifact {
 
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
 /** `encodeLosslessWebp` is optional so a runner without it stores PNG (a logged format fallback). */
-type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run"> & Partial<Pick<CommandRunner, "encodeLosslessWebp">>;
+type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run"> & Partial<Pick<CommandRunner, "encodeLosslessWebp" | "decodeWebpToPng">>;
 
 /**
  * Durable selected-page raster Module. Callers provide page numbers and get
@@ -449,6 +449,11 @@ export class PdfRasterCache {
     let sizeBytes = existing ?? 0;
     if (existing === null) {
       const source = await this.sources.get(document);
+      if (mimeType === "image/webp") {
+        const validated = `${source.path}.validated.png`;
+        try { if (!this.runner.decodeWebpToPng) throw new Error("VM WebP decoder unavailable"); await this.runner.run(await this.runner.decodeWebpToPng(source.path, validated)); }
+        finally { await rm(validated, { force: true }); }
+      }
       const bytes = await readFile(source.path);
       await this.storage.putBytes(key, bytes, mimeType);
       sizeBytes = bytes.byteLength;

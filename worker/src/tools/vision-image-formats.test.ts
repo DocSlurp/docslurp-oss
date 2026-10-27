@@ -32,9 +32,9 @@ describe("vision image formats", () => {
 
   it("sends WebP as is to a verified model", async () => {
     const run = vi.fn();
-    const out = await visionImageForModel({ model: "z-ai/glm-5.3-flash", imagePath: await file(WEBP), fallbackMimeType: "image/png", runner: { run } as never });
+    const out = await visionImageForModel({ model: "z-ai/glm-5.3-flash", imagePath: await file(WEBP), fallbackMimeType: "image/png", runner: { run, decodeWebpToPng: async () => ({ available: true }) } as never });
     expect(out).toMatchObject({ mimeType: "image/webp", transcoded: false });
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it("transcodes WebP to PNG through the sandboxed dwebp for an unverified model", async () => {
@@ -49,6 +49,10 @@ describe("vision image formats", () => {
     expect(out.bytes.equals(PNG)).toBe(true);
     expect(decodeWebpToPng).toHaveBeenCalledWith(imagePath, `${imagePath}.vision.png`);
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an unavailable decoder even for a verified model", async () => {
+    await expect(visionImageForModel({ model: "z-ai/glm-5.3-flash", imagePath: await file(WEBP), fallbackMimeType: "image/webp", runner: { run: vi.fn() } as never })).rejects.toThrow("Unsupported image for model");
   });
 
   it("labels by the bytes, not the caller's default", async () => {

@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 
 import { sniffImageMimeType } from "../pipeline/page-image-format.js";
 import type { CommandRunner } from "./runner.js";
@@ -48,19 +48,18 @@ export async function visionImageForModel(args: {
   runner: Pick<CommandRunner, "run"> & Partial<Pick<CommandRunner, "decodeWebpToPng">>;
   signal?: AbortSignal;
 }): Promise<{ bytes: Buffer; mimeType: string; transcoded: boolean }> {
+  if ((await stat(args.imagePath)).size > 64 * 1024 * 1024) throw new Error("Oversized vision input");
   const bytes = await readFile(args.imagePath);
   const mimeType = sniffImageMimeType(bytes) ?? args.fallbackMimeType;
-  if (mimeType !== "image/webp" || visionModelAcceptsImage(args.model, mimeType)) return { bytes, mimeType, transcoded: false };
+  if (mimeType !== "image/webp") return { bytes, mimeType, transcoded: false };
   const output = `${args.imagePath}.vision.png`;
   const plan = args.runner.decodeWebpToPng ? await args.runner.decodeWebpToPng(args.imagePath, output) : null;
   if (!plan?.available) {
-    // dwebp ships in the same package as cwebp, so this means a broken image. Sending the WebP is a
-    // format risk (the provider may reject it), not an isolation one.
-    console.warn(`[page-image] WARNING dwebp unavailable; sending WebP to unverified vision model ${args.model}`);
-    return { bytes, mimeType, transcoded: false };
+    throw new Error(`Unsupported image for model ${args.model}: dedicated VM WebP decoder unavailable`);
   }
   try {
     await args.runner.run(plan, args.signal);
+    if (visionModelAcceptsImage(args.model, mimeType)) return { bytes, mimeType, transcoded: false };
     const png = await readFile(output);
     if (sniffImageMimeType(png) !== "image/png") throw new Error("dwebp produced no PNG");
     return { bytes: png, mimeType: "image/png", transcoded: true };
