@@ -33,7 +33,24 @@ Run `scripts/evaluation-integrity-judge.mjs` independently of quality scoring an
 
 The v2 corpus is exploratory. Following the newly available Fool’s Gold skill, a fresh-context builder receives only `fools-gold-spec.md` and writes three training prototypes before full expansion. Native tables, proper plotted figures, realistic metadata, producer diversity, source profiles, tell checks, independent audits and the skill's deterministic pass/revise gate are required. Candidate/source provenance is retained externally in `mixed-pdf-fools-gold-audit`; no existing corpus has been relabeled as skill-approved.
 
-The builder uses GPT-6 Luna; new final judges use an allowed model below the project's price cap. Earlier code review records are retained, but no new Astra evaluation delegates are permitted after its live output price was verified at the exclusion threshold. Direct model API calls remain out of scope; orchestration usage is reported as unavailable unless the host supplies actual tokens/cost.
+On 2026-10-27 the user extended the budget to up to 20 total specification attempts
+and explicitly selected GPT-6.1 Sol for continued work. Use Sol for the describer,
+fresh builders and independent reviewers. Stop sooner when the corpus is accepted;
+20 is a cap, not a requirement to exhaust attempts. Target at least 95 on both the
+deterministic audit and final visual-judge gates, with no substantive unresolved
+misses. Preserve the skill's clean-room and independent-review requirements.
+
+Before attempt 4, measure all 30 authorized development-source pages and replace
+ambiguous layout labels with block geometry, text budgets and reading-order
+contracts. Require actual full-document producer diversity. Separate matched
+prototypes from deliberately enriched derivatives, whose own specifications define
+their additional content and difficulty. Do not confuse stronger synthetic corpus
+diversity with fidelity to the three initial source examples.
+
+Earlier code review records are retained, but no new Astra evaluation delegates are
+permitted after its live output price was verified at the exclusion threshold.
+Direct model API calls remain out of scope; orchestration usage is reported as
+unavailable unless the host supplies actual tokens/cost.
 
 ## Frozen execution design
 

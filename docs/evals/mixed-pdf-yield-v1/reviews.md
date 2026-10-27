@@ -64,8 +64,10 @@ quality floors before marking an improvement accepted.
 The attempt-3 reports, manifest, history, spec and concrete corrections are archived
 under `mixed-pdf-fools-gold-audit/rejected/attempt-3`; original PDFs and source artifacts
 remain intact. No frontier judge, full expansion, accepted threshold search or savings
-measurement followed the rejection. Further generation requires extending the skill's
-attempt limit. Independent visual validation must precede any expansion.
+measurement followed the rejection. The user extended the skill's attempt limit to
+20 on 2026-10-27 and selected GPT-6.1 Sol. A measured specification rewrite is active
+on Sol after Terra failed at capacity before starting. Independent visual validation
+must precede any expansion; the first three attempts remain rejected.
 
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
