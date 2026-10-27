@@ -8,9 +8,11 @@ import { apiErrorResponse } from "../lib/api-error.js";
 import { getRequestActor, isFirstPartyAppActor } from "../lib/request-actor.js";
 import { consumeFeatureRateLimit } from "../middleware/rate-limit.js";
 import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/spend-guard.js";
-import { composeSystemMessage, composeSystemMessageSections, defaultChatInstructionsTemplate } from "../services/chat-instructions.js";
+import { composeAgentWorkspaceInstructions, composeSystemMessage, composeSystemMessageSections, defaultChatInstructionsTemplate } from "../services/chat-instructions.js";
 import { findCoreRuleConflicts, ImproveUnavailableError, improveChatInstructions, resolveImproveModel } from "../services/chat-instructions-improve.js";
-import { loadChatScope } from "../services/chat-scope.js";
+import { chatScopeFor } from "../services/chat-scope.js";
+import { describeSearchSettingsForAgent } from "../services/chat-search-options.js";
+import { describeCurrentSearchSettings } from "../services/workspace-chat.js";
 import { canEditWorkspace, getWorkspaceAccess } from "../services/organizations.js";
 import { getWorkspaceSearchSettings } from "../services/search-controls.js";
 import { getWorkspace } from "../services/workspaces.js";
@@ -64,19 +66,29 @@ export const chatInstructionsRoutes = new Hono()
       const settings = await getWorkspaceSearchSettings(workspaceId, userId);
       const body = c.req.valid("json");
       const instructions = body.instructions === undefined ? settings.chat.searchInstructions : body.instructions;
-      const scope = await loadChatScope(workspaceId, workspace.name);
-      const args = {
+      const scope = chatScopeFor(workspace);
+      const chat = { ...settings.chat, answerStyle: body.answerStyle ?? settings.chat.answerStyle, citations: body.citations ?? settings.chat.citations };
+      const base = {
         ingestInstructions: workspace.systemPrompt,
         searchInstructions: instructions,
-        answerStyle: body.answerStyle ?? settings.chat.answerStyle,
-        citations: body.citations ?? settings.chat.citations,
+        answerStyle: chat.answerStyle,
+        citations: chat.citations,
         scope,
       };
+      // Exactly what each chat path composes: direct answers (one retrieval, one
+      // model call) and the search agent (the default in the app and /v1/chat).
+      const direct = { ...base, contextNote: describeCurrentSearchSettings({ ...settings, chat }), contextLabel: "workspace excerpts", autoExecutePlans: true };
+      const agent = composeAgentWorkspaceInstructions({ ...base, contextNote: describeSearchSettingsForAgent({ ...settings, chat }) });
       return c.json({
-        sections: composeSystemMessageSections(args),
-        systemMessage: composeSystemMessage(args),
-        defaultTemplate: defaultChatInstructionsTemplate(scope),
+        sections: composeSystemMessageSections(direct),
+        systemMessage: composeSystemMessage(direct),
+        paths: {
+          direct: { label: "Direct answers", sections: composeSystemMessageSections(direct) },
+          agent: { label: "Search agent (default in the app)", sections: agent.sections, note: "The agent adds its own tool, grounding and citation rules between the core rules and the workspace part." },
+        },
+        defaultTemplate: defaultChatInstructionsTemplate(scope, chat),
         conflicts: findCoreRuleConflicts(instructions),
+        ingestConflicts: findCoreRuleConflicts(workspace.systemPrompt),
         maxChars: CHAT_INSTRUCTIONS_MAX_CHARS,
         scopeDecline: {
           threshold: resolveScopeDeclineThreshold(settings.chat.scopeDeclineThreshold),
@@ -102,7 +114,7 @@ export const chatInstructionsRoutes = new Hono()
         [`user:${userId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_USER_LIMIT_PER_HOUR", 10)],
         [`workspace:${workspaceId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_WORKSPACE_LIMIT_PER_HOUR", 30)],
       ] as const) {
-        const retryAfter = await consumeFeatureRateLimit({ feature: "chat-instructions-improve", subject, limit, windowMs: IMPROVE_WINDOW_MS });
+        const retryAfter = await consumeFeatureRateLimit({ feature: "chat-instructions-improve", subject, limit, windowMs: IMPROVE_WINDOW_MS, requireShared: true });
         if (retryAfter !== null) {
           c.header("Retry-After", String(retryAfter));
           return apiErrorResponse(c, 429, "rate_limited", "Too many Improve requests. Try again later.", { retryAfterSeconds: retryAfter });
@@ -111,20 +123,21 @@ export const chatInstructionsRoutes = new Hono()
 
       const settings = await getWorkspaceSearchSettings(workspaceId, userId);
       const body = c.req.valid("json");
-      const scope = await loadChatScope(workspaceId, workspace.name);
+      const scope = chatScopeFor(workspace);
       const draft = (body.instructions === undefined ? settings.chat.searchInstructions : body.instructions)?.trim()
-        || defaultChatInstructionsTemplate(scope);
+        || defaultChatInstructionsTemplate(scope, settings.chat);
       try {
         resolveImproveModel();
         const result = await improveChatInstructions({
           userId, orgId: workspace.orgId, workspaceId, pipeline: workspace.pipeline,
-          draft, scope, chat: settings.chat,
+          draft, scope, chat: settings.chat, signal: c.req.raw.signal,
         });
         return c.json({ ...result, draft, saved: false });
       } catch (error) {
         if (isSpendBlockedError(error)) return spendBlockedResponse(c, error);
         if (error instanceof ImproveUnavailableError) {
           if (error.reason === "privacy_mode") return apiErrorResponse(c, 409, "privacy_mode_blocked", error.message);
+          // Model timeouts and provider errors (and a client that left) are 503; nothing was charged.
           return apiErrorResponse(c, 503, "unavailable", error.message);
         }
         throw error;

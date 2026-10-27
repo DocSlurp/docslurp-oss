@@ -110,6 +110,8 @@ export type RateLimitConsumeResult = {
   counted: boolean;
   /** The in-memory store is full and this request needed a new counter: denied without counting. */
   full?: boolean;
+  /** True when a shared (Redis) store answered; absent or false for the per-process limiter, including a Redis fallback. */
+  shared?: boolean;
 };
 
 export interface RateLimitStore {
@@ -365,7 +367,7 @@ abstract class FallbackStore implements RateLimitStore {
   private retryBackendAt = 0;
 
   async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
-    if (Date.now() < this.retryBackendAt) return await this.fallback.consume(input);
+    if (Date.now() < this.retryBackendAt) return { ...(await this.fallback.consume(input)), shared: false };
     try {
       const { keys, args } = scriptArgs(input);
       const result = parseScriptResult(await this.evaluate(keys, args), input.counters.length);
@@ -373,7 +375,7 @@ abstract class FallbackStore implements RateLimitStore {
         this.fallbackWarningLogged = false;
         console.warn("[rate-limit] Redis backend recovered; shared limits restored");
       }
-      return result;
+      return { ...result, shared: true };
     } catch (error) {
       // Never fail open: a Redis outage degrades to the per-process limiter,
       // which still enforces every limit (per instance).
@@ -382,7 +384,7 @@ abstract class FallbackStore implements RateLimitStore {
         this.fallbackWarningLogged = true;
         console.error("[rate-limit] Redis backend failed; falling back to the per-process in-memory limiter (limits now apply per instance):", error instanceof Error ? error.message : String(error));
       }
-      return await this.fallback.consume(input);
+      return { ...(await this.fallback.consume(input)), shared: false };
     }
   }
 
@@ -1020,19 +1022,25 @@ export const apiRateLimit = apiIpRateLimit;
 /**
  * A fixed-window limit for one feature and subject (for example
  * `chat-instructions-improve`, `user:<id>`), outside the per-request category
- * limits. Returns the seconds to wait when the limit is reached, else null.
- * A store failure refuses (fails closed): these limits guard paid calls.
+ * limits. Returns the seconds to wait when refused, else null. Fails closed:
+ * a limit of 0, a store error, and (with `requireShared`) an answer from the
+ * per-process limiter, including a Redis outage fallback, all refuse.
+ * `requireShared` is waived only outside production, or when
+ * `RATE_LIMIT_ALLOW_PROCESS_FEATURE_LIMITS=true` accepts per-instance limits.
  */
 export async function consumeFeatureRateLimit(args: {
   feature: string;
   subject: string;
   limit: number;
   windowMs: number;
+  requireShared?: boolean;
   store?: RateLimitStore;
   now?: number;
 }): Promise<number | null> {
-  if (!rateLimitEnabled() || args.limit <= 0) return null;
   const now = args.now ?? Date.now();
+  const retry = Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
+  if (args.limit <= 0) return retry;
+  if (!rateLimitEnabled()) return args.requireShared && sharedLimitRequired() ? retry : null;
   const base = `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:feature:${safeIdentityPart(args.feature)}:{${safeIdentityPart(args.subject)}}`;
   try {
     const result = await (args.store ?? getDefaultStore()).consume({
@@ -1041,10 +1049,19 @@ export async function consumeFeatureRateLimit(args: {
       now,
       countDenied: false,
     });
+    if (args.requireShared && result.shared !== true && sharedLimitRequired()) {
+      console.error(`[rate-limit] feature=${args.feature} refused: no shared rate-limit store answered (per-process limits only)`);
+      return retry;
+    }
     if (result.blockedMs > 0) return Math.max(1, Math.ceil(result.blockedMs / 1000));
     if (result.denied < 0) return null;
   } catch (error) {
     console.error("[rate-limit] feature limit unavailable:", error instanceof Error ? error.message : String(error));
   }
-  return Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
+  return retry;
+}
+
+function sharedLimitRequired(): boolean {
+  if (process.env.RATE_LIMIT_ALLOW_PROCESS_FEATURE_LIMITS?.trim().toLowerCase() === "true") return false;
+  return process.env.NODE_ENV === "production";
 }
