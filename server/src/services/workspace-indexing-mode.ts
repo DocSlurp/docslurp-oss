@@ -91,6 +91,8 @@ async function unindexedPages(workspaceId: string, documentIds?: string[]): Prom
     where d.workspace_id = ${workspaceId}
       and d.status = 'completed' and d.superseded_at is null
       and d.indexing_mode <> 'full'
+      -- Extract documents expire with their extract; a full-index version would outlive it.
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
       ${documentIds ? sql`and d.id = any(${documentIds})` : sql``}
     order by d.created_at, d.id
   `;
@@ -131,6 +133,7 @@ export async function estimateModeSwitch(
     from documents d
     where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
       and d.indexing_mode <> 'full'
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
       ${to === "visual"
         ? sql`and d.page_count > (select count(*) from document_page_states s where s.document_id = d.id and s.embedded_at is not null)`
         : sql`and not exists (select 1 from document_maps m where m.document_id = d.id)`}
@@ -183,6 +186,8 @@ async function liveDocs(workspaceId: string, ids: string[]): Promise<SourceDoc[]
     select d.id, d.org_id, d.user_id, d.workspace_id, d.filename, d.mime_type, d.source_key, d.extraction_mode,
       d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.run_id
     from documents d where d.workspace_id = ${workspaceId} and d.id = any(${ids})
+      -- Never a source for new versions: extract documents expire with their extract.
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
     order by d.created_at, d.id
   `;
 }
