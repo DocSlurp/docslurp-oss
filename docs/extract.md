@@ -1,6 +1,6 @@
 # Extract mode
 
-Extract is an upload that deletes itself. It takes the same inputs as upload (multipart files, public URLs, direct storage sessions and, over MCP, inline files), runs the same pipeline and returns the same outputs: page-by-page Markdown, page images, chunks and search. When the retention window ends, the source files and every derived asset are deleted.
+Extract is an upload that deletes itself. It takes the same inputs as upload (multipart files, public URLs, direct storage sessions and, over MCP, inline files), runs the same pipeline and returns the same outputs: page-by-page Markdown, page images, chunks and search. When the retention window ends, the source files and every derived asset are deleted: stored objects under the extract's prefix, Postgres rows (documents, pages, chunks, graph links) and the extract's rows in the workspace's LanceDB vector tables, which are compacted at once so no older table version keeps the text.
 
 Use it for one-off conversions, like turning a PDF into Markdown, when you don't want the documents kept in a workspace.
 
@@ -61,12 +61,12 @@ Follow progress with the run (`GET /v1/runs/{runId}/progress`) or the extract:
 | --- | --- | --- |
 | `GET /v1/extracts` | `ingest` or `artifacts` | Recent extracts you can see |
 | `GET /v1/extracts/{id}` | `ingest` or `artifacts` | Status, retention and download state; `410 extract_expired` after expiry |
-| `GET /v1/extracts/{id}/download` | `artifacts`, server keys | `302` to a two-minute signed URL for the zip |
+| `GET /v1/extracts/{id}/download` | `artifacts`, server keys | `302` to a two-minute signed URL for the zip. The requester, or an owner or admin of the organization (as for exports); other workspace readers get `403` |
 | `DELETE /v1/extracts/{id}` | `ingest` | Expire now (the requester only); the next sweep deletes everything |
 
 `status` moves from `pending` (no run yet) to `processing`, then `completed` or `failed`, then `expired`. `download.status` moves from `pending` to `preparing`, then `ready` (`download.url` set) or `failed`, then `expired`.
 
-Creating an extract is rate-limited as an upload. An extract is visible to anyone who can read its workspace. API keys see it only when they belong to the extract's organization and are allowed its workspace. Anyone else gets `404 extract_not_found`, whether or not the ID exists.
+Creating an extract is rate-limited as an upload. An extract's status is visible to anyone who can read its workspace; its download and early deletion are not. API keys see it only when they belong to the extract's organization and are allowed its workspace. Anyone else gets `404 extract_not_found`, whether or not the ID exists.
 
 ## The completion email
 
@@ -78,23 +78,30 @@ The emailed link is not a credential. It opens the app's download page (`/app?ex
 
 Retention counts from `createdAt`, so an extract that is still processing when its window ends is cancelled and deleted. The maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`, one minute by default, on every API instance; rows are claimed with `for update skip locked` and a ten-minute lease) handles each expired extract in this order:
 
-1. Cancels its run if it is still in flight and waits 15 minutes for late writes before listing objects.
-2. Withdraws every zip that holds its documents: its own download, and any workspace export that included them.
-3. Deletes its documents and runs. The delete triggers (migration 0035) queue LanceDB rows, graph nodes, stage artifacts and sources for the worker's cleanup sweep.
-4. Deletes every object under `extracts/<org>/<extract>/`, 1,000 keys per page and 20 pages per pass, and aborts unfinished multipart uploads there.
-5. Marks the extract `deleted` with `deleted_objects`, `deleted_bytes` and `deleted_at`.
+1. If a run is still in flight, cancels it (and any zip still being built) and stops. Nothing is deleted until 15 minutes later, so late writes of the cancelled run are not orphaned.
+2. Charges an unsettled paid window on what is stored (a run that never finished still pays).
+3. Withdraws every zip that holds its documents (its own download, and workspace exports that included them) and stops workspace exports still being built.
+4. Deletes its documents, every copy made from them (versions, re-indexes, reused or deduplicated copies, and anything whose source is under the prefix), and its runs. The delete triggers (migration 0035) queue LanceDB rows, graph nodes, stage artifacts and sources for the worker's cleanup drain, which deletes the vector rows and compacts the table with `cleanupOlderThan: now`. Media receipts (`remote_media_jobs`, `media_video_admissions`) stay as accounting records with their run and document links set to null.
+5. Deletes every object under `extracts/<org>/<extract>/`, 1,000 keys per page and 20 pages per pass, and aborts unfinished multipart uploads there. An extract with direct upload sessions waits 30 minutes first, longer than a presigned PUT stays valid (15 minutes). A failure in step 4 doesn't stop this step.
+6. Marks the extract `deleted` with `deleted_objects`, `deleted_bytes`, `failed_objects` and `deleted_at`, then lists the prefix once more six hours later and deletes anything that arrived after the purge.
 
-Each step can be repeated safely. A failure records `last_error` (internal only; public responses never show it) and the next pass resumes. The row remains as a tombstone, so `GET` keeps answering `410` and the extract's usage stays reportable.
+Each step can be repeated safely. A failure records `last_error` (internal only; public responses never show it) and backs off 2^attempts minutes, up to six hours. Claims go least-failed first, so one failing extract never holds up the others. The `extract-deletion-stuck` alert (critical) fires while any expired extract has `last_error`, or one is more than an hour past expiry. The row remains as a tombstone, so `GET` keeps answering `410` and the extract's usage stays reportable.
+
+What remains after deletion:
+
+- **LanceDB:** deleted rows leave the table when the worker's cleanup drain runs (every sweep, normally within a minute, after a 15-minute grace for documents that were in flight). Until then they are already invisible to search (deletion vectors).
+- **Chat history:** conversations that cited an extract's documents keep their messages; their citations stop resolving. Chat history is the user's own record of a conversation, and scrubbing quoted text out of answers would rewrite it. Delete the conversation to remove it.
+- **Audit and usage:** audit entries and usage events keep IDs, counts and costs, but no document content.
 
 Logs: `[extract-retention] deleted extract=… objects=… bytes=… lag_s=…` per extract, and one `settled= charged= exports= emailed= deleted= deleted_objects= deleted_bytes= max_lag_s= failed=` line per sweep that did anything. `lag_s` is the time from expiry to the last object deleted. Each sweep runs in a `maintenance.extracts` span.
 
 ### Bucket lifecycle backstop (optional)
 
-The sweeper is the primary deletion path. As a backstop for a sweeper that is down for days, add a lifecycle rule that expires objects under `extracts/` some days after the longest retention you allow. With the default 30-day cap, 35 days works:
+The sweeper is the primary deletion path. As a backstop for a sweeper that is down for days, add a lifecycle rule that expires objects under `extracts/` one day after the longest retention you allow. With the default 30-day cap, that is 31 days:
 
 ```json
 { "Rules": [{ "ID": "extract-backstop", "Status": "Enabled", "Filter": { "Prefix": "extracts/" },
-  "Expiration": { "Days": 35 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 2 } }] }
+  "Expiration": { "Days": 31 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 2 } }] }
 ```
 
 If you raise `DOCSLURP_EXTRACT_MAX_RETENTION_DAYS`, raise this too, or extended extracts lose their files early.
@@ -102,9 +109,9 @@ If you raise `DOCSLURP_EXTRACT_MAX_RETENTION_DAYS`, raise this too, or extended 
 ## Pricing
 
 - The free window (`DOCSLURP_EXTRACT_FREE_RETENTION_HOURS`, default 48) costs nothing beyond ingestion, which is billed exactly as for uploads (Fast and Rich pages, media minutes and features).
-- Extended retention (up to `DOCSLURP_EXTRACT_MAX_RETENTION_DAYS`, default 30) is charged once, when the extract finishes, as storage at `EXTRACT_RETENTION_STORAGE_MULTIPLIER` (2) times the storage price (`PRICE_CARD.storageGbMonth`, 25 credits per GB-month), prorated over the whole window in 30-day months: `credits = stored GB × 25 × 2 × retentionDays / 30`. The stored size uses the daily meter's model: source bytes plus an estimated 96 KB of artifacts and 28 KB of index per page.
-- A paid window is checked before anything is stored: the organization must be allowed to spend (`assertCanSpend`) and must hold the estimated charge when billing is enforced. Otherwise the request fails with `402 credit_exhausted`.
-- The charge is a billable unit event (`storage-extract-retention`, provider `docslurp`, ID `extract-retention:<extract>`) recorded through the usage ledger with the extract's org, workspace, run and API key, plus the matching credit debit. It counts as storage spend.
+- Extended retention (up to `DOCSLURP_EXTRACT_MAX_RETENTION_DAYS`, default 30) bills **the whole window, free hours included** (7 days is 7 days of storage, not 5), as storage at `EXTRACT_RETENTION_STORAGE_MULTIPLIER` (2) times the storage price (`PRICE_CARD.storageGbMonth`, 25 credits per GB-month), prorated over the whole window in 30-day months: `credits = stored GB × 25 × 2 × retentionDays / 30`. The stored size uses the daily meter's model: source bytes plus an estimated 96 KB of artifacts and 28 KB of index per page.
+- A paid window is checked before anything is stored: the organization must be allowed to spend (`assertCanSpend`) and, when billing is enforced, must hold the estimated charge for the declared size. Otherwise the request fails with `402 credit_exhausted`.
+- It is charged as soon as intake has created the run and the sizes are known (`extract-retention:<extract>`), so parallel extracts can't all pass the pre-check and then overdraw. When the run finishes, any rise in the measured size is charged (`extract-retention:<extract>:settle`). An extract whose run never finished is charged at expiry (`…:expiry`). There are no refunds when the stored size turns out smaller. Each charge is a billable unit event (`storage-extract-retention`, provider `docslurp`) recorded through the usage ledger with the extract's org, workspace, run and API key, plus the matching credit debit. It counts as storage spend.
 
 For example, 1,000 pages with 75 KB sources kept for 30 days store about 0.19 GB and cost about 9.5 credits ($0.095) of retention, about 10,500 pages per $1 for retention alone. Storage for those pages costs us about $0.013 a month (Tigris objects at $0.02 per GB-month and Neon index storage at $0.35 per GB-month).
 
