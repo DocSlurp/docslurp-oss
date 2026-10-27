@@ -60,13 +60,20 @@ def formula_tokens(text):
 def printed_formula_recall(reference,text):
     """Check declared gold occurrences through one monotonic page alignment.
 
-    All prose participates in the alignment, so a prose mention cannot be reused
-    to repair a later formula. Legacy references without spans must have exactly
+    Count every mention as well as checking the declared span: a surviving prose
+    copy cannot repair a missing authored copy. Legacy references must have exactly
     the declared number of unambiguous, nonoverlapping formula occurrences.
     """
     expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
     if not expected:return None
     source=reference['expectedMarkdown'];gold=formula_tokens(source);actual=formula_tokens(text)
+    occurrence_recall=1.0
+    for pattern in expected:
+        n=len(pattern)
+        count=lambda sequence:sum(tuple(sequence[i:i+n])==pattern for i in range(len(sequence)-n+1))
+        wanted=count(gold)
+        if not wanted:raise ValueError('missing-reference-formula')
+        occurrence_recall=min(occurrence_recall,count(actual)/wanted)
     mapping={m.a+k:m.b+k for m in SequenceMatcher(None,gold,actual,autojunk=False).get_matching_blocks()
              for k in range(m.size)}
     declared=reference.get('printedFormulaOccurrences')
@@ -97,7 +104,7 @@ def printed_formula_recall(reference,text):
         left=gold[max(0,i-3):i];right=gold[j:j+3]
         if (begin==0 or (left and actual[max(0,begin-len(left)):begin]==left)) and (end==len(actual) or (right and actual[end:end+len(right)]==right)):
             found+=1
-    return found/len(spans)
+    return min(found/len(spans),occurrence_recall)
 
 def content_score(reference, text, legacy):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))

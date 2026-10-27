@@ -63,6 +63,23 @@ class ScorerTests(unittest.TestCase):
         bad=content_score(ref,prose+'\n\nq = A / b',tolerant_markdown)
         self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],0)
 
+    def test_repeated_prose_copy_cannot_repair_deleted_formula_block(self):
+        from v4_reference import page_reference
+        pad='The valve has a pressure of 12 units. '*60
+        formula='q = a / b';following='End of rule. Continue discussion.'
+        prose=formula+'\n\n'+following+' This is an explanatory repetition.'
+        sections=[pad,formula,following,prose]
+        blocks=[dict(id=str(i),visible=True,displayText=text,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,text in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(4)],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['acceptable'])
+        bad=content_score(ref,'\n\n'.join([pad,prose]),tolerant_markdown)
+        self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],.5)
+        self.assertFalse(content_score(ref,ref['expectedMarkdown'].replace(formula,'q = A / b'),tolerant_markdown)['acceptable'])
+
     def test_case_sensitive_formulas_cannot_swap_identical_contexts(self):
         first='q = a / b';second='q = A / b'
         text='padding '*300+'Rule '+first+' end. Rule '+second+' end.'

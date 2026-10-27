@@ -303,3 +303,16 @@ immediately before and after the invocation. The regression mutates the original
 concurrently, verifies the snapshot was invoked, and rejects a mutation of the
 snapshot itself. All 45 focused tests pass. A new proof bundle records fresh score
 executions; previous evidence is retained rather than overwritten.
+
+### Council round 4: repeated formula mention accounting
+
+The adversarial reviewer reproduced a deleted authored formula plus following
+block being credited from a surviving explanatory repetition at `6bb055a0`.
+A greedy alignment alone did not establish preservation of the declared copy.
+Primary formula recall now also accounts for every matching literal occurrence
+in the gold stream, including prose mentions. It is bounded by their output
+multiplicity recall, so one surviving copy cannot replace two expected copies.
+Exact repeated output remains valid. The reported four-block projection is a
+regression control: the deletion receives formula recall .5 and fails acceptance;
+exact output passes. All 46 focused tests pass. No extraction measurements are
+promoted by this change; the revised scorer needs a fresh identity when run.
