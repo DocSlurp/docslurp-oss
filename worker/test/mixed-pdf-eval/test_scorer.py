@@ -98,6 +98,55 @@ class ScorerTests(unittest.TestCase):
         for text in [ref['expectedMarkdown'],ref['expectedMarkdown'].replace(following,'### '+following,1)]:
             self.assertTrue(content_score(ref,text,tolerant_markdown)['acceptable'])
 
+    def test_forced_alignment_matches_exhaustive_tiny_controls(self):
+        from functools import lru_cache
+        from itertools import product
+        from measure import forced_token_matches
+        sequences=[list(p) for length in range(4) for p in product('ab',repeat=length)]
+        for gold in sequences:
+            for actual in sequences:
+                @lru_cache(None)
+                def align(i,j):
+                    if i==len(gold) or j==len(actual):return frozenset([()])
+                    paths=set(align(i+1,j))|set(align(i,j+1))
+                    if gold[i]==actual[j]:paths.update(((i,j),)+tail for tail in align(i+1,j+1))
+                    best=max(map(len,paths))
+                    return frozenset(p for p in paths if len(p)==best)
+                paths=align(0,0)
+                common=set.intersection(*(set(p) for p in paths))
+                expected={i:j for i,j in common}
+                self.assertEqual(forced_token_matches(gold,actual,set(range(len(gold)))),expected)
+
+    def test_insertion_location_and_fabricated_context_cannot_repair_formula(self):
+        from v4_reference import page_reference
+        formula='q = a / b';pad='Harmless prose with no mathematical meaning. '*100
+        sections=[pad,'For this rule '+formula+' End of rule.',
+                  'A separate note. For this rule End of rule. Continue here.',
+                  'A prose repetition says '+formula+' for comparison.']
+        blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,value in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(4)],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['acceptable'])
+        bad=list(sections);bad[1]=bad[1].replace(formula,'q = A / b')
+        bad[2]=bad[2].replace('For this rule End','For this rule '+formula+' End')
+        self.assertFalse(content_score(ref,'\n\n'.join(bad),tolerant_markdown)['acceptable'])
+        bad=list(sections);bad[1]=bad[1].replace(formula,'q = A / b')
+        bad.append('An unrelated alternative quotes For this rule '+formula+' End of rule, but is not the operative relation.')
+        self.assertFalse(content_score(ref,'\n\n'.join(bad),tolerant_markdown)['acceptable'])
+        header_sections=[pad,'Heading',formula,'Following prose.']
+        header_blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                           formula=dict(display=formula,latex='q=a/b') if i==2 else None)
+                       for i,value in enumerate(header_sections)]
+        header_ref=page_reference(dict(id='heading-control',sizePt=[612,792],blocks=header_blocks,
+            readingOrder=[str(i) for i in range(4)],sections=header_sections,paragraphs=header_sections,
+            expectedMarkdown='\n\n'.join(header_sections)))
+        for heading in ['### Heading','### Heading ###']:
+            output=header_ref['expectedMarkdown'].replace('Heading',heading)
+            self.assertTrue(content_score(header_ref,output,tolerant_markdown)['acceptable'])
+
     def test_recased_prose_cannot_mask_corrupt_formula_occurrence(self):
         from v4_reference import page_reference
         formula='q = a / b'

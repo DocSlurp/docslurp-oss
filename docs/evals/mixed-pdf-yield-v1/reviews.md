@@ -350,3 +350,26 @@ compensation, the recasing-plus-compensation variant, intact heading syntax and
 exact/whitespace controls. This is strict textual preservation with conservative
 context attribution; it does not establish spatial formula layout. Prior scorer
 results remain provisional, and fresh council review remains required.
+
+### Council round 6: certify occurrence ownership across all optimal alignments
+
+Both reviewers broke reference-mention-only uniqueness: an insertion into a
+previously formula-free location, or a fabricated quotation carrying the same
+local context, could conceal a corrupted formula. The adversarial reviewer also
+found closing Markdown heading markers were incorrectly treated as content.
+
+The v3 scorer now certifies protected formula/context tokens against every
+maximum-length token alignment. A token must have exactly one possible output
+position and cannot be deletable on any optimal path; the certified range must
+remain contiguous. Forward/reverse LCS scores establish those conditions, rather
+than selecting one greedy mapping. Joint mention counts, order and expression
+boundaries remain separate requirements. Opening and closing heading envelopes
+outside printed expressions are excluded; line-leading mathematical operators stay.
+
+All 51 focused tests pass. A separate exhaustive control enumerates all optimal
+alignments for 225 tiny gold/output pairs and checks the forced-match helper
+against their intersection. The two new attacks, closing-heading control and all
+prior regressions pass. The Mastra wrapper and measurement version now identify
+`mixed-page-preservation@v3`. Scoring is conservative when ownership is ambiguous;
+its quadratic alignment work is evaluation overhead, not ingestion latency, and
+has not been performance-benchmarked. No corpus measurement is promoted yet.

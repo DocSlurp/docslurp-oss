@@ -27,7 +27,7 @@ import fitz
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
-VERSION = "mixed-page-preservation@v2"
+VERSION = "mixed-page-preservation@v3"
 MEASURE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 OCR_BINARY_HASH = hashlib.sha256(Path(shutil.which("tesseract")).read_bytes()).hexdigest()
 OCR_LANGUAGE_HASH = hashlib.sha256(Path(os.environ.get("TESSDATA_PREFIX","/usr/share/tessdata"),"eng.traineddata").read_bytes()).hexdigest()
@@ -70,17 +70,53 @@ def formula_page_tokens(text, patterns):
         for i in range(len(raw)-n+1):
             if tuple(raw[i:i+n])==pattern:protected.update(range(i,i+n))
     ignored=set()
-    for match in re.finditer(r'(?m)^[ \t]{0,3}(#{1,6})[ \t]+',text):
-        start=len(formula_tokens(text[:match.start(1)]))
-        ignored.update(i for i in range(start,start+len(match.group(1))) if i not in protected)
+    for match in re.finditer(r'(?m)^[ \t]{0,3}(#{1,6})[ \t]+([^\n]*)',text):
+        ranges=[(match.start(1),len(match.group(1)))]
+        closing=re.search(r'[ \t]+(#+)[ \t]*$',match.group(2))
+        if closing:ranges.append((match.start(2)+closing.start(1),len(closing.group(1))))
+        for position,length in ranges:
+            start=len(formula_tokens(text[:position]))
+            ignored.update(i for i in range(start,start+length) if i not in protected)
     return [token for i,token in enumerate(raw) if i not in ignored]
+
+
+def forced_token_matches(gold, actual, protected):
+    """Certify matches present in every maximum-length token alignment.
+
+    A chosen greedy alignment cannot certify ownership. Keep forward rows only
+    for protected gold tokens, then combine them with streaming reverse rows to
+    detect any optimal deletion or competing output position for each token.
+    """
+    from array import array
+    if gold==actual:return {i:i for i in protected}
+    width=len(actual);previous=array('I',[0])*(width+1);rows={}
+    for i,token in enumerate(gold):
+        if i in protected:rows[i]=previous
+        row=array('I',[0])*(width+1)
+        for j,other in enumerate(actual):
+            row[j+1]=previous[j]+1 if token==other else max(previous[j+1],row[j])
+        previous=row
+    optimum=previous[-1];after=array('I',[0])*(width+1);forced={}
+    for i in range(len(gold)-1,-1,-1):
+        if i in protected:
+            before=rows[i]
+            deletable=any(before[j]+after[j]==optimum for j in range(width+1))
+            candidates=[j for j in range(width) if gold[i]==actual[j]
+                        and before[j]+1+after[j+1]==optimum]
+            if not deletable and len(candidates)==1:forced[i]=candidates[0]
+        row=array('I',[0])*(width+1)
+        for j in range(width-1,-1,-1):
+            row[j]=after[j+1]+1 if gold[i]==actual[j] else max(after[j],row[j+1])
+        after=row
+    return forced
 
 
 def printed_formula_recall(reference,text):
     """Jointly attribute every formula mention with unambiguous gold contexts.
 
-    Context widths are frozen from reference text, expanding until repetitions
-    are distinguished. All mentions, including prose, must survive in order;
+    Reference contexts distinguish repetitions. Protected tokens must also be
+    forced and contiguous in every optimal alignment, preventing copied contexts
+    from borrowing attribution. All mentions, including prose, survive in order;
     compensating duplicates cannot separately repair counts and attribution.
     """
     expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
@@ -116,6 +152,9 @@ def printed_formula_recall(reference,text):
     if [p for i,j,p in wanted]!=[p for i,j,p in received]:return 0.0
     def context(sequence,i,j,width):
         return (tuple(sequence[max(0,i-width):i]),tuple(sequence[j:j+width]),i<width,j+width>len(sequence))
+    protected=set()
+    for i,j,_ in wanted:protected.update(range(max(0,i-3),min(len(gold),j+3)))
+    forced=forced_token_matches(gold,actual,protected)
     matched=0
     for (i,j,pattern),(x,y,_) in zip(wanted,received):
         width=3
@@ -126,7 +165,9 @@ def printed_formula_recall(reference,text):
             if width>=len(gold):raise ValueError('ambiguous-reference-formula-context')
             width=min(len(gold),width*2)
         candidates=[(u,v) for u,v,p in received if p==pattern and context(actual,u,v,width)==signature]
-        if candidates==[(x,y)]:matched+=1
+        start=max(0,i-3);end=min(len(gold),j+3);mapped=forced.get(start)
+        certified=mapped is not None and all(forced.get(k)==mapped+k-start for k in range(start,end))
+        if candidates==[(x,y)] and certified:matched+=1
     return matched/len(wanted)
 
 def content_score(reference, text, legacy):
