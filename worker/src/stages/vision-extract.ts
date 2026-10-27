@@ -28,11 +28,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
-import {
-  type ArtifactStore,
-  cleanupTempFile,
-  keyFromStorageUri,
-} from "../tools/storage.js";
+import { type ArtifactStore, cleanupTempFile, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
 import { executeVisionRuntime, rejectedVisionUsageInput, visionCall } from "../tools/vision-runtime.js";
 import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
@@ -194,7 +190,7 @@ export class VisionExtractStage implements Stage {
           return;
         }
 
-        const key = `${document.userId}/${state.run.id}/vision/${document.id}.json`;
+        const key = `${runArtifactRoot(state.run, document.userId)}/vision/${document.id}.json`;
         const pages = maxInt(1, document.pageCount);
         const artifactSlot = `${document.id}:vision`;
         const playbook = this.resolveParserPlaybook(state, document.id);
@@ -1255,10 +1251,10 @@ export class VisionExtractStage implements Stage {
       });
     }
 
-    const reconciledCanonicalKey = `${document.userId}/${state.run.id}/canonical-reconciled/${document.id}.json`;
-    const reconciledContractKey = `${document.userId}/${state.run.id}/extraction-reconciled/${document.id}.contract.json`;
-    const reconciledMarkdownKey = `${document.userId}/${state.run.id}/markdown-reconciled/${document.id}.md`;
-    const reconciliationKey = `${document.userId}/${state.run.id}/canonical-reconciliation/${document.id}.json`;
+    const reconciledCanonicalKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciled/${document.id}.json`;
+    const reconciledContractKey = `${runArtifactRoot(state.run, document.userId)}/extraction-reconciled/${document.id}.contract.json`;
+    const reconciledMarkdownKey = `${runArtifactRoot(state.run, document.userId)}/markdown-reconciled/${document.id}.md`;
+    const reconciliationKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciliation/${document.id}.json`;
     await this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument);
     await this.storage.putJson(reconciledContractKey, reconciled.extractionContract);
     await this.storage.putBytes(

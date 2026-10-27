@@ -17,7 +17,7 @@ import { backendRuntime, resolveVectorBackends } from "../embeddings/resolver.js
 import type { EmbeddingArtifact, VectorBackendRecord } from "./embedding-runtime.js";
 import { maxInt } from "./utils.js";
 import { workspaceVectorLocation } from "./lancedb-location.js";
-import { keyFromStorageUri } from "../tools/storage.js";
+import { keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
 import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
 import { lanceDbMaintenanceSettings, type LanceDbMaintenanceSettings } from "./lancedb-maintenance.js";
 import { LanceDbWriteQueue, type VectorWriteOutcome } from "./lancedb-write-queue.js";
@@ -239,7 +239,7 @@ export class IndexStage implements Stage {
           // copy in another workspace than its source, the source's (rebound below).
           const embedUri = state.documentStage(document.id, "embed")?.artifactUri;
           const embeddingKey = (embedUri ? keyFromStorageUri(embedUri, this.storage.bucket) : null)
-            ?? `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
+            ?? `${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`;
           const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey, { streamJson: true });
           const records = await this.documentRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
@@ -279,11 +279,11 @@ export class IndexStage implements Stage {
                 signal
               });
 
-              const key = `${document.userId}/${state.run.id}/vectors/${backend}/${document.id}/manifest.json`;
+              const key = `${runArtifactRoot(state.run, document.userId)}/vectors/${backend}/${document.id}/manifest.json`;
               const shardManifests = result.shards
                 ? await Promise.all(
                     result.shards.map(async (shard, shardIndex) => {
-                      const shardKey = `${document.userId}/${state.run.id}/vectors/${backend}/${document.id}/shards/${shardIndex.toString().padStart(3, "0")}.json`;
+                      const shardKey = `${runArtifactRoot(state.run, document.userId)}/vectors/${backend}/${document.id}/shards/${shardIndex.toString().padStart(3, "0")}.json`;
                       await this.storage.putJson(shardKey, {
                         documentId: document.id,
                         backend,
@@ -339,7 +339,7 @@ export class IndexStage implements Stage {
             Array.from({ length: CONCURRENCY }, () => runBackend.call(this))
           );
 
-          const summaryKey = `${document.userId}/${state.run.id}/vectors/${document.id}.json`;
+          const summaryKey = `${runArtifactRoot(state.run, document.userId)}/vectors/${document.id}.json`;
           const search = buildVectorIndexSearchMetadata(records.length);
           await this.storage.putJson(summaryKey, {
             documentId: document.id,

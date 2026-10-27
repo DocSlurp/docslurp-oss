@@ -65,7 +65,7 @@ import {
   type RuntimeCatalog,
 } from "../routing/runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { type ArtifactStore, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
@@ -154,7 +154,7 @@ export class RoutePagesStage implements Stage {
     if (mode === "off") return;
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/page-route/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/page-route/${document.id}.json`;
       await runDocumentStage(
         state,
         document,

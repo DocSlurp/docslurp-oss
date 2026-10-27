@@ -24,6 +24,7 @@ import {
   validateStructuredResult,
 } from "@docslurp/shared";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
+import { runArtifactRoot } from "../tools/storage.js";
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -196,7 +197,7 @@ export class StructuredExtractStage implements Stage {
       state.docConcurrency,
       async (document) => {
         const artifactSlot = `${document.id}:structured`;
-        const key = `${document.userId}/${state.run.id}/structured/${document.id}.json`;
+        const key = `${runArtifactRoot(state.run, document.userId)}/structured/${document.id}.json`;
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +

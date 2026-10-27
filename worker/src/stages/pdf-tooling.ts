@@ -6,6 +6,7 @@ import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner, CommandPlan } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
+import { runArtifactRoot } from "../tools/storage.js";
 
 export class PdfToolingStage implements Stage {
   readonly name = "pdf-tooling";
@@ -17,7 +18,7 @@ export class PdfToolingStage implements Stage {
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/pdf-tooling/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/pdf-tooling/${document.id}.json`;
       const artifactSlot = `${document.id}:pdf-tooling`;
 
       await runDocumentStage(
@@ -51,8 +52,8 @@ export class PdfToolingStage implements Stage {
               mimeType: document.mimeType,
               sourceKey: document.sourceKey,
               pageCount,
-              pageImagesKey: `${document.userId}/${state.run.id}/images/${document.id}/manifest.json`,
-              pageManifestKey: `${document.userId}/${state.run.id}/pages/${document.id}/manifest.json`
+              pageImagesKey: `${runArtifactRoot(state.run, document.userId)}/images/${document.id}/manifest.json`,
+              pageManifestKey: `${runArtifactRoot(state.run, document.userId)}/pages/${document.id}/manifest.json`
             },
             tableDetection: {
               hasTablePages: tableDetection.hasTablePages,

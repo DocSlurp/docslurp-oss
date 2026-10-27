@@ -11,6 +11,7 @@ import type { MediaConfig } from "./config.js";
 import type { MediaVisionProvider, VideoFrame, VisionResult } from "./vision.js";
 import { selectVideoFrames, packVideoFrames, type VideoCandidate, type VideoPolicy } from "./video-policy.js";
 import { emitTelemetryLog } from "./telemetry.js";
+import { runArtifactRoot } from "../tools/storage.js";
 
 export async function describeVideoChunk(args: { state: WorkflowState; scope: MediaScope; storage: ArtifactStore; journal: MediaJournal;
   provider: MediaVisionProvider; frames: VideoFrame[]; policy: VideoPolicy; config: MediaConfig; signal?: AbortSignal }): Promise<VisionResult> {
@@ -25,7 +26,7 @@ export async function describeVideoChunk(args: { state: WorkflowState; scope: Me
     reserveCents: Math.max(0.001, pageCredits("rich", Math.max(1, frames[frames.length - 1]!.seconds - frames[0]!.seconds) / 60 * (PRICE_CARD.videoMinuteRichPages - PRICE_CARD.audioMinuteRichPages))), maxRunCostCents: state.run.pipeline.maxCostCents ?? null,
     maxDocumentCostCents: policy.maxCostCents, maxConcurrent: config.maxConcurrent, dailyBudgetCents: config.dailyBudgetCents });
   if (!acquired && receipt.status !== "completed") throw new Error("Video request requires reconciliation before retry");
-  const resultKey = receipt.resultKey ?? `${state.run.userId}/${scope.runId}/media/receipts/${receipt.id}.json`;
+  const resultKey = receipt.resultKey ?? `${scope.runId === state.run.id ? runArtifactRoot(state.run, state.run.userId) : `${state.run.userId}/${scope.runId}`}/media/receipts/${receipt.id}.json`;
   const started = Date.now();
   try {
     const result = acquired ? await withObservation({ name: "media.vision", type: "span",

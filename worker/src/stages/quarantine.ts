@@ -7,7 +7,7 @@ import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import {
   type ArtifactStore,
-  buildArtifactStorageKey,
+  buildArtifactStorageKey, runArtifactRoot,
   cleanupTempFile,
   sourceStorageKey
 } from "../tools/storage.js";
@@ -29,7 +29,7 @@ export class QuarantineStage implements Stage {
     }
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = buildArtifactStorageKey(document.userId, state.run.id, "quarantine", `${document.id}.json`);
+      const key = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.json`);
       const artifactSlot = `${document.id}:quarantine`;
 
       await runDocumentStage(

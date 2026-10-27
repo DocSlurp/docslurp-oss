@@ -7,7 +7,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore } from "../tools/storage.js";
+import { type ArtifactStore, runArtifactRoot } from "../tools/storage.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { readFile } from "node:fs/promises";
 import { detectHtmlEmbeds } from "../routing/html-embeds.js";
@@ -33,8 +33,8 @@ export class ExtractHtmlStage implements Stage {
       healthyDocuments(state),
       state.docConcurrency,
       async (document) => {
-        const htmlKey = `${document.userId}/${state.run.id}/html/${document.id}.html`;
-        const manifestKey = `${document.userId}/${state.run.id}/html/${document.id}.json`;
+        const htmlKey = `${runArtifactRoot(state.run, document.userId)}/html/${document.id}.html`;
+        const manifestKey = `${runArtifactRoot(state.run, document.userId)}/html/${document.id}.json`;
         const artifactSlot = `${document.id}:html`;
 
         console.log(
@@ -55,7 +55,7 @@ export class ExtractHtmlStage implements Stage {
               // H9: embedded / script-rendered content is not extracted; record it instead of dropping it silently.
               const source = await this.sources.get(document);
               const report = detectHtmlEmbeds(await readFile(source.path, "utf8"));
-              const embedsKey = `${document.userId}/${state.run.id}/html/${document.id}.embeds.json`;
+              const embedsKey = `${runArtifactRoot(state.run, document.userId)}/html/${document.id}.embeds.json`;
               if (report.needsAttention) {
                 await this.storage.putJson(embedsKey, { documentId: document.id, ...report });
                 state.artifactLedger.recordDocument(document.id, "html-embeds", this.storage.uri(embedsKey));

@@ -23,6 +23,7 @@ import {
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { selectSummaryInput } from "./summary-input.js";
 import { readSummarySource } from "./summary-source.js";
+import { runArtifactRoot } from "../tools/storage.js";
 
 export const SUMMARY_MAX_CONCURRENCY = 4;
 const SUMMARY_DEADLINE_MS = 120_000;
@@ -165,7 +166,7 @@ export class DocumentSummaryStage implements Stage {
               });
             }
 
-            const key = `${document.userId}/${state.run.id}/summaries/${document.id}.json`;
+            const key = `${runArtifactRoot(state.run, document.userId)}/summaries/${document.id}.json`;
             await this.storage.putJson(key, {
               documentId: document.id,
               summary: summaryText,

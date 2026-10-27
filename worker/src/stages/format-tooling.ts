@@ -4,6 +4,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { runArtifactRoot } from "../tools/storage.js";
 
 export class FormatToolingStage implements Stage {
   readonly name = "format-tooling";
@@ -16,7 +17,7 @@ export class FormatToolingStage implements Stage {
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const normalizedFormat = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? "unknown";
-      const key = `${document.userId}/${state.run.id}/format-tooling/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/format-tooling/${document.id}.json`;
       const artifactSlot = `${document.id}:format-tooling`;
 
       await runDocumentStage(state, document, this.name, artifactSlot, "format toolchain manifest ready", async () => {

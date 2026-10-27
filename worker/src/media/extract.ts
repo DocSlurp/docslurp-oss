@@ -18,7 +18,7 @@ import { runDocumentStage } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { cleanupTempFile, type ArtifactStore, runArtifactRoot } from "../tools/storage.js";
 import { mediaConfig, type MediaConfig } from "./config.js";
 import { configuredMediaProvider } from "./providers.js";
 import { inspectMedia, prepareAudioChunk } from "./prepare.js";
@@ -144,7 +144,7 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
         visualSegments, sourceArtifactUri, extractor: `media:${provider.id}` });
       const summary = buildMediaSummary({ mediaKind, durationSeconds: duration, segments, visualSegments, coverage, costUsd, diarized: speakerTurns.length > 0,
         diarization: diarization?.status, diarizationReason: diarization?.reason });
-      const prefix = `${document.userId}/${state.run.id}/media/${document.id}`;
+      const prefix = `${runArtifactRoot(state.run, document.userId)}/media/${document.id}`;
       await storage.putBytes(`${prefix}.md`, Buffer.from(text), "text/markdown; charset=utf-8");
       await storage.putJson(`${prefix}.json`, { documentId: document.id, provider: provider.id, model: provider.model,
         durationSeconds: duration, segments, speakerTurns, visualSegments, scanStats, samplingVersion: "video-gray96-v1", coverage, summary,

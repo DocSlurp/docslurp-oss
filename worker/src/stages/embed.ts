@@ -9,7 +9,7 @@ import { adaptiveEmbeddingBatchSizeForStage } from "../pipeline/adaptive-tuning.
 import { checkDedup, completeDocumentPages, emitDocumentPageProgress, hashContent, isCostCapExceeded, registerHash, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { keyFromStorageUri } from "../tools/storage.js";
+import { keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
 import { deleteLanceDbRecords } from "./lancedb-writer.js";
 import { workspaceVectorLocation } from "./lancedb-location.js";
 import { detectLanguage, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
@@ -122,7 +122,7 @@ export class EmbedStage implements Stage {
           );
 
           if (extracted.schemaArtifact) {
-            const schemaKey = `${document.userId}/${state.run.id}/json-schema/${document.id}.json`;
+            const schemaKey = `${runArtifactRoot(state.run, document.userId)}/json-schema/${document.id}.json`;
             await this.storage.putJson(schemaKey, extracted.schemaArtifact);
             state.artifactLedger.recordDocument(document.id, "json-schema", this.storage.uri(schemaKey));
           }
@@ -150,7 +150,7 @@ export class EmbedStage implements Stage {
             orgId: state.run.orgId,
             seedArtifactUris: [priorEmbeddingsUri],
           });
-          const artifactKey = `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
+          const artifactKey = `${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`;
           const preamblesEnabled = state.run.pipeline.contextualChunkPreambles !== false;
           let contextKey: string | undefined;
           let reusedDocumentContext: string | undefined;
@@ -896,7 +896,7 @@ export class EmbedStage implements Stage {
         };
       }),
     };
-    const ownKey = `${args.document.userId}/${args.state.run.id}/embeddings/${args.document.id}.json`;
+    const ownKey = `${runArtifactRoot(args.state.run, args.document.userId)}/embeddings/${args.document.id}.json`;
     await this.storage.putJson(ownKey, artifact);
     const pipelineVersion = createHash("sha256")
       .update(JSON.stringify(pipelineVersionFeatures(args.state.run.pipeline)))

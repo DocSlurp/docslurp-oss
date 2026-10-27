@@ -7,7 +7,7 @@ import path from "node:path";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { cleanupTempFile } from "../tools/storage.js";
+import { cleanupTempFile, documentArtifactRoot } from "../tools/storage.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
@@ -245,7 +245,7 @@ export class PdfRasterCache {
     const dpiDir = resolved.name === "native-pdf" ? `v2-${dpi}dpi-native-pdf` : `v2-${dpi}dpi`;
     const keys = new Map(pageNumbers.map((pageNumber) => [
       pageNumber,
-      `${args.document.userId}/${args.runId}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
+      `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
     ]));
     let engineName: RasterEngineName = resolved.name;
     const existing = new Map<number, number | null>();
@@ -286,7 +286,7 @@ export class PdfRasterCache {
         // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
         engineName = "pdftoppm";
         for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${args.document.userId}/${args.runId}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
+          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
         }
         await Promise.all(pageNumbers.map(async (pageNumber) => {
           existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
