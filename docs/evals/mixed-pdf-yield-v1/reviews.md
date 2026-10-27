@@ -53,8 +53,19 @@ quality floors before marking an improvement accepted.
 - Attempt 3: strengthened source-free spec explicitly requires technical formulas,
   software metadata and aligned gold ordering. Spec overlap checks passed for all
   three authorized sources (zero shared eight-word sequences). A fresh Terra Builder
-  is active; prior code and artifacts are excluded from its inputs. Independent final
-  visual judge and full corpus expansion remain pending.
+  completed 18 PDFs / 180 pages in a3-r2; prior code and artifacts were excluded from
+  its inputs. Structural rerun passed and all 383 artifact hashes were independently
+  confirmed, but the independent audit found four high misses: source-relative
+  two-column geometry and body length (spec), subtitle-only LibreOffice production
+  and conflicting side-panel reading order (build). Repeated content was a medium
+  miss. The scorer returned 35, stop, with three spec attempts exhausted. The best
+  recorded audit score was 75 in attempt 2; no attempt passed acceptance.
+
+The attempt-3 reports, manifest, history, spec and concrete corrections are archived
+under `mixed-pdf-fools-gold-audit/rejected/attempt-3`; original PDFs and source artifacts
+remain intact. No frontier judge, full expansion, accepted threshold search or savings
+measurement followed the rejection. Further generation requires extending the skill's
+attempt limit. Independent visual validation must precede any expansion.
 
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
