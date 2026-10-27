@@ -92,11 +92,11 @@ export interface FeedbackDeps {
   sendAlert?: FeedbackAlertSender;
 }
 
-/** Normalized text hash for duplicate detection (case, whitespace and the prefilled timestamp line ignored). */
+/** Normalized text hash for duplicate detection (case, whitespace and the prefilled When/Trace ID/Request ID lines ignored). */
 export function feedbackMessageHash(message: string): string {
   const normalized = message
     .split("\n")
-    .filter((line) => !/^\s*(when|time)\s*:/i.test(line))
+    .filter((line) => !/^\s*(when|time|trace id|request id)\s*:/i.test(line))
     .join(" ")
     .toLowerCase()
     .replace(/\s+/g, " ")
@@ -267,19 +267,36 @@ function logFeedback(level: "info" | "warn", line: string, attributes: Record<st
 // has its URLs defanged, so it cannot add fake fields, mentions or live links.
 // ---------------------------------------------------------------------------
 
-// C0/C1 controls, zero-width and bidi override/isolate characters.
-// Built from code points so the source stays ASCII.
-const UNSAFE_CHARS = new RegExp(`[${([[0x00, 0x1f], [0x7f, 0x9f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff]] as const).map(([from, to]) => `\\u${from.toString(16).padStart(4, "0")}-\\u${to.toString(16).padStart(4, "0")}`).join("")}]`, "g");
+/**
+ * Invisible and formatting characters: C0/C1 controls, every Unicode format
+ * character (\p{Cf}: zero-width, bidi overrides and isolates, soft hyphen,
+ * Arabic letter mark, Mongolian vowel separator, word joiners, BOM, tag
+ * characters), variation selectors and line/paragraph separators.
+ */
+const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\u{AD}\u{61C}\u{180E}\u{2028}\u{2029}\u{FE00}-\u{FE0F}\u{E0000}-\u{E007F}]/gu;
+/** ASCII full stop plus the ideographic, full-width and half-width ideographic full stops. */
+const DOT_LIKE = /[\u{3002}\u{FF0E}\u{FF61}]/gu;
+/** A dot (after full-width normalization) with a letter, digit, underscore or hyphen on both sides: domains, IDNs and IPs. */
+const INNER_DOT = /(?<=[\p{L}\p{N}\p{M}_-])\.(?=[\p{L}\p{N}\p{M}_-])/gu;
 
-/** One-line, length-capped, control-free text with URLs defanged (hxxps[://]example[.]com). */
+/** Linkable patterns made inert: schemes, every inner dot, IP addresses, @mentions and /commands. */
+export function defangAlertText(value: string): string {
+  return value
+    .replace(DOT_LIKE, ".")
+    .replace(/\bhttp(s?):\/\//giu, "hxxp$1[://]")
+    .replace(/\b([a-z][a-z0-9+.-]{1,15}):\/\//giu, "$1[://]")
+    .replace(INNER_DOT, "[.]")
+    // Telegram links @username and /command when they start a word.
+    .replace(/(^|[^\p{L}\p{N}_])@(?=[\p{L}\p{N}_])/gu, "$1[at]")
+    .replace(/(^|\s)\/(?=[\p{L}\p{N}_])/gu, "$1[/]");
+}
+
+/** One-line, length-capped, invisible-free text, defanged unless `defang: false` (server-issued values only). */
 export function sanitizeAlertField(value: string | null | undefined, maxChars: number, options: { defang?: boolean } = {}): string {
   if (!value) return "";
-  const flat = value.replace(/\r\n|\r|\n/g, " ⏎ ").replace(UNSAFE_CHARS, "").replace(/\s+/g, " ").trim();
-  const defanged = options.defang === false ? flat : flat
-    .replace(/\bhttp(s?):\/\//gi, "hxxp$1[://]")
-    .replace(/\b([a-z][a-z0-9+.-]{1,15}):\/\//gi, "$1[://]")
-    .replace(/([a-z0-9-])\.([a-z]{2,})(?=[/:?#\s]|$)/gi, "$1[.]$2");
-  return defanged.length > maxChars ? `${defanged.slice(0, maxChars - 1)}…` : defanged;
+  const flat = value.replace(/\r\n|\r|\n/g, " \u{23CE} ").replace(UNSAFE_CHARS, "").replace(/\s+/g, " ").trim();
+  const defanged = options.defang === false ? flat : defangAlertText(flat);
+  return defanged.length > maxChars ? `${defanged.slice(0, maxChars - 1)}\u{2026}` : defanged;
 }
 
 /** Slack mrkdwn escaping (https://api.slack.com/reference/surfaces/formatting#escaping). */
@@ -312,7 +329,9 @@ export function formatFeedbackAlertLines(alert: FeedbackAlert, environment: stri
     `User: ${field(alert.userEmail, 320, false)}`,
     `Screen: ${field(alert.screen, 120)} · Route: ${field(alert.route, 200)}`,
     ...(alert.errorCode ? [`Error code: ${field(alert.errorCode, 80)}`] : []),
-    `Trace: ${field(alert.traceId, 64, false)}${alert.requestId ? ` · Request: ${field(alert.requestId, 128, false)}` : ""}`,
+    // Both IDs come from the client: labelled as such, and the request ID is defanged
+    // (a value such as "signoz-docslurp.io" would otherwise render as a link).
+    `Trace (client-reported): ${field(alert.traceId, 64, false)}${alert.requestId ? ` · Request (client-reported): ${field(alert.requestId, 128)}` : ""}`,
     ...(traceUrl ? [`SigNoz: ${traceUrl}`] : []),
     `Message: ${field(alert.message, FEEDBACK_LIMITS.alertExcerptChars)}`,
   ];
