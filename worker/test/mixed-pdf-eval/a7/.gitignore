@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pdf
+*.odt
+*.fodt
+*.png
+*.jpg
+*.svg
+*.json
+clean-inputs/

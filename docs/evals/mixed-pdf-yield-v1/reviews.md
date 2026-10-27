@@ -617,3 +617,18 @@ physical expectations must be frozen before export; old pipe glyph counts are
 obsolete under this explicit user override. Reference Markdown remains separate.
 Round 2 also repairs the reported Writer and E1 reasoning defects and must stop
 for review before further builds or bulk generation. Round 1 remains immutable.
+
+Round 2 froze at 15:11:32 UTC and exported six original PDFs / three editable ODTs
+by 15:12:41. The coordinator inspected the actual table crops: visible pipes are
+removed, columns align, header bands/row rules are present, the merged header is
+retained and the sampled fraction rules are uninterrupted. Builder checks report
+matching glyph inventories and no table-alignment/markup/fraction-probe misses;
+these findings do not constitute independent acceptance. Width and E3 layer/order
+readback flags remain retained.
+
+At the user's request for more parallelism, three independent Sol lanes review
+visual quality, technical mathematics/reasoning and artifact integrity while the
+Builder separately packages the gallery. All read unchanged frozen candidate
+artifacts and write separate reports. Packaging reverified protected round-1 and
+round-2 hashes without re-export or producer edits. No round 3 or bulk work is
+authorized by this checkpoint.
