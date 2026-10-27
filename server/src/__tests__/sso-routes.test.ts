@@ -46,11 +46,17 @@ function resetDb(): void {
 }
 resetDb();
 
+const twoFactorUsers = new Set<string>();
+const createVerificationValueMock = vi.fn(async (data: unknown) => data);
+
 function runFakeSql(strings: TemplateStringsArray, ...values: any[]): any[] {
   const q = strings.join("?").replace(/\s+/g, " ").trim();
   const v = values;
   const now = new Date().toISOString();
 
+  if (q.startsWith('select "twoFactorEnabled" as enabled from "user"')) {
+    return twoFactorUsers.has(v[0]) ? [{ enabled: true }] : [];
+  }
   if (q.startsWith("select role from org_memberships")) {
     return db.memberships.filter((m) => m.org_id === v[0] && m.user_id === v[1]).map(({ role }) => ({ role }));
   }
@@ -168,8 +174,10 @@ vi.mock("../lib/auth.js", () => ({
           }
         }
       },
+      createAuthCookie: (name: string) => ({ name: `better-auth.${name}`, attributes: { httpOnly: true, path: "/", secure: false, sameSite: "Lax" } }),
       internalAdapter: {
-        createSession: createSessionMock
+        createSession: createSessionMock,
+        createVerificationValue: createVerificationValueMock
       }
     })
   }
@@ -635,6 +643,28 @@ describe("SSO callback account binding", () => {
     expect(response.headers.get("set-cookie")).toContain("better-auth.session_token=");
     expect(response.headers.get("set-cookie")).not.toContain("docslurp.sso_unlinked=");
     expect(createSessionMock).toHaveBeenCalledWith("victim-1");
+  });
+
+  it("starts the second-factor challenge instead of a session for a 2FA user", async () => {
+    seedVictim();
+    twoFactorUsers.add("victim-1");
+    db.links.push({ org_id: "org-1", user_id: "victim-1", provider: "oidc", issuer, subject: "idp-victim", email: "victim@acme.com", created_at: "", last_used_at: null });
+    seedRequest("s2fa");
+    await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s2fa" }));
+    try {
+      const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s2fa&code=c", { headers: ssoCookie("s2fa") });
+      expect(response.status).toBe(302);
+      const location = new URL(response.headers.get("location")!);
+      expect(location.pathname).toBe("/app/sign-in");
+      expect(location.searchParams.get("mfa")).toBe("required");
+      const cookies = response.headers.get("set-cookie") ?? "";
+      expect(cookies).not.toContain("better-auth.session_token=");
+      expect(cookies).toMatch(/better-auth\.two_factor=2fa-[^;]+;.*HttpOnly/i);
+      expect(createSessionMock).not.toHaveBeenCalled();
+      expect(createVerificationValueMock).toHaveBeenCalledWith(expect.objectContaining({ value: "victim-1" }));
+    } finally {
+      twoFactorUsers.delete("victim-1");
+    }
   });
 
   it("does not sign in a linked identity whose user left the org", async () => {
