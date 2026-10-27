@@ -15,6 +15,8 @@ export interface WorkspaceRun {
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
   /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
   orgFunded?: boolean;
+  /** False when the org turned off China-based model providers. */
+  orgAllowChinaProviders?: boolean;
   userId: string;
   workspaceId?: string;
   kind: string;

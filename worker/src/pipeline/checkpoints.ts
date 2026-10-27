@@ -286,7 +286,7 @@ export async function runDocumentStage(
         stageName,
         pushPerformance: (event) => state.pendingPerformance.push(event),
         pushUsage: (event) => state.usageLedger.enqueue(event),
-      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId }, () => run(attempt.strategy)));
+      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.orgAllowChinaProviders }, () => run(attempt.strategy)));
       const stats = result.stats ?? {};
 
       const plausibilityDecision = shouldEscalateForLowPlausibility(stats, attempt);

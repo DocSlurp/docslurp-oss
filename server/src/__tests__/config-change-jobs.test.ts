@@ -126,8 +126,10 @@ describe("config-change jobs", () => {
       [indexConfigHash(before)]: before,
       [indexConfigHash(indexConfigOf(embeddingChange().pipeline))]: indexConfigOf(embeddingChange().pipeline),
     });
-    const [run] = await sql<{ job_id: string }[]>`select job_id from workspace_runs where id = ${applied!.job!.id}`;
+    const [run] = await sql<{ job_id: string; ready: boolean }[]>`select job_id, creation_ready_at is not null as ready from workspace_runs where id = ${applied!.job!.id}`;
     expect(run!.job_id).toBe(applied!.job!.id);
+    // Published for processing: run start and run-start recovery only pick up runs with creation_ready_at.
+    expect(run!.ready).toBe(true);
     const [child] = await sql<{ reindex_of: string }[]>`select reindex_of from documents where run_id = ${applied!.job!.id} order by id limit 1`;
     expect(child!.reindex_of).toMatch(/^d\d$/);
     const [count] = await sql<{ n: number }[]>`select count(*)::int as n from documents where run_id = ${applied!.job!.id}`;
@@ -168,8 +170,8 @@ describe("config-change jobs", () => {
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
     await sql`update organizations set credit_balance_cents = 10000 where id = 'o1'`;
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(applied!.job!.runIds.length);
-    const [run] = await sql<{ status: string; blocked_reason: string | null }[]>`select status, blocked_reason from workspace_runs where id = ${applied!.job!.id}`;
-    expect(run).toEqual({ status: "queued", blocked_reason: null });
+    const [run] = await sql<{ status: string; blocked_reason: string | null; ready: boolean }[]>`select status, blocked_reason, creation_ready_at is not null as ready from workspace_runs where id = ${applied!.job!.id}`;
+    expect(run).toEqual({ status: "queued", blocked_reason: null, ready: true });
   });
 
   it("A to B then B to C mid-flight: cancels the B job, re-queues every document for C, ends with only C", async () => {

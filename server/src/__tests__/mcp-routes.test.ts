@@ -40,7 +40,16 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
 vi.mock("../routes/uploads.js", async () => {
   const { Hono } = await import("hono");
   return { uploadEstimateRoutes: new Hono(), uploadsRoutes: new Hono().post("/*", async (c) => {
-    const body = c.req.path.endsWith("/confirm") ? {} : await c.req.json();
+    const body = c.req.path.endsWith("/confirm") ? {}
+      : c.req.path.endsWith("/bulk") ? await (async () => {
+        const form = await c.req.formData();
+        const files = await Promise.all(form.getAll("files").map(async entry => {
+          const file = entry as File;
+          return { name: file.name, type: file.type, bytes: Buffer.from(await file.arrayBuffer()).toString("hex") };
+        }));
+        return { workspace: form.get("workspace") ?? undefined, files };
+      })()
+      : await c.req.json();
     const outcome = uploadRequest({ path: c.req.path, actor: c.get("requestActor"), body, idempotencyKey: c.req.header("Idempotency-Key") });
     if (outcome instanceof Response) return outcome;
     return c.json({ workspace: { id: "ws-1" }, run: { id: "run-1" } }, 201);
@@ -187,6 +196,31 @@ describe("mcpRoutes", () => {
     expect((await request()).status).toBe(404);
   });
 
+  it("sends inline text and base64 files through bulk intake for clients that cannot reach storage", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({
+      workspace: "ws-1", idempotencyKey: "inline-1",
+      inlineFiles: [{ filename: "notes.md", text: "# Hi" }, { filename: "scan.pdf", mimeType: "application/pdf", contentBase64: Buffer.from("%PDF-1.7").toString("base64").replace(/=+$/, "") }],
+    }) });
+    expect(response.status).toBe(201);
+    expect(uploadRequest).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/bulk", idempotencyKey: "inline-1", body: { workspace: "ws-1", files: [
+      { name: "notes.md", type: "application/octet-stream", bytes: Buffer.from("# Hi").toString("hex") },
+      { name: "scan.pdf", type: "application/pdf", bytes: Buffer.from("%PDF-1.7").toString("hex") },
+    ] } }));
+  });
+
+  it.each([
+    [{ inlineFiles: [{ filename: "x.pdf", contentBase64: "not base64!" }] }, 400],
+    [{ inlineFiles: [{ filename: "x.md", text: "a", contentBase64: "YQ" }] }, 400],
+    [{ inlineFiles: [{ filename: "x.md", text: "a" }], urls: ["https://example.com/a.pdf"] }, 400],
+    [{ inlineFiles: [{ filename: "a.md", text: "a".repeat(300 * 1024) }, { filename: "b.md", text: "b".repeat(300 * 1024) }] }, 413],
+  ])("rejects malformed or oversized inline uploads: %#", async (body, status) => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect(response.status).toBe(status);
+    expect(uploadRequest).not.toHaveBeenCalled();
+  });
+
   it("refuses upload without ingest scope or outside the credential workspace allowlist", async () => {
     const request = (body: unknown) => app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const input = { urls: ["https://example.com/manual.pdf"] };
@@ -216,7 +250,7 @@ describe("mcpRoutes", () => {
   it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "getJob"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "getJob"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
   });
@@ -275,9 +309,9 @@ describe("mcpRoutes", () => {
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
     expect(await listed({ scopes: ["search", "ingest", "workspaces:manage"], keyType: "server" })).toEqual([
-      "updateEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate",
+      "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "indexingModeEstimate", "graphRebuildEstimate",
     ]);
-    expect(await listed({ scopes: ["ingest"] })).toEqual(["reprocessEstimate", "fullIndexEstimate", "uploadEstimate"]);
+    expect(await listed({ scopes: ["ingest"] })).toEqual(["uploadEstimate", "fullIndexEstimate", "reprocessEstimate"]);
     expect(await listed({ scopes: ["search"] })).toEqual([]);
   });
 
@@ -414,7 +448,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "getUploadStatus", "reprocessEstimate", "fullIndexEstimate", "uploadEstimate", "getJob"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "getWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
@@ -506,8 +540,9 @@ describe("session MCP tools", () => {
     const tool = tools.find((tool: { id: string }) => tool.id === "upload");
     expect(tool.inputSchema.properties.urls).toBeDefined();
     expect(tool.inputSchema.properties.files).toBeDefined();
+    expect(tool.inputSchema.properties.inlineFiles.items.properties.contentBase64).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "proposeWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "updateEstimate", "searchSettingsEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate", "getJob"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "proposeWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });

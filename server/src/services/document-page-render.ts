@@ -1,4 +1,4 @@
-import { pageRenderSlot, pageRenderDpi, pageRenderCapabilities, isBillingExemptOrg } from "@docslurp/shared";
+import { pageRenderSlot, pageRenderDpi, pageRenderCapabilities } from "@docslurp/shared";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -17,11 +17,8 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     const access = await getWorkspaceAccess(doc.workspaceId, userId);
     if (!access || !canEditWorkspace(access, userId)) return { status: "missing" as const };
   }
-  const [organization] = await sql<{ funded: boolean }[]>`select funded_at is not null as funded from organizations where id=${doc.orgId}`;
-  if (!organization) return { status: "missing" as const };
-  const funded = organization.funded || isBillingExemptOrg(doc.orgId);
-  const dpi = pageRenderDpi(quality, funded);
-  const capabilities = pageRenderCapabilities(funded);
+  const dpi = pageRenderDpi(quality);
+  const capabilities = pageRenderCapabilities();
   const artifact = viewer.artifacts.find(item => item.slot === pageRenderSlot(documentId, pageNumber, quality, dpi));
   if (!artifact && quality === "reader") {
     const legacy = viewer.artifacts.find(item => item.slot === `${documentId}:page-${pageNumber}` || item.slot === `${documentId}:raster-v2-reader-page-${pageNumber}`);

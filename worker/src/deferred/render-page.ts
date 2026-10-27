@@ -1,7 +1,7 @@
 import { ApplicationFailure } from "@temporalio/common";
 import { createHash } from "node:crypto";
 import type { RenderDocumentPageInput } from "@docslurp/shared";
-import { pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingExemptOrg, isBillingEnforced } from "@docslurp/shared";
+import { pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingEnforced } from "@docslurp/shared";
 import type { Store } from "../db/store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { spendBlockCode } from "../db/spend-check.js";
@@ -20,19 +20,17 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const sql = store.stageSql;
   const document = await store.loadDocument(input.documentId);
   if (document.runId !== input.runId || document.status !== "completed" || document.mimeType !== "application/pdf" || !Number.isInteger(input.pageNumber) || input.pageNumber < 1 || input.pageNumber > document.pageCount) throw new Error("Document page is not renderable");
-  const [row] = await sql<{ org_id: string; workspace_id: string; withheld: boolean; funded: boolean; low: string | null; high: string | null }[]>`
+  const [row] = await sql<{ org_id: string; workspace_id: string; withheld: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.workspace_id,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
-      o.funded_at is not null as funded,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 250)} as high
-    from documents d join workspace_runs r on r.id=d.run_id join organizations o on o.id=d.org_id
+    from documents d join workspace_runs r on r.id=d.run_id
     where d.id=${document.id} and r.id=${input.runId}
   `;
   if (!row || row.withheld) throw new Error("Document page is unavailable");
-  const funded = row.funded || isBillingExemptOrg(row.org_id);
-  const dpi = input.dpi ?? pageRenderDpi(quality, funded);
-  if ((dpi !== 120 && dpi !== 250) || (dpi === 250 && (quality !== "export" || !funded))) throw ApplicationFailure.nonRetryable("Page render policy changed; request again", "PageRenderPolicyChanged");
+  const dpi = input.dpi ?? pageRenderDpi(quality);
+  if ((dpi !== 120 && dpi !== 250) || (dpi === 250 && quality !== "export")) throw ApplicationFailure.nonRetryable("Page render policy changed; request again", "PageRenderPolicyChanged");
   const slot = pageRenderSlot(input.documentId, input.pageNumber, quality, dpi);
   if (dpi === 250 ? row.high : row.low) {
     await sql`delete from document_page_renders where document_id=${document.id} and run_id=${input.runId} and page_number=${input.pageNumber} and quality=${quality} and dpi=${dpi}`;
@@ -61,10 +59,9 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   signal?.throwIfAborted();
   await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
-    const live = await client`select d.id, o.funded_at is not null as funded from documents d join organizations o on o.id=d.org_id
+    const live = await client`select d.id from documents d
       where d.id=${document.id} and d.run_id=${input.runId} and d.status='completed'
       and coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'),0)=0 for update of d`;
-    if (live.length && dpi === 250 && !(live[0].funded === true || isBillingExemptOrg(row.org_id))) throw ApplicationFailure.nonRetryable("Page render policy changed; request again", "PageRenderPolicyChanged");
     if (!live.length) throw new Error("Document page is unavailable");
     signal?.throwIfAborted();
     await client`update workspace_runs set artifacts=coalesce(artifacts,'{}'::jsonb) || ${client.json({ [slot]: page.artifactUri, ...(quality === "reader" ? { [`${document.id}:page-${input.pageNumber}`]: page.artifactUri } : {}) })}::jsonb where id=${input.runId}`;

@@ -39,7 +39,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   };
   const server = new Server(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. Follow getUploadStatus with the returned sessionId, then workspace and run IDs. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
+    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. If you cannot reach those URLs, send small files as upload inlineFiles. For a public file, pass its URL so DocSlurp downloads it directly. Follow getUploadStatus with the returned sessionId, then workspace and run IDs. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
   const tools = manifest.capabilities.filter((item) => item.category === "tool");
   server.setRequestHandler("tools/list", () => ({ tools: tools.map((item) => {

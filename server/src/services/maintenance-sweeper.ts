@@ -3,6 +3,7 @@ import { runAutoRecharge } from "./billing/auto-recharge.js";
 import { syncMeteringEnforcement } from "./billing/metering.js";
 import { runStorageMeter } from "./billing/storage-meter.js";
 import { sweepInterruptedConnectorSyncs } from "./connector-sync-recovery.js";
+import { sweepDocumentExports } from "./document-exports.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -42,6 +43,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["credit-lease-expiry", () => sweepExpiredCreditLeases()],
   // Finish organization deletions interrupted after their tombstone was written.
   ["tenant-offboarding", () => resumeOrganizationDeletions()],
+  // Zip exports: email finished large ones, delete objects past their 7-day link.
+  ["document-exports", () => sweepDocumentExports()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

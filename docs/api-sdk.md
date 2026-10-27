@@ -196,11 +196,12 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
+| Export as a zip | `POST /v1/exports`, poll `GET /v1/exports/:id`, then `GET /v1/exports/:id/download` | Use HTTP | Use HTTP |
 | Retention | `PATCH /v1/organizations/:orgId` or `/v1/workspaces/:workspace` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
 | Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
 | Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
-| Read / update organization | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
+| Read / update organization (name, slug, retention, `allowChinaProviders`) | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
 | Organization details / access | `GET /v1/organizations/:orgId/details` / `access` | `getOrganizationDetails` / `getOrganizationAccess` | Use SDK/HTTP |
 | List members | `GET /v1/organizations/:orgId/members` | `listOrganizationMembers` | Use SDK/HTTP |
 | Invite / list / revoke invites | `POST` / `GET /v1/organizations/:orgId/invites`, `DELETE …/invites/:inviteId` | `inviteOrganizationMember` / `listOrganizationInvites` / `revokeOrganizationInvite` | Use SDK/HTTP |
@@ -560,7 +561,7 @@ Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `w
 | `config` | The pipeline settings that shaped what was observed (vision, vision page limit, playbook, OCR language, tables, embeddings, chunking, video, cost cap, privacy mode), each with why it matters here. |
 | `recommendations` | Deterministic rules with the evidence, the expected effect, `cost.centsPer100Pages` for future uploads, `cost.reprocessCents` for re-running the affected files, and the pipeline `patch` an editor can apply. |
 
-Video frame reading defaults to enabled for new workspaces and configurations that omit `mediaVideo.enabled`. Explicit `false` disables frame reading even for silent video. This workspace policy still requires the worker's `MEDIA_VIDEO_ENABLED=true`, remote-media support, privacy permission and available budget/quota. The report shows workspace policy, not proof that frames were processed. Changing the default does not reprocess existing uploads; reprocessing remains explicit.
+Video frame reading defaults to enabled for new workspaces and configurations that omit `mediaVideo.enabled`. Explicit `false` disables frame reading even for silent video, and bills the file as audio (see below). Every organization gets the same video limits (up to 2 hours per file); only credits and budgets bound what a video costs. This workspace policy still requires the worker's `MEDIA_VIDEO_ENABLED=true`, remote-media support, privacy permission and available budget. The report shows workspace policy, not proof that frames were processed. Changing the default does not reprocess existing uploads; reprocessing remains explicit.
 
 Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `vision.forceAllPages` and a page limit of up to 32); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. A failed file never produces a vision recommendation; `retry-failed-files` names the cause and says when retrying will fail the same way (for example `ocr_unavailable`). Singular and plural wording follows the counts. Every recommendation id is classified in `INGEST_RECOMMENDATION_CATALOG`: those with a `patch` (`turn-on-vision`, `vision-all-pages`, `preserve-tables`, `turn-on-embeddings`, `turn-on-video`) can be prepared in chat with `proposeWorkspaceSettings` as `{changes: {pipeline: <patch>}}`; the rest are reprocess-only, informational or outside the proposal allowlist, and a test enforces that. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
 
@@ -905,34 +906,32 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-The table comes from the organization's billing state, never from the key: an organization that has only its starter credits is a *starter* organization and gets the `free` table; once it buys credits (a top-up, an auto top-up, or credits added by DocSlurp) it is *funded* and gets the `paid` table, for good. An API key gets its organization's table, and a signed-in user gets the paid table when any organization they belong to is funded. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits, so a high value on a starter organization does not unlock funded limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Funding takes effect within a minute. Default per-minute limits on docslurp.io:
+Every account gets the same table, whatever its billing state: buying credits does not change it. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Default per-minute limits on docslurp.io:
 
-| Category | Starter (`free`) | Funded (`paid`) | Per client IP |
-| --- | ---: | ---: | ---: |
-| `upload` | 60 | 120 | 90 |
-| `search` | 240 | 600 | 240 |
-| `chat-ai` | 60 | 120 | 90 |
-| `read` | 600 | 1,500 | 1,200 |
-| `write` | 300 | 600 | 300 |
-| `webhook` | 120 | 600 | 600 |
+| Category | Per account | Per client IP |
+| --- | ---: | ---: |
+| `upload` | 120 | 90 |
+| `search` | 600 | 240 |
+| `chat-ai` | 120 | 90 |
+| `read` | 1,500 | 1,200 |
+| `write` | 600 | 300 |
+| `webhook` | 600 | 600 |
 
-These are abuse protection, not a spending control: credits and budgets bound what you spend. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
+These are abuse protection, not a spending control: credits and budgets bound what you spend. No feature, model, media type, setting or rate limit depends on whether an organization has bought credits. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_ACCOUNT_SEARCH_MAX`) or `API_RATE_LIMIT_<CATEGORY>_MAX`.
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.account`: `starter`, `funded` or `ip`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing and buying credits, `rel="help"` for these docs), and the message says where to go. A starter organization's limit says that buying credits raises it:
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`, which names the table: `account-*`, `ip-*` or `self-hosted-*`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
 
 ```json
 {
   "error": {
     "code": "rate_limited",
-    "message": "Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at https://docslurp.io/app/billing#bl-topup, or wait for Retry-After and try again.",
+    "message": "Please wait a moment before trying again. Rate limits: https://docslurp.io/docs/http#rate-limits-and-headers",
     "details": {
       "category": "chat-ai",
-      "policy": "free-chat-ai",
-      "account": "starter",
+      "policy": "account-chat-ai",
       "retryAfterSeconds": 12,
       "links": {
         "billing": "https://docslurp.io/app/billing",
-        "buyCredits": "https://docslurp.io/app/billing#bl-topup",
         "docs": "https://docslurp.io/docs/http#rate-limits-and-headers"
       }
     },
@@ -955,15 +954,15 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 | Video (frames read) | 3 Rich pages per minute |
 | Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
 | Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
-| Chat answer | 2.5 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
+| Chat answer | 1 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
 | Document summary (`summarize`) | 0.5 per document |
 | Structured fields (`outputSchema`) | 1 per started 10 pages per document |
 | Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
 | Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
 
-Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
+Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
 
-Organizations that have bought credits (funded) run up to 250 workers at once and get the higher rate limits; starter organizations run up to 50. Larger ceilings and dedicated (private) machines are sold by sales.
+Organizations that have bought credits (funded) run up to 250 workers at once; starter organizations run up to 50. Rate limits are the same for both. Larger ceilings and dedicated (private) machines are sold by sales.
 
 Auto top-up is off by default. Turn it on from the billing page with a threshold in credits, a refill amount (a pack or a custom amount of at least $10) and a required monthly cap; every charge emails a receipt and appears in the credit ledger, and it pauses after two failed charges. `GET /v1/billing/overview` returns the balance, funding, worker ceiling, auto top-up settings, this month's spend by category and a monthly forecast built from what you store and the last 30 days of searches, chat answers and pages.
 
@@ -1004,6 +1003,42 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 `GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
 
 Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
+
+## Export documents as a zip
+
+Export one document or a workspace's current documents as an organized zip. The worker builds the archive in the background and stages it in object storage; the API never holds it in memory.
+
+```bash
+curl -X POST "$DOCSLURP_URL/v1/exports" -H "Authorization: Bearer $KEY" \
+  -H "content-type: application/json" -d '{"workspaceId":"default","content":"markdown"}'
+# 202 { "export": { "id": "exp_…", "status": "queued", "notifyEmail": false, "expiresAt": "…" } }
+curl "$DOCSLURP_URL/v1/exports/exp_…" -H "Authorization: Bearer $KEY"     # status: queued → running → ready
+curl -L -o export.zip "$DOCSLURP_URL/v1/exports/exp_…/download" -H "Authorization: Bearer $KEY"
+```
+
+Pass `documentId` for one document, or `workspaceId` (UUID, slug or `default`) for a workspace; omit both to export the organization's default workspace. `content` is `markdown` (default) or `all`:
+
+```text
+Finance/                      one folder per document (a document export is just its folder)
+  Q3 plan/
+    Q3 plan.md                extracted Markdown for the whole document
+    pages/page-0001.md        the same text page by page (documents with more than one page)
+    structured.json           schema fields, when the workspace has a schema
+    metadata.json             filename, type, status, page count, version, tags
+    original/Q3 plan.pdf      "all" only: the uploaded file
+    images/page-0001.png      "all" only: rendered page images
+    outputs/html.html         "all" only: readable pipeline outputs (HTML, canonical document, …)
+  README.md                   the layout, a document table, and any file that could not be included
+```
+
+Workspace exports hold current versions only (no superseded, archived or purged documents), up to 5,000 documents; a document still processing contributes its `metadata.json`. Files the PII policy withholds are never exported, and the README lists them. Deleting or purging a document in an export withdraws the export. Limits:
+
+- **Size:** exports estimated over **3 GB** are refused with `413 payload_too_large`; export Markdown only or one document at a time. The worker also stops adding files at that size and lists the rest in `README.md`.
+- **Email:** exports estimated over **250 MB** are emailed to the requester when ready (`notifyEmail: true`), so nobody has to keep a tab open.
+- **Lifetime:** every link works for **7 days** from when the export is ready (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, workspace access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
+- **Limits:** three unfinished exports per user, and 20 exports or 20 GB (estimated) per user per day (`429 rate_limited`). Asking for the same export again within an hour returns the one already in flight or finished. A single document must have finished processing (`409` otherwise).
+
+Sessions and server keys with `artifacts` can export; keys stay within their organization and workspace restrictions. Objects live in the private bucket under `exports/<orgId>/<workspaceId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
 
 ## Primary sponsor
 

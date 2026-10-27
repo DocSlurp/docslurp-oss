@@ -127,9 +127,9 @@ const registered = [
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
     prepare: async (runner, source, config, context) => {
       const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
-      // An image has no text layer, so Kreuzberg can only OCR it. Without Tesseract language data (the lean
-      // worker image) that fails on every image, so report it unavailable and let the stage route the image
-      // to vision. Text-layer formats never invoke OCR.
+      // An image has no text layer, so Kreuzberg can only OCR it. Without Tesseract language data (an image or
+      // local setup built without it) that fails on every image, so report it unavailable and let the stage
+      // route the image to vision. Text-layer formats never invoke OCR.
       if (context?.format === "image" && !ocrAvailable({ env: context.env, language: kreuzbergOcrLanguage(config) })) {
         return { ...plan, available: false };
       }

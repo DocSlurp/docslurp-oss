@@ -60,7 +60,7 @@ describe("multimedia extraction pipeline boundary", () => {
     vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:false,hasVideo:true});
     await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
     expect(transcribeChunk).not.toHaveBeenCalled();expect(describeVideoChunk).toHaveBeenCalledTimes(1);
-    expect(f.journal.admitVideo).toHaveBeenCalledWith(expect.objectContaining({orgId:"org"}),2,12);
+    expect(f.journal.admitVideo).toHaveBeenCalledWith(expect.objectContaining({orgId:"org"}),2,24);
     expect(f.storage.putJson).toHaveBeenCalledWith(expect.stringContaining(".json"),expect.objectContaining({coverage:"sampled-visual-only",visualSegments:[expect.objectContaining({id:"doc:visual:0",samples:[0,1]})]}));
     const markdown=f.storage.putBytes.mock.calls[0] as unknown as [string,Buffer];expect(markdown[1].toString()).toBe("[00:00–00:01] On screen: [1s] A visible label");
     const canonical = (f.storage.putJson.mock.calls as unknown as [string, unknown][]).find(c => c[0].endsWith(".canonical.json"))![1] as { blocks: { metadata: Record<string, unknown> }[] };

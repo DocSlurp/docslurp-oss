@@ -19,5 +19,7 @@ export const updateOrganizationSchema = z.object({
   slug: z.string().trim().min(2).max(120).regex(/^[a-z0-9-]+$/).nullable().optional(),
   /** Null returns to DEFAULT_RETAINED_VERSIONS. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
-}).strict().refine(value => Object.keys(value).length > 0, "Supply name, slug or retainDocumentVersions");
+  /** False keeps China-based model providers out of every model request made for the org. */
+  allowChinaProviders: z.boolean().optional(),
+}).strict().refine(value => Object.keys(value).length > 0, "Supply name, slug, retainDocumentVersions or allowChinaProviders");
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;

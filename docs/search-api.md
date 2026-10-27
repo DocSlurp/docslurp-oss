@@ -84,6 +84,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Workspaces and runs: `workspace_forbidden`, `workspace_scope_forbidden` (a key limited to specific workspaces tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
 - Anything else: `unavailable` and `internal`.
 
@@ -126,7 +127,7 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. Unless you set it, the agent gets 4 calls and continues past them, up to 8, only while each search adds new evidence and the turn has used under 150,000 input tokens; set `maxSteps` for a fixed budget. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
 | `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
 | `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
@@ -169,7 +170,7 @@ Agent responses add these `debug` fields (other turns omit them):
 | `zeroHitSearchCount` | Search calls that returned no results |
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
-| `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
+| `limits` | `{maxSteps, baseSteps, maxToolCalls, searchConcurrency, clamped}` as applied; `baseSteps` is the dynamic step budget |
 | `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
@@ -221,7 +222,7 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
       {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
       {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
     ],
-    "limits": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
+    "limits": {"maxSteps": 4, "baseSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
   }
 }
 ```

@@ -4,12 +4,12 @@ vi.mock("../pipeline/pdf-asset-cache.js", () => ({ PdfRasterCache: class { rende
 vi.mock("../db/usage-event-store.js", () => ({ persistScopedUsageEvents: mocks.persist }));
 import { renderDocumentPage } from "./render-page.js";
 const document = { id: "doc", runId: "run", userId: "owner", mimeType: "application/pdf", status: "completed", pageCount: 3 };
-function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: boolean; existing?: string; funded?: boolean; liveFunded?: boolean } = {}) {
+function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: boolean; existing?: string } = {}) {
   const artifacts: Record<string, string> = {};
   const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
-    if (query.includes("select d.org_id")) return [{ org_id: "org", workspace_id: "workspace", withheld: options.withheld ?? false, funded:options.funded??false, low:options.existing, high:options.existing }];
-    if (query.includes("select d.id, o.funded_at")) return options.deleted ? [] : [{ id: "doc", funded:options.liveFunded??options.funded??false }];
+    if (query.includes("select d.org_id")) return [{ org_id: "org", workspace_id: "workspace", withheld: options.withheld ?? false, low:options.existing, high:options.existing }];
+    if (query.includes("select d.id")) return options.deleted ? [] : [{ id: "doc" }];
     if (query.includes("update workspace_runs")) Object.assign(artifacts, values[0]);
     return [];
   }), { json: (value: unknown) => value, begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
@@ -44,7 +44,7 @@ describe("lazy PDF worker rendering", () => {
   });
   it("separates export receipts and renders the exact page at its selected quality", async () => {
     await renderDocumentPage(setup().deps, { documentId: "doc", runId: "run", pageNumber: 3 });
-    await renderDocumentPage(setup({funded:true}).deps, { documentId: "doc", runId: "run", pageNumber: 3, quality: "export" });
+    await renderDocumentPage(setup().deps, { documentId: "doc", runId: "run", pageNumber: 3, quality: "export" });
     expect(mocks.render.mock.calls.map(call => [call[0].pageNumbers, call[0].dpi])).toEqual([[[3], 120], [[3], 250]]);
     expect(mocks.receipts[0].usageEvents[0].id).not.toBe(mocks.receipts[1].usageEvents[0].id);
   });
@@ -62,18 +62,18 @@ describe("lazy PDF worker rendering", () => {
   });
 });
 
-it("cannot bypass the owning organization's quality policy through raw DPI or quality", async () => {
+it("renders the 250-DPI export for any organization but never a sharper reader or an arbitrary DPI", async () => {
+  await renderDocumentPage(setup().deps, {
+    documentId: "doc",
+    runId: "run",
+    pageNumber: 1,
+    quality: "export",
+    dpi: 250,
+  });
+  expect(mocks.render).toHaveBeenCalledWith(expect.objectContaining({ dpi: 250 }));
+  mocks.render.mockClear();
   await expect(
     renderDocumentPage(setup().deps, {
-      documentId: "doc",
-      runId: "run",
-      pageNumber: 1,
-      quality: "export",
-      dpi: 250,
-    }),
-  ).rejects.toMatchObject({ nonRetryable: true });
-  await expect(
-    renderDocumentPage(setup({ funded: true }).deps, {
       documentId: "doc",
       runId: "run",
       pageNumber: 1,
@@ -82,7 +82,7 @@ it("cannot bypass the owning organization's quality policy through raw DPI or qu
     }),
   ).rejects.toMatchObject({ nonRetryable: true });
   await expect(
-    renderDocumentPage(setup({ funded: true }).deps, {
+    renderDocumentPage(setup().deps, {
       documentId: "doc",
       runId: "run",
       pageNumber: 1,
@@ -92,30 +92,7 @@ it("cannot bypass the owning organization's quality policy through raw DPI or qu
   ).rejects.toMatchObject({ nonRetryable: true });
   expect(mocks.render).not.toHaveBeenCalled();
 });
-it("keeps an admitted120 DPI snapshot valid after funding while rechecking250 before publication", async () => {
-  await renderDocumentPage(setup({ funded: true }).deps, {
-    documentId: "doc",
-    runId: "run",
-    pageNumber: 1,
-    quality: "export",
-    dpi: 120,
-  });
-  expect(mocks.render).toHaveBeenCalledWith(
-    expect.objectContaining({ dpi: 120 }),
-  );
-  mocks.persist.mockClear();
-  await expect(
-    renderDocumentPage(setup({ funded: true, liveFunded: false }).deps, {
-      documentId: "doc",
-      runId: "run",
-      pageNumber: 1,
-      quality: "export",
-      dpi: 250,
-    }),
-  ).rejects.toMatchObject({ nonRetryable: true });
-  expect(mocks.persist).not.toHaveBeenCalled();
-});
-it("separates free and funded export receipts even for the same document page", async () => {
+it("separates 120 and 250 DPI export receipts for the same document page", async () => {
   await renderDocumentPage(setup().deps, {
     documentId: "doc",
     runId: "run",
@@ -123,7 +100,7 @@ it("separates free and funded export receipts even for the same document page", 
     quality: "export",
     dpi: 120,
   });
-  await renderDocumentPage(setup({ funded: true }).deps, {
+  await renderDocumentPage(setup().deps, {
     documentId: "doc",
     runId: "run",
     pageNumber: 1,
@@ -133,24 +110,4 @@ it("separates free and funded export receipts even for the same document page", 
   expect(mocks.receipts[0].usageEvents[0].id).not.toBe(
     mocks.receipts[1].usageEvents[0].id,
   );
-});
-
-it("allows house-account explicit quality while retaining the 120-DPI reader default", async () => {
-  vi.stubEnv("BILLING_EXEMPT_ORG_IDS", "org");
-  await renderDocumentPage(setup().deps, {
-    documentId: "doc",
-    runId: "run",
-    pageNumber: 1,
-    quality: "reader",
-  });
-  await renderDocumentPage(setup().deps, {
-    documentId: "doc",
-    runId: "run",
-    pageNumber: 1,
-    quality: "export",
-    dpi: 250,
-  });
-  expect(mocks.render.mock.calls.map((call) => call[0].dpi)).toEqual([
-    120, 250,
-  ]);
 });

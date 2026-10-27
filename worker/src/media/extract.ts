@@ -89,9 +89,9 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
         && state.run.pipeline.mediaVideo?.enabled !== false;
       if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
-      const policy = hasVideo ? videoPolicy(state.run.orgFunded, duration, state.run.pipeline.mediaVideo) : undefined;
+      const policy = hasVideo ? videoPolicy(duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {
-        if (!args.journal.admitVideo) throw new Error("Video requires durable organization quota admission");
+        if (!args.journal.admitVideo) throw new Error("Video requires durable admission");
         await args.journal.admitVideo(scope, duration, visualEnabled ? policy.frames : 0);
       }
       // Until capacity reservations support a document ledger, reject this combination

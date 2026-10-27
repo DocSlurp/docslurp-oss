@@ -12,7 +12,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -72,6 +72,7 @@ type WorkspaceRunRow = {
   org_id: string;
   /** Joined from organizations by loadRun; absent from other run queries. */
   org_funded?: boolean | null;
+  org_allow_china_providers?: boolean | null;
   workspace_id: string;
   user_id: string;
   kind: string;
@@ -369,7 +370,8 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   // The org's plan rides along (no extra round trip): it sets the AI credit
   // factor for bonus plans in the usage ledger.
   return client<WorkspaceRunRow[]>`
-    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
+    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded,
+      (select o.allow_china_providers from organizations o where o.id = r.org_id) as org_allow_china_providers
     from workspace_runs r
     where r.id = ${runId}
     limit 1
@@ -2171,10 +2173,30 @@ export class Store {
         .map((reference) => reference.key),
     );
     const checkedReferences = Array.from(expectedKeySet).slice(0, maxKeys);
+    // Existence comes from listing each run's prefix (`<user>/<run>/`) completely:
+    // one LIST per run instead of a HEAD per artifact, with no reliance on listing
+    // order. Keys a complete listing lacks are confirmed with a HEAD before they
+    // count as missing; prefixes too large to list, and keys without one, are HEADed.
     const existingKeySet = new Set<string>();
+    const { byPrefix, ungrouped } = groupReferencesByRunPrefix(checkedReferences);
+    const needsHead = [...ungrouped];
+    let listCalls = 0;
+    const prefixes = [...byPrefix.entries()];
+    for (let index = 0; index < prefixes.length; index += 8) {
+      await Promise.all(prefixes.slice(index, index + 8).map(async ([runPrefix, keys]) => {
+        const listing = await storage.listKeys({ prefix: runPrefix, maxKeys: 10_000 }).catch(() => null);
+        listCalls += 1;
+        if (!listing || listing.truncated) { needsHead.push(...keys); return; }
+        const listed = new Set(listing.keys);
+        for (const key of keys) {
+          if (listed.has(key)) existingKeySet.add(key);
+          else needsHead.push(key);
+        }
+      }));
+    }
 
-    for (let index = 0; index < checkedReferences.length; index += 25) {
-      const batch = checkedReferences.slice(index, index + 25);
+    for (let index = 0; index < needsHead.length; index += 25) {
+      const batch = needsHead.slice(index, index + 25);
       const results = await Promise.all(
         batch.map(async (key) => ({
           key,
@@ -2188,6 +2210,7 @@ export class Store {
         }
       }
     }
+    console.log(`[storage-integrity] references=${checkedReferences.length} run_prefixes=${byPrefix.size} list_calls=${listCalls} head_checks=${needsHead.length}`);
 
     const baseReport = buildStorageIntegrityReport({
       bucket: storage.bucket,
@@ -2478,6 +2501,18 @@ export class Store {
             updated_at = now()
       `;
     }
+  }
+
+  async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
+    const rows = await this.sql`
+      update documents
+      set metadata = coalesce(metadata, '{}'::jsonb)
+        || jsonb_build_object('title', ${title.title}::text, 'titleSource', ${title.source}::text)
+      where id = ${documentId}
+        and nullif(btrim(metadata ->> 'title'), '') is null
+      returning id
+    `;
+    return rows.length > 0;
   }
 
   async insertPages(
@@ -3750,6 +3785,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     id: row.id,
     orgId: row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
+    ...(row.org_allow_china_providers === false ? { orgAllowChinaProviders: false } : {}),
     userId: row.user_id,
     workspaceId: row.workspace_id,
     kind: row.kind,
@@ -4035,4 +4071,23 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * Groups referenced keys by their run prefix (`<user>/<run>/`, the artifact
+ * layout), so each run can be listed once. Keys with fewer segments are left
+ * for a HEAD each.
+ */
+export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<string, string[]>; ungrouped: string[] } {
+  const byPrefix = new Map<string, string[]>();
+  const ungrouped: string[] = [];
+  for (const key of keys) {
+    const parts = key.split("/");
+    if (parts.length < 3 || !parts[0] || !parts[1]) { ungrouped.push(key); continue; }
+    const prefix = `${parts[0]}/${parts[1]}/`;
+    const list = byPrefix.get(prefix);
+    if (list) list.push(key);
+    else byPrefix.set(prefix, [key]);
+  }
+  return { byPrefix, ungrouped };
 }

@@ -322,7 +322,7 @@ describe("chatWorkspace", () => {
         model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
         actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
       expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
-        limits: { maxSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
+        limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
       expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
     } finally {
       if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
@@ -351,12 +351,12 @@ describe("chatWorkspace", () => {
       if (allowed) {
         await turn("inception/mercury-3");
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "inception/mercury-3",
-          limits: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
+          limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
       } else {
         await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
         await turn();
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
-          limits: { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
+          limits: { maxSteps: 8, baseSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
       }
     } finally {
       for (const [name, value] of [["OPENROUTER_API_KEY", previous.key], ["DOCSLURP_CHAT_EVAL_MODELS", previous.models], ["DOCSLURP_CHAT_EVAL_ORG_IDS", previous.orgs]] as const) {

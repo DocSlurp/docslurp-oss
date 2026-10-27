@@ -76,6 +76,8 @@ export const organizations = pgTable(
   {
     id: text().primaryKey().notNull(),
     retainDocumentVersions: integer("retain_document_versions"),
+    /** False keeps China-based model providers out of the org's OpenRouter requests (migration 0086). */
+    allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
     retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
     retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
     name: text().notNull(),

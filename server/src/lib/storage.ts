@@ -5,6 +5,7 @@ import {
   CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -16,7 +17,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
-import { resolveS3ClientTuning, s3ClientConfig } from "@docslurp/shared";
+import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig } from "@docslurp/shared";
 import { uploadSigningTarget } from "./upload-signing-target.js";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
@@ -214,6 +215,31 @@ export async function signSingleUploadPut(args: {
       ContentType: args.contentType
     }),
     { expiresIn: args.expiresInSeconds ?? 900 }
+  );
+}
+
+/** Longest life of a presigned download link; the request is authorized just before signing. */
+export const DOWNLOAD_LINK_MAX_SECONDS = 300;
+
+/**
+ * A short-lived GET link straight to storage, saving the object as `filename`.
+ * Only for large downloads that should not stream through the API (zip
+ * exports); every other read goes through the file proxy (routes/files.ts).
+ * Callers authorize the request immediately before calling this.
+ */
+export async function signDownloadGet(args: { key: string; filename: string; expiresInSeconds?: number }): Promise<string> {
+  const ascii = args.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return await getSignedUrl(
+    presignClient,
+    new GetObjectCommand({
+      Bucket: uploadTarget.bucket,
+      Key: args.key,
+      ResponseContentType: "application/zip",
+      ResponseContentDisposition: `attachment; filename="${ascii}"; filename*=UTF-8''${rfc5987Encode(args.filename)}`,
+      // Never kept by browser or proxy caches once the link's minutes are up.
+      ResponseCacheControl: "private, no-store"
+    }),
+    { expiresIn: Math.min(args.expiresInSeconds ?? 120, DOWNLOAD_LINK_MAX_SECONDS) }
   );
 }
 

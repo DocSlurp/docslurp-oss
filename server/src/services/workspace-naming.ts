@@ -1,8 +1,16 @@
+import { cleanDocumentTitle } from "@docslurp/shared";
 import { sql } from "../db.js";
 
+/**
+ * A short workspace name from a heading, title or first question. Every source is
+ * untrusted (document text, or text a user pasted), and workspace names reach chat
+ * prompts, so the candidate passes the same checks as document titles: one line,
+ * no control/zero-width/bidi characters or markup, nothing instruction-shaped, no
+ * URLs or email addresses, nothing generic.
+ */
 export function workspaceSubject(value: string): string | null {
-  const title = value.replace(/^#+\s*/, "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  if (title.length < 3 || /^(?:untitled|contents|table of contents|copyright|all rights reserved|page \d+)$/i.test(title)) return null;
+  const title = cleanDocumentTitle(value);
+  if (!title || /^(?:copyright|all rights reserved)$/i.test(title)) return null;
   const words = title.split(" ").slice(0, 9).join(" ");
   return words.slice(0, 72).replace(/\s+\S*$/, words.length > 72 ? "" : "$&");
 }
@@ -24,6 +32,9 @@ export async function refineWorkspaceNames(workspaceIds: string[], firstMessage?
   if (!workspaceIds.length) return;
   const rows = await sql<{ id: string; name: string; title: string | null }[]>`
     select w.id, w.name, coalesce(
+      -- A document title derived at extraction (already cleaned) beats a chunk heading.
+      (select d.metadata ->> 'title' from documents d
+        where d.workspace_id = w.id and nullif(btrim(d.metadata ->> 'title'), '') is not null order by d.created_at limit 1),
       c.metadata ->> 'title', c.heading_path[1],
       -- Deferred documents have no chunks until pages are searched; their Index Map supplies a title.
       (select d.metadata ->> 'mapTitle' from documents d
