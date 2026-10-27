@@ -275,7 +275,11 @@ pi mcp list                                             # connects and lists the
   sign in again. Token errors are RFC 6749 JSON with an `error_description`, and the
   server logs `[mcp-oauth] token_rejected reason=…` without the token.
 - Loopback redirect URIs may use any port (RFC 8252). The `resource` parameter
-  defaults to the MCP endpoint and any other value is refused.
+  defaults to the MCP endpoint and any other value is refused, except that the
+  first-party DocSlurp CLI (`docslurp-cli`) may request the REST API (`<origin>/v1`).
+  CLI tokens (`dscli_`) also work on `/v1/mcp`, a sub-resource; MCP tokens never
+  work on the REST API. `docslurp mcp` uses a stored `docslurp login` without an
+  API key. See [OAuth access tokens](api-sdk.md#oauth-access-tokens-cli-login).
 
 ## Dashboard chat and WebMCP
 

@@ -123,7 +123,7 @@ export interface McpTool {
   /** An API key needs at least one of these scopes to see or call the tool. */
   scopes: McpScope[];
   /** Replaces the `scopes` check for API keys (scope and key type): estimates mirror the access of the mutation they price. */
-  keyAccess?: (key: { scopes: readonly string[]; keyType?: string }) => boolean;
+  keyAccess?: (key: { scopes: readonly string[]; keyType?: string; oauth?: { audience: string } }) => boolean;
   annotations: ToolAnnotations;
 }
 
@@ -206,14 +206,17 @@ export function mcpTools(baseUrl: string): McpTool[] {
     .map(tool => ({ ...tool, category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/${tool.id}` }));
 }
 
-/** The catalog visible to a caller: session callers see everything, API keys see tools their scopes allow. */
-export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string) {
+/**
+ * The catalog visible to a caller: session callers see everything, API keys see tools their scopes allow.
+ * `oauth` is the key's OAuth marker: a CLI (REST-audience) token sees web tools only with the `web` scope.
+ */
+export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string, oauth?: { audience: string }) {
   return {
     server: {
       id: env.mcpServerId, title: "DocSlurp MCP", version: "0.1.0",
       transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp`,
       auth: { type: "apiKey", scopes: ["search", "ingest"] },
     },
-    capabilities: mcpTools(baseUrl).filter(tool => !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType }) : tool.scopes.some(scope => scopes.includes(scope)))),
+    capabilities: mcpTools(baseUrl).filter(tool => !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType, oauth }) : tool.scopes.some(scope => scopes.includes(scope)))),
   };
 }

@@ -6,7 +6,10 @@
  * (opt-in, workspace-bound). Server keys keep them with `search`, and
  * `ingestWebsite` always needs `ingest` as well.
  */
-export function apiKeyCanUseWebTools(key: { scopes: readonly string[]; keyType?: string }, ingest = false): boolean {
+export function apiKeyCanUseWebTools(key: { scopes: readonly string[]; keyType?: string; oauth?: { audience: string } }, ingest = false): boolean {
   if (!key.scopes.includes(ingest ? "ingest" : "search")) return false;
+  // A CLI (REST-audience) OAuth token is a delegated credential: paid web
+  // calls need their own `web` scope, granted explicitly at login.
+  if (key.oauth?.audience === "api") return key.scopes.includes("web");
   return key.keyType !== "client" || key.scopes.includes("web");
 }
