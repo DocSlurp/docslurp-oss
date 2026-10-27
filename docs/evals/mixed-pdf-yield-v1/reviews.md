@@ -295,3 +295,11 @@ fail closed otherwise. Expression boundary checks and nonoverlapping use remain.
 The two new mutations and authored-block projection control are covered by the
 44 passing focused tests. Scores from earlier scorer revisions remain provisional
 and must be recomputed under a new immutable identity before promotion.
+
+The round-3 methods reviewer independently reproduced formula swaps and found a
+scorer provenance race: the binder copied a script but executed its original
+path. The binder now executes the copied snapshot and verifies its attested hash
+immediately before and after the invocation. The regression mutates the original
+concurrently, verifies the snapshot was invoked, and rejects a mutation of the
+snapshot itself. All 45 focused tests pass. A new proof bundle records fresh score
+executions; previous evidence is retained rather than overwritten.

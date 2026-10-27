@@ -172,6 +172,26 @@ class V4SealTests(unittest.TestCase):
                      patch.object(Path, 'read_text', side_effect=AssertionError('unauthorized read')):
                     with self.assertRaises(ValueError): scope.load(dict(path=str(path), sha256=index['files']['link.json']))
 
+    def test_scoring_executes_attested_snapshot_and_rejects_mutation(self):
+        from bind_v4_reviews import run_score_snapshot
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as tmp:
+            root=Path(tmp);snapshot=root/'score-script.py';original=root/'original.py'
+            snapshot.write_text('# frozen');original.write_text('# current')
+            digest=file_hash(snapshot)
+            def invoke(command,**kwargs):
+                self.assertEqual(command[2],str(snapshot))
+                original.write_text('# concurrent source edit')
+                return SimpleNamespace(stdout='{"pass":true}')
+            with patch('bind_v4_reviews.subprocess.run',side_effect=invoke):
+                self.assertTrue(run_score_snapshot(snapshot,digest,[])['pass'])
+            def mutate(command,**kwargs):
+                snapshot.write_text('# changed during execution')
+                return SimpleNamespace(stdout='{}')
+            with patch('bind_v4_reviews.subprocess.run',side_effect=mutate):
+                with self.assertRaisesRegex(ValueError,'changed-score-snapshot'):
+                    run_score_snapshot(snapshot,digest,[])
+
     def test_native_and_delivered_pdf_share_identity_namespace(self):
         manifest, spec = self.manifest(split=True)
         for case in manifest['cases'][:6]: case['nativePdfHash'] = manifest['cases'][6]['sha256']

@@ -21,6 +21,15 @@ def entry(path):
     return dict(path=str(path.absolute()), sha256=file_hash(path))
 
 
+def run_score_snapshot(snapshot, expected_hash, arguments):
+    """Execute the attested copy, rejecting mutations around the invocation."""
+    if file_hash(snapshot)!=expected_hash:raise ValueError('changed-score-snapshot')
+    result=subprocess.run([sys.executable,'-I',str(snapshot),*arguments],
+                          capture_output=True,text=True,check=True)
+    if file_hash(snapshot)!=expected_hash:raise ValueError('changed-score-snapshot')
+    return json.loads(result.stdout)
+
+
 def bind(dataset, semantic_path, reports, out, snapshots, reviewer_ids,
          score_script, pilot_path=None, review_semantic_path=None):
     dataset = dataset.resolve()
@@ -80,12 +89,11 @@ def bind(dataset, semantic_path, reports, out, snapshots, reviewer_ids,
             raise ValueError('review-report-stage-mismatch')
         digest = file_hash(report_paths[stage])
         stages[digest] = dict(stage=stage, reviewerId=reviewer_ids[stage])
-        command = [sys.executable, '-I', str(score_script), '--stage', stage,
+        command = ['--stage', stage,
                    '--audit', str(report_paths['audit']), '--attempt', '4', '--round', '2',
                    '--max-attempts', '20', '--no-record']
         if stage == 'judge': command += ['--judge', str(report_paths['judge'])]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        decision = json.loads(result.stdout)
+        decision = run_score_snapshot(out/'score-script.py', files['score-script.py'], command)
         decision.update(schema='mixed-pdf-score-proof@1', reviewReportSha256=digest,
                         scoreScriptSha256=files['score-script.py'])
         if stage == 'judge': decision['auditReportSha256'] = file_hash(report_paths['audit'])
