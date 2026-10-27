@@ -23,3 +23,10 @@ export const updateOrganizationSchema = z.object({
   allowChinaProviders: z.boolean().optional(),
 }).strict().refine(value => Object.keys(value).length > 0, "Supply name, slug, retainDocumentVersions or allowChinaProviders");
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;
+/** PUT /v1/organizations/:orgId/security-policy: require members to use MFA after a grace period. */
+export const updateOrganizationMfaPolicySchema = z.object({
+  requireMfa: z.boolean(),
+  /** Days a member may keep signing in without MFA, from when the policy turned on or they joined. */
+  gracePeriodDays: z.number().int().min(0).max(30).optional(),
+}).strict();
+export type UpdateOrganizationMfaPolicyInput = z.infer<typeof updateOrganizationMfaPolicySchema>;
