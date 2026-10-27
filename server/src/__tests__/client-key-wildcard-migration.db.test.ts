@@ -6,11 +6,11 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { originMatchesAllowlist } from "../lib/allowed-origins.js";
 
 /**
- * Migration 0088: browser-key entries stored by the old normalizer ("example.com",
+ * Migration 0090: browser-key entries stored by the old normalizer ("example.com",
  * which matched every subdomain, and which is also what "*.example.com" became)
  * keep that meaning under exact matching by gaining "*.example.com".
  */
-const migration = readFileSync(new URL("../../db/migrations/0088_client_key_wildcard_domains.sql", import.meta.url), "utf8");
+const migration = readFileSync(new URL("../../db/migrations/0090_client_key_wildcard_domains.sql", import.meta.url), "utf8");
 let stop: () => Promise<void>;
 let sql: postgres.Sql;
 
