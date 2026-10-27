@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { visionConfigSchema } from "@docslurp/shared";
+import { visionConfigSchema, visionModelCatalog } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
-import { MARKDOWN_LATEX_VISION_PROMPT, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
+import { MARKDOWN_LATEX_VISION_PROMPT, VISION_MODEL_PROFILES, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
 const SNAPSHOT = "deepseek/deepseek-v4.1-flash-1017";
@@ -76,5 +76,19 @@ describe("per-model vision profiles", () => {
     expect(visionPromptKeyForModel("layout", SNAPSHOT)).toBe("layout");
     expect(visionPromptKeyForModel("<OCR>", "google/gemini-3.1-flash-lite")).toBe("<OCR>");
     expect(visionPromptTemplates["markdown-latex"]).toBe(MARKDOWN_LATEX_VISION_PROMPT);
+  });
+});
+
+describe("vision catalog route pricing", () => {
+  it("prices a pinned-route catalog entry from exactly the providers its profile pins, with fallbacks off", () => {
+    const pinned = visionModelCatalog.filter((entry) => entry.tokenPricing && "basis" in entry.tokenPricing && entry.tokenPricing.basis === "pinned-route");
+    expect(pinned.map((entry) => entry.id)).toContain(SNAPSHOT);
+    for (const entry of pinned) {
+      const route = VISION_MODEL_PROFILES[entry.id]?.openRouterProvider;
+      expect(route, entry.id).toBeDefined();
+      expect(route!.allow_fallbacks, entry.id).toBe(false);
+      if (!entry.tokenPricing || !("providers" in entry.tokenPricing)) throw new Error(`Missing pinned providers: ${entry.id}`);
+      expect(route!.order, entry.id).toEqual(entry.tokenPricing.providers);
+    }
   });
 });

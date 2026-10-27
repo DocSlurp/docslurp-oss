@@ -61,10 +61,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install worker test tools
         if: matrix.worker-tools
+        timeout-minutes: 12
         run: |
+          node --test scripts/install-worker-test-tools.test.mjs
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap poppler-data poppler-utils pandoc tesseract-ocr tesseract-ocr-eng ffmpeg
+          bash scripts/install-worker-test-tools.sh
       - name: Set up worker Python test dependencies
         if: matrix.worker-tools
         run: |
