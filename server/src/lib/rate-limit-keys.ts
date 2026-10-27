@@ -21,6 +21,31 @@ export function rateLimitAddress(ip: string): string {
   return `${groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
+/** The eight hextets of an IPv6 address, or null (IPv4, IPv4-mapped, invalid). */
+function ipv6Groups(ip: string): number[] | null {
+  const value = ip.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  if (!value.includes(":") || value.includes(".")) return null;
+  const [head = "", tail] = value.split("::", 2);
+  const left = head ? head.split(":") : [];
+  const right = tail === undefined ? [] : tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.map((group) => parseInt(group, 16));
+}
+
+/**
+ * Network prefixes an address belongs to for the in-memory limiter's
+ * per-prefix share: an IPv6 /48 (a typical site allocation) and /56. IPv4
+ * gets none (a /24 holds only 256 identities).
+ */
+export function rateLimitPrefixes(ip: string | null | undefined): string[] {
+  const groups = ip ? ipv6Groups(ip) : null;
+  if (!groups) return [];
+  const hex = (n: number) => n.toString(16);
+  const p48 = groups.slice(0, 3).map(hex).join(":");
+  return [`48:${p48}`, `56:${p48}:${hex(groups[3]! >> 8)}`];
+}
+
 export function classifyRateLimitCategory(method: string, path: string): RateLimitCategory {
   const normalizedPath = path.replace(/\/+$/, "") || "/";
   const normalizedMethod = method.toUpperCase();
