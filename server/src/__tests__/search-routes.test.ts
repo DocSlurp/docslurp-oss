@@ -382,6 +382,9 @@ describe("searchRoutes", () => {
       expect(crossSite.status).toBe(403);
       const foreignOrigin = await app.request("/search/chat/stream?q=test&workspace=ws-chat", { headers: { Origin: "https://evil.example" } });
       expect(foreignOrigin.status).toBe(403);
+      // No Origin and no Fetch Metadata (an <img>, curl with a stolen cookie, Safari before 16.4): refused too.
+      const bare = await app.request("/search/chat/stream?q=test&workspace=ws-chat");
+      expect(bare.status).toBe(403);
       expect(chatWorkspace).not.toHaveBeenCalled();
     });
   });
@@ -503,7 +506,7 @@ describe("searchRoutes", () => {
     expect(post.status).toBe(400);
     expect(await post.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     chatWorkspace.mockClear();
-    const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat&model=inception/mercury-3");
+    const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat&model=inception/mercury-3", { headers: { "Sec-Fetch-Site": "same-origin" } });
     expect(stream.status).toBe(400);
     expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
@@ -520,7 +523,7 @@ describe("searchRoutes", () => {
       expect(post.status).toBe(403);
       expect(await post.json()).toMatchObject({ error: { code: "chat_disabled", message: "Chat is turned off for this workspace." } });
 
-      const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat");
+      const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat", { headers: { "Sec-Fetch-Site": "same-origin" } });
       expect(stream.status).toBe(403);
       expect(await stream.json()).toMatchObject({ error: { code: "chat_disabled" } });
       expect(chatWorkspace).not.toHaveBeenCalled();

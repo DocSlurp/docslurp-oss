@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Regenerates server/src/lib/public-suffix-data.ts from the Public Suffix List
-// (ICANN and private sections). Usage:
-//   node server/scripts/update-public-suffix-list.mjs              # download from publicsuffix.org
+// (ICANN and private sections). Run it monthly, and before a release that
+// touches browser-key website checks; commit the result. Usage:
+//   pnpm psl:update                                                # download from publicsuffix.org
 //   node server/scripts/update-public-suffix-list.mjs ./list.dat   # use a downloaded copy
 // The list is data only: rules are parsed, never evaluated. Commit the result.
 import { readFileSync, writeFileSync } from "node:fs";

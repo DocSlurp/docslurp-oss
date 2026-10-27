@@ -155,7 +155,7 @@ async function deferredRequestContext(
 /**
  * For cookie-authenticated GETs that do work: the browser says the request is
  * same-origin (Fetch Metadata), or its Origin is the API's own origin or an
- * allowed app origin. Non-browser clients send neither header.
+ * allowed app origin. A request with neither header is refused.
  */
 function sameOriginBrowserRequest(c: Context): boolean {
   const origin = c.req.header("Origin");
@@ -164,8 +164,9 @@ function sameOriginBrowserRequest(c: Context): boolean {
   try { ownOrigin = new URL(c.req.url).origin; } catch { /* keep empty */ }
   const trustedOrigin = (value: string) => value === ownOrigin || env.corsAllowedOrigins.includes(value);
   if (origin) return trustedOrigin(origin) && (!site || site === "same-origin" || site === "same-site");
-  if (site) return site === "same-origin";
-  return true;
+  // Neither header: refused. Browsers that send no Fetch Metadata on same-origin
+  // GETs (Safari before 16.4) can't stream with a cookie session; POST /v1/chat works.
+  return site === "same-origin";
 }
 
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
