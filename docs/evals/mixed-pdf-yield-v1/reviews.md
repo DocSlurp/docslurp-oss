@@ -138,6 +138,20 @@ The coordinator confirmed changed-code hashes match the receipt. It reports all
 11 tests with six valid controls and 62 rehashed/schema-valid negative probes.
 A fresh independent review is pending; this receipt does not grant acceptance.
 
+The fresh independent review resolved the prior high finding and reported no new
+misses. It verified the receipt, all 1,317 protected artifacts, 30 authoring pages,
+180 label pages and rejection of both original counterexamples. The skill scorer
+recorded attempt 4 / audit round 2 as 100, pass. This is the audit gate only; the
+independent final visual judge is running. The coordinator independently reran all
+11 validator tests successfully. Unsupported enriched classes remain unaccepted.
+
+`seal_v4.py` prepares a separate immutable evaluation view after exact stage
+inventory, corpus-bound approval, distinct audit/judge decisions and a matching
+semantic validation receipt pass. It preserves original generation records and
+copies input PDF bytes. Negative checks cover omitted whole families, changed
+class/split membership, duplicate cases, path traversal, altered evidence and using
+an audit decision as a judge decision. No view has been promoted or measured.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.
