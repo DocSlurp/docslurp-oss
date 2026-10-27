@@ -60,6 +60,7 @@ import {
 } from "./usage-attribution.js";
 import { loadWithheldArtifactUrisForRun } from "./pii-artifact-guard.js";
 import { processSingleton } from "../lib/process-singleton.js";
+import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
 
 export { summarizeRunUsageCost };
 export { isRunCreationBlockedError, RunCreationBlockedError } from "./run-creation.js";
@@ -448,22 +449,7 @@ export async function getDocumentVersions(
   return versions;
 }
 
-/** A reprocess request the source run cannot satisfy (4xx, nothing created). */
-export class ReprocessRejectedError extends Error {
-  constructor(
-    message: string,
-    readonly statusCode: 400 | 409,
-    readonly code: "no_stages_to_run" | "source_not_reusable" | "missing_stage_artifacts",
-    readonly details: Record<string, unknown> = {},
-  ) {
-    super(message);
-    this.name = "ReprocessRejectedError";
-  }
-}
-
-export function isReprocessRejectedError(error: unknown): error is ReprocessRejectedError {
-  return error instanceof ReprocessRejectedError;
-}
+export { ReprocessRejectedError, isReprocessRejectedError } from "./reprocess-errors.js";
 
 type ReuseSourceRow = {
   id: string;
@@ -558,6 +544,8 @@ export async function reprocessRun(
   if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
+  const [extractRun] = await sql<{ extract_id: string | null }[]>`select extract_id from workspace_runs where id = ${runId}`;
+  if (extractRun?.extract_id) throw extractNotReprocessable();
 
   const docs = await sql<DocumentRow[]>`
     select * from documents where run_id = ${runId} order by created_at, id

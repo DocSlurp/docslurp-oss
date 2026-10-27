@@ -37,6 +37,7 @@ import {
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { isReprocessRejectedError } from "../services/reprocess-errors.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
@@ -546,7 +547,14 @@ export const documentsRoutes = new Hono()
       () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
       `/v1/workspaces/${bulkWorkspaceId ?? "{workspaceId}"}/documents/bulk/estimate`,
     );
-    const { runs, failed, warnings } = await bulkReprocessDocuments(body.documentIds, userId);
+    let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
+    try {
+      bulk = await bulkReprocessDocuments(body.documentIds, userId);
+    } catch (error) {
+      if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
+      throw error;
+    }
+    const { runs, failed, warnings } = bulk;
     await appendAuditLog({
       userId,
       apiKeyId,

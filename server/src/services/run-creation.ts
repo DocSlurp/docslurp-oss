@@ -33,6 +33,8 @@ import {
   resolveSourceMetadata,
   UnreadableSourceError,
 } from "./source-metadata.js";
+import { extractNotReprocessable } from "./reprocess-errors.js";
+import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
 // it never authorizes processing. Every document write and publication locks
@@ -633,6 +635,11 @@ export function createRunCreation(deps: RunCreationDeps) {
     const { input } = args;
     const requestId = currentRequestId();
     const [row] = await admitRunSpend(args.orgId, input.workspaceId, async (tx) => {
+      if (input.extract) {
+        // Never a run for an extract that expired or was deleted meanwhile (a confirm racing the sweep).
+        const [live] = await tx`select id from extracts where id = ${input.extract.id} and state = 'active' and expires_at > now() for update`;
+        if (!live) throw new ExtractError(410, "extract_expired", EXTRACT_EXPIRED_MESSAGE);
+      }
       const rows = await tx<WorkspaceRunRow[]>`
       with inserted as (
         insert into workspace_runs (
@@ -901,14 +908,19 @@ export function createRunCreation(deps: RunCreationDeps) {
     const { sources } = input;
     let sourceDocuments: SourceDocumentRow[] = [];
     if (sources.kind === "versionsOf") {
-      // Extract documents are never run again: a new version would outlive the
-      // extract while pointing at sources and artifacts its expiry deletes.
       sourceDocuments = await sql<SourceDocumentRow[]>`
         select d.* from documents d
         where d.workspace_id = ${input.workspaceId} and d.id = any(${sql.array(sources.documentIds)})
-          and not exists (select 1 from workspace_runs r where r.id = d.run_id and r.extract_id is not null)
         order by d.created_at, d.id
       `;
+      // Extract documents are never run again: a new version would outlive the
+      // extract while pointing at sources and artifacts its expiry deletes.
+      const [extractSource] = await sql<{ id: string }[]>`
+        select d.id from documents d join workspace_runs r on r.id = d.run_id
+        where d.id = any(${sql.array(sourceDocuments.map((doc) => doc.id))}) and r.extract_id is not null
+        limit 1
+      `;
+      if (extractSource) throw extractNotReprocessable();
       if (sourceDocuments.length === 0) throw new Error("No documents to create new versions of");
     }
 
