@@ -1,7 +1,10 @@
 import { constants, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { open, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, open, writeFile, rm } from "node:fs/promises";
 import type { ModalSdk } from "./index.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DOPPLER_MAX_PDF_BYTES } from "@docslurp/shared";
 import { resolveModalImage } from "./index.js";
 import { SandboxRunError } from "../../types.js";
 import type { UsageEvent } from "../../../models.js";
@@ -10,9 +13,11 @@ import type { UsageEvent } from "../../../models.js";
 class DopplerVmFailure extends Error {}
 
 export type DopplerVmJob = { operation: "doppler-markdown"; input: string; output: string; };
-export const MAX_PDF_BYTES = 64 * 1024 * 1024;
+export const MAX_PDF_BYTES = DOPPLER_MAX_PDF_BYTES;
+export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+export const INPUT_BUFFER_BYTES = 8 * 1024 * 1024;
 export const MAX_LOG_BYTES = 16 * 1024;
-export const VM_TIMEOUT_MS = 60_000;
+export const VM_TIMEOUT_MS = 180_000;
 export const VM_CLEANUP_TIMEOUT_MS = 5_000;
 
 /** Sandbox list prices verified 2026-10-27 at https://modal.com/pricing.
@@ -94,6 +99,7 @@ export async function executeDopplerVm(
   let terminating: Promise<void> | undefined;
   let creationRequested = false;
   let stagedOutput: string | undefined;
+  let inputDirectory: string | undefined;
   let succeeded = false;
   let allocationUsage: UsageEvent | undefined;
   function terminate(target: NonNullable<typeof vm>): Promise<void> {
@@ -118,30 +124,65 @@ export async function executeDopplerVm(
     return terminating;
   }
   try {
-    const bytes = await control(async () => {
-
+    const stagedInput = await control(async () => {
       const input = await open(job.input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      let bytes: Buffer;
+      let snapshot: Awaited<ReturnType<typeof open>> | undefined;
       try {
+        checkActive();
         const info = await input.stat();
         if (!info.isFile() || info.size > MAX_PDF_BYTES) throw new DopplerVmFailure("Document VM invalid or oversized input");
-        // An extra byte detects growth without an unbounded readFile allocation.
-        bytes = Buffer.alloc(Math.min(info.size + 1, MAX_PDF_BYTES + 1));
-        const { bytesRead } = await input.read(bytes, 0, bytes.length, 0);
-        if (bytesRead > MAX_PDF_BYTES || bytesRead !== info.size) throw new DopplerVmFailure("VM input changed or exceeded limit");
-        bytes = bytes.subarray(0, bytesRead);
-      } finally { await input.close(); }
-      return bytes;
+        const inMemory = info.size <= INPUT_BUFFER_BYTES;
+        const buffer = Buffer.alloc(inMemory ? info.size + 1 : 1024 * 1024);
+        let snapshotPath: string | undefined;
+        if (!inMemory) {
+          inputDirectory = await mkdtemp(join(tmpdir(), "doppler-input-"));
+          checkActive();
+          snapshotPath = join(inputDirectory, "input");
+          snapshot = await open(snapshotPath, "wx", 0o600);
+        }
+        let total = 0;
+        for (;;) {
+          checkActive();
+          const { bytesRead } = await input.read(buffer, inMemory ? total : 0, Math.min(buffer.length - (inMemory ? total : 0), info.size - total + 1), total);
+          checkActive();
+          if (!bytesRead) break;
+          total += bytesRead;
+          if (total > info.size) throw new DopplerVmFailure("VM input changed or exceeded limit");
+          if (snapshot) {
+            let written = 0;
+            while (written < bytesRead) {
+              const result = await snapshot.write(buffer, written, bytesRead - written);
+              checkActive();
+              if (!result.bytesWritten) throw new DopplerVmFailure("VM input staging failed");
+              written += result.bytesWritten;
+            }
+          }
+        }
+        const after = await input.stat();
+        if (total !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) {
+          throw new DopplerVmFailure("VM input changed or exceeded limit");
+        }
+        return snapshotPath ? { path: snapshotPath } : { bytes: buffer.subarray(0, total) };
+      } finally {
+        await snapshot?.close();
+        await input.close();
+        if (cancelled && inputDirectory) await rm(inputDirectory, { recursive: true, force: true });
+      }
     });
     sdk = await control(loadSdk);
     checkActive();
     client = new sdk.ModalClient({ tokenId: process.env.MODAL_TOKEN_ID, tokenSecret: process.env.MODAL_TOKEN_SECRET });
     const app = await control(() => client!.apps.fromName("docslurp-doppler-vm", { createIfMissing: true }));
-    const registrySecret = process.env.DOCSLURP_DOPPLER_REGISTRY_SECRET
+    const importedId = process.env.DOCSLURP_DOPPLER_MODAL_IMAGE_ID;
+    if (importedId && !/^im-[A-Za-z0-9]+$/.test(importedId)) throw new DopplerVmFailure("Invalid imported document VM image ID");
+    const registrySecret = !importedId && process.env.DOCSLURP_DOPPLER_REGISTRY_SECRET
       ? await control(() => client!.secrets.fromName(process.env.DOCSLURP_DOPPLER_REGISTRY_SECRET!))
       : undefined;
+    const vmImage = importedId
+      ? await control(() => client!.images.fromId(importedId))
+      : client.images.fromRegistry(image, registrySecret);
     creationRequested = true;
-    vm = await control(() => client!.sandboxes.create(app, client!.images.fromRegistry(image, registrySecret), {
+    vm = await control(() => client!.sandboxes.create(app, vmImage, {
       runtime: "vm", cpu, cpuLimit: 1, memoryMiB: 1024, memoryLimitMiB: 1024,
       timeoutMs: VM_TIMEOUT_MS, blockNetwork: true, includeOidcIdentityToken: false,
       env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
@@ -153,16 +194,18 @@ export async function executeDopplerVm(
       return created;
     }));
     const work = (async () => {
-      await control(() => vm!.filesystem.writeBytes(bytes, "/job/input"));
+      await control(() => stagedInput.path
+        ? vm!.filesystem.copyFromLocal(stagedInput.path, "/job/input")
+        : vm!.filesystem.writeBytes(stagedInput.bytes!, "/job/input"));
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
       const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py"];
-      const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 55_000, mode: "binary" }));
-      const [output, stderr, code] = await control(() => Promise.all([boundedStream(child.stdout, MAX_PDF_BYTES), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
+      const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 155_000, mode: "binary" }));
+      const [output, stderr, code] = await control(() => Promise.all([boundedStream(child.stdout, MAX_OUTPUT_BYTES), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
       const diagnostics = JSON.parse(stderr.toString("utf8"));
-      if (diagnostics.protocol !== "doppler-vm@1" || diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length ||
+      if (diagnostics.protocol !== "doppler-vm@2" || diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length ||
           !Number.isSafeInteger(diagnostics.conversion?.pages) || diagnostics.conversion.pages < 1) {
         throw new DopplerVmFailure("Document VM invalid result envelope");
       }
@@ -188,7 +231,12 @@ export async function executeDopplerVm(
     finished = true;
     try {
       try { if (vm) await terminate(vm); }
-      catch { throw new SandboxRunError("Document VM termination failed or exceeded cleanup deadline", usage()); }
+      catch {
+        const exposure = dopplerVmUsage(image, Math.max(VM_TIMEOUT_MS / 1000, (Date.now() - started) / 1000));
+        exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
+          estimateReason: "VM termination unconfirmed; reserve full configured lifetime" };
+        throw new SandboxRunError("Document VM termination failed or exceeded cleanup deadline", exposure);
+      }
       if (vm && allocationUsage) Object.assign(allocationUsage, usage());
       if (succeeded && stagedOutput) {
         if (cancelled || signal?.aborted || Date.now() - started >= VM_TIMEOUT_MS) {
@@ -202,6 +250,7 @@ export async function executeDopplerVm(
       signal?.removeEventListener("abort", onAbort);
       clientClosed = true; client?.close();
       if (stagedOutput) await rm(stagedOutput, { force: true });
+      if (inputDirectory) await rm(inputDirectory, { recursive: true, force: true });
     }
   }
 }

@@ -1,4 +1,4 @@
-import { executeDopplerVm, type DopplerVmJob } from "../sandbox/providers/modal/doppler-vm.js";
+import { executeDopplerVm, VM_TIMEOUT_MS, type DopplerVmJob } from "../sandbox/providers/modal/doppler-vm.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
   ensureVendorBundle,
@@ -1190,7 +1190,7 @@ export class CommandRunner {
    * backend credentials and run outside the sandbox. Callers must `release()` when done.
    */
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
-    if (plan.dopplerVm) return { remote: executeDopplerVm(plan.dopplerVm, signal), timeoutMs: 60_000, release: async () => {} };
+    if (plan.dopplerVm) return { remote: executeDopplerVm(plan.dopplerVm, signal), timeoutMs: VM_TIMEOUT_MS, release: async () => {} };
     if (isVectorBackendCommand(plan.args, this.scriptsDir)) {
       const env = buildCommandEnv({ plan, venvBin: this.venvBin, isVectorBackend: true });
       const child = spawn(plan.binary, plan.args, { env, stdio: ["ignore", "pipe", "pipe"], signal });

@@ -9,22 +9,24 @@ import type { ModalSdk } from "./index.js";
 function stream(bytes: string) {
   return new ReadableStream<Uint8Array>({ start(c) { c.enqueue(Buffer.from(bytes)); c.close(); } });
 }
-function diagnostics(outputBytes = 6) { return JSON.stringify({ protocol: "doppler-vm@1", engine: "doppler", outputBytes, conversion: { pages: 1 } }); }
+function diagnostics(outputBytes = 6) { return JSON.stringify({ protocol: "doppler-vm@2", engine: "doppler", outputBytes, conversion: { pages: 1 } }); }
 function harness(fail = false) {
   const terminate = vi.fn(async () => {});
   const exec = vi.fn(async () => ({ stdout: stream("result"), stderr: stream(diagnostics()), wait: async (): Promise<number> => fail ? 1 : 0 }));
   const writeBytes = vi.fn(async () => {});
+  const copyFromLocal = vi.fn(async (_source: string, _destination: string) => {});
   const makeDirectory = vi.fn(async () => {});
-  const vm = { sandboxId: "sb-test", terminate, exec, filesystem: { makeDirectory, writeBytes } };
+  const vm = { sandboxId: "sb-test", terminate, exec, filesystem: { makeDirectory, writeBytes, copyFromLocal } };
   const create = vi.fn(async (..._args: unknown[]) => vm);
   const fromName = vi.fn(async () => "app");
   const reconnect = vi.fn();
   const fromRegistry = vi.fn();
+  const fromId = vi.fn(async () => ({ imageId: "im-imported" }));
   const close = vi.fn();
   const registrySecret = { id: "registry-only" };
   const secretFromName = vi.fn(async () => registrySecret);
-  const sdk = { ModalClient: class { secrets = { fromName: secretFromName }; apps = { fromName }; images = { fromRegistry }; sandboxes = { create }; close = close; }, Sandbox: class { terminate = terminate; constructor(...args: unknown[]) { reconnect(...args); } } } as unknown as ModalSdk;
-  return { sdk, create, exec, terminate, writeBytes, close, fromName, makeDirectory, vm, reconnect, fromRegistry, registrySecret, secretFromName };
+  const sdk = { ModalClient: class { secrets = { fromName: secretFromName }; apps = { fromName }; images = { fromRegistry, fromId }; sandboxes = { create }; close = close; }, Sandbox: class { terminate = terminate; constructor(...args: unknown[]) { reconnect(...args); } } } as unknown as ModalSdk;
+  return { sdk, create, exec, terminate, copyFromLocal, writeBytes, close, fromName, makeDirectory, vm, reconnect, fromId, fromRegistry, registrySecret, secretFromName };
 }
 const dirs: string[] = [];
 afterEach(async () => { vi.useRealTimers(); vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map(d => rm(d, { recursive: true, force: true }))); });
@@ -55,7 +57,7 @@ describe("dedicated document VM contract (offline)", () => {
     const j = await job(); const h = harness();
     vi.stubEnv("AWS_SECRET_ACCESS_KEY", "must-never-travel");
     await executeDopplerVm(j, undefined, async () => h.sdk);
-    expect(h.create.mock.calls[0]?.[2]).toEqual({ runtime: "vm", cpu: 0.5, cpuLimit: 1, memoryMiB: 1024, memoryLimitMiB: 1024, timeoutMs: 60000, blockNetwork: true, includeOidcIdentityToken: false, env: {}, secrets: [], volumes: {}, cloudBucketMounts: {} });
+    expect(h.create.mock.calls[0]?.[2]).toEqual({ runtime: "vm", cpu: 0.5, cpuLimit: 1, memoryMiB: 1024, memoryLimitMiB: 1024, timeoutMs: VM_TIMEOUT_MS, blockNetwork: true, includeOidcIdentityToken: false, env: {}, secrets: [], volumes: {}, cloudBucketMounts: {} });
     expect(h.writeBytes).toHaveBeenCalledExactlyOnceWith(Buffer.from("hostile bytes"), "/job/input");
     expect(JSON.stringify(h.exec.mock.calls)).not.toContain("must-never-travel");
     expect(h.terminate).toHaveBeenCalled(); expect(h.close).toHaveBeenCalled();
@@ -77,7 +79,7 @@ describe("dedicated document VM contract (offline)", () => {
   it("caps streams during consumption", async () => {
     await expect(boundedStream(stream("12345"), 4)).rejects.toThrow("byte limit");
     expect((await boundedStream(stream("1234"), 4)).length).toBe(4);
-    expect(MAX_PDF_BYTES).toBe(67108864);
+    expect(MAX_PDF_BYTES).toBe(500 * 1024 * 1024);
   });
   it("uses a fresh VM and fixed remote paths for each job", async () => {
     const a = await job(); const b = await job(); const h = harness();
@@ -125,7 +127,7 @@ describe("dedicated document VM contract (offline)", () => {
     h.exec.mockImplementation(async () => { started(); await new Promise(() => {}); return undefined as never; });
     const pending = executeDopplerVm(j, undefined, async () => h.sdk);
     const rejected = expect(pending).rejects.toThrow("deadline exceeded");
-    await running; await vi.advanceTimersByTimeAsync(60_001); await rejected;
+    await running; await vi.advanceTimersByTimeAsync(VM_TIMEOUT_MS + 1); await rejected;
     expect(h.terminate).toHaveBeenCalled();
     await expect(readFile(j.output)).rejects.toThrow();
   });
@@ -165,7 +167,8 @@ describe("dedicated document VM contract (offline)", () => {
     let started!: () => void; const running = new Promise<void>(resolve => { started = resolve; });
     h.terminate.mockImplementation(() => { started(); return new Promise(() => {}); });
     const pending = executeDopplerVm(j, undefined, async () => h.sdk);
-    const rejected = expect(pending).rejects.toThrow("cleanup deadline");
+    const rejected = expect(pending).rejects.toMatchObject({ message: expect.stringContaining("cleanup deadline"),
+      usage: { costCents: dopplerVmUsage("image", VM_TIMEOUT_MS / 1000).costCents, metadata: { allocationUnconfirmed: true } } });
     await running; await vi.advanceTimersByTimeAsync(VM_CLEANUP_TIMEOUT_MS); await rejected;
     expect(h.close).toHaveBeenCalledOnce(); expect(h.terminate).toHaveBeenCalledOnce();
     await expect(readFile(j.output)).rejects.toThrow();
@@ -203,7 +206,7 @@ describe("dedicated document VM contract (offline)", () => {
     h.create.mockImplementation(() => { started(); return new Promise(() => {}); });
     const pending = executeDopplerVm(j, controller.signal, async () => h.sdk).catch(e => e);
     await running; controller.abort(); const error = await pending;
-    expect(error.usage).toMatchObject({ costCents: 0.27654, metadata: { allocationUnconfirmed: true } });
+    expect(error.usage).toMatchObject({ costCents: dopplerVmUsage("image", VM_TIMEOUT_MS / 1000).costCents, metadata: { allocationUnconfirmed: true } });
   });
   it("does not expose parser-controlled diagnostics", async () => {
     const j = await job(); const h = harness();
@@ -221,9 +224,9 @@ describe("dedicated document VM contract (offline)", () => {
   it.each([
     "", "not-json", JSON.stringify({ engine: "doppler", outputBytes: 6, conversion: { pages: 1 } }),
     JSON.stringify({ protocol: "wrong", engine: "doppler", outputBytes: 6, conversion: { pages: 1 } }),
-    JSON.stringify({ protocol: "doppler-vm@1", engine: "doppler", outputBytes: 5, conversion: { pages: 1 } }),
-    JSON.stringify({ protocol: "doppler-vm@1", engine: "doppler", outputBytes: 6, conversion: { pages: 0 } }),
-    JSON.stringify({ protocol: "doppler-vm@1", engine: "doppler", outputBytes: 6, conversion: { pages: 1.5 } }),
+    JSON.stringify({ protocol: "doppler-vm@2", engine: "doppler", outputBytes: 5, conversion: { pages: 1 } }),
+    JSON.stringify({ protocol: "doppler-vm@2", engine: "doppler", outputBytes: 6, conversion: { pages: 0 } }),
+    JSON.stringify({ protocol: "doppler-vm@2", engine: "doppler", outputBytes: 6, conversion: { pages: 1.5 } }),
   ])("refuses an invalid successful guest envelope without publishing: %s", async envelope => {
     const j = await job(); const h = harness();
     h.exec.mockImplementation(async () => ({ stdout: stream("result"), stderr: stream(envelope), wait: async () => 0 }));
@@ -244,4 +247,51 @@ describe("dedicated document VM contract (offline)", () => {
     expect(h.create).not.toHaveBeenCalled();
   });
 
+});
+
+
+it("streams a PDF above the old 64 MiB limit from a private bounded snapshot", async () => {
+  const j = await job(); const h = harness();
+  const source = await open(j.input, "w"); await source.truncate(65 * 1024 * 1024); await source.close();
+  let copiedPath = "";
+  h.copyFromLocal.mockImplementation(async (file, destination) => {
+    copiedPath = file;
+    expect(file).not.toBe(j.input); expect(destination).toBe("/job/input");
+    const input = await open(file, "r"); expect((await input.stat()).size).toBe(65 * 1024 * 1024); await input.close();
+  });
+  await executeDopplerVm(j, undefined, async () => h.sdk);
+  expect(h.copyFromLocal).toHaveBeenCalledOnce(); expect(h.writeBytes).not.toHaveBeenCalled();
+  await expect(open(copiedPath, "r")).rejects.toThrow();
+  expect(await readFile(j.output, "utf8")).toBe("result");
+});
+
+it("reserves full lifetime when early cancellation cannot confirm teardown", async () => {
+  const j = await job(); const h = harness(); const controller = new AbortController(); vi.useFakeTimers();
+  let ready!: () => void; const running = new Promise<void>(resolve => { ready = resolve; });
+  let cleanup!: () => void; const cleaning = new Promise<void>(resolve => { cleanup = resolve; });
+  h.exec.mockImplementation(async () => { ready(); return new Promise(() => {}); });
+  h.terminate.mockImplementation(async () => { cleanup(); return new Promise(() => {}); });
+  const pending = executeDopplerVm(j, controller.signal, async () => h.sdk).catch(error => error);
+  await running; controller.abort(); await cleaning;
+  await vi.advanceTimersByTimeAsync(VM_CLEANUP_TIMEOUT_MS);
+  const error = await pending;
+  expect(error.usage).toMatchObject({ costCents: dopplerVmUsage("image", VM_TIMEOUT_MS / 1000).costCents,
+    metadata: { allocationUnconfirmed: true } });
+  await expect(readFile(j.output)).rejects.toThrow();
+});
+
+
+it("uses a preimported image ID without giving production a registry credential", async () => {
+  const j = await job(); const h = harness(); vi.stubEnv("DOCSLURP_DOPPLER_MODAL_IMAGE_ID", "im-imported");
+  vi.stubEnv("DOCSLURP_DOPPLER_REGISTRY_SECRET", "must-not-use");
+  await executeDopplerVm(j, undefined, async () => h.sdk);
+  expect(h.fromId).toHaveBeenCalledExactlyOnceWith("im-imported");
+  expect(h.fromRegistry).not.toHaveBeenCalled(); expect(h.secretFromName).not.toHaveBeenCalled();
+});
+
+it("does not fall back to registry when imported image resolution fails", async () => {
+  const j = await job(); const h = harness(); vi.stubEnv("DOCSLURP_DOPPLER_MODAL_IMAGE_ID", "im-missing");
+  h.fromId.mockRejectedValue(new Error("private-provider-detail"));
+  await expect(executeDopplerVm(j, undefined, async () => h.sdk)).rejects.toThrow(/^Document VM execution failed$/);
+  expect(h.fromRegistry).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
 });

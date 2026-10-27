@@ -1,3 +1,4 @@
+- Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
 # Completed
 
 - Add optional Doppler PDF extraction in a fresh offline VM (2026-10-27): generic core adapter, bounded transfers and lifecycle, scoped estimated compute usage, scan-preserving empty outputs, and no implicit native reparse of Doppler results. Private binaries and deployment remain in the app repository; owner-approved rollout and merged app pin are pending.

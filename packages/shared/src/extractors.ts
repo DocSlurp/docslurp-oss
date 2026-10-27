@@ -1,3 +1,6 @@
+/** Maximum PDF source size supported by the bounded Doppler VM route. */
+export const DOPPLER_MAX_PDF_BYTES = 500 * 1024 * 1024;
+
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
 import type { UsageEvent } from "./usage.js";
 

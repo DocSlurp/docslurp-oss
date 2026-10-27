@@ -18,6 +18,7 @@ import { Transform, type Readable } from "node:stream";
 
 import {
   applyWorkspacePipelineOverrides,
+  DOPPLER_MAX_PDF_BYTES,
   defaultPipelineFeatures,
   getWorkspaceTemplate,
   isUntitledWorkspaceName,
@@ -337,6 +338,12 @@ function isRemoteKind(kind: WorkspaceIntakeKind): kind is keyof typeof remoteSou
   return kind in remoteSourceLabels;
 }
 
+function intakeByteLimit(filename: string, mimeType?: string | null): number {
+  const dopplerPdf = resolveUploadMimeType(mimeType ?? null, filename) === "application/pdf" &&
+    (process.env.DOCSLURP_DOPPLER_INSTALLED === "1" || process.env.DOCSLURP_PDF_EXTRACTOR === "doppler");
+  return dopplerPdf ? Math.min(env.maxUploadBytes, DOPPLER_MAX_PDF_BYTES) : env.maxUploadBytes;
+}
+
 /** The one validation policy for every intake source. */
 export function screenIntakeFile(
   file: { filename: string; mimeType?: string | null; sizeBytes?: number | null },
@@ -361,13 +368,14 @@ export function screenIntakeFile(
   if (!isSupportedUploadMimeType(declared, filename)) {
     return { ok: false, filename, reason: "type", statusCode: 415, message: `Unsupported file type for ${filename}` };
   }
-  if (typeof file.sizeBytes === "number" && file.sizeBytes > env.maxUploadBytes) {
+  const maxBytes = intakeByteLimit(filename, declared);
+  if (typeof file.sizeBytes === "number" && file.sizeBytes > maxBytes) {
     return {
       ok: false,
       filename,
       reason: "size",
       statusCode: 413,
-      message: `${filename} exceeds MAX_UPLOAD_BYTES (${env.maxUploadBytes} bytes)`,
+      message: `${filename} exceeds MAX_UPLOAD_BYTES for this route (${maxBytes} bytes)`,
     };
   }
   return { ok: true, filename, mimeType: resolveUploadMimeType(declared, filename) };
@@ -424,15 +432,15 @@ function declaredSize(item: WorkspaceIntakeItem): number | null {
 }
 
 /** Pipes a stream through a byte counter that fails once it passes the upload cap. */
-function boundedStream(stream: Readable, onOverflow: () => void, onBytes: (total: number) => void): Readable {
+function boundedStream(stream: Readable, maxBytes: number, onOverflow: () => void, onBytes: (total: number) => void): Readable {
   let total = 0;
   const limiter = new Transform({
     transform(chunk, _encoding, callback) {
       total += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
       onBytes(total);
-      if (total > env.maxUploadBytes) {
+      if (total > maxBytes) {
         onOverflow();
-        callback(new Error(`Upload exceeds MAX_UPLOAD_BYTES (${env.maxUploadBytes} bytes)`));
+        callback(new Error(`Upload exceeds MAX_UPLOAD_BYTES (${maxBytes} bytes)`));
         return;
       }
       callback(null, chunk);
@@ -485,7 +493,8 @@ async function storeItem(
 
   let overflowed = false;
   let measuredBytes = 0;
-  const body = boundedStream(content.stream, () => {
+  const maxBytes = intakeByteLimit(admitted.filename, admitted.mimeType);
+  const body = boundedStream(content.stream, maxBytes, () => {
     overflowed = true;
   }, (total) => { measuredBytes = total; });
   try {
@@ -493,7 +502,7 @@ async function storeItem(
   } catch (error) {
     if (overflowed) {
       throw new WorkspaceIntakeError(
-        `${admitted.filename} exceeds MAX_UPLOAD_BYTES (${env.maxUploadBytes} bytes)`,
+        `${admitted.filename} exceeds MAX_UPLOAD_BYTES (${maxBytes} bytes)`,
         413,
       );
     }
