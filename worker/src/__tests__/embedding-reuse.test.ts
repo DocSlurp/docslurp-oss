@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides, VectorNamespaceManager } from "@docslurp/shared";
+import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const providerCalls = vi.hoisted(() => ({ embed: [] as string[][], context: 0 }));
@@ -432,7 +432,7 @@ describe("EmbedStage chunk materialization", () => {
 
   it("deletes the LanceDB rows of chunks a retry dropped before their Postgres rows, so native search cannot serve them", async () => {
     const calls: string[] = [];
-    const deleted: Array<{ table: string; ids: readonly string[] }> = [];
+    const deleted: Array<{ uri: string; table: string; ids: readonly string[] }> = [];
     const result = await embedDocument({
       storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-orphan", documentId: "orphan",
       storeExtras: {
@@ -441,13 +441,13 @@ describe("EmbedStage chunk materialization", () => {
         deleteStaleDocumentChunks: async () => { calls.push("prune"); },
         markDocumentLexicalSearchable: async () => { calls.push("mark"); },
       },
-      deleteVectors: async (_uri, table, ids) => { calls.push("lance"); deleted.push({ table, ids }); },
+      deleteVectors: async (uri, table, ids) => { calls.push("lance"); deleted.push({ uri, table, ids }); },
     });
     expect(calls).toEqual(["insert", "lance", "prune", "mark"]);
     expect(deleted).toHaveLength(1);
     expect(deleted[0]!.ids).toEqual(["orphan-007", "orphan-008"]);
     const space = result.artifact.embedding;
-    expect(deleted[0]!.table).toBe(VectorNamespaceManager.getEmbeddingLocation("", "o1", space.model, space.dimensions).table);
+    expect(deleted[0]).toMatchObject(VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, "o1", "w1", space.model, space.dimensions));
     // Handed to the index stage, which deletes them again after its own write commits.
     expect(result.state.staleVectorIds.get("orphan")).toEqual(["orphan-007", "orphan-008"]);
   });

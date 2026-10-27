@@ -19,6 +19,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { mediaConfig, type MediaConfig } from "./config.js";
 import { configuredMediaProvider } from "./providers.js";
 import { inspectMedia, prepareAudioChunk } from "./prepare.js";
@@ -89,9 +90,9 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
         && state.run.pipeline.mediaVideo?.enabled !== false;
       if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
-      const policy = hasVideo ? videoPolicy(state.run.orgFunded, duration, state.run.pipeline.mediaVideo) : undefined;
+      const policy = hasVideo ? videoPolicy(duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {
-        if (!args.journal.admitVideo) throw new Error("Video requires durable organization quota admission");
+        if (!args.journal.admitVideo) throw new Error("Video requires durable admission");
         await args.journal.admitVideo(scope, duration, visualEnabled ? policy.frames : 0);
       }
       // Until capacity reservations support a document ledger, reject this combination
@@ -144,7 +145,7 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
         visualSegments, sourceArtifactUri, extractor: `media:${provider.id}` });
       const summary = buildMediaSummary({ mediaKind, durationSeconds: duration, segments, visualSegments, coverage, costUsd, diarized: speakerTurns.length > 0,
         diarization: diarization?.status, diarizationReason: diarization?.reason });
-      const prefix = `${document.userId}/${state.run.id}/media/${document.id}`;
+      const prefix = `${runArtifactRoot(state.run, document.userId)}/media/${document.id}`;
       await storage.putBytes(`${prefix}.md`, Buffer.from(text), "text/markdown; charset=utf-8");
       await storage.putJson(`${prefix}.json`, { documentId: document.id, provider: provider.id, model: provider.model,
         durationSeconds: duration, segments, speakerTurns, visualSegments, scanStats, samplingVersion: "video-gray96-v1", coverage, summary,

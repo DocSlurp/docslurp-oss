@@ -16,7 +16,6 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   getCorrectionWorkbench,
-  listLowConfidenceReviewQueue,
   reindexDocumentCorrection,
   saveDocumentCorrection
 } from "../services/document-review.js";
@@ -30,12 +29,14 @@ import {
   getDocumentVersionsWithTags,
   getDocumentViewerPayload,
   listDocumentIndexEntries,
+  listDocumentOwners,
   listDocumentsWithFilters,
   removeDocumentTags,
   setDocumentTags
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { isReprocessRejectedError } from "../services/reprocess-errors.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
@@ -49,6 +50,8 @@ import { estimateFullIndex, IndexingModeError, requestFullIndex } from "../servi
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleWorkspaceOf } from "../services/work-estimates.js";
+import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 
 const bulkSchema = z.object({
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
@@ -83,6 +86,25 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
   return { viewer };
 }
 
+/** Document changes a server key with `ingest` may make: delete, retag and bulk reprocess/retag/delete. */
+function isContentUpdateRequest(method: string, path: string): boolean {
+  if (method === "DELETE") return /\/documents\/[^/]+\/?$/.test(path);
+  if (method === "PUT") return /\/documents\/[^/]+\/tags\/?$/.test(path);
+  return method === "POST" && /\/documents\/bulk\/?$/.test(path);
+}
+
+/**
+ * For an API key, every listed document must exist in a workspace the key can
+ * use; anything else answers 404 like a missing document, before any change.
+ */
+async function denyOutOfScopeDocuments(c: Context, documentIds: string[], userId: string): Promise<Response | null> {
+  const apiKey = c.get("apiKey");
+  if (!apiKey) return null;
+  const owners = await listDocumentOwners([...new Set(documentIds)], userId);
+  const usable = new Set(owners.filter((owner) => apiKeyCanUseWorkspace(apiKey, owner)).map((owner) => owner.id));
+  return documentIds.every((id) => usable.has(id)) ? null : apiStatusError(c, 404, "Document not found");
+}
+
 export const documentsRoutes = new Hono()
   .use("*", async (c, next) => {
     const apiKey = c.get("apiKey");
@@ -91,12 +113,22 @@ export const documentsRoutes = new Hono()
       return;
     }
     const fullIndexRequest = c.req.method === "POST" && /\/[^/]+\/full-index(\/estimate)?\/?$/.test(c.req.path);
+    if (isContentUpdateRequest(c.req.method, c.req.path)) {
+      // Bulk artifact export is a read; the other bulk actions change content.
+      const body = c.req.method === "POST" ? await c.req.raw.clone().json().catch(() => null) as { action?: unknown } | null : null;
+      const allowed = body?.action === "export-artifacts"
+        ? apiKeyHasAnyScope(apiKey, ["artifacts"])
+        : apiKeyCanUpdateContent(apiKey);
+      if (!allowed) return apiStatusError(c, 403, body?.action === "export-artifacts" ? "Forbidden" : CONTENT_UPDATE_SCOPE_MESSAGE);
+      await next();
+      return;
+    }
     // Full index spends credits, so it needs ingest (like the workspace endpoint) instead of artifacts.
     if (!apiKeyHasAnyScope(apiKey, fullIndexRequest ? ["ingest"] : ["artifacts"])) {
       return apiStatusError(c, 403, "Forbidden");
     }
     if (c.req.method !== "GET" && !fullIndexRequest) {
-      return apiStatusError(c, 403, "This endpoint requires a dashboard session or server-side document API");
+      return apiStatusError(c, 403, "This endpoint requires a dashboard session or a server API key with the ingest scope");
     }
     await next();
   })
@@ -233,23 +265,10 @@ export const documentsRoutes = new Hono()
     });
     return c.json(result);
   })
-  .get("/review-queue", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const sort = c.req.query("sort");
-    const queue = await listLowConfidenceReviewQueue({
-      userId,
-      orgId: c.get("apiKey")?.orgId ?? undefined,
-      runId: c.req.query("runId") ?? undefined,
-      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId")),
-      sort:
-        sort === "cost" || sort === "org" || sort === "failure-mode" || sort === "severity"
-          ? sort
-          : undefined
-    });
-    return c.json({ queue });
-  })
   .delete("/:docId", async (c) => {
     const userId = c.get("sessionUser").id;
+    const denied = await denyOutOfScopeDocuments(c, [c.req.param("docId")], userId);
+    if (denied) return denied;
     let deleted;
     try {
       deleted = await deleteDocument(c.req.param("docId"), userId);
@@ -271,6 +290,7 @@ export const documentsRoutes = new Hono()
 
     await appendAuditLog({
       userId,
+      apiKeyId: c.get("apiKey")?.keyId ?? null,
       action: "document.deleted",
       resourceType: "document",
       resourceId: deleted.documentId,
@@ -416,6 +436,8 @@ export const documentsRoutes = new Hono()
   .put("/:docId/tags", zValidator("json", setTagsSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
+    const denied = await denyOutOfScopeDocuments(c, [c.req.param("docId")], userId);
+    if (denied) return denied;
     const tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
 
     if (tags === null) {
@@ -424,6 +446,7 @@ export const documentsRoutes = new Hono()
 
     await appendAuditLog({
       userId,
+      apiKeyId: c.get("apiKey")?.keyId ?? null,
       documentId: c.req.param("docId"),
       action: "document.tags.updated",
       resourceType: "document",
@@ -440,11 +463,15 @@ export const documentsRoutes = new Hono()
   .post("/bulk", zValidator("json", bulkSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
+    const denied = await denyOutOfScopeDocuments(c, body.documentIds, userId);
+    if (denied) return denied;
+    const apiKeyId = c.get("apiKey")?.keyId ?? null;
 
     if (body.action === "apply-tags") {
       const updated = await addDocumentTags(body.documentIds, userId, body.tags ?? []);
       await appendAuditLog({
         userId,
+        apiKeyId,
         action: "documents.tags.bulk_applied",
         resourceType: "document-bulk",
         resourceId: body.documentIds.join(","),
@@ -462,6 +489,7 @@ export const documentsRoutes = new Hono()
       const updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? []);
       await appendAuditLog({
         userId,
+        apiKeyId,
         action: "documents.tags.bulk_removed",
         resourceType: "document-bulk",
         resourceId: body.documentIds.join(","),
@@ -479,6 +507,7 @@ export const documentsRoutes = new Hono()
       const deleted = await deleteDocuments(body.documentIds, userId);
       await appendAuditLog({
         userId,
+        apiKeyId,
         action: "documents.deleted",
         resourceType: "document-bulk",
         resourceId: body.documentIds.join(","),
@@ -502,9 +531,17 @@ export const documentsRoutes = new Hono()
       () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
       `/v1/workspaces/${bulkWorkspaceId ?? "{workspaceId}"}/documents/bulk/estimate`,
     );
-    const { runs, failed, warnings } = await bulkReprocessDocuments(body.documentIds, userId);
+    let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
+    try {
+      bulk = await bulkReprocessDocuments(body.documentIds, userId);
+    } catch (error) {
+      if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
+      throw error;
+    }
+    const { runs, failed, warnings } = bulk;
     await appendAuditLog({
       userId,
+      apiKeyId,
       action: "documents.bulk_reprocessed",
       resourceType: "document-bulk",
       resourceId: body.documentIds.join(","),
@@ -526,13 +563,15 @@ export const documentsRoutes = new Hono()
     return c.json({ runs, failed, warnings, ...(job ? { job } : {}) }, 201);
   });
 
-// Reads only, plus full-index (policy-gated): the router guard above rejects other non-GET API key requests.
+// Reads, full-index (policy-gated) and content updates (server keys with ingest); the router guard above rejects other API key writes.
 acceptApiKeys(documentsRoutes, [
+  "DELETE /:docId",
+  "PUT /:docId/tags",
+  "POST /bulk",
   "POST /:documentId/full-index",
   "POST /:documentId/full-index/estimate",
   "GET /",
   "GET /index",
-  "GET /review-queue",
   "GET /:docId",
   "GET /:docId/structured",
   "GET /:docId/versions",

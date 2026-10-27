@@ -8,8 +8,10 @@ import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { cleanupTempFile } from "../tools/storage.js";
+import { documentArtifactRoot } from "../lib/artifact-root.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
+import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
@@ -34,6 +36,8 @@ export interface RasterCacheOptions {
   /** Max parallel native renders (one document handle per lane). */
   concurrency?: number;
 }
+
+let rasterEngineUnavailableReported = false;
 
 const defaultLoadEngine = async (): Promise<NativePdfEngine | null> => {
   const loaded = await loadNativePdfEngine();
@@ -166,8 +170,19 @@ export class PdfRasterCache {
 
   private async resolveEngine(): Promise<{ name: RasterEngineName; engine: NativePdfEngine | null }> {
     if (this.requestedEngine !== "native-pdf") return { name: "pdftoppm", engine: null };
-    const engine = await (this.options.loadEngine ?? defaultLoadEngine)().catch(() => null);
-    return engine ? { name: "native-pdf", engine } : { name: "pdftoppm", engine: null };
+    const engine = await (this.options.loadEngine ?? defaultLoadEngine)().catch((error: unknown) => {
+      logNativePdfFallback("raster-engine", error, "pdftoppm");
+      return null;
+    });
+    if (!engine) {
+      // Once per process: the requested engine is a process setting, so repeating it per page adds nothing.
+      if (!rasterEngineUnavailableReported) {
+        rasterEngineUnavailableReported = true;
+        logNativePdfFallback("raster-engine", new NativePdfError("NATIVE_PDF_UNAVAILABLE", "PDF_RASTER_ENGINE=native-pdf but the engine is unavailable"), "pdftoppm");
+      }
+      return { name: "pdftoppm", engine: null };
+    }
+    return { name: "native-pdf", engine };
   }
 
   /**
@@ -196,7 +211,9 @@ export class PdfRasterCache {
         signal: args.signal,
       });
       return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
-    } catch {
+    } catch (error) {
+      if (args.signal?.aborted) throw error;
+      logNativePdfFallback(`raster-clip page=${args.pageNumber}`, error, "full-page render and crop");
       return null;
     }
   }
@@ -229,7 +246,7 @@ export class PdfRasterCache {
     const dpiDir = resolved.name === "native-pdf" ? `v2-${dpi}dpi-native-pdf` : `v2-${dpi}dpi`;
     const keys = new Map(pageNumbers.map((pageNumber) => [
       pageNumber,
-      `${args.document.userId}/${args.runId}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
+      `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
     ]));
     let engineName: RasterEngineName = resolved.name;
     const existing = new Map<number, number | null>();
@@ -263,14 +280,14 @@ export class PdfRasterCache {
           }
         } catch (error) {
           if (args.signal?.aborted) throw error;
-          console.warn(`[raster] native-pdf render failed, falling back to pdftoppm: ${error instanceof Error ? error.message : String(error)}`);
+          logNativePdfFallback("raster-render", error, "pdftoppm");
         }
       }
       if (isPdf && !nativeDone && resolved.engine) {
         // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
         engineName = "pdftoppm";
         for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${args.document.userId}/${args.runId}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
+          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
         }
         await Promise.all(pageNumbers.map(async (pageNumber) => {
           existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));

@@ -1,4 +1,4 @@
-import type { PrivacyAuditEntry } from "@docslurp/shared";
+import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
 import type { StageState, WorkspaceRunEvent } from "../models.js";
 import type { Document, ParserEvaluation, PerformanceEvent, WorkspaceRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
@@ -51,6 +51,11 @@ export interface CheckpointStore {
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
+  /**
+   * Stores the derived display title in documents.metadata unless one is already set
+   * (re-runs do not churn it and a user rename wins). Returns whether it was written.
+   */
+  setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
 }
 
 export interface Stage {

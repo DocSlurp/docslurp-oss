@@ -217,6 +217,39 @@ server and worker start. Watch its exit status and the server logs. Breaking sch
 changes are possible while DocSlurp is pre-release; read release notes before
 upgrading and keep a rollback backup (see [Backups and restore](#backups-and-restore)).
 
+### Moving to per-workspace LanceDB databases (migration 0082)
+
+Vectors used to live in org-level tables
+(`<LANCEDB_URI>/<orgId>/vectors/<model>/<dims>`, `chunks_org_…`). Every
+workspace now has its own database,
+`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dims>`, and search reads
+only that one. Until existing rows are moved, vector search returns nothing
+for documents indexed before the upgrade (keyword search still works; the API
+counts `lanceTableMissing` and logs `[search] lancedb table missing`).
+
+1. Stop ingest (or let runs finish), then upgrade the server and worker
+   together. Migration 0082 repoints pending queued vector writes at their
+   workspace database and marks old org-deletion cleanup rows.
+2. Move the rows, without re-embedding, from the worker image:
+   `node worker/dist/stages/lancedb-relocate-cli.js --all --dry-run`, then
+   without `--dry-run`, with ingest still stopped. It routes each row to its
+   document's workspace (dedup copies in another workspace get their own
+   rebound rows), keeps only rows whose chunk still exists, appends without
+   replacing rows already in the workspace database, then builds the vector
+   and full-text indexes. Reruns converge. Rows of deleted documents and
+   replaced chunks stay behind (`orphan_rows`, `stale_rows`).
+   It registers every table it maintains for the maintenance sweep; after
+   changing `vectorIndexMinRows`, rerun with `--maintain-all` to index tables
+   that already crossed the new threshold.
+3. Resume ingest, check search in a few workspaces, then rerun with
+   `--drop-legacy` to delete the org-level tables (they hold chunk text). It
+   drops only after a run that read every row and had no error. Deleting an
+   org queues its org-level tables for the cleanup sweep too.
+
+Rolling back the code reads the org-level tables again, which miss anything
+indexed after the upgrade: keep them until step 3 and reprocess documents
+uploaded since.
+
 ## Monitoring
 
 - `GET /health` returns `{"ok":true,...}` while the server process is up. The
@@ -280,3 +313,19 @@ This is scaling on a single host, not a multi-host design.
 | Full worker shows `[worker-start] installing deferred Python deps` for a long time | With no vendor bundle source, the full worker pip-installs several GB on first boot. | Wait, or set `DOCSLURP_VENDOR_BUNDLE_BASE_URL`. See [Worker image and vendor bundles](../worker-image.md). |
 | Storage errors after you edited `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` | MinIO, the server and the worker all read these as one credential. They disagree until every service is recreated. | Recreate them together with `up -d`. If errors continue, change the keys back. |
 | Postgres rejects the new password after you edited `POSTGRES_PASSWORD` | Postgres sets its password only when the volume is first created. | Change it inside Postgres with `ALTER USER docslurp PASSWORD '...'`, then update `POSTGRES_PASSWORD` and the `DATABASE_URL` password to match and run `up -d`. |
+
+## Export cleanup
+
+Zip exports (`POST /v1/exports`) are built by the worker: exports under 250 MB on the `docslurp-document-export` task queue and larger, emailed ones on `docslurp-document-export-large` (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` and `TEMPORAL_LARGE_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker), one slot each per worker. Set `WORKER_DOCUMENT_EXPORTS=off` on workers that scale in or restart often, so exports run on long-lived machines; streaming a 2 GB export peaks around 185 MB of worker memory. Exports are stored under `exports/<orgId>/<workspaceId>/<exportId>/`, one zip per attempt. Each link lives seven days from when the export is ready. Downloads redirect to a two-minute presigned storage link, so the bucket's public endpoint (`DOCSLURP_STORAGE_PUBLIC_BUCKET_URL`, when set) must serve signed GETs; the link sets the download filename and `Cache-Control: private, no-store`. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend (five attempts with backoff), when the worker has woken the app via `WORKER_APP_KEEPALIVE_URL`, deletes objects whose seven days have passed or whose document, workspace or requester was deleted (including organization and account deletion), and marks exports unfinished after ten hours as failed. Exports hold at most 65,000 files (zip without ZIP64); past that, page-by-page Markdown is left out and the README says so. Look for `[document-export]` log lines.
+
+As a backstop, add a bucket lifecycle rule that expires objects under the `exports/` prefix after 8 days, so a stopped sweep never leaves exports behind:
+
+```json
+{ "Rules": [{ "ID": "expire-exports", "Status": "Enabled", "Filter": { "Prefix": "exports/" }, "Expiration": { "Days": 8 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 } }] }
+```
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --endpoint-url "$S3_ENDPOINT" --lifecycle-configuration file://lifecycle.json
+```
+
+Merge this rule into any existing lifecycle configuration (such as incomplete-multipart expiry) rather than replacing it.

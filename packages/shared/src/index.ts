@@ -31,6 +31,7 @@ export * from "./page-vectors.js";
 export * from "./pipeline.js";
 export * from "./document-versions.js";
 export * from "./jobs.js";
+export * from "./media-upload-estimate.js";
 export * from "./config-change.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";
@@ -44,6 +45,7 @@ export * from "./chunks.js";
 export * from "./search.js";
 export * from "./usage.js";
 export * from "./text-normalization.js";
+export * from "./document-title.js";
 
 // Explicit named re-exports that were originally inlined in index.ts to satisfy
 // any consumer that imports them by name from @docslurp/shared.
@@ -59,6 +61,7 @@ export type {
 } from "./layout.js";
 
 export * from "./openrouter-usage.js";
+export * from "./openrouter-routing.js";
 export * from "./chat-model-prices.js";
 
 export * from "./workspace-state.js";
@@ -76,5 +79,7 @@ export * from "./frontend-api.js";
 export { documentTagsSchema } from "./document-tags.js";
 
 export * from "./page-render.js";
+export * from "./document-export.js";
+export * from "./extract-mode.js";
 
 export * from "./workspace-settings-proposal.js";

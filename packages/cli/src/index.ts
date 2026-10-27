@@ -44,6 +44,9 @@ function usage(): void {
   console.log(`Usage:
   docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--watch] [--api-url <url>]
+  docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
+  docslurp extract-status <extractId> [--json]
+  docslurp extract-download <extractId>
   docslurp full-index [--workspace <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
   docslurp jobs get <jobId> [--json]
@@ -68,6 +71,10 @@ it with that name (and --template, if given); other commands answer workspace no
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
+extract works like upload (files) or ingest-url (URLs), but the files and every output are
+deleted when the retention window ends: 48 hours free by default, --retention-days for longer
+(charged as storage). It emails a sign-in download link when done unless --no-email is set;
+extract-download prints a two-minute signed URL for the results zip.
 
 Copyright 2025-2026 DocSlurp, Inc. and contributors. No warranty.
 You may redistribute this CLI under SSPL-1.0; an Apache-2.0 grant applies
@@ -233,12 +240,15 @@ function parseCliArgs(argv: string[]) {
     if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate") {
       flags[arg.slice(2)] = true;
       i++;
+    } else if (arg === "--no-email") {
+      flags.noEmail = true;
+      i++;
     } else if (arg === "--new-workspace") {
       flags.newWorkspace = true;
       i++;
     } else if (arg === "--workspace-name" || arg === "--workspace-id") {
       throw new Error(`${arg} was removed: pass a workspace ID, slug or name with --workspace (a name that matches no workspace is created on upload).`);
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from") {
+    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -299,10 +309,12 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
 }
 
 /** Create a direct upload session, PUT each file (or its parts), complete, then confirm. Returns the confirm response. */
-async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>): Promise<Response> {
+async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<Response> {
   const field = (name: string) => (typeof fields.get(name) === "string" ? String(fields.get(name)) : undefined);
   const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const created = await apiFetch("/v1/uploads/direct/sessions", flags, json({
+  // Extract sessions are created under /v1/extracts and continue on the shared upload session routes.
+  const created = await apiFetch(`${intake.base}/direct/sessions`, flags, json({
+    ...intake.fields,
     ...(field("workspace") ? { workspace: field("workspace") } : {}),
     ...(field("newWorkspace") === "true" ? { newWorkspace: true } : {}),
     ...(field("templateKey") ? { templateKey: field("templateKey") } : {}),
@@ -346,14 +358,18 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   }
 }
 
-async function uploadCommand(files: string[], flags: Record<string, string | boolean>): Promise<void> {
+/** Upload, or extract mode: the same transports against /v1/extracts plus the retention fields. */
+type IntakeMode = { base: "/v1/uploads" | "/v1/extracts"; fields: Record<string, string | number | boolean> };
+const UPLOAD_MODE: IntakeMode = { base: "/v1/uploads", fields: {} };
+
+async function uploadCommand(files: string[], flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<void> {
   if (files.length === 0) {
     console.error("Error: at least one file path required");
     process.exitCode = 1;
     return;
   }
 
-  if (flags.estimate === true) {
+  if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const sized = await Promise.all(files.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
     await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspace ? { workspace: target.workspace } : {}) }, flags);
@@ -361,6 +377,7 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   }
 
   const formData = new FormData();
+  for (const [name, value] of Object.entries(intake.fields)) formData.append(name, String(value));
 
   const target = resolveIntakeTarget(flags);
   if (target.workspace) formData.append("workspace", target.workspace);
@@ -388,8 +405,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   // larger uploads go straight to storage through a direct upload session.
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
-    ? await uploadDirect(blobs, formData, flags)
-    : await apiFetch("/v1/uploads/bulk", flags, {
+    ? await uploadDirect(blobs, formData, flags, intake)
+    : await apiFetch(`${intake.base}/bulk`, flags, {
       method: "POST",
       body: formData
     });
@@ -469,14 +486,15 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
     process.exitCode = 1;
     return;
   }
-  const result = await response.json() as { runId?: string; id?: string; job?: JobStatus };
+  // Reprocess answers the run itself, or { run, warnings } when its start was deferred.
+  const result = await response.json() as { runId?: string; id?: string; run?: { id?: string }; job?: JobStatus };
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
-    const runId = result.runId ?? result.id;
+    const runId = result.runId ?? result.id ?? result.run?.id;
     if (runId) console.log(`Run ID:    ${runId}`);
     if (result.job) printJob(result.job);
   }
-  const runId = result.runId ?? result.id;
+  const runId = result.runId ?? result.id ?? result.run?.id;
   if (flags.watch === true && runId) await statusCommand(runId, flags);
 }
 
@@ -560,28 +578,36 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
   process.exitCode = 1;
 }
 
-type IntakeResult = { job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[] };
+type IntakeResult = {
+  job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[];
+  extract?: { id: string; expiresAt: string; paidRetention: boolean; notifyEmail: boolean };
+};
 
 async function printIntakeResult(response: Response, flags: Record<string, string | boolean>): Promise<void> {
   const result = await response.json() as IntakeResult;
   console.log(`Workspace: ${result.workspace.name} (${result.workspace.slug ?? result.workspace.id})`);
   console.log(`Run ID:    ${result.run.id}`);
   console.log(`Documents: ${result.documents.length}`);
+  if (result.extract) {
+    console.log(`Extract:   ${result.extract.id}`);
+    console.log(`Deleted:   ${result.extract.expiresAt}${result.extract.paidRetention ? " (extended retention, charged as storage)" : ""}`);
+    if (result.extract.notifyEmail) console.log("You'll get an email with a download link when it finishes.");
+  }
   if (result.job) printJob(result.job);
   for (const warning of result.warnings ?? []) console.error(`Warning: ${warning}`);
   if (flags.watch === true) await statusCommand(result.run.id, flags);
 }
 
-async function ingestUrlCommand(urls: string[], flags: Record<string, string | boolean>): Promise<void> {
+async function ingestUrlCommand(urls: string[], flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<void> {
   if (urls.length === 0) {
     console.error("Error: at least one URL required");
     process.exitCode = 1;
     return;
   }
-  const response = await apiFetch("/v1/uploads/url", flags, {
+  const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags) }),
+    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...intake.fields }),
   });
   if (!response.ok) {
     console.error(publicHttpError(response.status));
@@ -589,6 +615,64 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     return;
   }
   await printIntakeResult(response, flags);
+}
+
+/** `docslurp extract`: files or URLs (not both), with the retention options. */
+async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
+  const fields: Record<string, string | number | boolean> = {};
+  if (typeof flags.retentionDays === "string") {
+    const days = Number(flags.retentionDays);
+    if (!Number.isInteger(days) || days < 1) throw new Error("--retention-days must be a whole number of days.");
+    fields.retentionDays = days;
+  }
+  if (flags.noEmail === true) fields.notifyEmail = false;
+  if (typeof flags.download === "string") {
+    if (flags.download !== "markdown" && flags.download !== "all") throw new Error("--download must be markdown or all.");
+    fields.download = flags.download;
+  }
+  const intake: IntakeMode = { base: "/v1/extracts", fields };
+  const urls = inputs.filter((input) => /^https?:\/\//i.test(input));
+  if (urls.length > 0 && urls.length !== inputs.length) throw new Error("Pass either files or URLs to extract, not both.");
+  if (urls.length > 0) await ingestUrlCommand(urls, flags, intake);
+  else await uploadCommand(inputs, flags, intake);
+}
+
+async function extractStatusCommand(extractId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  if (!extractId) throw new Error("Extract ID required.");
+  const response = await apiFetch(`/v1/extracts/${encodeURIComponent(extractId)}`, flags);
+  if (response.status === 410) {
+    console.error("This extract has expired and its files and outputs were deleted.");
+    process.exitCode = 1;
+    return;
+  }
+  if (!response.ok) {
+    console.error(publicHttpError(response.status));
+    process.exitCode = 1;
+    return;
+  }
+  const { extract } = await response.json() as { extract: { id: string; status: string; expiresAt: string; pages: number | null; download: { status: string; url: string | null } } };
+  if (flags.json === true) {
+    console.log(JSON.stringify(extract, null, 2));
+    return;
+  }
+  console.log(`Extract:  ${extract.id}`);
+  console.log(`Status:   ${extract.status}`);
+  console.log(`Pages:    ${extract.pages ?? "-"}`);
+  console.log(`Download: ${extract.download.status}${extract.download.url ? ` (docslurp extract-download ${extract.id})` : ""}`);
+  console.log(`Deleted:  ${extract.expiresAt}`);
+}
+
+/** Prints the two-minute signed URL; the API key goes only to DocSlurp, never to storage. */
+async function extractDownloadCommand(extractId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  if (!extractId) throw new Error("Extract ID required.");
+  const response = await apiFetch(`/v1/extracts/${encodeURIComponent(extractId)}/download`, flags, { redirect: "manual" });
+  const location = response.headers.get("location");
+  if (response.status >= 300 && response.status < 400 && location) {
+    console.log(location);
+    return;
+  }
+  console.error(response.status === 410 ? "This extract has expired and its files and outputs were deleted." : publicHttpError(response.status));
+  process.exitCode = 1;
 }
 
 function renderBar(current: number, total: number, width = 20): string {
@@ -971,6 +1055,15 @@ async function main(): Promise<void> {
       break;
     case "ingest-url":
       await ingestUrlCommand(positional, flags);
+      break;
+    case "extract":
+      await extractCommand(positional, flags);
+      break;
+    case "extract-status":
+      await extractStatusCommand(positional[0], flags);
+      break;
+    case "extract-download":
+      await extractDownloadCommand(positional[0], flags);
       break;
     case "full-index":
       await fullIndexCommand(flags);

@@ -21,6 +21,16 @@ afterEach(() => {
 });
 
 describe("Telegram signup delivery", () => {
+  it.each(["development", "test", "preview", "staging", undefined])("does not notify Telegram outside production (%s)", async (nodeEnv) => {
+    vi.stubEnv("NODE_ENV", nodeEnv);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "test-chat");
+    const transport = vi.fn();
+    vi.stubGlobal("fetch", transport);
+    await notifySignup({ kind: "account", email: "local@example.test" });
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("skips missing configuration without making a request", async () => {
     const transport = vi.fn();
     expect(await createTelegramDelivery({ configure: () => ({}), transport })("signup"))
@@ -45,6 +55,7 @@ describe("Telegram signup delivery", () => {
   });
 
   it("contains transport errors and logs no token or user data", async () => {
+    vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "secret-token");
     vi.stubEnv("TELEGRAM_CHAT_ID", "test-chat");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("secret-token")));
@@ -75,6 +86,7 @@ describe("Telegram signup delivery", () => {
     vi.stubGlobal("fetch", transport);
     query.mockResolvedValue({ rows: [{ ready: true, name: "New User" }] });
     await import("./better-auth.js");
+    vi.stubEnv("NODE_ENV", "production");
     await authOptions.value.databaseHooks.user.create.after({
       id: "user-1", email: "new@example.com", name: "New User"
     });

@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { McpDispatch } from "../lib/mcp-http.js";
 import { CHAT_AGENT_LIMIT_DEFAULTS } from "@docslurp/shared";
 import { asSchema } from "ai";
-import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT } from "./chat-mcp-tools.js";
+import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT, withoutEvidence } from "./chat-mcp-tools.js";
 import { mcpManifest, uploadStatusInput, mediaEvidenceInput } from "./mcp-catalog.js";
 import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[] } = {}) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[]; maxToolCalls?: number; suggestions?: boolean } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
@@ -54,6 +54,15 @@ describe("chat MCP tools", () => {
     expect(Object.keys(t.tools)).toEqual(["search"]);
   });
 
+  it("never lets the model start a paid full index", () => {
+    expect(Object.keys(setup(["search", "fullIndex"]).tools)).toEqual(["search"]);
+  });
+
+  it("leaves rarely used tools out of the per-step tool catalog", () => {
+    const t = setup(["search", "fullIndexEstimate", "uploadEstimate", "reprocessEstimate", "getJob", "suggestQueries", "getUploadStatus"]);
+    expect(Object.keys(t.tools)).toEqual(["search", "getUploadStatus"]);
+  });
+
   it("offers only webSearch and webFetch to chat, and only when the turn allows web tools", () => {
     const ids = ["search", "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite"];
     expect(Object.keys(setup(ids).tools)).toEqual(["search"]);
@@ -92,12 +101,57 @@ describe("chat MCP tools", () => {
     ] });
   });
 
-  it("blocks partially failed web fetches instead of presenting the successful pages as completion", async () => {
+  it("answers from the pages a web fetch read and reports the unread ones without blocking the turn", async () => {
     const t = setup(["webFetch"], { webTools: true, userText: ["https://example.com/a https://example.com/b"] });
-    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", markdown: "Partial content" }], failed: [{ url: "https://example.com/b", reason: "timeout" }] }));
-    await expect(t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b"] })).resolves.toMatchObject({ blocked: true, code: "partial_failure" });
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", markdown: "Partial content" }], failed: [{ url: "https://example.com/b", reason: "blocked" }] }));
+    const result = await t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b"] });
+    expect(result).toMatchObject({ ok: true, result: { pages: [{ url: "https://example.com/a" }] },
+      unread: [{ url: "https://example.com/b", reason: expect.stringContaining("bot protection") }] });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it.each([
+    ["webSearch", { query: "status" }, 502, { error: { code: "unavailable", message: "Web search failed. Try again shortly." } }, "unavailable", /may be down.*bot protection.*AI/],
+    ["webSearch", { query: "status" }, 429, { error: { code: "rate_limited", message: "Too many web tool calls." } }, "rate_limited", /try again/],
+    ["webFetch", { urls: ["https://example.com/a"] }, 400, { error: { code: "invalid_request", message: "The web fetch request was rejected." } }, "invalid_request", /rejected/],
+  ] as const)("turns a failed %s (HTTP %s) into an explained result instead of blocking", async (name, input, status, body, code, reason) => {
+    const t = setup(["search", "webSearch", "webFetch"], { webTools: true, userText: ["https://example.com/a"] });
+    t.dispatch.mockResolvedValueOnce(Response.json(body, { status }));
+    const result = await t.execute(name, input, "a") as { error: string; instruction: string };
+    expect(result).toMatchObject({ ok: false, blocked: false, code, status });
+    expect(result.error).toMatch(reason);
+    expect(result.instruction).toMatch(/plainly.*Still complete every other part/s);
+    expect(t.failure).toBeUndefined();
+    await expect(t.execute("search", { q: "next" }, "b")).resolves.toMatchObject({ ok: true });
+  });
+
+  it("explains a web fetch that read no pages with each page's reason", async () => {
+    const t = setup(["webFetch"], { webTools: true, userText: ["https://example.com/a"] });
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [], failed: [{ url: "https://example.com/a", reason: "http_403" }] }));
+    const result = await t.execute("webFetch", { urls: ["https://example.com/a"] });
+    expect(result).toMatchObject({ ok: false, blocked: false, code: "http_403", error: expect.stringMatching(/web page.*403.*AI/),
+      failed: [{ url: "https://example.com/a", reason: expect.stringContaining("403") }] });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it("returns rejected search arguments to the model to correct, then blocks after two rejections", async () => {
+    const t = setup(["search"]);
+    const rejected = () => Response.json({ error: { code: "invalid_request", message: "Invalid request", details: { issues: [{ path: ["limit"], message: "Expected number" }] } } }, { status: 400 });
+    t.dispatch.mockResolvedValueOnce(rejected()).mockResolvedValueOnce(rejected()).mockResolvedValueOnce(rejected());
+    await expect(t.execute("search", { q: "a", limit: "ten" }, "a")).resolves.toMatchObject({ ok: false, blocked: false, code: "invalid_arguments",
+      issues: [{ path: ["limit"], message: "Expected number" }], instruction: expect.stringContaining("again once") });
+    await expect(t.execute("search", { q: "a", limit: "ten" }, "b")).resolves.toMatchObject({ blocked: false, code: "invalid_arguments" });
+    await expect(t.execute("search", { q: "a", limit: "ten" }, "c")).resolves.toMatchObject({ blocked: true });
     expect(t.failure).toMatchObject({ code: "chat_tool_failed" });
-    expect(t.citations).toEqual([]);
+  });
+
+  it("does not block the turn when a web call throws or times out", async () => {
+    const t = setup(["webSearch"], { webTools: true, toolBudgetMs: () => 30 });
+    t.dispatch.mockImplementationOnce((_path, init) => new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason))));
+    await expect(t.execute("webSearch", { query: "slow" }, "a")).resolves.toMatchObject({ ok: false, blocked: false, code: "tool_timeout" });
+    t.dispatch.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(t.execute("webSearch", { query: "broken" }, "b")).resolves.toMatchObject({ ok: false, blocked: false, code: "exception" });
+    expect(t.failure).toBeUndefined();
   });
 
   it("streams only short http(s) source URLs and still reports a partially failed fetch", async () => {
@@ -108,7 +162,7 @@ describe("chat MCP tools", () => {
     await t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b", long] });
     const [loading, done] = t.onActivity.mock.calls.map(([event]) => event);
     expect(loading.web).toEqual({ kind: "fetch", urls: ["https://example.com/a", "https://example.com/b"], requestedCount: 3 });
-    expect(done.status).toBe("error");
+    expect(done.status).toBe("success");
     expect(done.web).toMatchObject({ failedCount: 1, credits: 0.25, results: [{ url: "https://example.com/a", domain: "example.com", title: "A" }] });
   });
 
@@ -137,6 +191,27 @@ describe("chat MCP tools", () => {
     const result = await t.execute("search");
     expect(t.citations).toHaveLength(1);
     expect(result).toMatchObject({ evidence: [{ citationIndex: 1, text: "Supported fact" }] });
+  });
+
+  it("sends each passage once: only this call's evidence, with raw hits stripped from the result", async () => {
+    const t = setup();
+    const hit = (chunkIndex: number, text: string) => ({ text, score: 1, citation: { documentId: "doc", filename: "guide.pdf", pageNumber: chunkIndex + 1, chunkIndex, headingPath: [] } });
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [hit(0, "First")], searchSessionId: "s1" }));
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [hit(0, "First"), hit(1, "Second")], searchSessionId: "s2" }));
+    await t.execute("search");
+    const second = await t.execute("search");
+    expect(second).toEqual({ ok: true, status: 200, result: { searchSessionId: "s2" }, evidence: [
+      { citationIndex: 1, filename: "guide.pdf", documentId: "doc", pageNumber: 1, text: "First" },
+      { citationIndex: 2, filename: "guide.pdf", documentId: "doc", pageNumber: 2, text: "Second" },
+    ] });
+  });
+
+  it("keeps a zero-hit result and a nested answer visible to the model", async () => {
+    const t = setup();
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [] }));
+    await expect(t.execute("search")).resolves.toEqual({ ok: true, status: 200, result: { results: [] } });
+    expect(withoutEvidence({ answer: "Yes [1]", citations: [{ text: "x", score: 1, citation: { documentId: "d", filename: "f", pageNumber: 1, chunkIndex: 0, headingPath: [] } }] }))
+      .toEqual({ answer: "Yes [1]" });
   });
 });
 
@@ -364,6 +439,59 @@ describe("tool failure latch", () => {
     await expect(t.execute("search", { q: "follow-up" }, "second")).rejects.toMatchObject({ code: "chat_tool_failed" });
     expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 0 : 1);
     expect(t.citations).toEqual([]);
+  });
+
+  it.each([403, 500, "exception", "invalid-input"] as const)("never latches a failed settings proposal (%s): the answer stands", async failure => {
+    const t = setup(["search", "proposeWorkspaceSettings"]);
+    if (failure === "exception") t.dispatch.mockRejectedValueOnce(new Error("network failed"));
+    else if (typeof failure === "number") t.dispatch.mockResolvedValueOnce(Response.json({ error: { code: "no_change" } }, { status: failure }));
+    const result = await t.execute("proposeWorkspaceSettings", failure === "invalid-input" ? null : { changes: { retrieval: { resultCount: 8 } } });
+    expect(result).toMatchObject({ ok: false, blocked: false });
+    expect((result as { error: string }).error).toMatch(/could not be prepared/);
+    expect(t.failure).toBeUndefined();
+    expect(() => t.throwIfBlocked()).not.toThrow();
+    // Later tools still run.
+    await t.execute("search", { q: "follow-up" }, "second");
+    expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 1 : 2);
+  });
+
+  it("does not latch a settings proposal refused by the tool-call budget", async () => {
+    const t = setup(["search", "proposeWorkspaceSettings"], { maxToolCalls: 1 });
+    await t.execute("search", { q: "first" }, "a");
+    await expect(t.execute("proposeWorkspaceSettings", { changes: {} }, "b")).resolves.toMatchObject({ code: "tool_call_limit", blocked: false });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it("does not count a refused optional call as a tool-call-limit stop", async () => {
+    const t = setup(["search", "proposeWorkspaceSettings"], { maxToolCalls: 1 });
+    await t.execute("search", { q: "first" }, "a");
+    await t.execute("proposeWorkspaceSettings", { changes: {} }, "b");
+    expect(t.counters).toMatchObject({ refused: 0, softRefused: 1 });
+  });
+
+  it("treats an unreadable proposal as not prepared, without leaking the raw result", async () => {
+    const t = setup(["proposeWorkspaceSettings"]);
+    t.dispatch.mockResolvedValueOnce(Response.json({ settingsProposal: { token: "raw-grant", malformed: true } }));
+    const result = await t.execute("proposeWorkspaceSettings", { changes: {} });
+    expect(result).toMatchObject({ ok: false, blocked: false, code: "invalid_proposal" });
+    expect(JSON.stringify(result)).not.toContain("raw-grant");
+    expect(t.details.get("call")).toMatchObject({ status: "error", errorCode: "invalid_proposal" });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it("in suggestions mode, a budget refusal of a diagnostic read does not cost the answer", async () => {
+    const t = setup(["search", "getUploadStatus"], { maxToolCalls: 1, suggestions: true });
+    await t.execute("search", { q: "first" }, "a");
+    await expect(t.execute("getUploadStatus", {}, "b")).resolves.toMatchObject({ code: "tool_call_limit", blocked: false });
+    expect(t.failure).toBeUndefined();
+    // A real failure of the same read still blocks.
+    const real = setup(["getUploadStatus"], { suggestions: true });
+    real.dispatch.mockResolvedValueOnce(Response.json({ error: "failed" }, { status: 500 }));
+    await expect(real.execute("getUploadStatus", {})).resolves.toMatchObject({ blocked: true });
+    // Outside suggestions mode the refusal blocks as before.
+    const plain = setup(["search", "getUploadStatus"], { maxToolCalls: 1 });
+    await plain.execute("search", { q: "first" }, "a");
+    await expect(plain.execute("getUploadStatus", {}, "b")).resolves.toMatchObject({ blocked: true });
   });
 
   it("does not latch a successful search with no matching documents", async () => {

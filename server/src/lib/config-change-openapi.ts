@@ -102,7 +102,7 @@ export const configChangePaths = {
     post: {
       tags: ["ingest"],
       summary: "Estimate an upload",
-      description: "Body `{ files: [{ name, size, pages? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace). Pages default to about one per 75 KB.",
+      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace). Pages default to about one per 75 KB. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price.",
       security,
       requestBody: body,
       responses: estimateResponses,

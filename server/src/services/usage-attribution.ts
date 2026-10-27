@@ -189,7 +189,7 @@ export async function orgSpendByCategory(
     select
       case
         when au.metric = any(${INGEST_UNIT_METRICS}::text[]) then 'ingest'
-        when au.metric = ${STORAGE_USAGE_METRIC} then 'storage'
+        when au.metric = any(${[STORAGE_USAGE_METRIC, BILLABLE_UNIT_METRICS.extractRetention]}::text[]) then 'storage'
         when au.metric = ${BILLABLE_UNIT_METRICS.search} then 'search'
         when au.metric = ${BILLABLE_UNIT_METRICS.chatAnswer} then 'chat'
         else 'other'
@@ -550,4 +550,61 @@ export async function runUsageCostSummaries(
     group by au.run_id
   `;
   return new Map(rows.map((row) => [row.run_id, summarizeRunUsageCost(row)]));
+}
+
+export interface ExtractUsageTotals {
+  /** Extracts created in the window. */
+  extracts: number;
+  /** Pages they stored (settled extracts only). */
+  pages: number;
+  /** Credits charged for their runs: ingest units, features and extended retention. */
+  costCents: number;
+  /** Of which extended retention. */
+  retentionCents: number;
+  /** Rate-card estimate of unbilled worker compute on their runs (as summarizeRunUsageCost). */
+  computeCostCents: number;
+  /** pages / dollars charged; null without charges. */
+  pagesPerDollar: number | null;
+}
+
+/**
+ * Extract mode's own usage and cost, separable from uploads: every usage event
+ * of an extract's run (also after the run is deleted, through source_run_id),
+ * scoped to the org. Extract runs are workspace_runs with extract_id; the
+ * extracts row outlives them, so the figures survive expiry.
+ */
+export async function extractUsageTotals(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<ExtractUsageTotals> {
+  const window = since === null ? client`true` : since === "month" ? client`e.created_at >= date_trunc('month', now())` : client`e.created_at >= ${since}`;
+  const [row] = await client<{ extracts: number; pages: number; cost_cents: number; retention_cents: number; compute_cents: number }[]>`
+    with scoped as (
+      select e.id, e.run_id, e.pages, e.created_at from extracts e where e.org_id = ${orgId} and ${window}
+    ),
+    usage as (
+      select
+        coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
+        coalesce(sum(au.cost_cents) filter (where au.metric = ${BILLABLE_UNIT_METRICS.extractRetention}), 0)::double precision as retention_cents,
+        coalesce(sum((au.metadata ->> 'effectiveCostCents')::double precision) filter (
+          where au.provider = 'local-compute' and coalesce(au.metadata ->> 'billable', 'false') <> 'true'
+        ), 0)::double precision as compute_cents
+      from usage_attribution au
+      join scoped on scoped.run_id = au.source_run_id
+      -- Bounded by org and time (no usage predates its extract) instead of scanning the view's
+      -- run expression across the org's whole history.
+      where au.org_id = ${orgId} and au.created_at >= (select min(created_at) from scoped)
+    )
+    select (select count(*)::int from scoped) as extracts,
+      (select coalesce(sum(pages), 0)::int from scoped) as pages,
+      usage.cost_cents, usage.retention_cents, usage.compute_cents
+    from usage
+  `;
+  const cost = Number(row?.cost_cents ?? 0);
+  const pages = Number(row?.pages ?? 0);
+  return {
+    extracts: Number(row?.extracts ?? 0),
+    pages,
+    costCents: cost,
+    retentionCents: Number(row?.retention_cents ?? 0),
+    computeCostCents: Number(row?.compute_cents ?? 0),
+    pagesPerDollar: cost > 0 ? pages / (cost / 100) : null,
+  };
 }

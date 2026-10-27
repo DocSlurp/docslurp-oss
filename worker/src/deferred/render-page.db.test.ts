@@ -77,9 +77,8 @@ it("migrates existing reader/export demand without deletion and gives it conserv
   ]);
   await expect(sql`update document_page_renders set dpi=999`).rejects.toThrow();
 });
-it("keeps paid 250 demand while an admitted free 120 export finishes after funding", async () => {
+it("keeps 250-DPI demand while an admitted 120-DPI export finishes", async () => {
   await sql`delete from document_page_renders`;
-  await sql`update organizations set funded_at=null where id='o'`;
   await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',120,now()+interval '10 minutes')`;
   let releaseLow!: () => void, releaseHigh!: () => void;
   const lowBarrier = new Promise<void>((resolve) => {
@@ -100,7 +99,6 @@ it("keeps paid 250 demand while an admitted free 120 export finishes after fundi
     dpi: 120,
   });
   await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledTimes(1));
-  await sql`update organizations set funded_at=now() where id='o'`;
   await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',250,now()+interval '10 minutes')`;
   const high = renderDocumentPage(deps(), {
     documentId: "doc",
@@ -126,7 +124,6 @@ it("keeps paid 250 demand while an admitted free 120 export finishes after fundi
 });
 it("clears a repeatedly renewed same-DPI demand when matching cached pixels already exist", async () => {
   await sql`delete from document_page_renders`;
-  await sql`update organizations set funded_at=now() where id='o'`;
   await sql`update workspace_runs set artifacts=${sql.json({ "doc:raster-v3-export-250dpi-page-1": "s3://page-250" })}::jsonb where id='run'`;
   for (let attempt = 0; attempt < 3; attempt++) {
     await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',250,now()+interval '10 minutes') on conflict(document_id,run_id,page_number,quality,dpi) do update set expires_at=excluded.expires_at`;

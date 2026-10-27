@@ -191,6 +191,8 @@ export const organizationSchema = z.object({
   funded: z.boolean().default(false),
   /** Versions kept per document chain; null uses DEFAULT_RETAINED_VERSIONS. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /** China-based model providers may serve the org's requests (DeepSeek, GLM and similar open models often cost about half there). */
+  allowChinaProviders: z.boolean().default(true),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -306,10 +308,20 @@ export type WorkspaceChatWholeCorpusDebug = z.infer<
 /** Search-agent budgets for one /v1/chat turn. Non-admin callers may only lower them. */
 export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6 } as const;
 export const CHAT_AGENT_LIMIT_MAXIMUMS = { maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 } as const;
+/**
+ * Dynamic step budget: a turn gets this many model steps (final answer
+ * included). It continues past them, up to maxSteps, only while each tool step
+ * adds new evidence and the turn's input tokens stay under
+ * CHAT_AGENT_EXTENSION_INPUT_TOKENS. Every step resends the whole history, so
+ * late steps cost the most (production 2026-10: 4-step turns averaged 142k
+ * input tokens, 8-step turns 545k).
+ */
+export const CHAT_AGENT_BASE_STEPS = 4;
+export const CHAT_AGENT_EXTENSION_INPUT_TOKENS = 150_000;
 export type ChatAgentLimitName = keyof typeof CHAT_AGENT_LIMIT_DEFAULTS;
 
 export const chatAgentLimitsInputSchema = z.object({
-  /** Model steps (calls), including the final answer step. Default 8. */
+  /** Model steps (calls), including the final answer step. Default: CHAT_AGENT_BASE_STEPS, extended up to 8 while searches add evidence; a set value is a fixed budget. */
   maxSteps: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxSteps).optional(),
   /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 16. */
   maxToolCalls: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxToolCalls).optional(),
@@ -322,11 +334,28 @@ export const chatAgentLimitsInputSchema = z.object({
    * agent decides which tools to call.
    */
   tools: z.boolean().optional(),
+  /**
+   * Web tools (webSearch, webFetch) for this turn. false: never offered.
+   * Omitted or true: offered when the deployment, the workspace's
+   * `pipeline.webTools` and its privacy mode allow them; a request cannot
+   * enable them past those policies.
+   */
+  web: z.boolean().optional(),
+  /**
+   * Suggestions mode: the agent watches for ingestion and search problems
+   * (zero or weak results, failed or still-processing files, degraded
+   * extraction) and proposes specific workspace-setting changes. A proposal
+   * never applies itself; the user confirms each one with Apply. Default off
+   * for API callers; the DocSlurp app turns it on unless the user switches it off.
+   */
+  suggestions: z.boolean().optional(),
 }).strict();
 export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;
 
 export const chatAgentLimitsSchema = z.object({
   maxSteps: z.number().int().positive(),
+  /** Steps before the turn must show progress to continue; equals maxSteps when the caller set maxSteps. */
+  baseSteps: z.number().int().positive().optional(),
   maxToolCalls: z.number().int().positive(),
   searchConcurrency: z.number().int().positive(),
   /** Requested limits lowered to the defaults because the caller is not an admin. */
@@ -385,6 +414,17 @@ export const chatAgentTimeBudgetDebugSchema = z.object({
 });
 export type ChatAgentTimeBudgetDebug = z.infer<typeof chatAgentTimeBudgetDebugSchema>;
 
+/**
+ * Agent modes a turn ran with. `web`: "on" (web tools offered), "off" (the
+ * request turned them off) or "unavailable" (requested, but the deployment,
+ * workspace setting, privacy mode or key scope does not allow them).
+ */
+export const chatAgentModesSchema = z.object({
+  web: z.enum(["on", "off", "unavailable"]),
+  suggestions: z.boolean(),
+});
+export type ChatAgentModes = z.infer<typeof chatAgentModesSchema>;
+
 export const workspaceChatDebugSchema = z.object({
   /** Search-agent turns only: the `model` the caller asked for (null when omitted). */
   requestedModel: z.string().nullable().optional(),
@@ -404,6 +444,7 @@ export const workspaceChatDebugSchema = z.object({
   stepUsage: z.array(chatAgentStepUsageSchema).optional(),
   limits: chatAgentLimitsSchema.optional(),
   timeBudget: chatAgentTimeBudgetDebugSchema.optional(),
+  modes: chatAgentModesSchema.optional(),
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),

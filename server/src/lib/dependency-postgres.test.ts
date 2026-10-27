@@ -33,5 +33,15 @@ it.skipIf(!process.env.GRAPH_PURGE_TEST_DATABASE_URL)("preserves lazy queries, f
     await expect(sql`select 1/0`).rejects.toMatchObject({ code: "22012" });
     expect(spans.some(span => span.attributes["db.response.status_code"] === "22012")).toBe(true);
     expect(spans.filter(span => span.name === "postgres.begin")).toHaveLength(2);
+    // The statement as sent (placeholders, no values), its summary and the calling code.
+    const answer = spans.find(span => span.attributes["db.query.text"] === "select $1::int as answer")!;
+    expect(answer.attributes).toMatchObject({ "db.query.summary": "SELECT" });
+    expect(JSON.stringify(answer.attributes)).not.toContain("42");
+    expect(spans.find(span => String(span.attributes["db.query.text"]).startsWith("select n from generate_series(1, 3) n where n = $1"))).toBeTruthy();
+    // Failing (and slow) queries also name the code that issued them.
+    const failed = spans.find(span => span.attributes["db.response.status_code"] === "22012")!;
+    expect(failed.attributes).toMatchObject({ "db.query.text": "select 1/0", "code.file.path": expect.stringContaining("dependency-postgres.test.ts") });
+    await sql`select pg_sleep(0.06)`;
+    expect(spans.find(span => String(span.attributes["db.query.text"]).startsWith("select pg_sleep"))?.attributes["code.line.number"]).toEqual(expect.any(Number));
   } finally { await sql.end({ timeout: 1 }); }
 });

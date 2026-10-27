@@ -78,12 +78,11 @@ export function narrowMaterializationPolicy(
 }
 
 /**
- * Starter orgs (never funded) defer (`map`); funded orgs index fully.
- * Never `visual`: page-image embedding is an explicit, priced opt-in.
+ * What a new workspace indexes with unless the caller picks a mode: everything up front, for every organization.
+ * `map` (On demand · page map) and `visual` (On demand · page images) are explicit, cheaper choices; no balance,
+ * plan or template selects them for you.
  */
-export function defaultIndexingModeForOrg(input: { funded: boolean }): IndexingMode {
-  return input.funded ? "full" : "map";
-}
+export const DEFAULT_INDEXING_MODE: IndexingMode = "full";
 
 /** Typical image-page token count and Gemini image price, for page-embedding cost estimates. */
 export const PAGE_EMBED_ESTIMATED_PAGE_TOKENS = 258;

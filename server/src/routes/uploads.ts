@@ -4,6 +4,7 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import {
   documentTagsSchema,
+  isBillingExemptOrg,
   pipelineFeatureOverridesSchema,
   WORKSPACE_INPUT_MAX_LENGTH,
   workspaceTemplateKeySchema,
@@ -16,6 +17,7 @@ import {
   normalizeUploadPath,
   sourcePathsForFiles,
   InvalidCanonicalIdError,
+  isReservedCanonicalId,
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
 import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, lookupActorWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
@@ -50,21 +52,23 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
 import { workspaceInputNotFoundError } from "../services/default-workspace.js";
 import { estimateUpload } from "../services/work-estimates.js";
+import { ExtractError } from "../services/extracts.js";
 import { billingState } from "../services/config-change.js";
 
 type Uploadable = File | string | Array<File | string> | undefined;
 
-const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
+export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH)
+  .refine((value) => !isReservedCanonicalId(value), "canonicalId must not start with docslurp: (reserved)");
 
 /** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
-const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
+export const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
 
 /** A restricted API key's workspace allowlist (null for sessions and unrestricted keys). */
-function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
+export function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
   return actor.type === "apiKey" && actor.apiKey.workspaceIds?.length ? actor.apiKey.workspaceIds : null;
 }
 
-const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
+export const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
   try {
     normalizeUploadPath(value);
   } catch (error) {
@@ -87,7 +91,7 @@ const ingestUrlSchema = z.object({
   pipeline: pipelineFeatureOverridesSchema.optional(),
 });
 
-const directUploadFileSchema = z.object({
+export const directUploadFileSchema = z.object({
   singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
@@ -123,7 +127,7 @@ const completeDirectFileSchema = z.object({
     .optional(),
 });
 
-const uploadValidationHook = (
+export const uploadValidationHook = (
   result: { success: boolean; error?: ValidationErrorSource },
   c: Context,
 ) => {
@@ -138,7 +142,7 @@ const uploadValidationHook = (
   );
 };
 
-function parseCanonicalIds(
+export function parseCanonicalIds(
   files: File[],
   body: Record<string, unknown>,
 ): Array<string | null> {
@@ -153,7 +157,7 @@ function parseCanonicalIds(
   }
 }
 
-function parseSourcePaths(files: File[], body: Record<string, unknown>): string[] {
+export function parseSourcePaths(files: File[], body: Record<string, unknown>): string[] {
   try {
     return sourcePathsForFiles(files.length, { path: body.path, paths: body.paths });
   } catch (error) {
@@ -162,7 +166,7 @@ function parseSourcePaths(files: File[], body: Record<string, unknown>): string[
   }
 }
 
-function normalizeFiles(entry: Uploadable): File[] {
+export function normalizeFiles(entry: Uploadable): File[] {
   if (!entry) {
     return [];
   }
@@ -187,6 +191,8 @@ export function workspaceIntakeErrorResponse(
   if (error instanceof WorkspaceAccessError) {
     return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
+  // A direct extract session confirmed after its extract expired (run-creation.ts).
+  if (error instanceof ExtractError) return apiErrorResponse(c, error.status, error.code, error.message);
   if (error instanceof UnreadableSourceError) {
     return apiStatusError(c, error.statusCode, error.message, { code: error.code });
   }
@@ -202,7 +208,7 @@ export function workspaceIntakeErrorResponse(
  * create a new one (which would land outside the allowlist). Session users are
  * unrestricted. Security finding SEC-2026-10-07.
  */
-function apiKeyMayCreateWorkspace(c: Context): boolean {
+export function apiKeyMayCreateWorkspace(c: Context): boolean {
   const apiKey = c.get("apiKey");
   return !apiKey || (apiKey.workspaceIds ?? []).length === 0;
 }
@@ -469,7 +475,7 @@ export const uploadsRoutes = createUploadsRoutes();
  * existing workspace's ID, or the name of the workspace to create at confirm
  * (neither: a self-titled one). Same rules as intakeIntoWorkspace.
  */
-async function directUploadTarget(
+export async function directUploadTarget(
   actor: RequestActor,
   input: { workspace?: string; newWorkspace?: boolean; templateKey?: string },
   orgId: string | null,
@@ -498,6 +504,10 @@ const uploadEstimateSchema = z.object({
     name: z.string().min(1).max(1024),
     size: z.number().int().nonnegative(),
     pages: z.number().int().positive().optional(),
+    /** MIME type, so audio and video are priced by duration even when the name has no extension. */
+    type: z.string().max(255).optional(),
+    /** Length in seconds when the client can read it; otherwise estimated from the size. */
+    durationSeconds: z.number().positive().max(24 * 3600).optional(),
   })).min(1).max(1000),
   workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
@@ -526,8 +536,9 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
-    const estimate = await estimateUpload({ files: body.files, workspace });
-    return c.json({ estimate, billing: billingState() });
+    const { estimate, media } = await estimateUpload({ files: body.files, workspace });
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance.
+    return c.json({ estimate, media, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
   },
 );
 acceptApiKeys(uploadEstimateRoutes);

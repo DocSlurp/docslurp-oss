@@ -166,6 +166,19 @@ await client.waitForRun(accepted.run.id);
 
 DocSlurp must be able to reach the URLs. URL ingestion is retried only when you supply an `idempotencyKey`. Use the same `upload()` method for local files or public URLs.
 
+### Extract and auto-delete
+
+`extract()` takes everything `upload()` takes, but the files and every output are deleted when the retention window ends: 48 hours free by default, or `retentionDays` (charged as storage, up to 30 days by default). The response adds `extract` with its `id`, `expiresAt` and download state, and the requester is emailed a sign-in download link when it finishes unless `notifyEmail: false`.
+
+```ts
+const { run, extract } = await client.extract([await openAsBlob("report.pdf")], { retentionDays: 7, download: "markdown" });
+await client.waitForRun(run.id);
+const status = await client.getExtract(extract.id); // DocSlurpApiError 410 once it has expired
+const zipUrl = await client.getExtractDownloadUrl(extract.id); // two-minute signed URL; server key with artifacts
+```
+
+See [Extract mode](https://docslurp.io/docs/extract) for retention, pricing and deletion.
+
 ### Search several questions in one request
 
 ```js
@@ -424,7 +437,11 @@ Environment variables are read once, when the client is created, and only on the
 | `updateWorkspaceEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `workspaces:manage` |
 | `fullIndexEstimate({ documentId } or { workspace?, documentIds? }, request?)` / `uploadEstimate({ files, workspace? }, request?)` | `{ estimate, billing }` | `ingest` |
 | `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `workspaces:manage` |
-| `updateSearchSettingsEstimate(id, input, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutations accept no API key, so neither do these |
+| `updateSearchSettingsEstimate(id, input, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutation accepts no API key |
+| `reprocessRun(runId, { stageFrom?, stages? }?, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ run, job?, warnings }` / `{ estimate, billing }`. Reprocessing re-extracts files a re-upload of identical bytes would not | Server key with `ingest` |
+| `deleteDocument(documentId, request?)` / `setDocumentTags(documentId, tags, request?)` | Removed identities / `{ documentId, tags }` | Server key with `ingest` |
+| `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`) | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's workspaces |
+| `reprocessIngestRecommendation(workspace?, { recommendationId, runId?, documentIds? })` / `applyIngestRecommendation(...)` | Created runs / applied settings patch | Server key with `ingest` / `workspaces:manage` |
 | `setRetention({ orgId } or { workspace? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
 | `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |

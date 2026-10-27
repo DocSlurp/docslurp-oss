@@ -26,7 +26,7 @@ export type LanceDbMaintenanceOptions = {
 };
 
 /**
- * How documents reach the per-org table. `queued` (default): enqueue to the Postgres
+ * How documents reach a workspace table. `queued` (default): enqueue to the Postgres
  * outbox and let the table's single write-lease holder commit pending documents in one
  * batch. `direct`: every document commits its own merge-insert (optimistic, conflicts
  * under concurrency; kept as a fallback for setups without the worker database).
@@ -94,7 +94,7 @@ export const LEGACY_OPTIMIZE_EVERY_ROWS = 20_000;
 
 /**
  * Maintenance and write-path tuning from LANCEDB_URI, e.g.
- * s3://bucket/lancedb?vectorIndexMinRows=5000&versionRetentionMinutes=10&writeMode=queued.
+ * s3://bucket/lancedb?vectorIndexMinRows=1000&versionRetentionMinutes=10&writeMode=queued.
  * Environment variables override the URI: LANCEDB_WRITE_MODE, LANCEDB_MAINTENANCE_MODE,
  * LANCEDB_OPTIMIZE_EVERY_ROWS, LANCEDB_OPTIMIZE_EVERY_COMMITS, LANCEDB_OPTIMIZE_INTERVAL_SECONDS,
  * LANCEDB_OPTIMIZE_MIN_INTERVAL_SECONDS, LANCEDB_MAX_INDEX_SEGMENTS, LANCEDB_CONSOLIDATE_MAX_ROWS.
@@ -123,7 +123,7 @@ export function lanceDbMaintenanceSettings(
     enabled: !/^(0|false|no|off)$/i.test(params.get("maintenance") ?? ""),
     mode: inline ? "inline" : "background",
     reindexPages: positive("reindexPages", 20),
-    vectorIndexMinRows: positive("vectorIndexMinRows", 5_000),
+    vectorIndexMinRows: positive("vectorIndexMinRows", 1_000),
     writeMode: mode === "direct" ? "direct" : "queued",
     versionRetentionMs: positive("versionRetentionMinutes", 10) * 60_000,
     optimizeEveryRows: positive("optimizeEveryRows", inline ? LEGACY_OPTIMIZE_EVERY_ROWS : d.optimizeEveryRows, "LANCEDB_OPTIMIZE_EVERY_ROWS"),
@@ -184,42 +184,32 @@ process.env.LANCE_INCLUDE_VECTOR_CENTROIDS ??= "false";
 export const lanceMaintenanceKey = (uri: string, tableName: string) => `${uri}\u0000${tableName}`;
 
 type MaintenanceTask = () => Promise<void>;
-type Slot = { running: Promise<void>; pending: Promise<void> | null };
+type Slot = { tail: Promise<void>; pending: Promise<void> | null };
 
-/**
- * Serializes awaited maintenance per key. While a run is active, further requests coalesce
- * into exactly one follow-up run (dirty flag) instead of queueing one run per request. Used by
- * callers that wait for maintenance anyway (inline mode, the superseded-document purge), so
- * keys are not bounded by the background pool's concurrency, as before.
- */
+/** Serialize every run; ordinary requests coalesce, strict erasure requests keep their own options. */
 export function createMaintenanceCoordinator() {
   const slots = new Map<string, Slot>();
-
-  const launch = (key: string, slot: Slot, task: MaintenanceTask): Promise<void> =>
-    task().catch(() => undefined).finally(() => {
-      if (!slot.pending && slots.get(key) === slot) slots.delete(key);
-    });
-
   return {
-    request(key: string, task: MaintenanceTask): Promise<void> {
+    request(key: string, task: MaintenanceTask, coalesce = true): Promise<void> {
       const existing = slots.get(key);
-      if (!existing) {
-        const slot: Slot = { running: Promise.resolve(), pending: null };
-        slots.set(key, slot);
-        slot.running = launch(key, slot, task);
-        return slot.running;
-      }
-      if (existing.pending) return existing.pending;
-      existing.pending = existing.running.then(() => {
-        existing.pending = null;
-        existing.running = launch(key, existing, task);
-        return existing.running;
+      if (coalesce && existing?.pending) return existing.pending;
+      const slot = existing ?? { tail: Promise.resolve(), pending: null };
+      slots.set(key, slot);
+      let queued: Promise<void>;
+      const run = async () => {
+        if (slot.pending === queued) slot.pending = null;
+        await task();
+      };
+      // Start the first task immediately, preserving the inline maintenance behaviour.
+      const work = existing ? slot.tail.then(run) : run();
+      queued = work.catch(() => undefined).finally(() => {
+        if (slot.tail === queued) slots.delete(key);
       });
-      return existing.pending;
+      slot.tail = queued;
+      if (existing) slot.pending = queued;
+      return queued;
     },
-    activeKeys(): number {
-      return slots.size;
-    },
+    activeKeys(): number { return slots.size; },
   };
 }
 
@@ -238,6 +228,22 @@ export function requestLanceDbMaintenance(
   return coordinator.request(lanceMaintenanceKey(uri, tableName), async () => {
     await runLanceDbMaintenance(uri, tableName, options);
   });
+}
+
+/** Erasure must observe success and must never join a run with weaker retention options. */
+export async function requireLanceDbMaintenance(
+  uri: string,
+  tableName: string,
+  options: LanceDbMaintenanceOptions,
+): Promise<void> {
+  let failure: unknown;
+  await coordinator.request(lanceMaintenanceKey(uri, tableName), async () => {
+    try {
+      const result = await runLanceDbMaintenance(uri, tableName, options);
+      if (!result.ok) throw new Error(result.error ?? "LanceDB erasure maintenance failed");
+    } catch (error) { failure = error; }
+  }, false);
+  if (failure !== undefined) throw failure;
 }
 
 /**

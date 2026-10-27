@@ -23,7 +23,9 @@ export const PUBLIC_ERROR_MESSAGES = {
   unsupportedType: "This file type isn’t supported.",
   unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
+  graphRebuildFailed: "The knowledge graph rebuild failed. Start it again; if it keeps failing, contact support.",
   silentVideo: "This video has no audio track, and video frame reading is disabled for this workspace or server.",
+  imageNeedsVision: "This image can only be read with OCR or vision, and neither is available for this workspace. Check the workspace's vision and privacy settings.",
   paused: "Processing is paused. Your workspace administrator can help you resume it.",
   workspaceMissing: "We couldn’t find that workspace. It may have been moved or removed.",
   personalOrganization: "Personal organizations can’t be changed this way.",
@@ -70,6 +72,8 @@ export function publicDiagnostics(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).flatMap(([key, item]) => {
     if (/stack|exception|traceback|stderr|stdout|debug|raw.?response|provider.?response/i.test(key)) return [];
+    // Internal extractor routing (engine versions, rollout state, attempt order) stays operator-only.
+    if (/^(nativePdf|extractorOrder|extractorAttempts|secondaryExtractor|retryStrategy)$/.test(key)) return [];
     if (/error|failure|warning|reason|message|detail/i.test(key)) {
       if (item == null || item === false || item === "") return [[key, item]];
       if (typeof item === "number" || typeof item === "boolean") return [[key, item]];
@@ -93,6 +97,7 @@ export function publicDiagnostics(value: unknown): unknown {
  */
 export const DOCUMENT_FAILURE_MARKERS = {
   silentVideo: "Video has no audio track and video frame reading is disabled",
+  imageNeedsVision: "Image needs OCR or vision to read and neither is available",
 } as const;
 
 /** Public copy for a stored Document, stage or Run error. Never echoes the raw text. */

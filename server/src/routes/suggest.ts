@@ -46,7 +46,8 @@ export const suggestRoutes = new Hono()
       limit ${limit}
     `;
 
-    // 3) Common filenames and headings as suggestions (workspace-scoped, not user-scoped)
+    // 3) Common filenames and headings as suggestions (workspace-scoped, not user-scoped).
+    // Only current, searchable files: a failed or replaced file can't answer anything.
     const headings = await sql<{ phrase: string; weight: number }[]>`
       select distinct on (phrase) phrase, weight from (
         select d.filename as phrase, 5 as weight
@@ -55,6 +56,7 @@ export const suggestRoutes = new Hono()
         left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
         left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
         where d.workspace_id = ${workspaceId}
+          and d.status = 'completed' and d.superseded_at is null
           and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
           and d.filename ilike ${like}
         limit ${limit}

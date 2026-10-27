@@ -1,4 +1,4 @@
-import { mediaSummarySchema, publicDiagnostics, publicDocumentError, type MediaSummary } from "@docslurp/shared";
+import { cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, type MediaSummary } from "@docslurp/shared";
 import path from "node:path";
 
 import {
@@ -30,6 +30,7 @@ import {
   summarizeRunUsageCost,
   type UsageAggregate,
 } from "./usage-attribution.js";
+import { extractNotReprocessable } from "./reprocess-errors.js";
 
 type DocumentRow = {
   id: string;
@@ -546,6 +547,15 @@ function documentStatusReason(row: Pick<DocumentRow, "status" | "metadata">): st
   return typeof reason === "string" && reason ? reason : "Blocked from indexing by the workspace PII policy.";
 }
 
+/**
+ * The friendly title from ingestion (metadata.title), else the page map's title.
+ * Both are untrusted document content, so they are re-sanitized for display here.
+ */
+function documentTitle(row: Pick<DocumentRow, "filename" | "metadata">): string | null {
+  const options = { filename: row.filename };
+  return cleanDocumentTitle(row.metadata?.title, options) ?? cleanDocumentTitle(row.metadata?.mapTitle, options);
+}
+
 function mapDocument(row: DocumentRow): DocumentRecord {
   return documentSchema.parse({
     id: row.id,
@@ -554,6 +564,7 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     workspaceId: row.workspace_id,
     runId: row.run_id,
     filename: row.filename,
+    title: documentTitle(row),
     mimeType: row.mime_type,
     sourceKey: row.source_key,
     status: row.status,
@@ -1393,6 +1404,19 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   });
 }
 
+/** The workspace and organization of each listed document the user can read, so API key routes can check key scope. */
+export async function listDocumentOwners(documentIds: string[], userId: string): Promise<Array<{ id: string; workspaceId: string; orgId: string }>> {
+  if (documentIds.length === 0) return [];
+  const workspaceIds = await listAccessibleWorkspaceIds(userId);
+  if (workspaceIds.length === 0) return [];
+  const rows = await sql<{ id: string; workspace_id: string; org_id: string }[]>`
+    select d.id, d.workspace_id, w.org_id
+    from documents d join workspaces w on w.id = d.workspace_id
+    where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(documentIds)})
+  `;
+  return rows.map((row) => ({ id: row.id, workspaceId: row.workspace_id, orgId: row.org_id }));
+}
+
 export async function deleteDocument(docId: string, userId: string): Promise<DeletedDocumentResult | null> {
   const [deleted] = await deleteDocumentRows([docId], userId);
   return deleted ?? null;
@@ -1472,9 +1496,10 @@ export async function bulkReprocessDocuments(
     return result;
   }
 
-  const rows = await sql<(DocumentRow & { pipeline: PipelineFeatures | null })[]>`
+  const selected = await sql<(DocumentRow & { pipeline: PipelineFeatures | null; is_extract: boolean })[]>`
     select
       d.*,
+      exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null) as is_extract,
       case when ${options.useWorkspacePipeline === true}
         then (select w.pipeline from workspaces w where w.id = d.workspace_id)
         else coalesce(
@@ -1486,6 +1511,18 @@ export async function bulkReprocessDocuments(
     where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(documentIds)})
     order by d.workspace_id, d.created_at
   `;
+  // Extract documents are deleted with their extract and are never reprocessed (409 when nothing else is left).
+  const rows = selected.filter((row) => !row.is_extract);
+  const extractRows = selected.filter((row) => row.is_extract);
+  if (extractRows.length > 0) {
+    const rejected = extractNotReprocessable();
+    for (const workspaceId of new Set(extractRows.map((row) => row.workspace_id))) {
+      const ids = extractRows.filter((row) => row.workspace_id === workspaceId).map((row) => row.id);
+      result.failed.push({ workspaceId, documentIds: ids, message: rejected.message, code: rejected.code });
+      result.warnings.push(`${ids.length} extract ${ids.length === 1 ? "document was" : "documents were"} not reprocessed: ${rejected.message}`);
+    }
+    if (rows.length === 0) throw rejected;
+  }
 
   const groups = new Map<string, Array<DocumentRow & { pipeline: PipelineFeatures | null }>>();
   for (const row of rows) {

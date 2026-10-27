@@ -142,6 +142,11 @@ describe("buildDecisionModelCatalog", () => {
       "cloudflare/clef-omni",
       "openai/gpt-6-luna-decisions",
     ]);
+    for (const id of ["liquid/d1", "liquid/d1:direct"]) {
+      expect(all.models.find((model) => model.id === id)!.pricing).toMatchObject({
+        inputUsdPerMTok: 0.02, outputUsdPerMTok: 0, checkedAt: "2026-10-25",
+      });
+    }
     const jev = all.models.find((m) => m.id === "typesafe/jev-1.13")!;
     expect(jev.modalities.image).toBe(false);
     expect(jev.pricing.inputUsdPerMTok).toBe(0.042);

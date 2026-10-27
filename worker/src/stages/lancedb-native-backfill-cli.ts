@@ -10,8 +10,8 @@
  * (compiled into the worker image; from a checkout, `pnpm --filter @docslurp/worker exec tsx
  * scripts/lancedb-native-backfill.ts …` runs the same code).
  *
- * --org and --all cover every table native search reads for each org (embedding-space,
- * root-level embedding and legacy chunks_org tables) and index/optimize each once.
+ * --org and --all cover every workspace database (one per workspace and embedding space)
+ * and index/optimize each once.
  * Safe to rerun. Read-only on Postgres. Exits 1 when any table failed.
  */
 import postgres from "postgres";
@@ -57,5 +57,5 @@ const failed = present.filter((result) => result.error);
 const withoutFts = present.filter((result) => !result.error && !result.ftsPresent);
 console.log(`[backfill] done tables=${present.length} chunk_rows=${present.reduce((sum, result) => sum + result.chunkRows, 0)}`
   + ` fts_built=${present.filter((result) => result.ftsBuilt).length} without_fts=${withoutFts.length} failed=${failed.length}`);
-for (const result of failed) console.log(`[backfill] FAILED org=${result.orgId} table=${result.table}: ${result.error}`);
+for (const result of failed) console.log(`[backfill] FAILED org=${result.orgId} workspace=${result.workspaceId} uri=${result.uri}: ${result.error}`);
 if (failed.length > 0) process.exitCode = 1;

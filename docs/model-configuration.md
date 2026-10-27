@@ -73,7 +73,7 @@ Per-model prompt, output cap, routing and reasoning settings live in
 
 | Model URI | List $/M in / out | Est. cost/page | Profile behaviour |
 | --- | --- | --- | --- |
-| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Funded orgs: Together, Fireworks, Parasail (US), no other fallbacks. Unfunded starter orgs: DeepSeek's own China-hosted endpoint first ($0.15 / $0.60, about 0.04 cents a page), then the US hosts |
+| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Together, Fireworks, Parasail (US), no other fallbacks, for every organization (DeepSeek's own China-hosted endpoint is cheaper but is not used: where page images go never depends on the account's balance) |
 | `llm://openrouter/xiaomi/mimo-v2.6-flash` | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
 | `llm://openrouter/openai/gpt-6-luna` | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
 | `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Markdown transcription prompt, output cap ceiling 8,192, reasoning `minimal`, routed to Wafer, Friendli then InferenceNet with no other fallbacks, missing table delimiter rows repaired |
@@ -186,6 +186,33 @@ defaults for actual extraction.
 (custom addenda, non-commercial, research-only, undeclared) from the page router: target and decision-model catalogs,
 the decision chain, executors and the Extract flat-tier OCR routes. It does not touch proprietary hosted APIs; those
 stay under the privacy modes below. Classes, sources and the full table are in `docs/page-router.md` ("Licence classes").
+
+## Hosted provider routing
+
+OpenRouter serves many open-weight models from several hosts, at different
+prices. DocSlurp adds routing preferences to each OpenRouter request:
+
+- **Cheapest host first for GLM and DeepSeek.** Requests for `z-ai/glm-*` and
+  `deepseek/deepseek-*` sort hosts by price (`provider.sort: "price"`) and only
+  use hosts that serve FP8 or better weights. Fallbacks stay on. Keeping the same
+  cheap host across chat steps also keeps prompt-cache reads working.
+- **China-based providers, per organization.** These are on by default. Owners
+  and admins can turn them off for the whole organization with
+  `PATCH /v1/organizations/:orgId { "allowChinaProviders": false }`, or with the
+  toggle in organization settings. When off, every OpenRouter request made for
+  the organization excludes the China-based hosts. This covers chat, search
+  helpers, ingestion text and vision, and embeddings. Hosted open models such as
+  DeepSeek and GLM often cost about half as much on these hosts as on US-hosted
+  ones, so turning them off can raise model costs. The setting picks hosts; it
+  does not block models built by Chinese labs, which also run on hosts elsewhere.
+  The current host list is `CHINA_PROVIDER_SLUGS` in
+  `packages/shared/src/openrouter-routing.ts`: Alibaba, Baidu, DeepSeek, MiniMax,
+  Moonshot AI, Nex AGI, SiliconFlow, StepFun, StreamLake, Tencent, Xiaomi and
+  Z.AI.
+
+A request knows its organization from its API key or from the workspace it
+uses. A signed-in request without either applies the restriction when any of
+the user's organizations has it on. Changes apply within 30 seconds.
 
 ## Privacy modes
 

@@ -1,4 +1,5 @@
 import {
+  embeddingModelBaseUri,
   embeddingModelCatalogByUri,
   indexConfigHash,
   indexConfigOf,
@@ -55,7 +56,7 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
 
 /** The embedding config that reproduces a stored index config's query vectors. */
 export function embeddingConfigFor(current: EmbeddingConfig, config: IndexConfig): EmbeddingConfig {
-  const native = embeddingModelCatalogByUri[config.embeddingModel]?.dimensions ?? null;
+  const native = embeddingModelCatalogByUri[embeddingModelBaseUri(config.embeddingModel)]?.dimensions ?? null;
   return {
     ...current,
     modelUri: config.embeddingModel,
@@ -82,47 +83,56 @@ export async function documentCountsByIndexConfig(workspaceId: string, sql: SqlC
 }
 
 /**
- * Removes map entries no live document is built with (the current config always stays). Returns the pruned
- * map. Cheap and idempotent: called when a re-index run completes (sweeper) and lazily from search.
+ * Removes map entries no live document is built with and keeps the current config's entry (re-adding it if a
+ * stale prune dropped it). The current config is read from the stored pipeline and the update applies only
+ * while that pipeline is unchanged: a prune computed from a snapshot taken before a config change would drop
+ * the new config's entry while its documents are still being built. Returns the pruned map, or null when the
+ * pipeline changed underneath (the next sweep retries). Cheap and idempotent: called by the sweeper and lazily
+ * from search.
  */
-export async function pruneIndexConfigs(
-  workspaceId: string,
-  currentHash: string,
-  sql: SqlClient = defaultSql,
-): Promise<IndexConfigMap> {
+export async function pruneIndexConfigs(workspaceId: string, sql: SqlClient = defaultSql): Promise<IndexConfigMap | null> {
+  const [ws] = await sql<{ pipeline: PipelineFeatures | null }[]>`
+    select pipeline from workspaces where id = ${workspaceId} and index_configs is not null
+  `;
+  if (!ws) return {};
+  const current = indexConfigOf(normalizePipelineFeatures(ws.pipeline ?? null));
+  const currentHash = indexConfigHash(current);
+  const unchanged = ws.pipeline === null
+    ? sql`ws.pipeline is null`
+    : sql`ws.pipeline = ${sql.json(JSON.parse(JSON.stringify(ws.pipeline)))}::jsonb`;
   const [row] = await sql<{ index_configs: unknown }[]>`
     update workspaces as ws
     set index_configs = (
       select coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
       from jsonb_each(ws.index_configs) as e
-      where e.key = ${currentHash}
-        or exists (select 1 from documents d where d.workspace_id = ws.id and d.index_config_hash = e.key and ${LIVE_VECTORIZED(sql)})
-    )
-    where ws.id = ${workspaceId} and ws.index_configs is not null
+      where e.key <> ${currentHash}
+        and exists (select 1 from documents d where d.workspace_id = ws.id and d.index_config_hash = e.key and ${LIVE_VECTORIZED(sql)})
+    ) || jsonb_build_object(${currentHash}::text, ${sql.json(JSON.parse(JSON.stringify(current)))}::jsonb)
+    where ws.id = ${workspaceId} and ws.index_configs is not null and ${unchanged}
     returning ws.index_configs
   `;
-  return parseIndexConfigs(row?.index_configs);
+  return row ? parseIndexConfigs(row.index_configs) : null;
 }
 
 /** Sweeper: prunes drained configs in every workspace that still records more than one. */
 export async function pruneDrainedIndexConfigs(sql: SqlClient = defaultSql, limit = 50): Promise<number> {
-  const rows = await sql<{ id: string; pipeline: PipelineFeatures | null }[]>`
-    select ws.id, ws.pipeline from workspaces as ws
+  const rows = await sql<{ id: string }[]>`
+    select ws.id from workspaces as ws
     where ws.index_configs is not null and (select count(*) from jsonb_object_keys(ws.index_configs)) > 1
     limit ${limit}
   `;
   let pruned = 0;
   for (const row of rows) {
-    const current = indexConfigHash(indexConfigOf(normalizePipelineFeatures(row.pipeline ?? null)));
-    const map = await pruneIndexConfigs(row.id, current, sql);
-    if (Object.keys(map).length <= 1) pruned += 1;
+    const map = await pruneIndexConfigs(row.id, sql);
+    if (map && Object.keys(map).length <= 1) pruned += 1;
   }
   return pruned;
 }
 
 function spaceKey(embedding: EmbeddingConfig): string {
   const route = resolveEmbeddingRoute(embedding);
-  return `${route.model}\u0000${route.dimensions}`;
+  // modelUri, not model: two poolings of one model embed queries differently.
+  return `${route.modelUri}\u0000${route.dimensions}`;
 }
 
 /**
@@ -146,7 +156,7 @@ export async function servedVectorSearch<T extends ChunkLike>(args: {
 
   const counts = await documentCountsByIndexConfig(args.workspaceId, args.sql);
   const drained = hashes.filter((hash) => !counts.get(hash));
-  if (drained.length > 0) void pruneIndexConfigs(args.workspaceId, currentHash, args.sql).catch(() => undefined);
+  if (drained.length > 0) void pruneIndexConfigs(args.workspaceId, args.sql).catch(() => undefined);
   const others = hashes.filter((hash) => counts.get(hash));
   if (others.length === 0) return await args.deps.search(args.queryVector, null);
 

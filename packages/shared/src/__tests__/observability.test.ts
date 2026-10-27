@@ -150,6 +150,23 @@ describe("server observability", () => {
     expect(JSON.stringify(state.updates)).not.toContain("private");
   });
 
+  it("marks a caller abort as a cancelled outcome, not an ERROR observation", async () => {
+    enable();
+    const abort = new DOMException("This operation was aborted", "AbortError");
+    await expect(withObservation({ name: "api.chat.documents", type: "generation" }, async () => { throw abort; })).rejects.toBe(abort);
+    expect(state.updates.at(-1)?.data).toMatchObject({ level: "WARNING", statusMessage: "cancelled" });
+    expect(state.attributes).toContainEqual({ name: "api.chat.documents", key: "docslurp.outcome", value: "cancelled" });
+    expect(state.updates.some(update => update.data.level === "ERROR")).toBe(false);
+  });
+
+  it("keeps a timeout (even one wrapping an abort) as an ERROR observation", async () => {
+    enable();
+    const timeout = new DOMException("timed out", "TimeoutError");
+    await expect(withObservation({ name: "slow" }, async () => { throw timeout; })).rejects.toBe(timeout);
+    expect(state.updates.at(-1)?.data).toMatchObject({ level: "ERROR" });
+    expect(state.attributes.some(entry => entry.key === "docslurp.outcome")).toBe(false);
+  });
+
   it("bounds and sanitizes opted-in content", async () => {
     enable();
     vi.stubEnv("LANGFUSE_CAPTURE_CONTENT", "true");

@@ -138,6 +138,13 @@ Customers pay the `web-search`, `web-page` and `web-map` price card units.
   `privacy_mode_blocked`, `rate_limited`, `unavailable` and `invalid_request`.
   Provider names and provider error text appear only in internal logs, traces
   and cost events.
+- **In chat:** a failed `webSearch` or `webFetch` never fails the answer. The
+  model gets a plain reason (the site may be down, may block automated AI
+  access, needs a login, or the lookup timed out), tells the user it could not
+  retrieve that source, and answers the rest of the question. A fetch that read
+  some pages answers from those and lists the unread ones. The one exception is
+  the URL guard: a fetch of a URL the user did not write and web search did not
+  return still blocks the turn.
 
 ## Tracing
 

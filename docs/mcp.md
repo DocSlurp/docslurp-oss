@@ -7,7 +7,7 @@ Choose a tool based on the result you need:
 | Tool | Result | AI generation |
 | --- | --- | --- |
 | `listWorkspaces` | Authorized workspaces, slugs, default, document/page counts and processing status | None |
-| `upload` | Storage transfer descriptors for up to 10 files, or ingestion from remote URLs | Workspace ingestion settings |
+| `upload` | Storage transfer descriptors for up to 10 files, small inline files, or direct server-side ingestion from remote URLs | Workspace ingestion settings |
 | `completeUpload` | Optional single-PUT completion fallback; normal uploads finalize automatically | Workspace ingestion settings |
 | `suggestQueries` | Prior queries and suggestions | None |
 | `search` | Portable text passages with document/page citation metadata | None |
@@ -46,7 +46,7 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 }
 ```
 
-Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, and `searchSettingsEstimate` and `reprocessEstimate` are available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
+Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, `reprocessEstimate` needs `ingest` on a server key, and `searchSettingsEstimate` is available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
@@ -66,6 +66,32 @@ Acceptance means a run exists, not that extraction has finished. Follow the
 returned run ID for processing progress. If a status request times out, check
 the same session before starting another upload. For unknown-size streams, use
 the SDK's `upload()` or the [HTTP stream completion flow](https://docslurp.io/docs/http#streams-without-a-known-size).
+
+### Public URLs and clients without network access
+
+For a file that is already public, call `upload({ urls: ["https://…/report.pdf"] })`.
+DocSlurp's server downloads each URL itself with an SSRF-checked direct fetch. It
+does not use the web search or crawl tools, and the agent needs no network access.
+Redirects are refused, so pass the final URL.
+
+Some hosted agents run code in a sandbox whose firewall blocks storage hosts, so
+signed PUTs fail even though every other tool works. Allowing the upload host
+(`f.docslurp.io` on hosted DocSlurp) in the client's network settings fixes the
+PUT path. Without that, send small files inline:
+
+```json
+{ "inlineFiles": [
+  { "filename": "notes.md", "text": "# Meeting notes\n…" },
+  { "filename": "scan.pdf", "contentBase64": "JVBERi0xLjcK…" }
+] }
+```
+
+Each item carries exactly one of `text` (UTF-8) or `contentBase64` (standard or
+URL-safe). Up to 10 files and 512 KiB of decoded bytes per call fit the 1 MiB MCP
+request limit. `mimeType` is optional; the extension decides when it is omitted.
+Inline files go through the same intake as multipart uploads, so ingestion starts
+immediately. The response carries workspace and run IDs for `getUploadStatus`;
+there is no `sessionId`. Reuse `idempotencyKey` when you retry.
 
 ## Testing with real clients
 
@@ -135,7 +161,7 @@ for authentication boundaries, feature flags and the API parity roadmap.
 
 ## Protocol and file-handling conventions
 
-These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. The server verifies stored files before starting ingestion; it does not trust an agent's claim that PUT succeeded.
+These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage, except for small `inlineFiles` from clients that cannot reach it. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. The server verifies stored files before starting ingestion; it does not trust an agent's claim that PUT succeeded.
 
 The catalog uses valid case-sensitive tool names, deterministic scope-filtered discovery, JSON Schema inputs, mutation annotations, structured results with text fallback, and `isError` for execution failures. Authorization remains enforced server-side independently of annotations; OAuth tokens are not forwarded to storage.
 

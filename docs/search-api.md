@@ -84,6 +84,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Workspaces and runs: `workspace_forbidden`, `workspace_scope_forbidden` (a key limited to specific workspaces tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
 - Anything else: `unavailable` and `internal`.
 
@@ -126,10 +127,31 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. Unless you set it, the agent gets 4 calls and continues past them, up to 8, only while each search adds new evidence and the turn has used under 150,000 input tokens; set `maxSteps` for a fixed budget. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
 | `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
 | `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
+| `web` | workspace setting | boolean | `false` removes `webSearch` and `webFetch` from the turn. Omitted or `true` offers them only when the deployment (`WEB_TOOLS_ENABLED`, `WEB_TOOLS_CHAT_ENABLED`), the workspace's `pipeline.webTools`, its privacy mode and the key's scopes allow them; a request cannot turn them on past those. |
+| `suggestions` | `false` | boolean | Suggestions mode, described below. |
+
+#### Suggestions mode
+
+With `agent: {suggestions: true}` the agent watches the turn's own tool results for ingestion and search problems: a search with no results or only unrelated passages for something the workspace should contain, files reported as failed or still processing (current versions only) when the question's evidence is missing and that file could plausibly hold it, and passage text that is garbled, cut off or missing the table or page the question needs. When it sees one, it adds a short section after the answer that names the likely cause and the evidence, and can prepare up to two specific changes with `proposeWorkspaceSettings` (see [Workspace settings from chat](agent-workspace-settings.md)). A turn with no such signal gets no suggestions section: a question the results fully answer never mentions failed or processing files, the agent never guesses a file's contents or type, and it names a file only after `getUploadStatus` shows it. A proposal never changes anything by itself: a person applies it with **Apply** in the app, or the authenticated apply endpoint. A proposal that cannot be prepared never fails the turn; the answer stands and says so.
+
+Without suggestions mode the agent still prepares a proposal when the user asks to change a setting, but never volunteers one.
+
+#### Search settings asked for in chat
+
+A chat message such as "turn on reranking" can change the retrieval settings that appear in `retrievalDefaults` (result count, reranking, diversification) for **that chat thread only**; workspace defaults never change from a message. The agent is told exactly what changed (for example `useRerank false→true`, this thread only) and says so, rather than reporting the setting as "already enabled". A message that asks for the whole workspace ("for this workspace", "for everyone", "by default") changes nothing: the agent prepares a workspace-wide `proposeWorkspaceSettings` proposal for the user to **Apply**, and offers a thread-only change on request. Settings are configuration, not document evidence, so the agent never attaches a `[n]` citation to a statement about them. Answers also never include visible self-corrections: the agent works calculations out before it writes.
+
+A caller who stops a turn (Stop in the app, or a client disconnect) is recorded as a cancelled outcome, not a failure: telemetry logs it at INFO and the spans carry `docslurp.outcome=cancelled` (the agent span's `docslurp.chat.stop_reason` is `cancelled`) instead of an `ERROR` status. Timeouts and deadline stops remain errors.
+
+Suggestions mode and `agent.web` are set per request on `POST /v1/chat` (and the SDK's `chat`). They are not available on `GET /v1/chat/stream`, the MCP `chat` tool or `/v1/chat/completions`, which always run with suggestions off and the workspace's web setting. The DocSlurp web app turns suggestions on by default and has **Web** (default off) and **Suggestions** toggles in the composer.
+
+```bash
+curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"q": "Why can'"'"'t I find the Q3 renewal terms?", "agent": {"suggestions": true, "web": false}}'
+```
 
 The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
 
@@ -148,7 +170,8 @@ Agent responses add these `debug` fields (other turns omit them):
 | `zeroHitSearchCount` | Search calls that returned no results |
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
-| `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
+| `limits` | `{maxSteps, baseSteps, maxToolCalls, searchConcurrency, clamped}` as applied; `baseSteps` is the dynamic step budget |
+| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 
@@ -199,7 +222,7 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
       {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
       {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
     ],
-    "limits": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
+    "limits": {"maxSteps": 4, "baseSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
   }
 }
 ```
@@ -242,7 +265,7 @@ The TypeScript SDK supports direct `for await (const hit of client.search(input)
 Two in-process caches cut repeated-query latency. Both are per server process and per organization; an entry is never visible to another organization.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Workspaces in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
-- **Vector-result cache** (off by default). Keyed by organization, each LanceDB table's version, the query-vector hash, document scope, `limit` and ANN tuning, so a write to a table produces a new key. Results from a partially failed search are not cached. Enable with `SEARCH_RESULT_CACHE_MAX_ENTRIES` (default 0) and tune `SEARCH_RESULT_CACHE_TTL_SECONDS` (default 30). A hit can be as stale as the LanceDB read-consistency interval (`LANCEDB_READ_CONSISTENCY_SECONDS`, default 30 s) plus the TTL.
+- **Vector-result cache** (off by default). Keyed by organization, the workspace database's location and table version, the query-vector hash, document scope, `limit` and ANN tuning, so a write to a table produces a new key. Results from a partially failed search are not cached. Enable with `SEARCH_RESULT_CACHE_MAX_ENTRIES` (default 0) and tune `SEARCH_RESULT_CACHE_TTL_SECONDS` (default 30). A hit can be as stale as the LanceDB read-consistency interval (`LANCEDB_READ_CONSISTENCY_SECONDS`, default 30 s) plus the TTL.
 - **Privacy and tracing.** `strict-privacy` never reads or writes either cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
 
 Hits and misses appear as `embedCacheHit`/`embedCacheMiss` and `resultCacheHit`/`resultCacheMiss` counters in search timings, in the session diagnostics (`embeddingCache`), as `[search-cache]` log lines, and as `embed.cache` and `lancedb.result_cache` spans (`docslurp.cache.hit`).

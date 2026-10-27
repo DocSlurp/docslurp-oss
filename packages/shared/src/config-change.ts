@@ -2,7 +2,8 @@ import { z } from "zod";
 
 import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
 import { sha256Hex } from "./hash.js";
-import { embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
+import { embeddingModelBaseUri,
+  embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   affectedStages,
@@ -53,7 +54,7 @@ export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   const modelUri = embedding.modelUri ?? embeddingProfileCatalog[embedding.profile].config.modelUri;
   return {
     embeddingModel: modelUri,
-    dims: embedding.dimensions ?? embeddingModelCatalogByUri[modelUri]?.dimensions ?? null,
+    dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
     chunking: {
       chunkOverlap: features.chunkOverlap,
       contextualChunkPreambles: features.contextualChunkPreambles,
@@ -154,6 +155,17 @@ const EFFECTS: Partial<Record<ConfigChangeKind, string>> = {
   "new-uploads": "Applies to new uploads only.",
 };
 
+/** Field-specific wording for the effect on stored data, where the generic text would mislead. */
+const FIELD_EFFECTS: Partial<Record<keyof PipelineFeatures, Partial<Record<ConfigChangeKind, string>>>> = {
+  vision: {
+    "reindex-recommended": "New uploads use these vision page-selection settings. Existing documents keep their current text until you reprocess them; reprocessing re-reads their pages with vision and is billed per page.",
+  },
+  visionFallback: {
+    "reindex-recommended": "New uploads can read scanned or image-only pages with vision. Existing documents keep their current text until you reprocess them.",
+    "new-uploads": "Future uploads stop reading pages with vision. Existing documents keep the text already extracted.",
+  },
+};
+
 /** Classify a pipeline config change. Pure and synchronous (well under 5 ms). */
 export function analyzePipelineChange(
   before: PipelineFeatures,
@@ -167,7 +179,7 @@ export function analyzePipelineChange(
     if (pipelineValuesEqual(before[field], after[field])) continue;
     const rule = PIPELINE_FIELD_IMPACT[field];
     let fieldKind = typeof rule === "function" ? rule(before, after) : rule;
-    let effect = EFFECTS[fieldKind] ?? "No effect on stored data.";
+    let effect = FIELD_EFFECTS[field]?.[fieldKind] ?? EFFECTS[fieldKind] ?? "No effect on stored data.";
     if (KIND_RANK[fieldKind] >= KIND_RANK["reindex-recommended"]) {
       // Only a field with an effective seed stage in the new config can re-index anything. Otherwise (e.g. the
       // embedding model changes while embedding is off) existing data is left as is and the field applies to

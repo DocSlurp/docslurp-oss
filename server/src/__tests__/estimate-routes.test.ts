@@ -220,7 +220,9 @@ describe("estimate twins enforce the mutation's authorization", () => {
     expect((await post(appFor("u1", server({ workspaceIds: ["other"] })), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(404);
     expect((await post(appFor("u1", server({ orgId: "o2" })), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(404);
     expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(200);
-    expect((await post(appFor("u1"), "/v1/uploads/estimate", files)).status).toBe(200);
+    const defaultEstimate = await post(appFor("u1"), "/v1/uploads/estimate", files);
+    expect(defaultEstimate.status).toBe(200);
+    expect(await defaultEstimate.json()).toMatchObject({ media: null, orgId: expect.any(String), billingExempt: false });
 
     // u2's personal org has no default workspace: 404, and nothing is created.
     await sql`delete from workspaces where org_id = 'o2'`;

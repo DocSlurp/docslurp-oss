@@ -575,6 +575,55 @@
       "when": 1792792800020,
       "tag": "0081_api_key_chat_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1792792800030,
+      "tag": "0082_workspace_vector_databases",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1792792800040,
+      "tag": "0083_lancedb_workspace_followups",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1792792800050,
+      "tag": "0084_documents_workspace_failed_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1792792800100,
+      "tag": "0085_document_exports",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1792792800200,
+      "tag": "0086_org_china_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1792792800250,
+      "tag": "0087_search_sessions_workspace_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1792792800300,
+      "tag": "0088_extract_mode",
+      "breakpoints": true
     }
   ]
 }

@@ -61,8 +61,11 @@ describe("request actor helpers", () => {
 
   it("resolves a Better Auth session actor from validated session headers", async () => {
     vi.mocked(auth.api.getSession).mockResolvedValue({
-      session: { id: "session-1", userId: "user-1" },
-      user: { id: "user-1", email: "user@example.com", name: "User One" }
+      headers: new Headers(),
+      response: {
+        session: { id: "session-1", userId: "user-1" },
+        user: { id: "user-1", email: "user@example.com", name: "User One" }
+      }
     } as never);
 
     const actor = await resolveBetterAuthSessionActor(new Headers());
@@ -73,6 +76,26 @@ describe("request actor helpers", () => {
       sessionId: "session-1",
       user: { id: "user-1", email: "user@example.com", name: "User One", isAdmin: false }
     });
+  });
+
+  it("hands Better Auth's refreshed session cookie to the caller", async () => {
+    const refreshed = new Headers();
+    refreshed.append("set-cookie", "better-auth.session_token=renewed; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax");
+    vi.mocked(auth.api.getSession).mockResolvedValue({
+      headers: refreshed,
+      response: { session: { id: "session-1", userId: "user-1" }, user: { id: "user-1", email: "user@example.com", name: "User One" } }
+    } as never);
+    const responseHeaders = new Headers();
+
+    await resolveBetterAuthSessionActor(new Headers(), responseHeaders);
+
+    expect(vi.mocked(auth.api.getSession)).toHaveBeenCalledWith(expect.objectContaining({ returnHeaders: true }));
+    expect(responseHeaders.getSetCookie()).toEqual(refreshed.getSetCookie());
+  });
+
+  it("returns no actor when there is no session", async () => {
+    vi.mocked(auth.api.getSession).mockResolvedValue({ headers: new Headers(), response: null } as never);
+    expect(await resolveBetterAuthSessionActor(new Headers())).toBeNull();
   });
 
   it("wraps a validated bearer key as an API-key actor with request origin context", async () => {

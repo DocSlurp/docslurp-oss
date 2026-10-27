@@ -9,17 +9,14 @@
  *      not in the table are skipped);
  *   3. build the chunk-text FTS (BM25) index when it is missing;
  *   4. optimize the table: a merge-insert moves every updated row out of the vector (and FTS)
- *      index until the next optimize, so without it the org's searches, flag on or off, would
- *      flat-scan the backfilled rows until some later ingest triggers maintenance.
+ *      index until the next optimize, so without it the workspace's searches, flag on or off,
+ *      would flat-scan the backfilled rows until some later ingest triggers maintenance.
  *
- * Every table native search reads for an org is covered (see searchTargets in
- * server/src/search/lancedb.ts): the embedding-space table, the older root-level embedding
- * table and the legacy `chunks_org_…` table. A table without an FTS index sends the whole
- * org's keyword search to Postgres FTS, so leaving one out keeps the org on the fallback.
+ * Every workspace has its own LanceDB database per embedding space (see searchTarget in
+ * server/src/search/lancedb.ts); each one its documents were indexed into is covered. A
+ * table without an FTS index sends that workspace's keyword search to Postgres FTS.
  *
- * Scope: one workspace, every workspace of an org, or every org. Tables are shared by an
- * org's workspaces: the selected workspaces' rows are filled, and each table gets its FTS
- * index and optimize once per run, not once per workspace.
+ * Scope: one workspace, every workspace of an org, or every org.
  *
  * Safe to rerun: rows already carrying hydration are rewritten with the same values, an
  * existing FTS index is kept. Each batch is one Lance commit that can conflict with a
@@ -53,9 +50,9 @@ export interface LanceNativeBackfillOptions extends LanceNativeBackfillScope {
 
 export interface LanceNativeBackfillTableResult {
   orgId: string;
+  workspaceId: string;
   uri: string;
   table: string;
-  kind: "embedding" | "root-embedding" | "legacy";
   skipped?: "missing";
   /** The table failed (logged); the run went on with the next table. */
   error?: string;
@@ -64,7 +61,7 @@ export interface LanceNativeBackfillTableResult {
   /** The table has a chunk-text FTS index after the run (built now or before). */
   ftsPresent: boolean;
   optimized: boolean;
-  /** Rows of the table still without hydration (unselected workspaces, orphaned rows); null on a dry run. */
+  /** Rows of the table still without hydration (orphaned rows); null on a dry run. */
   rowsWithoutHydration: number | null;
 }
 
@@ -79,7 +76,7 @@ async function withRetry<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-/** One workspace (its org's tables, filled with this workspace's rows). */
+/** One workspace's LanceDB databases. */
 export async function backfillWorkspaceLanceHydration(options: LanceNativeBackfillOptions): Promise<LanceNativeBackfillTableResult[]> {
   const [workspace] = await options.sql<{ org_id: string }[]>`select org_id from workspaces where id = ${options.workspaceId}`;
   if (!workspace) throw new Error(`workspace ${options.workspaceId} not found`);
@@ -105,9 +102,9 @@ export async function backfillAllLanceHydration(options: LanceNativeBackfillScop
 }
 
 /**
- * Every LanceDB table native search reads for `orgId`, filled with the rows of
- * `workspaceIds` (default: all of the org's workspaces), each table indexed
- * and optimized once.
+ * Every LanceDB database of `workspaceIds` (default: all of the org's
+ * workspaces), one per workspace and embedding space, each filled from
+ * Postgres, indexed and optimized once.
  */
 export async function backfillOrgLanceHydration(options: LanceNativeBackfillScope & { orgId: string; workspaceIds?: string[] }): Promise<LanceNativeBackfillTableResult[]> {
   const { sql, orgId, dryRun = false, skipFts = false, skipOptimize = false } = options;
@@ -115,26 +112,21 @@ export async function backfillOrgLanceHydration(options: LanceNativeBackfillScop
   const log = options.log ?? ((line: string) => console.log(line));
   const workspaceIds = options.workspaceIds ?? (await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgId} order by id`).map((row) => row.id);
   if (workspaceIds.length === 0) return [];
-  const indexed = await sql<{ document_id: string; embedding_model: string; dimension: number }[]>`
-    select distinct v.document_id, v.embedding_model, v.dimension
+  const indexed = await sql<{ document_id: string; workspace_id: string; embedding_model: string; dimension: number }[]>`
+    select distinct v.document_id, d.workspace_id, v.embedding_model, v.dimension
     from vector_indexes v join documents d on d.id = v.document_id
     where d.workspace_id = any(${sql.array(workspaceIds)}) and v.backend = 'lancedb'
     order by 1
   `;
   const { root } = resolveLanceDbConfig();
-  // The tables searchTargets reads, each with the documents whose rows it may hold.
-  const targets = new Map<string, { uri: string; table: string; kind: LanceNativeBackfillTableResult["kind"]; documentIds: Set<string> }>();
-  const target = (uri: string, table: string, kind: LanceNativeBackfillTableResult["kind"]) => {
-    const key = `${uri}\u0000${table}`;
-    let entry = targets.get(key);
-    if (!entry) targets.set(key, entry = { uri, table, kind, documentIds: new Set() });
-    return entry;
-  };
+  // Each workspace database with the documents whose rows it may hold.
+  const targets = new Map<string, { workspaceId: string; uri: string; table: string; documentIds: Set<string> }>();
   for (const row of indexed) {
-    const location = VectorNamespaceManager.getEmbeddingLocation(root, orgId, row.embedding_model, row.dimension);
-    target(location.uri, location.table, "embedding").documentIds.add(row.document_id);
-    target(root, VectorNamespaceManager.getEmbeddingTableName(orgId, row.embedding_model, row.dimension), "root-embedding").documentIds.add(row.document_id);
-    target(root, VectorNamespaceManager.getTableName(orgId), "legacy").documentIds.add(row.document_id);
+    const location = VectorNamespaceManager.getEmbeddingLocation(root, orgId, row.workspace_id, row.embedding_model, row.dimension);
+    const key = `${location.uri}\u0000${location.table}`;
+    let entry = targets.get(key);
+    if (!entry) targets.set(key, entry = { workspaceId: row.workspace_id, uri: location.uri, table: location.table, documentIds: new Set() });
+    entry.documentIds.add(row.document_id);
   }
   const results: LanceNativeBackfillTableResult[] = [];
   for (const entry of targets.values()) {
@@ -143,35 +135,35 @@ export async function backfillOrgLanceHydration(options: LanceNativeBackfillScop
     } catch (error) {
       // One bad table (an old schema, a storage error) must not stop an org-wide or --all run.
       const message = error instanceof Error ? error.message : String(error);
-      log(`[backfill] table=${entry.uri}/${entry.table} kind=${entry.kind} FAILED: ${message}`);
-      results.push({ orgId, uri: entry.uri, table: entry.table, kind: entry.kind, error: message,
+      log(`[backfill] table=${entry.uri}/${entry.table} FAILED: ${message}`);
+      results.push({ orgId, workspaceId: entry.workspaceId, uri: entry.uri, table: entry.table, error: message,
         chunkRows: 0, ftsBuilt: false, ftsPresent: false, optimized: false, rowsWithoutHydration: null });
     }
   }
   const withoutFts = results.filter((result) => !result.skipped && !result.ftsPresent);
   log(`[backfill] org=${orgId} tables=${results.filter((result) => !result.skipped).length} missing=${results.filter((result) => result.skipped).length}`
     + ` failed=${results.filter((result) => result.error).length}`
-    + ` without_fts=${withoutFts.length}${withoutFts.length ? " (keyword search stays on Postgres FTS for this org)" : ""}`);
+    + ` without_fts=${withoutFts.length}${withoutFts.length ? " (keyword search stays on Postgres FTS for those workspaces)" : ""}`);
   return results;
 }
 
 async function backfillTable(args: {
-  sql: postgres.Sql; orgId: string; uri: string; table: string; kind: LanceNativeBackfillTableResult["kind"]; documentIds: string[];
+  sql: postgres.Sql; orgId: string; workspaceId: string; uri: string; table: string; documentIds: string[];
   batchDocs: number; dryRun: boolean; skipFts: boolean; skipOptimize: boolean; log: (line: string) => void;
 }): Promise<LanceNativeBackfillTableResult> {
   const { sql, documentIds, batchDocs, dryRun, skipFts, skipOptimize, log } = args;
   const result: LanceNativeBackfillTableResult = {
-    orgId: args.orgId, uri: args.uri, table: args.table, kind: args.kind,
+    orgId: args.orgId, workspaceId: args.workspaceId, uri: args.uri, table: args.table,
     chunkRows: 0, ftsBuilt: false, ftsPresent: false, optimized: false, rowsWithoutHydration: null,
   };
   const db = await connectLanceDb(args.uri);
   try {
     if (!(await db.tableNames()).includes(args.table)) {
       result.skipped = "missing";
-      if (args.kind === "embedding") log(`[backfill] table=${args.uri}/${args.table} missing; skipped`);
+      log(`[backfill] table=${args.uri}/${args.table} missing; skipped`);
       return result;
     }
-    log(`[backfill] table=${args.uri}/${args.table} kind=${args.kind} documents=${documentIds.length}`);
+    log(`[backfill] table=${args.uri}/${args.table} documents=${documentIds.length}`);
     const table = await db.openTable(args.table);
     try {
       if (!dryRun) log(`[backfill] hydration columns added=${await withRetry(() => ensureLanceHydrationColumns(table))}`);
@@ -226,7 +218,7 @@ async function backfillTable(args: {
       }
       if (!dryRun) {
         result.rowsWithoutHydration = await table.countRows("hydration IS NULL OR hydration = ''");
-        log(`[backfill] rows still without hydration (unselected workspaces, orphaned rows): ${result.rowsWithoutHydration}`);
+        log(`[backfill] rows still without hydration (orphaned rows): ${result.rowsWithoutHydration}`);
       }
     } finally {
       table.close();

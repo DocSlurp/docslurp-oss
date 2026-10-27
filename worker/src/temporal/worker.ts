@@ -30,6 +30,7 @@ import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
 import { resolveWorkerVersioning } from "./worker-versioning.js";
 import { FatalWorkerError, installWorkerProcessGuards, logWorkerFatal, runWorkerGroup, superviseTemporalWorkers, type SupervisedSession } from "./worker-supervisor.js";
+import { assertNativePdfEngineAtStartup } from "../native-pdf/loader.js";
 import { evaluateWorkerHealth, resolveWorkerHealthPort, startWorkerHealthServer } from "./health-server.js";
 import { ScalerPublisher } from "./scaler-publisher.js";
 import { UtilizationMeter } from "./utilization.js";
@@ -41,7 +42,7 @@ import { resolveWorkerScalerConfig, resolveWorkerScalerQueryParams } from "@docs
 import { warmLocalEmbedding } from "../stages/embedding-runtime.js";
 import { closeSharedLocalEmbeddingPool } from "../stages/local-embedding-thread.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
-import { DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
+import { DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
 import { purgeConfig } from "../db/superseded-purge.js";
 import { prefetchVendorBundles } from "../tools/vendor-bundles.js";
 import { initializePrivateModelEndpoints } from "../lib/privacy-guard.js";
@@ -110,6 +111,11 @@ async function main(): Promise<void> {
   // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
   const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
     throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  });
+  // Load the native PDF engine before taking work: its state is logged once, and an image that ships it
+  // (or a mode that needs it) refuses to start without it rather than serving every PDF without it.
+  await assertNativePdfEngineAtStartup(process.env).catch((error) => {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);
@@ -225,6 +231,25 @@ async function main(): Promise<void> {
         maxConcurrentActivityTaskExecutions: 2, maxConcurrentActivityTaskPolls: 2,
         taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || "docslurp-page-render",
       }));
+      // Zip exports stream for minutes, so they run only where WORKER_DOCUMENT_EXPORTS
+      // is on (default on; production keeps them on the always-on floor machine so
+      // scale-in never cancels one). Small and large exports have their own slot,
+      // so an emailed multi-GB export never holds up a download someone waits for.
+      if ((process.env.WORKER_DOCUMENT_EXPORTS ?? "on").trim().toLowerCase() !== "off") {
+        const exportActivities = { buildDocumentExportActivity: activities.buildDocumentExportActivity };
+        for (const queue of [
+          process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE,
+          process.env.TEMPORAL_LARGE_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_QUEUE,
+        ]) {
+          workers.push(await Worker.create({
+            ...common, ...workflowOptions,
+            activities: exportActivities,
+            maxConcurrentActivityTaskExecutions: 1, maxConcurrentActivityTaskPolls: 1,
+            taskQueue: queue,
+          }));
+        }
+        console.log("[temporal-worker] document export queues on (1 small + 1 large slot)");
+      }
       const activityWorkers = activityTaskQueue ? workers.slice(1) : workers;
       return {
         workers,
@@ -514,11 +539,11 @@ async function main(): Promise<void> {
       await store
         .runRetentionSweep(storage, cfg.retentionSweepBatchSize)
         .catch(() => {});
-      await store
+      await withBackgroundSpan("worker.storage-integrity-sweep", () => store
         .runStorageIntegritySweep(storage, {
           maxKeys: cfg.storageIntegritySweepMaxKeys,
           prefix: cfg.storageIntegritySweepPrefix,
-        })
+        }))
         .catch(() => {});
     }
 
@@ -577,5 +602,8 @@ main().catch(async (error) => {
   initializeWorkerErrorReporting();
   reportException(error, { operation: "worker-startup-or-shutdown" });
   await flushErrorReporting();
+  // Batched OTLP logs (e.g. docslurp.native_pdf.engine required=true) live on the shared provider, which
+  // flushErrorReporting does not drain; export them before the process exits.
+  await shutdownObservability().catch(() => undefined);
   process.exitCode = 1;
 });

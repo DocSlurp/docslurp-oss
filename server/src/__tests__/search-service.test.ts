@@ -602,7 +602,7 @@ describe("hybridSearch", () => {
       parentRetrieval: false, suppressSessionLog: true,
     });
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
-      orgId: "org-1", documentIds: ["doc-1"], legacyDocumentIds: ["doc-1"],
+      orgId: "org-1", workspaceId: "ws-1", documentIds: ["doc-1"],
     }));
   });
 

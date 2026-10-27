@@ -19,12 +19,29 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | | `Dockerfile.lean` (production, `fly.worker.toml`) | `Dockerfile.full` (self-host `--profile full`) |
 | --- | --- | --- |
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
-| System tools | poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap | adds LibreOffice, Tesseract (eng/fra/deu/spa), ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf |
+| System tools | poppler-utils + poppler-data (CJK CMaps), Tesseract (eng, deu, fra, spa, ara, chi_sim, chi_tra, ell, heb, hin, ita, jpn, kor, nld, pol, por, rus, tha, tur, ukr, vie), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap; fonts for non-embedded PDF fonts: URW base-35 and Liberation (metric-compatible Times/Helvetica/Courier and Arial/Times New Roman/Courier New), Noto core (Arabic, Hebrew, Thai, Devanagari, Greek, Cyrillic), Droid Sans Fallback (CJK) | adds LibreOffice, ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf; Noto CJK instead of Droid Sans Fallback |
 | Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
 | Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
 | Kreuzberg, LiteParse, mammoth, LanceDB, transformers.js | in `node_modules` | same |
 | Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
+
+### Images without Tesseract data
+
+Both images ship Tesseract and its 21 languages. On the lean image they add 107 MiB (the apt delta for
+`tesseract-ocr` and the language packs, measured 2026-10-26; the image is 2,085 MiB uncompressed). The prerequisite
+check fails the build, and a `lean` or `full` worker's startup, if any language is missing. Production therefore OCRs
+images locally, in the parser sandbox, instead of sending them to vision. Image OCR uses English unless the
+extractor config sets `ocr.language`, so text in other scripts may come out poor; `DOCSLURP_OCR=off` restores
+vision-first routing. A self-built image or local setup without the language data falls back
+as follows. Kreuzberg's bundled Tesseract otherwise looks for that data at the path of the machine that built it. The extractor planner therefore checks for `<lang>.traineddata` in
+`TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
+Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still
+fails, an image continues with empty text so page triage and the vision stage read it (manifest and stage stats
+record `textlessFallback`). If the workspace has vision fallback off, or its privacy mode forbids the vision
+route, the document fails with the public message "This image can only be read with OCR or vision, and neither is
+available for this workspace." and the raw cause stays in the stored error and logs. PDFs are unaffected: Kreuzberg
+reads their text layer and does not OCR them by default; scanned pages reach vision through page triage.
 
 ### Measured sizes (local builds, 2026-10-14, linux/amd64)
 

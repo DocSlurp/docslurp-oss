@@ -20,6 +20,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 const endpoint = process.env.BENCH_ENDPOINT ?? "http://127.0.0.1:9120";
 const bucket = process.env.BENCH_BUCKET ?? "lance-session-bench";
 const orgId = "benchorg";
+const workspaceId = "bench-ws";
 const model = "bench-embedding";
 const credentials = { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" };
 const dim = Number(process.env.BENCH_DIM ?? 1536);
@@ -34,7 +35,7 @@ function applyEnv(via: string) {
 
 async function locate() {
   const { VectorNamespaceManager, resolveLanceDbConfig } = await import("@docslurp/shared");
-  const location = VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, orgId, model, dim);
+  const location = VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, orgId, workspaceId, model, dim);
   return { ...location, shared: await import("@docslurp/shared") };
 }
 
@@ -109,7 +110,7 @@ async function query() {
     // One in three queries is scoped to a few documents, as workspace-scoped chat is.
     const documentIds = i % 3 === 2 ? Array.from({ length: 5 }, (_, k) => `doc-${(i * 7 + k * 13) % Math.max(1, Math.floor(rows / 100))}`) : undefined;
     const started = performance.now();
-    await lanceDbVectorSearch({ orgId, embeddingModel: model, queryVector: randomVector(), documentIds, limit: 20 });
+    await lanceDbVectorSearch({ orgId, workspaceId, embeddingModel: model, queryVector: randomVector(), documentIds, limit: 20 });
     latencies.push(performance.now() - started);
     if (pauseMs > 0) await sleep(pauseMs);
   }

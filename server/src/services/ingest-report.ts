@@ -1,5 +1,7 @@
 import {
   buildByteHistogram,
+  classifyIngestFailure,
+  sanitizeFailureDetail,
   INGEST_REPORT_FACTS_SINCE,
   INGEST_REPORT_FILE_BYTE_EDGES,
   INGEST_REPORT_MAX_DOCUMENTS,
@@ -13,6 +15,8 @@ import {
   visionProfileCatalog,
   type IngestReport,
   type IngestReportConfigItem,
+  type IngestReportFailure,
+  type IngestReportFailureReason,
   type IngestReportPage,
   type IngestReportPageReason,
   type IngestReportRecommendation,
@@ -76,6 +80,8 @@ export interface IngestReportStageRow {
   costCents: number | null;
   tablePages: number | null;
   durationSeconds: number | null;
+  /** The worker's stored stage error (raw: never exposed, only classified and sanitized). Present on failed stages. */
+  error?: string | null;
 }
 
 export interface IngestReportRunRow {
@@ -142,6 +148,11 @@ function round(value: number | null, digits = 2): number | null {
 
 function plural(n: number, word: string, many = `${word}s`) {
   return `${n.toLocaleString("en-US")} ${n === 1 ? word : many}`;
+}
+
+/** Verb or pronoun that agrees with a count: agree(1, "has", "have"). */
+function agree(n: number, one: string, many: string) {
+  return n === 1 ? one : many;
 }
 
 function formatCents(cents: number): string {
@@ -268,7 +279,8 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     return doc && statusBucket(doc.status) === "completed" && doc.chunkTotal > doc.chunkUnattributed;
   }).map((row) => row.chunkBytes);
   const imageTotal = imagePages.reduce((sum, page) => sum + (page.imageCount ?? 0), 0);
-  const scannedPages = pageViews.filter((page) => page.scannedLooking);
+  // Pages of failed files are accounted for under `failures`; a crash during extraction says nothing about page triage.
+  const scannedPages = pageViews.filter((page) => page.scannedLooking && page.docStatus !== "failed");
 
   // Vision outcome: page facts first, stage stats for files without them
   const visionCount = (status: string) => pageViews.filter((page) => page.visionStatus === status).length;
@@ -350,8 +362,10 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     ? `Text-layer and image facts are not recorded for ${plural(withoutFacts, "file")} (processed before ${INGEST_REPORT_FACTS_SINCE}, a format other than PDF or image, or with page facts turned off); reprocessing PDFs and images fills them in.`
     : null;
 
+  const failureList = listFailures(docs, stagesByDoc);
   const observed = {
     docs,
+    failureList,
     pageViews,
     scannedPages,
     unsearchable,
@@ -428,6 +442,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
       byReason: reasonOrder.filter((reason) => reasonCounts.has(reason)).map((reason) => ({ reason, pages: reasonCounts.get(reason)! })),
       examples,
     },
+    failures: summarizeFailures(failureList),
     focus,
     languages: [...languageCounts].sort((a, b) => b[1] - a[1]).map(([code, documents]) => ({ code, documents })),
     stages: {
@@ -466,6 +481,34 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
   };
 }
 
+const FAILURE_EXAMPLE_LIMIT = 20;
+const FAILURE_REASON_ORDER: IngestReportFailureReason[] = ["ocr_unavailable", "extractor_failed", "unreadable_file", "unsupported_format", "policy_blocked", "provider_failed", "timeout", "unknown", "cancelled"];
+
+/** Failed files with the classified reason, failed stage and a sanitized excerpt of the stored error. */
+function listFailures(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReportFailure[] {
+  const failures: IngestReportFailure[] = [];
+  for (const doc of docs) {
+    if (statusBucket(doc.status) !== "failed") continue;
+    const failedStage = stagesByDoc.get(doc.id)?.find((stage) => stage.status === "failed" && stage.error);
+    const { reason, message, retryable } = classifyIngestFailure(failedStage?.error, doc.status);
+    failures.push({
+      documentId: doc.id, filename: doc.filename, stage: failedStage?.stage ?? null, reason, message,
+      detail: sanitizeFailureDetail(failedStage?.error), retryable,
+    });
+  }
+  return failures;
+}
+
+function summarizeFailures(failures: IngestReportFailure[]): IngestReport["failures"] {
+  const counts = new Map<IngestReportFailureReason, number>();
+  for (const failure of failures) counts.set(failure.reason, (counts.get(failure.reason) ?? 0) + 1);
+  return {
+    total: failures.length,
+    byReason: FAILURE_REASON_ORDER.filter((reason) => counts.has(reason)).map((reason) => ({ reason, documents: counts.get(reason)! })),
+    examples: failures.slice(0, FAILURE_EXAMPLE_LIMIT),
+  };
+}
+
 function withoutSupersededReprocess(recs: IngestReportRecommendation[], docs: IngestReportDocumentRow[]): IngestReportRecommendation[] {
   const superseded = new Set(docs.filter((doc) => doc.superseded).map((doc) => doc.id));
   if (superseded.size === 0) return recs;
@@ -474,6 +517,8 @@ function withoutSupersededReprocess(recs: IngestReportRecommendation[], docs: In
 
 type Observed = {
   docs: IngestReportDocumentRow[];
+  /** Every failed file, with its classified reason. */
+  failureList: IngestReportFailure[];
   pageViews: PageView[];
   scannedPages: PageView[];
   unsearchable: PageView[];
@@ -596,12 +641,35 @@ function reprocessEstimate(observed: Observed, documentIds: string[], visionPage
 }
 
 /**
+ * How each recommendation the report can emit reaches the user. Every id must be
+ * listed (the compiler enforces it): "pipeline-patch" recommendations carry a
+ * `patch` the chat assistant can prepare with `proposeWorkspaceSettings`
+ * ({changes: {pipeline: patch}}); the rest are deliberately not proposable.
+ */
+export const INGEST_RECOMMENDATION_CATALOG = {
+  "turn-on-vision": { proposal: "pipeline-patch", note: "visionFallback and vision page selection are proposable." },
+  "vision-all-pages": { proposal: "pipeline-patch", note: "vision.forceAllPages and vision.maxPagesPerDocument are proposable." },
+  "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
+  "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
+  "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
+  "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
+  "turn-on-embeddings": { proposal: "pipeline-patch", note: "embed and indexVectors are proposable." },
+  "turn-on-video": { proposal: "pipeline-patch", note: "mediaVideo.enabled is proposable." },
+  "media-without-transcript": { proposal: "outside-allowlist", note: "Transcription is a platform setting for operators." },
+  "reindex-pages-with-text": { proposal: "reprocess-only", note: "Nothing to change; reprocessing re-chunks the files." },
+  "retry-failed-files": { proposal: "reprocess-only", note: "Nothing to change; reprocessing runs the files again (see failures for causes that will not clear)." },
+  "multilingual-embeddings": { proposal: "outside-allowlist", note: "Changing the embedding profile re-embeds everything; the proposal tool never changes it." },
+  "scans-handled": { proposal: "informational", note: "No change needed." },
+} as const satisfies Record<string, { proposal: "pipeline-patch" | "reprocess-only" | "outside-allowlist" | "informational"; note: string }>;
+export type IngestRecommendationId = keyof typeof INGEST_RECOMMENDATION_CATALOG;
+
+/**
  * Deterministic recommendations. Each names an existing pipeline option, the
  * evidence, the expected effect and an estimated cost; "patch" is merged onto
  * the stored pipeline when applied.
  */
 export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Observed): IngestReportRecommendation[] {
-  const recs: IngestReportRecommendation[] = [];
+  const recs: Array<IngestReportRecommendation & { id: IngestRecommendationId }> = [];
   const vision = visionCentsPerPage(pipeline, observed);
   const missedScans = observed.scannedPages.filter((page) => page.visionStatus !== "extracted" && page.searchable !== true);
   const overCap = observed.pageViews.filter((page) => page.visionStatus === "over-cap" && page.searchable !== true);
@@ -620,8 +688,8 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     const estimate = reprocessEstimate(observed, affectedDocIds, (doc) => Math.min(cap, Math.max(0, doc.pageCount)), vision.cents);
     const capNote = longest > VISION_PAGE_CAP_MAX ? ` Files longer than ${VISION_PAGE_CAP_MAX} pages get vision on their first ${VISION_PAGE_CAP_MAX} pages only.` : "";
     const evidence = missedScans.length > 0
-      ? `${plural(missedScans.length, "page")}${recordedPages ? ` of ${recordedPages.toLocaleString("en-US")} measured` : ""} have images and almost no text layer (they look scanned) and no searchable text`
-      : `${plural(overCap.length, "page")} were selected for vision but went past the per-file vision page limit`;
+      ? `${plural(missedScans.length, "page")}${recordedPages ? ` of ${recordedPages.toLocaleString("en-US")} measured` : ""} ${agree(missedScans.length, "has", "have")} images and almost no text layer (${agree(missedScans.length, "it looks", "they look")} scanned) and no searchable text`
+      : `${plural(overCap.length, "page")} ${agree(overCap.length, "was", "were")} selected for vision but went past the per-file vision page limit`;
     const why = !pipeline.visionFallback
       ? "Vision is off, so nothing reads text from page images."
       : pipeline.vision.forceAllPages
@@ -635,7 +703,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
         ? `${evidence}. Vision already reads every page (up to ${cap} per file), so these files were processed before that setting${longest > VISION_PAGE_CAP_MAX ? " or are longer than the vision page maximum" : ""}.`
         : `${evidence}. ${why}`,
       effect: settingInPlace
-        ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so their scanned pages are read from the page images.${capNote}`
+        ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so ${agree(affectedDocIds.length, "its", "their")} scanned pages are read from the page images.${capNote}`
         : `Pages are read from their images, so scanned text becomes searchable and citable. Applies to new uploads; reprocess the ${plural(affectedDocIds.length, "affected file")} to fix existing pages.${capNote}`,
       affectedPages: affected.length,
       affectedDocuments: affectedDocIds.length,
@@ -656,7 +724,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "retry-vision-failures", severity: "medium",
       title: "Retry pages where vision failed",
-      reason: `${plural(failedVision.length, "page")} in ${plural(ids.length, "file")} were sent to vision but returned no text (provider error or timeout).`,
+      reason: `${plural(failedVision.length, "page")} in ${plural(ids.length, "file")} ${agree(failedVision.length, "was", "were")} sent to vision but returned no text (provider error or timeout).`,
       effect: "Reprocessing retries vision on these pages with the current settings.",
       affectedPages: failedVision.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
@@ -683,7 +751,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "preserve-tables", severity: "medium",
       title: "Keep tables as tables",
-      reason: `${plural(observed.tablePages, "page")} in ${plural(observed.tableDocs.size, "file")} look table-heavy, but table preservation is off, so rows and columns are flattened into prose.`,
+      reason: `${plural(observed.tablePages, "page")} in ${plural(observed.tableDocs.size, "file")} ${agree(observed.tablePages, "looks", "look")} table-heavy, but table preservation is off, so rows and columns are flattened into prose.`,
       effect: "Tables stay as Markdown tables, so cells keep their row and column context in answers. Applies to new uploads.",
       affectedPages: observed.tablePages, affectedDocuments: observed.tableDocs.size,
       cost: { centsPer100Pages: 0, reprocessCents: null, basis: "No model call; extraction keeps table structure." },
@@ -711,7 +779,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "turn-on-video", severity: "medium",
       title: "Read video frames",
-      reason: `${plural(videos.length, "video file")} have video frame reading disabled in this workspace; on-screen text and slides may not be indexed.`,
+      reason: `${plural(videos.length, "video file")} ${agree(videos.length, "has", "have")} video frame reading disabled in this workspace; on-screen text and slides may not be indexed.`,
       effect: "Selected frames are read with a vision model alongside the transcript. Applies to new uploads and needs platform video support.",
       affectedPages: 0, affectedDocuments: videos.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: "Depends on video length and frame selection; mediaVideo.maxCostCents bounds it per file." },
@@ -740,7 +808,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "reindex-pages-with-text", severity: "medium",
       title: "Reprocess pages that have text but no chunks",
-      reason: `${plural(notIndexed.length, "page")} in ${plural(ids.length, "file")} have a text layer but no chunks, so search cannot return them.`,
+      reason: `${plural(notIndexed.length, "page")} in ${plural(ids.length, "file")} ${agree(notIndexed.length, "has", "have")} a text layer but no chunks, so search cannot return ${agree(notIndexed.length, "it", "them")}.`,
       effect: "Reprocessing re-extracts and re-chunks these files.",
       affectedPages: notIndexed.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: estimate.baseKnown ? "This workspace's observed cost per page." : `Planning estimate ${EMBED_CENTS_PER_PAGE}¢ per page.` },
@@ -752,11 +820,18 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   if (failedDocs.length > 0) {
     const ids = failedDocs.map((doc) => doc.id);
     const estimate = reprocessEstimate(observed, ids, () => 0, vision.cents);
+    const causes = observed.failureList.filter((failure) => ids.includes(failure.documentId));
+    const knownCauses = [...new Set(causes.filter((failure) => failure.reason !== "unknown").map((failure) => failure.message))].slice(0, 3);
+    const retryable = causes.filter((failure) => failure.retryable).length;
     recs.push({
       id: "retry-failed-files", severity: "medium",
       title: "Retry failed files",
-      reason: `${plural(failedDocs.length, "file")} failed during processing and are not searchable.`,
-      effect: "Reprocessing runs them again with the current workspace settings.",
+      reason: `${plural(failedDocs.length, "file")} failed during processing and ${agree(failedDocs.length, "is", "are")} not searchable.${knownCauses.length ? ` Cause: ${knownCauses.join(" ")}` : ""}`,
+      effect: retryable === causes.length
+        ? "Reprocessing runs them again with the current workspace settings."
+        : retryable === 0
+          ? `Reprocessing will fail the same way until the cause is fixed; changing workspace settings does not help. Check the failure details first.`
+          : `Reprocessing runs the ${plural(retryable, "retryable file")} again with the current workspace settings; the others will fail the same way until their cause is fixed.`,
       affectedPages: failedDocs.reduce((sum, doc) => sum + Math.max(0, doc.pageCount), 0), affectedDocuments: failedDocs.length,
       cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: estimate.baseKnown ? "This workspace's observed cost per page." : `Planning estimate ${EMBED_CENTS_PER_PAGE}¢ per page.` },
       patch: null, reprocessDocumentIds: ids,
@@ -769,7 +844,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "multilingual-embeddings", severity: "info",
       title: "Use a multilingual embedding profile",
-      reason: `${plural(files, "file")} are in ${nonEnglish.map(([code]) => code).join(", ")}, and the ${pipeline.embedding.profile} profile is tuned for English.`,
+      reason: `${plural(files, "file")} ${agree(files, "is", "are")} in ${nonEnglish.map(([code]) => code).join(", ")}, and the ${pipeline.embedding.profile} profile is tuned for English.`,
       effect: "Switch the embedding profile to multilingual-local in workspace settings. Changing profiles re-embeds everything, so reprocess the whole workspace afterwards.",
       affectedPages: 0, affectedDocuments: files,
       cost: { centsPer100Pages: 0, reprocessCents: null, basis: "Local profile: worker compute only." },
@@ -782,7 +857,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "scans-handled", severity: "info",
       title: "Scanned pages were read with vision",
-      reason: `${plural(totalScanned, "page")} look scanned and all of them have searchable text.`,
+      reason: totalScanned === 1 ? "1 page looks scanned and it has searchable text." : `${plural(totalScanned, "page")} look scanned and all of them have searchable text.`,
       effect: "No change needed.",
       affectedPages: 0, affectedDocuments: 0,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: vision.basis },
@@ -809,9 +884,10 @@ export function summarizeIngestReport(report: IngestReport): string {
   const pages = report.pages.total;
   const searchable = report.searchability.searchablePages;
   const evaluated = report.searchability.searchablePages + report.searchability.unsearchablePages;
-  lines.push(`**Ingest report** for ${scope}: ${plural(report.files.total, "file")}, ${plural(pages, "page")}${evaluated ? `, ${searchable.toLocaleString("en-US")} of ${evaluated.toLocaleString("en-US")} checked pages searchable` : ""}.`);
+  lines.push(`**Ingest report** for ${scope}: ${plural(report.files.total, "file")}, ${plural(pages, "page")}${evaluated ? `, ${searchable.toLocaleString("en-US")} of ${plural(evaluated, "checked page")} searchable` : ""}.`);
+  if (report.failures.total > 0) lines.push(summarizeFailureLine(report.failures));
   if (report.images.scannedLookingPages > 0) {
-    lines.push(`${plural(report.images.scannedLookingPages, "page")} look scanned (images, almost no text layer); vision read ${plural(report.extraction.visionPages, "page")}.`);
+    lines.push(`${plural(report.images.scannedLookingPages, "page")} ${agree(report.images.scannedLookingPages, "looks", "look")} scanned (images, almost no text layer); vision read ${plural(report.extraction.visionPages, "page")}.`);
   }
   if (report.focus?.length) {
     for (const page of report.focus.slice(0, 3)) {
@@ -819,10 +895,21 @@ export function summarizeIngestReport(report: IngestReport): string {
     }
   }
   const top = report.recommendations.find((rec) => rec.severity !== "info");
-  if (top) lines.push(`Suggested: ${top.title.toLowerCase()}. ${top.reason}`);
+  if (top) lines.push(`Suggested: ${top.title.toLowerCase()}. ${top.id === "retry-failed-files" ? top.effect : top.reason}`);
   else if (report.searchability.unsearchablePages === 0) lines.push("Nothing needs changing.");
   if (report.coverage.note) lines.push(report.coverage.note);
   return lines.join("\n\n");
+}
+
+/** Names the failed files, what stopped them and (sanitized) the recorded error, so chat never has to guess a cause. */
+function summarizeFailureLine(failures: IngestReport["failures"]): string {
+  const shown = failures.examples.slice(0, 3).map((failure) => {
+    const where = failure.stage ? ` at ${escapeMarkdown(failure.stage)}` : "";
+    const detail = failure.detail ? ` (recorded error: ${escapeMarkdown(failure.detail)})` : "";
+    return `${escapeMarkdown(failure.filename)}${where}: ${failure.message}${detail}`;
+  });
+  const more = failures.total - shown.length;
+  return `${plural(failures.total, "file")} failed. ${shown.join(" ")}${more > 0 ? ` And ${plural(more, "more file")}.` : ""}`;
 }
 
 export function describeReason(reason: IngestReportPageReason | null): string {
@@ -956,9 +1043,9 @@ export async function loadIngestReport(args: {
     client<{
       document_id: string; stage_name: string; status: string; skipped: boolean; reason: string | null;
       selected_pages: number | null; pages: string | number | null; cost_cents: string | number | null;
-      table_pages: string | number | null; duration_seconds: string | number | null;
+      table_pages: string | number | null; duration_seconds: string | number | null; error: string | null;
     }[]>`
-      select s.document_id, s.stage_name, s.status,
+      select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
         left(s.stats ->> 'reason', 80) as reason,
         case when jsonb_typeof(s.stats -> 'selectedPages') = 'array' then jsonb_array_length(s.stats -> 'selectedPages') end as selected_pages,
@@ -969,6 +1056,7 @@ export async function loadIngestReport(args: {
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.workspace_id = ${workspaceId} and d.id = any(${client.array(ids)}::text[])
+      order by s.started_at nulls last, s.updated_at
     `,
     client<{ document_id: string; language: string | null }[]>`
       select distinct on (p.document_id) p.document_id, left(p.metadata ->> 'detectedLanguage', 16) as language
@@ -1014,6 +1102,7 @@ export async function loadIngestReport(args: {
       documentId: row.document_id, stage: row.stage_name, status: row.status, skipped: row.skipped, reason: row.reason,
       selectedPages: numOrNull(row.selected_pages), pages: numOrNull(row.pages), costCents: numOrNull(row.cost_cents),
       tablePages: numOrNull(row.table_pages), durationSeconds: numOrNull(row.duration_seconds),
+      error: row.status === "failed" ? row.error : null,
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms) })),
     costCents: cost?.costCents ?? null,

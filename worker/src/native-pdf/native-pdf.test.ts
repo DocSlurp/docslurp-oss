@@ -509,13 +509,13 @@ describe("registry fallback semantics", () => {
     ["PDF_SOMETHING_NEW", "NATIVE_PDF_FAILED", true],
   ])("%s rejects as %s so the next extractor runs (warns: %s)", async (engineCode, code, warns) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const info = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const failure = await runRegistry(engineError(engineCode));
     expect(failure).toBeInstanceOf(NativePdfError);
     expect(failure).toMatchObject({ code });
     const logged = (warns ? warn : info).mock.calls.map((c) => String(c[0])).find((line) => line.includes("fell back"));
     expect(logged).toContain(`code=${code}`);
-    expect(logged).toContain("next=kreuzberg");
+    expect(logged).toContain("next=next-in-order");
     if (!warns) expect(warn).not.toHaveBeenCalled();
   });
 

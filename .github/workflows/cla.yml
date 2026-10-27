@@ -54,6 +54,24 @@ jobs:
           elif [ "$GITHUB_EVENT_NAME" != pull_request_target ]; then
             exit 0
           fi
+          # Known automation PRs already belong to the CLA allowlist below.
+          # Check every commit before exempting them, without reading CLA secrets.
+          case "$PR_AUTHOR" in
+            'dependabot[bot]'|'renovate[bot]'|'github-actions[bot]')
+              expected="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.commits')"
+              case "$expected" in ''|*[!0-9]*) exit 1 ;; esac
+              # The REST endpoint caps results at 250 even with pagination.
+              if [ "$expected" -gt 250 ] || [ "$expected" -lt 1 ]; then exit 0; fi
+              commits="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" --paginate --slurp)"
+              inspected="$(printf '%s' "$commits" | jq '[.[][]] | length')"
+              if [ "$inspected" -ne "$expected" ]; then exit 0; fi
+              foreign="$(printf '%s' "$commits" | jq '[.[][] | .author.login as $login | select($login != env.PR_AUTHOR and (((env.ORG_MEMBERS // "") | split(",")) | index($login) | not))] | length')"
+              if [ "$foreign" -eq 0 ]; then
+                echo "exempt=true" >> "$GITHUB_OUTPUT"
+              fi
+              exit 0
+              ;;
+          esac
           # Private organization membership can be hidden in webhook payloads.
           # Repository admins maintain this list from the organization API.
           case "$ASSOCIATION" in

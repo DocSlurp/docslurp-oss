@@ -56,16 +56,12 @@ const chunks: ChunkSeed[] = [];
 /**
  * `hydrated: false` is an evolved, not yet backfilled table (the columns exist
  * but hold nulls); `evolved: false` is a table written before the hydration
- * columns existed; `legacy` writes the pre-embedding-space `chunks_org_…` table
- * instead of the embedding-space one.
+ * columns existed.
  */
-async function writeLanceTable(options: { hydrated: boolean; fts: boolean; evolved?: boolean; legacy?: boolean }): Promise<void> {
-  const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", route.model, DIM);
-  const legacyName = VectorNamespaceManager.getTableName("org1");
-  const embeddingDb = await lancedb.connect(location.uri);
-  if ((await embeddingDb.tableNames()).includes(location.table)) await embeddingDb.dropTable(location.table);
-  const rootDb = await lancedb.connect(lanceDir);
-  if ((await rootDb.tableNames()).includes(legacyName)) await rootDb.dropTable(legacyName);
+async function writeLanceTable(options: { hydrated: boolean; fts: boolean; evolved?: boolean }): Promise<void> {
+  const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", "w", route.model, DIM);
+  const db = await lancedb.connect(location.uri);
+  if ((await db.tableNames()).includes(location.table)) await db.dropTable(location.table);
   const rows = chunks.map((chunk) => ({
     id: chunk.id, documentId: chunk.documentId, chunkIndex: chunk.index, text: chunk.text, vector: vectors.get(chunk.id)!,
     metadata: { documentId: chunk.documentId, sourceKey: "k", filename: `${chunk.documentId}.pdf` },
@@ -74,13 +70,11 @@ async function writeLanceTable(options: { hydrated: boolean; fts: boolean; evolv
       hydration: encodeLanceChunkHydration({ runId: "run1", headingPath: chunk.headingPath, pageNumber: chunk.page, tokenEstimate: 12, metadata: chunk.metadata }),
     } : {}),
   }));
-  const db = options.legacy ? rootDb : embeddingDb;
-  const table = await db.createTable(options.legacy ? legacyName : location.table, rows);
+  const table = await db.createTable(location.table, rows);
   if (!options.hydrated && options.evolved !== false) await table.addColumns(LANCE_HYDRATION_COLUMN_SPECS.map((column) => ({ ...column })));
   if (options.fts) await table.createIndex("text", { config: lancedb.Index.fts({ withPosition: false }) });
   table.close();
-  embeddingDb.close();
-  rootDb.close();
+  db.close();
   lance.resetLanceDbConnectionForTests();
 }
 
@@ -285,20 +279,6 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     }
   });
 
-  it("falls back to Postgres for a legacy chunks_org table", async () => {
-    await writeLanceTable({ hydrated: false, fts: false, evolved: false, legacy: true });
-    try {
-      const queryVector = near("doc2-3");
-      const legacy = await run(false, "cavitation erosion", { queryVector });
-      const native = await run(true, "cavitation erosion", { queryVector });
-      expect(native.timings?.nativeLexicalUnindexed).toBe(1);
-      expect(native.results.length).toBeGreaterThan(0);
-      expect(citations(native)).toEqual(citations(legacy));
-    } finally {
-      await writeLanceTable({ hydrated: true, fts: true });
-    }
-  });
-
   it("never serves text a correction reindex replaced (stale LanceDB rows)", async () => {
     const original = chunks.find((chunk) => chunk.id === "doc4-9")!;
     const corrected = original.text.replaceAll("cavitation", "corrosion");
@@ -330,9 +310,9 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
   });
 
   it("falls back to Postgres FTS, without caching the table as missing, when a table fails to open", async () => {
-    expect(lance.isLanceTableNotFound(new Error("Table 'chunks_org_x' was not found"))).toBe(true);
+    expect(lance.isLanceTableNotFound(new Error("Table 'chunks' was not found"))).toBe(true);
     expect(lance.isLanceTableNotFound(new Error("lance error: LanceError(IO): does not have sufficient data"))).toBe(false);
-    const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", route.model, DIM);
+    const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", "w", route.model, DIM);
     const versions = path.join(location.uri.replace(/^file:\/\//, ""), `${location.table}.lance`, "_versions");
     const manifests = await readdir(versions);
     const saved = await Promise.all(manifests.map((name) => readFile(path.join(versions, name))));

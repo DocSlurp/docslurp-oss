@@ -10,7 +10,7 @@ import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
-import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
+import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
 import { validateApiKey, type ValidatedKey } from "../services/api-keys.js";
 import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
 import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
@@ -68,11 +68,25 @@ export async function resolveApiKeyActor(
   return apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null;
 }
 
-export async function resolveBetterAuthSessionActor(headers: Headers): Promise<SessionRequestActor | null> {
-  const session = await auth.api.getSession({ headers }) as {
-    session: { id: string; userId: string };
-    user: SessionUser;
+/**
+ * Resolves the Better Auth session for a request. Better Auth slides the
+ * session's expiry forward once `updateAge` has passed and issues a refreshed
+ * cookie; pass `responseHeaders` to receive those `Set-Cookie` values so the
+ * caller can forward them. Without forwarding, the database row is extended
+ * but the browser cookie still expires on its original date.
+ */
+export async function resolveBetterAuthSessionActor(
+  headers: Headers,
+  responseHeaders?: Headers
+): Promise<SessionRequestActor | null> {
+  const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
+    headers: Headers | null;
+    response: { session: { id: string; userId: string }; user: SessionUser } | null;
   } | null;
+  const session = result?.response ?? null;
+  if (responseHeaders) {
+    for (const cookie of result?.headers?.getSetCookie() ?? []) responseHeaders.append("set-cookie", cookie);
+  }
 
   if (!session?.user) {
     return null;
@@ -94,6 +108,7 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
   setCurrentRequestApiKeyWorkspaceIds(actor.type === "apiKey" ? actor.apiKey.workspaceIds : null);
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
+  if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
   if (actor.type === "apiKey") {
     c.set("apiKey", actor.apiKey);
@@ -230,6 +245,7 @@ export async function loadActorScopedWorkspace(
   }
 
   addTraceMetadata({ workspaceId: workspace.id, orgId: workspace.orgId });
+  setCurrentRequestOrgId(workspace.orgId);
   return workspace;
 }
 
