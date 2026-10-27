@@ -163,6 +163,9 @@ export async function deleteWorkspaceData(
   const [runs] = await deps.sql<{ count: number }[]>`
     select count(*)::int as count from workspace_runs where workspace_id = ${workspaceId}
   `;
+  // Extracts in the workspace expire now: their rows outlive the workspace (no
+  // FK) and the extract sweep empties their extracts/<org>/<extract>/ prefixes.
+  await deps.sql`update extracts set expires_at = least(expires_at, now()), updated_at = now() where workspace_id = ${workspaceId} and state <> 'deleted'`;
   // Rows a concurrent upload added since the last batch cascade here and are
   // still enqueued by the trigger.
   await deps.sql`delete from workspaces where id = ${workspaceId}`;

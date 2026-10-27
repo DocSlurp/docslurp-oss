@@ -107,6 +107,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   chat_answer_evidence_spans: "chat (API only)",
   chat_message_feedback: "chat (API only)",
   chat_sessions: "chat (API only)",
+  extracts: "extract retention, charges and deletion (API maintenance sweep only); the worker reads runs' storage_prefix",
   chat_turns: "chat (API only)",
   connector_sync_log: "connector administration (API only)",
   credit_grants: "billing: purchased and promotional credit",

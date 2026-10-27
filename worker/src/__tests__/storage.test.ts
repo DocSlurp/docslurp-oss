@@ -355,3 +355,15 @@ describe("large artifact JSON streaming", () => {
     expect(Buffer.concat(buffers).length).toBeGreaterThan(1_000_000);
   });
 });
+
+describe("run artifact roots", () => {
+  it("keeps <user>/<run> for ordinary runs and the extract prefix for extract runs", async () => {
+    const { runArtifactRoot, documentArtifactRoot } = await import("../tools/storage.js");
+    expect(runArtifactRoot({ id: "run-1" }, "user-1")).toBe("user-1/run-1");
+    expect(runArtifactRoot({ id: "run-1", storagePrefix: null }, "user-1")).toBe("user-1/run-1");
+    expect(runArtifactRoot({ id: "run-1", storagePrefix: "extracts/org-1/ext_1" }, "user-1")).toBe("extracts/org-1/ext_1");
+    expect(documentArtifactRoot({ userId: "user-1", runId: "run-1" })).toBe("user-1/run-1");
+    expect(documentArtifactRoot({ userId: "user-1", runId: "run-1" }, "run-2")).toBe("user-1/run-2");
+    expect(documentArtifactRoot({ userId: "user-1", runId: "run-1", artifactRoot: "extracts/org-1/ext_1" }, "run-2")).toBe("extracts/org-1/ext_1");
+  });
+});

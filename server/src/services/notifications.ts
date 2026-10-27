@@ -552,6 +552,49 @@ export async function sendExportReadyEmail(args: {
   if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the export email`);
 }
 
+/**
+ * An extract finished: its download is ready (or could not be built). The
+ * link is the app's signed-in download page, never a credential; the
+ * retention end is stated because everything is deleted then.
+ */
+export async function sendExtractReadyEmail(args: {
+  userId: string;
+  recipientEmail: string;
+  orgId: string;
+  workspaceId: string;
+  extractId: string;
+  ready: boolean;
+  pages: number;
+  expiresAt: Date;
+  url: string;
+}): Promise<void> {
+  const deliveryId = randomUUID();
+  const until = args.expiresAt.toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: "UTC" });
+  const subject = args.ready ? "Your DocSlurp extract is ready" : "Your DocSlurp extract didn't finish";
+  const pages = `${args.pages.toLocaleString("en-US")} page${args.pages === 1 ? "" : "s"}`;
+  const html = args.ready
+    ? `<p>Your DocSlurp extract (${escapeHtml(pages)}) is ready.</p><p><a href="${escapeAttribute(args.url)}">Download the results</a></p><p>Sign in with this email address to download. The files and results are deleted on ${escapeHtml(until)} (UTC).</p>`
+    : `<p>Your DocSlurp extract couldn't produce a download.</p><p><a href="${escapeAttribute(args.url)}">Open DocSlurp</a> to check it. Its files are deleted on ${escapeHtml(until)} (UTC).</p>`;
+  const text = args.ready
+    ? `Your DocSlurp extract (${pages}) is ready.\n\nDownload: ${args.url}\n\nSign in with this email address to download. The files and results are deleted on ${until} (UTC).\n`
+    : `Your DocSlurp extract couldn't produce a download.\n\nOpen DocSlurp to check it: ${args.url}\n\nIts files are deleted on ${until} (UTC).\n`;
+
+  const delivery = await deliverEmail({ deliveryId, recipient: args.recipientEmail, subject, html, text });
+  await logDelivery({
+    id: deliveryId,
+    userId: args.userId,
+    orgId: args.orgId,
+    workspaceId: args.workspaceId,
+    event: args.ready ? "extract.ready" : "extract.failed",
+    provider: delivery.provider,
+    recipient: args.recipientEmail,
+    subject,
+    delivered: delivery.delivered,
+    metadata: { orgId: args.orgId, workspaceId: args.workspaceId, extractId: args.extractId, response: delivery.responseText ?? null }
+  }).catch(() => undefined);
+  if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the extract email`);
+}
+
 /** The signed-in accept page (dashboard). */
 export function inviteAcceptUrl(token: string, kind: "organization" | "workspace"): string {
   const base = (process.env.APP_URL ?? "http://localhost:4321").replace(/\/$/, "");
@@ -597,7 +640,7 @@ async function logDelivery(args: {
   orgId?: string | null;
   workspaceId?: string | null;
   /** Transactional emails the user asked for (exports) are not preference-gated events. */
-  event: NotificationEvent | "export.ready" | "export.failed";
+  event: NotificationEvent | "export.ready" | "export.failed" | "extract.ready" | "extract.failed";
   provider: string;
   recipient: string;
   subject: string;
