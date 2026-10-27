@@ -1,3 +1,4 @@
+import type { ScopeSignal } from "../search/scope-relevance.js";
 import { randomUUID } from "node:crypto";
 import { qualifyCommunitySummary } from "../search/community-context.js";
 import { retrievalScope } from "../search/retrieval-scope.js";
@@ -195,6 +196,8 @@ export interface SearchResponse {
   timings?: SearchTimings;
   /** Present when the search touched deferred-mode documents (map/visual). */
   deferred?: DeferredSearchStats;
+  /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
+  scopeSignal?: ScopeSignal | null;
 }
 
 export interface SearchAvailability {

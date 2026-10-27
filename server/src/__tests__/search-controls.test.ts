@@ -46,7 +46,8 @@ describe("applySearchControls", () => {
           mode: "retrieval",
           answerStyle: "balanced",
           citations: true,
-          searchInstructions: null
+          searchInstructions: null,
+          scopeDeclineThreshold: null
         },
         compatSettings: {},
         rules: [],
@@ -94,7 +95,8 @@ describe("applySearchControls", () => {
           mode: "retrieval",
           answerStyle: "balanced",
           citations: true,
-          searchInstructions: null
+          searchInstructions: null,
+          scopeDeclineThreshold: null
         },
         compatSettings: {},
         rules: [],
@@ -142,7 +144,8 @@ describe("applySearchControls", () => {
           mode: "retrieval",
           answerStyle: "balanced",
           citations: true,
-          searchInstructions: null
+          searchInstructions: null,
+          scopeDeclineThreshold: null
         },
         compatSettings: {},
         rules: [],

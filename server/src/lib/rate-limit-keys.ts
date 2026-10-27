@@ -50,6 +50,7 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
   const normalizedPath = path.replace(/\/+$/, "") || "/";
   const normalizedMethod = method.toUpperCase();
 
+  if (normalizedPath === "/v1/extracts" || normalizedPath.startsWith("/v1/extracts/")) return "upload";
   if (normalizedPath.startsWith("/webhooks/")) return "webhook";
   if ((normalizedPath.startsWith("/v1/ingest") || normalizedPath === "/v1/uploads" || normalizedPath.startsWith("/v1/uploads/"))) return "upload";
   if (normalizedPath === "/v1/extracts" || normalizedPath.startsWith("/v1/extracts/")) return "upload";
@@ -58,6 +59,8 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
     || normalizedPath === "/v1/chat"
     || normalizedPath === "/v1/chat/completions"
     || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
+    // Improve calls a model: it shares the AI chat budget.
+    || /^\/v1\/workspaces\/[^/]+\/chat-instructions\/improve$/.test(normalizedPath)
   ) {
     return "chat-ai";
   }
