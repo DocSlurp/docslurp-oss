@@ -60,8 +60,9 @@ Access tokens start with `dscli_` and last 15 minutes; refresh tokens (`dsclir_`
 | `chat` | `chat` |
 | `read` | `artifacts` |
 | `ingest` | `ingest` |
+| `web` | `web` |
 
-No OAuth scope grants `workspaces:manage`, `organizations:read`, `organizations:manage` or `web`, so a token cannot change workspace settings, manage an organization or use browser-key web access. OAuth tokens are never a dashboard session, so they never reach the app-only settings tools, and they cannot mint API keys or `/v1/capabilities` tokens that would outlive them. `GET /v1/whoami` returns the token's user, organization, default workspace, granted scopes and expiry.
+A CLI token needs `web` for the paid web tools; `search` alone does not unlock them (MCP-audience grants keep the older rule, where a server identity with `search` may use them). No OAuth scope grants `workspaces:manage`, `organizations:read` or `organizations:manage`, so a token cannot change workspace settings or manage an organization. Device approvals grant only `search` and `read` unless the approving user ticks the other requested scopes, and the device flow has no `verification_uri_complete`: the user always types the code. OAuth tokens, MCP-audience ones included, are never platform admins. An expired or revoked OAuth token gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`, on compat routes too. OAuth tokens are never a dashboard session, so they never reach the app-only settings tools, and they cannot mint API keys or `/v1/capabilities` tokens that would outlive them. `GET /v1/whoami` returns the token's user, organization, default workspace, granted scopes and expiry.
 
 In the SDK, pass `accessToken` as a string or as a provider `({ forceRefresh }) => token`; the client calls it per request and once more with `forceRefresh: true` after a 401. Without `apiKey`, `DOCSLURP_API_KEY` or `accessToken`, the SDK reads `DOCSLURP_TOKEN`. Revoke a login with `docslurp logout` (RFC 7009 `POST /oauth/mcp/revoke`) or from the connected apps list in your account.
 

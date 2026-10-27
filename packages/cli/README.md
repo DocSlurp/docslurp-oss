@@ -217,7 +217,7 @@ docslurp logout                        # revokes the login on the server, then d
 ```
 
 - **Browser login** uses OAuth 2.1 authorization code with PKCE and a one-time listener on `127.0.0.1` on a random port. If the browser does not open, the CLI prints the URL; `--no-browser` only prints it.
-- **Device login** (`--device`, RFC 8628) prints a short code such as `WDJB-MJHT` and a page on your DocSlurp origin. Open it on any signed-in device, check the code matches, and approve. Never enter a code someone else sent you.
+- **Device login** (`--device`, RFC 8628) prints a short code such as `WDJB-MJHT` and a page on your DocSlurp origin. Open the page on any signed-in device and type the code; there is no link with the code filled in. The approval page shows when and from which IP the request was made. It grants `search` and `read` only: any other scope you asked for (`chat`, `ingest`, `web`) stays off unless you tick it there. Never enter a code someone else sent you.
 - **Scopes** are least privilege by default: `search` and `read`. Add `chat` to ask questions (uses credits) and `ingest` to upload, ingest URLs or reprocess. A CLI login can never change workspace settings, manage an organization or mint API keys; use the dashboard or a server key with those scopes.
 
 | Login scope | Lets the CLI |
@@ -226,8 +226,9 @@ docslurp logout                        # revokes the login on the server, then d
 | `read` | Read document text, pages, files, runs and exports |
 | `chat` | Ask grounded questions (`docslurp chat`) |
 | `ingest` | Upload, ingest URLs, reprocess, retag or delete documents |
+| `web` | Paid web search, fetch, map and crawl (not included in `search` for CLI logins) |
 
-**Where the login is stored.** The CLI uses the OS keychain when it can: macOS Keychain, the Secret Service on Linux (through `secret-tool` from libsecret), or Windows Credential Manager. Otherwise it writes `~/.config/docslurp/credentials.json` (`$XDG_CONFIG_HOME`, `%APPDATA%` on Windows) with mode `0600` in a `0700` directory, and refuses to read that file if its permissions are looser. `DOCSLURP_CREDENTIAL_STORE=keychain` requires the keychain; `file` forces the file. Each `--profile` (or `DOCSLURP_PROFILE`) keeps one login per API URL, so `docslurp login --profile work --api-url https://docs.example.com` does not replace your default login.
+**Where the login is stored.** The CLI uses the OS keychain when it can: macOS Keychain, the Secret Service on Linux (through `secret-tool` from libsecret), or Windows Credential Manager. Otherwise it writes `~/.config/docslurp/credentials.json` (`$XDG_CONFIG_HOME`, `%APPDATA%` on Windows) with mode `0600` in a `0700` directory, and refuses to read that file if its permissions are looser. The keychain helpers are run only from system directories (`/usr/bin`, `%SystemRoot%\System32`), never from `PATH`. Concurrent CLI processes take a lock file next to `credentials.json`, so they never spend the same refresh token twice. `DOCSLURP_CREDENTIAL_STORE=keychain` requires the keychain; `file` forces the file. Each `--profile` (or `DOCSLURP_PROFILE`) keeps one login per API URL, so `docslurp login --profile work --api-url https://docs.example.com` does not replace your default login.
 
 **Which credential wins.** Every command, including `docslurp mcp`, uses the first of:
 
@@ -250,7 +251,7 @@ docslurp exec -- npm run ingest-docs
 docslurp exec --workspace contracts -- python agent.py
 ```
 
-`exec` sets `DOCSLURP_TOKEN`, `DOCSLURP_URL` and, when you choose one, `DOCSLURP_WORKSPACE`, and exits with the child's status. The SDK reads `DOCSLURP_TOKEN` when no API key is set. Env tokens are short-lived (at most 15 minutes, not refreshed) and carry only the scopes of your login, so use them for one job; for long-running CI, use a scoped server key. `auth token` and `exec` refuse to forward an API key.
+`exec` sets `DOCSLURP_TOKEN`, `DOCSLURP_URL` and, when you choose one, `DOCSLURP_WORKSPACE`, and exits with the child's status. The SDK reads `DOCSLURP_TOKEN` when no API key is set. Env tokens are short-lived (at most 15 minutes, not refreshed) and carry only the scopes of your login, so use them for one job; for long-running CI, use a scoped server key. `auth token` and `exec` refuse to forward an API key. When `DOCSLURP_TOKEN` is already set, `auth token` prints it back unchanged (with a note on stderr); unset it to get a token from your stored login. On Windows, `exec` finds commands through `PATHEXT` (so `npm`, `npx` and `pnpm` work) and never runs one from the current directory.
 
 ## When something goes wrong
 
