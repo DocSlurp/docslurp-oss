@@ -105,10 +105,10 @@ describe("apiKeyAuth middleware", () => {
     await app.request("/v1/protected", {
       headers: { Authorization: "Bearer my-secret-key" },
     });
-    expect(validateApiKey).toHaveBeenCalledWith("my-secret-key", {
+    expect(validateApiKey).toHaveBeenCalledWith("my-secret-key", expect.objectContaining({
       origin: undefined,
-      referer: undefined
-    });
+      referer: undefined,
+    }));
   });
 
   it("calls validateApiKey exactly once per request", async () => {
@@ -137,9 +137,11 @@ describe("apiKeyAuth middleware", () => {
       }
     });
 
-    expect(validateApiKey).toHaveBeenCalledWith("dslp_client_key", {
+    // Plus the client address (`ip`) for server-key IP allowlists.
+    expect(validateApiKey).toHaveBeenCalledWith("dslp_client_key", expect.objectContaining({
       origin: "https://app.docslurp.dev",
-      referer: "https://app.docslurp.dev/widget"
-    });
+      referer: "https://app.docslurp.dev/widget",
+    }));
+    expect(vi.mocked(validateApiKey).mock.calls.at(-1)![1]).toHaveProperty("ip");
   });
 });

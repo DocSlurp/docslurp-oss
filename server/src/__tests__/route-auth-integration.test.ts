@@ -147,3 +147,33 @@ describe("API key route declarations (real middleware stack)", () => {
     expect(accepted).toEqual([]);
   }, 120_000);
 });
+
+describe("browser keys on admin and server-only routes (real middleware stack)", () => {
+  const browserKey = {
+    keyId: "key-browser", userId: "user-route-auth", orgId: "org-route-auth", keyType: "client",
+    allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [],
+    workspaceIds: ["00000000-0000-4000-8000-000000000001"], maxOutputTokens: 1000,
+  };
+  it.each([
+    ["GET", "/v1/api-keys"],
+    ["POST", "/v1/api-keys"],
+    ["POST", "/v1/api-keys/test-id/rotate"],
+    ["GET", "/v1/admin/billing/organizations"],
+    ["POST", "/v1/admin/billing/credits"],
+    ["GET", "/v1/organizations"],
+    ["DELETE", "/v1/organizations/test-id"],
+    ["PATCH", "/v1/workspaces/00000000-0000-4000-8000-000000000001"],
+    ["POST", "/v1/workspaces/00000000-0000-4000-8000-000000000001/settings-proposals/apply"],
+    ["POST", "/v1/uploads/url"],
+    ["GET", "/v1/workspaces/00000000-0000-4000-8000-000000000001/state"],
+  ])("refuses a browser key on %s %s", async (method, path) => {
+    mocks.validateApiKey.mockResolvedValueOnce(browserKey);
+    const response = await app.request(path, {
+      method,
+      headers: { Authorization: "Bearer dslp_pub_route_auth", "content-type": "application/json", "fly-client-ip": "192.0.2.1", Origin: "https://docs.example.com" },
+      body: method === "GET" || method === "DELETE" ? undefined : "{}",
+    });
+    expect([401, 403, 404], `${method} ${path} answered ${response.status}`).toContain(response.status);
+  });
+});
+
