@@ -41,8 +41,8 @@ const requestSchema = z.object({
   n: z.literal(1).optional(),
   user: z.string().max(256).optional(),
   /**
-   * "auto" (default): the workspace agent may call its own tools (search, web,
-   * settings) before answering. "none": answer directly from one retrieval and
+   * "auto" (default): the workspace agent may call its own tools (search, web)
+   * before answering; workspace settings tools are DocSlurp-app only. "none": answer directly from one retrieval and
    * one model call. Client-defined tools are not supported.
    */
   tool_choice: z.enum(["auto", "none"], { error: 'tool_choice must be "auto" or "none"; DocSlurp runs its own workspace tools and does not accept client-defined tools' }).optional(),
@@ -178,10 +178,17 @@ export const chatCompletionsRoutes = new Hono()
     if (chatDisabled) {
       return c.json(errorBody(chatDisabled.error, "permission_error", chatDisabled.code, "model"), 403);
     }
-    const history: Array<Pick<WorkspaceChatTurn, "role" | "content">> = input.messages.slice(0, -1).map((message) => ({
-      role: message.role === "developer" ? "system" : message.role,
-      content: contentText(message.content),
-    }));
+    // A browser (client) key is public: anyone who reads the page can send any
+    // messages. Its callers' system/developer messages would sit beside the
+    // workspace instructions with system authority, so they are dropped; only
+    // server keys may set system instructions.
+    const systemAllowed = actor.type !== "apiKey" || actor.apiKey.keyType === "server";
+    const history: Array<Pick<WorkspaceChatTurn, "role" | "content">> = input.messages.slice(0, -1)
+      .filter((message) => systemAllowed || (message.role !== "system" && message.role !== "developer"))
+      .map((message) => ({
+        role: message.role === "developer" ? "system" : message.role,
+        content: contentText(message.content),
+      }));
     const args = {
       workspaceId,
       userId: actor.userId,
