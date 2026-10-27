@@ -52,6 +52,9 @@ export async function loginCommand(flags: Flags, apiUrl: string): Promise<void> 
     updatedAt: new Date().toISOString(),
   };
   const store = await saveCredential(account, credential, err);
+  // The approver can grant less than asked (device logins grant search and read unless more is ticked).
+  const withheld = scopes.filter((scope) => !credential.scopes.includes(scope));
+  if (withheld.length) err(`Note: you asked for ${scopes.join(" ")}, but the approval granted only ${credential.scopes.join(" ")}. Not granted: ${withheld.join(" ")}. Run \`docslurp login${flags.device === true ? " --device" : ""} --scopes "${scopes.join(" ")}"\` and tick them to add them.`);
   const who = me.body?.user?.email ?? me.body?.user?.name ?? "your account";
   console.log(`Signed in to ${new URL(apiUrl).origin} as ${who}.`);
   if (me.body?.organization) console.log(`Organization: ${me.body.organization.name} (${me.body.organization.id})`);

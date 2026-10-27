@@ -27,13 +27,15 @@ function escapeCmdCommand(file: string): string {
 /** First PATH entry holding `command` with a PATHEXT extension (or as given when it already has one). */
 export function resolveWindowsCommand(command: string, env: NodeJS.ProcessEnv, exists: (path: string) => boolean = existsSync): string | null {
   const extensions = (env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map((ext) => ext.toLowerCase());
-  const hasExtension = /\.[^\\/.]+$/.test(command);
+  // Only a known PATHEXT extension counts: `python3.11` still gets .exe/.cmd appended.
+  const hasExtension = extensions.some((ext) => command.toLowerCase().endsWith(ext));
   const candidates = (base: string) => hasExtension ? [base] : extensions.map((ext) => `${base}${ext}`);
   if (/[\\/]/.test(command) || /^[A-Za-z]:/.test(command)) {
     return candidates(command).find(exists) ?? null;
   }
   // Like cmd.exe's lookup, but never the current directory: a planted npm.cmd in a cloned repo must not run.
-  for (const dir of (env.PATH ?? env.Path ?? "").split(";").filter(Boolean)) {
+  // Relative PATH entries (".", "bin") resolve against the working directory: skip them.
+  for (const dir of (env.PATH ?? env.Path ?? "").split(";").filter((entry) => /^(?:[A-Za-z]:[\\/]|\\\\)/.test(entry))) {
     const base = `${dir.replace(/[\\/]+$/, "")}\\${command}`;
     const found = candidates(base).find(exists);
     if (found) return found;
