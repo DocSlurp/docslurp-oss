@@ -35,7 +35,7 @@ def add_detector_arguments(parser):
     parser.add_argument('--classifier-revision')
 
 
-def create_detector(args):
+def create_detector(args, verified_artifact_sha256=None):
     if args.model=='heron-custom' and not args.model_path:
         raise ValueError('heron-custom requires --model-path to a local safetensors checkpoint')
     if args.model=='pp-small' and not args.model_path:
@@ -66,6 +66,14 @@ def create_detector(args):
         from rectification import RectifiedDetector
         detector=RectifiedDetector(detector,max_edge=args.rectify_max_edge)
     if artifact_hash:detector.metadata['graph_sha256']=artifact_hash
+    # All adapters share the verified bundle identity, including native Paddle and
+    # Transformers models that have no single ONNX graph. Wrappers retain it at
+    # the top level so it is included in both the profile and result identity.
+    if verified_artifact_sha256 is not None:
+        from asset_identity import SHA256
+        if not isinstance(verified_artifact_sha256, str) or not SHA256.fullmatch(verified_artifact_sha256):
+            raise ValueError('Invalid verified bundle SHA256')
+        detector.metadata['artifact_sha256'] = verified_artifact_sha256
     return detector
 
 
@@ -116,7 +124,7 @@ def build_result(detector,data,device,threshold=.3):
         if 'classification' in region: entry['classification']=region['classification']
         if 'detector_label' in region: entry['detectorLabel']=region['detector_label']
         entry.update(describe_region(image,region)); regions.append(entry)
-    return {'schemaVersion':1,'inferenceProfileSha256':inference_profile_sha256(detector,device,threshold),'model':{'id':detector.metadata['id'],'revision':detector.metadata['revision'],**({'artifactSha256':detector.metadata['graph_sha256']} if detector.metadata.get('graph_sha256') else {})},
+    return {'schemaVersion':1,'inferenceProfileSha256':inference_profile_sha256(detector,device,threshold),'model':{'id':detector.metadata['id'],'revision':detector.metadata['revision'],**({'artifactSha256':detector.metadata.get('artifact_sha256',detector.metadata.get('graph_sha256'))} if detector.metadata.get('artifact_sha256',detector.metadata.get('graph_sha256')) else {})},
         'device':device,'image':{'width':image.width,'height':image.height,'sha256':hashlib.sha256(data).hexdigest()},
         'coordinateSpace':'normalized-source','supportedLabels':detector.supported_labels,'regions':regions,
         'diagnostics':{'timings':timings,'decodeMs':1000*(start-decode_start),'elapsedMs':1000*(time.perf_counter()-decode_start),

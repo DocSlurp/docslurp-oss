@@ -7,7 +7,7 @@ import { SandboxRunError } from "../../types.js";
 
 export interface LayoutVmRequest {
   model: "heron" | "heron-custom" | "ppv3" | "pp-small" | "pp-small-onnx";
-  device: "cpu"; modelId: string; revision: string; artifactSha256?: string; inferenceProfileSha256?: string;
+  device: "cpu"; modelId: string; revision: string; artifactSha256: string; inferenceProfileSha256: string;
 }
 export type DocumentVmJob = {
   operation: "encode-webp" | "decode-webp" | "layout";
