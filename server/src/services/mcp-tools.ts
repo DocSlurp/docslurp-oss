@@ -1,7 +1,9 @@
 import { getWorkspaceSearchSettings } from "./search-controls.js";
 import { workspaceSettingsPipelinePatchSchema } from "./workspace-settings-proposal-input.js";
 import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
-import { currentChatSessionId } from "../lib/chat-agent-context.js";
+import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-context.js";
+import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
+import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 import { proposeWorkspaceSettings, SettingsProposalError } from "./workspace-settings-proposals.js";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
@@ -200,6 +202,18 @@ const mcpAdapterRoutes = new Hono()
 
     if (toolId === "search" || toolId === "chat") {
       const actor = c.get("requestActor");
+      // A direct MCP chat call runs a model turn: it counts as chat-ai and takes
+      // a chat slot. A nested call from the chat agent is already inside its turn.
+      let slot: { release: () => void } | null | "uncapped" = "uncapped";
+      if (toolId === "chat" && !inChatAgentContext()) {
+        const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
+        if (limited) return limited;
+        slot = acquireChatSlot(c);
+        if (!slot) {
+          c.header("Retry-After", "5");
+          return adapterError(c, 429, "Too many chat requests in progress for this key; wait for one to finish", "rate_limited");
+        }
+      }
       // The MCP chat tool is grounded retrieval only: it never starts another
       // agent (which would refresh the outer tool budget) or changes settings.
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
@@ -207,10 +221,16 @@ const mcpAdapterRoutes = new Hono()
         await next();
       }).route("/", toolId === "chat" ? groundedWorkspaceChatRoutes : searchRoutes);
       native.onError(spendAwareErrorHandler);
-      return native.request("http://mcp.internal/", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body), signal: c.req.raw.signal,
-      });
+      try {
+        const response = await native.request("http://mcp.internal/", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body), signal: c.req.raw.signal,
+        });
+        // Hold the slot until the answer body is read (the grounded route answers in one JSON body).
+        return slot && slot !== "uncapped" ? new Response(await response.arrayBuffer(), response) : response;
+      } finally {
+        if (slot && slot !== "uncapped") slot.release();
+      }
     }
 
     if (toolId === "getMediaEvidence") {
