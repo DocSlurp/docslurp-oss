@@ -1,17 +1,19 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { CommandRunner } from "../tools/runner.js";
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readLayoutObserverConfig, RoutingLayoutObserver, type RoutingLayoutObserverConfig } from "./routing-observer.js";
 
 const env = {
-  PAGE_ROUTER_LAYOUT: "shadow", PAGE_ROUTER_LAYOUT_ENDPOINT: "http://127.0.0.1:9876/layout",
-  PAGE_ROUTER_LAYOUT_MODEL_ID: "detector", PAGE_ROUTER_LAYOUT_REVISION: "pinned",
+  PAGE_ROUTER_LAYOUT: "shadow", PAGE_ROUTER_LAYOUT_ENDPOINT: "modal-vm://layout",
+  PAGE_ROUTER_LAYOUT_MODEL_ID: "docling-project/docling-layout-heron", PAGE_ROUTER_LAYOUT_REVISION: "pinned",
   PAGE_ROUTER_LAYOUT_ARTIFACT_SHA256: "a".repeat(64), PAGE_ROUTER_LAYOUT_PROFILE_SHA256: "b".repeat(64),
 };
 const config = (overrides: Partial<RoutingLayoutObserverConfig> = {}) => ({ ...readLayoutObserverConfig(env)!, ...overrides });
 const image = (background = "white") => sharp({ create: { width: 20, height: 10, channels: 3, background } }).png().toBuffer();
 function response(payload: Uint8Array, overrides: Record<string, unknown> = {}): Response {
-  return Response.json({ schemaVersion: 1, inferenceProfileSha256: "b".repeat(64), coordinateSpace: "normalized-source", model: { id: "detector", revision: "pinned", artifactSha256: "a".repeat(64) }, device: "cpu",
+  return Response.json({ schemaVersion: 1, inferenceProfileSha256: "b".repeat(64), coordinateSpace: "normalized-source", model: { id: "docling-project/docling-layout-heron", revision: "pinned", artifactSha256: "a".repeat(64) }, device: "cpu",
     image: { width: 20, height: 10, sha256: createHash("sha256").update(payload).digest("hex") }, supportedLabels: ["paragraph"],
     regions: [{ label: "paragraph", rawLabel: "text", confidence: 0.9, bbox: [0, 0, 1, 1] }], ...overrides });
 }
@@ -25,10 +27,18 @@ function mockEndpoint(options: { delay?: number; overrides?: Record<string, unkn
     });
     return options.fail ? new Response("unavailable", { status: 503 }) : response(init.body as Uint8Array, options.overrides);
   });
-  vi.stubGlobal("fetch", fetcher);
+  vi.spyOn(CommandRunner.prototype, "run").mockImplementation(async (plan, signal) => {
+    const job = plan.documentVm!;
+    const payload = await readFile(job.input);
+    if (payload.toString() === "not an image") throw new Error("Mock VM refuses malformed image");
+    const result = await fetcher("mock-vm", { body: payload, signal });
+    if (!result.ok) throw new Error(`Mock VM failure ${result.status}`);
+    await writeFile(job.output, await result.text());
+    return { stdout: "", stderr: "" };
+  });
   return fetcher;
 }
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("layout observer configuration", () => {
   it("is disabled by default and keeps unknown pricing unknown", () => {
@@ -41,6 +51,7 @@ describe("layout observer configuration", () => {
     { PAGE_ROUTER_LAYOUT_ENDPOINT: "http://localhost/layout" }, { PAGE_ROUTER_LAYOUT_ENDPOINT: "http://127.0.0.1/layout?x=1" },
     { PAGE_ROUTER_LAYOUT_ARTIFACT_SHA256: "" }, { PAGE_ROUTER_LAYOUT_REVISION: "" }, { PAGE_ROUTER_LAYOUT_PROFILE_SHA256: "" },
     { PAGE_ROUTER_LAYOUT_MAX_BYTES: "26214401" }, { PAGE_ROUTER_LAYOUT_CONCURRENCY: "0" },
+    { PAGE_ROUTER_LAYOUT_DEVICE: "cuda" }, { PAGE_ROUTER_LAYOUT_DEVICE: "cuda:0" },
     { PAGE_ROUTER_LAYOUT_TIMEOUT_MS: "NaN" }, { PAGE_ROUTER_LAYOUT_DEVICE: "auto" },
     { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "" }, { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "0" },
     { PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: "0" }, { PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: "1024", PAGE_ROUTER_LAYOUT_MAX_BYTES: "2048" }, { PAGE_ROUTER_LAYOUT_AUDIT_PAGES: "17" },
@@ -78,8 +89,8 @@ describe("bounded routing layout observer", () => {
   });
   it.each([
     { model: { id: "other", revision: "pinned", artifactSha256: "a".repeat(64) } },
-    { model: { id: "detector", revision: "other", artifactSha256: "a".repeat(64) } },
-    { model: { id: "detector", revision: "pinned", artifactSha256: "b".repeat(64) } },
+    { model: { id: "docling-project/docling-layout-heron", revision: "other", artifactSha256: "a".repeat(64) } },
+    { model: { id: "docling-project/docling-layout-heron", revision: "pinned", artifactSha256: "b".repeat(64) } },
     { inferenceProfileSha256: "c".repeat(64) }, { inferenceProfileSha256: undefined },
     { device: "cuda" }, { image: { width: 20, height: 10, sha256: "b".repeat(64) } },
   ])("rejects endpoint identity mismatch without caching %j", async (overrides) => {
@@ -185,12 +196,13 @@ describe("bounded routing layout observer", () => {
     await expect(observer.observe({ scopeKey: "b", payload, onRequest: joinHook })).rejects.toThrow("503");
     expect(joinHook).toHaveBeenCalledOnce();
   });
-  it("does not record invalid-image or cancelled queued requests as HTTP attempts", async () => {
+  it("records VM validation attempts but does not dispatch cancelled queued requests", async () => {
     mockEndpoint({ delay: 30 });
     const observer = new RoutingLayoutObserver(config());
     const hook = vi.fn();
     await expect(observer.observe({ scopeKey: "invalid", payload: Buffer.from("not an image"), onRequest: hook })).rejects.toThrow();
-    expect(hook).not.toHaveBeenCalled();
+    expect(hook).toHaveBeenCalledOnce();
+    hook.mockClear();
     const payload = await image();
     const first = observer.observe({ scopeKey: "a", payload });
     const controller = new AbortController();

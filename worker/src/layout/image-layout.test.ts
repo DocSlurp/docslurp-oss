@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import sharp from "sharp";
-import { describe, expect, it } from "vitest";
+import { access, readFile, writeFile } from "node:fs/promises";
+import { describe, expect, it, vi } from "vitest";
 import type { CommandPlan } from "../tools/runner.js";
 import { detectImageLayout, detectImageLayoutAtEndpoint, parseImageLayout } from "./image-layout.js";
 
@@ -44,84 +40,35 @@ describe("image layout transport boundary", () => {
     expect(() => parseImageLayout({ ...payload(), coordinateSpace: "pixels" })).toThrow("coordinate space");
     expect(() => parseImageLayout({ ...payload(), regions: [{ ...payload().regions[0], confidence: NaN }] })).toThrow("finite");
   });
-  it("stages bytes, requests the exact device offline, validates provenance, and cleans up", async () => {
-    const runtime = await mkdtemp(path.join(tmpdir(), "docslurp-layout-test-"));
+  it("stages opaque bytes for VM metadata and inference without host decoding", async () => {
+    const input = Buffer.from("malformed or hostile source bytes");
     let output = "";
-    const options = { python: path.join(runtime, "bin", "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const, modelSize: 640, orientationOnnxPath: path.join(runtime, "orientation.onnx"), orientationRevision: "pinned", orientationMinimumScore: 0.8, rectifyPage: true, rectifyMaxEdge: 128 };
-    await mkdir(path.join(runtime, "bin"));
-    await writeFile(path.join(runtime, "pyvenv.cfg"), "home = /usr/bin\n");
-    await writeFile(options.python, "");
-    await writeFile(options.script, "");
-    await writeFile(options.orientationOnnxPath, "");
-    try {
-      const input = await sharp({ create: { width: 20, height: 10, channels: 3, background: "white" } }).png().toBuffer();
-      const runner = { run: async (plan: CommandPlan) => {
-        expect(plan.timeoutMs).toBe(120_000);
-        expect(plan.bundleRoots).toContain(runtime);
-        expect(plan.bundleEnv?.HF_HUB_OFFLINE).toBe("1");
-        expect(plan.args).toContain("cpu");
-        expect(plan.args).toEqual(expect.arrayContaining(["--model-size", "640", "--orientation-onnx-path", options.orientationOnnxPath, "--orientation-revision", "pinned", "--orientation-minimum-score", "0.8", "--rectify-page", "--rectify-max-edge", "128"]));
-        expect(plan.bundleRoots).toContain(options.orientationOnnxPath);
-        output = plan.args[plan.args.indexOf("--output") + 1];
-        await writeFile(output, JSON.stringify({ ...payload(), model: { id: "docling-project/docling-layout-heron", revision: "test" }, image: { ...payload().image, sha256: createHash("sha256").update(input).digest("hex") } }));
-        return { stdout: "", stderr: "" };
-      } };
-      await expect(detectImageLayout(input, { ...options, modelSize: 33 }, runner)).rejects.toThrow("Model size");
-      await expect(detectImageLayout(input, { ...options, orientationMinimumScore: NaN }, runner)).rejects.toThrow("orientation");
-      await expect(detectImageLayout(input, { ...options, rectifyMaxEdge: 8 }, runner)).rejects.toThrow("Rectification");
-      await expect(detectImageLayout(input, { ...options, rectifyMaxEdge: 127 }, runner)).rejects.toThrow("Rectification");
-      const result = await detectImageLayout(input, options, runner);
-      expect(result.image.sha256).toMatch(/^[a-f0-9]{64}$/);
-      const wrongHash = { run: async (plan: CommandPlan) => {
-        await writeFile(plan.args[plan.args.indexOf("--output") + 1], JSON.stringify({ ...payload(), model: { id: "docling-project/docling-layout-heron", revision: "test" }, image: { ...payload().image, sha256: "0".repeat(64) } }));
-        return { stdout: "", stderr: "" };
-      } };
-      await expect(detectImageLayout(input, options, wrongHash)).rejects.toThrow("source hash");
-      await expect(access(output)).rejects.toThrow();
-      const wrongDevice = { run: async (plan: CommandPlan) => {
-        output = plan.args[plan.args.indexOf("--output") + 1];
-        await writeFile(output, JSON.stringify({ ...payload(), device: "cuda" }));
-        return { stdout: "", stderr: "" };
-      } };
-      await expect(detectImageLayout(input, options, wrongDevice)).rejects.toThrow("changed requested device");
-      await expect(access(output)).rejects.toThrow();
-      const wrongSize = { run: async (plan: CommandPlan) => {
-        output = plan.args[plan.args.indexOf("--output") + 1];
-        await writeFile(output, JSON.stringify({ ...payload(), image: { width: 10, height: 20 } }));
-        return { stdout: "", stderr: "" };
-      } };
-      await expect(detectImageLayout(input, options, wrongSize)).rejects.toThrow("dimensions");
-      await expect(access(output)).rejects.toThrow();
-    } finally { await rm(runtime, { recursive: true, force: true }); }
-  });
-});
-
-
-describe("resident image layout transport", () => {
-  it("sends raw bytes and verifies model identity and source hash", async () => {
-    const input = await sharp({ create: { width: 20, height: 10, channels: 3, background: "white" } }).png().toBuffer();
-    let badHash = false;
-    const server = createServer(async (request, response) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) chunks.push(chunk);
-      expect(Buffer.concat(chunks)).toEqual(input);
-      response.setHeader("Content-Type", "application/json");
-      response.end(JSON.stringify({ ...payload(), image: { width: 20, height: 10, sha256: badHash ? "0".repeat(64) : createHash("sha256").update(input).digest("hex") } }));
+    const run = vi.fn(async (plan: CommandPlan) => {
+      expect(plan.bundleEnv).toBeUndefined(); expect(plan.bundleRoots).toBeUndefined();
+      expect(plan.documentVm?.operation).toBe("layout");
+      expect(await readFile(plan.documentVm!.input)).toEqual(input);
+      output = plan.documentVm!.output;
+      await writeFile(output, JSON.stringify({ ...payload(), model: { id: "docling-project/docling-layout-heron", revision: "pinned", artifactSha256: "a".repeat(64) }, inferenceProfileSha256: "b".repeat(64), image: { width: 20, height: 10, sha256: createHash("sha256").update(input).digest("hex") } }));
+      return { stdout: "", stderr: "" };
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await detectImageLayout(input, { model: "heron", device: "cpu", revision: "pinned", artifactSha256: "a".repeat(64), inferenceProfileSha256: "b".repeat(64) }, { run });
+    expect(run).toHaveBeenCalledOnce(); await expect(access(output)).rejects.toThrow();
+  });
+  it.each(["cuda", "cuda:0", "cpu:0"])("refuses unsupported device %s without dispatch", async (device) => {
+    const run = vi.fn();
+    await expect(detectImageLayout(Buffer.from("bytes"), { model: "heron", device: device as "cuda", revision: "pinned", artifactSha256: "a".repeat(64), inferenceProfileSha256: "b".repeat(64) }, { run })).rejects.toThrow("CPU-only");
+    expect(run).not.toHaveBeenCalled();
+  });
+  it("refuses oversized input and malformed or excessive guest dimensions/regions", async () => {
+    await expect(detectImageLayout(Buffer.alloc(25*1024*1024+1), {} as never, { run: vi.fn() })).rejects.toThrow("25 MiB");
+    expect(() => parseImageLayout({ ...payload(), image: { width: 100000, height: 100000 } })).toThrow("dimensions");
+    expect(() => parseImageLayout({ ...payload(), regions: Array(4097).fill(payload().regions[0]) })).toThrow("bounds");
+  });
+  it("refuses the legacy loopback backend without fetching", async () => {
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
     try {
-      const address = server.address();
-      if (!address || typeof address === "string") throw new Error("Missing test listener");
-      const options = { endpoint: `http://127.0.0.1:${address.port}/layout`, expectedModelId: "detector", expectedRevision: "test", device: "cpu" as const };
-      const result = await detectImageLayoutAtEndpoint(input, options);
-      expect(result.regions).toHaveLength(1);
-      await expect(detectImageLayoutAtEndpoint(input, { ...options, expectedRevision: "different" })).rejects.toThrow("model identity");
-      await expect(detectImageLayoutAtEndpoint(input, { ...options, device: "cuda" })).rejects.toThrow("device");
-      badHash = true;
-      await expect(detectImageLayoutAtEndpoint(input, options)).rejects.toThrow("source hash");
-      await expect(detectImageLayoutAtEndpoint(input, { ...options, endpoint: "https://example.com/layout" })).rejects.toThrow("127.0.0.1");
-    } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-    }
+      await expect(detectImageLayoutAtEndpoint(Buffer.from("bytes"), { endpoint: "http://127.0.0.1:8769/layout", expectedModelId: "x", expectedRevision: "pinned", device: "cpu" })).rejects.toThrow("not a VM boundary");
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 });

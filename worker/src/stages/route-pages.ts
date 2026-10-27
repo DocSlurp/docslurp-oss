@@ -491,7 +491,7 @@ export class RoutePagesStage implements Stage {
       auditBudgetExhausted: exhausted.audit,
       artifactResultBytes, artifactBudgetExhausted, elapsedMs: performance.now() - started };
     if (rows.length > 0) {
-      const artifactKey = `${document.userId}/${state.run.id}/page-route-layout-shadow/${document.id}.json`;
+      const artifactKey = `${runArtifactRoot(state.run, document.userId)}/page-route-layout-shadow/${document.id}.json`;
       const persistDeadline = AbortSignal.timeout(LAYOUT_PERSIST_TIMEOUT_MS);
       const persistSignal = signal ? AbortSignal.any([signal, persistDeadline]) : persistDeadline;
       try {

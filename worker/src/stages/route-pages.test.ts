@@ -149,7 +149,7 @@ describe("RoutePagesStage", () => {
     });
     const run = async (tableGate?: "off" | "shadow") => {
       const storage = makeStorage();
-      const state = makeState({ mode: "shadow", pageRouter: { router: "baseline" } });
+      const state = makeState({ mode: "shadow", pageRouter: { router: "baseline", marginFloor: 0 } });
       await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, {
         probe: tableProbe, catalog, openNativePdf, ...(tableGate ? { tableGate } : {}),
       }).run(state);
@@ -169,7 +169,7 @@ describe("RoutePagesStage", () => {
 
   it("table gate shadow fails open when the native engine is unavailable", async () => {
     const storage = makeStorage();
-    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline" } });
+    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline", marginFloor: 0 } });
     await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, {
       probe: vi.fn(async () => JSON.stringify(row(1, { tableRuleScore: 3 }))), catalog, tableGate: "shadow", openNativePdf: async () => null,
     }).run(state);
@@ -400,7 +400,7 @@ describe("layout shadow integration", () => {
   function fixtures(options: { hit?: boolean; maxPages?: number; timeoutMs?: number; healthy?: boolean; hourlyCostUsd?: number; auditPages?: number } = {}) {
     const storage = Object.assign(makeStorage(), { getBytes: vi.fn(async () => Buffer.from("raster")) });
     const observer: Observer = {
-      config: { endpoint: "http://127.0.0.1:8080/layout", expectedModelId: "tiny", expectedRevision: "pinned",
+      config: { endpoint: "modal-vm://layout", expectedModelId: "tiny", expectedRevision: "pinned",
         expectedArtifactSha256: "a".repeat(64), expectedInferenceProfileSha256: "b".repeat(64), device: "cpu", maxPages: options.maxPages ?? 1,
         timeoutMs: options.timeoutMs ?? 2000, maxBytes: 1024, concurrency: 1, queueCapacity: 8, queueMaxBytes: 1 << 20,
         auditPages: options.auditPages ?? 0, hourlyCostUsd: options.hourlyCostUsd ?? null },
@@ -422,7 +422,7 @@ describe("layout shadow integration", () => {
       images: [{ bbox: [0, 0, 612, 792], coverage: 1 }],
     }))];
     const localProbe = vi.fn(async () => rows.map((r) => JSON.stringify(r)).join("\n"));
-    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline" } });
+    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline", marginFloor: 0 } });
     const run = (enabled = true, signal?: AbortSignal) => new RoutePagesStage(storage, envCfg("shadow"), sources, undefined,
       { probe: localProbe, catalog, ...(enabled ? { layoutObserver: observer, rasterCache: { renderSelectedPages } } : {}) }).run(state, signal);
     return { state, storage, observer, renderSelectedPages, run };
@@ -454,6 +454,13 @@ describe("layout shadow integration", () => {
     const evidence = shadow.storage.putJson.mock.calls[1]![1] as Record<string, unknown>;
     expect(evidence).toMatchObject({ sourceSha256: "x", pdfPointTransform: null, summary: { selected: 1, observed: 1, errors: 0 } });
     expect(shadow.state.pendingPerformance.find((p) => p.metric === "page-route-timing")?.metadata).toHaveProperty("layoutShadowMs");
+  });
+  it("keeps layout shadow artifacts under the extract retention prefix", async () => {
+    const setup = fixtures();
+    setup.state.run.storagePrefix = "extracts/org/extract-id";
+    await setup.run();
+    const shadowKey = setup.storage.putJson.mock.calls.find(([key]) => String(key).includes("layout-shadow"))?.[0];
+    expect(shadowKey).toBe("extracts/org/extract-id/page-route-layout-shadow/doc.json");
   });
   it("loads a durable raster hit with a byte bound and does not charge observation cache hits", async () => {
     const setup = fixtures({ hit: true });

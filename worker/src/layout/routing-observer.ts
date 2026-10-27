@@ -38,16 +38,13 @@ export function readLayoutObserverConfig(env: NodeJS.ProcessEnv = process.env): 
     return value;
   };
   const endpoint = required("ENDPOINT");
-  const url = new URL(endpoint);
-  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.pathname !== "/layout" || url.search || url.hash) {
-    throw new Error("Layout endpoint must be http://127.0.0.1:<port>/layout with no credentials or query");
-  }
+  if (endpoint !== "modal-vm://layout") throw new Error("Layout endpoint must be modal-vm://layout; loopback is not a VM boundary");
   const expectedArtifactSha256 = required("ARTIFACT_SHA256");
   if (!/^[0-9a-f]{64}$/.test(expectedArtifactSha256)) throw new Error("Invalid layout artifact SHA256");
   const expectedInferenceProfileSha256 = required("PROFILE_SHA256");
   if (!/^[0-9a-f]{64}$/.test(expectedInferenceProfileSha256)) throw new Error("Invalid inference profile SHA256");
   const device = env.PAGE_ROUTER_LAYOUT_DEVICE ?? "cpu";
-  if (device !== "cpu" && device !== "cuda") throw new Error("Invalid layout device");
+  if (device !== "cpu") throw new Error("CUDA layout inference is unsupported: dedicated VM runtime is CPU-only");
   const maxBytes = integer(env.PAGE_ROUTER_LAYOUT_MAX_BYTES, 25 * 1024 * 1024, 1, 25 * 1024 * 1024, "layout maximum bytes");
   const queueMaxBytes = integer(env.PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES, 64 * 1024 * 1024, 1, 1024 * 1024 * 1024, "layout queue maximum bytes");
   if (queueMaxBytes < maxBytes) throw new Error("Layout queue maximum bytes must be at least the per-request maximum bytes");

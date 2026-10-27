@@ -19,3 +19,6 @@ if (existsSync(prices)) {
 } else {
   console.warn(`[copy-routing-assets] ${prices} not found; the page router will have no hosted VLM targets`);
 }
+
+// Production inference assets belong to the worker package, never scripts/layout-eval.
+cpSync(path.join(workerDir, "src/layout/runtime"), path.join(workerDir, "dist/layout/runtime"), { recursive: true });

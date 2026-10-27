@@ -274,7 +274,7 @@ export class PdfRasterCache {
       throw new Error(`Native image documents only support page 1, received ${pageNumbers.join(",")}`);
     }
     const root = documentArtifactRoot(args.document, args.runId);
-    if (!isPdf) return await this.storeNativeImage(args.document, root, dpi, pageNumbers);
+    if (!isPdf) return await this.storeNativeImage(args.document, root, dpi, pageNumbers, args.onRenderedPage);
 
     const preferredFormat = this.options.format ?? readPageImageFormat();
     // Transient renders still reuse a stored WebP; they only skip encoding a new one.
@@ -456,7 +456,7 @@ export class PdfRasterCache {
   }
 
   /** An uploaded image is its own page 1: stored as uploaded, never re-encoded. */
-  private async storeNativeImage(document: Document, root: string, dpi: number, pageNumbers: number[]): Promise<RasterPageArtifact[]> {
+  private async storeNativeImage(document: Document, root: string, dpi: number, pageNumbers: number[], onRenderedPage?: (page: RenderedRasterPage) => Promise<void>): Promise<RasterPageArtifact[]> {
     const mimeType = document.mimeType;
     const key = `${root}/images/${document.id}/v2-${dpi}dpi/page-1.${extensionForImageMimeType(mimeType)}`;
     const existing = await this.storage.objectSize(key);
@@ -471,6 +471,7 @@ export class PdfRasterCache {
       const bytes = await readFile(source.path);
       await this.storage.putBytes(key, bytes, mimeType);
       sizeBytes = bytes.byteLength;
+      await onRenderedPage?.({ pageNumber: 1, bytes, artifactKey: key, mimeType });
     }
     return pageNumbers.map((pageNumber) => ({
       pageNumber,

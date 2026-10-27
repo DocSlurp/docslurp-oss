@@ -5,8 +5,13 @@ import type { ModalSdk } from "./index.js";
 import { buildModalUsageEvent, resolveModalImage } from "./index.js";
 import { SandboxRunError } from "../../types.js";
 
+export interface LayoutVmRequest {
+  model: "heron" | "heron-custom" | "ppv3" | "pp-small" | "pp-small-onnx";
+  device: "cpu"; modelId: string; revision: string; artifactSha256?: string; inferenceProfileSha256?: string;
+}
 export type DocumentVmJob = {
-  operation: "encode-webp" | "decode-webp";
+  operation: "encode-webp" | "decode-webp" | "layout";
+  layout?: LayoutVmRequest;
   input: string;
   output: string;
   effort?: number;
@@ -77,18 +82,20 @@ export async function executeDocumentVm(
   loadSdk: () => Promise<ModalSdk> = () => import("modal"),
 ) {
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
+  if (job.operation === "layout" && (!job.layout || job.layout.device !== "cpu")) throw new SandboxRunError("Document VM layout requires CPU; CUDA is unsupported");
   if (job.effort !== undefined && (!Number.isInteger(job.effort) || job.effort < 0 || job.effort > 9)) throw new Error("Invalid WebP effort");
   const image = resolveModalImage(process.env.DOCSLURP_DOCUMENT_VM_IMAGE ?? "", process.env.DOCSLURP_DOCUMENT_VM_IMAGE_DIGEST);
   if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(image)) throw new SandboxRunError("Document VM requires a verified digest-pinned DOCSLURP_DOCUMENT_VM_IMAGE with offline parser assets");
+  const inputLimit = job.operation === "layout" ? 25 * 1024 * 1024 : MAX_IMAGE_BYTES;
   const input = await open(job.input, constants.O_RDONLY | constants.O_NOFOLLOW);
   let bytes: Buffer;
   try {
     const info = await input.stat();
-    if (!info.isFile() || info.size > MAX_IMAGE_BYTES) throw new Error("Invalid or oversized VM input");
+    if (!info.isFile() || info.size > inputLimit) throw new Error("Invalid or oversized VM input");
     // An extra byte detects growth without an unbounded readFile allocation.
-    bytes = Buffer.alloc(Math.min(info.size + 1, MAX_IMAGE_BYTES + 1));
+    bytes = Buffer.alloc(Math.min(info.size + 1, inputLimit + 1));
     const { bytesRead } = await input.read(bytes, 0, bytes.length, 0);
-    if (bytesRead > MAX_IMAGE_BYTES || bytesRead !== info.size) throw new Error("VM input changed or exceeded limit");
+    if (bytesRead > inputLimit || bytesRead !== info.size) throw new Error("VM input changed or exceeded limit");
     bytes = bytes.subarray(0, bytesRead);
   } finally { await input.close(); }
   const sdk = await loadSdk();
@@ -117,12 +124,15 @@ export async function executeDocumentVm(
       await vm!.filesystem.makeDirectory("/job");
       await vm!.filesystem.writeBytes(bytes, "/job/input");
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
-      const child = await vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), "python3", "-I", "-c", IMAGE_PROGRAM, job.operation, String(job.effort ?? 1)], { timeoutMs: 55_000, mode: "binary" });
+      const parserArgs = job.operation === "layout"
+        ? ["python3", "-P", "/opt/docslurp/layout/runtime/vm_entry.py", JSON.stringify(job.layout)]
+        : ["python3", "-I", "-c", IMAGE_PROGRAM, job.operation, String(job.effort ?? 1)];
+      const child = await vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 55_000, mode: "binary" });
       const [stdout, stderr, code] = await Promise.all([boundedStream(child.stdout, MAX_LOG_BYTES), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]);
       if (code !== 0) throw new Error(`Document VM parser failed (${code}): ${stderr.toString("utf8").slice(0, 1000)}`);
       // Transfer exactly one declared output via a bounded stream, never a recursive tree.
       const transfer = await vm!.exec(["python3", "-I", "-c", READ_OUTPUT], { timeoutMs: 5_000, mode: "binary" });
-      const [output, , transferCode] = await Promise.all([boundedStream(transfer.stdout, MAX_IMAGE_BYTES), boundedStream(transfer.stderr, MAX_LOG_BYTES), transfer.wait()]);
+      const [output, , transferCode] = await Promise.all([boundedStream(transfer.stdout, job.operation === "layout" ? 10 * 1024 * 1024 : MAX_IMAGE_BYTES), boundedStream(transfer.stderr, MAX_LOG_BYTES), transfer.wait()]);
       if (transferCode !== 0 || output.length === 0) throw new Error("Document VM output transfer failed");
       if (cancelled) throw new Error("Document VM cancelled before output commit");
       await writeFile(job.output, output);
