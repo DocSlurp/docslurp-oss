@@ -1,8 +1,9 @@
-import { mkdtemp, writeFile, rm, readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, open, writeFile, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boundedStream, executeDocumentVm, MAX_IMAGE_BYTES } from "./document-vm.js";
+import { boundedStream, executeDocumentVm, MAX_IMAGE_BYTES, IMAGE_PROGRAM } from "./document-vm.js";
 import type { ModalSdk } from "./index.js";
 
 function stream(bytes: string) {
@@ -60,4 +61,39 @@ describe("dedicated document VM contract (offline)", () => {
     expect(h.create).toHaveBeenCalledTimes(2); expect(h.terminate).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(h.exec.mock.calls)).not.toContain(path.dirname(a.input));
   });
+  it.each([{ w: 4097, h: 2, frames: 1 }, { w: 4000, h: 4001, frames: 1 }, { w: 10, h: 10, frames: 2 }])("guest validation refuses oversized or animated rasters %j before codecs", ({ w, h, frames }) => {
+    // Execute the guest validation with a fake image object, never a host image decoder.
+    const stub = `import sys, types\nclass Fake:\n    size=(${w},${h})\n    n_frames=${frames}\n    def __enter__(self): return self\n    def __exit__(self,*args): pass\n    def load(self): raise RuntimeError('codec must not run')\nsys.modules['PIL']=types.SimpleNamespace(Image=types.SimpleNamespace(open=lambda p: Fake()))\nsys.argv=['guest','decode-webp','1']\n`;
+    const result = spawnSync("python3", ["-I", "-c", stub + IMAGE_PROGRAM], { encoding: "utf8", timeout: 5000 });
+    expect(result.status).not.toBe(0); expect(result.stderr).toContain("unsupported image dimensions or animation");
+    expect(result.stderr).not.toContain("codec must not run");
+  });
+  it("refuses oversized files before any SDK or VM call", async () => {
+    const j = await job(); const h = harness();
+    const handle = await open(j.input, "w"); await handle.truncate(MAX_IMAGE_BYTES + 1); await handle.close();
+    await expect(executeDocumentVm(j, undefined, async () => h.sdk)).rejects.toThrow("oversized");
+    expect(h.create).not.toHaveBeenCalled();
+  });
+  it("destroys a running VM on cancellation with no output commit", async () => {
+    const j = await job(); const h = harness(); const controller = new AbortController();
+    let started!: () => void; const running = new Promise<void>(resolve => { started = resolve; });
+    h.exec.mockImplementation(async () => { started(); await new Promise(() => {}); return undefined as never; });
+    const pending = executeDocumentVm(j, controller.signal, async () => h.sdk);
+    await running; controller.abort();
+    await expect(pending).rejects.toThrow("aborted"); expect(h.terminate).toHaveBeenCalled();
+    await expect(readFile(j.output)).rejects.toThrow();
+  });
+  it("destroys a VM when logs exceed their incremental cap", async () => {
+    const j = await job(); const h = harness();
+    h.exec.mockImplementation(async () => ({ stdout: stream("x".repeat(16385)), stderr: stream(""), wait: async () => 0 }));
+    await expect(executeDocumentVm(j, undefined, async () => h.sdk)).rejects.toThrow("execution failed");
+    expect(h.terminate).toHaveBeenCalled(); expect(h.exec).toHaveBeenCalledTimes(1);
+  });
+  it("does not expose control authentication errors or fall back locally", async () => {
+    const j = await job(); const h = harness();
+    h.create.mockRejectedValue(new Error("revoked secret-token"));
+    await expect(executeDocumentVm(j, undefined, async () => h.sdk)).rejects.toThrow("Document VM execution failed");
+    expect(h.exec).not.toHaveBeenCalled(); expect(h.close).toHaveBeenCalled();
+  });
+
 });

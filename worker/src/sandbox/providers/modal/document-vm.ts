@@ -37,7 +37,7 @@ export async function boundedStream(stream: ReadableStream<Uint8Array>, limit: n
 
 // This program and Pillow are image assets, not host imports. Image.open/load/convert and
 // frame/dimension checks all execute behind the VM kernel before codecs receive pixels.
-const IMAGE_PROGRAM = `
+export const IMAGE_PROGRAM = `
 import os, sys, subprocess, resource
 resource.setrlimit(resource.RLIMIT_FSIZE, (67108864, 67108864))
 resource.setrlimit(resource.RLIMIT_CPU, (50, 50))
@@ -133,7 +133,7 @@ export async function executeDocumentVm(
   } catch (error) {
     // Raw SDK errors can contain control credentials. Keep them out of logs.
     const message = error instanceof Error && error.message.startsWith("Document VM") ? error.message : "Document VM execution failed";
-    throw new SandboxRunError(message);
+    throw new SandboxRunError(message, vm ? buildModalUsageEvent({ tokenId: "", tokenSecret: "", app: "docslurp-document-vm", image, cpu: 2, memoryMb: 1024, sessionTimeoutSeconds: 60 }, randomUUID(), (Date.now() - started) / 1000) : undefined);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
