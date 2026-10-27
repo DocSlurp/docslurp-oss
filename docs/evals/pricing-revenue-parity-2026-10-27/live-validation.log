@@ -1,0 +1,163 @@
+
+> docslurp-app@ pricing:validate /home/dan/.t3/worktrees/docslurp-app/t3-a3a318b4
+> tsx scripts/validate-pricing.mjs
+
+
+== sources
+source             status      error                
+-----------------  ----------  ---------------------
+fly-pricing        ok                               
+modal-pricing      ok                               
+tigris-pricing     ok                               
+neon-pricing       ok                               
+vast-offers        unverified  VAST_API_KEY not set 
+openrouter-models  ok                               
+fly-inventory      unverified  FLY_API_TOKEN not set
+
+== observations
+observation                  lane     encoded  live     drift  status    
+---------------------------  -------  -------  -------  -----  ----------
+fly:shared-cpu-1x-256mb:iad           $0.0030  $0.0030  0.0%   verified  
+fly:shared-vcpu:lax          allowed  $0.0011  $0.0011  0.0%   verified  
+fly:extra-ram:lax            allowed  $0.0100  $0.0100  0.0%   verified  
+fly:shared-cpu-8x-16gb:lax   allowed  $0.1691  $0.1691  0.0%   verified  
+fly:shared-cpu-8x-16gb:iad   allowed  $0.1410  $0.1410  0.0%   verified  
+fly:shared-cpu-2x-4gb:lax    allowed  $0.0423  $0.0423  0.0%   verified  
+fly:performance-1x-2gb:lax            $0.0550  $0.0550  0.0%   verified  
+fly:stopped-rootfs                    $0.1500  $0.1500  0.0%   verified  
+fly:egress:na-eu             allowed  $0.0200  $0.0200  0.0%   verified  
+vast:rtx-4090                         $0.5378  n/a      n/a    unverified
+vast:l4                      allowed  $0.3300  n/a      n/a    unverified
+vast:rtx-3090                allowed  $0.2901  n/a      n/a    unverified
+vast:a100-80gb               allowed  $1.1361  n/a      n/a    unverified
+vast:h100-sxm                         $3.9900  n/a      n/a    unverified
+modal:l4                              $0.7992  $0.7992  0.0%   verified  
+modal:a10                             $1.1016  $1.1016  0.0%   verified  
+modal:a100-80gb                       $2.4984  $2.4984  0.0%   verified  
+modal:h100                            $3.9492  $3.9492  0.0%   verified  
+modal:l4-nonpreemptible               $2.3976  $2.3976  0.0%   verified  
+modal:cpu-core                        $0.0472  $0.0472  0.0%   verified  
+tigris:standard              allowed  $0.0200  $0.0200  0.0%   verified  
+neon:storage                 allowed  $0.3500  $0.3500  0.0%   verified  
+openrouter:pass-through      allowed  $1.0550  n/a      n/a    unverified
+
+== policy
+policy           sku                         infra    list     break-even (encoded)  break-even (live)  target  typical margin  status    
+---------------  --------------------------  -------  -------  --------------------  -----------------  ------  --------------  ----------
+cpu-worker-host  fly:shared-cpu-8x-16gb:lax  $0.1691  $0.5600  30.2%                 30.2%              ≤ 40%   57%             ok        
+cpu-worker-host  fly:shared-cpu-8x-16gb:iad  $0.1410  $0.5600  25.2%                 25.2%              ≤ 40%   64%             ok        
+cpu-worker-host  fly:shared-cpu-2x-4gb:lax   $0.0423  $0.1400  30.2%                 30.2%              ≤ 40%   57%             ok        
+cpu-worker-host  fly:performance-1x-2gb:lax  $0.0550  $0.0700  78.5%                 78.5%              ≤ 40%   -12%            disallowed
+cpu-worker-host  modal:cpu-core              $0.0472  $0.0200  235.8%                235.8%             ≤ 40%   -237%           disallowed
+cpu              fly:shared-vcpu:lax         $0.0011  $0.0100  11.5%                 11.5%              ≤ 40%   84%             ok        
+memory           fly:extra-ram:lax           $0.0100  $0.0300  33.3%                 33.3%              ≤ 40%   52%             ok        
+gpu-standard     vast:rtx-4090               $0.5378  $0.9000  59.8%                 59.8%              ≤ 60%   15%             disallowed
+gpu-standard     vast:l4                     $0.3300  $0.9000  36.7%                 36.7%              ≤ 60%   48%             ok        
+gpu-standard     vast:rtx-3090               $0.2901  $0.9000  32.2%                 32.2%              ≤ 60%   54%             ok        
+gpu-standard     modal:l4                    $0.7992  $0.9000  88.8%                 88.8%              ≤ 60%   -27%            disallowed
+gpu-standard     modal:a10                   $1.1016  $0.9000  122.4%                122.4%             ≤ 60%   -75%            disallowed
+gpu-standard     modal:l4-nonpreemptible     $2.3976  $0.9000  266.4%                266.4%             ≤ 60%   -281%           disallowed
+gpu-large        vast:a100-80gb              $1.1361  $3.0000  37.9%                 37.9%              ≤ 60%   46%             ok        
+gpu-large        vast:h100-sxm               $3.9900  $3.0000  133.0%                133.0%             ≤ 60%   -90%            disallowed
+gpu-large        modal:a100-80gb             $2.4984  $3.0000  83.3%                 83.3%              ≤ 60%   -19%            disallowed
+gpu-large        modal:h100                  $3.9492  $3.0000  131.6%                131.6%             ≤ 60%   -88%            disallowed
+object-storage   tigris:standard             $0.0200  $0.0500  40.0%                 40.0%              ≤ 50%   60%             ok        
+index-storage    neon:storage                $0.3500  $0.7500  46.7%                 46.7%              ≤ 50%   53%             ok        
+egress           fly:egress:na-eu            $0.0200  $0.0500  40.0%                 40.0%              ≤ 50%   60%             ok        
+ai               openrouter:pass-through     $1.0550  $1.2000  87.9%                 87.9%              ≤ 90%   12%             ok        
+
+== ai
+role                 model                              in $/1M  out $/1M  catalog ¢/page  live ¢/page  drift  status      notes                                       
+-------------------  ---------------------------------  -------  --------  --------------  -----------  -----  ----------  --------------------------------------------
+vision               google/gemini-3.1-flash-lite       $0.250   $1.500    0.5             0.1575¢      -69%   verified    catalog estimate is conservative (>2× live) 
+vision               google/gemini-2.5-flash-lite       $0.100   $0.400    0.25            0.0470¢      -81%   verified    catalog estimate is conservative (>2× live) 
+vision               nvidia/nemotron-3.5-super-vl       $0.150   $0.500    0.2             0.0625¢      -69%   verified    catalog estimate is conservative (>2× live) 
+vision               deepseek/deepseek-v4.1-flash-1017  $0.150   $0.600    0.103           0.0705¢      -32%   verified                                                
+vision               xiaomi/mimo-v2.6-flash             $0.140   $0.280    0.056           0.0434¢      -23%   verified                                                
+vision               openai/gpt-6-luna                  $0.100   $0.500    0.061           0.0550¢      -10%   verified                                                
+vision               z-ai/glm-5.3-flash                 $0.150   $0.500    0.073           0.0625¢      -14%   verified                                                
+vision               openai/gpt-4.1-mini                $0.400   $1.600    3               0.2320¢      -92%   verified    catalog estimate is conservative (>2× live) 
+text (default)       qwen/qwen3.5-flash-02-23           $0.065   $0.260                    0.0442¢             verified                                                
+embedding (default)  openai/text-embedding-3-small      $0.020   $0.000                    0.0012¢             verified                                                
+chat option          z-ai/glm-5.3-flash                 $0.150   $0.500                                        verified                                                
+chat option          anthropic/claude-haiku-5.5         $0.100   $0.500                                        verified                                                
+chat option          deepseek/deepseek-v4.1-flash       $0.140   $0.420                                        verified                                                
+chat option          openai/gpt-6.1-sol                 $2.000   $10.000                                       verified                                                
+chat option          openai/gpt-6-luna                  $0.100   $0.500                                        verified                                                
+fallback pricing     deepinfra/BAAI/bge-m3              n/a      n/a                                           unverified                                              
+fallback pricing     qwen/qwen3.5-flash-02-23           $0.065   $0.260                                 0%     verified                                                
+fallback pricing     anthropic/claude-opus-5.5          $4.000   $20.000                                0%     verified                                                
+fallback pricing     anthropic/claude-opus-5.5          $4.000   $20.000                                0%     verified                                                
+fallback pricing     anthropic/claude-sonnet-5.5        $2.000   $10.000                                0%     verified                                                
+fallback pricing     anthropic/claude-sonnet-5.5        $2.000   $10.000                                0%     verified                                                
+fallback pricing     anthropic/claude-haiku-5.5         $0.100   $0.500                                 0%     verified                                                
+fallback pricing     anthropic/claude-haiku-5.5         $0.100   $0.500                                 0%     verified                                                
+fallback pricing     perplexity/pplx-embed-v1-0.6b      $0.004   $0.000                                 0%     verified                                                
+fallback pricing     perplexity/pplx-embed-v1-0.6b      $0.004   $0.000                                 0%     verified                                                
+fallback pricing     perplexity/pplx-embed-v1-4b        $0.030   $0.000                                 0%     verified                                                
+fallback pricing     perplexity/pplx-embed-v1-4b        $0.030   $0.000                                 0%     verified                                                
+fallback pricing     anthropic/claude-haiku-4.5         $1.000   $5.000                                 0%     verified    deprecated model (historical repricing only)
+fallback pricing     anthropic/claude-sonnet-4          n/a      n/a                                           unverified  deprecated model (historical repricing only)
+fallback pricing     openai/text-embedding-3-small      $0.020   $0.000                                 0%     verified                                                
+
+== profiles
+profile   page class  mode  worker-s/page  price /1k pages  worker $/1k @2 slots/host  worker $/1k @2 slots/host  worker share of price
+--------  ----------  ----  -------------  ---------------  -------------------------  -------------------------  ---------------------
+fast      text        fast  0.2s           $0.05            $0.0070                    $0.0070                    14.0%                
+fast      complex     fast  0.8s           $0.05            $0.0280                    $0.0280                    56.1%                
+fast      scanned     rich  3s             $2.50            $0.1052                    $0.1052                    4.2%                 
+standard  text        fast  0.3s           $0.05            $0.0105                    $0.0105                    21.0%                
+standard  complex     fast  4s             $0.05            $0.1402                    $0.1402                    280.5%               
+standard  scanned     rich  4.2s           $2.50            $0.1473                    $0.1473                    5.9%                 
+deep      text        fast  0.8s           $0.05            $0.0280                    $0.0280                    56.1%                
+deep      complex     rich  6s             $2.50            $0.2104                    $0.2104                    8.4%                 
+deep      scanned     rich  6s             $2.50            $0.2104                    $0.2104                    8.4%                 
+
+== selfHostedReferences
+capability  reference model                encoded in/out $/MTok  live in/out $/MTok  encoded ¢/page  live ¢/page  drift  status  
+----------  -----------------------------  ---------------------  ------------------  --------------  -----------  -----  --------
+text        z-ai/glm-5.3-flash             $0.15 / $0.5           $0.1500 / $0.5000   0.0625¢         0.0625¢      -0.0%  verified
+vision      z-ai/glm-5.3-flash             $0.15 / $0.5           $0.1500 / $0.5000   0.0625¢         0.0625¢      -0.0%  verified
+embedding   openai/text-embedding-3-small  $0.02 / $0             $0.0200 / $0.0000   0.0030¢         0.0030¢      0.0%   verified
+
+== selfHosted
+page size          hosted-equivalent list /1k pages  discount  billed /1k pages  own-GPU cost /1k pages  margin  floor  status  
+-----------------  --------------------------------  --------  ----------------  ----------------------  ------  -----  --------
+1500 in / 800 out  $0.750                            50%       $0.375            $0.080                  79%     ≥ 40%  verified
+
+== flatTier
+route (token prices)               $ / 1k pages  Extract OCR (cap $0.50)
+---------------------------------  ------------  -----------------------
+qwen/qwen3.5-flash-02-23           $0.306        eligible               
+xiaomi/mimo-v2.6-flash             $0.434        eligible               
+google/gemini-2.5-flash-lite       $0.470        eligible               
+deepseek/deepseek-v4.1-flash       $0.546        excluded               
+openai/gpt-6-luna                  $0.550        excluded               
+anthropic/claude-haiku-5.5         $0.550        excluded               
+nvidia/nemotron-3.5-super-vl       $0.625        excluded               
+z-ai/glm-5.3-flash                 $0.625        excluded               
+deepseek/deepseek-v4.1-flash-1017  $0.705        excluded               
+google/gemini-3.1-flash-lite       $1.575        excluded               
+openai/gpt-4.1-mini                $1.880        excluded               
+anthropic/claude-haiku-4.5         $5.500        excluded               
+openai/gpt-6.1-sol                 $11.000       excluded               
+anthropic/claude-sonnet-5.5        $11.000       excluded               
+anthropic/claude-opus-5.5          $22.000       excluded               
+
+== dedicated
+managed GPU  monthly cost incl. ops  price  floor  margin after fees  status  
+-----------  ----------------------  -----  -----  -----------------  --------
+$2.75/h      $2508                   $4400  $4400  40%                verified
+
+== idle
+app  machines  states  image GB (compressed)  rootfs GB (est.)  24h started  24h stopped  24h total
+---  --------  ------  ---------------------  ----------------  -----------  -----------  ---------
+
+Worker slot: 1 vCPU + 2 GB = 7 credits/h list, $0.0846 infra (120.8% break-even).
+Starter credits (250) if all spent: $3.02 on compute, $2.20 on AI.
+Production design idle (125 stopped hosts): n/a / 24 h; one warm host $4.06 / 24 h.
+
+Result: PASS
+
+JSON: .remote-compute/state/pricing/pricing-validation-2026-10-27T14-25-26-468Z.json
+Report: docs/evals/pricing-validation-2026-10-27.md
