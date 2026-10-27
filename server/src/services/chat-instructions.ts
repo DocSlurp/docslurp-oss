@@ -98,8 +98,10 @@ export function neutralizeWorkspaceText(text: string | null | undefined, maxChar
   if (!text) return "";
   return text
     .normalize("NFKC")
-    .replace(/[<‹❮〈⟨〈﹤]/g, "‹")
-    .replace(/[>›❯〉⟩〉﹥]/g, "›")
+    .replace(/[<‹❮〈⟨〈﹤˂ᐸ❬❰⧼]/g, "‹")
+    .replace(/[>›❯〉⟩〉﹥˃ᐳ❭❱⧽]/g, "›")
+    // Bidirectional embedding, override and isolate controls can disguise text order.
+    .replace(/[‪-‮⁦-⁩‎‏]/g, "")
     .replace(/\r\n?/g, "\n")
     // C0/C1 controls except tab and newline.
     .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "")

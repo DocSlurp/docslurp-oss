@@ -1088,10 +1088,12 @@ export async function consumeFeatureRateLimit(args: {
   const now = args.now ?? Date.now();
   const retry = Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
   if (args.limit <= 0) return retry;
-  if (!rateLimitEnabled()) return null;
+  // API_RATE_LIMIT_ENABLED=false turns off request limits, not this floor:
+  // feature limits guard paid calls, so they fall back to the per-process store.
+  const store = args.store ?? getDefaultStore();
   const base = `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:feature:${safeIdentityPart(args.feature)}:{${safeIdentityPart(args.subject)}}`;
   try {
-    const result = await (args.store ?? getDefaultStore()).consume({
+    const result = await store.consume({
       blockKey: `${base}:block`,
       counters: [{ key: `${base}:${args.windowMs}`, limit: args.limit, windowMs: args.windowMs }],
       now,
@@ -1111,6 +1113,7 @@ export async function consumeFeatureRateLimit(args: {
 
 /** Whether a shared (Redis or Upstash) limiter is configured; without one, per-process limits are expected. */
 function sharedStoreConfigured(): boolean {
-  const backend = rateLimitBackend();
-  return backend === "redis" || backend === "upstash-rest";
+  const restUrl = process.env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const restToken = process.env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  return Boolean((restUrl && restToken) || process.env.API_RATE_LIMIT_REDIS_URL?.trim() || process.env.REDIS_URL?.trim());
 }

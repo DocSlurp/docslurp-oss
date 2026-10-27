@@ -534,12 +534,19 @@ describe("chatWorkspace", () => {
     function arrange(chat: Partial<WorkspaceSearchSettings["chat"]> = {}, relevance: number | null = 0.02) {
       sqlMock.mockResolvedValue([]);
       getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Heat pump manuals", systemPrompt: null });
-      getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings({ chat: { searchInstructions: permissive, ...chat } }));
+      getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings({ chat: { searchInstructions: permissive, scopeDeclineThreshold: 0.05, ...chat } }));
       loadWorkspaceWholeCorpusContext.mockResolvedValue(notEligible);
       hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [manualChunk], scopeSignal: signal(relevance) });
       generateAnthropicDocumentText.mockResolvedValue({ text: "Five years [1].", usage: { inputTokens: 9, outputTokens: 4 }, sources: [] });
       process.env.ANTHROPIC_API_KEY = "test-key";
     }
+
+    it("keeps the shortcut disabled for default workspace settings", async () => {
+      arrange({ scopeDeclineThreshold: null });
+      const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "How do I cook a pasta dinner?" });
+      expect(response.scopeDecline).toBeUndefined();
+      expect(generateAnthropicDocumentText).toHaveBeenCalled();
+    });
 
     it("declines a clearly unrelated first question politely, with suggestions and no citations or model call, even with permissive instructions", async () => {
       arrange();
@@ -568,11 +575,20 @@ describe("chatWorkspace", () => {
       ["a follow-up in a conversation", { query: "what's the weather in Paris tomorrow?", history: [{ role: "user" as const, content: "How long is the warranty?" }, { role: "assistant" as const, content: "Five years [1]." }] }],
       ["a question about the workspace itself", { query: "Why are my uploaded files still processing?" }],
       ["a greeting", { query: "hello" }],
-      ["an unsegmented script", { query: "今天北京的天气怎么样？" }],
+      ["an uncalibrated script", { query: "今天北京的天气怎么样？" }],
+      ["an Arabic question", { query: "كيف أطبخ الكبسة في البيت؟" }],
       ["a filtered request", { query: "What is the best pizza topping in Naples?", filters: { mimeTypes: ["application/pdf"] } }],
     ])("lets the model handle %s", async (_label, request) => {
       arrange();
       const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", history: [], ...request } as never);
+      expect(response.scopeDecline).toBeUndefined();
+      expect(generateAnthropicDocumentText).toHaveBeenCalledOnce();
+    });
+
+    it("never overrides keyword or graph evidence: a weak vector score with a keyword hit is answered", async () => {
+      arrange();
+      hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [manualChunk], scopeSignal: { ...signal(0.0), nonVectorEvidence: true } });
+      const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Where is the Yuma campus location" });
       expect(response.scopeDecline).toBeUndefined();
       expect(generateAnthropicDocumentText).toHaveBeenCalledOnce();
     });
@@ -873,6 +889,36 @@ describe("chatWorkspace", () => {
         onTextDelta: expect.any(Function),
       }),
     );
+  });
+
+  it.each(["safe", "unsafe", "provider-error"])("buffers public text until moderation resolves (%s)", async verdict => {
+    vi.stubEnv("CHAT_OUTPUT_MODERATION", "llama-guard");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+    let release!: (response: Response) => void;
+    const provider = vi.fn(() => new Promise<Response>(resolve => { release = resolve; }));
+    vi.stubGlobal("fetch", provider);
+    try {
+      sqlMock.mockResolvedValue([]);
+      getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+      getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings({ chat: { mode: "retrieval" } }));
+      loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, reason: "chunk-limit-exceeded", results: [], stats: {} });
+      hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [{ text: "Equipment warranty.", score: 1,
+        citation: { documentId: "doc-1", filename: "manual.pdf", pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] } }] });
+      generateAnthropicDocumentText.mockImplementation(async ({ onTextDelta }) => {
+        await onTextDelta?.("unreviewed answer");
+        return { text: "unreviewed answer", usage: { inputTokens: 10, outputTokens: 4 }, sources: [] };
+      });
+      const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], workspaceIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+      const deltas: string[] = [];
+      const pending = chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "What is the warranty?", actor, allowAgentTools: false, history: [], onTextDelta: delta => { deltas.push(delta); } });
+      await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce());
+      expect(deltas).toEqual([]);
+      release(verdict === "provider-error" ? new Response("unavailable", { status: 503 })
+        : new Response(JSON.stringify({ choices: [{ message: { content: verdict } }], usage: { prompt_tokens: 10, completion_tokens: 1 } })));
+      const response = await pending;
+      expect(deltas).toEqual([response.answer]);
+      expect(response.answer).toBe(verdict === "safe" ? "unreviewed answer" : verdict === "unsafe" ? "I can't help with that." : "I couldn't check this answer, so I can't show it right now. Please try again.");
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
   });
 
   it("rethrows a client disconnect instead of persisting a fallback assistant turn (M2)", async () => {

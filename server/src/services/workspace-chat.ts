@@ -1065,6 +1065,12 @@ async function chatWorkspaceInTurn(args: {
     sessionId: args.sessionId,
   });
 
+  // Optional output moderation for public (browser-key) answers; off unless
+  // CHAT_OUTPUT_MODERATION is set. Moderated turns buffer streamed text so
+  // nothing reaches the client before the check.
+  const moderated = moderationAppliesTo(args.actor) && configuredOutputModerator() !== null;
+  const streamDelta = moderated ? args.onTextDelta : undefined;
+  if (moderated) args = { ...args, onTextDelta: undefined };
   let response = await runWithAiObservability(
     {
       distinctId: args.userId,
@@ -1073,12 +1079,14 @@ async function chatWorkspaceInTurn(args: {
     },
     () => chatWorkspaceTurn(args, sessionId, policy),
   );
-  // Optional output moderation for public (browser-key) answers; off unless CHAT_OUTPUT_MODERATION is set.
-  if (moderationAppliesTo(args.actor) && configuredOutputModerator()) {
+  if (moderated) {
     response = await moderateChatAnswer(response, {
       actor: args.actor, question: args.query, userId: args.userId, workspaceId: args.workspaceId,
+      orgId: args.actor?.type === "apiKey" ? args.actor.apiKey.orgId : null,
       privacyMode: await loadWorkspacePrivacyMode(args.workspaceId), signal: args.signal,
     });
+    // Streamed text was held back; the client receives only the moderated answer.
+    if (streamDelta) await streamDelta(response.answer);
   }
   await chargeChatAnswer(response, args, sessionId, policy);
   if (requiresChatSessionToken(args.actor)) {

@@ -577,9 +577,9 @@ export const CHAT_INSTRUCTIONS_MAX_CHARS = 4000;
  * the turn's best vector match, rescaled above the embedding pipeline's noise
  * baseline (0..1), must reach this for a first question to skip the model.
  * Conservative on purpose: the model declines unrelated questions itself.
- * Measured in docs/evals/retrieval-quality/scope-decline-calibration.md.
+ * Disabled until calibration exercises the real search session pipeline.
  */
-export const DEFAULT_SCOPE_DECLINE_THRESHOLD = 0.05;
+export const DEFAULT_SCOPE_DECLINE_THRESHOLD = 0;
 
 export const workspaceSearchChatSettingsSchema = z.object({
   /** Workspace chat on or off. Off rejects every chat surface (app, /v1/chat, chat/completions, MCP). */
@@ -591,9 +591,9 @@ export const workspaceSearchChatSettingsSchema = z.object({
    * Chat instructions: the workspace owner's text, added to the chat system
    * message for every answer in this workspace (app, /v1/chat,
    * /v1/chat/completions, MCP, SDK and embed). It may change citations,
-   * answer style, tone and scope wording; it can never weaken the fixed core
-   * rules, which are always composed first. Null or empty uses the default
-   * template built from the workspace name and its documents.
+   * answer style, tone and scope wording. The fixed core rules are always
+   * composed first and the model is told they win. Null or empty uses the default
+   * template built from the workspace name (never document content).
    */
   searchInstructions: z.string().trim().max(CHAT_INSTRUCTIONS_MAX_CHARS).nullable().default(null),
   /**

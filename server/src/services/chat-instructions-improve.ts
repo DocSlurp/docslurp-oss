@@ -260,6 +260,7 @@ export async function improveChatInstructions(args: {
 
   // Nothing is delivered to a client that already left, so nothing is charged.
   if (args.signal?.aborted) throw new ImproveUnavailableError("aborted");
+  if (timeout.aborted) throw new ImproveUnavailableError("timeout");
   // One standard-tier chat answer, charged only for a delivered suggestion. The
   // prompt (<= ~3,500 tokens) plus MAX_OUTPUT_TOKENS stays far below the 100,000
   // tokens that would count as a second answer, so this is 1 credit; the

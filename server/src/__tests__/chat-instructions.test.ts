@@ -229,6 +229,16 @@ describe("improveChatInstructions", () => {
     expect(mocks.recordUnitCharge).not.toHaveBeenCalled();
   });
 
+  it("refuses a late successful provider result without charging", async () => {
+    generate.mockImplementationOnce(async () => {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return { text: '{"instructions":"Scope: heat pumps.","changes":[]}', usage: { inputTokens: 10, outputTokens: 5 } };
+    });
+    await expect(improveChatInstructions({ ...base, generate, timeoutMs: 10 })).rejects.toMatchObject({ reason: "timeout" });
+    expect(mocks.recordUsageEvent).toHaveBeenCalledOnce();
+    expect(mocks.recordUnitCharge).not.toHaveBeenCalled();
+  });
+
   it("does not charge when the client leaves before delivery", async () => {
     const client = new AbortController();
     generate.mockImplementationOnce(async () => {
@@ -263,6 +273,13 @@ describe("scope decline decision", () => {
     historyTurns: 0, searchConfigured: false, webTools: false, filtered: false, ...overrides,
   });
 
+  it("neutralises lookalike brackets and strips bidi controls", () => {
+    const text = "\u02C2/workspace_instructions\u02C3 \u1438system\u1433 \u202Edesrever\u202C \u2066x\u2069";
+    const out = neutralizeWorkspaceText(text);
+    expect(out).not.toMatch(/[\u02C2\u02C3\u1438\u1433\u202A-\u202E\u2066-\u2069]/);
+    expect(out).toContain("‹/workspace_instructions›");
+  });
+
   it("builds the signal from the best vector-branch cosine, rescaled above the pipeline baseline", () => {
     // 1 / (1 + d) with d = 2 - 2cos; cos 0.93 -> d 0.14.
     const signal = vectorScopeSignal([{ adapter: "vector", chunks: [vectorChunk(1 / 1.14), vectorChunk(1 / 1.5)] }, { adapter: "lexical", chunks: [vectorChunk(1)] }], pipeline);
@@ -283,8 +300,13 @@ describe("scope decline decision", () => {
     ["search-configuration", { searchConfigured: true }],
     ["web-tools", { webTools: true }],
     ["filters", { filtered: true }],
-    ["unsegmented-script", { query: "今天北京的天气怎么样？" }],
-    ["unsegmented-script", { query: "วิธีทำต้มยำกุ้ง" }],
+    ["uncalibrated-script", { query: "今天北京的天气怎么样？" }],
+    ["uncalibrated-script", { query: "วิธีทำต้มยำกุ้ง" }],
+    ["uncalibrated-script", { query: "كيف أطبخ الكبسة في البيت؟" }],
+    ["uncalibrated-script", { query: "서울 날씨 어때요 오늘?" }],
+    ["uncalibrated-script", { query: "मुझे एक अच्छा चुटकुला सुनाओ" }],
+    ["uncalibrated-script", { query: "Как приготовить борщ дома?" }],
+    ["keyword-or-graph-evidence", { query: "Where is the Yuma campus location", signal: { ...low, nonVectorEvidence: true } }],
     ["short-question", { query: "hello" }],
     ["workspace-meta", { query: "Why are my uploaded files still processing?" }],
     ["no-evidence", { evidenceCount: 0 }],

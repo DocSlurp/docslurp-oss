@@ -1,32 +1,37 @@
 #!/usr/bin/env -S pnpm exec tsx
 /**
- * Calibrates the chat scope-decline threshold (DEFAULT_SCOPE_DECLINE_THRESHOLD)
- * on the calibrated vector signal: bge-m3 cosine run through the same local
- * transformers.js pipeline the noise baseline was measured with
- * (search/relevance.ts, `transformers.js/Xenova/bge-m3`), rescaled above that
- * baseline. Top-k only: a question's score is its best cosine among the top-k
- * passages of its corpus, which is what a vector search returns.
+ * Calibrates the chat quick-decline threshold (DEFAULT_SCOPE_DECLINE_THRESHOLD)
+ * through the search pipeline's own functions, so it sees the population the
+ * shortcut judges in production:
  *
- * Inputs:
- * - --traces <dir>: recorded production /v1/search traces (the retrieval-quality
- *   evidence root). Their passages form the corpus; each traced question is an
- *   on-topic positive.
- * - --queries <file>: authored probes (scope-decline-queries-v2.json), by class.
+ * 1. Vector branch: the top 20 passages by bge-m3 cosine, from the same local
+ *    transformers.js pipeline the noise baseline was measured with, reported in
+ *    the vector adapter's `1 / (1 + squaredL2)` score space.
+ * 2. Lexical branch, emulating the full-text adapter: rows containing every
+ *    content term (strict match), else the OR backoff (rows with any term,
+ *    marked `lexicalMatch: "partial"`), top 20 by term coverage.
+ * 3. The shipped annotateEvidenceRelevance, reciprocal rank fusion with the best
+ *    branch relevance, applyRelevanceFloor at the default 0.1, and the top 8
+ *    (chat's default resultCount) as the returned evidence.
+ * 4. The shipped vectorScopeSignal and decideScopeDecline with the real evidence
+ *    count and the keyword-evidence flag.
  *
- * Every question goes through the shipped decision (decideScopeDecline), so
- * classes the decision never judges (follow-ups, CJK and Thai) count as
- * answered. Labels are self-assigned by the author of the probes.
+ * Limits: the lexical branch is an emulation (Postgres `english` stemming and
+ * ts_rank differ from termCoverage), graph and page-locator branches are absent,
+ * and labels are self-assigned by the author of the probes.
  *
- * Usage: pnpm exec tsx scripts/retrieval-quality/scope-decline-calibrate.mts --traces <dir> --queries <file> [--k 8]
- *        pnpm exec tsx scripts/retrieval-quality/scope-decline-calibrate.mts --from <earlier output.json>
- *        (re-judges saved scores with the current decision rules, without re-embedding)
+ * Usage: pnpm exec tsx scripts/retrieval-quality/scope-decline-calibrate.mts --traces <dir> --queries <file> [--cache <embeddings.json>]
  * Local CPU only: no network, no paid calls (the model is read from ~/.cache).
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { embedConfiguredText } from "../../server/src/lib/ai.ts";
-import { decideScopeDecline, type ScopeSignal } from "../../server/src/search/scope-relevance.ts";
+import { annotateEvidenceRelevance, applyRelevanceFloor, contentTerms, DEFAULT_MIN_SCORE, termCoverage, withBestRelevance } from "../../server/src/search/relevance.ts";
+import { reciprocalRankFusion } from "../../server/src/search/rrf.ts";
+import { decideScopeDecline, scopeEvidenceKey, vectorScopeSignal } from "../../server/src/search/scope-relevance.ts";
+import type { EvidenceRetrievalResult } from "../../server/src/search/retrieval-adapters.ts";
+import type { SearchChunk } from "../../server/src/services/search.ts";
 
 function arg(name: string, fallback?: string): string {
   const index = process.argv.indexOf(name);
@@ -42,12 +47,13 @@ function walk(dir: string): string[] {
   });
 }
 
-type Passage = { text: string; corpus: string };
+type Passage = { id: string; text: string; corpus: string };
 
 function readTraces(dir: string): { questions: Array<{ query: string; corpus: string }>; passages: Passage[] } {
   const questions = new Map<string, string>();
   const passages = new Map<string, Passage>();
   for (const file of walk(dir)) {
+    if (file.includes("scope-decline-")) continue;
     let parsed: unknown;
     try { parsed = JSON.parse(readFileSync(file, "utf8")); } catch { continue; }
     for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
@@ -62,15 +68,15 @@ function readTraces(dir: string): { questions: Array<{ query: string; corpus: st
       const query = url.searchParams.get("q");
       const corpus = url.searchParams.get("workspaceId") ?? "unknown";
       if (query) questions.set(query, corpus);
-      for (const result of body.results) if (result.text) passages.set(result.text, { text: result.text, corpus });
+      for (const result of body.results) if (result.text && !passages.has(result.text)) passages.set(result.text, { id: `p${passages.size}`, text: result.text, corpus });
     }
   }
   return { questions: [...questions].map(([query, corpus]) => ({ query, corpus })), passages: [...passages.values()] };
 }
 
-const BASELINE = 0.65; // NOISE_BASELINES["transformers.js/Xenova/bge-m3"]
 const PIPELINE = "transformers.js/Xenova/bge-m3";
-const k = Number(arg("--k", "8"));
+const BRANCH_DEPTH = 20;
+const RESULT_COUNT = 8;
 
 async function embed(text: string): Promise<number[]> {
   const { embedding } = await embedConfiguredText({ value: text.slice(0, 2_000), runtime: "local", provider: "transformers.js", model: "Xenova/bge-m3", normalize: true, privacyMode: "standard" });
@@ -79,46 +85,55 @@ async function embed(text: string): Promise<number[]> {
 const dot = (a: number[], b: number[]) => a.reduce((sum, value, index) => sum + value * b[index]!, 0);
 
 type Probe = { class: string; label: "related" | "unrelated"; query: string; history?: boolean; corpus?: "all" | "tiny" };
-type Row = { class: string; label: "related" | "unrelated"; query: string; cosine: number; relevance: number; history?: boolean; skipped?: string };
-const rows: Row[] = [];
-function judgeRow(row: Omit<Row, "skipped">) {
-  const signal: ScopeSignal = { name: "vector", pipeline: PIPELINE, topCosine: row.cosine, relevance: row.relevance };
-  const decision = decideScopeDecline({ query: row.query, signal, evidenceCount: 1, threshold: 1, historyTurns: row.history ? 2 : 0, searchConfigured: false, webTools: false, filtered: false });
-  rows.push({ ...row, ...(decision.skipped ? { skipped: decision.skipped } : {}) });
+const { questions, passages } = readTraces(arg("--traces"));
+const probes = (JSON.parse(readFileSync(arg("--queries"), "utf8")) as { probes: Probe[] }).probes;
+const corpora = [...new Set(passages.map(passage => passage.corpus))];
+const smaller = [...corpora].sort((a, b) => passages.filter(p => p.corpus === a).length - passages.filter(p => p.corpus === b).length)[0]!;
+const tiny = passages.filter(p => p.corpus === smaller).sort((a, b) => a.text.length - b.text.length).slice(0, 3);
+
+const cachePath = process.argv.includes("--cache") ? arg("--cache") : null;
+const cache: Record<string, number[]> = cachePath && existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, "utf8")) : {};
+async function vectorOf(text: string): Promise<number[]> {
+  cache[text] ??= await embed(text);
+  return cache[text]!;
 }
-let meta: { passages: number; tinyCorpusPassages: number };
-const from = process.argv.includes("--from") ? arg("--from") : null;
-if (from) {
-  const saved = JSON.parse(readFileSync(from, "utf8")) as { passages: number; tinyCorpusPassages: number; rows: Row[] };
-  meta = { passages: saved.passages, tinyCorpusPassages: saved.tinyCorpusPassages };
-  const probes = (JSON.parse(readFileSync(arg("--queries", "docs/evals/retrieval-quality/scope-decline-queries-v2.json"), "utf8")) as { probes: Probe[] }).probes;
-  const history = new Set(probes.filter(probe => probe.history).map(probe => probe.query));
-  for (const { skipped: _skipped, ...row } of saved.rows) judgeRow({ ...row, history: row.history ?? history.has(row.query) });
-} else {
-  const { questions, passages } = readTraces(arg("--traces"));
-  const probes = (JSON.parse(readFileSync(arg("--queries"), "utf8")) as { probes: Probe[] }).probes;
-  const corpora = [...new Set(passages.map(passage => passage.corpus))];
-  // Tiny corpus: the three shortest passages of the smaller workspace.
-  const smaller = corpora.sort((a, b) => passages.filter(p => p.corpus === a).length - passages.filter(p => p.corpus === b).length)[0]!;
-  const tiny = passages.filter(p => p.corpus === smaller).sort((a, b) => a.text.length - b.text.length).slice(0, 3);
-  meta = { passages: passages.length, tinyCorpusPassages: tiny.length };
-  console.error(`embedding ${passages.length} passages and ${questions.length + probes.length} questions with ${PIPELINE} (local CPU)…`);
-  const vectors = new Map<string, number[]>();
-  for (const passage of passages) vectors.set(passage.text, await embed(passage.text));
-  const score = async (query: string, pool: Passage[]) => {
-    const q = await embed(query);
-    return pool.map(passage => dot(q, vectors.get(passage.text)!)).sort((a, b) => b - a).slice(0, k)[0] ?? 0;
-  };
-  const measure = async (probe: Probe, pool: Passage[]) => {
-    const cosine = await score(probe.query, pool);
-    const relevance = Math.max(0, Math.min(1, (cosine - BASELINE) / (1 - BASELINE)));
-    judgeRow({ class: probe.class, label: probe.label, query: probe.query, cosine: +cosine.toFixed(4), relevance: +relevance.toFixed(4), ...(probe.history ? { history: true } : {}) });
-  };
-  for (const question of questions) await measure({ class: "on-topic-traced", label: "related", query: question.query }, passages.filter(p => p.corpus === question.corpus));
-  for (const probe of probes) await measure(probe, probe.corpus === "tiny" ? tiny : passages);
+console.error(`embedding up to ${passages.length} passages and ${questions.length + probes.length} questions with ${PIPELINE} (local CPU; ${Object.keys(cache).length} cached)…`);
+for (const passage of passages) await vectorOf(passage.text);
+
+function chunkOf(passage: Passage, score: number, extra: Partial<SearchChunk> = {}): SearchChunk {
+  const index = Number(passage.id.slice(1));
+  return { id: passage.id, documentId: passage.corpus, runId: "r", chunkIndex: index, text: passage.text, headingPath: [], pageNumber: null, tokenEstimate: 0, score, filename: "", pageNumbers: [], blockIds: [], ...extra } as SearchChunk;
 }
 
-const declinedAt = (row: Row, threshold: number) => !row.skipped && row.relevance < threshold;
+type Row = { class: string; label: "related" | "unrelated"; query: string; relevance: number | null; evidence: number; keywordEvidence: boolean; skipped?: string };
+const rows: Row[] = [];
+async function measure(probe: Probe, pool: Passage[]) {
+  const q = await vectorOf(probe.query);
+  const vector = pool.map(passage => ({ passage, cos: dot(q, cache[passage.text]!) })).sort((a, b) => b.cos - a.cos).slice(0, BRANCH_DEPTH)
+    .map(({ passage, cos }) => chunkOf(passage, 1 / (1 + (2 - 2 * cos))));
+  const terms = contentTerms(probe.query).join(" ");
+  const coverage = pool.map(passage => ({ passage, coverage: terms ? termCoverage(terms, passage.text) : 0 }));
+  const strict = coverage.filter(entry => entry.coverage === 1);
+  const lexical = (strict.length ? strict.map(entry => chunkOf(entry.passage, 1))
+    : coverage.filter(entry => entry.coverage > 0).sort((a, b) => b.coverage - a.coverage).map(entry => chunkOf(entry.passage, entry.coverage, { lexicalMatch: "partial" })))
+    .slice(0, BRANCH_DEPTH);
+  const evidence: EvidenceRetrievalResult[] = [{ adapter: "vector", chunks: vector }, { adapter: "lexical", chunks: lexical }];
+  const lists = annotateEvidenceRelevance(evidence, { query: probe.query, embeddingPipeline: PIPELINE });
+  const fused = withBestRelevance(reciprocalRankFusion(lists) ?? [], lists);
+  const returned = applyRelevanceFloor(fused, DEFAULT_MIN_SCORE).kept.slice(0, RESULT_COUNT);
+  const strong = new Set(annotateEvidenceRelevance([evidence[1]!], { query: probe.query, embeddingPipeline: PIPELINE })
+    .flat().filter(chunk => (chunk.relevance ?? 1) > 0 && (chunk.relevance ?? 1) >= DEFAULT_MIN_SCORE).map(chunk => scopeEvidenceKey(chunk)));
+  const base = vectorScopeSignal(evidence, PIPELINE);
+  const signal = base ? { ...base, nonVectorEvidence: returned.some(chunk => strong.has(scopeEvidenceKey(chunk))) } : null;
+  const decision = decideScopeDecline({ query: probe.query, signal, evidenceCount: returned.length, threshold: 1, historyTurns: probe.history ? 2 : 0, searchConfigured: false, webTools: false, filtered: false });
+  rows.push({ class: probe.class, label: probe.label, query: probe.query, relevance: signal?.relevance === null || signal?.relevance === undefined ? null : +signal.relevance.toFixed(4),
+    evidence: returned.length, keywordEvidence: Boolean(signal?.nonVectorEvidence), ...(decision.skipped ? { skipped: decision.skipped } : {}) });
+}
+for (const question of questions) await measure({ class: "on-topic-traced", label: "related", query: question.query }, passages.filter(p => p.corpus === question.corpus));
+for (const probe of probes) await measure(probe, probe.corpus === "tiny" ? tiny : passages);
+if (cachePath) writeFileSync(cachePath, JSON.stringify(cache));
+
+const declinedAt = (row: Row, threshold: number) => !row.skipped && row.relevance !== null && row.relevance < threshold;
 const thresholds = [0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
 const classes = [...new Set(rows.map(row => row.class))];
 const table = thresholds.map(threshold => {
@@ -136,4 +151,5 @@ const table = thresholds.map(threshold => {
     }).filter((entry): entry is [string, string] => entry !== null))),
   };
 });
-console.log(JSON.stringify({ pipeline: PIPELINE, baseline: BASELINE, k, ...meta, table, rows }, null, 2));
+const skips = rows.reduce<Record<string, number>>((counts, row) => ({ ...counts, [row.skipped ?? "judged"]: (counts[row.skipped ?? "judged"] ?? 0) + 1 }), {});
+console.log(JSON.stringify({ pipeline: PIPELINE, floor: DEFAULT_MIN_SCORE, branchDepth: BRANCH_DEPTH, resultCount: RESULT_COUNT, passages: passages.length, tinyCorpusPassages: tiny.length, skips, table, rows }, null, 2));

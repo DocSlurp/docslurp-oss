@@ -250,22 +250,22 @@ Improve is a DocSlurp-app feature: `POST /v1/workspaces/:id/chat-instructions/im
 
 The model declines unrelated questions politely and suggests related ones; that is the fixed core rule, applied on every turn.
 
-For direct answers, a server-side **quick decline** can skip the model call for a clearly unrelated first question. It is a UX shortcut, not a safety control: it returns the same kind of polite reply (what the workspace covers and two or three related questions, sanitised from document titles and headings, with no citations), and the response carries `scopeDecline: {relevance, threshold, scope, suggestions}`. It fires only when all of these hold:
+For direct answers, a server-side **quick decline** can skip the model call for a clearly unrelated first question. It is a UX shortcut, not a safety control: it returns the same kind of polite reply (what the workspace covers and two or three related questions, sanitised from document titles and headings, with no citations), and the response carries `scopeDecline: {relevance, threshold, scope, suggestions}`. It is disabled by default. With an explicit experimental threshold it fires only when all of these hold:
 
-- the best vector match for the turn, rescaled above the embedding pipeline's measured noise baseline, is below `chat.scopeDeclineThreshold` (default 0.05). Pipelines without a measured baseline never take the shortcut;
+- the best vector match for the turn, rescaled above the embedding pipeline's measured noise baseline, is below `chat.scopeDeclineThreshold` (default 0, disabled until real-pipeline calibration). Pipelines without a measured baseline never take the shortcut;
 - it is the first turn of the conversation;
 - the message did not change search settings, web tools are off, and the request has no filters;
-- the question is in a script the scorer can segment (not Chinese, Japanese, Thai and similar), has at least two content words, and is not about the workspace's own files, uploads or settings.
+- the question uses only calibrated Latin-script letters, has at least three content words, and is not about the workspace's own files, uploads or settings.
 
-Anything else, including every search-agent turn, goes to the model. Chat instructions cannot turn the shortcut off; `chat.scopeDeclineThreshold: 0` does. Each decline is logged as `[chat-scope-decline]` with the request, chat session and search session ids, the relevance, threshold, top cosine and pipeline (never the question). Calibration: [scope-decline calibration](evals/retrieval-quality/scope-decline-calibration.md) (at 0.05 on self-labelled probes: precision 1.00, recall 0.72, no related question declined).
+Anything else, including every search-agent turn, goes to the model. Chat instructions cannot turn the shortcut off; `chat.scopeDeclineThreshold: 0` does. Each decline is logged as `[chat-scope-decline]` with the request, chat session and search session ids, the relevance, threshold, top cosine and pipeline (never the question). Calibration: [scope-decline calibration](evals/retrieval-quality/scope-decline-calibration.md) (earlier emulated figures are withdrawn as production evidence).
 
 #### Output moderation
 
 Off by default. With `CHAT_OUTPUT_MODERATION=llama-guard`, answers to browser (publishable) keys, which back the embed widget and public docs search, are classified by Llama Guard 4 12B (OpenRouter, pinned to DeepInfra in the US, `data_collection: deny`). A flagged answer is replaced with "I can't help with that." and loses its citations. The interface is provider-neutral (`server/src/services/chat-output-moderation.ts`); the default is a no-op. The owner has not decided to enable it.
 
 - **Cost** (live OpenRouter prices, 2026-10-26: $0.18 per 1M input and output tokens): about 800 input tokens per typical answer (question, answer and the classifier's prompt) and about 5 output tokens, so $0.15 per 1,000 answers, about $0.29 per 1,000 for long (p90) answers. That is 1.5–3% of the 1 credit ($0.01) a standard answer is billed. `openai/gpt-oss-safeguard-20b` on Groq ($0.075 in, $0.30 out) would be about $0.11 per 1,000 but adds reasoning tokens and latency. Each call is recorded as a `chat-output-moderation` usage event with the org, workspace and session scope.
-- **Privacy:** the question and answer leave for the moderation provider. Only `standard` privacy-mode workspaces are sent; any other mode skips moderation with a log line.
-- **Limits:** it judges the final answer. Streamed text already sent is not retracted, and the stored conversation turn keeps the original text. A moderation failure keeps the answer (logged).
+- **Privacy:** the question and answer leave for the moderation provider. Only `standard` privacy-mode workspaces are sent; any other mode withholds the public answer without sending content to the provider.
+- **Limits:** public text deltas are buffered until classification. Provider failures and malformed verdicts withhold the answer and citations. Questions over 4,000 characters or answers over 16,000 characters are withheld rather than checked partially. The stored conversation turn keeps the original text.
 
 ### Agent traces
 

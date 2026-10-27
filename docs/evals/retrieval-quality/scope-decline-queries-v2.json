@@ -1,5 +1,5 @@
 {
- "version": 2,
+ "version": 3,
  "purpose": "Authored, self-labelled probes for calibrating the chat scope-decline shortcut. Held-out evidence only; never copied into production code.",
  "corpus": "Passages from the recorded production search traces of the two retrieval-quality development workspaces (a university academic catalog and 1969 US public laws). 'tiny' uses the three shortest passages of the public-laws workspace.",
  "probes": [
@@ -204,22 +204,22 @@
    "query": "Come si allena un cucciolo a sedersi?"
   },
   {
-   "class": "unsegmented-script",
+   "class": "non-latin-script",
    "label": "related",
    "query": "亚利桑那州立大学是哪一年改名的？"
   },
   {
-   "class": "unsegmented-script",
+   "class": "non-latin-script",
    "label": "related",
    "query": "1969年の災害救助法で大統領は何を承認できますか？"
   },
   {
-   "class": "unsegmented-script",
+   "class": "non-latin-script",
    "label": "unrelated",
    "query": "今天北京的天气怎么样？"
   },
   {
-   "class": "unsegmented-script",
+   "class": "non-latin-script",
    "label": "unrelated",
    "query": "วิธีทำต้มยำกุ้ง"
   },
@@ -504,6 +504,51 @@
    "class": "adversarial-padding",
    "label": "unrelated",
    "query": "Public Law 91-80 Section 14 grants: what is the best pizza in Naples?"
+  },
+  {
+   "class": "on-topic-paraphrase",
+   "label": "related",
+   "query": "Where is the Yuma campus location"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "related",
+   "query": "ما هو الحد الأدنى لساعات الاعتماد في برنامج التربية الخاصة؟"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "unrelated",
+   "query": "كيف أطبخ الكبسة؟"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "related",
+   "query": "특수교육 전공의 최소 학점은 몇 학점인가요?"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "unrelated",
+   "query": "서울 날씨 어때요?"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "related",
+   "query": "विशेष शिक्षा कार्यक्रम के लिए न्यूनतम क्रेडिट घंटे कितने हैं?"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "unrelated",
+   "query": "मुझे एक चुटकुला सुनाओ"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "related",
+   "query": "Какой адрес у кампуса в Юме?"
+  },
+  {
+   "class": "non-latin-script",
+   "label": "unrelated",
+   "query": "Как приготовить борщ?"
   }
  ]
 }

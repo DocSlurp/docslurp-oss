@@ -9,7 +9,7 @@ import {
   retrieveEvidence,
 } from "./retrieval-adapters.js";
 import { annotateEvidenceRelevance, embeddingPipelineId, resolveMinScore } from "./relevance.js";
-import { vectorScopeSignal, type ScopeSignal } from "./scope-relevance.js";
+import { scopeEvidenceKey, vectorScopeSignal, type ScopeSignal } from "./scope-relevance.js";
 import type { SearchSetup } from "./session-setup.js";
 import {
   executeSearchSessionRetrieval,
@@ -236,6 +236,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
 
       let deferred: { stats: DeferredSearchStats; documentIds: string[] } | null = null;
       let scopeSignal: ScopeSignal | null = null;
+      const strongEvidenceKeys = new Set<string>();
       const response = await executeSearchSessionRetrieval({
         query,
         retrievalQuery,
@@ -285,7 +286,14 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
             query: retrievalQuery,
             embeddingPipeline: pipeline,
           });
+          // Chunks a keyword, phrase or graph branch found above the floor: the
+          // chat quick decline never overrides that evidence.
+          const floorScore = resolveMinScore(effectiveOptions.minScore);
+          for (const list of annotateEvidenceRelevance(boundedResults.filter((result) => result.adapter !== "vector"), { query: retrievalQuery, embeddingPipeline: pipeline })) {
+            for (const chunk of list) if ((chunk.relevance ?? 1) > 0 && (chunk.relevance ?? 1) >= floorScore) strongEvidenceKeys.add(scopeEvidenceKey(chunk));
+          }
           const deferredResult = await deferredPromise;
+          for (const chunk of deferredResult?.chunks ?? []) strongEvidenceKeys.add(scopeEvidenceKey(chunk));
           deferred = deferredResult ? { stats: deferredResult.stats, documentIds: deferredResult.documentIds } : null;
           // Locator-ranked chunks go first so fusion keeps their stage label.
           return deferredResult && deferredResult.chunks.length > 0 ? [deferredResult.chunks, ...lists] : lists;
@@ -303,7 +311,11 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         rerankScope: normalizedScope,
         privacyMode,
       });
-      const withSignal = scopeSignal ? { ...response, scopeSignal } : response;
+      // Assigned inside the retrieval callback, which TypeScript cannot see.
+      const signal = scopeSignal as ScopeSignal | null;
+      const withSignal = signal
+        ? { ...response, scopeSignal: { ...signal, nonVectorEvidence: response.results.some((result) => strongEvidenceKeys.has(scopeEvidenceKey(result.citation))) } }
+        : response;
       return deferred ? withDeferredStats(withSignal, deferred as { stats: DeferredSearchStats; documentIds: string[] }) : withSignal;
     },
   );

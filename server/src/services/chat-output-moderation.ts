@@ -1,6 +1,7 @@
 import type { PrivacyMode, WorkspaceChatResponse } from "@docslurp/shared";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
+import { assertCanSpend } from "./billing/spend-guard.js";
 import type { RequestActor } from "../lib/request-actor.js";
 
 /**
@@ -12,15 +13,18 @@ import type { RequestActor } from "../lib/request-actor.js";
  * The interface is provider-neutral; the default is a no-op. The one adapter,
  * Llama Guard 4 12B on OpenRouter pinned to DeepInfra (US), classifies the
  * question and answer pair. Only `standard` privacy-mode workspaces are sent
- * to it; any other mode skips moderation with a log line, because the answer
- * text would leave the workspace's allowed providers.
+ * to it; any other mode refuses the public answer without a provider call, because the answer
+ * text would leave the workspace's allowed providers; the answer is withheld.
  *
- * Limits: it judges the final answer. Streamed deltas already sent are not
- * retracted, and the stored conversation turn keeps the original text.
+ * When it applies, the chat turn buffers streamed text and emits only the
+ * moderated answer. A moderation failure fails closed for these public actors:
+ * the answer is withheld with a short message. The stored conversation turn
+ * keeps the original text.
  */
 
 export interface ModerationVerdict {
   flagged: boolean;
+  unavailable?: boolean;
   /** Provider category codes (for Llama Guard, S1..S14). */
   categories: string[];
   usage?: { model: string; inputTokens: number; outputTokens: number; costCents?: number; metadata?: Record<string, unknown> };
@@ -48,6 +52,8 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
   return {
     name: "llama-guard-4",
     async moderate(input, signal) {
+      // Refuse oversized output; never classify a prefix and release an unchecked suffix.
+      if (input.question.length > 4_000 || input.answer.length > 16_000) throw new Error("moderation input exceeds limit");
       const timeout = AbortSignal.timeout(args.timeoutMs ?? 8_000);
       const response = await doFetch(`${args.baseUrl ?? "https://openrouter.ai/api/v1"}/chat/completions`, {
         method: "POST",
@@ -55,8 +61,8 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
         body: JSON.stringify({
           model: LLAMA_GUARD_MODEL,
           messages: [
-            { role: "user", content: input.question.slice(0, 4_000) },
-            { role: "assistant", content: input.answer.slice(0, 16_000) },
+            { role: "user", content: input.question },
+            { role: "assistant", content: input.answer },
           ],
           max_tokens: 16,
           temperature: 0,
@@ -68,12 +74,14 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
       if (!response.ok) throw new Error(`moderation provider returned ${response.status}`);
       const body = await response.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number } };
       const verdict = (body.choices?.[0]?.message?.content ?? "").trim().toLowerCase();
-      const flagged = verdict.startsWith("unsafe");
-      const categories = flagged ? (verdict.split(/\s+/)[1] ?? "").split(",").map(code => code.trim().toUpperCase()).filter(Boolean) : [];
+      const valid = /^(?:safe|unsafe(?:\s+s(?:[1-9]|1[0-4])(?:\s*,\s*s(?:[1-9]|1[0-4]))*)?)$/.test(verdict);
+      const flagged = verdict !== "safe";
+      const categories = valid && flagged ? [...verdict.matchAll(/s(?:1[0-4]|[1-9])/g)].map(match => match[0].toUpperCase()) : [];
       const inputTokens = body.usage?.prompt_tokens ?? 0;
       const outputTokens = body.usage?.completion_tokens ?? 0;
       return {
         flagged,
+        ...(valid ? {} : { unavailable: true }),
         categories,
         usage: {
           model: LLAMA_GUARD_MODEL, inputTokens, outputTokens,
@@ -82,6 +90,12 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
       };
     },
   };
+}
+
+/** Validates CHAT_OUTPUT_MODERATION at startup, so a misconfiguration fails the boot instead of a chat turn. */
+export function assertOutputModerationConfig(env: NodeJS.ProcessEnv = process.env): void {
+  const moderator = configuredOutputModerator(env);
+  if (moderator) console.warn(`[chat-moderation] output moderation on (${moderator.name}) for browser-key answers`);
 }
 
 /** The configured moderator, or null when moderation is off (the default). */
@@ -102,11 +116,13 @@ export function moderationAppliesTo(actor: RequestActor | null | undefined): boo
 }
 
 export const MODERATED_ANSWER = "I can't help with that.";
+/** Shown when the check itself failed: the answer is withheld (fail closed). */
+export const MODERATION_UNAVAILABLE_ANSWER = "I couldn't check this answer, so I can't show it right now. Please try again.";
 
 /**
  * Moderate a public answer when moderation is on. A flagged answer is replaced
- * with a short refusal and loses its citations. A moderation failure keeps the
- * answer (the model's refusal rule still applies) and is logged loudly.
+ * with a short refusal and loses its citations. A moderation failure withholds
+ * the answer the same way (fail closed) and is logged loudly.
  */
 export async function moderateChatAnswer(response: WorkspaceChatResponse, args: {
   actor: RequestActor | null | undefined;
@@ -122,14 +138,15 @@ export async function moderateChatAnswer(response: WorkspaceChatResponse, args: 
   if (!moderator || moderator === noopOutputModerator || !moderationAppliesTo(args.actor) || !response.answer.trim()) return response;
   if (args.privacyMode !== "standard") {
     console.warn(`[chat-moderation] skipped workspace=${args.workspaceId}: privacy mode ${args.privacyMode} does not allow the moderation provider`);
-    return response;
+    return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   }
   let verdict: ModerationVerdict;
   try {
+    await assertCanSpend(args.orgId ?? null, args.workspaceId, { kind: "interactive", hold: false });
     verdict = await moderator.moderate({ question: args.question, answer: response.answer }, args.signal);
   } catch (error) {
-    console.error(`[chat-moderation] failed workspace=${args.workspaceId}:`, error instanceof Error ? error.message : String(error));
-    return response;
+    console.error(`[chat-moderation] failed workspace=${args.workspaceId}; answer withheld:`, error instanceof Error ? error.message : String(error));
+    return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   }
   if (verdict.usage) {
     await recordUsageEvent({
@@ -140,6 +157,7 @@ export async function moderateChatAnswer(response: WorkspaceChatResponse, args: 
         metadata: { moderator: moderator.name, flagged: verdict.flagged } },
     });
   }
+  if (verdict.unavailable) return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   if (!verdict.flagged) return response;
   console.warn(`[chat-moderation] flagged workspace=${args.workspaceId} categories=${verdict.categories.join(",") || "unknown"}`);
   return { ...response, answer: MODERATED_ANSWER, citations: [], evidenceSpans: [] };

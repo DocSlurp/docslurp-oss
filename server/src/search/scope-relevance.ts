@@ -12,7 +12,8 @@ import type { EvidenceRetrievalResult } from "./retrieval-adapters.js";
  * a calibrated vector signal below the threshold, no conversation history, no
  * settings change from the message, no web tools, no request filters, a script
  * the scorer can segment, and a question that is not about the workspace
- * itself. In every other case the turn proceeds and the model applies the fixed
+ * itself, and no returned passage was found by a keyword, phrase, graph or
+ * page-locator branch. In every other case the turn proceeds and the model applies the fixed
  * core rule (decline unrelated requests politely and suggest related ones).
  * Anyone can phrase a question to avoid the shortcut; that is fine, because it
  * only saves a model call.
@@ -36,6 +37,17 @@ export interface ScopeSignal {
   topCosine: number;
   /** The best cosine rescaled above the pipeline's noise baseline (0..1); null without a measured baseline. */
   relevance: number | null;
+  /**
+   * Whether any returned result was also found by a lexical, phrase, graph or
+   * page-locator branch at or above the relevance floor. Such evidence is
+   * stronger than the vector score, so the shortcut never overrides it.
+   */
+  nonVectorEvidence?: boolean;
+}
+
+/** Key that ties a chunk to its returned result. */
+export function scopeEvidenceKey(item: { documentId: string; chunkIndex?: number | null }): string {
+  return `${item.documentId}:${item.chunkIndex ?? "?"}`;
 }
 
 /** The turn's vector signal from the retrieval branches before fusion, or null when no vector branch ran. */
@@ -50,12 +62,17 @@ export function vectorScopeSignal(results: readonly EvidenceRetrievalResult[], p
 /**
  * Questions with fewer content terms than this are never declined: greetings,
  * "thanks", and short questions whose embeddings are too unreliable to judge
- * ("Where is the Yuma location?" scored below the noise baseline in calibration).
+ * (a short location question can score below the embedding noise baseline).
  */
 export const SCOPE_MIN_CONTENT_TERMS = 3;
 
-/** Scripts written without spaces between words; the term counting cannot segment them yet. */
-const UNSEGMENTED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Tibetan}]/u;
+/**
+ * Only scripts with calibration probes are judged: Latin. Any letter from
+ * another script (CJK, Thai, Arabic, Hebrew, Cyrillic, Greek, Hangul,
+ * Devanagari and the rest) skips the shortcut until probes exist for it; the
+ * term counting also mis-splits scripts with combining marks.
+ */
+const UNCALIBRATED_SCRIPT = /(?=\p{L})[^\p{Script=Latin}]/u;
 
 /**
  * Questions about the workspace itself (its files, uploads, processing, search
@@ -80,7 +97,7 @@ export function resolveScopeDeclineThreshold(workspaceThreshold: number | null |
 
 export type ScopeDeclineSkip =
   | "disabled" | "history" | "search-configuration" | "web-tools" | "filters"
-  | "unsegmented-script" | "short-question" | "workspace-meta" | "no-evidence" | "uncalibrated";
+  | "uncalibrated-script" | "short-question" | "workspace-meta" | "no-evidence" | "keyword-or-graph-evidence" | "uncalibrated";
 
 export interface ScopeDeclineDecision {
   decline: boolean;
@@ -119,10 +136,11 @@ export function decideScopeDecline(input: ScopeDeclineInput): ScopeDeclineDecisi
   if (input.searchConfigured) return skip("search-configuration");
   if (input.webTools) return skip("web-tools");
   if (input.filtered) return skip("filters");
-  if (UNSEGMENTED_SCRIPT.test(input.query)) return skip("unsegmented-script");
+  if (UNCALIBRATED_SCRIPT.test(input.query)) return skip("uncalibrated-script");
   if (contentTerms(input.query).length < SCOPE_MIN_CONTENT_TERMS) return skip("short-question");
   if (isWorkspaceMetaQuestion(input.query)) return skip("workspace-meta");
   if (input.evidenceCount === 0) return skip("no-evidence");
+  if (input.signal?.nonVectorEvidence) return skip("keyword-or-graph-evidence");
   if (input.signal?.relevance === null || input.signal?.relevance === undefined) return skip("uncalibrated");
   return { ...base, decline: input.signal.relevance < input.threshold };
 }

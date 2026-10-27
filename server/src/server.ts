@@ -37,6 +37,7 @@ import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
+import { assertOutputModerationConfig } from "./services/chat-output-moderation.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
@@ -306,6 +307,8 @@ export function ensureApiStartup(): Promise<void> {
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
       // Loud when limits are per instance (no Redis) or disabled.
       logRateLimitBackendAtStartup();
+      // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
+      assertOutputModerationConfig();
       void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
         const { sql } = await import("./db.js");
         return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;

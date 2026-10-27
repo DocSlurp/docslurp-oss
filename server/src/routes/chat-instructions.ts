@@ -110,9 +110,10 @@ export const chatInstructionsRoutes = new Hono()
       // Improve suggests settings, so it needs edit access, like saving them.
       if (!access || !workspace || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
 
+      // The workspace limit is checked first, so a workspace refusal never uses up the user's allowance.
       for (const [subject, limit] of [
-        [`user:${userId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_USER_LIMIT_PER_HOUR", 10)],
         [`workspace:${workspaceId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_WORKSPACE_LIMIT_PER_HOUR", 30)],
+        [`user:${userId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_USER_LIMIT_PER_HOUR", 10)],
       ] as const) {
         const retryAfter = await consumeFeatureRateLimit({ feature: "chat-instructions-improve", subject, limit, windowMs: IMPROVE_WINDOW_MS, requireShared: true });
         if (retryAfter !== null) {
