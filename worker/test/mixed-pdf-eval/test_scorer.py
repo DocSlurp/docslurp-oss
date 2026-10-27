@@ -32,6 +32,14 @@ class ScorerTests(unittest.TestCase):
             ref={'expectedMarkdown':expected,'sections':[expected],'paragraphs':[expected],'tables':[],'formulas':[],'excludedText':[]}
             score=content_score(ref,actual,tolerant_markdown)
             self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
+    def test_repeated_field_context_and_formula_grouping(self):
+        prefix='padding '*300
+        text=prefix+'Account Alpha has a reported balance of 12 dollars at close. Account Beta has a reported balance of 34 dollars at close.'
+        actual=text.replace('12','VALUE').replace('34','12').replace('VALUE','34')
+        for expected,extracted in [(text,actual),('Result: (a + b) * c = d.','Result: a + b * c = d.')]:
+            ref={'expectedMarkdown':expected,'sections':[expected],'paragraphs':[expected],'tables':[],'formulas':[],'excludedText':[]}
+            score=content_score(ref,extracted,tolerant_markdown)
+            self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
     def test_empty(self):
         self.assertEqual(self.score("")["quality"],0)
     def test_swapped_table_cells(self):

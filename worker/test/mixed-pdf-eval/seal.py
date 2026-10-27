@@ -20,7 +20,7 @@ def seal(root):
         labels=json.loads((root/case['labels']).read_text())
         if file_hash(root/case['labels'])!=case['labelHash'] or labels['pages']!=authored['pages']:raise RuntimeError('label-authoring-order-mismatch')
         if file_hash(root/case['pdf'])!=case['sha256']:raise RuntimeError('changed-pdf')
-        refs=authored['pages']
+        refs=[{k:v for k,v in p.items() if k!='pageId'} for p in authored['pages']]
         case['pageContentHashes']=[page_content_hash(p) for p in refs]
         case['pageReferenceHashes']=[identity_hash(p) for p in refs]
         case['sourceContentHash']=identity_hash([p['expectedMarkdown'] for p in refs])

@@ -40,13 +40,13 @@ def tokens(text):
     text='\n'.join(line for line in text.splitlines()
                    if not ('-' in line and set(line.strip())<=set('|:- \t') and line.count('-')>=3))
     text=re.sub(r'(?m)^\s*[-*]\s+','',text)
-    return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠-]", unicodedata.normalize("NFKC", text).casefold())
+    return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]", unicodedata.normalize("NFKC", text).casefold())
 
 def value_contexts(text):
     """Bind numeric values and mathematical operators to adjacent semantic tokens."""
     sequence=tokens(text)
     return Counter(tuple(sequence[max(0,i-2):i+3]) for i,t in enumerate(sequence)
-                   if re.fullmatch(r'[-+]?\d+(?:\.\d+)?|[=+*/<>^%−×÷±≤≥≠-]',t))
+                   if re.fullmatch(r'[-+]?\d+(?:\.\d+)?|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]',t))
 
 def content_score(reference, text, legacy):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
@@ -62,6 +62,17 @@ def content_score(reference, text, legacy):
     numbers = lambda c: Counter({k:v for k,v in c.items() if re.fullmatch(r"[-+]?\d+(?:\.\d+)?",k)})
     a,b = numbers(expected), numbers(actual)
     numeric = sum((a&b).values())/sum(a.values()) if a else None
+    numeric_sequence=lambda text:[t for t in tokens(text) if re.fullmatch(r'[-+]?\d+(?:\.\d+)?',t)]
+    wanted_numbers=numeric_sequence(reference['expectedMarkdown']);actual_numbers=numeric_sequence(text)
+    numeric_order=sum(m.size for m in SequenceMatcher(None,wanted_numbers,actual_numbers,autojunk=False).get_matching_blocks())/len(wanted_numbers) if wanted_numbers else None
+    # A number belongs to its authored statement, even when its entity is far away.
+    # Match normalized statements in the output stream so output line wrapping and
+    # omitted sentence punctuation do not change the result. This is deliberately
+    # strict statement preservation, not a semantic judge of arbitrary paraphrases.
+    statements=[tokens(s) for paragraph in reference['paragraphs']
+                for s in re.split(r'(?<=[.!?])\s+',paragraph) if numeric_sequence(s)]
+    actual_stream=' '+' '.join(tokens(text))+' '
+    statement_recall=sum((' '+' '.join(s)+' ') in actual_stream for s in statements)/len(statements) if statements else None
     wanted_contexts=value_contexts(reference['expectedMarkdown']);actual_contexts=value_contexts(text)
     contextual=sum((wanted_contexts&actual_contexts).values())/sum(wanted_contexts.values()) if wanted_contexts else None
     compact=lambda s:re.sub(r'[^\w]','',unicodedata.normalize('NFKC',s).casefold())
@@ -76,16 +87,16 @@ def content_score(reference, text, legacy):
         if found>=0:row_matches+=1;cursor=found+len(wanted)-1
     table_row_recall=row_matches/len(table_rows) if table_rows else None
     minimum_section=min(sections,default=1.0)
-    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,contextual] if v is not None]
+    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,numeric_order,contextual,statement_recall] if v is not None]
     ref = {"prose":reference["expectedMarkdown"], "paragraphs":reference["paragraphs"],
            "tables":reference["tables"], "formulas":reference["formulas"], "groundTruth":{"prosePresent":True,"kind":"authored"}}
     modern = legacy.compact(legacy.score(ref,text))
     return {"version":VERSION, "recall":recall,"precision":precision,
             "f1":2*recall*precision/max(1e-9,recall+precision),"sectionRecall":sections,
-            "minimumSectionRecall":minimum_section,"numericRecall":numeric,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
+            "minimumSectionRecall":minimum_section,"numericRecall":numeric,"numericOrderRecall":numeric_order,"numericStatementRecall":statement_recall,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
             "tableRowRecall":table_row_recall,"orderedSimilarity":ordered,
             "quality": min(applicable),
-            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,table_row_recall,contextual]) and ordered>=.9 and not excluded,
+            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and ordered>=.9 and not excluded,
             "modern":modern}
 
 def invoke(argv):

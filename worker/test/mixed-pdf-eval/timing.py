@@ -85,4 +85,4 @@ if __name__=='__main__':
             result={**item,'startedAt':started,'host':socket.gethostname(),'workers':1,'elapsedSeconds':time.perf_counter()-clock,
                     'cpuSeconds':cpu()-before,'outputHash':output_hash,'pages':len(case['pages']),'policyHash':file_hash(a.policy)}
         immutable_json(output,result);print(json.dumps(result),flush=True)
-    immutable_json(a.out/'complete.json',{'scheduleHash':file_hash(a.out/'schedule.json'),'samples':len(schedule)})
+    immutable_json(a.out/'complete.json',{'scheduleHash':file_hash(a.out/'schedule.json'),'samples':len(schedule),'resultHashes':{f'{i:03d}.json':file_hash(a.out/f'{i:03d}.json') for i in range(len(schedule))},'liveIdentityHash':identity_hash(live)})
