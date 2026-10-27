@@ -500,8 +500,26 @@ establishes the reference round trip, not extraction quality or formula groundin
 
 An exploratory region diagnostic now assigns captured words to each authored
 formula's final display rectangle. Text outside that rectangle cannot repair a
-damaged expression. Competing regions and crossing/clipped words are uncredited;
+damaged expression. Competing regions, insufficient overlap and display clipping
+leave words uncredited;
 literal comparison preserves case, grouping, operators and identifier boundaries.
 It remains explicitly incomplete evidence and does not change primary acceptance.
 Its independent invented controls include corrupt-operative/correct-quotation,
 deletion, added terms, grouping changes, overlapping regions and malformed boxes.
+
+### Council round 11: diagnostic clipping consistency
+
+Both source-only reviewers independently reproduced diagnostic credit for an
+out-of-display word box carrying a contradictory clippedByDisplay=false flag.
+The diagnostic now recomputes clipping from normalized bounds before crediting a
+word; the malformed interface input is explicitly tested. The normalizer already
+marked such coordinates clipped, so this finding did not demonstrate a pipeline
+or acceptance bypass. Both reviewers confirmed that perfect regional diagnostics
+still cannot open formula acceptance or optimization.
+
+Separate original PDF controls retained the drawing plan before extraction.
+All eight native outcomes matched the intended intact/corrupt distinction across
+four rotations, and two 150-DPI OCR outcomes agreed. A correct quotation elsewhere
+could not repair the corrupted operative expression. The first runner omitted
+its required cache directory; that failure remains retained alongside successful
+control revision 2. These controls are exploratory and not corpus acceptance.

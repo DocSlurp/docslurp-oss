@@ -65,5 +65,13 @@ class FormulaRegionTests(unittest.TestCase):
         for bad in [None,[regions[0],regions[0]],[{**regions[0],'bboxNormalized':[-.1,0,.5,.5]}]]:
             with self.assertRaises(ValueError):formula_region_diagnostics(bad,evidence)
 
+    def test_clipping_is_recomputed_when_metadata_claims_unclipped(self):
+        regions=[dict(blockId='rule',text='q=a/b',bboxNormalized=[0,.1,.6,.3])]
+        evidence=self.evidence('q=a/b','')
+        evidence['words'][0].update(bboxNormalized=[-.1,.15,.5,.2],clippedByDisplay=False)
+        result=formula_region_diagnostics(regions,evidence)
+        self.assertEqual(result['literalRegionRecall'],0)
+        self.assertEqual(result['regions'][0]['issues'][0]['kind'],'boundary-word')
+
 
 if __name__=='__main__':unittest.main()

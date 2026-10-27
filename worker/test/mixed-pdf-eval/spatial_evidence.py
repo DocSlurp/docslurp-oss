@@ -178,7 +178,9 @@ def formula_region_diagnostics(regions, evidence):
             continue
         index,fraction=hits[0];target=region_boxes[index]
         center=[(bounds[0]+bounds[2])/2,(bounds[1]+bounds[3])/2]
-        if (word.get('clippedByDisplay') is not False or fraction<.5
+        # Recompute clipping here instead of trusting the supplied flag. This
+        # interface also receives retained evidence independently of its parser.
+        if (any(v<0 or v>1 for v in bounds) or word.get('clippedByDisplay') is not False or fraction<.5
                 or not (target[0]<=center[0]<=target[2] and target[1]<=center[1]<=target[3])):
             issues[index].append(dict(kind='boundary-word',wordOrder=order))
             continue

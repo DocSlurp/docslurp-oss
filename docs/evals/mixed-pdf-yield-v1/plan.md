@@ -92,8 +92,19 @@ do not establish formula ownership and are not promotion evidence.
 Coordinate preparation now retains raw Poppler XHTML and Tesseract TSV alongside
 word boxes, PDF rotation/crop/media/display metadata and source hashes. Native
 capture costs a second Poppler invocation, included in native and paired timing
-work. OCR already requests TSV; parsing is included. All raw word evidence remains
-unnormalized/unverified: independent controls exposed differing Poppler page-size
-and word-coordinate conventions on rotated pages. Final reference formula regions
+work. OCR already requests TSV; parsing is included. Raw coordinates are retained;
+a bounded zero-origin MediaBox/CropBox contract projects supported native and
+raster coordinates into display fractions. All projections remain unverified:
+independent controls exposed differing Poppler page-size and word-coordinate
+conventions on rotated pages. Final reference formula regions
 come from transformed visible glyph geometry. These fields prepare a grounded
 scorer; they do not yet make formula acceptance evidence complete.
+
+An exploratory diagnostic compares literal, case-sensitive expression tokens only
+within the declared final region. A word must have its center inside and at least
+half its area overlapping that region. Display-clipped words and words intersecting
+competing regions remain uncredited. Independent original
+controls cover intact/corrupt expressions with a correct quotation elsewhere,
+four native rotations and local OCR. These controls do not certify visibility,
+complete reference declarations or coordinate provenance. Diagnostic matches do
+not change acceptance or permit policy optimization.
