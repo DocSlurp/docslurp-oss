@@ -39,7 +39,7 @@ def tokens(text):
     # Markdown table separators and list markers are envelopes, not printed operators.
     text='\n'.join(line for line in text.splitlines()
                    if not ('-' in line and set(line.strip())<=set('|:- \t') and line.count('-')>=3))
-    text=re.sub(r'(?m)^\s*[-*]\s+','',text)
+    text=re.sub(r'(?m)^[ \t]*[-*][ \t]+(?=\S)','',text)
     return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]", unicodedata.normalize("NFKC", text).casefold())
 
 def value_contexts(text):
@@ -73,6 +73,18 @@ def content_score(reference, text, legacy):
                 for s in re.split(r'(?<=[.!?])\s+',paragraph) if numeric_sequence(s)]
     actual_stream=' '+' '.join(tokens(text))+' '
     statement_recall=sum((' '+' '.join(s)+' ') in actual_stream for s in statements)/len(statements) if statements else None
+    # Formula errors must not disappear into a long page's token average. These
+    # are literal printed references, separate from LaTeX diagnostic references.
+    printed_formulas=Counter(tuple(tokens(f)) for f in reference.get('printedFormulas',[]) if tokens(f))
+    formula_counts=[]
+    for expression,required in printed_formulas.items():
+        pattern=' '+' '.join(expression)+' ';cursor=0;found=0
+        for _ in range(required):
+            start=actual_stream.find(pattern,cursor)
+            if start<0:break
+            found+=1;cursor=start+len(pattern)-1
+        formula_counts.append(found/required)
+    printed_formula_recall=min(formula_counts) if formula_counts else None
     wanted_contexts=value_contexts(reference['expectedMarkdown']);actual_contexts=value_contexts(text)
     contextual=sum((wanted_contexts&actual_contexts).values())/sum(wanted_contexts.values()) if wanted_contexts else None
     compact=lambda s:re.sub(r'[^\w]','',unicodedata.normalize('NFKC',s).casefold())
@@ -87,7 +99,7 @@ def content_score(reference, text, legacy):
         if found>=0:row_matches+=1;cursor=found+len(wanted)-1
     table_row_recall=row_matches/len(table_rows) if table_rows else None
     minimum_section=min(sections,default=1.0)
-    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,numeric_order,contextual,statement_recall] if v is not None]
+    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,numeric_order,contextual,statement_recall,printed_formula_recall] if v is not None]
     ref = {"prose":reference["expectedMarkdown"], "paragraphs":reference["paragraphs"],
            "tables":reference["tables"], "formulas":reference["formulas"], "groundTruth":{"prosePresent":True,"kind":"authored"}}
     modern = legacy.compact(legacy.score(ref,text))
@@ -95,8 +107,9 @@ def content_score(reference, text, legacy):
             "f1":2*recall*precision/max(1e-9,recall+precision),"sectionRecall":sections,
             "minimumSectionRecall":minimum_section,"numericRecall":numeric,"numericOrderRecall":numeric_order,"numericStatementRecall":statement_recall,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
             "tableRowRecall":table_row_recall,"orderedSimilarity":ordered,
+            "printedFormulaRecall":printed_formula_recall,
             "quality": min(applicable),
-            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and ordered>=.9 and not excluded,
+            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and (printed_formula_recall is None or printed_formula_recall==1) and ordered>=.9 and not excluded,
             "modern":modern}
 
 def invoke(argv):

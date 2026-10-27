@@ -19,6 +19,15 @@ Native: Poppler `pdftotext -layout`. Cheap: Tesseract English at 150 DPI/PSM 6. 
 
 `mixed-page-preservation@v2` measures visible token precision/recall, minimum section recall, atomic and ordered numeric recall, authored numeric-statement preservation and contextual value/operator/grouping recall, complete ordered table-row recall and hidden-text leakage. The minimum content dimension is the main diagnostic score. Acceptance: precision/recall at least .95, every section at least .90, numeric/contextual-value/row recall at least .95, global token-order similarity at least .90, no excluded hidden text. Non-applicable numeric/table dimensions are null and excluded from gates. Exact references plus deletion, cell-swap, padding, whitespace and hidden-text mutations validate the deterministic scorer before tuning. The local Mastra scorer executes this same scoring function.
 
+V4 references additionally retain literal printed formulas separately from their
+typed semantics and LaTeX diagnostics. Every printed formula and its required
+occurrence count must survive normalized token matching; a local operator/grouping
+error cannot be diluted by a long page. This is literal preservation for the local
+plain-text extractors. Mathematical equivalence across arbitrary rewritten notation
+remains a separate preservation diagnostic. A v4 format adapter preserves ordered
+visible text, merged-cell origins, typed cells/formulas and authored exclusions;
+projection never substitutes for independent corpus acceptance.
+
 Latest located reusable preservation scorers: `tolerant-markdown@v1`, `tolerant-table@v3`, and `markdown-math-preservation@v2`, recovered from the archived repository and snapshotted with hashes externally. Table structure, wrapping and math diagnostics remain separate; this corpus currently has no typeset-math applicability labels. No LLM judge substitutes for authored source content.
 
 Metadata features include glyph count/yield, invisible glyphs, image placement coverage, image resource stream bytes, compressed and decoded content-stream bytes, vector-drawing and font counts, rotation, and object count. Image-resource bytes and actually placed image bytes are distinct. Residual PDF storage is not expected text bytes. Compare original documents with QPDF one-page and four-page outputs: total size, image/nonimage residuals, split overhead, extraction latency and token equivalence.

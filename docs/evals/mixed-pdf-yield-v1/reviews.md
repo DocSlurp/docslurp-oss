@@ -107,6 +107,26 @@ repository helpers additionally contain unexecuted enriched-class corrections;
 neither enriched outputs nor the balanced pilot/full corpus have been validated.
 Independent review must use the frozen source snapshot for prototype provenance.
 
+The first attempt-4 external audit found no observed delivered render/gold
+contradiction and a source-relative native block IoU minimum of 0.718 across 321
+comparable blocks. It found one high build-caused validation gap: schema-valid
+interval AST bounds and cell units could disagree with the world/printed reference
+while the checker passed. All 30 actual interval references passed its independent
+checks; this is a validator counterexample, not evidence of corrupted delivered
+values. The skill score was 85, revise-build. A source-blind validator-only correction
+is active; original PDFs, labels and snapshots remain immutable.
+
+The auditor confirmed repeat label differences are provenance-only, with no semantic
+page differences. Capitalization-based entity flags were individually adjudicated
+as ordinary technical/directional words; original raw overlap failures remain intact.
+
+The harness now has a v4 reference projection and a per-printed-formula occurrence
+gate, tested with invented long-prose operator/grouping/deletion mutations and merged
+cell/reading-order errors. A wrapped standalone multiplication operator is retained
+instead of being mistaken for a Markdown list marker. The focused evaluation suite
+passes 32 tests. These scorer changes precede accepted measurements; all code and
+label identities must be frozen again before tuning.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.

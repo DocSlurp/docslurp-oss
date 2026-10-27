@@ -42,6 +42,19 @@ class ScorerTests(unittest.TestCase):
             self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
     def test_empty(self):
         self.assertEqual(self.score("")["quality"],0)
+    def test_formula_error_cannot_hide_in_long_prose(self):
+        formula='Result: (a + b) * c = d.'
+        text='padding '*400+formula
+        ref={'expectedMarkdown':text,'sections':[text],'paragraphs':[text],
+             'tables':[],'formulas':[],'printedFormulas':[formula],'excludedText':[]}
+        for changed in [formula.replace('+','-'),formula.replace('(','').replace(')','')]:
+            score=content_score(ref,text.replace(formula,changed),tolerant_markdown)
+            self.assertFalse(score['acceptable']);self.assertEqual(score['quality'],0)
+        self.assertTrue(content_score(ref,text.replace(' * ','\n*\n'),tolerant_markdown)['acceptable'])
+        ref['expectedMarkdown']=text+' '+formula;ref['printedFormulas'].append(formula)
+        score=content_score(ref,text,tolerant_markdown)
+        self.assertEqual(score['printedFormulaRecall'],.5)
+        self.assertFalse(score['acceptable'])
     def test_swapped_table_cells(self):
         row=self.ref["tables"][0]["rows"][1]
         altered=self.text.replace(" | ".join(row)," | ".join([row[0],row[2],row[1],row[3]]))
