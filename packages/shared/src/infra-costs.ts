@@ -67,7 +67,7 @@ export function flyPerformanceMonthlyUsd(vcpu: number, memoryGb: number): number
   return vcpu * FLY_LIST_MONTHLY.performanceVcpuWith2Gb + Math.max(0, memoryGb - includedGb) * FLY_LIST_MONTHLY.extraRamGb;
 }
 
-const OBSERVED_AT = "2026-10-09";
+const OBSERVED_AT = "2026-10-25";
 const FLY_PRICING = "https://fly.io/docs/about/pricing/";
 const VAST_BUNDLES = "https://console.vast.ai/api/v0/bundles/";
 const MODAL_PRICING = "https://modal.com/pricing";
@@ -203,11 +203,11 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     notes: "Billed by the sending region; app machines run in North America. APAC $0.04, Africa/India $0.12.",
   },
   // Vast.ai, verified on-demand single-GPU medians.
-  vastGpu("rtx-4090", 0.471, 24, 28),
-  vastGpu("l4", 0.33, 24, 4),
-  vastGpu("rtx-3090", 0.269, 24, 25),
-  vastGpu("a100-80gb", 1.15, 80, 7),
-  vastGpu("h100-sxm", 2.227, 80, 4),
+  vastGpu("rtx-4090", 0.58962963, 24, 45),
+  { ...vastGpu("l4", 0.33, 24, 4), observedAt: "2026-10-09", notes: "Historical median (n=4, 2026-10-09); live 2026-10-25 sample n=2 is insufficient to refresh." },
+  vastGpu("rtx-3090", 0.25111111, 24, 27),
+  vastGpu("a100-80gb", 1.00222222, 80, 7),
+  vastGpu("h100-sxm", 2.40266667, 80, 3),
   // Modal, per-second list prices.
   modalGpu("l4", 0.000222, 24),
   modalGpu("a10", 0.000306, 24),
@@ -256,10 +256,10 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     sku: "pass-through",
     unit: "usd",
     usd: 1.055,
-    sourceUrl: "https://openrouter.ai/docs/faq",
+    sourceUrl: "https://openrouter.ai/pricing",
     observedAt: OBSERVED_AT,
     method: "pricing-page",
-    notes: "Provider list price plus OpenRouter's 5.5% fee on credit purchases.",
+    notes: "Standard plan credit-purchase fee is 5.5%; Business is 8%. This observation assumes Standard.",
   },
 ];
 
@@ -337,7 +337,7 @@ export const RESOURCE_CLASS_POLICY: readonly ResourceClassPolicy[] = [
     rationale:
       "GPU hosts start only for queued GPU work and are billed per GPU-second of task time; the loss is boot and model-load time plus Vast's ±20% spot volatility. A tighter target would price OCR out of reach, so 60% leaves headroom for a 1.5× price swing at full utilization.",
     skus: [
-      { observationId: "vast:rtx-4090", bundle: { gpuStandardHour: 1 } },
+      { observationId: "vast:rtx-4090", bundle: { gpuStandardHour: 1 }, disallowedReason: "2026-10-25 live median $0.5896/h exceeds the $0.54/h cost ceiling at the current standard GPU rate." },
       { observationId: "vast:l4", bundle: { gpuStandardHour: 1 } },
       { observationId: "vast:rtx-3090", bundle: { gpuStandardHour: 1 } },
       { observationId: "modal:l4", bundle: { gpuStandardHour: 1 }, disallowedReason: "Modal L4 base price breaks even at ~89%." },

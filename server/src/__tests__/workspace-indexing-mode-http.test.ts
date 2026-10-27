@@ -81,16 +81,18 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 const storedMode = async (id: string) => (await sql<{ m: string }[]>`select pipeline ->> 'indexingMode' as m from workspaces where id = ${id}`)[0]?.m;
 
 describe("POST /v1/workspaces", () => {
-  it("applies the plan default when the body has a pipeline without a mode", async () => {
-    const res = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "free", pipeline: {} }));
-    expect(res.status).toBe(201);
-    expect(await res.json()).toMatchObject({ indexingMode: "map" });
+  it("applies the same default to every org when the body has a pipeline without a mode", async () => {
+    for (const orgId of ["free", "gold"]) {
+      const res = await app.request("/v1/workspaces", json("POST", { name: "P", orgId, pipeline: {} }));
+      expect(res.status).toBe(201);
+      expect(await res.json()).toMatchObject({ indexingMode: "full" });
+    }
   });
 
-  it("gates an explicit full on a free org without credits (402)", async () => {
+  it("accepts an explicit full on a free org", async () => {
     const res = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "free", pipeline: { indexingMode: "full" } }));
-    expect(res.status).toBe(402);
-    expect(await res.json()).toMatchObject({ error: { details: { category: "credits_required_for_full_index" } } });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ indexingMode: "full" });
   });
 });
 

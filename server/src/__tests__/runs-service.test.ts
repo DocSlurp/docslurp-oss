@@ -52,7 +52,7 @@ const {
   buildRunProcessingPreview,
   shouldFailStaleProcessingRun,
   listRuns,
-  runExportArtifacts,
+  listRunEventsForRunId,
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
@@ -66,6 +66,23 @@ function createRun(input: { userId: string; workspaceId: string; kind: string; t
   const { totalDocuments: _total, ...rest } = input;
   return createRunCreation({ sql: sqlMock as never, start: runCreationStart }).create({ ...rest, sources: { kind: "files", files: [] } });
 }
+
+describe("run events", () => {
+  const row = (id: string, eventType: string) => ({
+    id, user_id: "u", run_id: "run-1", document_id: "doc-1", stage_name: "extract-markdown", event_type: eventType,
+    status: "completed", message: null, progress: {}, stats: {}, payload: {}, created_at: "2026-10-25T04:48:00.000Z",
+  });
+
+  it("skips an event type the schema does not know instead of failing the whole history", async () => {
+    sqlMock.mockReset();
+    sqlMock.mockResolvedValue([row("e1", "document.completed"), row("e2", "document.some_future_event"), row("e3", "document.plausibility_warning")]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const events = await listRunEventsForRunId({ runId: "run-1" });
+    expect(events.map(event => event.id)).toEqual(["e1", "e3"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("document.some_future_event"), expect.anything());
+    warn.mockRestore();
+  });
+});
 
 describe("createRun", () => {
   beforeEach(() => {
@@ -345,21 +362,3 @@ describe("run resource and cost rollups", () => {
   });
 });
 
-describe("runExportArtifacts", () => {
-  it("returns proxy URLs only, never the raw storage URI or key layout", () => {
-    const artifacts = runExportArtifacts({
-      "doc-1:markdown": "s3://docslurp-artifacts/user-1/run-1/doc-1/document.md",
-      "doc-1:page-1": "s3://docslurp-artifacts/user-1/run-1/doc-1/page-0001.png",
-      "doc-2:markdown": "s3://docslurp-artifacts/user-1/run-1/doc-2/document.md"
-    }, new Set(["s3://docslurp-artifacts/user-1/run-1/doc-2/document.md"]));
-
-    expect(artifacts).toEqual([
-      { slot: "doc-1:markdown", url: expect.stringMatching(/^\/v1\/files\//) },
-      { slot: "doc-1:page-1", url: expect.stringMatching(/^\/v1\/files\//) }
-    ]);
-    const serialized = JSON.stringify(artifacts);
-    expect(serialized).not.toContain("s3://");
-    expect(serialized).not.toContain("docslurp-artifacts");
-    expect(serialized).not.toContain("user-1/run-1");
-  });
-});

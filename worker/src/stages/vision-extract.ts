@@ -1014,7 +1014,6 @@ export class VisionExtractStage implements Stage {
         imagePath,
         mimeType: page.mimeType,
         privacyMode: state.run.pipeline.privacyMode,
-        funded: state.run.orgFunded,
         outputPath,
         vision,
         cfg: this.cfg,

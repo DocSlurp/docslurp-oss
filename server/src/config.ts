@@ -194,7 +194,7 @@ const storage = resolveObjectStorageConfig();
 
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
-  /** Public chat APIs (/v1/search/chat, /v1/chat, chat completions) may run the bounded search agent. */
+  /** Public chat APIs (/v1/chat, its stream, chat completions) may run the bounded search agent. */
   publicChatAgentEnabled: readBoolean(process.env.DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED, true),
   webMcpEnabled: readBoolean(process.env.DOCSLURP_WEBMCP_ENABLED, true),
   port: readNumber(process.env.PORT, 8787),
@@ -213,9 +213,9 @@ export const env = {
   lancedb: resolveLanceDbConfig(process.env, storage),
   maxUploadBytes: readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
   /**
-   * Cap for the buffered multipart path (POST /v1/ingest/bulk). Hono's
+   * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct
-   * upload sessions (/v1/ingest/direct/sessions), which go straight to storage.
+   * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.
    */
   maxMultipartUploadBytes: Math.min(
     readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),

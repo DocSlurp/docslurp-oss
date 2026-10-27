@@ -336,9 +336,13 @@ export async function createReindexRuns(args: {
     const stats = { job: { id: jobId, ...args.meta } };
     await tx`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, blocked_reason, job_id, priority, stage,
-        total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats)
+        total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats,
+        creation_ready_at, creation_expires_at)
+      -- The documents are inserted in this transaction, so the manifest is complete when it commits; without
+      -- creation_ready_at neither runLifecycle.start nor run-start recovery would ever start the run.
       values (${runId}, ${workspace.orgId}, ${args.userId}, ${workspace.id}, 'reindex', ${status}, ${args.blockedReason}, ${jobId}, 0, 'queued',
-        ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))})
+        ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
+        now(), null)
     `;
     for (const doc of batch.docs) {
       const canonicalId = doc.canonical_id ?? `docslurp:document:${doc.id}`;

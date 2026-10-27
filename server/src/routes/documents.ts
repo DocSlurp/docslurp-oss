@@ -16,7 +16,6 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   getCorrectionWorkbench,
-  listLowConfidenceReviewQueue,
   reindexDocumentCorrection,
   saveDocumentCorrection
 } from "../services/document-review.js";
@@ -264,21 +263,6 @@ export const documentsRoutes = new Hono()
       includeSuperseded: ["1", "true"].includes(c.req.query("includeSuperseded") ?? "")
     });
     return c.json(result);
-  })
-  .get("/review-queue", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const sort = c.req.query("sort");
-    const queue = await listLowConfidenceReviewQueue({
-      userId,
-      orgId: c.get("apiKey")?.orgId ?? undefined,
-      runId: c.req.query("runId") ?? undefined,
-      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId")),
-      sort:
-        sort === "cost" || sort === "org" || sort === "failure-mode" || sort === "severity"
-          ? sort
-          : undefined
-    });
-    return c.json({ queue });
   })
   .delete("/:docId", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -580,7 +564,6 @@ acceptApiKeys(documentsRoutes, [
   "POST /:documentId/full-index/estimate",
   "GET /",
   "GET /index",
-  "GET /review-queue",
   "GET /:docId",
   "GET /:docId/structured",
   "GET /:docId/versions",

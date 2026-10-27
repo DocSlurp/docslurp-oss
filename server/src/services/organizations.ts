@@ -26,6 +26,7 @@ import { sql } from "../db.js";
 import { insertDefaultWorkspace } from "./default-workspace.js";
 import { sendOrganizationInviteEmail, sendWorkspaceInviteEmail } from "./notifications.js";
 import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
+import { forgetProviderPolicy } from "../lib/provider-policy.js";
 
 /** Narrows workspace IDs to the current API key request's allowlist, if any. */
 function withinRequestKeyAllowlist(workspaceIds: string[]): string[] {
@@ -44,6 +45,7 @@ type OrganizationRow = {
   member_role: OrganizationRecord["memberRole"];
   funded?: boolean | null;
   retain_document_versions?: number | null;
+  allow_china_providers?: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -107,6 +109,7 @@ function mapOrganization(row: OrganizationRow): OrganizationRecord {
     memberRole: row.member_role,
     funded: row.funded === true,
     retainDocumentVersions: row.retain_document_versions ?? null,
+    allowChinaProviders: row.allow_china_providers !== false,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
@@ -184,7 +187,7 @@ export async function ensurePersonalOrganization(userId: string): Promise<Organi
       o.credit_balance_cents,
       om.role as member_role,
       o.funded_at is not null as funded,
-      o.retain_document_versions,
+      o.retain_document_versions, o.allow_china_providers,
       o.created_at::text,
       o.updated_at::text
     from organizations o
@@ -247,7 +250,7 @@ export async function listOrganizations(userId: string): Promise<OrganizationRec
       o.credit_balance_cents,
       om.role as member_role,
       o.funded_at is not null as funded,
-      o.retain_document_versions,
+      o.retain_document_versions, o.allow_china_providers,
       o.created_at::text,
       o.updated_at::text
     from organizations o
@@ -271,7 +274,7 @@ export async function getOrganization(orgId: string, userId: string): Promise<Or
       o.credit_balance_cents,
       om.role as member_role,
       o.funded_at is not null as funded,
-      o.retain_document_versions,
+      o.retain_document_versions, o.allow_china_providers,
       o.created_at::text,
       o.updated_at::text
     from organizations o
@@ -360,9 +363,11 @@ export async function updateOrganization(orgId: string, userId: string, input: U
       await tx`update organizations set name = coalesce(${parsed.name ?? null}, name),
         slug = case when ${parsed.slug !== undefined} then ${parsed.slug ?? null} else slug end,
         retain_document_versions = case when ${parsed.retainDocumentVersions !== undefined} then ${parsed.retainDocumentVersions ?? null}::integer else retain_document_versions end,
+        allow_china_providers = coalesce(${parsed.allowChinaProviders ?? null}::boolean, allow_china_providers),
         updated_at = now() where id = ${orgId}`;
       await auditOrganization(tx, orgId, userId, "organization.updated", parsed);
     });
+    if (parsed.allowChinaProviders !== undefined) forgetProviderPolicy(orgId);
     return await getOrganizationDetails(orgId, userId);
   } catch (error) { throw organizationConflict(error); }
 }

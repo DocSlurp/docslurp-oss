@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SEARCH_BEFORE_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory, QUIET_INJECTION_INSTRUCTION } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -280,6 +280,33 @@ describe("chat agent limits, debug and spans", () => {
     const result = await runChatMcpAgent({ ...args, limits: { maxSteps: 2, maxToolCalls: 12, searchConcurrency: 4, clamped: [] } });
     expect(seenToolChoice).toEqual(["auto", "none"]);
     expect(result.debug).toMatchObject({ steps: 2, toolCallCount: 1, stopReason: "step_limit" });
+  });
+
+  describe("dynamic step budget", () => {
+    const searching = () => scripted([{ tools: [{ id: "a", input: { q: "a" } }] }, { tools: [{ id: "b", input: { q: "b" } }] },
+      { tools: [{ id: "c", input: { q: "c" } }] }, { tools: [{ id: "d", input: { q: "d" } }] }, { tools: [{ id: "e", input: { q: "e" } }] }]);
+    const hit = (chunkIndex: number) => ({ text: `Passage ${chunkIndex}`, score: 1, citation: { filename: "a.pdf", documentId: "doc", chunkIndex, headingPath: [], pageNumber: 1 } });
+    const limits = { maxSteps: 6, baseSteps: 2, maxToolCalls: 12, searchConcurrency: 4, clamped: [] };
+
+    it("answers at the base budget when the last search found nothing new", async () => {
+      const { model, seenToolChoice } = searching();
+      mocks.provider.mockReturnValue(model);
+      mocks.dispatch.mockImplementation(async () => Response.json({ results: [hit(0)] }));
+      const result = await runChatMcpAgent({ ...args, limits });
+      expect(seenToolChoice).toEqual(["auto", "auto", "none"]);
+      expect(result.debug).toMatchObject({ steps: 3, toolCallCount: 2 });
+      expect(spans.list.find(span => span.name === "invoke_agent workspace-chat")!.attributes).toMatchObject({ "docslurp.chat.base_steps": 2, "docslurp.chat.step_budget_stop": 3 });
+    });
+
+    it("keeps searching past the base budget, up to maxSteps, while each search adds evidence", async () => {
+      const { model, seenToolChoice } = searching();
+      mocks.provider.mockReturnValue(model);
+      let calls = 0;
+      mocks.dispatch.mockImplementation(async () => Response.json({ results: [hit(calls++)] }));
+      const result = await runChatMcpAgent({ ...args, limits });
+      expect(seenToolChoice).toEqual(["auto", "auto", "auto", "auto", "auto", "none"]);
+      expect(result.debug).toMatchObject({ steps: 6, toolCallCount: 5, stopReason: "step_limit" });
+    });
   });
 
   it("refuses tool calls over the budget with a distinguishable result and stop reason", async () => {
@@ -532,6 +559,16 @@ describe("failed tool turns are blocked by code", () => {
   });
 });
 
+it("ignores injected document instructions quietly instead of announcing them every turn", async () => {
+  mocks.manifestIds = ["search"];
+  const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+  mocks.provider.mockReturnValue(model);
+  await runChatMcpAgent(args);
+  const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
+  expect(instructions).toContain(JSON.stringify(QUIET_INJECTION_INSTRUCTION).slice(1, -1));
+  expect(instructions).toContain("never repeat a notice you already gave");
+});
+
 describe("agent modes", () => {
   const systemText = (model: MockLanguageModelV4) => JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
 
@@ -721,7 +758,7 @@ describe("final-step answers never leak tool-call markup", () => {
       onTextDelta: (delta) => { deltas.push(delta); } });
     const call = model.doStreamCalls[0]!;
     expect(call.tools ?? []).toEqual([]);
-    expect(JSON.stringify(call.prompt.filter(message => message.role === "system"))).toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(JSON.stringify(call.prompt.at(-1))).toContain(FINAL_ANSWER_INSTRUCTION);
     expect(result.answer).toBe("Let me check the docs first.");
     expect(deltas.join("")).toBe(result.answer);
     expect(result.answer).not.toContain("tool_call");
@@ -734,8 +771,31 @@ describe("final-step answers never leak tool-call markup", () => {
     const result = await runChatMcpAgent({ ...args, limits: { maxSteps: 2, maxToolCalls: 12, searchConcurrency: 4, clamped: [] } });
     expect(seenToolChoice).toEqual(["auto", "none"]);
     expect(model.doStreamCalls[1]!.tools?.map(tool => tool.name)).toEqual(["search"]);
-    expect(JSON.stringify(model.doStreamCalls[1]!.prompt.filter(message => message.role === "system"))).toContain(FINAL_ANSWER_INSTRUCTION);
-    expect(JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"))).not.toContain(FINAL_ANSWER_INSTRUCTION);
+    // The rule follows the history as a user turn; the instructions stay byte-identical so the cached prefix holds.
+    expect(model.doStreamCalls[1]!.prompt.at(-1)).toMatchObject({ role: "user" });
+    expect(JSON.stringify(model.doStreamCalls[1]!.prompt.at(-1))).toContain(FINAL_ANSWER_INSTRUCTION);
+    const system = (index: number) => JSON.stringify(model.doStreamCalls[index]!.prompt.filter(message => message.role === "system"));
+    expect(system(1)).toBe(system(0));
+    expect(system(0)).not.toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(system(0)).toContain(SEARCH_BEFORE_ANSWER_INSTRUCTION);
     expect(result.answer).toBe("Supported [1].");
+  });
+
+  it("marks prompt-cache breakpoints on the instructions and the latest message for explicit-cache models only", async () => {
+    const run = async (modelId: string) => {
+      const { model } = scripted([{ tools: [{ id: "a", input: { q: "a" } }] }, { text: "Supported [1]." }]);
+      mocks.provider.mockReturnValue(model);
+      mocks.dispatch.mockImplementation(async () => Response.json({ results: [] }));
+      await runChatMcpAgent({ ...args, model: modelId, limits: { maxSteps: 4, maxToolCalls: 12, searchConcurrency: 4, clamped: [] } });
+      return model.doStreamCalls;
+    };
+    const marked = (message: { providerOptions?: unknown }) => JSON.stringify(message.providerOptions ?? {}).includes("ephemeral");
+    const claude = await run("anthropic/claude-haiku-5.5");
+    for (const call of claude) {
+      expect(marked(call.prompt[0]!)).toBe(true);
+      expect(marked(call.prompt.at(-1)!)).toBe(true);
+      expect(call.prompt.slice(1, -1).some(marked)).toBe(false);
+    }
+    for (const call of await run("z-ai/glm-5.3-flash")) expect(call.prompt.some(marked)).toBe(false);
   });
 });

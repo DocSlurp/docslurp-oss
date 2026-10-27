@@ -69,8 +69,35 @@ describe("estimate parity", () => {
     const workspace = { pipeline: defaultPipelineFeatures, orgId: "o1" };
     const sized = await work.estimateUpload({ files: [{ name: "a.pdf", size: 75 * 1024 * 10 }], workspace });
     const known = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace });
-    expect(sized.pages).toBe(10);
+    expect(sized.estimate.pages).toBe(10);
     expect(sized).toEqual(known);
+    expect(sized.media).toBeNull();
+  });
+
+  it("prices audio and video by duration on top of the paged files, with the cheaper audio-track option", async () => {
+    const workspace = { pipeline: defaultPipelineFeatures, orgId: "o1" };
+    const env = { STRIPE_SECRET_KEY: "sk_test" };
+    const docs = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace, env });
+    const mixed = await work.estimateUpload({
+      files: [{ name: "a.pdf", size: 1, pages: 10 }, { name: "demo.mp4", size: 1, durationSeconds: 600 }],
+      workspace,
+      env,
+    });
+    expect(mixed.estimate.pages).toBe(10);
+    expect(mixed.estimate.documents).toBe(docs.estimate.documents + 1);
+    expect(mixed.media).toMatchObject({ videoFiles: 1, videoMinutes: 10, videoFrames: true });
+    expect(mixed.media!.credits.high).toBeGreaterThan(mixed.media!.credits.low);
+    expect(mixed.media!.lighter).toMatchObject({ pipeline: { mediaVideo: { enabled: false } } });
+    expect(mixed.estimate.credits!.high).toBeCloseTo(docs.estimate.credits!.high + mixed.media!.credits.high);
+    expect(mixed.estimate.credits!.low).toBeCloseTo(docs.estimate.credits!.low + mixed.media!.credits.low);
+  });
+
+  it("prices a media-only upload and offers no lighter option when the workspace already skips video frames", async () => {
+    const workspace = { pipeline: { ...defaultPipelineFeatures, mediaVideo: { enabled: false } }, orgId: "o1" };
+    const result = await work.estimateUpload({ files: [{ name: "talk.mp3", size: 1, durationSeconds: 1800 }], workspace, env: { STRIPE_SECRET_KEY: "sk_test" } });
+    expect(result.estimate.pages).toBe(0);
+    expect(result.estimate.credits!.low).toBeCloseTo(result.media!.credits.low);
+    expect(result.media!.lighter).toBeNull();
   });
 
   it("full-index estimate is null without a workspace and prices only unindexed pages otherwise", async () => {

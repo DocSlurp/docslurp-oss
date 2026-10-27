@@ -5,13 +5,19 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 /** Automatic workspace naming against a database built from db/migrations. */
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
+let concurrent: postgres.Sql;
+const raceDatabaseUrl = process.env.WORKSPACE_NAMING_RACE_DATABASE_URL;
 let ws: typeof import("../services/workspaces.js");
 let naming: typeof import("../services/workspace-naming.js");
 
 beforeAll(async () => {
-  const database = await startMigratedPostgres();
-  stop = database.stop;
-  sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
+  // For the lock regression, point this at an isolated DB migrated with db/migrate.mjs.
+  // PGlite serializes connections and cannot model PostgreSQL row-lock races.
+  const database = raceDatabaseUrl ? null : await startMigratedPostgres();
+  stop = database?.stop ?? (async () => {});
+  sql = postgres(raceDatabaseUrl ?? database!.url, { max: 1, prepare: false, onnotice: () => {},
+    connection: { application_name: "workspace-naming-race" } });
+  if (raceDatabaseUrl) concurrent = postgres(raceDatabaseUrl, { max: 1, prepare: false });
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'naming@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Org', 'naming', 'u')`;
@@ -22,6 +28,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sql?.end();
+  await concurrent?.end();
   await stop?.();
 });
 
@@ -114,4 +121,67 @@ describe("automatic workspace naming", () => {
     await naming.refineWorkspaceNames([workspace.id], "What is the deposit?");
     expect((await state(workspace.id)).name).toBe("My leases");
   });
+});
+
+it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a concurrent manual rename (%s candidate)", async (candidate) => {
+  const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });
+  const before = await state(workspace.id);
+  const connection = await concurrent.reserve();
+  let automatic: Promise<unknown> | undefined;
+  try {
+    await connection`begin`;
+    await connection`update workspaces set name = 'Manual confidential title' where id = ${workspace.id}`;
+    // The initial SELECT sees the old committed name. applyAutoTitle must wait
+    // for this transaction, then reject the stale expected name in the UPDATE.
+    automatic = naming.refineWorkspaceNames([workspace.id], candidate === "same" ? "Untitled workspace" : "Annual budget review");
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const [row] = await connection`select exists (
+        select 1 from pg_stat_activity where application_name = 'workspace-naming-race'
+          and wait_event_type = 'Lock' and query like '%update workspaces%'
+      ) as waiting`;
+      if (row!.waiting) break;
+      if (Date.now() > deadline) throw new Error("Automatic title UPDATE never reached the row-lock barrier");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await connection`commit`;
+    await automatic;
+    expect(await state(workspace.id)).toEqual({ name: "Manual confidential title", autoTitle: before.autoTitle });
+  } finally {
+    await connection`rollback`;
+    connection.release();
+    await automatic;
+  }
+});
+
+it("advances a same-name phase and leaves the workspace timestamp unchanged", async () => {
+  const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });
+  const [before] = await sql`select updated_at from workspaces where id = ${workspace.id}`;
+  await naming.refineWorkspaceNames([workspace.id], "Untitled workspace");
+  expect(await state(workspace.id)).toEqual({ name: "Untitled workspace", autoTitle: { phase: "chat", name: "Untitled workspace" } });
+  const [after] = await sql`select updated_at from workspaces where id = ${workspace.id}`;
+  expect(after!.updated_at).toEqual(before!.updated_at);
+});
+
+it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked"])("excludes %s documents from all naming sources", async (excluded) => {
+  const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });
+  const secret = await addDocument(workspace.id, "secret_merger.pdf");
+  await sql`update documents set
+    superseded_at = ${excluded === "superseded" ? new Date() : null},
+    archived_at = ${excluded === "archived" ? new Date() : null},
+    purged_at = ${excluded === "purged" ? new Date() : null},
+    status = ${["failed", "cancelled", "pii_blocked"].includes(excluded) ? excluded : "completed"},
+    metadata = '{"title":"Secret extracted title","mapTitle":"Secret mapped title"}'
+    where id = ${secret.id}`;
+  await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+    values (${secret.id + "-s"}, ${secret.id}, ${secret.runId}, 'u', 'This document describes a secret merger transaction.')`;
+  await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+    values (${secret.id + "-c"}, ${secret.id}, ${secret.runId}, 'u', 0, 'Secret body', 2, ${["Secret heading"]})`;
+  // Summary, extracted title, chunk heading and map title must all be excluded.
+  await naming.refineWorkspaceNames([workspace.id]);
+  expect((await state(workspace.id)).name).toBe("Untitled workspace");
+  await naming.nameWorkspaceFromUpload({ workspaceId: workspace.id, filenames: ["public.pdf"] });
+  await addDocument(workspace.id, "public.pdf");
+  await naming.nameWorkspaceFromUpload({ workspaceId: workspace.id, filenames: ["public.pdf"] });
+  expect((await state(workspace.id)).name).toBe("Public");
 });

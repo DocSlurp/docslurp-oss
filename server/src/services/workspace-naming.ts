@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { cleanDocumentTitle } from "@docslurp/shared";
 import { sql } from "../db.js";
 
 /**
@@ -20,8 +21,8 @@ export type AutoTitlePhase = (typeof AUTO_TITLE_PHASES)[number];
 export type AutoTitleSource = "summary" | "heading";
 
 export function workspaceSubject(value: string): string | null {
-  const title = value.replace(/^#+\s*/, "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  if (title.length < 3 || /^(?:untitled|contents|table of contents|copyright|all rights reserved|page \d+)$/i.test(title)) return null;
+  const title = cleanDocumentTitle(value);
+  if (!title || /^(?:copyright|all rights reserved)$/i.test(title)) return null;
   const words = title.split(" ").slice(0, 9).join(" ");
   return words.slice(0, 72).replace(/\s+\S*$/, words.length > 72 ? "" : "$&");
 }
@@ -95,25 +96,26 @@ export async function markWorkspaceAutoNamed(workspaceId: string, userId: string
 
 /**
  * Renames the workspace and advances its autoTitle, but only while its name is
- * still `currentName` (a concurrent manual rename wins). The workspace row is
- * left untouched when the name does not change. Returns whether the name changed.
+ * still `currentName` (a concurrent manual rename wins). The UPDATE predicate is
+ * rechecked after acquiring the row lock; a snapshot-only CTE guard is unsafe.
+ * Same-name transitions still admit a metadata update without changing updated_at.
+ * Returns whether the name changed.
  */
 async function applyAutoTitle(args: { workspaceId: string; currentName: string; name: string; phase: AutoTitlePhase; source?: AutoTitleSource }): Promise<boolean> {
   const rows = await sql<{ renamed: boolean }[]>`
-    with guard as (
-      select id from workspaces where id = ${args.workspaceId} and name = ${args.currentName}
-    ), renamed as (
-      update workspaces set name = ${args.name}, updated_at = now()
-      where id in (select id from guard) and name <> ${args.name}
+    with admitted as (
+      update workspaces set name = ${args.name},
+        updated_at = case when name <> ${args.name} then now() else updated_at end
+      where id = ${args.workspaceId} and name = ${args.currentName}
       returning id
     ), marked as (
       update workspace_search_settings
       set compat_metadata = jsonb_set(compat_metadata, '{autoTitle}', jsonb_strip_nulls(jsonb_build_object(
         'phase', ${args.phase}::text, 'name', ${args.name}::text, 'source', ${args.source ?? null}::text)))
-      where workspace_id in (select id from guard)
+      where workspace_id in (select id from admitted)
       returning workspace_id
     )
-    select exists (select 1 from renamed) as renamed
+    select exists (select 1 from admitted) and ${args.currentName !== args.name}::boolean as renamed
   `;
   return rows[0]?.renamed === true;
 }
@@ -144,7 +146,7 @@ export async function nameWorkspaceFromUpload(args: { workspaceId: string; filen
     const documents = await sql<{ filename: string }[]>`
       select filename from documents
       where workspace_id = ${args.workspaceId} and superseded_at is null and purged_at is null and archived_at is null
-        and status not in ('failed', 'pii_blocked')
+        and status not in ('failed', 'cancelled', 'pii_blocked')
       order by created_at, id
     `;
     const filenames = [...new Set(documents.map((document) => document.filename))];
@@ -181,20 +183,28 @@ export async function refineWorkspaceNames(workspaceIds: string[], firstMessage?
       s.compat_metadata -> 'autoTitle' ->> 'phase' as phase,
       (select ds.summary from documents d
         join document_summaries ds on ds.user_id = d.user_id and ds.run_id = d.run_id and ds.document_id = d.id
-        where d.workspace_id = w.id and d.superseded_at is null and length(trim(ds.summary)) > 0
+        where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+          and d.status not in ('failed', 'cancelled', 'pii_blocked') and length(trim(ds.summary)) > 0
         order by d.created_at, ds.created_at desc limit 1) as summary,
       case when s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content' then null else coalesce(
+        -- Retain extraction-derived titles as a fallback when no summary exists.
+        (select d.metadata ->> 'title' from documents d
+          where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+          and d.status not in ('failed', 'cancelled', 'pii_blocked') and nullif(btrim(d.metadata ->> 'title'), '') is not null
+          order by d.created_at limit 1),
         c.metadata ->> 'title', c.heading_path[1],
         -- Deferred documents have no chunks until pages are searched; their Index Map supplies a title.
         (select d.metadata ->> 'mapTitle' from documents d
-          where d.workspace_id = w.id and d.metadata ->> 'mapTitle' is not null order by d.created_at limit 1)
+          where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+          and d.status not in ('failed', 'cancelled', 'pii_blocked') and d.metadata ->> 'mapTitle' is not null order by d.created_at limit 1)
       ) end as title
     from workspaces w
     join workspace_search_settings s on s.workspace_id = w.id
     left join lateral (
       select dc.metadata, dc.heading_path from document_chunks dc
       join documents d on d.id = dc.document_id
-      where d.workspace_id = w.id and s.compat_metadata -> 'autoTitle' ->> 'phase' <> 'content'
+      where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+          and d.status not in ('failed', 'cancelled', 'pii_blocked') and s.compat_metadata -> 'autoTitle' ->> 'phase' <> 'content'
         and (dc.metadata ->> 'title' is not null or array_length(dc.heading_path, 1) > 0)
       order by d.created_at, dc.chunk_index limit 1
     ) c on true

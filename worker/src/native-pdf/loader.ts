@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BindingNativePdfEngine, isNativePdfBindingModule } from "./binding-engine.js";
+import { resolveNativePdfMode } from "./mode.js";
+import { reportNativePdfEngineLoad } from "./telemetry.js";
 import type { NativePdfEngine } from "./types.js";
 
 /**
@@ -105,7 +107,7 @@ export function loadNativePdfModule(env: NodeJS.ProcessEnv = process.env): Nativ
     }
   }
   const reason = tried.length > 0 ? tried.join("; ") : "no engine module configured (vendor-artifacts/native-pdf/manifest.json missing)";
-  console.error(`[native-pdf] engine unavailable reason=${reason}`);
+  reportNativePdfEngineLoad({ ok: false, reason }, nativePdfEngineRequired(env));
   return (moduleCache = { ok: false, reason });
 }
 
@@ -122,13 +124,75 @@ export async function loadNativePdfEngine(env: NodeJS.ProcessEnv = process.env):
   if (engineCache) return engineCache;
   const loaded = loadNativePdfModule(env);
   if (!loaded.ok) return (engineCache = loaded);
-  const engine = new BindingNativePdfEngine(loaded.module as ConstructorParameters<typeof BindingNativePdfEngine>[0]);
-  const info = engine.version();
-  console.error(
-    `[native-pdf] engine loaded source=${loaded.source} version=${info.version}+${info.gitSha.slice(0, 12)} ` +
-      `features=${info.features.join(",")}`,
+  let engine: BindingNativePdfEngine;
+  let info: ReturnType<BindingNativePdfEngine["version"]>;
+  try {
+    engine = new BindingNativePdfEngine(loaded.module as ConstructorParameters<typeof BindingNativePdfEngine>[0]);
+    info = engine.version();
+  } catch (error) {
+    // A binding that loads but cannot report its version is treated as unavailable, and cached as such.
+    const reason = `${loaded.source}: engine version() failed: ${error instanceof Error ? error.message : String(error)}`;
+    reportNativePdfEngineLoad({ ok: false, reason }, nativePdfEngineRequired(env));
+    return (engineCache = { ok: false, reason });
+  }
+  const sha = typeof info.gitSha === "string" ? info.gitSha.slice(0, 12) : "";
+  reportNativePdfEngineLoad(
+    { ok: true, source: loaded.source, version: `${info.version}${sha ? `+${sha}` : ""}`, features: Array.isArray(info.features) ? info.features : [] },
+    nativePdfEngineRequired(env),
   );
   return (engineCache = { ok: true, engine, source: loaded.source });
+}
+
+/** DOCSLURP_NATIVE_PDF_POPPLER=1: a missing binding degrades to the poppler text/markdown subset (native-pdf/engine.ts). */
+export function popplerFallbackEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true)$/i.test(env.DOCSLURP_NATIVE_PDF_POPPLER?.trim() ?? "");
+}
+
+/**
+ * The engine must load when the image says it ships it (DOCSLURP_NATIVE_PDF_INSTALLED=1, set by the
+ * Dockerfile when DOCSLURP_NATIVE_PDF=1) or a mode asks for it (DOCSLURP_PDF_ENGINE=shadow|native-pdf).
+ */
+export function nativePdfEngineRequired(env: NodeJS.ProcessEnv = process.env): boolean {
+  const installed = env.DOCSLURP_NATIVE_PDF_INSTALLED?.trim().toLowerCase();
+  return installed === "1" || installed === "true" || resolveNativePdfMode(env) !== "off";
+}
+
+/**
+ * Worker startup: load the engine eagerly so its state is logged before any document, and fail when it is
+ * required but missing instead of silently serving every PDF without it.
+ */
+export async function assertNativePdfEngineAtStartup(env: NodeJS.ProcessEnv = process.env): Promise<NativePdfEngineLoad> {
+  const loaded = await loadNativePdfEngine(env);
+  // An image that claims to ship the binding must load it; a mode alone accepts the explicit poppler subset.
+  const installed = /^(1|true)$/i.test(env.DOCSLURP_NATIVE_PDF_INSTALLED?.trim() ?? "");
+  if (!loaded.ok && nativePdfEngineRequired(env) && (installed || !popplerFallbackEnabled(env))) {
+    throw new Error(
+      `native-pdf engine is required (DOCSLURP_NATIVE_PDF_INSTALLED=${env.DOCSLURP_NATIVE_PDF_INSTALLED ?? ""}, ` +
+        `DOCSLURP_PDF_ENGINE=${env.DOCSLURP_PDF_ENGINE ?? ""}) but did not load: ${loaded.reason}`,
+    );
+  }
+  return loaded;
+}
+
+/** Engine state for stage stats, from the process cache (loads on first call). */
+export async function nativePdfEngineState(env: NodeJS.ProcessEnv = process.env): Promise<
+  | { status: "loaded"; source: string; version: string }
+  | { status: "degraded"; source: string; version: string; reason: string }
+  | { status: "unavailable"; reason: string }
+> {
+  try {
+    const loaded = await loadNativePdfEngine();
+    if (!loaded.ok) {
+      return popplerFallbackEnabled(env)
+        ? { status: "degraded", source: "poppler", version: "poppler-subset", reason: loaded.reason }
+        : { status: "unavailable", reason: loaded.reason };
+    }
+    const info = loaded.engine.version();
+    const sha = typeof info.gitSha === "string" ? info.gitSha.slice(0, 12) : "";
+    return { status: "loaded", source: loaded.source, version: `${info.version}${sha ? `+${sha}` : ""}` };
+  } catch (error) {
+    return { status: "unavailable", reason: `engine state failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 /**

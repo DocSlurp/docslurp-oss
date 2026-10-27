@@ -62,20 +62,15 @@ export class PostgresMediaJournal implements MediaJournal {
   async admitVideo(scope: Parameters<NonNullable<MediaJournal["admitVideo"]>>[0], duration: number, frames: number) {
     await this.sql.begin(async tx => {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.orgId}))`;
-      const [org] = await tx`select o.funded_at is not null as funded from organizations o join workspace_runs r on r.org_id=o.id join documents d on d.run_id=r.id
-        where o.id=${scope.orgId} and r.id=${scope.runId} and r.workspace_id=${scope.workspaceId} and d.id=${scope.documentId}`;
-      if (!org) throw new Error("Video admission scope mismatch");
-      const policy = videoPolicy(org.funded === true, duration);
-      if (!Number.isInteger(frames) || frames < 0 || frames > policy.frames) throw new Error("Video frame budget exceeds tier");
+      const [scoped] = await tx`select 1 from workspace_runs r join documents d on d.run_id=r.id
+        where r.org_id=${scope.orgId} and r.id=${scope.runId} and r.workspace_id=${scope.workspaceId} and d.id=${scope.documentId}`;
+      if (!scoped) throw new Error("Video admission scope mismatch");
+      const policy = videoPolicy(duration);
+      if (!Number.isInteger(frames) || frames < 0 || frames > policy.frames) throw new Error("Video frame budget exceeds the limit");
       const [existing] = await tx`select * from media_video_admissions where document_id=${scope.documentId}`;
       if (existing) {
         if (existing.org_id !== scope.orgId || existing.run_id !== scope.runId || Number(existing.duration_seconds) !== duration || Number(existing.reserved_frames) !== frames) throw new Error("Video admission changed on retry");
         return;
-      }
-      if (policy.tier === "starter") {
-        const [used] = await tx`select coalesce(sum(duration_seconds),0) as seconds, coalesce(sum(reserved_frames),0) as frames from media_video_admissions
-          where org_id=${scope.orgId} and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'`;
-        if (Number(used.seconds)+duration > 600 || Number(used.frames)+frames > 60) throw new Error("Starter video daily organization quota exhausted");
       }
       await tx`insert into media_video_admissions(document_id,org_id,run_id,duration_seconds,reserved_frames) values (${scope.documentId},${scope.orgId},${scope.runId},${duration},${frames})`;
     });

@@ -17,7 +17,8 @@ import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
-import { SPARSE_PAGE_WORDS, type PageImageEvidence } from "../lib/page-image-evidence.js";
+import { SPARSE_PAGE_WORDS, pageAlignedTexts, type PageImageEvidence } from "../lib/page-image-evidence.js";
+import { pageTextYield } from "../lib/page-yield-evidence.js";
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
 // Emits a classification artifact and (optionally) a suggested parser playbook override per document.
@@ -247,7 +248,8 @@ function parsePageImageEvidence(value: unknown): PageImageEvidence | null {
   ) {
     return null;
   }
-  return { pageNumber, wordCount, imageCount, imageCoverage, largestImageCoverage };
+  return { pageNumber, wordCount, imageCount, imageCoverage, largestImageCoverage,
+    embeddedImageBytes: number("embeddedImageBytes", Number.MAX_SAFE_INTEGER) };
 }
 
 export interface StructuredPageComplexityEvidence {
@@ -293,12 +295,14 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
     });
   }
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename);
+  const hasPageAlignment = pageAlignedTexts(args.text, args.pageCount) !== null;
   const pages = buildAdaptivePageRoutes(args.text, Math.max(1, args.pageCount)).map((page) => {
     const complexity = args.structuredComplexity?.get(page.pageNumber);
     const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
     if (!complexity && !imageEvidence) return page;
     const ocrDecision = complexity
-      ? authorizeStructuredOcr(complexity, pageTextAt(args.text, args.pageCount, page.pageNumber), imageEvidence)
+      ? authorizeStructuredOcr(complexity, pageTextAt(args.text, args.pageCount, page.pageNumber), imageEvidence,
+          hasPageAlignment)
       : authorizeRasterPageOcr(imageEvidence!);
     if (!ocrDecision.authorized) {
       // Blank pages: confident there is nothing to read, so they are neither rendered nor sent to vision.
@@ -426,7 +430,22 @@ export function authorizeStructuredOcr(
   complexity: StructuredPageComplexityEvidence,
   nativeText: string,
   imageEvidence?: PageImageEvidence,
+  hasPageAlignment = true,
 ): AdaptiveOcrDecision {
+  const yieldEvidence = pageTextYield(nativeText, complexity.textLength);
+  // Independent structured text evidence shows a substantial text layer, yet canonical
+  // extraction lost most of it. Image byte totals do not establish text expectations.
+  if (hasPageAlignment && yieldEvidence.substantialDeficit && !complexity.isGarbled &&
+      Number.isFinite(complexity.textCoverage) && complexity.textCoverage >= 0.05 && complexity.textCoverage <= 1) {
+    return {
+      authorized: true,
+      confidence: 0.8,
+      signals: [
+        "ocr-authorized:structured-text-yield-deficit",
+        `text-yield:expected-chars=${yieldEvidence.expectedCharacters}:actual-chars=${yieldEvidence.actualCharacters}:actual-utf8-bytes=${yieldEvidence.actualTextBytes}`,
+      ],
+    };
+  }
   const reasons = new Set(complexity.reasons.map((reason) => reason.toLowerCase()));
   const noNativeText =
     !nativeText.trim() ||

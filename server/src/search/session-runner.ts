@@ -2,7 +2,7 @@ import { parseSelfQuerySyntax } from "./self-query.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
-import { resolveEmbeddingRoute, type DeferredSearchStats, type SearchResult } from "@docslurp/shared";
+import { localEmbeddingPooling, resolveEmbeddingRoute, type DeferredSearchStats, type SearchResult } from "@docslurp/shared";
 
 import {
   createEvidenceRetrievalAdapters,
@@ -98,6 +98,7 @@ function embeddingPipelineOf(setup: SearchSetup): string | null {
     return embeddingPipelineId({
       provider: route.provider,
       model: route.model,
+      pooling: route.provider === "transformers.js" ? localEmbeddingPooling(route.modelUri) : undefined,
       requestedDimensions: route.requestedDimensions,
       normalize: embedding.normalize,
     });

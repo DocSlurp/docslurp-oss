@@ -133,6 +133,23 @@ describe("servedVectorSearch", () => {
     expect(search).toHaveBeenCalledTimes(2);
   });
 
+  it("re-embeds the query for a config that differs only in pooling", async () => {
+    const Cls = withModel("llm://transformers.js/Xenova/bge-m3?pooling=cls");
+    expect(hash(Cls)).not.toBe(hash(C));
+    await seed([hash(C), hash(Cls)], { [hash(C)]: cfg(C), [hash(Cls)]: cfg(Cls) }, Cls);
+    const search = vi.fn(async (_vector: number[], _serve: Serve) => [chunk("x")]);
+    const embed = vi.fn(async (_text: string, _embedding: { modelUri?: string }) => [7]);
+    await serving.servedVectorSearch({
+      workspaceId: "w", pipeline: Cls, indexConfigs: { [hash(C)]: cfg(C), [hash(Cls)]: cfg(Cls) }, queryVector: [0], query: "q", deps: { search: search as never, embed },
+    });
+    // The mean-pooled documents are searched with a mean-pooled query, never the current CLS vector.
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(embed.mock.calls[0]![1]).toMatchObject({ modelUri: "llm://transformers.js/Xenova/bge-m3" });
+    const vectors = search.mock.calls.map(([vector, serve]) => ({ vector, value: serve?.hash?.value }));
+    expect(vectors).toContainEqual({ vector: [7], value: hash(C) });
+    expect(vectors).toContainEqual({ vector: [0], value: hash(Cls) });
+  });
+
   it("serves the three configs with the most documents and records a diagnostic when there are more", async () => {
     const E = withModel("llm://transformers.js/Xenova/gte-small");
     const F = { ...E, chunkOverlap: !E.chunkOverlap };
@@ -159,6 +176,51 @@ describe("servedVectorSearch", () => {
       const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
       expect(Object.keys(ws!.index_configs)).toEqual([hash(C)]);
     });
+  });
+
+  it("a prune from a snapshot taken before a config change keeps the new config while its documents build", async () => {
+    // Stored pipeline is already B (re-index queued, no B documents yet); the caller still holds C.
+    await seed([hash(C), hash(C)], { [hash(C)]: cfg(C), [hash(B)]: cfg(B) }, B);
+    const search = vi.fn(async () => [chunk("a")]);
+    await serving.servedVectorSearch({
+      workspaceId: "w", pipeline: C, indexConfigs: { [hash(C)]: cfg(C), [hash(B)]: cfg(B) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    expect(Object.keys(ws!.index_configs).sort()).toEqual([hash(B), hash(C)].sort());
+  });
+
+  it("restores the current config's entry when a stale prune dropped it", async () => {
+    await seed([hash(B), hash(B)], { [hash(C)]: cfg(C) }, B);
+    const search = vi.fn(async () => [chunk("b")]);
+    await serving.servedVectorSearch({
+      workspaceId: "w", pipeline: B, indexConfigs: { [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
+    });
+    await vi.waitFor(async () => {
+      const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+      expect(ws!.index_configs).toEqual({ [hash(B)]: cfg(B) });
+    });
+  });
+
+  it("does not apply a prune when the pipeline changes between reading it and updating", async () => {
+    await seed([hash(C)], { [hash(C)]: cfg(C), [hash(B)]: cfg(B) }, C);
+    // Simulate the sweeper's read then a config change to B landing before its update.
+    const racing = new Proxy(sql, {
+      apply(target, thisArg, args) {
+        const text = (args[0] as TemplateStringsArray).join("?");
+        const result = Reflect.apply(target as never, thisArg, args) as Promise<unknown>;
+        if (text.includes("select pipeline from workspaces")) {
+          return result.then(async (rows) => {
+            await sql`update workspaces set pipeline = ${sql.json(JSON.parse(JSON.stringify(B)))} where id = 'w'`;
+            return rows;
+          });
+        }
+        return result;
+      },
+    });
+    expect(await serving.pruneIndexConfigs("w", racing as never)).toBeNull();
+    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    expect(Object.keys(ws!.index_configs).sort()).toEqual([hash(B), hash(C)].sort());
   });
 
   it("sweeper prune empties entries once re-indexed documents replace the old ones", async () => {

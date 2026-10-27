@@ -45,25 +45,25 @@ export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: 
 }
 
 export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: string; description: string; inputSchema: Record<string, unknown> }> = [
-  { name: "updateEstimate", title: "Estimate Workspace Settings Change", description: "Impact kind and cost of PATCHing workspace settings (pipeline, embedding, chat...), including the re-index it would queue. Read-only; nothing is applied.", inputSchema: {
+  { name: "updateEstimate", title: "Estimate workspace settings cost", description: "Impact kind and cost of PATCHing workspace settings (pipeline, embedding, chat...), including the re-index it would queue. Read-only; nothing is applied.", inputSchema: {
     type: "object", properties: { workspace, changes: { ...freeObject, description: "The PATCH body you intend to send, for example { pipeline: {...}, apply: \"reindex\" }." } }, required: ["changes"] } },
-  { name: "searchSettingsEstimate", title: "Estimate Search Settings Change", description: "Impact and cost of changing a workspace's search settings. Read-only.", inputSchema: {
+  { name: "searchSettingsEstimate", title: "Estimate search settings cost", description: "Impact and cost of changing a workspace's search settings. Read-only.", inputSchema: {
     type: "object", properties: { workspace, changes: { ...freeObject, description: "The search-settings PATCH body." } }, required: ["changes"] } },
-  { name: "reprocessEstimate", title: "Estimate Run Reprocess", description: "Cost of re-running a run, optionally from a stage. Read-only.", inputSchema: {
+  { name: "reprocessEstimate", title: "Estimate reprocessing cost", description: "Cost of re-running a run, optionally from a stage. Read-only.", inputSchema: {
     type: "object", properties: { runId: { type: "string", minLength: 1 }, stages: { type: "array", items: { type: "string" } }, stageFrom: { type: "string" } }, required: ["runId"] } },
-  { name: "fullIndexEstimate", title: "Estimate Full Index", description: "Cost of fully indexing a deferred workspace, listed documents, or one document (documentId). Read-only.", inputSchema: {
+  { name: "fullIndexEstimate", title: "Estimate full indexing cost", description: "Cost of fully indexing a deferred workspace, listed documents, or one document (documentId). Read-only.", inputSchema: {
     type: "object", properties: { workspace, documentId: { type: "string", minLength: 1 }, documentIds: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 500 } } } },
-  { name: "indexingModeEstimate", title: "Estimate Indexing Mode Switch", description: "Cost of switching a workspace to full, map or visual indexing. Read-only.", inputSchema: {
+  { name: "indexingModeEstimate", title: "Estimate indexing mode cost", description: "Cost of switching a workspace to full, map or visual indexing. Read-only.", inputSchema: {
     type: "object", properties: { workspace, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
-  { name: "graphRebuildEstimate", title: "Estimate Graph Rebuild", description: "Cost of rebuilding the workspace knowledge graph. Read-only.", inputSchema: {
+  { name: "graphRebuildEstimate", title: "Estimate graph rebuild cost", description: "Cost of rebuilding the workspace knowledge graph. Read-only.", inputSchema: {
     type: "object", properties: { workspace } } },
-  { name: "uploadEstimate", title: "Estimate Upload", description: "Cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size.", inputSchema: {
+  { name: "uploadEstimate", title: "Estimate upload cost", description: "Cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option.", inputSchema: {
     type: "object", properties: { workspace, files: { type: "array", minItems: 1, maxItems: 500, items: {
-      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 } }, required: ["name", "size"] } } }, required: ["files"] } },
+      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 } }, required: ["name", "size"] } } }, required: ["files"] } },
 ];
 
 export const jobsGetToolDefinition = {
-  id: "getJob", title: "Get Job",
+  id: "getJob", title: "Check background job",
   description: "Read a background job (re-index, full-index, graph rebuild, reprocess) by ID: status (queued, blocked, processing, completed, failed, cancelled), blocked reason, queue position, runs and estimate. Poll on a later turn if unfinished.",
   inputSchema: { type: "object", properties: { jobId: { type: "string", minLength: 1 } }, required: ["jobId"] },
 };
@@ -77,7 +77,7 @@ const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>>
   "fullIndexEstimate": z.object({ ...common, documentId: z.string().min(1).optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }),
   "indexingModeEstimate": z.object({ ...common, mode: z.enum(["full", "map", "visual"]) }),
   "graphRebuildEstimate": z.object({ ...common }),
-  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional() })).min(1).max(500) }),
+  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional() })).min(1).max(500) }),
 };
 
 export function isEstimateToolName(name: string): name is EstimateToolName {

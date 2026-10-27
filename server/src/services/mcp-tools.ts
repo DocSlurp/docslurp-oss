@@ -14,7 +14,7 @@ import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { completeUploadInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -33,6 +33,13 @@ import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 import { dispatchWebTool, isWebToolId } from "./web/mcp-web-tools.js";
 
 export { mcpManifest };
+
+/** Standard or URL-safe base64, whitespace ignored; null when malformed. */
+function decodeBase64(value: string): Buffer | null {
+  const compact = value.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = compact.padEnd(Math.ceil(compact.length / 4) * 4, "=");
+  return /^[A-Za-z0-9+/]*={0,2}$/.test(padded) && compact.length % 4 !== 1 ? Buffer.from(padded, "base64") : null;
+}
 
 function routeBaseUrl(_url: string): string {
   return mcpOrigin(_url);
@@ -138,6 +145,20 @@ const mcpAdapterRoutes = new Hono()
       native.onError(spendAwareErrorHandler);
       const headers = new Headers();
       if (input.idempotencyKey) headers.set("Idempotency-Key", input.idempotencyKey);
+      if (input.inlineFiles) {
+        // Clients without network egress cannot PUT to storage, so the bytes
+        // arrive in the tool call and go through the multipart bulk intake.
+        const decoded = input.inlineFiles.map(file => ({ ...file, bytes: file.text === undefined ? decodeBase64(file.contentBase64!) : Buffer.from(file.text, "utf8") }));
+        const invalid = decoded.find(file => !file.bytes?.length);
+        if (invalid) return adapterError(c, 400, `contentBase64 for ${invalid.filename} is not valid base64`);
+        if (decoded.reduce((total, file) => total + file.bytes!.length, 0) > INLINE_UPLOAD_MAX_BYTES) {
+          return adapterError(c, 413, `Inline files exceed ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; use files for direct storage upload or urls`);
+        }
+        const form = new FormData();
+        if (input.workspace) form.set("workspace", input.workspace);
+        for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
+        return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
+      }
       headers.set("Content-Type", "application/json");
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ workspace: input.workspace,

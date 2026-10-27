@@ -18,13 +18,14 @@ import { Hono } from "hono";
 import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
-import { requestContextMiddleware } from "./lib/request-context.js";
+import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
+import { exportsRoutes } from "./routes/exports.js";
 import { extractorRoutes } from "./routes/extractors.js";
 import { docsRoutes } from "./routes/docs.js";
 import { healthRoutes } from "./routes/health.js";
@@ -37,7 +38,6 @@ import { workspacesRoutes } from "./routes/workspaces.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
-import { indexStalenessRoutes } from "./routes/index-staleness.js";
 import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
@@ -73,6 +73,10 @@ import { spendAwareErrorHandler } from "./services/billing/spend-guard.js";
 import { UnreadableSourceError } from "./services/source-metadata.js";
 import { warmDefaultLocalEmbedding } from "./lib/ai.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
+import { registerProviderPolicy } from "./lib/provider-policy.js";
+
+// OpenRouter requests made while serving a request follow its org's China-provider setting.
+registerProviderPolicy();
 
 const execFileAsync = promisify(execFile);
 
@@ -103,9 +107,13 @@ export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.
   // Native paths answer thrown errors in the error envelope; protocol surfaces keep their shapes.
-  app.onError(nativeErrorHandler((error, c) => error instanceof UnreadableSourceError
-    ? c.json({ error: error.message, code: error.code }, error.statusCode)
-    : spendAwareErrorHandler(error, c)));
+  app.onError(nativeErrorHandler((error, c) => {
+    // The request span records it (message, stack) once the response is sent.
+    setCurrentRequestError(error);
+    return error instanceof UnreadableSourceError
+      ? c.json({ error: error.message, code: error.code }, error.statusCode)
+      : spendAwareErrorHandler(error, c);
+  }));
 
   // Authentication is served first, ahead of the global middleware below: these
   // paths never ran the API IP limit, request context or widget CORS.
@@ -158,7 +166,9 @@ export function createApiApp(): Hono {
   app.route("/v1/jobs", jobsRoutes);
   app.route("/v1/workspaces", workspacesRoutes);
   app.route("/v1/documents", documentsRoutes);
+  app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
+  // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
@@ -174,7 +184,6 @@ export function createApiApp(): Hono {
   app.route("/v1/chat", workspaceChatRoutes);
   app.route("/v1", chatCompletionsRoutes);
   app.route("/v1", suggestRoutes);
-  app.route("/v1/runs", indexStalenessRoutes);
   app.route("/v1/mcp", mcpRoutes);
   app.route("/v1/session-tools", sessionToolRoutes);
   app.route("/compat/algolia", algoliaCompatRoutes);

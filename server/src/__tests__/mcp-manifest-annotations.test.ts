@@ -34,4 +34,16 @@ describe("capability manifest annotations", () => {
       expect(tool.annotations, tool.id).toMatchObject(expected[tool.id]!);
     }
   });
+
+  it("lists tools in product order with consistent sentence-case titles", () => {
+    const tools = mcpManifest("https://example.test").capabilities.filter((capability) => capability.category === "tool");
+    expect(tools.slice(0, 5).map((tool) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat"]);
+    expect(tools.at(-1)?.id).toBe("completeUpload");
+    for (const tool of tools) {
+      // Clients such as Claude.ai re-sort by id and show titles side by side, so no Title Case drift.
+      expect(tool.title, tool.id).toMatch(/^[A-Z][a-z]+ /);
+      expect(tool.title.split(" ").slice(1).filter((word) => /^[A-Z][a-z]/.test(word)), tool.title).toEqual([]);
+      if (tool.id.endsWith("Estimate")) expect(tool.title, tool.id).toMatch(/^Estimate .+ cost$/);
+    }
+  });
 });

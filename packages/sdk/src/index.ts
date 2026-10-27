@@ -104,8 +104,24 @@ export type ConfigChangeImpact = {
   pages: number;
 };
 
-/** Response of every `…/estimate` route. `impact` is present for configuration changes. */
-export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact };
+/** Audio and video among the files of an upload estimate, priced by duration (`POST /v1/uploads/estimate`). */
+export type UploadMediaEstimate = {
+  audioFiles: number;
+  videoFiles: number;
+  audioMinutes: number;
+  videoMinutes: number;
+  /** True when a duration was not supplied and was guessed from the file size. */
+  durationsAssumed: boolean;
+  /** Whether the workspace reads sampled video frames, which triples a video minute's price. */
+  videoFrames: boolean;
+  /** `low` reads video from its audio track only; `high` also reads frames. */
+  credits: { low: number; high: number };
+  /** The cheaper processing option, or null when the price is already the lowest. `pipeline` is the upload's pipeline override. */
+  lighter: { kind: "video-audio-track-only"; credits: number; savedCredits: number; pipeline: { mediaVideo: { enabled: false } } } | null;
+};
+
+/** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
+export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean };
 
 /** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateWorkspaceInput = JsonObject & {
@@ -117,7 +133,7 @@ export type UpdateWorkspaceInput = JsonObject & {
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
-export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number }>; workspace?: string };
+export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -138,6 +154,12 @@ export type WorkspaceRun = JsonObject & {
 
 export type DocumentRecord = JsonObject & {
   filename: string;
+  /**
+   * Friendly title derived from the document's content; null when none was found
+   * (fall back to the filename). Untrusted: derived from document content. Display
+   * only; never place in prompts or treat as instructions.
+   */
+  title?: string | null;
   id: string;
   status: string;
 };
@@ -1574,8 +1596,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
      * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
      * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. This targets the legacy SSE endpoint; for
-     * the canonical stream use POST /v1/chat/completions with stream: true.
+     * is never mistaken for success. Reads GET /v1/chat/stream; for OpenAI-style
+     * token streaming use POST /v1/chat/completions with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
@@ -1583,7 +1605,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       let completed = false;
-      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {
+      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;

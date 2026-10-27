@@ -509,6 +509,49 @@ export async function sendWorkspaceInviteEmail(args: {
   };
 }
 
+/**
+ * A finished (or failed) zip export the user was promised an email for.
+ * Throws when the provider refuses, so the export sweep can retry.
+ */
+export async function sendExportReadyEmail(args: {
+  userId: string;
+  recipientEmail: string;
+  orgId: string;
+  workspaceId: string;
+  filename: string;
+  ready: boolean;
+  sizeLabel: string | null;
+  expiresAt: Date;
+  url: string;
+}): Promise<void> {
+  const deliveryId = randomUUID();
+  const until = args.expiresAt.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+  // A fixed subject: the filename comes from user-named documents and workspaces, so it stays in the escaped body.
+  const subject = args.ready ? "Your DocSlurp export is ready" : "Your DocSlurp export didn't finish";
+  const size = args.sizeLabel ? ` (${args.sizeLabel})` : "";
+  const html = args.ready
+    ? `<p>Your DocSlurp export <strong>${escapeHtml(args.filename)}</strong>${escapeHtml(size)} is ready.</p><p><a href="${escapeAttribute(args.url)}">Download the export</a></p><p>The link works for 7 days, until ${escapeHtml(until)} (UTC). After that the file is deleted; export again from DocSlurp if you need it later. Sign in with this email address to download.</p>`
+    : `<p>Your DocSlurp export <strong>${escapeHtml(args.filename)}</strong> couldn't be built.</p><p><a href="${escapeAttribute(args.url)}">Open DocSlurp</a> to try again, or export Markdown only for a smaller file.</p>`;
+  const text = args.ready
+    ? `Your DocSlurp export ${args.filename}${size} is ready.\n\nDownload: ${args.url}\n\nThe link works for 7 days, until ${until} (UTC). After that the file is deleted; export again from DocSlurp if you need it later.\n`
+    : `Your DocSlurp export ${args.filename} couldn't be built.\n\nOpen DocSlurp to try again, or export Markdown only for a smaller file: ${args.url}\n`;
+
+  const delivery = await deliverEmail({ deliveryId, recipient: args.recipientEmail, subject, html, text });
+  await logDelivery({
+    id: deliveryId,
+    userId: args.userId,
+    orgId: args.orgId,
+    workspaceId: args.workspaceId,
+    event: args.ready ? "export.ready" : "export.failed",
+    provider: delivery.provider,
+    recipient: args.recipientEmail,
+    subject,
+    delivered: delivery.delivered,
+    metadata: { orgId: args.orgId, workspaceId: args.workspaceId, response: delivery.responseText ?? null }
+  }).catch(() => undefined);
+  if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the export email`);
+}
+
 /** The signed-in accept page (dashboard). */
 export function inviteAcceptUrl(token: string, kind: "organization" | "workspace"): string {
   const base = (process.env.APP_URL ?? "http://localhost:4321").replace(/\/$/, "");
@@ -553,7 +596,8 @@ async function logDelivery(args: {
   userId: string;
   orgId?: string | null;
   workspaceId?: string | null;
-  event: NotificationEvent;
+  /** Transactional emails the user asked for (exports) are not preference-gated events. */
+  event: NotificationEvent | "export.ready" | "export.failed";
   provider: string;
   recipient: string;
   subject: string;
