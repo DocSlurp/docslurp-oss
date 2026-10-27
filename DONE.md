@@ -111,3 +111,4 @@
 - Refreshed model prices, image support, context windows and infrastructure observations from official live sources (2026-10-25); reconciled runtime estimates, excluded retired free eval route and uneconomic RTX 4090 cost-policy SKU; retained evidence and unverified historical dates.
 
 - Store page images as lossless WebP (same pixels, roughly half the bytes), encoded by `cwebp` through the parser sandbox with effort 1 for short retention and 6 otherwise (`DOCSLURP_PAGE_IMAGE_FORMAT`, `DOCSLURP_PAGE_IMAGE_WEBP_EFFORT`, `DOCSLURP_PAGE_IMAGE_WEBP_SHORT_RETENTION_HOURS`); a separate key space keeps existing PNG pages readable, and a missing `cwebp` stores PNG with a warning and metric.
+- Bound worker CI apt installation to two five-minute attempts, retrying once with signed official Ubuntu archive/security sources when the runner mirror stalls.
