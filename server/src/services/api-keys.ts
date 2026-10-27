@@ -4,6 +4,7 @@ import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { apiKeyRateLimitRulesSchema, materializationPolicyOverridesSchema, type ApiKeyRateLimitRule, type MaterializationPolicy } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { AllowedOriginError, normalizeAllowedOriginEntry, originMatchesAllowlist } from "../lib/allowed-origins.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
 import { ensurePersonalOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
 
@@ -98,63 +99,40 @@ function parseApiKeyType(value: string | null | undefined): ApiKeyType {
   return value === "client" ? "client" : "server";
 }
 
-function normalizeAllowedDomain(value: string): string {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed) {
-    throw new Error("Allowed domains cannot be empty");
-  }
-
-  const withoutWildcard = trimmed.replace(/^\*\./, "").replace(/^\./, "");
-  const candidate = /^[a-z]+:\/\//.test(withoutWildcard) ? withoutWildcard : `https://${withoutWildcard}`;
-
-  let parsed: URL;
-  try {
-    parsed = new URL(candidate);
-  } catch {
-    throw new Error(`Invalid allowed domain: ${value}`);
-  }
-
-  if (parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
-    throw new Error(`Allowed domains must be hostnames only: ${value}`);
-  }
-
-  const hostname = parsed.hostname.trim().toLowerCase();
-  if (!hostname) {
-    throw new Error(`Invalid allowed domain: ${value}`);
-  }
-
-  return hostname;
-}
-
 function normalizeAllowedDomains(allowedDomains: string[] | undefined | null, keyType: ApiKeyType): string[] {
-  const normalized = [...new Set((allowedDomains ?? []).map(normalizeAllowedDomain))];
+  let normalized: string[];
+  try {
+    normalized = [...new Set((allowedDomains ?? []).map(normalizeAllowedOriginEntry))];
+  } catch (error) {
+    if (error instanceof AllowedOriginError) throw new OrganizationError(400, "invalid_allowed_domain", error.message);
+    throw error;
+  }
   if (keyType === "client" && normalized.length === 0) {
-    throw new Error("Client API keys must include at least one allowed domain");
+    throw new OrganizationError(400, "invalid_allowed_domain", "Client API keys must include at least one allowed domain");
   }
   return keyType === "server" ? [] : normalized;
 }
 
-function resolveRequestHostname(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed || trimmed.toLowerCase() === "null") {
-    return null;
-  }
+/** How to fix a browser key that has no workspace allowlist; shown on refusal and on save. */
+export const CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE = "Browser (client) API keys must be limited to specific workspaces. Edit the key on the API keys page, or PATCH /v1/api-keys/:id with workspaceIds, and choose the workspaces it may use.";
 
-  try {
-    return new URL(trimmed).hostname.trim().toLowerCase() || null;
-  } catch {
-    return null;
+/**
+ * A browser key is public, so it must name the workspaces it may reach: an
+ * empty allowlist would otherwise mean every workspace its owner can reach.
+ */
+export function assertClientKeyWorkspaces(keyType: ApiKeyType, workspaceIds: string[]): void {
+  if (keyType === "client" && workspaceIds.length === 0) {
+    throw new OrganizationError(400, "client_key_workspaces_required", CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE);
   }
 }
 
-function isAllowedClientHostname(requestHostname: string | null, allowedDomains: string[]): boolean {
-  if (!requestHostname || allowedDomains.length === 0) {
-    return false;
+/** A stored browser key without a workspace allowlist (written before the rule); refused at request time. */
+export class ClientKeyWorkspacesRequiredError extends Error {
+  readonly status = 403;
+  readonly code = "client_key_workspaces_required";
+  constructor() {
+    super(CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE);
   }
-
-  return allowedDomains.some((allowedDomain) =>
-    requestHostname === allowedDomain || requestHostname.endsWith(`.${allowedDomain}`)
-  );
 }
 
 /** Stored rules are re-validated on read so a malformed row can never break auth. */
@@ -225,6 +203,7 @@ export async function createApiKey(
   return await withOrganizationLock(orgId, userId, async (tx, actor) => {
     assertOrganizationKeyScopes(keyType, scopes, actor.role);
     const workspaceIds = await normalizeKeyWorkspaceIds(tx, orgId, userId, limits?.workspaceIds);
+    assertClientKeyWorkspaces(keyType, workspaceIds);
     assertClientKeySensitiveScopes(keyType, scopes, workspaceIds, limits?.allowClientSensitiveScopes === true);
     const [row] = await tx<ApiKeyRow[]>`
       insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy)
@@ -408,6 +387,8 @@ export async function updateApiKey(id: string, userId: string, updates: {
     const nextWorkspaceIds = updates.workspaceIds !== undefined
       ? await normalizeKeyWorkspaceIds(tx, existing.org_id!, userId, updates.workspaceIds)
       : existing.workspace_ids ?? [];
+    // Every save of a browser key must leave it bound to workspaces, including a legacy key with none.
+    assertClientKeyWorkspaces(nextKeyType, nextWorkspaceIds);
     if (updates.scopes !== undefined || updates.workspaceIds !== undefined) {
       assertClientKeySensitiveScopes(nextKeyType, nextScopes, nextWorkspaceIds, updates.allowClientSensitiveScopes === true);
     }
@@ -456,7 +437,7 @@ export interface ValidatedKey {
   rateLimitRpm: number | null;
   rateLimitPpd: number;
   rateLimits: ApiKeyRateLimitRule[];
-  /** Workspace allowlist; empty means every workspace the owner can reach in `orgId`. */
+  /** Workspace allowlist; empty (server keys only) means every workspace the owner can reach in `orgId`. Browser keys always have one. */
   workspaceIds: string[];
   /** Per-key materialization caps; absent or `{}` adds no restriction. */
   materializationPolicy?: Partial<MaterializationPolicy>;
@@ -486,12 +467,14 @@ export async function validateApiKey(
   const allowedDomains = row.allowed_domains ?? [];
   if (
     keyType === "client" &&
-    !isAllowedClientHostname(
-      resolveRequestHostname(requestContext?.origin != null ? requestContext.origin : requestContext?.referer),
-      allowedDomains
-    )
+    !originMatchesAllowlist(requestContext?.origin != null ? requestContext.origin : requestContext?.referer, allowedDomains)
   ) {
     return null;
+  }
+  // A browser key written before workspace allowlists were required: refuse it
+  // with how to fix it, never widen it to every workspace its owner can reach.
+  if (keyType === "client" && (row.workspace_ids ?? []).length === 0) {
+    throw new ClientKeyWorkspacesRequiredError();
   }
 
   // Usage statistics are buffered; every limit, including the daily page cap,

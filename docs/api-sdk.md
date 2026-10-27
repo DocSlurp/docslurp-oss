@@ -46,6 +46,19 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them by default: grant the `web` scope only to a key limited to specific workspaces, because anyone can copy a browser key from your page source.
 
+A browser key must name the workspaces it may use (`workspaceIds`), because anyone can copy it from your page source. A browser key created before this rule, with no workspaces, is refused with `client_key_workspaces_required` until you edit it and choose its workspaces; it is never widened to every workspace in the organization.
+
+Allowed websites for a browser key are matched like this:
+
+| Entry | Allows |
+| --- | --- |
+| `docs.example.com` | Exactly that host, over http or https, on any port. Subdomains are not included. |
+| `*.example.com` | Any subdomain of example.com, but not example.com itself (add both if you need both). |
+| `https://docs.example.com` | That host over https only. |
+| `docs.example.com:8443`, `http://localhost:4321` | That port only. |
+
+A shared public suffix such as `github.io`, `vercel.app`, `pages.dev`, `co.uk` or `com` is refused, because every site on it would be allowed: enter your own site, such as `yourname.github.io`. The check uses the browser's `Origin` (or `Referer` when there is no `Origin`), which only a browser enforces. A script outside a browser can send any `Origin`, so keep the key's scopes, workspaces and spend limits narrow.
+
 A key's type is fixed when you create it; to switch, create a new key. Keys issued before typed prefixes (`dslp_<hex>`) keep working. Create and rotate keys on the [API keys](https://docslurp.io/app/api-keys) page.
 
 The SDK, search adapters and search widget refuse to send a `dslp_priv_` key from a browser. This check is in SDK builds after 0.2.0; the published 0.2.0 does not include it.
@@ -901,7 +914,7 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Per client IP | `ip-<category>`, `ip-burst` | Every request. Categories: `upload`, `search`, `chat-ai`, `read`, `write`, `webhook`. |
 | Per key or signed-in user | `<table>-<category>` | The per-category limit of the organization's table (`free-…` for starter organizations, `paid-…` once it has bought credits), capped by the key's requests per minute if it has one. |
 | Custom key windows | `key-requests-<window>` | All endpoints together, e.g. 1,000 requests per hour. |
-| Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Credits the key's work was charged (pages, storage, searches, chat answers) in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. |
+| Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Credits the key's work was charged (pages, storage, searches, chat answers) in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. If the spend can't be read (a database problem), those requests get a 503 `unavailable` with `Retry-After` instead of going through unchecked. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 | Per visitor of a browser key | `client-visitor-<category>` | Browser (publishable) keys only: each visitor IP (an IPv6 /64) gets a share of the key's budget per minute, by default 20 `chat-ai` and 120 `search`, so one visitor cannot use up a widget's whole allowance. |
 | Chat in progress | `chat-concurrency` | AI chat turns still running or streaming at once: 16 per API key and 3 per browser-key visitor. A turn frees its slot when its response ends or the client disconnects. |
