@@ -496,6 +496,18 @@ export class CommandRunner {
     return { ...plan, pages: 1 };
   }
 
+  /** Lossless `dwebp` back to PNG (vision routes not verified for WebP), through the parser sandbox. */
+  async decodeWebpToPng(source: string, output: string): Promise<CommandPlan> {
+    if (!path.isAbsolute(source) || !path.isAbsolute(output)) throw new Error("dwebp paths must be absolute");
+    const plan = await this.planDocumentTool({
+      binary: "dwebp",
+      args: ["-quiet", "-o", output, source],
+      fileArgIndexes: [3],
+      supportsDoubleDash: true,
+    });
+    return { ...plan, pages: 1 };
+  }
+
   async extractMarkdown(source: string): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pandoc",
