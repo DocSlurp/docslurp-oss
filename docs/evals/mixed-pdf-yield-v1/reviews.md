@@ -91,6 +91,22 @@ schema behavior fixtures and 19 contract fixtures passing. A fresh source-blind
 Sol Builder is implementing the contract and may generate only the three training
 prototypes before independent review. No full expansion or measurements are accepted.
 
+The attempt-4 Builder completed the 18-PDF / 180-page prototype at
+`mixed-pdf-fools-gold-a4/round-3`. The coordinator reran the frozen structural checker:
+18 PDFs, 180 pages, zero reported misses. Seven focused contract tests also passed.
+The repeat invocation delivered 18 byte-identical PDFs; label bytes differ because
+they retain actual execution paths and producer-history hashes, while the Writer
+native export retains its actual export timestamp. Immutable authoring/world hashes
+match. The independent source-visible audit is still pending, so these observations
+do not establish fixture acceptance or extraction quality.
+
+The artifact directories preserve four generation invocations: an initial failed
+pixel check, an intermediate build, the final build and its repeat. Frozen sources
+used by the final and repeat builds are retained with their hashes. Two current
+repository helpers additionally contain unexecuted enriched-class corrections;
+neither enriched outputs nor the balanced pilot/full corpus have been validated.
+Independent review must use the frozen source snapshot for prototype provenance.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.
