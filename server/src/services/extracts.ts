@@ -904,7 +904,7 @@ async function deleteExtractRows(row: DeletionClaim, runIds: string[]): Promise<
 }
 
 /** Empties the prefix a bounded number of pages per pass, persisting deleted and failed counts as it goes. */
-async function purgeExtractPrefix(row: Pick<DeletionClaim, "id" | "storage_prefix">): Promise<{ objects: number; bytes: number; done: boolean }> {
+async function purgeExtractPrefix(row: Pick<DeletionClaim, "id" | "storage_prefix">, releaseLease = true): Promise<{ objects: number; bytes: number; done: boolean }> {
   let objects = 0;
   let bytes = 0;
   let failed = 0;
@@ -920,32 +920,35 @@ async function purgeExtractPrefix(row: Pick<DeletionClaim, "id" | "storage_prefi
     }
   } finally {
     await sql`update extracts set deleted_objects = deleted_objects + ${objects}, deleted_bytes = deleted_bytes + ${bytes},
-      failed_objects = failed_objects + ${failed}, ${done ? sql`` : sql`lease_expires_at = null,`} updated_at = now() where id = ${row.id}`;
+      failed_objects = failed_objects + ${failed}, ${done || !releaseLease ? sql`` : sql`lease_expires_at = null,`} updated_at = now() where id = ${row.id}`;
   }
   return { objects, bytes, done };
 }
 
 /** One more listing of each deleted extract's prefix, hours later, for writes that arrived after the purge. */
 async function relistDeletedExtracts(result: ExtractSweepResult): Promise<void> {
-  const due = await sql<{ id: string; storage_prefix: string }[]>`
-    update extracts set relist_after = null
+  const due = await sql<{ id: string; storage_prefix: string; lease_expires_at: string }[]>`
+    update extracts set lease_expires_at = now() + make_interval(mins => ${LEASE_MINUTES})
     where id in (
       select id from extracts where state = 'deleted' and relist_after is not null and relist_after <= now()
+        and (lease_expires_at is null or lease_expires_at <= now())
       order by relist_after limit ${DELETE_BATCH} for update skip locked
     )
-    returning id, storage_prefix
+    returning id, storage_prefix, lease_expires_at::text
   `;
   for (const row of due) {
     try {
-      const purge = await purgeExtractPrefix(row);
+      const purge = await purgeExtractPrefix(row, false);
       result.deletedObjects += purge.objects;
       result.deletedBytes += purge.bytes;
       if (purge.objects > 0) console.warn(`[extract-retention] late objects deleted extract=${row.id} objects=${purge.objects}`);
-      if (!purge.done) await sql`update extracts set relist_after = now() where id = ${row.id}`;
+      // A crashed claimant leaves relist_after due. Expiry permits retry; fence stale acknowledgments.
+      await sql`update extracts set relist_after = ${purge.done ? null : new Date()}, lease_expires_at = null
+        where id = ${row.id} and state = 'deleted' and lease_expires_at = ${row.lease_expires_at}`;
     } catch (error) {
       result.failed += 1;
       console.error(`[extract-retention] ALERT relist failed extract=${row.id}: ${error instanceof Error ? error.message : String(error)}`);
-      await sql`update extracts set relist_after = now() + interval '1 hour', last_error = ${(error instanceof Error ? error.message : String(error)).slice(0, 1000)} where id = ${row.id}`.catch(() => undefined);
+      await sql`update extracts set lease_expires_at = null, relist_after = now() + interval '1 hour', last_error = ${(error instanceof Error ? error.message : String(error)).slice(0, 1000)} where id = ${row.id} and state = 'deleted' and lease_expires_at = ${row.lease_expires_at}`.catch(() => undefined);
     }
   }
 }

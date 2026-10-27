@@ -16,7 +16,7 @@ import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
-import { lanceDbMaintenanceSettings, requestLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
+import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
 /**
  * Superseded-version purge.
@@ -286,12 +286,8 @@ export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: 
         }
         const maintenance = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
         if (purgeHistory) {
-          // Expired extract content: through the per-table maintenance queue (one optimize at a time per table,
-          // coalesced with other requests), pruning every prior version instead of keeping the retention window.
-          // A request made while another is pending joins it (with that request's options); the second
-          // request then runs after it, with these options, once the delete is committed.
-          await requestLanceDbMaintenance(uri, tableName, { ...maintenance, versionRetentionMs: 0 });
-          await requestLanceDbMaintenance(uri, tableName, { ...maintenance, versionRetentionMs: 0 });
+          // Keep the durable cleanup row unless compaction and history pruning actually succeed.
+          await requireLanceDbMaintenance(uri, tableName, { ...maintenance, versionRetentionMs: 0 });
         } else if (maintenance.enabled) {
           await requestLanceDbMaintenance(uri, tableName, maintenance);
         }

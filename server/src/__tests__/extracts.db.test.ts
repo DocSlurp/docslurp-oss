@@ -294,6 +294,12 @@ describe("extract sweep", () => {
     // Hours later the prefix is listed once more and a late write is removed.
     mocks.objects.set(`${extract.storagePrefix}/raw/late.pdf`, 7);
     await sql`update extracts set relist_after = now() - interval '1 second' where id = ${extract.id}`;
+    // Simulate a process dying after claiming but before storage I/O or acknowledgment.
+    await sql`update extracts set lease_expires_at = now() + interval '10 minutes' where id = ${extract.id}`;
+    expect(await extracts.sweepExtracts()).toMatchObject({ deletedObjects: 0 });
+    expect(mocks.objects.has(`${extract.storagePrefix}/raw/late.pdf`)).toBe(true);
+    expect((await sql`select relist_after from extracts where id = ${extract.id}`)[0]!.relist_after).not.toBeNull();
+    await sql`update extracts set lease_expires_at = now() - interval '1 second' where id = ${extract.id}`;
     expect(await extracts.sweepExtracts()).toMatchObject({ deletedObjects: 1 });
     expect(mocks.objects.has(`${extract.storagePrefix}/raw/late.pdf`)).toBe(false);
     expect((await sql`select relist_after from extracts where id = ${extract.id}`)[0]!.relist_after).toBeNull();

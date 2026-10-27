@@ -2,12 +2,13 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-import { artifactOwner, drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
+import * as lanceConnection from "../stages/lancedb-connection.js";
+import { deleteLanceDbDocumentRows, artifactOwner, drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
 
 
 let db: PGlite;
@@ -37,6 +38,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  vi.restoreAllMocks();
   await sql`delete from documents`;
   await sql`delete from kg_nodes`;
   await sql`delete from workspace_runs`;
@@ -408,8 +410,22 @@ describe("superseded version purge", () => {
     `;
     const vectorDeletes: Parameters<DeleteVectorRows>[0][] = [];
     const { storage } = fakeStorage([`extracts/o1/${ext}/raw/x.pdf`]);
-    await drainDocumentCleanupQueue(sql, storage, options(async (args) => { vectorDeletes.push(args); }));
+    const optimize = vi.fn().mockRejectedValueOnce(new Error("history prune failed")).mockResolvedValue({
+      compaction: { fragmentsRemoved: 1 }, prune: { oldVersionsRemoved: 1, bytesRemoved: 8 },
+    });
+    const table = { delete: vi.fn(), optimize, countRows: async () => 0, listIndices: async () => [], close: vi.fn() };
+    vi.spyOn(lanceConnection, "connectLanceDb").mockResolvedValue({
+      tableNames: async () => ["chunks"], openTable: async () => table, close: vi.fn(),
+    } as unknown as import("@lancedb/lancedb").Connection);
+    const remove: DeleteVectorRows = async (args) => { vectorDeletes.push(args); await deleteLanceDbDocumentRows(args); };
+    expect(await drainDocumentCleanupQueue(sql, storage, options(remove))).toEqual({ purged: 0, failed: 1 });
+    expect(await sql`select document_id, last_error from document_cleanup_queue`)
+      .toEqual([{ document_id: "extract-doc", last_error: "history prune failed" }]);
+    vectorDeletes.length = 0;
+    expect(await drainDocumentCleanupQueue(sql, storage, options(remove))).toEqual({ purged: 1, failed: 0 });
+    expect(optimize).toHaveBeenCalledTimes(2);
     expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["extract-doc"], purgeHistory: true }]);
+    expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });
 
   it("keeps queue entries for retry when external cleanup fails", async () => {
