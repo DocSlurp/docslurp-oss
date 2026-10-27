@@ -356,7 +356,8 @@ export type PageRouterMode = z.infer<typeof pageRouterModeSchema>;
 export const pageRouterConfigSchema = z.object({
   mode: pageRouterModeSchema.optional(),
   objective: routingObjectiveSchema.default("cost-quality"),
-  router: z.enum(["heuristic", "baseline", "decision-model"]).default("decision-model"),
+  // Free feature routing by default; paid decision-model triage remains opt-in.
+  router: z.enum(["heuristic", "baseline", "decision-model"]).default("baseline"),
   /**
    * One decision model id, or an ordered fallback chain. Each entry is used only while it is healthy
    * (known-answer canary + runtime degeneracy checks) and the policy pack has calibrations for it;
@@ -507,14 +508,22 @@ export const pipelineFeaturesSchema = z
      * delivery to a subset (empty means every subscribed event).
      */
     webhooks: workspaceWebhookSettingsSchema.default(defaultWorkspaceWebhookSettings),
+    /**
+     * Web tools (web search, page fetch, site map, crawl, website ingest) for
+     * this workspace's REST, MCP and chat calls. On by default and written
+     * explicitly into every workspace's pipeline (migration 0080); set false to
+     * opt the workspace out. Queries go to a hosted web provider, so privacy
+     * modes that forbid hosted calls block web tools regardless.
+     */
+    webTools: z.boolean().default(true),
     /** Per-page decision-model router (shadow/active); off unless `mode` is set. */
     pageRouter: pageRouterConfigSchema.default(defaultPageRouterConfig),
     /**
      * Read sampled video frames with a vision model (needs MEDIA_VIDEO_ENABLED on the worker).
-     * A video without an audio track is always read from frames, since there is nothing to transcribe.
+     * Enabled by default; an explicit false also disables silent-video frames.
      */
     mediaVideo: z.object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().default(true),
       scanFps: z.number().min(.1).max(10).optional(),
       maxSelectedFps: z.number().min(.1).max(10).optional(),
       maxFrames: z.number().int().min(1).max(1200).optional(),
@@ -522,7 +531,7 @@ export const pipelineFeaturesSchema = z
       maxVisualTokensPerCall: z.number().int().min(2048).max(24576).optional(),
       maxClipSeconds: z.number().min(1).max(120).optional(),
       maxCostCents: z.number().positive().max(10000).optional(),
-    }).optional(),
+    }).default({ enabled: true }),
   })
   .superRefine((value, ctx) => {
     if (value.privacyMode !== "standard") {
@@ -663,7 +672,9 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   privacyMode: "standard",
   pdfRegionExtraction: false,
   webhooks: defaultWorkspaceWebhookSettings,
+  webTools: true,
   pageRouter: defaultPageRouterConfig,
+  mediaVideo: { enabled: true },
 };
 
 const alwaysEnabled = () => true;
@@ -1484,6 +1495,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   privacyMode: ["pii-detect", "index"],
   pdfRegionExtraction: ["extract-markdown"],
   webhooks: [],
+  webTools: [],
   pageRouter: ["route-pages"],
   mediaVideo: ["extract-markdown"],
 };

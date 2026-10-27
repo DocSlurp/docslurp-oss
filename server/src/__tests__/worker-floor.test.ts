@@ -47,16 +47,20 @@ describe("worker floor fallback", () => {
 });
 
 describe("telegram alert delivery", () => {
+  it.each(["development", "test", "preview", "staging", undefined])("never enables Telegram outside production (%s)", (nodeEnv) => {
+    expect(resolveAlertDeliveryConfig({ NODE_ENV: nodeEnv, TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1", ALERT_TELEGRAM: "on", ALERT_ENVIRONMENT: "production", FLY_APP_NAME: "docslurp-app" }).telegram).toBeNull();
+  });
+
   const notification = {
     status: "firing" as const, id: "worker-pollers-missing" as const, severity: "critical" as const,
     summary: "No live worker pollers", details: { pendingRuns: 3 }, startedAt: 0, at: 60_000, repeat: false,
   };
 
   it("uses the signup bot with ALERT_TELEGRAM_CHAT_ID (else TELEGRAM_CHAT_ID), unless ALERT_TELEGRAM=off", () => {
-    expect(resolveAlertDeliveryConfig({ TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1" }).telegram).toEqual({ token: "b", chatId: "1" });
-    expect(resolveAlertDeliveryConfig({ TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1", ALERT_TELEGRAM_CHAT_ID: "2" }).telegram?.chatId).toBe("2");
-    expect(resolveAlertDeliveryConfig({ TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1", ALERT_TELEGRAM: "off" }).telegram).toBeNull();
-    expect(resolveAlertDeliveryConfig({ TELEGRAM_CHAT_ID: "1" }).telegram).toBeNull();
+    expect(resolveAlertDeliveryConfig({ NODE_ENV: "production", TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1" }).telegram).toEqual({ token: "b", chatId: "1" });
+    expect(resolveAlertDeliveryConfig({ NODE_ENV: "production", TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1", ALERT_TELEGRAM_CHAT_ID: "2" }).telegram?.chatId).toBe("2");
+    expect(resolveAlertDeliveryConfig({ NODE_ENV: "production", TELEGRAM_BOT_TOKEN: "b", TELEGRAM_CHAT_ID: "1", ALERT_TELEGRAM: "off" }).telegram).toBeNull();
+    expect(resolveAlertDeliveryConfig({ NODE_ENV: "production", TELEGRAM_CHAT_ID: "1" }).telegram).toBeNull();
   });
 
   it("sends the alert and never logs the token-bearing URL on failure", async () => {
@@ -64,13 +68,13 @@ describe("telegram alert delivery", () => {
     const sent: Array<{ url: string; body: { chat_id: string; text: string } }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       sent.push({ url: String(url), body: JSON.parse(String(init?.body)) });
-      return new Response("ok");
+      return new Response(JSON.stringify({ ok: true }));
     });
-    const config = resolveAlertDeliveryConfig({ TELEGRAM_BOT_TOKEN: "bot-secret", TELEGRAM_CHAT_ID: "42" });
+    const config = resolveAlertDeliveryConfig({ NODE_ENV: "production", TELEGRAM_BOT_TOKEN: "bot-secret", TELEGRAM_CHAT_ID: "42" });
     await deliverAlert(notification, config, fetchImpl as unknown as typeof fetch);
     expect(sent[0]?.body.chat_id).toBe("42");
     expect(sent[0]?.body.text).toContain("[FIRING] worker-pollers-missing");
-    await deliverAlert(notification, config, (async () => { throw new Error("fetch https://api.telegram.org/botbot-secret failed"); }) as unknown as typeof fetch);
+    await expect(deliverAlert(notification, config, (async () => { throw new Error("fetch https://api.telegram.org/botbot-secret failed"); }) as unknown as typeof fetch)).rejects.toThrow("Telegram alert delivery incomplete");
     expect(error.mock.calls.flat().join("\n")).not.toContain("bot-secret");
     error.mockRestore();
   });

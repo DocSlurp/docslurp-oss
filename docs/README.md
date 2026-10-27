@@ -11,6 +11,7 @@ This index lists the documentation published in the public source tree. The file
 | MCP server | mcp.md |
 | Chat voice input | chat-voice.md |
 | Model configuration and private endpoints | model-configuration.md |
+| Document and workspace summaries, costs and limits | document-summaries.md |
 | Worker images and supply chain | worker-image.md |
 | Page router and extraction paths | page-router.md |
 | Extraction feature matrix | extraction-feature-matrix.md |
@@ -19,7 +20,9 @@ This index lists the documentation published in the public source tree. The file
 | Batch failure policy | batch-failure-policy.md |
 | Temporal workflow changes | temporal-workflow-changes.md |
 | Data deletion | data-deletion.md |
+| Extract mode: auto-deleted uploads, retention pricing | extract.md |
 | Evaluation integrity policy | evaluation-integrity.md |
+| Stripe catalog feed and environment selection | [stripe-catalog-feed.md](stripe-catalog-feed.md) |
 | Licensing | licensing.md |
 
 Not published (private or not yet reviewed for export): business and pricing material, evaluation results and research, production operations and deploy runbooks, `releases.md` (mixes public release rules with private deploy steps), and the product docs site.

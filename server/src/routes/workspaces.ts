@@ -1,4 +1,8 @@
+import { ChatToolBlockedError } from "../services/chat-tool-error.js";
+import { applyWorkspaceSettingsProposalSchema } from "@docslurp/shared";
+import { applySettingsProposal, SettingsProposalError } from "../services/workspace-settings-proposals.js";
 import { reportPublicError } from "../lib/public-errors.js";
+import { isCancellation } from "@docslurp/shared/cancellation";
 import type { ChatToolActivity } from "../services/chat-mcp-tools.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
@@ -27,10 +31,11 @@ import {
   applyIngestRecommendationSchema,
   ingestReportQuerySchema,
   reprocessIngestRecommendationSchema,
+  isProhibitedRoutingModelId,
 } from "@docslurp/shared";
 
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, loadActorScopedWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, loadActorScopedWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isWorkspaceChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -57,7 +62,7 @@ import { listWorkspaceTags } from "../services/workspace-tags.js";
 import { getWorkspaceState } from "../services/workspace-state.js";
 import { applyWorkspaceChange, billingState, ConfigConflictError, estimateWorkspaceChange, planWorkspaceChange } from "../services/config-change.js";
 import { mergeWorkspaceSearchSettings } from "../services/search-controls.js";
-import { analyzeSearchSettingsChange, getPlan, isBillingEnforced } from "@docslurp/shared";
+import { analyzeSearchSettingsChange } from "@docslurp/shared";
 import { sql } from "../db.js";
 import {
   applyIngestRecommendation,
@@ -95,6 +100,7 @@ import {
   type WorkspaceChatUIMessage,
 } from "@docslurp/shared/workspace-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { getRun } from "../services/runs.js";
@@ -156,7 +162,23 @@ type WorkspaceChatPostBody = {
   retrieval?: unknown;
   /** Composer filters (documents, types, tags, dates). */
   filters?: unknown;
+  /** Composer web toggle: web tools for this turn. Default off. */
+  webTools?: unknown;
+  /** Composer suggestions toggle. Default on for the signed-in app, off for API keys. */
+  suggestions?: unknown;
 };
+
+/**
+ * Agent modes from the composer toggles. Web tools are off unless the user
+ * turns them on. Suggestions mode is on for the signed-in app unless switched
+ * off, and opt-in for API keys calling these routes, matching /v1/chat.
+ */
+function composerAgentModes(body: { webTools?: unknown; suggestions?: unknown }, actor: RequestActor) {
+  return {
+    web: body.webTools === true,
+    suggestions: actor.type === "session" ? body.suggestions !== false : body.suggestions === true,
+  };
+}
 
 /** Parses the composer's per-thread search scope; undefined when absent, null when invalid. */
 function parseChatScope(body: { retrieval?: unknown; filters?: unknown }) {
@@ -367,6 +389,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
             query,
             actor: getRequestActor(c), signal: c.req.raw.signal,
             answerIngestReport: getRequestActor(c).type === "session",
+            agent: composerAgentModes(body, getRequestActor(c)),
             onToolActivity: (activity) => {
               tools.set(activity.id, activity);
               writer.write({ type: "data-workspaceStatus", id: "workspace-status", data: {
@@ -490,6 +513,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
             startedAt: response.runtime.startedAt,
             completedAt: response.runtime.completedAt,
             availability: response.availability,
+            ...(response.debug.modes ? { modes: response.debug.modes } : {}),
           },
         });
         writer.write({
@@ -516,8 +540,11 @@ async function createWorkspaceAgentChatResponse(c: Context) {
         });
       },
       onError: (error) => {
-        console.error("Chat stream error:", error);
-        return reportPublicError(error);
+        // A Stop press or disconnect aborts the turn: log it as a cancel, not an error.
+        if (isCancellation(error, c.req.raw.signal)) console.info("Chat stream cancelled by caller");
+        else console.error("Chat stream error:", error);
+        const message = reportPublicError(error, {}, c.req.raw.signal);
+        return error instanceof ChatToolBlockedError ? error.message : message;
       },
     }),
   });
@@ -531,7 +558,41 @@ function workspaceMutationError(c: Context, error: unknown): Response {
   return apiStatusError(c, originalMessage === "Forbidden" ? 403 : 400, message);
 }
 
+/**
+ * Reject pipeline model selections the project prohibits (Pro/Ultra ids and
+ * models priced at or above the output-token ceiling). The chat model path
+ * enforces this in lib/chat-model-policy.ts; the workspace pipeline write path
+ * must too, or an operator/client can pin a prohibited model to a stage.
+ * Security finding SEC-2026-10-ROUND4-01.
+ */
+function findProhibitedModelId(value: unknown): string | null {
+  if (typeof value === "string") return isProhibitedRoutingModelId(value) ? value : null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findProhibitedModelId(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      const found = findProhibitedModelId(item);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 export const workspacesRoutes = new Hono()
+  .post("/:workspaceId/settings-proposals/apply", zValidator("json", applyWorkspaceSettingsProposalSchema, validationHook), async c => {
+    try {
+      const result = await applySettingsProposal({ actor: getRequestActor(c), workspaceId: String(c.req.param("workspaceId")), ...c.req.valid("json") });
+      return c.json(result);
+    } catch (error) {
+      if (error instanceof SettingsProposalError) return apiStatusError(c, error.status, error.message, { details: { category: error.category } });
+      throw error;
+    }
+  })
   .route("/", chatVoiceRoutes)
   .post(
     "/invites/:token/accept",
@@ -567,7 +628,10 @@ export const workspacesRoutes = new Hono()
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+    // The workspace list exposes org internals (pipeline config, budgets,
+    // systemPrompt), so a browser/client key must not read it even though it is
+    // scope-compatible. Security finding SEC-2026-10-ROUND3-01.
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     if (actor.type === "session") await ensurePersonalDefaultWorkspace(userId);
@@ -623,7 +687,7 @@ export const workspacesRoutes = new Hono()
   })
   .get("/:workspaceId/tags", async (c) => {
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), actor.userId);
@@ -657,18 +721,25 @@ export const workspacesRoutes = new Hono()
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     const query = c.req.valid("query");
-    const access = actor.type === "apiKey" ? null : await getWorkspaceAccess(workspace.id, actor.userId);
+    const access = await getWorkspaceAccess(workspace.id, actor.userId);
+    // A key can act on findings when it could call the matching action endpoints.
+    const keyCanAct = actor.type !== "apiKey" || apiKeyCanUpdateContent(actor.apiKey) || actorHasAnyApiKeyScope(actor, ["workspaces:manage"]);
     return c.json(await loadIngestReport({
       workspace,
-      canEdit: Boolean(access && canEditWorkspace(access, actor.userId)),
+      canEdit: Boolean(keyCanAct && access && canEditWorkspace(access, actor.userId)),
       runId: query.runId ?? null,
       documentIds: query.documentIds ?? null,
     }));
   })
   .post("/:workspaceId/ingest-report/apply", zValidator("json", applyIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
+    const actor = getRequestActor(c);
+    // Applying a finding changes workspace settings, so keys need the same scope as PATCH /:workspaceId.
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["workspaces:manage"]))) {
+      return apiStatusError(c, 403, "This endpoint requires a server API key with the workspaces:manage scope");
+    }
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-    if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
       const result = await applyIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
@@ -676,6 +747,7 @@ export const workspacesRoutes = new Hono()
         orgId: workspace.orgId,
         userId,
         workspaceId: workspace.id,
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
         action: "workspace.updated",
         resourceType: "workspace",
         resourceId: workspace.id,
@@ -696,8 +768,10 @@ export const workspacesRoutes = new Hono()
   })
   .post("/:workspaceId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-    if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
       const result = await reprocessIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
@@ -705,6 +779,7 @@ export const workspacesRoutes = new Hono()
         orgId: workspace.orgId,
         userId,
         workspaceId: workspace.id,
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
         action: "documents.bulk_reprocessed",
         resourceType: "document-bulk",
         resourceId: result.documentIds.join(","),
@@ -727,7 +802,7 @@ export const workspacesRoutes = new Hono()
   .get("/:workspaceId", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
@@ -930,8 +1005,12 @@ export const workspacesRoutes = new Hono()
   .post("/", zValidator("json", createWorkspaceSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const valid = c.req.valid("json");
+    const prohibitedModel = findProhibitedModelId(valid.pipeline);
+    if (prohibitedModel) {
+      return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
+    }
     // The schema defaults a missing pipeline.indexingMode to "full"; only an explicit
-    // mode in the raw body may override the plan default.
+    // mode in the raw body may override the organization default.
     const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
     const explicit = indexingModeSchema.safeParse(raw?.pipeline?.indexingMode).success;
     const { indexingMode: _defaulted, ...pipelineWithoutMode } = valid.pipeline ?? ({} as NonNullable<typeof valid.pipeline>);
@@ -1195,6 +1274,8 @@ export const workspacesRoutes = new Hono()
       retrievalOnly?: boolean;
       retrieval?: unknown;
       filters?: unknown;
+      webTools?: unknown;
+      suggestions?: unknown;
     }>();
     if (!body.q) {
       return apiStatusError(c, 400, "Missing q");
@@ -1219,6 +1300,7 @@ export const workspacesRoutes = new Hono()
         actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
         allowConfiguration: body.retrievalOnly === true ? false : undefined,
         answerIngestReport: getRequestActor(c).type === "session",
+        agent: composerAgentModes(body, getRequestActor(c)),
         sessionId: body.sessionId,
         model: body.model,
         ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
@@ -1340,6 +1422,10 @@ export const workspacesRoutes = new Hono()
           return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
         }
       }
+      const prohibitedModel = findProhibitedModelId(c.req.valid("json").pipeline);
+      if (prohibitedModel) {
+        return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
+      }
       // The schema defaults a missing pipeline.indexingMode to "full", so read the raw body
       // to tell an explicit mode change (and `indexAll`) from an unrelated pipeline edit.
       const raw = deferredProfilesEnabled() ? await c.req.json().catch(() => null) as Record<string, unknown> | null : null;
@@ -1372,15 +1458,6 @@ export const workspacesRoutes = new Hono()
       }
 
       const input = c.req.valid("json");
-      if (typeof input.retainDocumentVersions === "number" && isBillingEnforced()) {
-        const [org] = await sql<{ plan_id: string | null }[]>`
-          select o.plan_id from workspaces w join organizations o on o.id = w.org_id where w.id = ${workspaceId}
-        `;
-        if (org && getPlan(org.plan_id).id === "free") {
-          return apiErrorResponse(c, 402, "plan_not_entitled", "Keeping extra document versions needs a paid plan.", { category: "upgrade_required" });
-        }
-      }
-
       let applied: Awaited<ReturnType<typeof applyWorkspaceChange>>;
       try {
         const plan = await planWorkspaceChange({
@@ -1592,8 +1669,10 @@ export const workspacesRoutes = new Hono()
     })),
     async (c) => {
       const userId = c.get("sessionUser").id;
+      const actor = getRequestActor(c);
+      if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
       const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-      if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       const body = c.req.valid("json");
       const estimate = body.action === "reprocess"
         ? await estimateDocumentReprocess({ documentIds: body.documentIds, userId, workspaceId: workspace.id })
@@ -1640,4 +1719,4 @@ export const workspacesRoutes = new Hono()
   );
 
 // Workspace reads and rename/settings updates (the PATCH requires workspaces:manage).
-acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);
+acceptApiKeys(workspacesRoutes, ["POST /:workspaceId/settings-proposals/apply", "GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "POST /:workspaceId/ingest-report/apply", "POST /:workspaceId/ingest-report/reprocess", "POST /:workspaceId/documents/bulk/estimate", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);

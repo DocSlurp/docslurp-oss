@@ -1,4 +1,4 @@
-import { publicDiagnostics, publicDocumentError, publicProcessingMessage } from "@docslurp/shared";
+import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode } from "@docslurp/shared";
 import {
   planRunControlUpdate,
   runLifecycle,
@@ -22,7 +22,6 @@ import {
   type WorkspaceRunStageState,
 } from "@docslurp/shared";
 
-import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { runCreation } from "./run-creation.js";
 import {
   jsonRecord,
@@ -43,7 +42,7 @@ import {
   getRunProcessingPreview,
 } from "./run-processing-preview.js";
 import {
-  canEditWorkspace,
+  canContributeToWorkspace,
   getWorkspaceAccess,
   listAccessibleWorkspaceIds,
 } from "./organizations.js";
@@ -58,8 +57,8 @@ import {
   runUsageCostTotals,
   summarizeRunUsageCost,
 } from "./usage-attribution.js";
-import { loadWithheldArtifactUrisForRun } from "./pii-artifact-guard.js";
 import { processSingleton } from "../lib/process-singleton.js";
+import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
 
 export { summarizeRunUsageCost };
 export { isRunCreationBlockedError, RunCreationBlockedError } from "./run-creation.js";
@@ -448,22 +447,7 @@ export async function getDocumentVersions(
   return versions;
 }
 
-/** A reprocess request the source run cannot satisfy (4xx, nothing created). */
-export class ReprocessRejectedError extends Error {
-  constructor(
-    message: string,
-    readonly statusCode: 400 | 409,
-    readonly code: "no_stages_to_run" | "source_not_reusable" | "missing_stage_artifacts",
-    readonly details: Record<string, unknown> = {},
-  ) {
-    super(message);
-    this.name = "ReprocessRejectedError";
-  }
-}
-
-export function isReprocessRejectedError(error: unknown): error is ReprocessRejectedError {
-  return error instanceof ReprocessRejectedError;
-}
+export { ReprocessRejectedError, isReprocessRejectedError } from "./reprocess-errors.js";
 
 type ReuseSourceRow = {
   id: string;
@@ -555,9 +539,11 @@ export async function reprocessRun(
   const original = await getRun(runId, userId);
   if (!original) return null;
   const access = await getWorkspaceAccess(original.workspaceId, userId);
-  if (!access || !canEditWorkspace(access, userId)) {
+  if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
+  const [extractRun] = await sql<{ extract_id: string | null }[]>`select extract_id from workspace_runs where id = ${runId}`;
+  if (extractRun?.extract_id) throw extractNotReprocessable();
 
   const docs = await sql<DocumentRow[]>`
     select * from documents where run_id = ${runId} order by created_at, id
@@ -671,7 +657,7 @@ export async function retryRun(
     return null;
   }
   const access = await getWorkspaceAccess(run.workspaceId, userId);
-  if (!access || !canEditWorkspace(access, userId)) {
+  if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
 
@@ -694,7 +680,7 @@ export async function controlRun(
     return null;
   }
   const access = await getWorkspaceAccess(run.workspaceId, userId);
-  if (!access || !canEditWorkspace(access, userId)) {
+  if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
 
@@ -713,14 +699,14 @@ export async function controlRun(
     // leases it resumes only if it gets a lease; a refusal must not fall
     // through to the operator resume below.
     const outcome = await resumeSpendPausedRunOutcome(run.id);
-    if (outcome.status === "resumed") return getRun(run.id, userId);
+    if (outcome.status === "resumed" || outcome.status === "deferred") return getRun(run.id, userId);
     if (outcome.status === "blocked") {
       const code = (["workspace_budget_paused", "org_budget_paused", "plan_not_entitled"] as const)
         .find((candidate) => candidate === outcome.reason) ?? "credit_exhausted";
       throw new SpendBlockedError(
         code === "credit_exhausted"
           ? "Out of credits: other runs in this organization hold the remaining credits. " +
-            "Buy credits, enable auto-recharge or upgrade your plan at /app/billing to continue."
+            "Buy credits or turn on auto top-up at /app/billing to continue."
           : "AI processing is paused for this workspace or organization. Raise the budget to resume.",
         code,
       );
@@ -801,7 +787,7 @@ export async function listRunEvents(args: {
   });
 }
 
-async function listRunEventsForRunId(args: {
+export async function listRunEventsForRunId(args: {
   runId: string;
   after?: string;
   limit?: number;
@@ -829,7 +815,16 @@ async function listRunEventsForRunId(args: {
     limit ${limit}
   `;
 
-  return rows.map(mapWorkspaceRunEvent);
+  // One event the schema can't read (an event type added on the worker side
+  // before the shared list learned it) must not turn the whole history into a 500.
+  return rows.flatMap((row) => {
+    try {
+      return [mapWorkspaceRunEvent(row)];
+    } catch (error) {
+      console.warn(`[runs] skipped unreadable run event ${row.id} (${row.event_type}):`, error instanceof Error ? error.message.slice(0, 200) : String(error));
+      return [];
+    }
+  });
 }
 
 type StageResourceRow = { stage_name: string; metric: string; total: number | string; peak: number | string };
@@ -955,35 +950,6 @@ export async function getRunProgress(
   }
 
   return await buildRunProgressSnapshot(run, options);
-}
-
-export interface RunExportManifest {
-  runId: string;
-  exportedAt: string;
-  artifacts: Array<{ slot: string; uri: string; url: string }>;
-}
-
-export async function exportRun(
-  runId: string,
-  userId: string,
-): Promise<RunExportManifest | null> {
-  const run = await getRun(runId, userId);
-  if (!run) return null;
-
-  const artifacts: RunExportManifest["artifacts"] = [];
-  const withheld = await loadWithheldArtifactUrisForRun(run.id);
-
-  for (const [slot, uri] of Object.entries(run.artifacts)) {
-    if (withheld.has(uri)) continue;
-    // Session/key-bound proxy URL; the bucket is never exposed (lib/file-urls.ts).
-    artifacts.push({ slot, uri, url: fileUrlForArtifact(uri).url });
-  }
-
-  return {
-    runId,
-    exportedAt: new Date().toISOString(),
-    artifacts,
-  };
 }
 
 /**

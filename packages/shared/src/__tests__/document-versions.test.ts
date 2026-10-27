@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { documentVersionKey, effectiveRetainedVersions, normalizeSourcePath } from "../document-versions.js";
-import { SERVICE_PLANS } from "../index.js";
+import { documentVersionKey, DEFAULT_RETAINED_VERSIONS,
+  effectiveRetainedVersions, normalizeSourcePath } from "../document-versions.js";
 
 describe("normalizeSourcePath", () => {
   it("folds case, NFC, separators and slashes", () => {
@@ -44,26 +44,17 @@ describe("documentVersionKey", () => {
 });
 
 describe("effectiveRetainedVersions", () => {
-  it("free is always 1", () => {
-    expect(effectiveRetainedVersions({ planId: "free", orgSetting: 5, workspaceSetting: 5, billingEnforced: true })).toBe(1);
-    expect(effectiveRetainedVersions({ planId: null, orgSetting: 5, workspaceSetting: null, billingEnforced: true })).toBe(1);
+  it("defaults to 2 for every org", () => {
+    expect(DEFAULT_RETAINED_VERSIONS).toBe(2);
+    expect(effectiveRetainedVersions({ orgSetting: null, workspaceSetting: null })).toBe(2);
   });
-  it("paid falls back through workspace, org, plan default", () => {
-    expect(effectiveRetainedVersions({ planId: "silver", orgSetting: null, workspaceSetting: null, billingEnforced: true })).toBe(2);
-    expect(effectiveRetainedVersions({ planId: "gold", orgSetting: 5, workspaceSetting: null, billingEnforced: true })).toBe(5);
-    expect(effectiveRetainedVersions({ planId: "gold", orgSetting: 5, workspaceSetting: 3, billingEnforced: true })).toBe(3);
-  });
-  it("honours settings on every plan and defaults to the paid default when billing is not enforced", () => {
-    expect(effectiveRetainedVersions({ planId: "free", orgSetting: null, workspaceSetting: null, billingEnforced: false })).toBe(2);
-    expect(effectiveRetainedVersions({ planId: "free", orgSetting: 5, workspaceSetting: null, billingEnforced: false })).toBe(5);
-    expect(effectiveRetainedVersions({ planId: null, orgSetting: 5, workspaceSetting: 3, billingEnforced: false })).toBe(3);
-    expect(effectiveRetainedVersions({ planId: "free", orgSetting: 5, workspaceSetting: 3, billingEnforced: true })).toBe(1);
+  it("falls back through workspace, org, default", () => {
+    expect(effectiveRetainedVersions({ orgSetting: 5, workspaceSetting: null })).toBe(5);
+    expect(effectiveRetainedVersions({ orgSetting: 5, workspaceSetting: 3 })).toBe(3);
+    expect(effectiveRetainedVersions({ orgSetting: null, workspaceSetting: 1 })).toBe(1);
   });
   it("clamps to 1..100", () => {
-    expect(effectiveRetainedVersions({ planId: "gold", orgSetting: 0, workspaceSetting: null, billingEnforced: true })).toBe(1);
-    expect(effectiveRetainedVersions({ planId: "gold", orgSetting: 500, workspaceSetting: null, billingEnforced: true })).toBe(100);
-  });
-  it("plans default to 1 / 2", () => {
-    expect(SERVICE_PLANS.map((p) => p.defaultRetainedVersions)).toEqual([1, 2, 2, 2]);
+    expect(effectiveRetainedVersions({ orgSetting: 0, workspaceSetting: null })).toBe(1);
+    expect(effectiveRetainedVersions({ orgSetting: 500, workspaceSetting: null })).toBe(100);
   });
 });

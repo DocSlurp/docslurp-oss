@@ -6,6 +6,8 @@ import {
   startMigratedPostgres,
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
+  legacyEmbeddingLocations,
+  legacyOrgTable,
   type SupersededPurgeOptions,
 } from "@docslurp/worker/testing";
 
@@ -16,7 +18,6 @@ import {
  */
 
 const cancelWorkflow = vi.fn(async (_runId: string) => {});
-const cancelSubscription = vi.fn(async (_orgId: string) => ({ cancelled: true }));
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, postgres.PostgresType>>;
 let offboarding: typeof import("../services/tenant-offboarding.js");
@@ -29,7 +30,7 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../lib/temporal.js", () => ({ signalPipelineCancel: cancelWorkflow }));
   offboarding = await import("../services/tenant-offboarding.js");
-  deps = { sql, cancelWorkflow, cancelSubscription };
+  deps = { sql, cancelWorkflow };
 }, 60_000);
 
 afterAll(async () => {
@@ -54,8 +55,8 @@ async function seedUser(id: string) {
 
 async function seedOrg(id: string, name: string, members: Array<[userId: string, role: string]>, personalOwner?: string) {
   await sql`
-    insert into organizations(id, name, slug, created_by_user_id, is_personal, personal_owner_user_id, stripe_subscription_id, subscription_status)
-    values (${id}, ${name}, ${id}, ${members[0]![0]}, ${Boolean(personalOwner)}, ${personalOwner ?? null}, ${`sub_${id}`}, 'active')
+    insert into organizations(id, name, slug, created_by_user_id, is_personal, personal_owner_user_id, stripe_customer_id, auto_recharge_enabled)
+    values (${id}, ${name}, ${id}, ${members[0]![0]}, ${Boolean(personalOwner)}, ${personalOwner ?? null}, ${`cus_${id}`}, true)
   `;
   for (const [userId, role] of members) {
     await sql`insert into org_memberships(org_id, user_id, role) values (${id}, ${userId}, ${role})`;
@@ -101,22 +102,12 @@ describe("organization deletion", () => {
     await seedOrg("mine", "Mine", [["owner", "owner"]], "owner");
     await expect(offboarding.deleteOrganization({ orgId: "mine", userId: "owner", confirmation: "Mine" }, deps))
       .rejects.toMatchObject({ status: 409, code: "personal_organization" });
-    expect(cancelSubscription).not.toHaveBeenCalled();
   });
 
-  it("deletes nothing when Stripe refuses to cancel", async () => {
-    cancelSubscription.mockRejectedValueOnce(new Error("card_declined"));
-    await expect(offboarding.deleteOrganization({ orgId: "team", userId: "owner", confirmation: "Acme Team" }, deps))
-      .rejects.toMatchObject({ status: 502 });
-    expect(await sql`select deleted_at from organizations where id = 'team'`).toEqual([{ deleted_at: null }]);
-    expect(await sql`select count(*)::int as count from workspaces`).toEqual([{ count: 1 }]);
-  });
-
-  it("cancels billing and runs, revokes access, enqueues cleanup and keeps anonymized billing history", async () => {
+  it("turns off auto top-up, cancels runs, revokes access, enqueues cleanup and keeps anonymized billing history", async () => {
     const result = await offboarding.deleteOrganization({ orgId: "team", userId: "owner", confirmation: "Acme Team" }, deps);
 
     expect(result).toMatchObject({ orgId: "team", workspaces: 1, documents: 1, runsCancelled: 1 });
-    expect(cancelSubscription).toHaveBeenCalledWith("team");
     expect(cancelWorkflow.mock.calls.map(([runId]) => runId)).toEqual(["ws-live"]);
     expect(await sql`select count(*)::int as count from workspaces`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from org_memberships where org_id = 'team'`).toEqual([{ count: 0 }]);
@@ -125,11 +116,14 @@ describe("organization deletion", () => {
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },
       { kind: "storage_prefix", target: "member/ws-live/" },
-      { kind: "vector_table", target: "team|model-x|4" },
+      { kind: "vector_prefix", target: "team|ws" },
+      { kind: "vector_table", target: "team|legacy" },
+      { kind: "vector_table", target: "team|legacy|model-x|4" },
+      { kind: "vector_table", target: "team|ws|model-x|4" },
     ]);
     const [org] = await sql`select name, slug, deleted_at is not null as deleted, offboarded_at is not null as offboarded,
-      stripe_subscription_id from organizations where id = 'team'`;
-    expect(org).toEqual({ name: "Deleted organization", slug: null, deleted: true, offboarded: true, stripe_subscription_id: "sub_team" });
+      stripe_customer_id, auto_recharge_enabled from organizations where id = 'team'`;
+    expect(org).toEqual({ name: "Deleted organization", slug: null, deleted: true, offboarded: true, stripe_customer_id: "cus_team", auto_recharge_enabled: false });
     // Billing records survive for accounting; the deleted run is detached.
     expect(await sql`select id from credit_ledger`).toEqual([{ id: "ledger" }]);
     expect(await sql`select id, run_id from usage_events`).toEqual([{ id: "usage", run_id: null }]);
@@ -142,7 +136,9 @@ describe("organization deletion", () => {
     await sql`update document_cleanup_queue set not_before = now() - interval '1 second'`;
 
     const objects = new Set(["member/ws-done/markdown/ws-doc.md", "member/ws-live/vision/late.json", "member/up-ws/raw/a.pdf", "other/keep.json"]);
-    const tables = new Set(["/lance/team/vectors/model-x/4#chunks"]);
+    const legacy = [...legacyEmbeddingLocations("/lance", "team", "model-x", 4), legacyOrgTable("/lance", "team")]
+      .map((location) => `${location.uri}#${location.table}`);
+    const tables = new Set(["/lance/team/ws/vectors-model-x-4#chunks", "/lance/team/other-ws/vectors-model-x-4#chunks", ...legacy]);
     const vectorRowDeletes: string[][] = [];
     const storage = {
       bucket: "b",
@@ -162,7 +158,8 @@ describe("organization deletion", () => {
     await drainStorageCleanupQueue(db, storage, options);
 
     expect([...objects]).toEqual(["other/keep.json"]);
-    expect([...tables]).toEqual([]);
+    // Only the deleted org's workspace databases go.
+    expect([...tables]).toEqual(["/lance/team/other-ws/vectors-model-x-4#chunks"]);
     // The table is dropped whole, so no per-document vector deletes.
     expect(vectorRowDeletes).toEqual([]);
     expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
@@ -235,7 +232,6 @@ describe("account deletion", () => {
     const result = await offboarding.deleteAccount({ userId: "leaver", confirmation: " Leaver@Example.test " }, deps);
 
     expect(result).toEqual({ deletedOrganizations: ["personal", "solo"], leftOrganizations: ["team"] });
-    expect(cancelSubscription.mock.calls.map(([orgId]) => orgId)).toEqual(["personal", "solo"]);
     expect(await sql`select id from workspaces`).toEqual([{ id: "shared" }]);
     expect(await sql`select user_id from documents`).toEqual([{ user_id: "leaver" }]);
     expect(await sql`select org_id, user_id from org_memberships`).toEqual([{ org_id: "team", user_id: "teammate" }]);
@@ -247,27 +243,5 @@ describe("account deletion", () => {
     expect(await sql`select id, name from organizations where deleted_at is not null order by id`)
       .toEqual([{ id: "personal", name: "Deleted organization" }, { id: "solo", name: "Deleted organization" }]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([{ document_id: "mine-doc" }]);
-  });
-});
-
-describe("Stripe subscription cancel", () => {
-  it("cancels through the billing service and records the status", async () => {
-    await reset();
-    await seedUser("owner");
-    await seedOrg("paid", "Paid", [["owner", "owner"]]);
-    const { cancelOrgSubscription } = await import("../services/billing/customers.js");
-    const cancel = vi.fn(async () => ({}));
-    const stripe = { subscriptions: { cancel } } as unknown as import("stripe").default;
-
-    expect(await cancelOrgSubscription("paid", stripe)).toEqual({ cancelled: true, subscriptionId: "sub_paid" });
-    expect(cancel).toHaveBeenCalledWith(
-      "sub_paid",
-      expect.objectContaining({ invoice_now: true, prorate: false }),
-      { idempotencyKey: "org-delete:paid:sub_paid" },
-    );
-    expect(await sql`select subscription_status from organizations where id = 'paid'`).toEqual([{ subscription_status: "canceled" }]);
-    // Already cancelled: no second Stripe call.
-    expect(await cancelOrgSubscription("paid", stripe)).toEqual({ cancelled: false, subscriptionId: "sub_paid" });
-    expect(cancel).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,43 +1,6 @@
 {
   "schemaVersion": 1,
   "bundles": {
-    "docling": {
-      "description": "Docling CLI with CPU-only torch and its layout/table models (docs/worker-image.md). Built by scripts/vendor-bundles/build.sh, published by .github/workflows/vendor-bundles.yml.",
-      "binaries": [
-        "docling"
-      ],
-      "pythonModules": [
-        "docling",
-        "docling_core",
-        "docling_parse",
-        "docling_ibm_models",
-        "torch",
-        "torchvision",
-        "transformers"
-      ],
-      "distributions": [
-        "docling",
-        "docling-core",
-        "docling-parse",
-        "docling-ibm-models",
-        "torch",
-        "torchvision",
-        "transformers"
-      ],
-      "artifacts": [
-        {
-          "platform": "linux-x64-py3.13",
-          "sha256": "91164cc86889606307d87bbf3bb31cf2dbc49d1afed23dfbb9ead74862b0988c",
-          "size": 688894199,
-          "unpackedSize": 1828632003,
-          "file": "docling-linux-x64-py3.13.tar.zst"
-        }
-      ],
-      "env": {
-        "HF_HUB_OFFLINE": "1",
-        "DOCLING_ARTIFACTS_PATH": "./models/docling"
-      }
-    },
     "unstructured": {
       "description": "Unstructured partitioning (PDF hi_res, Office) with CPU-only inference deps, no audio/whisper stack (docs/worker-image.md).",
       "pythonModules": [

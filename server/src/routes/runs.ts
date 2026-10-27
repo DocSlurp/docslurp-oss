@@ -9,18 +9,16 @@ import {
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
 
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { isApiKeyLive } from "../services/api-key-liveness.js";
 import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
-import { getRunForensics } from "../services/run-forensics.js";
 import { type RunStartOutcome } from "../services/run-lifecycle.js";
 import {
   controlRun,
-  exportRun,
   getRun,
   getRunProcessingPreview,
   getRunProgress,
@@ -37,6 +35,29 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
+import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+
+/** A server key with `ingest` may reprocess runs in the workspaces it can use; null when the actor may proceed. */
+async function denyRunContentUpdate(c: Context, runId: string): Promise<Response | null> {
+  const actor = getRequestActor(c);
+  if (actor.type !== "apiKey") return null;
+  if (!apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
+  const run = await getRun(runId, actor.userId, { cost: false });
+  if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) return apiStatusError(c, 404, "Run not found");
+  return null;
+}
+
+/**
+ * Runs and run telemetry are operator surfaces. A browser/client API key is
+ * search-only by design, so it must not read them even though it carries the
+ * `search` scope (which the runs router also accepts). Security finding
+ * SEC-2026-10-ROUND3-01: a public `dslp_pub_` key could list org runs and
+ * workspace internals.
+ */
+function apiKeyMayReadRuns(actor: RequestActor): boolean {
+  return actor.type !== "apiKey"
+    || (actor.apiKey.keyType === "server" && actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"]));
+}
 
 const STREAM_HEARTBEAT_MS = 4_000;
 const STREAM_RECONCILE_MS = 30_000;
@@ -49,7 +70,7 @@ const controlRunSchema = z.object({
 /** Maps workspace resolution and access failures to 403/404; rethrows anything else. */
 function workspaceErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof WorkspaceAccessError) {
-    return apiStatusError(c, error.status === 403 ? 403 : 404, error.message, { code: error.code });
+    return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
   if (error instanceof Error && error.message === "Workspace not found") {
     return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
@@ -73,10 +94,16 @@ const runValidationHook = (result: { success: boolean; error?: ValidationErrorSo
 };
 
 export const runsRoutes = new Hono()
+  .use("*", async (c, next) => {
+    const actor = getRequestActor(c);
+    // Run history and events contain configuration, costs and internal diagnostics.
+    if (actor.type === "apiKey" && actor.apiKey.keyType !== "server") return apiStatusError(c, 403, "Server API key required");
+    await next();
+  })
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const runs = c.req.query("activity") === "true" ? await listRuns(userId, true) : await listRuns(userId);
@@ -86,7 +113,7 @@ export const runsRoutes = new Hono()
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
@@ -131,7 +158,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      if (!actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
@@ -150,7 +177,7 @@ export const runsRoutes = new Hono()
   .get("/:runId/progress/stream", async (c) => {
     const actor = getRequestActor(c);
     const runId = c.req.param("runId");
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const run = await getRun(runId, actor.userId, { cost: false });
@@ -174,31 +201,11 @@ export const runsRoutes = new Hono()
     response.headers.set("Cache-Control", "no-cache, no-transform");
     return response;
   })
-  .get("/:runId/export", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const manifest = await exportRun(c.req.param("runId"), userId);
-
-    if (!manifest) {
-      return apiStatusError(c, 404, "Run not found");
-    }
-
-    return c.json(manifest);
-  })
-  .get("/:runId/forensics", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const forensics = await getRunForensics(c.req.param("runId"), userId);
-
-    if (!forensics) {
-      return apiStatusError(c, 404, "Run not found");
-    }
-
-    return c.json(forensics);
-  })
   .get("/:runId/events", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      if (!actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
@@ -222,7 +229,7 @@ export const runsRoutes = new Hono()
     const run = await getRun(runId, userId, { cost: false });
 
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     if (!run || (actor.type === "apiKey" && !await loadActorScopedWorkspace(run.workspaceId, actor))) {
@@ -276,7 +283,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     try {
-      const workspace = await requireActorWorkspace(getRequestActor(c), body.workspaceId);
+      const workspace = await requireActorWorkspace(getRequestActor(c), body.workspace);
       const preview = await getRunProcessingPreview({ ...body, workspaceId: workspace.id }, userId);
       return c.json(preview);
     } catch (error) {
@@ -284,12 +291,8 @@ export const runsRoutes = new Hono()
     }
   })
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
-    // The MCP in-process forward bypasses sessionAuth, so key-to-workspace scoping is enforced here.
-    const actor = getRequestActor(c);
-    if (actor.type === "apiKey") {
-      const run = await getRun(c.req.param("runId"), c.get("sessionUser").id, { cost: false });
-      if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) return apiStatusError(c, 404, "Run not found");
-    }
+    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    if (denied) return denied;
     const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId: c.get("sessionUser").id, options: c.req.valid("json") });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
     return c.json({ estimate, billing: billingState() });
@@ -297,6 +300,9 @@ export const runsRoutes = new Hono()
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
+    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    if (denied) return denied;
+    const actor = getRequestActor(c);
     const inline = await inlineEstimate(
       () => estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body }),
       `/v1/runs/${c.req.param("runId")}/reprocess/estimate`,
@@ -328,6 +334,7 @@ export const runsRoutes = new Hono()
       userId,
       workspaceId: run.workspaceId,
       runId: run.id,
+      apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
       action: "run.reprocessed",
       resourceType: "run",
       resourceId: run.id,
@@ -412,6 +419,8 @@ export const runsRoutes = new Hono()
   });
 
 acceptApiKeys(runsRoutes, [
+  "POST /:runId/reprocess",
+  "POST /:runId/reprocess/estimate",
   "GET /",
   "GET /activity/stream",
   "GET /:runId/progress",

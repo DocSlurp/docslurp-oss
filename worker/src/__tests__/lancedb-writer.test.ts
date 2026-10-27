@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { connect } from "@lancedb/lancedb";
 import { expect, it } from "vitest";
-import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 
 it.each([1, 2, 3, 4, 5])("creates an org table concurrently and upserts retried chunks without Python (%i)", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-lance-test-"));
@@ -65,4 +65,21 @@ it("retries timed-out attempts and transient storage errors, not data errors", a
   expect(isRetryableLanceCommitError(new Error("S3 error: SlowDown, please reduce your request rate"))).toBe(true);
   expect(isRetryableLanceCommitError(new Error("Commit conflict for version 7"))).toBe(true);
   expect(isRetryableLanceCommitError(new Error("Invalid user input: vector dimension mismatch"))).toBe(false);
+});
+
+it("deletes rows by chunk id and ignores a table that does not exist", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "docslurp-lance-delete-"));
+  const record = (id: string) => ({ id, documentId: "d", chunkIndex: 0, text: id, vector: [0.1, 0.2, 0.3], metadata: { pageNumber: 1 } });
+  try {
+    await deleteLanceDbRecords(dir, "missing", ["a"]);
+    await writeLanceDbRecords(dir, "chunks", [record("d-000"), record("d-001"), record("d-0'2")]);
+    await deleteLanceDbRecords(dir, "chunks", ["d-001", "d-0'2", "never-written"]);
+    const db = await connect(dir);
+    try {
+      const table = await db.openTable("chunks");
+      try {
+        expect((await table.query().toArray()).map((row) => row.id)).toEqual(["d-000"]);
+      } finally { table.close(); }
+    } finally { db.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

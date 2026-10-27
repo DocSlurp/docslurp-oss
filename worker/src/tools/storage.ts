@@ -1,6 +1,7 @@
 import { instrumentS3Client } from "@docslurp/shared/observability";
 import {
   AbortMultipartUploadCommand,
+  ListMultipartUploadsCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
@@ -150,20 +151,29 @@ export class ArtifactStore {
   createMultipartUploadStream(
     key: string,
     contentType: string,
-    options?: { partSizeBytes?: number }
+    options?: { partSizeBytes?: number; object?: StorageObjectOptions }
   ): { writable: Writable; done: Promise<void> } {
     const writer = new MultipartUploadWriter({
       client: this.client,
       bucket: this.bucket,
       key,
       contentType,
-      partSizeBytes: options?.partSizeBytes
+      partSizeBytes: options?.partSizeBytes,
+      object: options?.object
     });
 
     return {
       writable: writer,
       done: writer.done
     };
+  }
+
+  /** Streams an object without buffering it; `size` is the stored length when known. */
+  async openStream(key: string, signal?: AbortSignal): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }> {
+    validateStorageKey(key);
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: signal });
+    if (!response.Body) throw new StorageReadError(new Error("empty storage object body"));
+    return { stream: response.Body as AsyncIterable<Uint8Array>, size: response.ContentLength ?? null };
   }
 
   async getBytes(key: string, options?: StorageReadOptions): Promise<Buffer> {
@@ -191,6 +201,44 @@ export class ArtifactStore {
     const data = Buffer.from(bytes ?? []);
     assertObjectWithinReadLimit(key, data.length, options?.maxBytes);
     return data;
+  }
+
+  /** Read an exact bounded range, rejecting endpoints that ignore Range. */
+  async getByteRange(key: string, start: number, end: number, signal?: AbortSignal): Promise<Buffer> {
+    validateStorageKey(key);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) {
+      throw new RangeError("Invalid storage byte range");
+    }
+    const maxBytes = end - start + 1;
+    const response = await this.client.send(new GetObjectCommand({
+      Bucket: this.bucket, Key: key, Range: `bytes=${start}-${end}`,
+    }), { abortSignal: signal });
+    try {
+      if (!response.ContentRange?.startsWith(`bytes ${start}-${end}/`)) {
+        throw new Error("Storage endpoint did not honor the requested byte range");
+      }
+      if (response.ContentLength !== undefined && response.ContentLength !== maxBytes) {
+        throw new Error("Unexpected storage range length");
+      }
+      const chunks: Buffer[] = [];
+      let received = 0;
+      if (response.Body) {
+        const source = Readable.fromWeb(response.Body.transformToWebStream() as import("node:stream/web").ReadableStream<Uint8Array>, { signal });
+        for await (const chunk of source) {
+          signal?.throwIfAborted();
+          received += chunk.length;
+          assertObjectWithinReadLimit(key, received, maxBytes);
+          chunks.push(chunk);
+        }
+      }
+      if (received !== maxBytes) throw new Error("Incomplete storage range body");
+      return Buffer.concat(chunks, received);
+    } catch (error) {
+      (response.Body as { destroy?: () => void } | undefined)?.destroy?.();
+      if (signal?.aborted) throw signal.reason;
+      if (error instanceof StorageObjectTooLargeError) throw error;
+      throw new StorageReadError(error);
+    }
   }
 
   async getJson<T>(key: string, options?: StorageReadOptions): Promise<T> {
@@ -250,10 +298,10 @@ export class ArtifactStore {
     }
   }
 
-  async objectSize(key: string): Promise<number | null> {
+  async objectSize(key: string, signal?: AbortSignal): Promise<number | null> {
     try {
       const response = await this.client.send(
-        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: signal },
       );
       return typeof response.ContentLength === "number" ? response.ContentLength : 0;
     } catch (error) {
@@ -309,6 +357,25 @@ export class ArtifactStore {
       truncated,
       nextContinuationToken: continuationToken ?? null
     };
+  }
+
+  /** Aborts every unfinished multipart upload under `prefix` (parts of uploads that will never complete). */
+  async abortMultipartUploads(prefix: string): Promise<number> {
+    validateStorageKey(prefix);
+    let aborted = 0;
+    let keyMarker: string | undefined;
+    let uploadIdMarker: string | undefined;
+    do {
+      const page = await this.client.send(new ListMultipartUploadsCommand({ Bucket: this.bucket, Prefix: prefix, KeyMarker: keyMarker, UploadIdMarker: uploadIdMarker }));
+      for (const upload of page.Uploads ?? []) {
+        if (!upload.Key || !upload.UploadId) continue;
+        await this.client.send(new AbortMultipartUploadCommand({ Bucket: this.bucket, Key: upload.Key, UploadId: upload.UploadId }));
+        aborted += 1;
+      }
+      keyMarker = page.IsTruncated ? page.NextKeyMarker : undefined;
+      uploadIdMarker = page.IsTruncated ? page.NextUploadIdMarker : undefined;
+    } while (keyMarker);
+    return aborted;
   }
 
   async deleteKeys(keys: string[]): Promise<void> {
@@ -424,6 +491,8 @@ export function artifactStorageKey(key: string): ArtifactStorageKey {
   return key as ArtifactStorageKey;
 }
 
+export { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
+
 export function buildArtifactStorageKey(...segments: string[]): ArtifactStorageKey {
   if (segments.length === 0) {
     throw new Error("artifact storage key requires at least one segment");
@@ -497,6 +566,12 @@ function assertObjectWithinReadLimit(key: string, sizeBytes: number, maxBytes?: 
   }
 }
 
+/** Headers stored with an object: an HTTP Expires date and user metadata (x-amz-meta-*). */
+export interface StorageObjectOptions {
+  expires?: Date;
+  metadata?: Record<string, string>;
+}
+
 class MultipartUploadWriter extends Writable {
   readonly done: Promise<void>;
 
@@ -505,6 +580,7 @@ class MultipartUploadWriter extends Writable {
   private readonly key: string;
   private readonly contentType: string;
   private readonly partSizeBytes: number;
+  private readonly object: StorageObjectOptions;
 
   private readonly completedParts: Array<{ ETag?: string; PartNumber: number }> = [];
   private readonly pendingChunks: Buffer[] = [];
@@ -523,8 +599,10 @@ class MultipartUploadWriter extends Writable {
     key: string;
     contentType: string;
     partSizeBytes?: number;
+    object?: StorageObjectOptions;
   }) {
     super();
+    this.object = args.object ?? {};
     this.client = args.client;
     this.bucket = args.bucket;
     this.key = args.key;
@@ -581,7 +659,9 @@ class MultipartUploadWriter extends Writable {
             Bucket: this.bucket,
             Key: this.key,
             Body: new Uint8Array(),
-            ContentType: this.contentType
+            ContentType: this.contentType,
+            Expires: this.object.expires,
+            Metadata: this.object.metadata
           })
         );
         this.settle();
@@ -661,7 +741,9 @@ class MultipartUploadWriter extends Writable {
       new CreateMultipartUploadCommand({
         Bucket: this.bucket,
         Key: this.key,
-        ContentType: this.contentType
+        ContentType: this.contentType,
+        Expires: this.object.expires,
+        Metadata: this.object.metadata
       })
     );
 

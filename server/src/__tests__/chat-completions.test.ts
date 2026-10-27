@@ -1,3 +1,4 @@
+import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,7 +13,7 @@ vi.mock("../services/billing/spend-guard.js", async (importOriginal) => ({
 }));
 
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace, workspaceChatDisabledBody }));
-vi.mock("../services/workspaces.js", () => ({ listWorkspaces, getWorkspace }));
+vi.mock("../services/workspaces.js", () => ({ listWorkspaces, getWorkspace, findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })) }));
 vi.mock("../services/api-keys.js", () => ({ validateApiKey }));
 vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit }));
 vi.mock("../lib/auth.js", () => ({ auth: {}, appDbPool: {} }));
@@ -24,7 +25,7 @@ const answer = {
   citations: [{ text: "annual", score: 1, citation: { filename: "contract.pdf", documentId: "doc-1", pageNumber: 2 } }],
   availability: null, usage: { inputTokens: 19, outputTokens: 7, totalTokens: 26 },
 };
-const key = { userId: "user-1", orgId: "org-1", scopes: ["search"], keyType: "server", keyId: "key-1" };
+const key = { userId: "user-1", orgId: "org-1", scopes: ["search", "chat"], keyType: "server", keyId: "key-1" };
 function app() { return new Hono().route("/v1", chatCompletionsRoutes); }
 function request(body: unknown) {
   return app().request("/v1/chat/completions", { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -46,12 +47,19 @@ describe("OpenAI-compatible workspace chat", () => {
     const host = app().get("/v1/unrelated", (c) => c.json({ ok: true }));
     expect((await host.request("/v1/unrelated")).status).toBe(200);
   });
-  it("requires a bearer key and search access", async () => {
+  it("requires a bearer key and chat access", async () => {
     const response = await app().request("/v1/models");
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: { type: "authentication_error" } });
     validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["ingest"] });
     expect((await request(input())).status).toBe(403);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+  it("refuses search-only keys: answers need the chat scope", async () => {
+    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search"] });
+    const response = await request(input());
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { type: "permission_error", code: "insufficient_scope", message: "API key needs chat access" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
   it("reports throttling as a rate limit rather than invalid credentials", async () => {
@@ -90,11 +98,57 @@ describe("OpenAI-compatible workspace chat", () => {
     expect((await request(input())).status).toBe(404);
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
+  it("answers an unknown workspace reference with an OpenAI-shaped model_not_found", async () => {
+    const { findWorkspaceForInput } = await import("../services/workspaces.js");
+    vi.mocked(findWorkspaceForInput).mockResolvedValueOnce(null);
+    const response = await request(input({ model: "workspace:no-such-workspace" }));
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error", code: "model_not_found", param: "model" } });
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
   it.each([{ tools: [] }, { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/image" } }] }] }, { n: 2 }, { max_tokens: 10, max_completion_tokens: 10 }, { messages: [{ role: "assistant", content: "hi" }] }])("rejects unsupported or invalid inputs: %j", async (extra) => {
     const response = await request(input(extra));
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+  it.each([undefined, "auto"])("keeps the workspace agent for tool_choice %s", async (toolChoice) => {
+    expect((await request(input(toolChoice ? { tool_choice: toolChoice } : {}))).status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: true }));
+  });
+  it.each([false, true])("answers directly without agent tools for tool_choice none (stream=%s)", async (stream) => {
+    chatWorkspace.mockImplementationOnce(async (args) => { if (args.onTextDelta) await args.onTextDelta(answer.answer); return answer; });
+    const response = await request(input({ tool_choice: "none", stream }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Renewal is annual [1].");
+    expect(chatWorkspace).toHaveBeenCalledOnce();
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false, allowConfiguration: false }));
+    if (stream) expect(chatWorkspace.mock.calls[0]![0].onTextDelta).toEqual(expect.any(Function));
+  });
+  it.each(["required", { type: "function", function: { name: "search" } }, { type: "allowed_tools", allowed_tools: { mode: "auto", tools: [] } }, ""])("rejects unsupported tool_choice %j naming the param", async (toolChoice) => {
+    const response = await request(input({ tool_choice: toolChoice }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { type: "invalid_request_error", param: "tool_choice" } });
+    expect(body.error.message).toContain('"auto" or "none"');
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+  it("names client-defined tools as an unsupported parameter", async () => {
+    const response = await request(input({ tools: [{ type: "function", function: { name: "lookup", parameters: {} } }] }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { type: "invalid_request_error", param: "tools", code: "unsupported_parameter" } });
+    expect(body.error.message).toContain('tool_choice "none"');
+  });
+  it("passes docslurp.retrieval overrides to the workspace answer and validates them", async () => {
+    expect((await request(input({ docslurp: { retrieval: { parentRetrieval: false, resultCount: 6 } } }))).status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ retrieval: { parentRetrieval: false, resultCount: 6 } }));
+    for (const docslurp of [{ retrieval: { parentRetrieval: "no" } }, { retrieval: { secret: true } }, { filters: {} }]) {
+      const response = await request(input({ docslurp }));
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.param).toMatch(/^docslurp\./);
+    }
+    expect(chatWorkspace).toHaveBeenCalledOnce();
   });
   it("streams data-only deltas, usage and DONE with one stable completion id", async () => {
     chatWorkspace.mockImplementationOnce(async (args) => {
@@ -138,6 +192,20 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(response.status).toBe(400);
     expect(getWorkspace).not.toHaveBeenCalled();
   });
+  it.each([false, true])("blocks tool failures without a successful completion (stream=%s)", async (stream) => {
+    chatWorkspace.mockRejectedValueOnce(new ChatToolBlockedError("search", "http_503"));
+    const response = await request(input({ stream }));
+    if (!stream) {
+      expect(response.status).toBe(424);
+      expect(await response.json()).toMatchObject({ error: { code: "chat_tool_failed" } });
+    } else {
+      const text = await response.text();
+      expect(text).toContain('"code":"chat_tool_failed"');
+      expect(text).not.toContain('"finish_reason":"stop"');
+      expect(text).not.toContain("[DONE]");
+    }
+  });
+
   it("reports midstream failure without a false successful finish", async () => {
     chatWorkspace.mockImplementationOnce(async (args) => { await args.onTextDelta("partial"); throw new Error("provider failed"); });
     const response = await request(input({ stream: true }));

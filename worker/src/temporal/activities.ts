@@ -1,3 +1,5 @@
+import { renderDocumentPage } from "../deferred/render-page.js";
+import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
 import type { VisionPageTask } from "./shared.js";
@@ -15,6 +17,7 @@ import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
  */
 
 import { Context } from "@temporalio/activity";
+import { dbTraceEnabled, withDbTraceLabel } from "../lib/db-trace.js";
 import { ApplicationFailure } from "@temporalio/common";
 
 import type { Config } from "../config.js";
@@ -178,6 +181,26 @@ export function createActivities(deps: ActivityDependencies) {
   const slotsEnabled = resolveWorkerSlotOptions().enabled;
 
   const activities = {
+    async renderDocumentPageActivity(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
+      if (!deps.runner) throw ApplicationFailure.nonRetryable("Page rendering requires a command runner");
+      const context = Context.current();
+      const timer = setInterval(() => context.heartbeat(), 10_000);
+      try { await renderDocumentPage({ store, storage: deps.storage, runner: deps.runner }, input, context.cancellationSignal); }
+      finally { clearInterval(timer); }
+    },
+    /**
+     * Heartbeats only on progress (each file and chunk), so a hung storage read
+     * misses the heartbeat timeout and is retried instead of holding the slot.
+     */
+    async buildDocumentExportActivity(input: import("@docslurp/shared").BuildDocumentExportInput): Promise<void> {
+      const context = Context.current();
+      await buildDocumentExport({ sql: store.stageSql, storage: deps.storage }, input.exportId, {
+        signal: context.cancellationSignal,
+        heartbeat: () => context.heartbeat(),
+        attempt: context.info.attempt,
+        final: context.info.attempt >= DOCUMENT_EXPORT_MAX_ATTEMPTS,
+      });
+    },
     /** One contiguous page range of a materializePages workflow. */
     async materializePageRangeActivity(input: MaterializePagesInput): Promise<MaterializeResult> {
       const context = Context.current();
@@ -303,9 +326,12 @@ export function createActivities(deps: ActivityDependencies) {
               }
               merged.stagesRun = resumeAt;
             }
+            // The previous stage's completion checkpoint already read the control state.
+            let controlRequested: boolean | undefined;
+            let preloaded: import("../db/store.js").PreloadedRunState | undefined;
             for (const [position, stageName] of input.stageNames.entries()) {
               if (position < resumeAt) continue;
-              if (position > resumeAt && input.yieldToControl && await store.hasRunControlRequest(input.runId)) {
+              if (position > resumeAt && input.yieldToControl && (controlRequested ?? await store.hasRunControlRequest(input.runId))) {
                 console.log(`[temporal] run=${input.runId} stage group yields before ${stageName}: control request`);
                 break;
               }
@@ -315,8 +341,14 @@ export function createActivities(deps: ActivityDependencies) {
                 heartbeat: (details) => context.heartbeat(details),
                 attempt: context.info.attempt,
                 classifyError: classify,
+                readControlState: input.yieldToControl === true,
+                // The next stage of this group opens with the reads this checkpoint already made.
+                preloadRunState: position < input.stageNames.length - 1,
+                preloaded,
                 onStageFailure: (failure) => { ordinaryFailures = failure.ordinaryFailures; },
               });
+              controlRequested = output.controlRequested;
+              preloaded = output.preloaded;
               artifacts = { ...artifacts, ...output.artifacts };
               Object.assign(merged.artifacts, output.artifacts);
               merged.usage.inputTokens += output.usage.inputTokens;
@@ -384,6 +416,12 @@ export function createActivities(deps: ActivityDependencies) {
     },
   };
 
+  if (dbTraceEnabled) {
+    for (const [name, fn] of Object.entries(activities)) {
+      (activities as Record<string, unknown>)[name] = (...args: unknown[]) => withDbTraceLabel(name, () => (fn as (...a: unknown[]) => unknown)(...args));
+    }
+  }
+
   async function runVisionPage(task: VisionPageTask, allocationFraction: number): Promise<UsageSummary> {
       const stage = stageMap.get("vision-extract");
       if (!(stage instanceof VisionExtractStage)) throw new Error("Vision stage unavailable");
@@ -433,7 +471,7 @@ export function createActivities(deps: ActivityDependencies) {
       };
       console.log(`[page-task] run=${task.runId} document=${task.documentId} page=${task.pageNumber} worker=${workerId} started`);
       try {
-        const result = await runWithProviderRateScope({ orgId: state.run.orgId },
+        const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.orgAllowChinaProviders },
           () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId: task.runId, documentId: task.documentId },
             () => stage.runPageTask(state, task, controller.signal)));
         recordPageCompute();

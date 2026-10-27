@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { defaultPipelineFeatures, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("./usage-attribution.js", () => ({ workspaceRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
 
 const {
+  INGEST_RECOMMENDATION_CATALOG,
   applyRecommendationPatch,
   buildIngestReport,
   effectiveVisionPageCap,
@@ -97,10 +98,11 @@ describe("ingest report: observed content", () => {
     const rec = report.recommendations[0]!;
     expect(rec).toMatchObject({ id: "turn-on-vision", severity: "high", affectedPages: 3, affectedDocuments: 1, reprocessDocumentIds: ["scan"] });
     expect(rec.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 4 } });
-    // Default Gemini Flash Lite catalog price: 0.5¢ per page.
-    expect(rec.cost.centsPer100Pages).toBe(50);
-    // Observed 2¢ / 3 pages for the re-run plus 3 vision pages at 0.5¢.
-    expect(rec.cost.reprocessCents).toBeCloseTo(2 + 1.5, 5);
+    // Default vision model's catalog price per page.
+    const perPage = visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].estimatedCostPerPageCents;
+    expect(rec.cost.centsPer100Pages).toBeCloseTo(perPage * 100, 2);
+    // Observed 2¢ / 3 pages for the re-run plus 3 vision pages at the catalog price.
+    expect(rec.cost.reprocessCents).toBeCloseTo(2 + 3 * perPage, 2);
     expect(report.config.find((item) => item.key === "visionFallback")?.value).toBe("Off");
   });
 
@@ -173,8 +175,17 @@ describe("ingest report: observed content", () => {
     expect(report.recommendations[0]!.reprocessDocumentIds).toEqual(["new"]);
   });
 
+  it("defaults video workspace policy on without claiming frames were processed", () => {
+    const report = build({ documents: [doc("video", { filename: "video.mp4", mimeType: "video/mp4" })] });
+    const setting = report.config.find((item) => item.key === "mediaVideo.enabled");
+    expect(setting?.value).toBe("On");
+    expect(setting?.note).toContain("not evidence that frames were processed");
+    expect(report.recommendations.some((item) => item.id === "turn-on-video")).toBe(false);
+  });
+
   it("audio: counts media, flags a recording without a transcript", () => {
     const report = build({
+      pipeline: pipeline({ mediaVideo: { enabled: false } }),
       documents: [
         doc("call", { filename: "call.mp3", mimeType: "audio/mpeg", pageCount: 1, chunkTotal: 0 }),
         doc("talk", { filename: "talk.mp4", mimeType: "video/mp4", pageCount: 1, chunkTotal: 3, chunkUnattributed: 3 }),
@@ -235,6 +246,175 @@ describe("ingest report: observed content", () => {
     const report = build({ documents: [] });
     expect(report.files.total).toBe(0);
     expect(summarizeIngestReport(report)).toMatch(/no files yet/);
+  });
+});
+
+describe("ingest report: failed files", () => {
+  const OCR_CRASH = "no extractor produced output: kreuzberg=Error: Error opening data file /app/node_modules/.pnpm/kreuzberg/tessdata/eng.traineddata";
+  const failedImage = () => build({
+    documents: [doc("shot", { filename: "shot.png", mimeType: "image/png", status: "failed", pageCount: 1 })],
+    pages: pages("shot", [{ text: 0, images: 1, vision: "not-selected" }]),
+    stages: [
+      { documentId: "shot", stage: "extract-markdown", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null, error: OCR_CRASH },
+      { documentId: "shot", stage: "vision-extract", status: "skipped", skipped: true, reason: "page-triage-skip", selectedPages: 0, pages: 1, costCents: null, tablePages: null, durationSeconds: null },
+    ],
+  });
+
+  it("surfaces the real failure: reason, stage and a sanitized detail with no paths", () => {
+    const report = failedImage();
+    expect(report.failures).toMatchObject({ total: 1, byReason: [{ reason: "ocr_unavailable", documents: 1 }] });
+    const [failure] = report.failures.examples;
+    expect(failure).toMatchObject({ documentId: "shot", filename: "shot.png", stage: "extract-markdown", reason: "ocr_unavailable", retryable: false });
+    expect(failure?.detail).toContain("Error opening data file <path>");
+    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\//);
+  });
+
+  it("does not blame page triage or recommend vision for a file that crashed in extraction", () => {
+    const report = failedImage();
+    expect(report.images.scannedLookingPages).toBe(0);
+    expect(report.recommendations.map((rec) => rec.id)).toEqual(["retry-failed-files"]);
+    const retry = report.recommendations[0]!;
+    expect(retry.reason).toMatch(/OCR/);
+    expect(retry.effect).toMatch(/fail the same way/);
+    const summary = summarizeIngestReport(report);
+    expect(summary).toMatch(/1 file failed/);
+    expect(summary).toMatch(/shot\.png/);
+    expect(summary).toMatch(/OCR/);
+    expect(summary).not.toMatch(/scanned|triage|vision/i);
+  });
+
+  it("reports a failed file with no recorded stage error as unknown", () => {
+    const report = build({ documents: [doc("lost", { status: "failed", pageCount: 2 })] });
+    expect(report.failures.examples).toEqual([expect.objectContaining({ reason: "unknown", stage: null, detail: null, retryable: true })]);
+    expect(report.recommendations[0]?.effect).toMatch(/runs them again/);
+  });
+
+  it("keeps vision recommendations for scanned pages of files that did not fail", () => {
+    const report = build({
+      documents: [doc("ok", { pageCount: 1 }), doc("bad", { status: "failed", pageCount: 1 })],
+      pages: [...pages("ok", [{ text: 0, images: 1, vision: "not-selected" }]), ...pages("bad", [{ text: 0, images: 1, vision: "not-selected" }])],
+    });
+    expect(report.images.scannedLookingPages).toBe(1);
+    expect(report.recommendations.find((rec) => rec.id === "vision-all-pages")).toMatchObject({ affectedPages: 1, reprocessDocumentIds: ["ok"] });
+  });
+});
+
+describe("ingest report: singular and plural agreement", () => {
+  const scanned = (n: number) => build({
+    documents: [doc("scan", { pageCount: n })],
+    pages: pages("scan", Array.from({ length: n }, () => ({ text: 0, images: 1, vision: "not-selected" }))),
+  });
+
+  it("agrees verbs with one scanned page", () => {
+    const report = scanned(1);
+    const rec = report.recommendations.find((entry) => entry.id === "vision-all-pages")!;
+    expect(rec.reason).toContain("1 page of 1 measured has images and almost no text layer (it looks scanned) and no searchable text");
+    expect(rec.effect).toContain("reprocess the 1 affected file to fix existing pages");
+    const summary = summarizeIngestReport(report);
+    expect(summary).toContain("1 page looks scanned (images, almost no text layer); vision read 0 pages");
+    expect(summary).toContain("0 of 1 checked page searchable");
+  });
+
+  it("agrees verbs with several scanned pages", () => {
+    const report = scanned(3);
+    const rec = report.recommendations.find((entry) => entry.id === "vision-all-pages")!;
+    expect(rec.reason).toContain("3 pages of 3 measured have images and almost no text layer (they look scanned) and no searchable text");
+    expect(summarizeIngestReport(report)).toContain("3 pages look scanned (images, almost no text layer); vision read 0 pages");
+    expect(summarizeIngestReport(report)).toContain("0 of 3 checked pages searchable");
+  });
+
+  it("agrees verbs across the other recommendations", () => {
+    const one = build({
+      pipeline: pipeline({ preserveTables: false, embed: false, indexVectors: false, embedding: { profile: "cheapest-hosted" }, mediaVideo: { enabled: false } }),
+      documents: [
+        doc("tables", { language: "de" }),
+        doc("clip", { filename: "clip.mp4", mimeType: "video/mp4", pageCount: 1 }),
+        doc("broken", { status: "failed", pageCount: 1 }),
+      ],
+      pages: pages("tables", [{ text: 3000, images: 0, chunks: 1 }, { text: 0, images: 1, vision: "failed" }, { text: 120, images: 0 }]),
+      stages: [{ documentId: "tables", stage: "classify-route", status: "completed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: 1, durationSeconds: null }],
+    });
+    const reasons = Object.fromEntries(one.recommendations.map((rec) => [rec.id, rec.reason]));
+    expect(reasons["preserve-tables"]).toContain("1 page in 1 file looks table-heavy");
+    expect(reasons["retry-vision-failures"]).toContain("1 page in 1 file was sent to vision");
+    expect(reasons["turn-on-video"]).toContain("1 video file has video frame reading disabled");
+    expect(reasons["reindex-pages-with-text"]).toContain("1 page in 1 file has a text layer but no chunks, so search cannot return it");
+    expect(reasons["retry-failed-files"]).toMatch(/^1 file failed during processing and is not searchable/);
+    expect(reasons["multilingual-embeddings"]).toContain("1 file is in de");
+
+    const many = build({
+      pipeline: pipeline({ preserveTables: false, mediaVideo: { enabled: false } }),
+      documents: [doc("a", { status: "failed" }), doc("b", { status: "failed" }), doc("v1", { filename: "1.mp4", mimeType: "video/mp4" }), doc("v2", { filename: "2.mp4", mimeType: "video/mp4" })],
+      pages: pages("a", [{ text: 3000, images: 0, chunks: 1 }, { text: 3000, images: 0, chunks: 1 }]),
+      stages: [{ documentId: "a", stage: "classify-route", status: "completed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: 2, durationSeconds: null }],
+    });
+    const manyReasons = Object.fromEntries(many.recommendations.map((rec) => [rec.id, rec.reason]));
+    expect(manyReasons["preserve-tables"]).toContain("2 pages in 1 file look table-heavy");
+    expect(manyReasons["turn-on-video"]).toContain("2 video files have video frame reading disabled");
+    expect(manyReasons["retry-failed-files"]).toMatch(/^2 files failed during processing and are not searchable/);
+  });
+
+  it("agrees verbs when scanned pages were all handled", () => {
+    const one = build({ documents: [doc("done", { pageCount: 1 })], pages: pages("done", [{ text: 0, images: 1, vision: "extracted", chunks: 1 }]), stages: [{ documentId: "done", stage: "vision-extract", status: "completed", skipped: false, reason: null, selectedPages: 1, pages: 1, costCents: 1, tablePages: null, durationSeconds: null }] });
+    expect(one.recommendations.find((rec) => rec.id === "scans-handled")?.reason).toBe("1 page looks scanned and it has searchable text.");
+  });
+});
+
+describe("ingest report: recommendations reach the settings proposal tool", () => {
+  const stage = (documentId: string, name: string, extra: Partial<Input["stages"][number]> = {}): Input["stages"][number] => ({
+    documentId, stage: name, status: "completed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null, ...extra,
+  });
+  const scenarios = (): Array<ReturnType<typeof build>> => [
+    build({ pipeline: pipeline({ visionFallback: false }), documents: [doc("scan", { pageCount: 2 })], pages: pages("scan", [{ text: 0, images: 1 }, { text: 0, images: 1 }]) }),
+    build({
+      documents: [doc("mixed", { pageCount: 4 })],
+      pages: pages("mixed", [{ text: 1800, images: 0, vision: "not-selected", chunks: 2 }, { text: 0, images: 1, vision: "not-selected" }, { text: 2000, images: 0, vision: "not-selected" }, { text: 0, images: 0, vision: "not-selected" }]),
+    }),
+    build({
+      pipeline: pipeline({ vision: { forceAllPages: true, maxPagesPerDocument: 32 } }),
+      documents: [doc("old", { pageCount: 1 })], pages: pages("old", [{ text: 0, images: 1, vision: "not-selected" }]),
+    }),
+    build({
+      pipeline: pipeline({ preserveTables: false, embed: false, indexVectors: false, embedding: { profile: "cheapest-hosted" }, mediaVideo: { enabled: false }, maxCostCents: 5 }),
+      documents: [
+        doc("tables", { language: "de" }), doc("broken", { status: "failed", pageCount: 2 }),
+        doc("call", { filename: "call.mp3", mimeType: "audio/mpeg", pageCount: 1 }), doc("clip", { filename: "clip.mp4", mimeType: "video/mp4", pageCount: 1, chunkTotal: 2, chunkUnattributed: 2 }),
+      ],
+      pages: pages("tables", [{ text: 3000, images: 0, chunks: 1 }, { text: 0, images: 1, vision: "failed" }, { text: 0, images: 1, vision: "cost-cap" }, { text: 2000, images: 0 }]),
+      stages: [stage("tables", "classify-route", { tablePages: 2 })],
+    }),
+    build({ documents: [doc("done", { pageCount: 1 })], pages: pages("done", [{ text: 0, images: 1, vision: "extracted", chunks: 1 }]), stages: [stage("done", "vision-extract", { selectedPages: 1, pages: 1, costCents: 1 })] }),
+  ];
+
+  it("accounts for every recommendation id the report can emit", () => {
+    const emitted = new Set(scenarios().flatMap((report) => report.recommendations.map((rec) => rec.id)));
+    expect([...emitted].sort()).toEqual(Object.keys(INGEST_RECOMMENDATION_CATALOG).sort());
+  });
+
+  it("every pipeline patch passes the settings proposal schema; every other recommendation is explicitly not proposable", async () => {
+    const { workspaceSettingsProposalInputSchema } = await import("./workspace-settings-proposal-input.js");
+    for (const rec of scenarios().flatMap((report) => report.recommendations)) {
+      const entry = INGEST_RECOMMENDATION_CATALOG[rec.id as keyof typeof INGEST_RECOMMENDATION_CATALOG];
+      expect(entry, `${rec.id} is missing from INGEST_RECOMMENDATION_CATALOG`).toBeDefined();
+      if (entry.proposal === "pipeline-patch") {
+        expect(rec.patch, rec.id).not.toBeNull();
+        const parsed = workspaceSettingsProposalInputSchema.safeParse({ changes: { pipeline: rec.patch } });
+        expect(parsed.success, `${rec.id}: ${JSON.stringify(rec.patch)}`).toBe(true);
+      } else {
+        expect(rec.patch, rec.id).toBeNull();
+      }
+    }
+  });
+
+  it("accepts the vision page-selection settings and rejects malformed ones", async () => {
+    const { workspaceSettingsProposalInputSchema } = await import("./workspace-settings-proposal-input.js");
+    const parse = (vision: unknown) => workspaceSettingsProposalInputSchema.safeParse({ changes: { pipeline: { vision } } }).success;
+    expect(parse({ forceAllPages: true })).toBe(true);
+    expect(parse({ forceAllPages: true, maxPagesPerDocument: 32 })).toBe(true);
+    expect(parse({ maxPagesPerDocument: 33 })).toBe(false);
+    expect(parse({ maxPagesPerDocument: 0 })).toBe(false);
+    expect(parse({})).toBe(false);
+    expect(parse({ modelUri: "llm://anything" })).toBe(false);
   });
 });
 

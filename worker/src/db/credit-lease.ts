@@ -131,7 +131,7 @@ export async function grantRunCreditLease(
       ${config.minCredits}::numeric, ${config.maxCredits}::numeric, ${config.initialCredits}::numeric,
       ${config.fraction}::numeric, ${config.horizonSeconds}::numeric, ${config.ttlSeconds}::int,
       ${isBillingExemptOrg(run.orgId)}::boolean,
-      ${chatReserveConfig().paidReserveCredits}::numeric, ${chatReserveConfig().freeReserveCredits}::numeric
+      ${chatReserveConfig().fundedReserveCredits}::numeric, ${chatReserveConfig().starterReserveCredits}::numeric
     )
   `;
   return {

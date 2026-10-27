@@ -15,12 +15,13 @@ const evalModels = new Set(["inception/mercury-3", "minimax/minimax-m3.1-flash:f
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("DOCSLURP_CHAT_EVAL_MODELS", () => {
-  it("admits priced OpenRouter ids (including :free) and rejects prohibited, unpriced and malformed ids", () => {
+  it("admits priced OpenRouter ids and rejects retired, prohibited, unpriced and malformed ids", () => {
     const { models, rejected } = parseChatEvalModels(
       " inception/mercury-3, minimax/minimax-m3.1-flash:free,inception/mercury-3, openai/gpt-6-sol-pro, acme/ultra-1, acme/unpriced-model, not a model, openai/gpt-6-astra",
     );
-    expect(models).toEqual(["inception/mercury-3", "minimax/minimax-m3.1-flash:free"]);
+    expect(models).toEqual(["inception/mercury-3"]);
     expect(rejected).toEqual([
+      { id: "minimax/minimax-m3.1-flash:free", reason: "missing-price" },
       { id: "openai/gpt-6-sol-pro", reason: "prohibited-model" },
       { id: "acme/ultra-1", reason: "prohibited-model" },
       { id: "acme/unpriced-model", reason: "missing-price" },
@@ -78,18 +79,18 @@ describe("chat model resolution", () => {
 });
 
 describe("agent limits", () => {
-  it("defaults to 6 steps, 12 tool calls and search concurrency 4", () => {
-    expect(resolveChatAgentLimits(undefined, false)).toEqual({ maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: [] });
+  it("defaults to 8 steps, 16 tool calls and search concurrency 6", () => {
+    expect(resolveChatAgentLimits(undefined, false)).toEqual({ maxSteps: 8, baseSteps: 4, maxToolCalls: 16, searchConcurrency: 6, clamped: [] });
   });
 
   it("lets non-admins lower limits but clamps raised ones to the defaults", () => {
-    expect(resolveChatAgentLimits({ maxSteps: 2, maxToolCalls: 3, searchConcurrency: 1 }, false)).toEqual({ maxSteps: 2, maxToolCalls: 3, searchConcurrency: 1, clamped: [] });
+    expect(resolveChatAgentLimits({ maxSteps: 2, maxToolCalls: 3, searchConcurrency: 1 }, false)).toEqual({ maxSteps: 2, baseSteps: 2, maxToolCalls: 3, searchConcurrency: 1, clamped: [] });
     expect(resolveChatAgentLimits({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 }, false))
-      .toEqual({ maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] });
+      .toEqual({ maxSteps: 8, baseSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] });
   });
 
   it("gives admins the full range, bounded by the schema maximums", () => {
-    expect(resolveChatAgentLimits({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 }, true)).toEqual({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8, clamped: [] });
+    expect(resolveChatAgentLimits({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 }, true)).toEqual({ maxSteps: 12, baseSteps: 12, maxToolCalls: 24, searchConcurrency: 8, clamped: [] });
     expect(resolveChatAgentLimits({ maxSteps: 99 }, true).maxSteps).toBe(12);
   });
 });
@@ -134,7 +135,7 @@ describe("eval access lookups", () => {
     expect(chatTurnNeedsEvalAccess("  ")).toBe(false);
     expect(chatTurnNeedsEvalAccess("z-ai/glm-5.3-flash", { maxSteps: 6, maxToolCalls: 2, searchConcurrency: 4 })).toBe(false);
     expect(chatTurnNeedsEvalAccess("inception/mercury-3")).toBe(true);
-    expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 7 })).toBe(true);
+    expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 9 })).toBe(true);
     expect(chatTurnNeedsEvalAccess(undefined, { searchConcurrency: 8 })).toBe(true);
   });
 

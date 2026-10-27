@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type postgres from "postgres";
-import { getPlan, isBillingEnforced, updateOrganizationSchema, type InvitePreview, type OrganizationAccess, type OrganizationDetails, type OrganizationMember, type UpdateOrganizationInput } from "@docslurp/shared";
+import { updateOrganizationSchema, type InvitePreview, type OrganizationAccess, type OrganizationDetails, type OrganizationMember, type UpdateOrganizationInput } from "@docslurp/shared";
 
 import {
   createOrganizationInviteSchema,
@@ -26,6 +26,7 @@ import { sql } from "../db.js";
 import { insertDefaultWorkspace } from "./default-workspace.js";
 import { sendOrganizationInviteEmail, sendWorkspaceInviteEmail } from "./notifications.js";
 import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
+import { forgetProviderPolicy } from "../lib/provider-policy.js";
 
 /** Narrows workspace IDs to the current API key request's allowlist, if any. */
 function withinRequestKeyAllowlist(workspaceIds: string[]): string[] {
@@ -42,8 +43,9 @@ type OrganizationRow = {
   created_by_user_id: string | null;
   credit_balance_cents: number;
   member_role: OrganizationRecord["memberRole"];
-  plan_id?: string | null;
+  funded?: boolean | null;
   retain_document_versions?: number | null;
+  allow_china_providers?: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -84,7 +86,10 @@ export interface WorkspaceAccess {
   workspaceId: string;
   orgId: string;
   workspaceOwnerUserId: string;
-  /** Every org member may read and write the org's default workspace. */
+  /**
+   * Every org member may read the org's default workspace and add content to it
+   * (`canContributeToWorkspace`); changing its settings still needs edit rights.
+   */
   isDefaultWorkspace?: boolean;
   orgRole: OrganizationRecord["memberRole"] | null;
   workspaceRole: WorkspaceMemberRecord["role"] | null;
@@ -102,8 +107,9 @@ function mapOrganization(row: OrganizationRow): OrganizationRecord {
     createdByUserId: row.created_by_user_id,
     creditBalanceCents: row.credit_balance_cents,
     memberRole: row.member_role,
-    planId: row.plan_id ?? null,
+    funded: row.funded === true,
     retainDocumentVersions: row.retain_document_versions ?? null,
+    allowChinaProviders: row.allow_china_providers !== false,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
@@ -180,8 +186,8 @@ export async function ensurePersonalOrganization(userId: string): Promise<Organi
       o.created_by_user_id,
       o.credit_balance_cents,
       om.role as member_role,
-      o.plan_id,
-      o.retain_document_versions,
+      o.funded_at is not null as funded,
+      o.retain_document_versions, o.allow_china_providers,
       o.created_at::text,
       o.updated_at::text
     from organizations o
@@ -243,8 +249,8 @@ export async function listOrganizations(userId: string): Promise<OrganizationRec
       o.created_by_user_id,
       o.credit_balance_cents,
       om.role as member_role,
-      o.plan_id,
-      o.retain_document_versions,
+      o.funded_at is not null as funded,
+      o.retain_document_versions, o.allow_china_providers,
       o.created_at::text,
       o.updated_at::text
     from organizations o
@@ -267,8 +273,8 @@ export async function getOrganization(orgId: string, userId: string): Promise<Or
       o.created_by_user_id,
       o.credit_balance_cents,
       om.role as member_role,
-      o.plan_id,
-      o.retain_document_versions,
+      o.funded_at is not null as funded,
+      o.retain_document_versions, o.allow_china_providers,
       o.created_at::text,
       o.updated_at::text
     from organizations o
@@ -353,19 +359,15 @@ export async function updateOrganization(orgId: string, userId: string, input: U
   try {
     await withOrganizationLock(orgId, userId, async (tx, actor) => {
       if (!organizationCapabilities(actor.role).update) throw new OrganizationError(403, "organization_forbidden", "Organization admin access required");
-      // Self-hosted deployments without billing honour retention on every plan.
-      if (typeof parsed.retainDocumentVersions === "number" && isBillingEnforced()) {
-        const [plan] = await tx<{ plan_id: string | null }[]>`select plan_id from organizations where id = ${orgId}`;
-        if (getPlan(plan?.plan_id).id === "free") {
-          throw new OrganizationError(402, "upgrade_required", "Keeping extra document versions needs a paid plan");
-        }
-      }
+      // Retention is open to every org: archived versions are billed as storage per GB.
       await tx`update organizations set name = coalesce(${parsed.name ?? null}, name),
         slug = case when ${parsed.slug !== undefined} then ${parsed.slug ?? null} else slug end,
         retain_document_versions = case when ${parsed.retainDocumentVersions !== undefined} then ${parsed.retainDocumentVersions ?? null}::integer else retain_document_versions end,
+        allow_china_providers = coalesce(${parsed.allowChinaProviders ?? null}::boolean, allow_china_providers),
         updated_at = now() where id = ${orgId}`;
       await auditOrganization(tx, orgId, userId, "organization.updated", parsed);
     });
+    if (parsed.allowChinaProviders !== undefined) forgetProviderPolicy(orgId);
     return await getOrganizationDetails(orgId, userId);
   } catch (error) { throw organizationConflict(error); }
 }
@@ -644,8 +646,8 @@ export async function listEditableWorkspaceIds(userId: string): Promise<string[]
   return withinRequestKeyAllowlist(rows.map((row) => row.workspace_id));
 }
 
-export async function getWorkspaceAccess(workspaceId: string, userId: string): Promise<WorkspaceAccess | null> {
-  const [row] = await sql<{
+export async function getWorkspaceAccess(workspaceId: string, userId: string, client: typeof sql = sql): Promise<WorkspaceAccess | null> {
+  const [row] = await client<{
     workspace_id: string;
     org_id: string;
     workspace_owner_user_id: string;
@@ -691,12 +693,22 @@ export async function getWorkspaceAccess(workspaceId: string, userId: string): P
   };
 }
 
+/** May change the workspace's settings, search and chat configuration, and spend-heavy builds. */
 export function canEditWorkspace(access: WorkspaceAccess, userId: string): boolean {
   return access.workspaceOwnerUserId === userId
-    || (access.isDefaultWorkspace === true && access.orgRole !== null)
     || (access.orgRole !== null && elevatedWorkspaceOrgRoles.has(access.orgRole))
     || access.workspaceRole === "admin"
     || access.workspaceRole === "editor";
+}
+
+/**
+ * May upload into the workspace and manage those runs. Every org member may add
+ * to the org's default workspace, including one listed as a viewer of it; that
+ * membership alone never grants settings changes (SEC-2026-10-PROD-14).
+ */
+export function canContributeToWorkspace(access: WorkspaceAccess, userId: string): boolean {
+  return canEditWorkspace(access, userId)
+    || (access.isDefaultWorkspace === true && access.orgRole !== null);
 }
 
 export function canManageWorkspace(access: WorkspaceAccess, userId: string): boolean {

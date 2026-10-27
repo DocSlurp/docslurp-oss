@@ -20,7 +20,7 @@ beforeAll(async () => {
   process.env.WORKER_CREDIT_LEASES = "on";
   // Lease mechanics with no chat reserve; chat-reserve.db.test.ts covers it.
   process.env.CHAT_CREDIT_RESERVE_CREDITS = "0";
-  process.env.CHAT_CREDIT_RESERVE_FREE_CREDITS = "0";
+  process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS = "0";
   const pg = await startMigratedPostgres();
   stop = pg.stop;
   sql = postgres(pg.url, {
@@ -40,7 +40,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.WORKER_CREDIT_LEASES;
   delete process.env.CHAT_CREDIT_RESERVE_CREDITS;
-  delete process.env.CHAT_CREDIT_RESERVE_FREE_CREDITS;
+  delete process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS;
   await sql?.end();
   await stop?.();
 });
@@ -103,6 +103,20 @@ describe("credit leases (app)", () => {
     expect((await sql<{ control_state: string }[]>`select control_state from workspace_runs where id = 'p2'`)[0]!.control_state).toBe("paused");
     // Another org's sweep never touches this org's runs.
     expect(await paused.sweepSpendPausedRuns({ sql: sql as never, signals, orgId: "other" })).toEqual({ resumed: 0, stillBlocked: 0 });
+  });
+
+  it("keeps the durable pause and lease unchanged after failed resume delivery, then retries once", async () => {
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state, pause_reason)
+      values ('delivery', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+    signals.resume.mockRejectedValueOnce(new Error("Temporal unavailable"));
+    expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "deferred" });
+    expect((await sql`select control_state, pause_reason from workspace_runs where id = 'delivery'`)[0]).toMatchObject({ control_state: "paused", pause_reason: "credit_exhausted" });
+    expect(await outstanding()).toBe(0);
+    expect(await sql`select id from workspace_run_events where run_id = 'delivery'`).toHaveLength(0);
+    expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "resumed" });
+    expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "not-spend-paused" });
+    expect(signals.resume).toHaveBeenCalledTimes(2);
+    expect(await sql`select id from workspace_run_events where run_id = 'delivery'`).toHaveLength(1);
   });
 
   it("parses org_spend_changed payloads defensively", () => {

@@ -1,11 +1,22 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { createOpenRouterReasoningFetch } from "@docslurp/shared";
+import { createOpenRouterReasoningFetch, createOpenRouterRoutingFetch } from "@docslurp/shared";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 /** DeepSeek V4 aliases and dated builds (deepseek/deepseek-v4.1-flash-1017) need explicit low reasoning. */
 export function chatAgentProviderOptions(model: string) {
   return model.startsWith("deepseek/deepseek-v4") ? { openrouter: { reasoning: { effort: "low" as const } } } : undefined;
+}
+
+/**
+ * Prompt-cache breakpoint for upstreams that cache only at explicit
+ * cache_control markers (Anthropic and Gemini through OpenRouter). Others
+ * (OpenAI, DeepSeek, GLM, Qwen and most open-weight hosts) cache a repeated
+ * prefix on their own, so they get no marker. Cached reads are billed at a
+ * discount, and OpenRouter's receipt cost already reflects it.
+ */
+export function promptCacheBreakpoint(model: string) {
+  return /^(anthropic|google)\//.test(model) ? { openrouter: { cacheControl: { type: "ephemeral" as const } } } : undefined;
 }
 
 /**
@@ -21,6 +32,6 @@ export function chatAgentProviderOptions(model: string) {
  */
 export function createChatAgentModel(args: { apiKey: string; model: string; fetch: typeof fetch }) {
   const provider = createOpenRouter({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, compatibility: "strict",
-    fetch: createOpenRouterReasoningFetch(args.fetch) });
+    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(args.fetch)) });
   return provider.chat(args.model, { usage: { include: true } });
 }

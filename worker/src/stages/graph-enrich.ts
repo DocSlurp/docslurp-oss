@@ -9,6 +9,7 @@ import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { CommunityRefreshResult, CommunitySummaryContext } from "../graph/communities.js";
 import { extractDocumentGraph, type GraphChunk } from "../graph/extract.js";
 import type { ReplaceDocumentGraphInput } from "../graph/graph-store.js";
@@ -16,6 +17,7 @@ import type { EmbeddingArtifact } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 
 /** Store surface graph enrichment writes through (the Postgres `Store`). */
 export interface KnowledgeGraphStore {
@@ -148,7 +150,12 @@ export class GraphEnrichStage implements Stage {
         },
       });
       windows += graph.windows;
-      if (graph.source === "llm") llmDocuments += 1;
+      if (graph.source === "llm") {
+        llmDocuments += 1;
+        // Price card: knowledge graph per started 10 pages, once per document per run, only when the
+        // model extracted it (heuristic fallback graphs are free). Community summaries are included.
+        chargeDocumentFeature(state, document, "knowledgeGraph");
+      }
 
       // Persist per document: search sees the graph grow during long runs.
       const written = graphStore
@@ -217,7 +224,7 @@ export class GraphEnrichStage implements Stage {
       );
     }
 
-    const artifactKey = `${state.run.userId}/${state.run.id}/graph/workspace-graph.json`;
+    const artifactKey = `${runArtifactRoot(state.run, state.run.userId)}/graph/workspace-graph.json`;
     await this.storage.putJson(artifactKey, {
       config: graphConfig,
       configHash,

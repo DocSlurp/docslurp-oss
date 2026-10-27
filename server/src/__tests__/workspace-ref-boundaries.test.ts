@@ -14,7 +14,6 @@ const mocks = vi.hoisted(() => ({
   createDirectUploadSession: vi.fn(),
   listDocumentsWithFilters: vi.fn(),
   listDocumentIndexEntries: vi.fn(),
-  listLowConfidenceReviewQueue: vi.fn(),
   aggregateWorkspaceRagSearch: vi.fn(),
   getRunProcessingPreview: vi.fn(),
   listNotificationInbox: vi.fn(),
@@ -29,6 +28,10 @@ vi.mock("../services/workspaces.js", () => ({
     if (ref === WS_ID || ref === "legal") return { id: WS_ID, slug: "legal", renamedFrom: null };
     if (ref === "old-legal") return { id: WS_ID, slug: "legal", renamedFrom: "old-legal" };
     return null;
+  }),
+  findWorkspaceForInput: vi.fn(async (ref: { kind: string; id?: string; slug?: string }) => {
+    if (ref.kind === "id") return ref.id === WS_ID || ref.id === DEFAULT_ID ? { id: ref.id, orgId: "org-1" } : null;
+    return ref.slug === "legal" || ref.slug === "old-legal" ? { id: WS_ID, orgId: "org-1" } : null;
   }),
   ensureDefaultWorkspace: mocks.ensureDefaultWorkspace,
   getWorkspace: vi.fn(async (id: string) =>
@@ -46,7 +49,6 @@ vi.mock("../services/documents.js", () => ({
   listDocumentIndexEntries: mocks.listDocumentIndexEntries,
 }));
 vi.mock("../services/document-review.js", () => ({
-  listLowConfidenceReviewQueue: mocks.listLowConfidenceReviewQueue,
 }));
 vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingWorkspaceScopeError: class extends Error {} }));
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace: vi.fn() }));
@@ -88,7 +90,7 @@ function buildApp() {
     c.set("sessionUser", { id: "user-1", email: "user@example.com", name: "User" } as never);
     await next();
   });
-  app.route("/ingest", uploadsRoutes);
+  app.route("/uploads", uploadsRoutes);
   app.route("/documents", documentsRoutes);
   app.route("/search", searchRoutes);
   app.route("/runs", runsRoutes);
@@ -101,8 +103,8 @@ const post = (body: Record<string, unknown>): RequestInit => ({
   headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
 });
-const withRef = (ref: string | undefined) => (ref === undefined ? {} : { workspaceId: ref });
-const query = (ref: string | undefined) => (ref === undefined ? "" : `?workspaceId=${encodeURIComponent(ref)}`);
+const withRef = (ref: string | undefined) => (ref === undefined ? {} : { workspace: ref });
+const query = (ref: string | undefined) => (ref === undefined ? "" : `?workspace=${encodeURIComponent(ref)}`);
 
 type Boundary = {
   route: string;
@@ -115,9 +117,9 @@ type Boundary = {
 
 const boundaries: Boundary[] = [
   {
-    route: "POST /ingest/direct/sessions",
+    route: "POST /uploads/direct/sessions",
     omitted: "default",
-    call: (app, ref) => app.request("/ingest/direct/sessions", post({
+    call: (app, ref) => app.request("/uploads/direct/sessions", post({
       ...withRef(ref),
       files: [{ filename: "a.txt", mimeType: "text/plain", sizeBytes: 5 }],
     })),
@@ -136,16 +138,10 @@ const boundaries: Boundary[] = [
     received: () => mocks.listDocumentIndexEntries.mock.calls[0]?.[0]?.workspaceId,
   },
   {
-    route: "GET /documents/review-queue",
-    omitted: "unfiltered",
-    call: (app, ref) => app.request(`/documents/review-queue${query(ref)}`),
-    received: () => mocks.listLowConfidenceReviewQueue.mock.calls[0]?.[0]?.workspaceId,
-  },
-  {
     route: "POST /search/aggregate",
     omitted: "unfiltered",
-    call: (app, ref) => app.request("/search/aggregate", post({ q: "terms", workspaceIds: ref === undefined ? [] : [ref] })),
-    received: () => mocks.aggregateWorkspaceRagSearch.mock.calls[0]?.[0]?.request.workspaceIds[0],
+    call: (app, ref) => app.request("/search/aggregate", post({ q: "terms", workspaces: ref === undefined ? [] : [ref] })),
+    received: () => mocks.aggregateWorkspaceRagSearch.mock.calls[0]?.[0]?.request.workspaces[0],
   },
   {
     route: "POST /runs/preview",
@@ -186,7 +182,6 @@ describe("workspace reference boundaries", () => {
     mocks.createDirectUploadSession.mockResolvedValue({ sessionId: "session-1" });
     mocks.listDocumentsWithFilters.mockResolvedValue([]);
     mocks.listDocumentIndexEntries.mockResolvedValue({ entries: [] });
-    mocks.listLowConfidenceReviewQueue.mockResolvedValue([]);
     mocks.aggregateWorkspaceRagSearch.mockResolvedValue({ workspaces: [] });
     mocks.getRunProcessingPreview.mockResolvedValue({ estimatedPages: 1 });
     mocks.listNotificationInbox.mockResolvedValue({ deliveries: [], unreadCount: 0 });
@@ -201,7 +196,7 @@ describe("workspace reference boundaries", () => {
         expect(boundary.received()).toBe(expected(boundary));
       });
 
-      if (boundary.route !== "POST /search/aggregate") {
+      if (boundary.route !== "POST /uploads/direct/sessions") {
         it("answers 404 for an unknown reference", async () => {
           const response = await boundary.call(buildApp(), "no-such-workspace");
           expect(response.status).toBe(404);
@@ -209,6 +204,18 @@ describe("workspace reference boundaries", () => {
       }
     });
   }
+
+  it("creates an unknown named workspace on direct upload, but 404s an unknown UUID", async () => {
+    const files = [{ filename: "a.txt", mimeType: "text/plain", sizeBytes: 5 }];
+    const named = await buildApp().request("/uploads/direct/sessions", post({ workspace: "No Such Workspace", files }));
+    expect(named.status).toBe(201);
+    expect(mocks.createDirectUploadSession).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: null, workspaceName: "No Such Workspace" }));
+    mocks.createDirectUploadSession.mockClear();
+    const unknownId = await buildApp().request("/uploads/direct/sessions", post({ workspace: "33333333-3333-4333-8333-333333333333", files }));
+    expect(unknownId.status).toBe(404);
+    await expect(unknownId.json()).resolves.toMatchObject({ error: { code: "workspace_not_found" } });
+    expect(mocks.createDirectUploadSession).not.toHaveBeenCalled();
+  });
 
   it("answers 404, not 500, when the default workspace's organization is not the caller's", async () => {
     mocks.ensureDefaultWorkspace.mockRejectedValue(
@@ -218,7 +225,7 @@ describe("workspace reference boundaries", () => {
     const runs = await app.request("/runs/preview", post({ files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }] }));
     expect(runs.status).toBe(404);
     await expect(runs.json()).resolves.toMatchObject({ error: { code: "organization_not_found" } });
-    const direct = await app.request("/ingest/direct/sessions", post({
+    const direct = await app.request("/uploads/direct/sessions", post({
       orgId: "org-other",
       files: [{ filename: "a.txt", mimeType: "text/plain", sizeBytes: 5 }],
     }));

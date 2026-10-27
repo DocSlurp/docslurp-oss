@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { visionModelCatalog } from "@docslurp/shared";
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_OPENROUTER_VISION_MODEL, visionListPriceCents, visionModelCatalog } from "@docslurp/shared";
 
 import {
   buildFailedVisionAttemptUsage,
@@ -9,6 +9,8 @@ import {
 import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js";
 import { resolveVisionPromptTemplate } from "../tools/vision-runtime.js";
 import { buildSchemaAwareVisionPrompt } from "../tools/vision-runtime.js";
+import { VisionOutputRejectedError } from "../tools/vision-stream.js";
+import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
@@ -28,12 +30,14 @@ describe("shouldFailOpenVisionError", () => {
     // Without a provider charge, cataloged hosted models use their own list price, not the generic fallback.
     const tokens = { ...result, inputTokens: 2_000, outputTokens: 1_000 };
     expect(price({ ...tokens, model: "nvidia/nemotron-3.5-super-vl" })).toBeCloseTo((2_000 * 0.15 + 1_000 * 0.5) / 1e4, 12);
+    expect(price({ ...tokens, model: DEFAULT_OPENROUTER_VISION_MODEL }))
+      .toBeCloseTo(visionListPriceCents(DEFAULT_OPENROUTER_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })!, 12);
     expect(price({ ...tokens, model: "google/gemini-3.1-flash-lite" })).toBeCloseTo((2_000 * 0.25 + 1_000 * 1.5) / 1e4, 12);
     expect(price({ ...tokens, model: "vendor/uncataloged-vlm" })).toBeCloseTo(0.05, 10);
     expect(price({ ...tokens, model: "nvidia/nemotron-3.5-super-vl", baseUrl: "http://127.0.0.1:8000/v1" })).toBe(0);
   });
 
-  it("never prices a receipt-less cataloged hosted call below the default fallback and labels its pricing source", () => {
+  it("prices a receipt-less cataloged hosted call at list price, not the generic fallback, and labels its pricing source", () => {
     const cfg = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
     const stage = new VisionExtractStage({} as CommandRunner, {} as ArtifactStore, cfg, {} as never);
     const internals = stage as unknown as {
@@ -48,7 +52,11 @@ describe("shouldFailOpenVisionError", () => {
         : { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1" };
       const cost = internals.calculateVisionCost({ ...call, ...tokens, model: entry.id });
       expect(cost, entry.id).toBeGreaterThan(0);
-      expect(cost, entry.id).toBeGreaterThanOrEqual(fallback);
+      expect(cost, entry.id).toBeCloseTo(visionListPriceCents(entry.id, tokens)!, 12);
+      // The generic fallback is a floor for every entry priced above it; only sub-fallback list prices go lower.
+      if (entry.tokenPricing!.inputUsdPerMillion >= 0.1 && entry.tokenPricing!.outputUsdPerMillion >= 0.3) {
+        expect(cost, entry.id).toBeGreaterThanOrEqual(fallback);
+      }
       expect(internals.visionPricingSource({ ...call, model: entry.id }), entry.id).toBe("vision-catalog-list-price");
     }
     expect(internals.visionPricingSource({ runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", model: "vendor/x" }))
@@ -198,6 +206,34 @@ describe("shouldFailOpenVisionError", () => {
         billable: false,
       },
     });
+  });
+
+  it("records the summed spend of a page rejected on every attempt through the usage ledger", () => {
+    const stage = new VisionExtractStage({} as CommandRunner, {} as ArtifactStore,
+      { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config, {} as never);
+    const record = (stage as unknown as { recordFailedVisionAttempt(...args: unknown[]): void }).recordFailedVisionAttempt.bind(stage);
+    const rejected = new VisionOutputRejectedError("rejected after 2 attempts", [], 2400, 640, 1.5);
+    rejected.route = { model: "google/gemini-3.1-flash-lite", provider: "openrouter" };
+    const state = { usageLedger: new PipelineUsageEventLedger(), pendingPerformance: [] } as unknown as WorkflowState;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const vision = { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" };
+    record(state, { id: "doc-1" }, vision, { pageNumber: 3, artifactUri: "s3://bucket/p3.png" }, rejected.message, new Error("wrapped", { cause: rejected }));
+    const events = state.usageLedger.snapshot();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      metric: "page-analysis-attempt", model: "google/gemini-3.1-flash-lite", inputTokens: 2400, outputTokens: 640,
+      metadata: { outcome: "rejected", billable: false, documentId: "doc-1", pageNumber: 3 },
+    });
+    // Provider spend is kept for cost accounting; the customer is not charged for a page with no output.
+    expect(events[0]!.costCents).toBe(0);
+    expect(events[0]!.metadata?.providerCostCents).toBeGreaterThan(0);
+    expect(state.usageLedger.totals()).toMatchObject({ inputTokens: 2400, outputTokens: 640 });
+    expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]"))).toHaveLength(1);
+    // A plain failure keeps the non-billable zero-cost marker.
+    const plain = { usageLedger: new PipelineUsageEventLedger(), pendingPerformance: [] } as unknown as WorkflowState;
+    record(plain, { id: "doc-1" }, vision, { pageNumber: 4, artifactUri: "x" }, "boom", new Error("boom"));
+    expect(plain.usageLedger.snapshot()).toMatchObject([{ costCents: 0, metadata: { outcome: "failure", billable: false } }]);
+    log.mockRestore();
   });
 
   it("fails open when the remote vision provider is out of quota", () => {

@@ -1,8 +1,9 @@
 import { z } from "zod";
 
-import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId, type PlanId } from "./billing.js";
+import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
 import { sha256Hex } from "./hash.js";
-import { embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
+import { embeddingModelBaseUri,
+  embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   affectedStages,
@@ -13,8 +14,8 @@ import {
   type PipelineRunStage,
 } from "./pipeline.js";
 
-export const configChangeKindSchema = z.enum(["none", "search-only", "new-uploads", "reindex-recommended", "reindex-required"]);
-export type ConfigChangeKind = z.infer<typeof configChangeKindSchema>;
+export { configChangeKindSchema, type ConfigChangeKind } from "./config-change-kind.js";
+import { configChangeKindSchema, type ConfigChangeKind } from "./config-change-kind.js";
 
 export type ConfigChangeImpact = {
   kind: ConfigChangeKind;
@@ -53,7 +54,7 @@ export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   const modelUri = embedding.modelUri ?? embeddingProfileCatalog[embedding.profile].config.modelUri;
   return {
     embeddingModel: modelUri,
-    dims: embedding.dimensions ?? embeddingModelCatalogByUri[modelUri]?.dimensions ?? null,
+    dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
     chunking: {
       chunkOverlap: features.chunkOverlap,
       contextualChunkPreambles: features.contextualChunkPreambles,
@@ -138,6 +139,8 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   pageRouter: "new-uploads",
   mediaVideo: "new-uploads",
   webhooks: "new-uploads",
+  // Query-time only: web tools never touch stored documents.
+  webTools: "none",
   // Indexing-mode switching has its own flow (#199); these never re-run stored documents here.
   indexingMode: "new-uploads",
   materialization: "new-uploads",
@@ -150,6 +153,17 @@ const EFFECTS: Partial<Record<ConfigChangeKind, string>> = {
   "reindex-required": "Existing documents must be re-indexed so search stays consistent with this setting.",
   "reindex-recommended": "Existing documents gain this on re-index; they keep working without it.",
   "new-uploads": "Applies to new uploads only.",
+};
+
+/** Field-specific wording for the effect on stored data, where the generic text would mislead. */
+const FIELD_EFFECTS: Partial<Record<keyof PipelineFeatures, Partial<Record<ConfigChangeKind, string>>>> = {
+  vision: {
+    "reindex-recommended": "New uploads use these vision page-selection settings. Existing documents keep their current text until you reprocess them; reprocessing re-reads their pages with vision and is billed per page.",
+  },
+  visionFallback: {
+    "reindex-recommended": "New uploads can read scanned or image-only pages with vision. Existing documents keep their current text until you reprocess them.",
+    "new-uploads": "Future uploads stop reading pages with vision. Existing documents keep the text already extracted.",
+  },
 };
 
 /** Classify a pipeline config change. Pure and synchronous (well under 5 ms). */
@@ -165,7 +179,7 @@ export function analyzePipelineChange(
     if (pipelineValuesEqual(before[field], after[field])) continue;
     const rule = PIPELINE_FIELD_IMPACT[field];
     let fieldKind = typeof rule === "function" ? rule(before, after) : rule;
-    let effect = EFFECTS[fieldKind] ?? "No effect on stored data.";
+    let effect = FIELD_EFFECTS[field]?.[fieldKind] ?? EFFECTS[fieldKind] ?? "No effect on stored data.";
     if (KIND_RANK[fieldKind] >= KIND_RANK["reindex-recommended"]) {
       // Only a field with an effective seed stage in the new config can re-index anything. Otherwise (e.g. the
       // embedding model changes while embedding is off) existing data is left as is and the field applies to
@@ -231,8 +245,6 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
   index: 0.04,
 };
 
-/** Per-document fixed cost in credits (cents), from the worker forecast. */
-const OVERHEAD_CREDITS_PER_DOCUMENT = 0.01;
 
 const profileFor = (features: PipelineFeatures): PipelineProfileId =>
   features.parserPlaybook === "fast" ? "fast" : features.parserPlaybook === "agentic" || features.parserPlaybook === "review-grade" ? "deep" : "standard";
@@ -248,7 +260,8 @@ export function estimatePipelineWork(args: {
   stages: readonly PipelineRunStage[];
   pages: number;
   documents: number;
-  plan?: PlanId;
+  /** Org concurrent worker ceiling (default FUNDED_WORKER_SLOTS). */
+  workerSlots?: number;
   /** Required: the caller decides which environment decides billing. Browsers pass their server-reported env. */
   env: Record<string, string | undefined>;
 }): CostEstimate {
@@ -262,11 +275,19 @@ export function estimatePipelineWork(args: {
   const plannedWeight = [...planned].reduce((sum, stage) => sum + STAGE_WEIGHT[stage], 0);
   const share = selectedWeight <= 0 ? 0 : Math.min(1, selectedWeight / Math.max(plannedWeight, selectedWeight));
 
+  // Optional per-document features are charged in full whenever their stage runs (not by stage share).
+  const features = {
+    documentSummary: selected.includes("document-summary"),
+    structuredFields: selected.includes("structured-extract"),
+    knowledgeGraph: selected.includes("graph-enrich") && Boolean(args.features.graphRag),
+    propositions: selected.includes("proposition-index"),
+  };
   const run = (mix: { text: number; complex: number; scanned: number }) =>
-    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, plan: args.plan ?? "free" });
+    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+  const priced = (estimate: ReturnType<typeof run>) =>
+    (estimate.credits.totalCredits - estimate.credits.breakdown.features) * share + estimate.credits.breakdown.features;
   const low = run({ text: 1, complex: 0, scanned: 0 });
   const high = run({ text: 0.2, complex: 0.3, scanned: 0.5 });
-  const overhead = documents * OVERHEAD_CREDITS_PER_DOCUMENT * (share > 0 ? 1 : 0);
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
 
   return costEstimateSchema.parse({
@@ -274,8 +295,8 @@ export function estimatePipelineWork(args: {
     documents,
     billing,
     credits: billing === "disabled" ? null : {
-      low: round(low.credits.totalCredits * share + overhead),
-      high: round(high.credits.totalCredits * share + overhead),
+      low: round(priced(low)),
+      high: round(priced(high)),
     },
     seconds: { low: round(scaleSeconds(low.wallSeconds)), high: round(scaleSeconds(high.wallSeconds)) },
     basis: `${profile} profile, ${selected.length} of ${Math.max(planned.size, selected.length)} stages; `

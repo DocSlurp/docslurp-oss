@@ -1,4 +1,4 @@
-import { priceAiUsageEvent } from "@docslurp/shared";
+import { PRICE_CARD, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
 import { createHash } from "node:crypto";
 import { readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -11,6 +11,7 @@ import type { MediaConfig } from "./config.js";
 import type { MediaVisionProvider, VideoFrame, VisionResult } from "./vision.js";
 import { selectVideoFrames, packVideoFrames, type VideoCandidate, type VideoPolicy } from "./video-policy.js";
 import { emitTelemetryLog } from "./telemetry.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export async function describeVideoChunk(args: { state: WorkflowState; scope: MediaScope; storage: ArtifactStore; journal: MediaJournal;
   provider: MediaVisionProvider; frames: VideoFrame[]; policy: VideoPolicy; config: MediaConfig; signal?: AbortSignal }): Promise<VisionResult> {
@@ -21,10 +22,11 @@ export async function describeVideoChunk(args: { state: WorkflowState; scope: Me
   const hash = createHash("sha256").update(JSON.stringify([scope, provider.id, provider.model, "video-gray96-v1", frames.map(f=>f.seconds)]));
   for (const f of frames) hash.update(f.bytes);
   const { receipt, acquired } = await journal.admit({ scope, key: hash.digest("hex"), provider: provider.id, model: provider.model,
-    reserveCents: priceAiUsageEvent({ costCents: provider.reserveUsd * 100 }, { planId: state.run.orgPlanId }).costCents, maxRunCostCents: state.run.pipeline.maxCostCents ?? null,
+    // Reserve the Rich pages these frames add on top of the audio minutes (video minutes bill as videoMinuteRichPages).
+    reserveCents: Math.max(0.001, pageCredits("rich", Math.max(1, frames[frames.length - 1]!.seconds - frames[0]!.seconds) / 60 * (PRICE_CARD.videoMinuteRichPages - PRICE_CARD.audioMinuteRichPages))), maxRunCostCents: state.run.pipeline.maxCostCents ?? null,
     maxDocumentCostCents: policy.maxCostCents, maxConcurrent: config.maxConcurrent, dailyBudgetCents: config.dailyBudgetCents });
   if (!acquired && receipt.status !== "completed") throw new Error("Video request requires reconciliation before retry");
-  const resultKey = receipt.resultKey ?? `${state.run.userId}/${scope.runId}/media/receipts/${receipt.id}.json`;
+  const resultKey = receipt.resultKey ?? `${scope.runId === state.run.id ? runArtifactRoot(state.run, state.run.userId) : `${state.run.userId}/${scope.runId}`}/media/receipts/${receipt.id}.json`;
   const started = Date.now();
   try {
     const result = acquired ? await withObservation({ name: "media.vision", type: "span",
@@ -35,7 +37,7 @@ export async function describeVideoChunk(args: { state: WorkflowState; scope: Me
     if (acquired) {
       await storage.putJson(resultKey, result);
       await journal.complete(receipt.id, resultKey, result.costUsd*100,
-        Math.max(result.costUsd, result.accounting.reportedCostUsd ?? 0) > provider.reserveUsd, result.accounting, priceAiUsageEvent({costCents:result.costUsd*100},{planId:state.run.orgPlanId}).costCents);
+        Math.max(result.costUsd, result.accounting.reportedCostUsd ?? 0) > provider.reserveUsd, result.accounting, 0);
       recordMediaTelemetry({ provider: provider.id, model: provider.model, operation: "vision", outcome: "succeeded", durationSeconds: (Date.now()-started)/1000,
         costUsd: result.costUsd, costSource: result.accounting.state, selectedFrames: frames.length, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
     }
@@ -43,7 +45,7 @@ export async function describeVideoChunk(args: { state: WorkflowState; scope: Me
       state.usageLedger.enqueue(priceAiUsageEvent({ id: receipt.id, provider: provider.id, model: provider.model, metric: "media-vision", amount: frames.length, unit: "frames",
         inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents: result.costUsd*100,
         metadata: { ...scope, mediaJobId: receipt.id, providerRequestId: result.requestId, accounting: result.accounting,
-          firstSeconds: frames[0].seconds, lastSeconds: frames[frames.length-1].seconds, samplingVersion: "video-gray96-v1" } }, {planId:state.run.orgPlanId}),
+          firstSeconds: frames[0].seconds, lastSeconds: frames[frames.length-1].seconds, samplingVersion: "video-gray96-v1" } }),
         { logAiUsage: result.inputTokens !== undefined || result.outputTokens !== undefined });
       state.artifactLedger.record(`media-usage:${receipt.id}`, resultKey);
     }

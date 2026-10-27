@@ -10,10 +10,19 @@ import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
  */
 export const API_ERROR_CODES = [
   "invalid_request",
+  "credit_request_rejected",
+  "credit_reconciliation_required",
+  "idempotency_conflict",
   "unauthorized",
   "forbidden",
+  "web_scope_required",
   "not_found",
   "workspace_not_found",
+  "workspace_forbidden",
+  "workspace_scope_forbidden",
+  "no_stages_to_run",
+  "source_not_reusable",
+  "missing_stage_artifacts",
   "organization_not_found",
   "organization_forbidden",
   "organization_conflict",
@@ -32,6 +41,7 @@ export const API_ERROR_CODES = [
   "ip_temporarily_blocked",
   "session_required",
   "unsupported_type",
+  "remote_format_disabled",
   "file_too_large",
   "unreadable_source",
   "payment_required",
@@ -42,7 +52,17 @@ export const API_ERROR_CODES = [
   "plan_not_entitled",
   "chat_disabled",
   "model_not_allowed",
+  "chat_deadline_exceeded",
+  "chat_tool_failed",
   "invalid_search_scope",
+  "web_disabled",
+  "url_blocked",
+  "privacy_mode_blocked",
+  "extract_not_found",
+  "extract_expired",
+  "retention_exceeds_cap",
+  "download_not_ready",
+  "download_failed",
   "unavailable",
   "internal",
 ] as const;
@@ -53,7 +73,11 @@ export function isApiErrorCode(value: unknown): value is ApiErrorCode {
   return typeof value === "string" && (API_ERROR_CODES as readonly string[]).includes(value);
 }
 
-/** Optional structured context. The boundary only forwards `issues` (validation field paths). */
+/**
+ * Optional structured context. The boundary only forwards validation `issues`
+ * (field paths), limit metadata (`retryAfterSeconds`, `category`, `policy`,
+ * `spendKind`, ...), `links` and a failed chat turn's `usage`.
+ */
 export type ApiErrorDetails = Record<string, unknown>;
 
 export type ApiErrorBody = { error: { code: ApiErrorCode; message: string; details?: ApiErrorDetails } };
@@ -76,12 +100,21 @@ export const apiErrorEnvelopeSchema = z.object({
 /** Reviewed copy per code. The boundary sends this instead of route-authored text. */
 export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   invalid_request: PUBLIC_ERROR_MESSAGES.invalid,
+  credit_request_rejected: "Credit request rejected before issuance. Correct the recipient or request and try again.",
+  credit_reconciliation_required: "Credit outcome requires operator reconciliation. Preserve this request ID; do not create a replacement.",
+  idempotency_conflict: "This credit request ID belongs to different parameters or an administrator. Reconcile the original request.",
   unauthorized: PUBLIC_ERROR_MESSAGES.unauthorized,
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
   workspace_not_found: PUBLIC_ERROR_MESSAGES.workspaceMissing,
+  workspace_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  workspace_scope_forbidden: "This API key is limited to specific workspaces, so it can't create a new one. Name a workspace the key can use.",
+  no_stages_to_run: "None of the requested stages runs in this pipeline. Choose stages the workspace has turned on.",
+  source_not_reusable: "This run's earlier output can't be reused for a partial reprocess. Reprocess every stage instead.",
+  missing_stage_artifacts: "This run is missing the earlier stage output needed to reprocess from there. Reprocess from an earlier stage or upload again.",
   organization_not_found: PUBLIC_ERROR_MESSAGES.organizationMissing,
   organization_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  web_scope_required: PUBLIC_ERROR_MESSAGES.forbidden,
   organization_conflict: PUBLIC_ERROR_MESSAGES.conflict,
   personal_organization: PUBLIC_ERROR_MESSAGES.personalOrganization,
   membership_exists: PUBLIC_ERROR_MESSAGES.conflict,
@@ -98,17 +131,28 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   ip_temporarily_blocked: PUBLIC_ERROR_MESSAGES.ipBlocked,
   session_required: PUBLIC_ERROR_MESSAGES.sessionRequired,
   unsupported_type: PUBLIC_ERROR_MESSAGES.unsupportedType,
+  remote_format_disabled: "This remote file requires complex-format parsing, which is disabled on this deployment. Upload the file directly, or ask an administrator to enable complex remote formats.",
   file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
-  payment_required: PUBLIC_ERROR_MESSAGES.unavailable,
-  credit_exhausted: PUBLIC_ERROR_MESSAGES.unavailable,
-  workspace_budget_paused: PUBLIC_ERROR_MESSAGES.unavailable,
-  org_budget_paused: PUBLIC_ERROR_MESSAGES.unavailable,
-  minimum_credit_required: PUBLIC_ERROR_MESSAGES.unavailable,
-  plan_not_entitled: PUBLIC_ERROR_MESSAGES.unavailable,
+  payment_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
+  credit_exhausted: PUBLIC_ERROR_MESSAGES.creditExhausted,
+  workspace_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
+  org_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
+  minimum_credit_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
+  plan_not_entitled: PUBLIC_ERROR_MESSAGES.planRequired,
   chat_disabled: PUBLIC_ERROR_MESSAGES.chatDisabled,
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
+  chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
+  chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,
+  web_disabled: "Web tools are turned off for this server or workspace.",
+  url_blocked: "This URL can't be fetched. Use a public HTTP or HTTPS address.",
+  privacy_mode_blocked: "This workspace's privacy mode doesn't allow web tools.",
+  extract_not_found: "Extract not found.",
+  extract_expired: "This extract has expired and its files and outputs were deleted. Run the extract again to get new results.",
+  retention_exceeds_cap: "retentionDays is longer than this deployment keeps extracts. Ask for fewer days; details.maxRetentionDays is the limit.",
+  download_not_ready: "This extract's download isn't ready yet. Try again once the extract completes.",
+  download_failed: "This extract's download couldn't be built. Contact support if this keeps happening.",
   unavailable: PUBLIC_ERROR_MESSAGES.unavailable,
   internal: PUBLIC_ERROR_MESSAGES.unexpected,
 };
@@ -120,6 +164,7 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";
+  if (status === 415) return "unsupported_type";
   if (status === 413) return "payload_too_large";
   if (status === 429) return "rate_limited";
   if (status === 503) return "unavailable";
@@ -127,12 +172,76 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   return "internal";
 }
 
-const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy"] as const;
+const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits", "maxRetentionDays", "requiredCredits"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind"] as const;
+
+/**
+ * Where a caller can lift a limit (`details.links` on 402 and 429 responses):
+ * the billing page, its credit top-up section, its auto top-up section (only
+ * while auto top-up is off), the API key's own limits and the docs for the
+ * limit. There is no plan to upgrade: limits rise once an org buys credits. Hosted deployments only; self-hosted
+ * servers have no billing and send none.
+ */
+export const API_ERROR_LINK_KEYS = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
+export type ApiErrorLinkName = (typeof API_ERROR_LINK_KEYS)[number];
+export type ApiErrorLinks = Partial<Record<ApiErrorLinkName, string>>;
+
+/** Server-authored absolute http(s) URLs only; anything else is dropped. */
+export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const links: ApiErrorLinks = {};
+  for (const key of API_ERROR_LINK_KEYS) {
+    const url = source[key];
+    if (typeof url !== "string" || url.length > 300 || !/^https?:\/\/[^\s"'<>\\]+$/.test(url)) continue;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") links[key] = url;
+    } catch { /* not a URL */ }
+  }
+  return Object.keys(links).length ? links : undefined;
+}
+
+/**
+ * Public copy for `code`, plus where to go next when the details carry links:
+ * a rate limit points at the docs (every account shares one table), credit
+ * errors at buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
+ * no billing) it is the reviewed copy alone.
+ */
+export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
+  const base = API_ERROR_PUBLIC_MESSAGES[code];
+  if (code === "workspace_not_found" && typeof details?.workspaceSlug === "string") {
+    return `No workspace matching "${details.workspaceSlug}" was found. Pass a workspace ID, slug or name from this organization, or omit workspace to use the default workspace.`;
+  }
+  const links = publicApiErrorLinks(details?.links);
+  if (!links) return base;
+  switch (code) {
+    // Every account shares one rate-limit table, so the message never suggests buying credits to raise it.
+    case "rate_limited":
+      return links.docs ? `${base} Rate limits: ${links.docs}` : base;
+    case "ip_temporarily_blocked":
+      return links.docs ? `${base} Rate limits: ${links.docs}` : base;
+    case "spend_limit_exceeded":
+    case "daily_page_limit":
+      return links.apiKeys ? `${base} Change the key's limits at ${links.apiKeys}.` : base;
+    case "credit_exhausted":
+    case "minimum_credit_required":
+    case "payment_required":
+      if (!links.buyCredits && !links.billing) return base;
+      return `Your organization is out of credits. Buy credits at ${links.buyCredits ?? links.billing}`
+        + (links.autoTopUp ? `, or turn on auto top-up at ${links.autoTopUp}.` : ".");
+    case "workspace_budget_paused":
+    case "org_budget_paused":
+      return links.billing ? `${base} Review spend and budgets at ${links.billing}.` : base;
+    default:
+      return base;
+  }
+}
 
 /**
  * The only details that cross the boundary: validation field paths (issue text
- * may echo input) and server-authored limit metadata. Anything else is dropped.
+ * may echo input), server-authored limit metadata, upgrade/billing `links` and
+ * a failed chat turn's usage. Anything else is dropped.
  */
 export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undefined {
   if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
@@ -151,6 +260,14 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   for (const key of SAFE_DETAIL_LABELS) {
     if (typeof source[key] === "string" && /^[\w:.-]{1,80}$/.test(source[key])) safe[key] = source[key];
   }
+  // The slug a `workspace` value was looked up by (lowercase letters, digits and hyphens only).
+  if (typeof source.workspaceSlug === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(source.workspaceSlug) && source.workspaceSlug.length <= 63) {
+    safe.workspaceSlug = source.workspaceSlug;
+  }
+  const links = publicApiErrorLinks(source.links);
+  if (links) safe.links = links;
+  const usage = publicChatTurnUsage(source.usage);
+  if (usage) safe.usage = usage;
   const direct = source.directUpload;
   if (direct && typeof direct === "object" && !Array.isArray(direct)) {
     const { createSession, maxFileBytes } = direct as Record<string, unknown>;
@@ -159,6 +276,28 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
     }
   }
   return Object.keys(safe).length ? safe : undefined;
+}
+
+const CHAT_TURN_USAGE_NUMBERS = ["providerCostCents", "creditCents", "refundedCreditCents", "chargedCreditCents"] as const;
+
+/**
+ * A failed chat turn's usage (`details.usage`): server-computed cost and
+ * credits, and whether the credits were refunded. Dropped unless every field
+ * has the expected type.
+ */
+function publicChatTurnUsage(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const usage = value as Record<string, unknown>;
+  if (typeof usage.turnId !== "string" || !/^[\w-]{1,80}$/.test(usage.turnId)) return undefined;
+  if (usage.outcome !== "open" && usage.outcome !== "delivered" && usage.outcome !== "failed") return undefined;
+  if (typeof usage.refunded !== "boolean") return undefined;
+  const safe: Record<string, unknown> = { turnId: usage.turnId, outcome: usage.outcome, refunded: usage.refunded };
+  for (const key of CHAT_TURN_USAGE_NUMBERS) {
+    const number = usage[key];
+    if (typeof number !== "number" || !Number.isFinite(number)) return undefined;
+    safe[key] = number;
+  }
+  return safe;
 }
 
 /**
@@ -174,5 +313,5 @@ export function publicApiErrorEnvelope(original: unknown, status: number, reques
   if (typeof candidate.code !== "string" || typeof candidate.message !== "string" || "type" in candidate || "param" in candidate) return null;
   const code = isApiErrorCode(candidate.code) ? candidate.code : apiErrorCodeForStatus(status);
   const details = publicApiErrorDetails(candidate.details);
-  return { error: { code, message: API_ERROR_PUBLIC_MESSAGES[code], ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
+  return { error: { code, message: publicApiErrorMessage(code, details), ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
 }

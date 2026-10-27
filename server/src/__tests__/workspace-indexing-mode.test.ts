@@ -1,4 +1,4 @@
-import { defaultPipelineFeatures, estimatePageEmbedCredits, hostedEquivalentListCredits, selfHostedBilledCredits, pipelineVersionFeatures, setPrivateModelEndpointRegistryForTests } from "@docslurp/shared";
+import { defaultPipelineFeatures, estimatePageEmbedCredits, pipelineVersionFeatures, setPrivateModelEndpointRegistryForTests } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -27,12 +27,13 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../services/source-metadata.js", () => ({ resolveSourceMetadata: async () => ({ pageCount: 1, sourceSha256: null }) }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values ('free', 'Free', 'free', 'u1', 0, 'free')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values ('gold', 'Gold', 'gold', 'u1', 1000, 'gold')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values ('funded', 'Funded', 'funded', 'u1', 1000, 'free')`;
+  // free: starter credits only; gold and funded: funded (a paid grant set funded_at, migration 0068).
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('free', 'Free', 'free', 'u1', 0)`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at) values ('gold', 'Gold', 'gold', 'u1', 1000, now())`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at) values ('funded', 'Funded', 'funded', 'u1', 1000, now())`;
   for (const org of ["free", "gold", "funded"]) await sql`insert into org_memberships(org_id, user_id, role) values (${org}, 'u1', 'owner')`;
-  await sql`insert into credit_grants(org_id, source, credits, pool) values ('funded', 'topup', 50, 'prepaid')`;
-  await sql`insert into credit_grants(org_id, source, credits, pool) values ('free', 'starter', 20, 'prepaid')`;
+  await sql`insert into credit_grants(org_id, source, credits) values ('funded', 'topup', 50)`;
+  await sql`insert into credit_grants(org_id, source, credits) values ('free', 'starter', 20)`;
   svc = await import("../services/workspace-indexing-mode.js");
   ws = await import("../services/workspaces.js");
   intake = await import("../services/workspace-intake.js");
@@ -68,13 +69,32 @@ async function seedDoc(id: string, workspaceId: string, orgId: string, pages: nu
   }
 }
 
-describe("plan defaults", () => {
-  it("defaults a free org without purchases to map, paid or funded orgs to full", async () => {
+describe("workspace defaults", () => {
+  it("defaults document summaries on, persists opt-outs, and preserves privacy locks", async () => {
+    const enabled = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "Summaries" });
+    expect(enabled.summaries).toBe(true);
+    expect(enabled.pipeline.summarize).toBe(true);
+    expect(enabled.pipeline.pageIndex).toBe(false);
+    const disabled = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "No summaries", summaries: false });
+    expect(disabled.summaries).toBe(false);
+    expect(disabled.pipeline.summarize).toBe(false);
+    expect((await ws.updateWorkspace(enabled.id, "u1", { summaries: false }))?.summaries).toBe(false);
+    expect((await ws.updateWorkspace(enabled.id, "u1", { name: "Renamed" }))?.summaries).toBe(false);
+    expect((await ws.updateWorkspace(enabled.id, "u1", { summaries: true }))?.pipeline.summarize).toBe(true);
+    const privateWorkspace = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "Private", templateKey: "legal-contracts" });
+    expect(privateWorkspace.summaries).toBe(false);
+    expect((await ws.updateWorkspace(privateWorkspace.id, "u1", { summaries: true }))?.summaries).toBe(false);
+    const defaultWorkspace = await ws.ensureDefaultWorkspace({ userId: "u1", orgId: "gold" });
+    expect(defaultWorkspace.summaries).toBe(true);
+  });
+
+  it("defaults every organization to full, whatever it has bought", async () => {
     const mk = (orgId: string) => ws.createWorkspace({ userId: "u1", orgId, name: "W" });
-    expect((await mk("free")).pipeline.indexingMode).toBe("map");
-    expect((await mk("free")).indexingMode).toBe("map");
-    expect((await mk("gold")).pipeline.indexingMode).toBe("full");
-    expect((await mk("funded")).pipeline.indexingMode).toBe("full");
+    for (const orgId of ["free", "gold", "funded"]) {
+      const created = await mk(orgId);
+      expect(created.pipeline.indexingMode, orgId).toBe("full");
+      expect(created.indexingMode, orgId).toBe("full");
+    }
   });
 
   it("honours an explicit mode and pins full while the flag is off", async () => {
@@ -112,9 +132,9 @@ describe("mode switching", () => {
     await expect(ws.updateWorkspace("t-priv", "u1", {}, { indexingMode: "visual" })).rejects.toMatchObject({ code: "visual_mode_privacy" });
   });
 
-  it("returns 402 for full on a free org without credits, allows it when funded", async () => {
+  it("lets any organization switch to full; credits are checked when the indexing work is admitted", async () => {
     await seedWorkspace("t-free", "free", "map");
-    await expect(ws.updateWorkspace("t-free", "u1", {}, { indexingMode: "full" })).rejects.toMatchObject({ status: 402, code: "credits_required_for_full_index" });
+    expect((await ws.updateWorkspace("t-free", "u1", {}, { indexingMode: "full" }))?.indexingMode).toBe("full");
     await seedWorkspace("t-funded", "funded", "map");
     expect((await ws.updateWorkspace("t-funded", "u1", {}, { indexingMode: "full" }))?.indexingMode).toBe("full");
   });
@@ -237,25 +257,14 @@ describe("estimateModeSwitch visual pricing follows the resolved embedder", () =
     }
   });
 
-  it("prices a private Jina route (token or hourly) at the billed hosted-equivalent formula, Gemini with markup otherwise", async () => {
+  it("prices pages embedded as images as Rich pages, whichever route embeds them", async () => {
     await seedWorkspace("t-vp", "gold", "map", { visualPages: { route: "auto", coarseFallback: false } });
     await seedDoc("t-vp-a", "t-vp", "gold", 1000, 0);
     const hosted = await svc.estimateModeSwitch("t-vp", "visual");
-    expect(hosted.estimatedCredits).toBeCloseTo(estimatePageEmbedCredits(1000, "gemini"), 3);
-
+    expect(hosted.estimatedCredits).toBeCloseTo(estimatePageEmbedCredits(1000, "gemini"), 6);
+    expect(hosted.estimatedCredits).toBeCloseTo(250, 6);
     setPrivateModelEndpointRegistryForTests(registry);
-    const privateCredits = (await svc.estimateModeSwitch("t-vp", "visual")).estimatedCredits;
-    // Billed formula: embedding hosted-equivalent list price less the self-hosted discount (not the $0.10/MTok GPU rate).
-    const billed = 1000 * selfHostedBilledCredits(hostedEquivalentListCredits({ capability: "embedding", inputTokens: 258 }));
-    expect(billed).toBeGreaterThan(0);
-    expect(privateCredits).toBeCloseTo(billed, 6);
-    expect(privateCredits).toBeLessThan(hosted.estimatedCredits!);
-
-    // An hourly-priced endpoint reads 0 raw cost per page but must price identically.
-    setPrivateModelEndpointRegistryForTests([{ ...registry[0]!, pricing: { usdPerHour: 1.2, concurrency: 8 } }]);
-    expect((await svc.estimateModeSwitch("t-vp", "visual")).estimatedCredits).toBeCloseTo(billed, 6);
-    await sql`update workspaces set pipeline = jsonb_set(pipeline, '{visualPages,route}', '"gemini"') where id = 't-vp'`;
-    expect((await svc.estimateModeSwitch("t-vp", "visual")).estimatedCredits!).toBeCloseTo(hosted.estimatedCredits!, 3);
+    expect((await svc.estimateModeSwitch("t-vp", "visual")).estimatedCredits).toBeCloseTo(250, 6);
   });
 });
 
@@ -290,7 +299,7 @@ describe("upload indexingMode", () => {
     const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ pipeline: { ...defaultPipelineFeatures, indexingMode: "full" } })] });
     const run = async () => {
       await intake.intakeIntoWorkspace({
-        userId: "u1", workspaceId: "ws-existing", kind: "bulk-upload", indexingMode: "visual",
+        userId: "u1", workspace: "ws-existing", kind: "bulk-upload", indexingMode: "visual",
         items: [{ filename: "a.pdf", mimeType: "application/pdf", content: { bytes: Buffer.from("x") } }],
       }, fakes.ports);
       return fakes.runs.at(-1)!;

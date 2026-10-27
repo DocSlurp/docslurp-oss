@@ -91,10 +91,25 @@ export function isEmailAuthConfigured(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.RESEND_API_KEY?.trim() && env.EMAIL_FROM?.trim());
 }
 
+/** Signed-in sessions expire after this long without an authenticated request. */
+export const SESSION_IDLE_TIMEOUT_SECONDS = 60 * 60 * 24 * 30;
+/** How often an active session's expiry (and cookie) is extended. */
+export const SESSION_REFRESH_AGE_SECONDS = 60 * 60 * 24;
+
 export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
   const baseURL = resolveBetterAuthBaseUrl(env);
 
   return {
+    account: {
+      accountLinking: {
+        enabled: true,
+        disableImplicitLinking: false,
+        allowDifferentEmails: false,
+        requireLocalEmailVerified: false,
+        // Never bypass the OAuth provider's verified-email assertion.
+        trustedProviders: [] as string[],
+      },
+    },
     emailAndPassword: {
       enabled: true,
       disableSignUp: !isEmailAuthConfigured(env),
@@ -104,13 +119,20 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
     baseURL,
     trustedOrigins: resolveBetterAuthTrustedOrigins(env, baseURL),
     session: {
-      expiresIn: 60 * 60 * 24 * 7,
-      updateAge: 60 * 60 * 24,
+      // Sliding 30-day idle timeout: any authenticated request more than a day
+      // after the last refresh pushes expiry out again (server middleware
+      // forwards the refreshed cookie). Revocation stays immediate because the
+      // session row is checked on every request (see cookieCache below), and
+      // sensitive account changes still require a session under an hour old.
+      expiresIn: SESSION_IDLE_TIMEOUT_SECONDS,
+      updateAge: SESSION_REFRESH_AGE_SECONDS,
       freshAge: 60 * 60,
+      // A cached `session_data` cookie authorizes on its own until it expires, so
+      // a revoked or signed-out session would keep working on another device for
+      // the cache lifetime (SEC-2026-10-PROD-15). Every request checks the
+      // session row instead.
       cookieCache: {
-        enabled: true,
-        maxAge: 60 * 5,
-        strategy: "jwe" as const
+        enabled: false
       }
     },
     rateLimit: {
@@ -141,6 +163,14 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
     },
     advanced: {
       useSecureCookies: isHttpsOrigin(baseURL),
+      // Pin the session cookie policy instead of relying on library defaults:
+      // Lax blocks cross-site sends (the CSRF boundary, SEC-2026-10-02), and
+      // HttpOnly keeps the token out of reach of script.
+      defaultCookieAttributes: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        secure: isHttpsOrigin(baseURL)
+      },
       trustedProxyHeaders: env.BETTER_AUTH_TRUST_PROXY_HEADERS === "true",
       ipAddress: {
         // Only a header the app sets itself (resolved by

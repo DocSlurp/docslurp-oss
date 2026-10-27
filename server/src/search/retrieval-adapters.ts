@@ -13,7 +13,8 @@ export interface EvidenceRetrievalContext {
   /** The query actually embedded (after rewrite/HyDE); other index configs embed this same text. */
   effectiveQuery?: string;
   textQuery: string;
-  queryVector: number[] | null;
+  /** May still be in flight: only the vector leg waits for it. */
+  queryVector: number[] | null | Promise<number[] | null>;
   userId: string;
   workspaceId: string;
   options: SearchOptions;
@@ -125,16 +126,18 @@ export function createEvidenceRetrievalAdapters(
     },
     {
       name: "vector",
-      retrieve: (context) =>
-        context.queryVector
+      retrieve: async (context) => {
+        const queryVector = await context.queryVector;
+        return queryVector
           ? fns.vectorSearch({
-              queryVector: context.queryVector,
+              queryVector,
               query: context.query,
               userId: context.userId,
               workspaceId: context.workspaceId,
               options: context.options,
             })
-          : Promise.resolve([]),
+          : [];
+      },
     },
   ];
 }
@@ -142,7 +145,9 @@ export function createEvidenceRetrievalAdapters(
 export async function retrieveEvidence(
   adapters: EvidenceRetrievalAdapter[],
   context: EvidenceRetrievalContext,
+  options: { parallel?: boolean } = {},
 ): Promise<EvidenceRetrievalResult[]> {
+  if (options.parallel) return await retrieveEvidenceInParallel(adapters, context);
   const results: EvidenceRetrievalResult[] = [];
   const previousResults: Partial<Record<EvidenceAdapterName, SearchChunk[]>> = {};
 
@@ -153,6 +158,29 @@ export async function retrieveEvidence(
   }
 
   return results;
+}
+
+/**
+ * The adapters run together; only completed-page waits, because it searches
+ * only when lexical found nothing. Results keep adapter order.
+ */
+async function retrieveEvidenceInParallel(
+  adapters: EvidenceRetrievalAdapter[],
+  context: EvidenceRetrievalContext,
+): Promise<EvidenceRetrievalResult[]> {
+  const pending = new Map<EvidenceAdapterName, Promise<SearchChunk[]>>();
+  const settled: Partial<Record<EvidenceAdapterName, SearchChunk[]>> = {};
+  for (const adapter of adapters) {
+    const run = adapter.name === "completed-page"
+      ? (pending.get("lexical") ?? Promise.resolve([] as SearchChunk[])).then((lexical) =>
+          adapter.retrieve(context, { ...settled, lexical }))
+      : adapter.retrieve(context, settled);
+    // Observe rejections now; Promise.all below still surfaces the first one.
+    run.catch(() => undefined);
+    pending.set(adapter.name, run);
+  }
+  const lists = await Promise.all(adapters.map((adapter) => pending.get(adapter.name)!));
+  return adapters.map((adapter, index) => ({ adapter: adapter.name, chunks: lists[index]! }));
 }
 
 export function flattenEvidenceResults(

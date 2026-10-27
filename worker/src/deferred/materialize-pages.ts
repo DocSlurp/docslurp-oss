@@ -6,7 +6,8 @@ import type { Sql } from "postgres";
 import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
-  VectorNamespaceManager,
+  pageCredits,
+  richPagesForOutputTokens,
   type MaterializePagesInput,
   type PipelineFeatures,
 } from "@docslurp/shared";
@@ -25,14 +26,15 @@ import {
   PdfSourceCache,
 } from "../pipeline/pdf-asset-cache.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
+import { workspaceVectorLocation } from "../stages/lancedb-location.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
-import { connectLanceDb } from "../stages/lancedb-connection.js";
-import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-runtime.js";
+import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
 
@@ -177,22 +179,7 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       await writeLanceDbRecords(uri, table, records, signal);
     },
     async deleteVectors(uri, table, ids) {
-      if (ids.length === 0) return;
-      const conn = await connectLanceDb(uri);
-      try {
-        if (!(await conn.tableNames()).includes(table)) return;
-        const t = await conn.openTable(table);
-        try {
-          for (let i = 0; i < ids.length; i += 500) {
-            const list = ids.slice(i, i + 500).map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
-            await t.delete(`id IN (${list})`);
-          }
-        } finally {
-          t.close();
-        }
-      } finally {
-        conn.close();
-      }
+      await deleteLanceDbRecords(uri, table, ids);
     },
   };
 }
@@ -290,7 +277,8 @@ export async function materializePageRange(
   const ocrPages: number[] = [];
   for (const page of pages) {
     const text = texts.get(page) ?? "";
-    if (text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS) prepared.set(page, { page, text, ocrCostCents: 0 });
+    // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee).
+    if (text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS) prepared.set(page, { page, text, ocrCostCents: pageCredits("fast", 1) });
     else ocrPages.push(page);
   }
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
@@ -313,11 +301,28 @@ export async function materializePageRange(
         outputTokens: ocr.outputTokens,
         metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
       });
-      const cost = event?.costCents ?? ocr.costCents;
+      // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
+      void event;
+      const cost = pageCredits("rich", richPagesForOutputTokens(ocr.outputTokens));
       spentCents += cost;
       if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
       else prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
     } catch (error) {
+      // A page rejected on every attempt was still billed: record the summed spend and count it against the budget.
+      const rejected = findVisionOutputRejected(error);
+      if (rejected) {
+        const usage = rejectedVisionUsageInput(rejected, rejected.costCents ?? calculateAiUsageCostCents({
+          inputTokens: rejected.inputTokens,
+          outputTokens: rejected.outputTokens,
+          costPer1kInputTokens: deps.config.costPer1kInputTokens,
+          costPer1kOutputTokens: deps.config.costPer1kOutputTokens,
+        }), "vision-runtime");
+        const event = deps.usage.record({
+          ...usage,
+          metadata: { ...usage.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+        });
+        spentCents += event?.costCents ?? usage.costCents;
+      }
       failed.set(page, error instanceof Error ? error.message : String(error));
     }
   });
@@ -422,8 +427,7 @@ export async function materializePageRange(
       await deps.store.insertChunks(dbChunks);
       await deps.store.linkChunksToPages(documentId, document.runId);
 
-      if (!run.orgId) throw new Error("page indexing requires a run orgId for tenant isolation");
-      const location = VectorNamespaceManager.getEmbeddingLocation(deps.config.lancedb.root, run.orgId, profile.model, dims);
+      const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
       await ops.writeVectors(location.uri, location.table, chunks.map((c, i) => ({
         id: c.id, documentId, chunkIndex: c.index, text: c.text, vector: vectors[i]!,
         metadata: { documentId, sourceKey: document.sourceKey, filename: document.filename, pageNumber: c.page },
@@ -451,8 +455,8 @@ export async function materializePageRange(
       `;
       const stale = existing.map((r) => r.id).filter((id) => !keep.has(id));
       if (stale.length > 0) {
-        if (run.orgId) {
-          const loc = VectorNamespaceManager.getEmbeddingLocation(deps.config.lancedb.root, run.orgId, profile.model, dims);
+        if (run.orgId && run.workspaceId) {
+          const loc = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
           await ops.deleteVectors(loc.uri, loc.table, stale);
         }
         await deps.sql`delete from document_chunks where document_id = ${documentId} and id = any(${stale}::text[])`;
@@ -472,9 +476,10 @@ export async function materializePageRange(
   result.indexed.sort((a, b) => a - b);
   result.blocked = blocked.sort((a, b) => a - b);
   for (const [page, reason] of [...failed].sort((a, b) => a[0] - b[0])) result.failed.push({ page, reason });
-  // Total actual spend of the call: all OCR (including pages that then failed) and every
-  // completed embedding batch, even if a later batch threw. 1 credit = 1 cent.
-  result.costCredits = Math.round((spentCents + embeddingCents) * 10_000) / 10_000;
+  // Customer credits of the call: every OCR-read page (Rich, including pages that then failed) and
+  // every text-layer page that indexed (Fast). Embedding batches are provider cost (0 credits).
+  const fastIndexed = result.indexed.filter((page) => !ocrPages.includes(page)).length;
+  result.costCredits = Math.round((spentCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
 
   const writes: Promise<void>[] = [];
   for (const [credits, group] of indexedByCost) {

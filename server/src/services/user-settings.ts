@@ -1,9 +1,9 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
 import { sql } from "../db.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 
 const generalSettingsSchema = z.object({
   enableGraphRag: z.boolean().default(false),
@@ -92,35 +92,18 @@ type McpServiceRow = {
   updated_at: string;
 };
 
-function getEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("CREDENTIALS_ENCRYPTION_KEY");
-}
-
 function encryptCredentials(credentials: Record<string, unknown>): string {
-  const key = getEncryptionKey();
-  const iv = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(JSON.stringify(credentials), "utf8"),
-    cipher.final(),
-  ]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("CREDENTIALS_ENCRYPTION_KEY", JSON.stringify(credentials));
 }
 
 function decryptCredentials(value: string): Record<string, unknown> {
   if (!value) return {};
 
-  const [ivHex, tagHex, ciphertextHex] = value.split(":");
-  if (!ivHex || !tagHex || !ciphertextHex) return {};
-
-  const decipher = createDecipheriv("aes-256-gcm", getEncryptionKey(), Buffer.from(ivHex, "hex"));
-  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(ciphertextHex, "hex")),
-    decipher.final(),
-  ]);
-  return JSON.parse(decrypted.toString("utf8")) as Record<string, unknown>;
+  try {
+    return JSON.parse(openSecret("CREDENTIALS_ENCRYPTION_KEY", value)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 function normalizeGeneral(value: unknown): UserGeneralSettings {

@@ -61,6 +61,49 @@ async function statuses(runId: string) {
 }
 
 describe("partial Document failure in the store", () => {
+  it.each(["complete", "fail"] as const)("retires an unflagged replaced pending document when its active run ends: %s", async (outcome) => {
+    const runId = `unflagged-${outcome}`;
+    await seedRun(runId);
+    await db.exec(`
+      update documents set status = 'cancelled' where id = '${runId}-bad';
+      update documents set canonical_id = '/${runId}' where id = '${runId}-mid';
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+        values ('${runId}-replacement', 'o1', 'u1', 'w', 'upload', 'processing', 'index', '{}');
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
+        values ('${runId}-replacement-doc', 'o1', 'u1', 'w', '${runId}-replacement', 'mid.pdf', 'application/pdf', 'replacement', 'completed', '/${runId}', '2026-01-04');
+    `);
+    expect((await db.query<{ superseded_at: null }>("select superseded_at from documents where id = $1", [`${runId}-mid`])).rows[0]?.superseded_at).toBeNull();
+    await withStore(async (store) => {
+      if (outcome === "complete") await store.completeRun(await loadRunState(store, runId));
+      else await store.failRun(runId, "embed", "lost worker");
+    });
+    expect(await statuses(runId)).toEqual({ bad: "cancelled", mid: "cancelled", new: outcome === "complete" ? "completed" : "queued" });
+    expect((await db.query<{ replacement: string }>("select superseded_by_document_id as replacement from documents where id = $1", [`${runId}-mid`])).rows[0]?.replacement)
+      .toBe(`${runId}-replacement-doc`);
+  });
+
+  it("retires pending superseded history instead of promoting it when a run completes", async () => {
+    await seedRun("run-closed-history");
+    await db.exec(`update documents set status = 'cancelled' where id = 'run-closed-history-bad';
+      update documents set superseded_at = now() where id = 'run-closed-history-mid'`);
+    await withStore(async (store) => {
+      const state = await loadRunState(store, "run-closed-history");
+      await store.completeRun(state);
+    });
+    expect(await statuses("run-closed-history")).toEqual({ bad: "cancelled", mid: "cancelled", new: "completed" });
+  });
+
+  it("does not resurrect cancelled or superseded documents when a run fails", async () => {
+    await seedRun("run-history");
+    await db.exec(`update documents set status = 'cancelled' where id = 'run-history-bad';
+      update documents set superseded_at = now() where id = 'run-history-mid'`);
+    await withStore(async (store) => {
+      await store.failRun("run-history", "embed", "lost worker");
+      expect((await store.loadDocumentsForRun("run-history")).map(document => document.id)).toEqual(["run-history-new"]);
+    });
+    expect(await statuses("run-history")).toEqual({ bad: "cancelled", mid: "cancelled", new: "queued" });
+  });
+
   it("a failed Run fails only Documents with a failed stage and leaves the rest queued for retry", async () => {
     await withStore(async (store) => {
       const state = await loadRunState(store, "run-fail");

@@ -18,7 +18,8 @@ import type { ValidatedKey } from "../services/api-keys.js";
 import { parseFilters } from "../search/filters.js";
 import {
   getWorkspaceSearchSettings,
-  upsertWorkspaceSearchSettings
+  mutateWorkspaceSearchSettingsForUser,
+  userCanEditWorkspaceSettings
 } from "../services/search-controls.js";
 
 const queryBodySchema = z.object({
@@ -59,7 +60,8 @@ const compatRetrievalOptions = {
 
 type CompatImportBody = {
   source?: "algolia" | "elastic" | "legacy-parser";
-  workspaceId?: string;
+  /** Workspace ID, slug or name to import into; falls back to indexName. */
+  workspace?: string;
   indexName?: string;
   synonyms?: unknown;
   rules?: unknown;
@@ -307,50 +309,76 @@ function requireSearchKey(apiKey: ValidatedKey): Response | null {
   return apiKeyHasAnyScope(apiKey, ["search"]) ? null : Response.json({ message: "search scope required" }, { status: 403 });
 }
 
-function requireServerSearchKey(apiKey: ValidatedKey): Response | null {
+/**
+ * Compatibility settings/synonyms/rules mutations are the "admin" surface: they
+ * change a workspace's search configuration, so they require the dedicated
+ * `workspaces:manage` scope (never granted by default) on top of a server key.
+ * Security finding SEC-2026-10-01.
+ */
+function requireServerManageKey(apiKey: ValidatedKey): Response | null {
   try {
     assertServerApiKey(apiKey);
   } catch (error) {
     return Response.json({ message: reportPublicError(error) }, { status: 403 });
   }
-  return requireSearchKey(apiKey);
+  if (!apiKeyHasAnyScope(apiKey, ["workspaces:manage"])) {
+    return Response.json({ message: "workspaces:manage scope required" }, { status: 403 });
+  }
+  return null;
+}
+
+/**
+ * The key owner must be allowed to edit the target workspace. The scope check
+ * above is org-level; this is the per-workspace boundary that stops a viewer
+ * from rewriting settings through a key they were permitted to mint.
+ * Security finding SEC-2026-10-01.
+ */
+async function requireWorkspaceEditAccess(workspaceId: string, apiKey: ValidatedKey): Promise<Response | null> {
+  if (await userCanEditWorkspaceSettings(workspaceId, apiKey.userId)) return null;
+  return Response.json({ message: "workspace edit access required" }, { status: 403 });
 }
 
 async function persistImport(args: {
-  settings: WorkspaceSearchSettings;
-  source: string;
+  workspaceId: string;
+  userId: string;
   indexName: string;
   body: CompatImportBody;
 }) {
   const source = args.body.source ?? "algolia";
-  const compatSettings = mergeCompatSettings(args.settings, args.body.settings ?? {});
+  const saved = await mutateWorkspaceSearchSettingsForUser({ workspaceId: args.workspaceId, userId: args.userId, mutate: current => {
+    const compatSettings = mergeCompatSettings(current, args.body.settings ?? {});
+    const synonyms = normalizeSynonymPayload(args.body.synonyms);
+    const rules = normalizeRulesPayload(args.body.rules);
+    const compatMetadata = {
+      ...(current.compatMetadata ?? {}),
+      source,
+      importedAt: new Date().toISOString(),
+      sourceIndexName: args.body.indexName ?? args.body.workspace ?? args.indexName,
+      schema: args.body.schema ?? {},
+      metadata: args.body.metadata ?? {}
+    };
+
+    const pinnedResults = source === "algolia"
+      ? rules.flatMap((rule) => ruleToPins(rule))
+      : current.pinnedResults;
+
+    return {
+      ...current,
+      synonyms: Object.keys(synonyms).length > 0 ? synonyms : current.synonyms,
+      rules: rules.length > 0 ? rules : current.rules,
+      compatSettings,
+      compatMetadata,
+      pinnedResults
+    };
+  } });
+  if (!saved) return null;
   const synonyms = normalizeSynonymPayload(args.body.synonyms);
   const rules = normalizeRulesPayload(args.body.rules);
-  const compatMetadata = {
-    ...(args.settings.compatMetadata ?? {}),
-    source,
-    importedAt: new Date().toISOString(),
-    sourceIndexName: args.body.indexName ?? args.body.workspaceId ?? args.indexName,
-    schema: args.body.schema ?? {},
-    metadata: args.body.metadata ?? {}
-  };
-
-  const pinnedResults = source === "algolia"
-    ? rules.flatMap((rule) => ruleToPins(rule))
-    : args.settings.pinnedResults;
-
-  await upsertWorkspaceSearchSettings({
-    ...args.settings,
-    synonyms: Object.keys(synonyms).length > 0 ? synonyms : args.settings.synonyms,
-    rules: rules.length > 0 ? rules : args.settings.rules,
-    compatSettings,
-    compatMetadata,
-    pinnedResults
-  });
+  const compatSettings = saved.compatSettings;
 
   return {
     source,
-    workspaceId: args.settings.workspaceId,
+    workspaceId: args.workspaceId,
     imported: {
       synonyms: Object.keys(synonyms).length,
       rules: rules.length,
@@ -621,19 +649,19 @@ export const algoliaCompatRoutes = new Hono()
   })
   .put("/1/indexes/:indexName/settings", async (c) => {
     const apiKey = c.get("apiKey");
-    const forbidden = requireServerSearchKey(apiKey);
+    const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
     const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
     if (!workspace) {
       return c.json({ message: "index (workspace) not found" }, 404);
     }
+    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    if (denied) return denied;
     const patch = await c.req.json<Record<string, unknown>>();
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
-    await upsertWorkspaceSearchSettings({
-      ...settings,
-      compatSettings: mergeCompatSettings(settings, patch)
-    });
-    return c.json({ ok: true, settings: mergeCompatSettings(settings, patch) });
+    const settings = await mutateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: apiKey.userId,
+      mutate: current => ({ ...current, compatSettings: mergeCompatSettings(current, patch) }) });
+    if (!settings) return c.json({ message: "Workspace editing permission is required" }, 403);
+    return c.json({ ok: true, settings: mergeCompatSettings(settings, {}) });
   })
   .get("/1/indexes/:indexName/synonyms", async (c) => {
     const apiKey = c.get("apiKey");
@@ -648,19 +676,19 @@ export const algoliaCompatRoutes = new Hono()
   })
   .post("/1/indexes/:indexName/synonyms/batch", async (c) => {
     const apiKey = c.get("apiKey");
-    const forbidden = requireServerSearchKey(apiKey);
+    const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
     const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
     if (!workspace) {
       return c.json({ message: "index (workspace) not found" }, 404);
     }
+    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    if (denied) return denied;
     const body = await c.req.json<{ synonyms?: unknown }>();
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
     const synonyms = normalizeSynonymPayload(body.synonyms);
-    await upsertWorkspaceSearchSettings({
-      ...settings,
-      synonyms
-    });
+    const saved = await mutateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: apiKey.userId,
+      mutate: current => ({ ...current, synonyms }) });
+    if (!saved) return c.json({ message: "Workspace editing permission is required" }, 403);
     return c.json({ updatedAt: new Date().toISOString(), count: Object.keys(synonyms).length });
   })
   .get("/1/indexes/:indexName/rules", async (c) => {
@@ -676,20 +704,19 @@ export const algoliaCompatRoutes = new Hono()
   })
   .post("/1/indexes/:indexName/rules/batch", async (c) => {
     const apiKey = c.get("apiKey");
-    const forbidden = requireServerSearchKey(apiKey);
+    const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
     const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
     if (!workspace) {
       return c.json({ message: "index (workspace) not found" }, 404);
     }
+    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    if (denied) return denied;
     const body = await c.req.json<{ rules?: unknown }>();
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
     const rules = normalizeRulesPayload(body.rules);
-    await upsertWorkspaceSearchSettings({
-      ...settings,
-      rules,
-      pinnedResults: rules.flatMap((rule) => ruleToPins(rule))
-    });
+    const saved = await mutateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: apiKey.userId,
+      mutate: current => ({ ...current, rules, pinnedResults: rules.flatMap((rule) => ruleToPins(rule)) }) });
+    if (!saved) return c.json({ message: "Workspace editing permission is required" }, 403);
     return c.json({ updatedAt: new Date().toISOString(), count: rules.length });
   })
   .get("/1/indexes/:indexName/analytics/summary", async (c) => {
@@ -785,24 +812,26 @@ export const algoliaCompatRoutes = new Hono()
   })
   .post("/1/import", async (c) => {
     const apiKey = c.get("apiKey");
-    const forbidden = requireServerSearchKey(apiKey);
+    const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
     const body = await c.req.json<CompatImportBody>();
-    const indexName = body.workspaceId ?? body.indexName ?? "";
+    const indexName = body.workspace ?? body.indexName ?? "";
     if (!indexName) {
-      return c.json({ message: "workspaceId or indexName is required" }, 400);
+      return c.json({ message: "workspace or indexName is required" }, 400);
     }
     const workspace = await loadScopedWorkspace(indexName, apiKey);
     if (!workspace) {
       return c.json({ message: "index (workspace) not found" }, 404);
     }
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
+    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    if (denied) return denied;
     const result = await persistImport({
-      settings,
-      source: body.source ?? "algolia",
+      workspaceId: workspace.id,
+      userId: apiKey.userId,
       indexName,
       body
     });
+    if (!result) return c.json({ message: "Workspace editing permission is required" }, 403);
     return c.json(result, 201);
   });
 

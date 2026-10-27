@@ -180,8 +180,10 @@ describe("usage recording", () => {
       metadata: { documentId: "doc-1", role: "triage", endpoint: "perplexity-decisions" },
     });
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[ai-usage\] page-route-decision model=perplexity\/pplx-decider-v1\.1-27b input_tokens=5000/));
-    expect(ledger.pendingBillableCents).toBeGreaterThan(0);
-    expect(ledger.pendingBillableCents).toBeLessThan(1);
+    // Provider cost is recorded for our reports; routing decisions bill no credits.
+    expect(Number(event!.metadata?.providerCostCents)).toBeGreaterThan(0);
+    expect(Number(event!.metadata?.providerCostCents)).toBeLessThan(1);
+    expect(ledger.pendingBillableCents).toBe(0);
   });
 
   it("prices input tokens only", () => {

@@ -5,7 +5,8 @@
  * always runs `minimum` activities; above that it takes one more only while
  * machine CPU and memory are under target, and waits `rampThrottle` between
  * additions so a burst of new tasks cannot pile onto a machine before the
- * last one's load shows up. A light stage (DB-bound bookkeeping) packs many
+ * last one's load shows up. Keep the throttle short (see rampThrottleMs): a
+ * long one starves short activities even below the minimum. A light stage (DB-bound bookkeeping) packs many
  * activities per machine; CPU-heavy work (embedding, OCR) stops near the CPU
  * target and leaves the rest of the queue to other machines, which the
  * autoscaler adds while demand stays.
@@ -48,9 +49,15 @@ export function resolveActivitySlotTuning(env: NodeJS.ProcessEnv, nominalSlots: 
     nominalSlots: nominal,
     minimumSlots,
     maximumSlots: Math.max(minimumSlots, int(env.WORKER_MAX_ACTIVITY_SLOTS, nominal * 2, 1, 256)),
-    // 30 s was too slow: shards of ~1 s each started only in 30 s waves (median wait 57 s, workers idle,
-    // 2026-10-13 bench). 5 s still lets an activity's load show before the next. Tune from utilization.
-    rampThrottleMs: int(env.WORKER_SLOT_RAMP_MS, 5_000, 0, 300_000),
+    // The ramp throttle gates every slot above the minimum AND each poller's wait: a slot is issued only when
+    // `rampThrottle` has passed since the previous issue, and every issue (including re-issues of the minimum
+    // slots as short activities finish) restarts that clock. At 5 s, activities shorter than the throttle
+    // never reached their maximum: a local Temporal dev server with 200 ms activities and 2 slots ran 316
+    // activities/min fixed, 16 with min 1 / max 2 / ramp 5 s, 53 with min 2 / max 2 / ramp 5 s, and 270-315
+    // with ramp 0-50 ms (the 2026-10-23 fleet load test saw 539 vs 21 pages/min the same way). 50 ms is the
+    // Temporal SDK's own activity default. Raise it only to spread out slow, memory-heavy starts, and expect
+    // short activities to slow down in proportion.
+    rampThrottleMs: int(env.WORKER_SLOT_RAMP_MS, 50, 0, 300_000),
     targetCpuUsage: ratio(env.WORKER_TARGET_CPU, 0.85),
     targetMemoryUsage: ratio(env.WORKER_TARGET_MEMORY, 0.8),
   };

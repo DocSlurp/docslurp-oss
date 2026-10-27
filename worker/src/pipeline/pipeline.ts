@@ -1,4 +1,4 @@
-import type { PrivacyAuditEntry } from "@docslurp/shared";
+import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
 import type { StageState, WorkspaceRunEvent } from "../models.js";
 import type { Document, ParserEvaluation, PerformanceEvent, WorkspaceRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
@@ -18,8 +18,9 @@ export interface CheckpointStore {
     state: WorkflowState,
     stage: string,
     artifactUri: string,
-    stats: Record<string, unknown>
-  ): Promise<void>;
+    stats: Record<string, unknown>,
+    options?: { readControlState?: boolean },
+  ): Promise<{ controlRequested?: boolean } | void>;
   /** Returns the stage's ordinary failure total when the store tracks it. */
   failRunStage(state: WorkflowState, stage: string, message: string, options?: { countFailure?: boolean }): Promise<number | void>;
   startDocumentStage(state: WorkflowState, documentId: string, stage: string): Promise<void>;
@@ -50,6 +51,11 @@ export interface CheckpointStore {
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
+  /**
+   * Stores the derived display title in documents.metadata unless one is already set
+   * (re-runs do not churn it and a user rename wins). Returns whether it was written.
+   */
+  setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
 }
 
 export interface Stage {
@@ -75,6 +81,13 @@ export class WorkflowState {
   artifacts: Record<string, string>;
   artifactLedger: DocumentArtifactLedger;
   readonly usageLedger = new PipelineUsageEventLedger();
+  /**
+   * Chunk ids the embed stage dropped (a retry that produced fewer chunks),
+   * per document: the index stage deletes their LanceDB rows again once the
+   * document's new rows are committed, so an earlier attempt's pending write
+   * cannot bring them back.
+   */
+  readonly staleVectorIds = new Map<string, string[]>();
   pendingPerformance: PerformanceEvent[];
   pendingParserEvaluations: ParserEvaluation[];
   vectorIndexes: VectorIndex[];
@@ -103,7 +116,6 @@ export class WorkflowState {
       artifacts: cloneArtifacts(run.artifacts)
     };
     this.documents = documents;
-    this.usageLedger.planId = run.orgPlanId ?? null;
     this.stage = run.stage;
     this.artifacts = this.run.artifacts;
     this.artifactLedger = DocumentArtifactLedger.create(
@@ -116,6 +128,7 @@ export class WorkflowState {
     this.runStages = new Map();
     this.documentStages = new Map();
     this.totalStages = 0;
+    this.usageLedger.runId = run.id;
   }
 
   static create(run: WorkspaceRun, documents: Document[]): WorkflowState {

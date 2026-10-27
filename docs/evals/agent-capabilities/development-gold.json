@@ -1,0 +1,141 @@
+[
+  {
+    "id": "document-search-action-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 1,
+    "requiredToolCalls": {
+      "search": 1
+    },
+    "requiredPatterns": [
+      "\\S",
+      "\\[\\d+\\]"
+    ],
+    "forbiddenPatterns": [
+      "I cannot search",
+      "I can't search"
+    ]
+  },
+  {
+    "id": "media-direct-read-action-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 0,
+    "maxSearchCalls": 0,
+    "requiredToolCalls": {
+      "getMediaEvidence": 1
+    },
+    "requiredPatterns": [
+      "transcript|frame|visual",
+      "sampled|coverage|continuous",
+      "\\[\\d+\\]"
+    ],
+    "forbiddenPatterns": [
+      "I watched (the )?(entire|whole) video",
+      "I cannot analyze video",
+      "I can't analyze video"
+    ]
+  },
+  {
+    "id": "media-check-before-refusal-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 0,
+    "requiredToolCalls": {
+      "getUploadStatus": 1,
+      "getMediaEvidence": 1
+    },
+    "requiredPatterns": [
+      "transcript|frame|visual",
+      "sampled|coverage|continuous",
+      "\\[\\d+\\]"
+    ],
+    "forbiddenPatterns": [
+      "I cannot analyze video",
+      "I can't analyze video"
+    ]
+  },
+  {
+    "id": "unsupported-automation-honesty-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 0,
+    "maxToolCalls": 0,
+    "requiredPatterns": [
+      "cannot|can't|not available|not exposed|unavailable"
+    ],
+    "forbiddenPatterns": [
+      "I (have )?scheduled",
+      "automation (is|was) (created|scheduled|running)",
+      "scheduled searches/automations are started from the app",
+      "DocSlurp (?:has|supports|provides|offers) (?:built-in )?(?:scheduled searches|recurring searches|scheduled automations)"
+    ]
+  },
+  {
+    "id": "no-fabricated-pdf-read-tool-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 0,
+    "forbiddenTools": [
+      "readPDF",
+      "openPDF",
+      "readDocument",
+      "getDocument"
+    ],
+    "requiredPatterns": [
+      "cannot|can't|unable|not able|don't have|do not have|not available|not exposed|unverified|limitation"
+    ],
+    "forbiddenPatterns": [
+      "I (have )?opened the (original )?PDF",
+      "I (have )?visually inspected",
+      "I (have )?examined every pixel",
+      "\\b(?:want to|wish to|if you|please|could you|can you) (?:re-?)?(?:upload|share|attach|send(?: me)?) (?:the|your|that|this|a copy of the) (?:original )?(?:PDF|file|document)\\b",
+      "\\b(?:re-?)?(?:upload|share|attach|send(?: me)?) (?:the|your|that|this) (?:original )?(?:PDF|file|document)\\b"
+    ]
+  },
+  {
+    "id": "cross-source-attribution-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 1,
+    "requiredToolCalls": {
+      "search": 1
+    },
+    "requireCitationBindings": true
+  },
+  {
+    "id": "overview-citation-coverage-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 1,
+    "requiredToolCalls": {
+      "search": 1
+    },
+    "requiredPatterns": [
+      "\\S",
+      "\\[\\d+\\]"
+    ],
+    "requireCitationBindings": true
+  },
+  {
+    "id": "existing-document-no-upload-request-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 0,
+    "forbiddenTools": [
+      "readPDF",
+      "openPDF",
+      "readDocument",
+      "getDocument"
+    ],
+    "requiredPatterns": [
+      "cannot|can't|unable|not able|don't have|do not have|not available|not exposed|unverified|limitation"
+    ],
+    "forbiddenPatterns": [
+      "I (have )?visually inspected",
+      "(?<!whether |if )the (?:smallest )?text (?:is|looks|renders) (?:crisp|sharp)",
+      "\\b(?:want to|wish to|if you|please|could you|can you) (?:re-?)?(?:upload|share|attach|send(?: me)?) (?:the|your|that|this|a copy of the) (?:original )?(?:PDF|file|document)\\b",
+      "\\b(?:re-?)?(?:upload|share|attach|send(?: me)?) (?:the|your|that|this) (?:original )?(?:PDF|file|document)\\b"
+    ]
+  }
+]

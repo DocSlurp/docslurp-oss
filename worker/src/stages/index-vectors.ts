@@ -1,9 +1,11 @@
 import { instrumentPostgres } from "@docslurp/shared/observability";
+import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { indexConfigHash, indexConfigOf, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
+import { indexConfigHash, indexConfigOf, LANCEDB_CHUNKS_TABLE } from "@docslurp/shared";
+import { encodeLanceChunkHydration, lancePageNumberValue } from "@docslurp/shared/lancedb-hydration";
 import postgres from "postgres";
 
 import type { Config } from "../config.js";
@@ -14,7 +16,10 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { backendRuntime, resolveVectorBackends } from "../embeddings/resolver.js";
 import type { EmbeddingArtifact, VectorBackendRecord } from "./embedding-runtime.js";
 import { maxInt } from "./utils.js";
-import { chunkFirstPage, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
+import { workspaceVectorLocation } from "./lancedb-location.js";
+import { keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
+import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
 import { lanceDbMaintenanceSettings, type LanceDbMaintenanceSettings } from "./lancedb-maintenance.js";
 import { LanceDbWriteQueue, type VectorWriteOutcome } from "./lancedb-write-queue.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
@@ -58,29 +63,44 @@ export function buildVectorIndexSearchMetadata(recordCount: number): {
 export function vectorBackendCollectionName(args: {
   backend: string;
   orgId: string | null;
+  workspaceId?: string | null;
   runId: string;
-  embedding?: { model: string; dimensions: number };
 }): string {
   if (args.backend === "lancedb") {
-    if (!args.orgId?.trim()) {
-      throw new Error("LanceDB vector indexing requires a run orgId for tenant isolation");
+    // The workspace's database (its URI) is the namespace; the table name is fixed.
+    if (!args.orgId?.trim() || !args.workspaceId?.trim()) {
+      throw new Error("LanceDB vector indexing requires the run's orgId and workspaceId for tenant isolation");
     }
-    return args.embedding
-      ? VectorNamespaceManager.getEmbeddingLocation("", args.orgId, args.embedding.model, args.embedding.dimensions).table
-      : VectorNamespaceManager.getTableName(args.orgId);
+    return LANCEDB_CHUNKS_TABLE;
   }
 
   return `${args.runId}_${args.backend}`;
 }
 
-/** Lance rows for one document's embedding artifact (the same shape in direct and queued mode). */
+/**
+ * Lance rows for one document's embedding artifact (the same shape in direct and queued mode).
+ * With a run id the rows also carry the hydration columns (@docslurp/shared/lancedb-hydration),
+ * so search can cite a hit without reading document_chunks: the same heading path, page, token
+ * estimate and metadata the embed stage stored there.
+ *
+ * A document whose embed checkpoint names another document's artifact (a dedup copy in another
+ * workspace than its source, a partial reprocess reusing embed) is rebound to its own chunks:
+ * `chunkIds` maps chunk index to this document's `document_chunks` id (chunks without one are
+ * skipped), so the rows are this document's own, in its own workspace's database.
+ */
 export function buildVectorRecords(
-  artifact: Pick<EmbeddingArtifact, "chunks">,
+  artifact: Pick<EmbeddingArtifact, "chunks"> & { documentId?: string },
   documentId: string,
   metadata: { sourceKey?: unknown; filename?: unknown },
+  runId?: string | null,
+  chunkIds?: ReadonlyMap<number, string>,
 ): VectorBackendRecord[] {
-  return artifact.chunks.map<VectorBackendRecord>((chunk) => ({
-    id: chunk.id,
+  const foreign = isForeignArtifact(artifact, documentId);
+  const chunkMetadata = (value: Record<string, unknown> | undefined) =>
+    foreign && value ? { ...value, documentId } : value;
+  const chunks = foreign && chunkIds ? artifact.chunks.filter((chunk) => chunkIds.has(chunk.index)) : artifact.chunks;
+  return chunks.map<VectorBackendRecord>((chunk) => ({
+    id: foreign && chunkIds ? chunkIds.get(chunk.index)! : chunk.id,
     documentId,
     chunkIndex: chunk.index,
     text: chunk.text,
@@ -89,9 +109,28 @@ export function buildVectorRecords(
       documentId,
       sourceKey: metadata.sourceKey,
       filename: metadata.filename
-    }
+    },
+    ...(runId ? {
+      runId,
+      pageNumber: lancePageNumberValue(chunk.pageNumber),
+      hydration: encodeLanceChunkHydration({
+        runId,
+        headingPath: chunk.headingPath,
+        pageNumber: chunk.pageNumber,
+        tokenEstimate: chunk.tokenEstimate,
+        metadata: chunkMetadata(chunk.metadata),
+      }),
+    } : {}),
   }));
 }
+
+/** The artifact was embedded for another document, so its chunk ids are not this document's. */
+export function isForeignArtifact(artifact: { documentId?: string }, documentId: string): boolean {
+  return Boolean(artifact.documentId) && artifact.documentId !== documentId;
+}
+
+/** This document's chunk ids by chunk index, for rebinding a foreign artifact. */
+export type ChunkIdLoader = (documentId: string) => Promise<ReadonlyMap<number, string>>;
 
 export class IndexStage implements Stage {
   readonly name = "index";
@@ -102,26 +141,62 @@ export class IndexStage implements Stage {
   constructor(
     private readonly runner: CommandRunner,
     private readonly storage: ArtifactStore,
-    private readonly config: Config
+    private readonly config: Config,
+    private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords,
+    loadChunkIds?: ChunkIdLoader,
   ) {
+    this.loadChunkIds = loadChunkIds ?? (async (documentId) => {
+      const rows = await this.sql()<{ chunk_index: number; id: string }[]>`
+        select chunk_index, id from document_chunks where document_id = ${documentId}
+      `;
+      return new Map(rows.map((row) => [row.chunk_index, row.id]));
+    });
     this.lance = lanceDbMaintenanceSettings(config.lancedb?.params ?? new URLSearchParams());
   }
 
-  /** One queue (and a small pooled client) per worker process, created on first LanceDB write. */
-  private writeQueue(): LanceDbWriteQueue {
-    if (this.queue) return this.queue;
+  private readonly loadChunkIds: ChunkIdLoader;
+
+  /** Records for one document's artifact, rebound to its own chunk ids when the artifact is another document's. */
+  private async documentRecords(
+    artifact: EmbeddingArtifact,
+    documentId: string,
+    metadata: { sourceKey?: unknown; filename?: unknown },
+    runId: string | null,
+  ): Promise<VectorBackendRecord[]> {
+    const chunkIds = isForeignArtifact(artifact, documentId) ? await this.loadChunkIds(documentId) : undefined;
+    const records = buildVectorRecords(artifact, documentId, metadata, runId, chunkIds);
+    if (chunkIds && records.length < artifact.chunks.length) {
+      // The document lacks chunks the artifact has: those vectors are not indexed for it.
+      console.warn(`[index] rebound artifact of ${artifact.documentId} to document=${documentId}: `
+        + `${records.length}/${artifact.chunks.length} chunks matched by index`);
+      if (records.length === 0 && artifact.chunks.length > 0) {
+        throw new Error(`document ${documentId} has none of the ${artifact.chunks.length} chunks of the embedding artifact it reuses`);
+      }
+    }
+    return records;
+  }
+
+  /** A small pooled client per worker process, created on first use. */
+  private sql(): ReturnType<typeof postgres> {
+    if (this.queueSql) return this.queueSql;
     this.queueSql = instrumentPostgres(postgres(this.config.databaseUrl, {
       max: Math.max(1, Number.parseInt(process.env.WORKER_VECTOR_QUEUE_DB_POOL_MAX ?? "2", 10) || 2),
       // Transaction-mode poolers (Neon pooler, PgBouncer) cannot route prepared statements.
       prepare: false,
       idle_timeout: 20,
       connect_timeout: 10,
-    }), this.config.databaseUrl);
+    }), this.config.databaseUrl, { onStatement: dbTraceStatementHook() });
+    return this.queueSql;
+  }
+
+  /** One queue per worker process, created on first LanceDB write. */
+  private writeQueue(): LanceDbWriteQueue {
+    if (this.queue) return this.queue;
     this.queue = new LanceDbWriteQueue({
-      sql: this.queueSql,
+      sql: this.sql(),
       loadRecords: async (row) => {
         const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey, { streamJson: true });
-        return buildVectorRecords(artifact, row.documentId, row.metadata);
+        return await this.documentRecords(artifact, row.documentId, row.metadata, row.runId);
       },
       maintenance: {
         enabled: this.lance.enabled,
@@ -161,13 +236,18 @@ export class IndexStage implements Stage {
         artifactSlot,
         "vector index manifests ready",
         async () => {
-          const embeddingKey = `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
+          // The embed checkpoint names the artifact: this document's own, or for a dedup
+          // copy in another workspace than its source, the source's (rebound below).
+          const embedUri = state.documentStage(document.id, "embed")?.artifactUri;
+          const embeddingKey = (embedUri ? keyFromStorageUri(embedUri, this.storage.bucket) : null)
+            ?? `${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`;
           const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey, { streamJson: true });
-          const records = buildVectorRecords(artifact, document.id, {
+          const records = await this.documentRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
             filename: document.filename
-          });
-          const recordPages = artifact.chunks.map((chunk) => chunkFirstPage(chunk));
+          }, state.run.id);
+          const pageByChunk = new Map(artifact.chunks.map((chunk) => [chunk.index, chunkFirstPage(chunk)]));
+          const recordPages = records.map((record) => pageByChunk.get(record.chunkIndex) ?? null);
 
           const manifests: Array<Record<string, unknown>> = [];
           const CONCURRENCY = Math.min(backends.length, 4);
@@ -181,12 +261,13 @@ export class IndexStage implements Stage {
               const collection = vectorBackendCollectionName({
                 backend,
                 orgId: state.run.orgId,
+                workspaceId: state.run.workspaceId,
                 runId: state.run.id,
-                embedding: artifact.embedding,
               });
               const result = await this.writeBackend({
                 backend,
                 orgId: state.run.orgId,
+                workspaceId: state.run.workspaceId ?? null,
                 runId: state.run.id,
                 documentId: document.id,
                 embeddingKey,
@@ -195,14 +276,15 @@ export class IndexStage implements Stage {
                 records,
                 recordPages,
                 embedding: artifact,
+                staleIds: state.staleVectorIds.get(document.id),
                 signal
               });
 
-              const key = `${document.userId}/${state.run.id}/vectors/${backend}/${document.id}/manifest.json`;
+              const key = `${runArtifactRoot(state.run, document.userId)}/vectors/${backend}/${document.id}/manifest.json`;
               const shardManifests = result.shards
                 ? await Promise.all(
                     result.shards.map(async (shard, shardIndex) => {
-                      const shardKey = `${document.userId}/${state.run.id}/vectors/${backend}/${document.id}/shards/${shardIndex.toString().padStart(3, "0")}.json`;
+                      const shardKey = `${runArtifactRoot(state.run, document.userId)}/vectors/${backend}/${document.id}/shards/${shardIndex.toString().padStart(3, "0")}.json`;
                       await this.storage.putJson(shardKey, {
                         documentId: document.id,
                         backend,
@@ -258,7 +340,7 @@ export class IndexStage implements Stage {
             Array.from({ length: CONCURRENCY }, () => runBackend.call(this))
           );
 
-          const summaryKey = `${document.userId}/${state.run.id}/vectors/${document.id}.json`;
+          const summaryKey = `${runArtifactRoot(state.run, document.userId)}/vectors/${document.id}.json`;
           const search = buildVectorIndexSearchMetadata(records.length);
           await this.storage.putJson(summaryKey, {
             documentId: document.id,
@@ -321,6 +403,7 @@ export class IndexStage implements Stage {
   private async writeBackend(args: {
     backend: string;
     orgId: string | null;
+    workspaceId: string | null;
     runId: string;
     documentId: string;
     embeddingKey: string;
@@ -329,19 +412,24 @@ export class IndexStage implements Stage {
     records: VectorBackendRecord[];
     recordPages: Array<number | null>;
     embedding: EmbeddingArtifact;
+    /** Chunk ids the embed stage dropped; deleted again after this document's rows commit. */
+    staleIds?: readonly string[];
     signal?: AbortSignal;
   }): Promise<BackendResult> {
     switch (args.backend) {
       case "lancedb":
-        if (!args.orgId) throw new Error("LanceDB indexing requires orgId");
-        const location = VectorNamespaceManager.getEmbeddingLocation(
-          resolveLanceDbConfig().root,
-          args.orgId, args.embedding.embedding.model, args.embedding.embedding.dimensions,
-        );
-        if (this.lance.writeMode === "queued") {
-          return await this.writeLanceDbQueued(location.uri, location.table, args);
-        }
-        return await this.writeLanceDb(location.uri, location.table, args.records, args.recordPages, args.signal);
+        const location = workspaceVectorLocation(args, args.embedding.embedding);
+        const result = this.lance.writeMode === "queued"
+          ? await this.writeLanceDbQueued(location.uri, location.table, args)
+          : await this.writeLanceDb(location.uri, location.table, args.records, args.recordPages, args.signal);
+        // An earlier attempt's write still pending in the outbox can land
+        // after the embed stage's delete. The table write lease normally
+        // orders it before this document's write; it is a TTL, so a drainer
+        // that lost it mid-write can still land later (rare, not guarded).
+        const written = new Set(args.records.map((record) => record.id));
+        const stale = (args.staleIds ?? []).filter((id) => !written.has(id));
+        if (stale.length > 0) await this.deleteVectors(location.uri, location.table, stale);
+        return result;
       default:
         return await this.writeScriptBackend(args.backend, args.collection, args.records, args.embedding, args.signal);
     }

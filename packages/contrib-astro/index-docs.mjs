@@ -59,20 +59,18 @@ export async function crawlDocs({ site, routes }, fetchImpl = fetch) {
  */
 export const DEFAULT_DOCS_PIPELINE = Object.freeze({ visionFallback: false, preserveImages: false, summarize: true });
 
-export async function indexDocs(corpus, { apiUrl, workspaceId, workspaceName, pipeline = DEFAULT_DOCS_PIPELINE }, apiKey, fetchImpl = fetch) {
+/**
+ * Uploads the rendered corpus into `workspace` (ID, slug or name): the server
+ * finds it, or creates a workspace with that name on the first build, so
+ * repeated builds keep landing in the same one.
+ */
+export async function indexDocs(corpus, { apiUrl, workspace = 'DocSlurp documentation', pipeline = DEFAULT_DOCS_PIPELINE }, apiKey, fetchImpl = fetch) {
   const base = apiUrl.replace(/\/$/, '');
   const request = async (path, init = {}) => {
     const response = await fetchImpl(`${base}${path}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new Error(`DocSlurp ${path}: HTTP ${response.status}`);
     return response.json();
   };
-  let target = workspaceId;
-  if (!target) {
-    const { workspaces } = await request('/v1/workspaces');
-    const matches = workspaces.filter(w => w.name === workspaceName);
-    if (matches.length > 1) throw new Error('Multiple docs workspaces: set DOCSLURP_DOCS_WORKSPACE_ID');
-    target = matches[0]?.id;
-  }
   const form = new FormData();
   const canonicalIds = [];
   for (const doc of corpus) {
@@ -81,10 +79,9 @@ export async function indexDocs(corpus, { apiUrl, workspaceId, workspaceName, pi
   }
   form.set('canonicalIds', JSON.stringify(canonicalIds));
   if (pipeline) form.set('pipeline', JSON.stringify(pipeline));
-  if (target) form.set('workspaceId', target);
-  else { form.set('newWorkspace', 'true'); form.set('workspaceName', workspaceName); }
-  const hash = createHash('sha256').update(JSON.stringify({ target: target ?? workspaceName, corpus, pipeline: pipeline ?? null })).digest('hex');
-  const result = await request('/v1/ingest/bulk', { method: 'POST', headers: { 'Idempotency-Key': `docs-${hash}` }, body: form });
+  form.set('workspace', workspace);
+  const hash = createHash('sha256').update(JSON.stringify({ target: workspace, corpus, pipeline: pipeline ?? null })).digest('hex');
+  const result = await request('/v1/uploads/bulk', { method: 'POST', headers: { 'Idempotency-Key': `docs-${hash}` }, body: form });
   const deadline = Date.now() + 10 * 60_000;
   while (Date.now() < deadline) {
     const { run } = await request(`/v1/runs/${encodeURIComponent(result.run.id)}/progress`);
@@ -98,7 +95,7 @@ export async function indexDocs(corpus, { apiUrl, workspaceId, workspaceName, pi
 async function main() {
   const args = process.argv.slice(2);
   const value = name => args[args.indexOf(name) + 1];
-  const options = { apiUrl: process.env.DOCSLURP_URL ?? 'https://docslurp.io', workspaceId: process.env.DOCSLURP_DOCS_WORKSPACE_ID || process.env.PUBLIC_DOCSLURP_DOCS_WORKSPACE_ID || undefined, workspaceName: 'DocSlurp documentation', ...(process.env.DOCSLURP_DOCS_PIPELINE ? { pipeline: JSON.parse(process.env.DOCSLURP_DOCS_PIPELINE) } : {}), ...JSON.parse(process.env.DOCSLURP_DOCS_INDEX_OPTIONS ?? '{}') };
+  const options = { apiUrl: process.env.DOCSLURP_URL ?? 'https://docslurp.io', workspace: process.env.DOCSLURP_DOCS_WORKSPACE_ID || process.env.PUBLIC_DOCSLURP_DOCS_WORKSPACE_ID || 'DocSlurp documentation', ...(process.env.DOCSLURP_DOCS_PIPELINE ? { pipeline: JSON.parse(process.env.DOCSLURP_DOCS_PIPELINE) } : {}), ...JSON.parse(process.env.DOCSLURP_DOCS_INDEX_OPTIONS ?? '{}') };
   const output = value('--output');
   let corpus;
   if (args.includes('--entry')) {
@@ -136,11 +133,11 @@ async function main() {
   if (key) {
     const indexed = await indexDocs(corpus, options, key);
     console.log('[docs-index]', indexed);
-    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ workspaceId: indexed.workspaceId }));
+    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ workspace: indexed.workspaceId }));
   }
   else {
     console.log('[docs-index] No API key; remote indexing skipped');
-    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ workspaceId: options.workspaceId ?? null }));
+    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ workspace: options.workspace ?? null }));
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

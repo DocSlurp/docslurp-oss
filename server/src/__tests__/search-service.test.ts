@@ -38,6 +38,7 @@ vi.mock("../search/rrf.js", () => ({
 
 vi.mock("../search/lancedb.js", () => ({
   lanceDbVectorSearch,
+  warmLanceDbSearch: vi.fn(async () => {}),
 }));
 
 vi.mock("../search/contextual-compression.js", () => ({
@@ -115,6 +116,8 @@ const { hybridSearch, MissingWorkspaceScopeError, deriveSearchAvailability, part
 
 describe("hybridSearch", () => {
   beforeEach(() => {
+    // These tests script the Postgres path's SQL; native search (the default) is covered by search-lancedb-native.db.test.ts.
+    vi.stubEnv("SEARCH_LANCEDB_NATIVE", "0");
     sqlMock.begin.mockImplementation(async (run) => {
       const client = Object.assign(vi.fn(async (strings, ...values) => {
         const result = await sqlMock(strings, ...values);
@@ -599,7 +602,7 @@ describe("hybridSearch", () => {
       parentRetrieval: false, suppressSessionLog: true,
     });
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
-      orgId: "org-1", documentIds: ["doc-1"], legacyDocumentIds: ["doc-1"],
+      orgId: "org-1", workspaceId: "ws-1", documentIds: ["doc-1"],
     }));
   });
 
@@ -699,7 +702,8 @@ describe("hybridSearch", () => {
 
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) {
+      // The search charge's org resolution (lib/ai-usage.ts) also reads workspaces; it is not an access check.
+      if (text.includes("from workspaces w") && !text.trimStart().startsWith("coalesce(")) {
         accessChecks += 1;
         return accessChecks === 1
           ? [

@@ -11,11 +11,15 @@ on:
       - 'scripts/start-worker.sh'
       - 'scripts/setup-cli-*.sh'
       - 'scripts/check-worker-prerequisites*'
+      - 'scripts/normalize-sbom-sarif*'
       - 'worker/package.json'
       - 'worker/vendor-bundles.json'
       - 'scripts/build-worker-venv.sh'
       - 'scripts/prune-worker-node-modules.mjs'
       - 'scripts/vendor-bundles/**'
+      - 'scripts/uv-installer*.txt'
+      - 'scripts/check-python-lock-hashes*'
+      - '.grype.yaml'
       - 'pnpm-lock.yaml'
   pull_request:
     branches: [main]
@@ -27,11 +31,15 @@ on:
       - 'scripts/start-worker.sh'
       - 'scripts/setup-cli-*.sh'
       - 'scripts/check-worker-prerequisites*'
+      - 'scripts/normalize-sbom-sarif*'
       - 'worker/package.json'
       - 'worker/vendor-bundles.json'
       - 'scripts/build-worker-venv.sh'
       - 'scripts/prune-worker-node-modules.mjs'
       - 'scripts/vendor-bundles/**'
+      - 'scripts/uv-installer*.txt'
+      - 'scripts/check-python-lock-hashes*'
+      - '.grype.yaml'
       - 'pnpm-lock.yaml'
   workflow_dispatch:
 
@@ -61,14 +69,20 @@ jobs:
           python-version: '3.11'
           version: '0.13.0'
 
+      # Every install path runs pip/uv with --require-hashes, so the locks must
+      # carry a sha256 for every artifact (uv pip compile --generate-hashes).
       - name: Rebuild tracked worker lockfiles
         run: |
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
+          uv pip compile scripts/uv-installer.txt --generate-hashes --universal --python-version 3.11 --output-file scripts/uv-installer.lock.txt
 
       - name: Ensure worker lockfiles are committed
-        run: git diff --exit-code -- worker/requirements-base.lock.txt worker/requirements.lock.txt worker/requirements-fallback.lock.txt
+        run: git diff --exit-code -- worker/requirements-base.lock.txt worker/requirements.lock.txt worker/requirements-fallback.lock.txt scripts/uv-installer.lock.txt
+
+      - name: Ensure every Python lock pins hashes
+        run: node scripts/check-python-lock-hashes.mjs
 
       - name: Reserve disk space for worker image build
         run: |
@@ -140,14 +154,17 @@ jobs:
           output-file: worker-source-sbom.spdx.json
           artifact-name: worker-source-sbom.spdx.json
 
+      # Fails on critical findings. Not-applicable findings are ignored only in
+      # .grype.yaml, per advisory and pinned package version, with a reason.
       - name: Scan worker source SBOM
         id: worker-source-sbom-scan
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           sbom: worker-source-sbom.spdx.json
-          fail-build: false
+          config: .grype.yaml
+          fail-build: true
           output-format: sarif
-          severity-cutoff: high
+          severity-cutoff: critical
 
       - name: Retain worker vulnerability report
         if: always() && steps.worker-source-sbom-scan.outputs.sarif != ''
@@ -158,8 +175,14 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+      - name: Prepare SARIF locations for GitHub
+        if: always() && steps.worker-source-sbom-scan.outputs.sarif != ''
+        env:
+          SCAN_SARIF: ${{ steps.worker-source-sbom-scan.outputs.sarif }}
+        run: node scripts/normalize-sbom-sarif.mjs "$SCAN_SARIF" worker-github.sarif worker-source-sbom.spdx.json
+
       - name: Upload worker scan SARIF
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: always() && steps.worker-source-sbom-scan.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
-          sarif_file: ${{ steps.worker-source-sbom-scan.outputs.sarif }}
+          sarif_file: worker-github.sarif

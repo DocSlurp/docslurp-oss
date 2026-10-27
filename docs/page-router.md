@@ -163,7 +163,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | Flag | Default | Values | Effect |
 |---|---|---|---|
 | `PAGE_ROUTER_MODE` | `off` (production: `shadow`) | off, shadow, active | Worker ceiling over the workspace `pageRouter.mode`; the lower of the two wins. The app reads it as the platform default: a new run whose workspace left `pageRouter.mode` unset gets `shadow` (never `active`) when it is shadow or active, so the route-pages stage is planned with no workspace setup. Set it on both `fly.app.toml` and `fly.worker.toml`. |
-| workspace `pipeline.pageRouter` | mode unset | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
+| workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
@@ -265,3 +265,7 @@ Promote the two features independently and only with evidence; each step is a co
    passing, and an active-mode canary workspace with a measured cost-per-1,000-pages and quality delta before wider rollout.
    Make `active` the default for unset workspaces only as a separate, reviewed change.
 4. Rollback for any step is the previous value of the flag; shadow output is telemetry only and safe to leave on.
+
+### Default free routing (2026-10-22)
+
+New default settings select the feature-based baseline, avoiding paid decision calls just to classify pages. Explicit decision-model settings remain available. Healthy native prose is retained; substantial unknown embedded images request cropped OCR instead of being assumed decorative. Scans request page OCR once, including tiled scans, and proven blank pages skip extraction. Form/annotation and vector-only pages are not blank. Cost, privacy and quality gates still select and constrain executors; production remains shadow until the promotion checks above pass. These changes do not promote the native PDF engine or claim a measured end-to-end speedup.

@@ -39,7 +39,9 @@ jobs:
           python-version: '3.11'
           version: '0.13.0'
       - run: uv venv
+      # The full worker lock (base parsers, unstructured, sentence-transformers,
+      # CPU torch), hash-checked like every other worker install path.
       - name: Install supported parser stack with CPU wheels
-        run: uv pip install -c worker/requirements.lock.txt -r worker/requirements-base.txt docling 'unstructured[pdf]' sentence-transformers
+        run: uv pip install --require-hashes -r worker/requirements.lock.txt
       - name: Exercise PDF and HTML adapters without downloading models
         run: uv run --no-project scripts/check-python-dependencies.py --optional

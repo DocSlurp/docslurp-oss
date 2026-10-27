@@ -1,3 +1,6 @@
+import type { Table } from "@lancedb/lancedb";
+import { LANCE_HYDRATION_COLUMN_SPECS } from "@docslurp/shared/lancedb-hydration";
+
 import { connectLanceDb } from "./lancedb-connection.js";
 import { setTimeout as delay } from "node:timers/promises";
 import type { VectorBackendRecord } from "./embedding-runtime.js";
@@ -100,7 +103,8 @@ async function writeLanceDbRecordsNow(
   const attemptTimeoutMs = retry.attemptTimeoutMs ?? lanceWriteAttemptTimeoutMs();
   const db = await connectLanceDb(uri);
   try {
-    const rows = records.map((record) => ({ ...record }));
+    const rows = withUniformHydrationColumns(records) as unknown as Array<Record<string, unknown>>;
+    const hydrated = rows.some((row) => row.hydration !== undefined);
     for (let attempt = 0; ; attempt += 1) {
       signal?.throwIfAborted();
       let initializingTable = true;
@@ -114,6 +118,7 @@ async function writeLanceDbRecordsNow(
         const table = await withAttemptTimeout(db.openTable(collection), attemptTimeoutMs);
         initializingTable = false;
         try {
+          if (hydrated) await withAttemptTimeout(ensureLanceHydrationColumns(table), attemptTimeoutMs);
           await withAttemptTimeout(
             table.mergeInsert("id").whenMatchedUpdateAll().whenNotMatchedInsertAll().execute(rows),
             attemptTimeoutMs,
@@ -140,6 +145,82 @@ async function writeLanceDbRecordsNow(
   } finally {
     db.close();
   }
+}
+
+/**
+ * Delete rows by chunk id, in this process's turn for the table (see
+ * inTableQueue). For rows whose chunk is gone: search serves hydrated rows
+ * without re-reading Postgres, so a row must not outlive its chunk.
+ */
+export async function deleteLanceDbRecords(
+  uri: string,
+  collection: string,
+  ids: readonly string[],
+  retry: LanceWriteRetryOptions = {},
+): Promise<void> {
+  if (ids.length === 0) return;
+  const retries = retry.retries ?? 10;
+  const baseDelayMs = retry.baseDelayMs ?? 200;
+  const maxDelayMs = retry.maxDelayMs ?? 15_000;
+  const attemptTimeoutMs = retry.attemptTimeoutMs ?? lanceWriteAttemptTimeoutMs();
+  await inTableQueue(`${uri}\u0000${collection}`, async () => {
+    const db = await connectLanceDb(uri);
+    try {
+      if (!(await withAttemptTimeout(db.tableNames(), attemptTimeoutMs)).includes(collection)) return;
+      for (let index = 0; index < ids.length; index += 500) {
+        const list = ids.slice(index, index + 500).map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
+        // Other machines commit to the same table: retry conflicts like writes do.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            const table = await withAttemptTimeout(db.openTable(collection), attemptTimeoutMs);
+            try {
+              await withAttemptTimeout(table.delete(`id IN (${list})`), attemptTimeoutMs);
+            } finally {
+              table.close();
+            }
+            break;
+          } catch (error) {
+            if (attempt >= retries || !isRetryableLanceCommitError(error)) throw error;
+            const cap = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+            await delay(Math.round(cap / 2 + Math.random() * (cap / 2)));
+          }
+        }
+      }
+    } finally {
+      db.close();
+    }
+  });
+}
+
+/**
+ * A merge-insert source needs one schema. Rows without a run id (legacy outbox
+ * rows) get empty hydration values when they share a batch with hydrated rows;
+ * search hydrates those from Postgres.
+ */
+export function withUniformHydrationColumns(records: VectorBackendRecord[]): VectorBackendRecord[] {
+  const hydrated = records.some((record) => record.hydration !== undefined);
+  return records.map((record) => hydrated && record.hydration === undefined
+    ? { ...record, runId: "", pageNumber: 0, hydration: "" }
+    : { ...record });
+}
+
+/**
+ * Tables created before the hydration columns existed get them as nullable
+ * columns (existing rows read null until lancedb-native-backfill fills them).
+ * Nullable, so a worker still running the previous release can keep inserting
+ * rows without them.
+ */
+export async function ensureLanceHydrationColumns(table: Pick<Table, "schema" | "addColumns">): Promise<boolean> {
+  const names = new Set((await table.schema()).fields.map((field) => field.name));
+  const missing = LANCE_HYDRATION_COLUMN_SPECS.filter((column) => !names.has(column.name));
+  if (missing.length === 0) return false;
+  try {
+    await table.addColumns(missing.map((column) => ({ name: column.name, valueSql: column.valueSql })));
+  } catch (error) {
+    // A concurrent writer added them first.
+    if (!/already exists|duplicate/i.test(error instanceof Error ? error.message : String(error))) throw error;
+  }
+  return true;
 }
 
 /**

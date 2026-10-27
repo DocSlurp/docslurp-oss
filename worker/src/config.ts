@@ -82,7 +82,7 @@ export interface Config {
   lancedbReindexPages: number;
   /** Run optimize/index maintenance after LanceDB writes. LANCEDB_URI ?maintenance=false disables. */
   lancedbMaintenanceEnabled: boolean;
-  /** Minimum table rows before maintenance builds the first ANN vector index. LANCEDB_URI ?vectorIndexMinRows= (default 5000). */
+  /** Minimum table rows before maintenance builds the first ANN vector index. LANCEDB_URI ?vectorIndexMinRows= (default 1000: with one database per workspace most tables are small, and an HNSW index over 1,000 rows keeps about 98% top-10 recall of a flat scan while reading a fraction of the vectors). */
   lancedbVectorIndexMinRows: number;
   workerLeaseTtlMs: number;
   workerMaxRuntimeMs: number;
@@ -91,12 +91,20 @@ export interface Config {
   workerAdaptiveTuning: boolean;
   serializePdfCandidateExtraction: boolean;
   visionDensityThreshold: number;
+  /** VISION_STREAMING=on|off (default on): stream hosted vision responses so degenerate output can be aborted early. */
+  visionStreaming?: boolean;
   /**
    * PAGE_ROUTER_MODE=off|shadow|active (default off). Ceiling over each workspace's
    * `pageRouter.mode`: nothing routes unless both opt in. Optional so partial
    * Config literals (tests) read as off.
    */
   pageRouterMode?: PageRouterMode;
+  /**
+   * VISION_MODEL_SWAP_POLICY=warn|fail (default warn). When a hosted vision call is
+   * served by a different model snapshot than requested, `warn` logs and flags it;
+   * `fail` throws a retryable provider error. Optional so partial Config literals read as warn.
+   */
+  visionModelSwapPolicy?: "warn" | "fail";
   pythonPoolSize: number;
   parserArtifactTimeoutMs: number;
   unstructuredParserChunkTimeoutMs: number;
@@ -262,7 +270,7 @@ export function fromEnv(): Config {
       "standard",
     ) as InferenceLane,
     vectorBackends: readList(process.env.VECTOR_BACKENDS, ["lancedb"]),
-    // Maintenance tuning rides on LANCEDB_URI, e.g. s3://bucket/lancedb?reindexPages=20&vectorIndexMinRows=5000.
+    // Maintenance tuning rides on LANCEDB_URI, e.g. s3://bucket/lancedb?reindexPages=20&vectorIndexMinRows=1000.
     lancedbReindexPages: maintenance.reindexPages,
     lancedbMaintenanceEnabled: maintenance.enabled,
     lancedbVectorIndexMinRows: maintenance.vectorIndexMinRows,
@@ -281,7 +289,9 @@ export function fromEnv(): Config {
     visionDensityThreshold: Number.parseFloat(
       process.env.VISION_DENSITY_THRESHOLD ?? "0.25",
     ),
+    visionStreaming: readBoolean(process.env.VISION_STREAMING, true),
     pageRouterMode: readPageRouterMode(process.env.PAGE_ROUTER_MODE),
+    visionModelSwapPolicy: readEnv(process.env.VISION_MODEL_SWAP_POLICY)?.toLowerCase() === "fail" ? "fail" : "warn",
     pythonPoolSize: readNumber(process.env.WORKER_PYTHON_POOL_SIZE, 2),
     parserArtifactTimeoutMs: readNumber(
       process.env.PARSER_ARTIFACT_TIMEOUT_MS,

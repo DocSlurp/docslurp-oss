@@ -6,6 +6,7 @@ import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
@@ -20,6 +21,7 @@ import {
   resolveEmbeddingModel,
 } from "../embeddings/resolver.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export class PropositionIndexStage implements Stage {
   readonly name = "proposition-index";
@@ -168,7 +170,7 @@ export class PropositionIndexStage implements Stage {
               ).insertPropositions(rows);
             }
 
-            const key = `${document.userId}/${state.run.id}/propositions/${document.id}.json`;
+            const key = `${runArtifactRoot(state.run, document.userId)}/propositions/${document.id}.json`;
             await this.storage.putJson(key, {
               documentId: document.id,
               propositions: rows.length,
@@ -202,6 +204,8 @@ export class PropositionIndexStage implements Stage {
                 metadata: { ...generationCost.metadata, documentId: document.id },
               },
             );
+            // Price card (provisional): propositions per started 10 pages, once per document per run.
+            chargeDocumentFeature(state, document, "propositions");
 
             // Record usage for embedding calls
             const embeddingTokens =

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides } from "@docslurp/shared";
+import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const providerCalls = vi.hoisted(() => ({ embed: [] as string[][], context: 0 }));
@@ -139,12 +139,15 @@ type EmbedArgs = {
   text?: string;
   pipeline?: PipelineFeatureOverrides;
   seedEmbeddingsUri?: string;
+  dedupHashes?: ReadonlyMap<string, string>;
   openRouter?: boolean;
   allowFailure?: boolean;
   /** Applied after validation: a pipeline whose hosted route predates a privacy switch. */
   privacyMode?: "local-only" | "strict-privacy";
   /** Extra store methods (e.g. chunk materialization) merged over the checkpoint store. */
   storeExtras?: Record<string, unknown>;
+  /** EmbedStage's LanceDB delete (default: none recorded). */
+  deleteVectors?: (uri: string, table: string, ids: readonly string[]) => Promise<void>;
 };
 
 async function embedDocument(args: EmbedArgs) {
@@ -177,6 +180,7 @@ async function runEmbed(args: EmbedArgs) {
     stage: "embed", status: "processing", pipeline, stats: {}, artifacts, spentCents: 0,
   } as unknown as WorkspaceRun;
   const state = WorkflowState.create(run, [document]);
+  for (const [hash, uri] of args.dedupHashes ?? []) state.contentHashes.set(hash, uri);
   if (args.reuse) state.store = { ...checkpointStore(args.reuse), ...args.storeExtras } as unknown as WorkflowState["store"];
   const config = { ...fromEnv(), openRouterApiKey: args.openRouter ? "test-key" : "" };
   const embedCallsBefore = providerCalls.embed.length;
@@ -184,7 +188,7 @@ async function runEmbed(args: EmbedArgs) {
 
   let failure: unknown;
   try {
-    await new EmbedStage({} as CommandRunner, args.storage as unknown as ArtifactStore, config).run(state);
+    await new EmbedStage({} as CommandRunner, args.storage as unknown as ArtifactStore, config, args.deleteVectors ?? (async () => {})).run(state);
   } catch (error) {
     if (!args.allowFailure) throw error;
     failure = error;
@@ -287,6 +291,28 @@ describe("EmbeddingReuseLookup", () => {
 });
 
 describe("EmbedStage chunk materialization", () => {
+  it("removes stale native and Postgres chunks when reusing an empty embedding artifact", async () => {
+    const storage = new MemoryStorage();
+    const reuse = new MemoryReuseStore();
+    const original = await embedDocument({ storage, reuse, runId: "original", documentId: "original" });
+    // Empty artifacts remain a valid stored shape (for example an earlier parser
+    // result); materializing one is a replacement, not permission to keep old rows.
+    await storage.putJson(original.artifactUri.replace(`s3://${BUCKET}/`, ""), { ...original.artifact, chunks: [] });
+    const calls: string[] = [];
+    const result = await embedDocument({
+      storage, reuse, runId: "run-empty", documentId: "empty", dedupHashes: original.state.contentHashes,
+      storeExtras: {
+        insertChunks: async (chunks: unknown[]) => { calls.push(`insert:${chunks.length}`); },
+        staleDocumentChunkIds: async (_id: string, keep: readonly string[]) => { expect(keep).toEqual([]); return ["empty-000"]; },
+        deleteStaleDocumentChunks: async (_id: string, keep: readonly string[]) => { expect(keep).toEqual([]); calls.push("prune"); },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
+      },
+      deleteVectors: async (_uri, _table, ids) => { expect(ids).toEqual(["empty-000"]); calls.push("lance"); },
+    });
+    expect(result.artifact.chunks).toEqual([]);
+    expect(calls).toEqual(["insert:0", "lance", "prune"]);
+  });
+
   it("publishes complete keyword chunks before embedding when early publication is enabled", async () => {
     vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
     const calls: string[] = [];
@@ -364,7 +390,11 @@ describe("EmbedStage chunk materialization", () => {
             markDocumentLexicalSearchable: async () => {},
           },
         });
-        return { rows, artifact: result.artifact, usage: result.state.usageLedger.snapshot().map(({ id: _id, ...event }) => event) };
+        return { rows, artifact: result.artifact, usage: result.state.usageLedger.snapshot().map(({ id: _id, metadata, ...event }) => {
+          // Each activity has its own trace; compare usage and pricing, not tracing identity.
+          const { traceId: _traceId, spanId: _spanId, ...usageMetadata } = metadata ?? {};
+          return { ...event, metadata: usageMetadata };
+        }) };
       } finally { vi.unstubAllEnvs(); }
     };
 
@@ -398,6 +428,59 @@ describe("EmbedStage chunk materialization", () => {
     });
     expect(calls).toEqual(["insert", "prune", "mark"]);
     expect(writtenIds).toEqual(result.artifact.chunks.map((chunk) => chunk.id));
+  });
+
+  it("deletes the LanceDB rows of chunks a retry dropped before their Postgres rows, so native search cannot serve them", async () => {
+    const calls: string[] = [];
+    const deleted: Array<{ uri: string; table: string; ids: readonly string[] }> = [];
+    const result = await embedDocument({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-orphan", documentId: "orphan",
+      storeExtras: {
+        insertChunks: async () => { calls.push("insert"); },
+        staleDocumentChunkIds: async () => ["orphan-007", "orphan-008"],
+        deleteStaleDocumentChunks: async () => { calls.push("prune"); },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
+      },
+      deleteVectors: async (uri, table, ids) => { calls.push("lance"); deleted.push({ uri, table, ids }); },
+    });
+    expect(calls).toEqual(["insert", "lance", "prune", "mark"]);
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]!.ids).toEqual(["orphan-007", "orphan-008"]);
+    const space = result.artifact.embedding;
+    expect(deleted[0]).toMatchObject(VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, "o1", "w1", space.model, space.dimensions));
+    // Handed to the index stage, which deletes them again after its own write commits.
+    expect(result.state.staleVectorIds.get("orphan")).toEqual(["orphan-007", "orphan-008"]);
+  });
+
+  it("keeps the stale Postgres rows when the LanceDB delete fails, so the retry deletes them again", async () => {
+    const calls: string[] = [];
+    const result = await runEmbed({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-fail", documentId: "fail", allowFailure: true,
+      storeExtras: {
+        insertChunks: async () => {},
+        staleDocumentChunkIds: async () => ["fail-009"],
+        deleteStaleDocumentChunks: async () => { calls.push("prune"); },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
+      },
+      deleteVectors: async () => { throw new Error("Too many concurrent writers"); },
+    });
+    expect(result.status).not.toBe("completed");
+    expect(calls).toEqual([]);
+  });
+
+  it("leaves LanceDB alone when no chunk rows were stale", async () => {
+    const deleted: unknown[] = [];
+    await embedDocument({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-clean", documentId: "clean",
+      storeExtras: {
+        insertChunks: async () => {},
+        staleDocumentChunkIds: async () => [],
+        deleteStaleDocumentChunks: async () => {},
+        markDocumentLexicalSearchable: async () => {},
+      },
+      deleteVectors: async (...call) => { deleted.push(call); },
+    });
+    expect(deleted).toEqual([]);
   });
 
   it("marks the document keyword-searchable only after every chunk row is written", async () => {

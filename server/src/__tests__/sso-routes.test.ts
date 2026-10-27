@@ -1,7 +1,9 @@
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestSession } from "./helpers/session-app.js";
+import { hasValidSsoUnlinkedPass } from "../lib/sso-unlinked-pass.js";
 
 process.env.SSO_RATE_LIMIT_MAX = "1000";
 process.env.SSO_RATE_LIMIT_WINDOW_MS = "60000";
@@ -142,9 +144,12 @@ vi.mock("../db.js", () => ({
   sql: sqlMock
 }));
 
+class FakeUnsafeExternalUrlError extends Error {}
+
 vi.mock("../lib/network-security.js", () => ({
   assertSafeExternalUrl: assertSafeExternalUrlMock,
-  safeExternalFetch: safeExternalFetchMock
+  safeExternalFetch: safeExternalFetchMock,
+  UnsafeExternalUrlError: FakeUnsafeExternalUrlError
 }));
 
 vi.mock("../lib/auth.js", () => ({
@@ -249,6 +254,11 @@ function seedRequest(state: string, linkUserId: string | null = null) {
   });
 }
 
+/** The state-binding cookie a callback must carry to prove it returns to the starting browser. */
+function ssoCookie(state: string): { Cookie: string } {
+  return { Cookie: `docslurp_sso_state=${createHash("sha256").update(state).digest("hex")}` };
+}
+
 beforeEach(() => {
   resetDb();
   sqlMock.mockClear();
@@ -288,6 +298,17 @@ describe("ssoRoutes security hardening", () => {
     expect(origin).toBe("https://api.docslurp.example");
   });
 
+  it("uses the public TLS origin for the SSO state cookie behind an HTTP proxy", async () => {
+    seedOrg(oidcConfig);
+    verifiedDomain("org-1");
+    await stubIdp(() => ({}));
+    process.env.PUBLIC_API_URL = "https://api.docslurp.example";
+    const response = await buildApp().request("http://internal.local/v1/auth/oidc/org-1/init");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("set-cookie")).toContain("Secure");
+    expect(response.headers.get("set-cookie")).toContain("SameSite=None");
+  });
+
   it("rejects OIDC metadata that points token or JWKS endpoints at untrusted hosts", async () => {
     seedOrg(oidcConfig);
     vi.mocked(fetch).mockResolvedValueOnce(Response.json({
@@ -299,7 +320,46 @@ describe("ssoRoutes security hardening", () => {
 
     const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
 
-    expect(await response.json()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "OIDC metadata endpoint host token.attacker.example is not the issuer's host or a trusted endpoint host"
+    });
+  });
+
+  it("accepts Google's split token and JWKS hosts for the Google issuer only", async () => {
+    const googleIssuer = "https://accounts.google.com";
+    const googleMetadata = {
+      issuer: googleIssuer,
+      authorization_endpoint: `${googleIssuer}/o/oauth2/v2/auth`,
+      token_endpoint: "https://oauth2.googleapis.com/token",
+      jwks_uri: "https://www.googleapis.com/oauth2/v3/certs"
+    };
+    seedOrg({ ...oidcConfig, metadataUrl: `${googleIssuer}/.well-known/openid-configuration` });
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json(googleMetadata));
+    const accepted = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
+    expect(await accepted.json()).toMatchObject({ ok: true });
+
+    seedOrg(oidcConfig, "org-2");
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ ...googleMetadata, issuer, authorization_endpoint: `${issuer}/authorize` }));
+    const borrowed = await buildApp().request("/v1/organizations/org-2/sso/test", { method: "POST" });
+    expect(await borrowed.json()).toEqual({
+      ok: false,
+      error: "OIDC metadata endpoint host oauth2.googleapis.com is not the issuer's host or a trusted endpoint host"
+    });
+  });
+
+  it("explains that Microsoft multi-tenant metadata needs a tenant-specific URL", async () => {
+    seedOrg({ ...oidcConfig, metadataUrl: "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration" });
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({
+      issuer: "https://login.microsoftonline.com/{tenantid}/v2.0",
+      authorization_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+      token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+      jwks_uri: "https://login.microsoftonline.com/common/discovery/v2.0/keys"
+    }));
+
+    const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
+
+    expect(JSON.stringify(await response.json())).toContain("use https://login.microsoftonline.com/<tenant-id>/v2.0");
   });
 
   it("rejects OIDC metadata whose issuer is not the discovery URL's issuer", async () => {
@@ -313,7 +373,10 @@ describe("ssoRoutes security hardening", () => {
 
     const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
 
-    expect(await response.json()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: `OIDC metadata issuer https://login.attacker.example does not match the metadata URL; expected the URL to be https://login.attacker.example/.well-known/openid-configuration`
+    });
   });
 
   it("rejects SAML metadata with DTD or entity declarations before xml2js parses it", async () => {
@@ -331,8 +394,40 @@ describe("ssoRoutes security hardening", () => {
 
     expect(await response.json()).toEqual({
       ok: false,
-      error: "We couldn’t complete that request. Please try again in a moment."
+      error: "SAML metadata must not contain DTD or entity declarations"
     });
+  });
+
+  it("tests a well-formed OIDC IdP successfully", async () => {
+    seedOrg(oidcConfig);
+    await stubIdp(() => ({}));
+
+    const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
+
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it("explains metadata URL policy rejections, timeouts and redirects in the connection test", async () => {
+    seedOrg(oidcConfig);
+    const test = async () => (await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" })).json();
+
+    assertSafeExternalUrlMock.mockRejectedValueOnce(new FakeUnsafeExternalUrlError("URL resolves to a private or loopback address"));
+    expect(await test()).toEqual({ ok: false, error: "Metadata URL rejected: URL resolves to a private or loopback address" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    expect(await test()).toEqual({ ok: false, error: "Timed out fetching the metadata URL" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("unexpected redirect") }));
+    expect(await test()).toEqual({ ok: false, error: "Metadata URL redirected; use the final metadata URL (redirects are not followed)" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed", { cause: Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }) }));
+    expect(await test()).toEqual({ ok: false, error: "Could not fetch the metadata URL (CERT_HAS_EXPIRED)" });
+
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("<html>login</html>", { headers: { "Content-Type": "text/html" } }));
+    expect(await test()).toEqual({ ok: false, error: "Metadata URL did not return a JSON OpenID Connect discovery document" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("internal detail at 10.0.0.5"));
+    expect(await test()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
   });
 
   it("rate limits repeated SSO auth endpoint requests", async () => {
@@ -458,6 +553,45 @@ describe("SSO domain verification", () => {
     expect(response.status).toBe(200);
     expect(db.links).toHaveLength(0);
   });
+
+  it("vets a new metadata URL at write time even while SSO is disabled", async () => {
+    seedOrg();
+    assertSafeExternalUrlMock.mockRejectedValueOnce(new FakeUnsafeExternalUrlError("Only https URLs are allowed"));
+
+    const response = await putSso(buildApp(), { providerType: "oidc", metadataUrl: "http://169.254.169.254/latest/meta-data" });
+
+    expect(response.status).toBe(422);
+    expect(JSON.stringify(await response.json())).toContain("metadataUrl rejected: Only https URLs are allowed");
+    expect(assertSafeExternalUrlMock).toHaveBeenCalledWith("http://169.254.169.254/latest/meta-data");
+    expect(db.orgs[0]!.sso_config).toEqual({});
+  });
+
+  it("does not re-vet an unchanged metadata URL", async () => {
+    seedOrg({ ...oidcConfig, enabled: false });
+
+    const response = await putSso(buildApp(), { metadataUrl, clientId: "client-2" });
+
+    expect(response.status).toBe(200);
+    expect(assertSafeExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the client secret when omitted or masked and clears it on explicit null", async () => {
+    seedOrg({ providerType: "oidc", metadataUrl, clientId: "client-id", clientSecret: "client-secret" });
+    const app = buildApp();
+    const storedSecret = () => (db.orgs[0]!.sso_config as { clientSecretEncrypted?: string | null }).clientSecretEncrypted ?? null;
+
+    const omitted = await (await putSso(app, { clientId: "client-id" })).json() as { ssoConfig: { clientSecret: string | null } };
+    expect(omitted.ssoConfig.clientSecret).toBe("***");
+    expect(storedSecret()).not.toBeNull();
+
+    const masked = await (await putSso(app, { clientSecret: "***" })).json() as { ssoConfig: { clientSecret: string | null } };
+    expect(masked.ssoConfig.clientSecret).toBe("***");
+    expect(storedSecret()).not.toBeNull();
+
+    const cleared = await (await putSso(app, { clientSecret: null })).json() as { ssoConfig: { clientSecret: string | null } };
+    expect(cleared.ssoConfig.clientSecret).toBeNull();
+    expect(storedSecret()).toBeNull();
+  });
 });
 
 describe("SSO callback account binding", () => {
@@ -474,12 +608,19 @@ describe("SSO callback account binding", () => {
     seedRequest("s1");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s1" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s1&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s1&code=c", { headers: ssoCookie("s1") });
 
     expect(response.status).toBe(302);
     expect(response.headers.get("location")).toContain("authError=");
-    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(response.headers.get("set-cookie") ?? "").not.toContain("better-auth.session_token=");
     expect(createSessionMock).not.toHaveBeenCalled();
+    // The IdP proved this email is unlinked: this browser may now sign in with
+    // its password (and link) without being bounced back to the IdP.
+    const passCookie = /docslurp\.sso_unlinked=([^;]+)/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    expect(passCookie).toBeTruthy();
+    expect(response.headers.get("set-cookie")).toMatch(/docslurp\.sso_unlinked=[^;]+;.*HttpOnly/i);
+    expect(hasValidSsoUnlinkedPass("test-secret", passCookie, "victim@acme.com")).toBe(true);
+    expect(hasValidSsoUnlinkedPass("test-secret", passCookie, "someone-else@acme.com")).toBe(false);
   });
 
   it("signs in a linked account", async () => {
@@ -488,10 +629,11 @@ describe("SSO callback account binding", () => {
     seedRequest("s2");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s2" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s2&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s2&code=c", { headers: ssoCookie("s2") });
 
     expect(response.status).toBe(302);
     expect(response.headers.get("set-cookie")).toContain("better-auth.session_token=");
+    expect(response.headers.get("set-cookie")).not.toContain("docslurp.sso_unlinked=");
     expect(createSessionMock).toHaveBeenCalledWith("victim-1");
   });
 
@@ -502,7 +644,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s3");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s3" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s3&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s3&code=c", { headers: ssoCookie("s3") });
 
     expect(response.status).toBe(403);
     expect(createSessionMock).not.toHaveBeenCalled();
@@ -515,7 +657,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s4");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s4" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s4&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s4&code=c", { headers: ssoCookie("s4") });
 
     expect(response.status).toBe(403);
     expect(createSessionMock).not.toHaveBeenCalled();
@@ -539,14 +681,16 @@ describe("SSO callback account binding", () => {
     const state = new URL(authorizeUrl).searchParams.get("state")!;
     expect(db.requests.at(-1)).toMatchObject({ state, link_user_id: "victim-1" });
 
-    const linked = await victimApp.request(`/v1/auth/oidc/org-1/callback?state=${state}&code=c`);
+    const linked = await victimApp.request(`/v1/auth/oidc/org-1/callback?state=${state}&code=c`, { headers: { Cookie: started.headers.get("set-cookie")!.split(";")[0]! } });
     expect(linked.status).toBe(302);
     expect(linked.headers.get("location")).toContain("/app/sso?linked=1");
-    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(createSessionMock).toHaveBeenCalledWith("victim-1");
+    expect(linked.headers.get("set-cookie")).toContain("session_token");
+    createSessionMock.mockClear();
     expect(db.links).toMatchObject([{ org_id: "org-1", user_id: "victim-1", issuer, subject: "idp-victim" }]);
 
     seedRequest("s5");
-    const signIn = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s5&code=c");
+    const signIn = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s5&code=c", { headers: ssoCookie("s5") });
     expect(createSessionMock).toHaveBeenCalledWith("victim-1");
     expect(signIn.headers.get("set-cookie")).toContain("better-auth.session_token=");
   });
@@ -556,7 +700,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s6", "victim-1");
     await stubIdp(() => ({ sub: "idp-other", email: "other@acme.com", nonce: "nonce-s6" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s6&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s6&code=c", { headers: ssoCookie("s6") });
 
     expect(response.status).toBe(403);
     expect(db.links).toHaveLength(0);
@@ -574,5 +718,16 @@ describe("SSO callback account binding", () => {
     });
 
     expect(response.status).toBe(403);
+  });
+
+  it("rejects a callback that arrives without the state-binding cookie (SEC-2026-10-06)", async () => {
+    seedVictim();
+    seedRequest("s7");
+    await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s7" }));
+
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s7&code=c");
+
+    expect(response.status).toBe(400);
+    expect(createSessionMock).not.toHaveBeenCalled();
   });
 });

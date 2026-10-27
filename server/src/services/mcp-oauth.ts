@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
 import { parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
 
-export const MCP_SCOPES = ["search", "read", "ingest"] as const;
+export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
 export const oauthHash = (value: string) => createHash("sha256").update(value).digest("hex");
 export const pkceChallenge = (value: string) => createHash("sha256").update(value).digest("base64url");
 const secret = (prefix: string) => `${prefix}_${randomBytes(32).toString("base64url")}`;
@@ -104,7 +104,7 @@ export async function validateMcpToken(raw: string, resource: string): Promise<V
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
     keyType: "server", allowedDomains: [], scopes: row.scopes,
-    rateLimitRpm: 120, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
   };
 }

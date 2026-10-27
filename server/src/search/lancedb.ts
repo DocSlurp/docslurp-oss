@@ -4,12 +4,13 @@ import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observ
  *
  * Connects to LanceDB (local filesystem or S3-backed; see LANCEDB_URI in
  * @docslurp/shared connection-uri),
- * opens the exact per-org table derived from trusted workspace access,
- * and runs cosine similarity search inside that storage boundary.
+ * opens the exact per-workspace database derived from trusted workspace
+ * access, and runs cosine similarity search inside that storage boundary.
  */
 import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager, type PrivacyMode } from "@docslurp/shared";
+import { LANCE_HYDRATION_COLUMNS } from "@docslurp/shared/lancedb-hydration";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
 import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-s3-trace";
 
@@ -17,8 +18,10 @@ import { formatLanceSessionLog, resolveLanceSessionConfig, type LanceSessionConf
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
 import { prewarmTable } from "./lancedb-prewarm.js";
+import { isLanceTableNotFound, lanceOpenFailure, openLanceTable } from "./lancedb-open.js";
+export { isLanceTableNotFound } from "./lancedb-open.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
-import { countSearchEvent } from "./timings.js";
+import { countSearchEvent, recordSearchPhase } from "./timings.js";
 
 /**
  * Connections and table handles are reused across searches. Opening them per
@@ -29,8 +32,14 @@ import { countSearchEvent } from "./timings.js";
  *   prewarmed into it when a table opens (see lancedb-prewarm.ts).
  * - Tables check for new versions at most every LANCEDB_READ_CONSISTENCY_SECONDS
  *   (default 10), so newly indexed rows appear within that interval.
- * - A table that does not exist yet is remembered for MISSING_TABLE_TTL_MS
- *   (5 min), so absent legacy tables don't cost S3 round trips on queries.
+ * - A table that does not exist yet is remembered for missingTableTtlMs()
+ *   (LANCEDB_MISSING_TABLE_TTL_SECONDS, default 15 s): short, because the
+ *   worker creates a new workspace's table in another process and its first
+ *   documents must become searchable soon after they are indexed.
+ * - At most LANCEDB_MAX_OPEN_TABLES (default 512) table handles stay open;
+ *   the least recently used one is closed with its connection. Every
+ *   workspace has its own database, so this bounds memory by active
+ *   workspaces rather than by all workspaces ever searched.
  * - A handle that errors is dropped and reopened on the next search.
  */
 let sessionState: { config: LanceSessionConfig; session: lancedb.Session; timer: NodeJS.Timeout } | undefined;
@@ -56,7 +65,21 @@ export function lanceDbSessionStats(): { sizeBytes: number; approxNumItems: numb
   const { config, session } = sessionState;
   return { sizeBytes: Number(session.sizeBytes()), approxNumItems: session.approxNumItems(), indexCacheBytes: config.indexCacheBytes, metadataCacheBytes: config.metadataCacheBytes };
 }
-const MISSING_TABLE_TTL_MS = 5 * 60_000;
+function missingTableTtlMs(): number {
+  const seconds = Number(process.env.LANCEDB_MISSING_TABLE_TTL_SECONDS ?? 15);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 15_000;
+}
+
+function maxOpenTables(): number {
+  const value = Number.parseInt(process.env.LANCEDB_MAX_OPEN_TABLES ?? "512", 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : 512;
+}
+
+/** `<org>/<workspace>/vectors-<model>-<dims>` for spans and logs: which workspace database. */
+export function lanceNamespace(uri: string): string {
+  const root = resolveLanceDbConfig().root.replace(/\/+$/, "");
+  return uri.startsWith(`${root}/`) ? uri.slice(root.length + 1) : uri;
+}
 const connections = new Map<string, Promise<lancedb.Connection>>();
 const tables = new Map<string, Promise<lancedb.Table>>();
 const missingTables = new Map<string, number>();
@@ -73,6 +96,62 @@ function resultColumns(table: lancedb.Table): Promise<string[]> {
     selectedColumns.set(table, columns);
   }
   return columns;
+}
+
+/** Hydration columns a native search reads (see @docslurp/shared/lancedb-hydration). */
+const HYDRATION_RESULT_COLUMNS = ["text", ...LANCE_HYDRATION_COLUMNS] as const;
+
+export interface LanceTableCapabilities {
+  /** The table carries runId, pageNumber and hydration (rows may still hold nulls). */
+  hydrationColumns: boolean;
+  /** A native FTS (BM25) index covers `text`; rows added since are flat-scanned. */
+  fullTextIndex: boolean;
+  columns: string[];
+}
+
+/** listIndices reads the manifest; refreshed at most this often per open table. */
+const CAPABILITY_TTL_MS = 60_000;
+const capabilityCache = new WeakMap<lancedb.Table, { at: number; value: Promise<LanceTableCapabilities> }>();
+
+export function lanceTableCapabilities(table: lancedb.Table, now = Date.now()): Promise<LanceTableCapabilities> {
+  const cached = capabilityCache.get(table);
+  if (cached && now - cached.at < CAPABILITY_TTL_MS) return cached.value;
+  const value = Promise.all([table.schema(), table.listIndices()]).then(([schema, indices]) => {
+    const names = schema.fields.map((field) => field.name);
+    const present = new Set(names);
+    return {
+      columns: names,
+      hydrationColumns: HYDRATION_RESULT_COLUMNS.every((name) => present.has(name)),
+      fullTextIndex: indices.some((index) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? "")),
+    };
+  });
+  value.catch(() => capabilityCache.delete(table));
+  capabilityCache.set(table, { at: now, value });
+  return value;
+}
+
+function nativeColumns(capabilities: LanceTableCapabilities, score: "_distance" | "_score"): string[] {
+  const present = new Set(capabilities.columns);
+  return [...["id", "documentId", "chunkIndex", ...HYDRATION_RESULT_COLUMNS].filter((name) => present.has(name)), score];
+}
+
+function documentIdFilter(documentIds: string[] | undefined): string | null {
+  if (!documentIds?.length) return null;
+  const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
+  return `"documentId" IN (${literals.join(", ")})`;
+}
+
+/** SQL for a page range over the `pageNumber` column; null without bounds. */
+export function lancePageRangeFilter(range: { from?: number; to?: number } | undefined): string | null {
+  const parts: string[] = [];
+  if (range?.from !== undefined && Number.isFinite(range.from)) parts.push(`"pageNumber" >= ${Number(range.from)}`);
+  if (range?.to !== undefined && Number.isFinite(range.to)) parts.push(`"pageNumber" <= ${Number(range.to)}`);
+  return parts.length ? parts.join(" AND ") : null;
+}
+
+function andFilters(...filters: Array<string | null | undefined>): string | null {
+  const present = filters.filter((filter): filter is string => Boolean(filter));
+  return present.length ? present.map((filter) => `(${filter})`).join(" AND ") : null;
 }
 
 function connectionKey(uri: string): string {
@@ -100,13 +179,26 @@ function getDb(uri: string): Promise<lancedb.Connection> {
 }
 
 async function getTable(uri: string, name: string): Promise<lancedb.Table | null> {
+  return (await openTarget(uri, name)).table;
+}
+
+/**
+ * Open a table: `table` null with `failed` false when it does not exist
+ * (cached for missingTableTtlMs()), `failed` true when opening it failed for
+ * another reason (not cached; the next search retries).
+ */
+async function openTarget(uri: string, name: string): Promise<{ table: lancedb.Table | null; failed: boolean }> {
   const key = `${connectionKey(uri)}\u0000${name}`;
   const missingUntil = missingTables.get(key);
-  if (missingUntil && missingUntil > Date.now()) return null;
+  if (missingUntil && missingUntil > Date.now()) return { table: null, failed: false };
   let table = tables.get(key);
-  if (!table) {
+  if (table) {
+    // Least recently used order: Map iteration order is insertion order.
+    tables.delete(key);
+    tables.set(key, table);
+  } else {
     table = getDb(uri).then(async (db) => {
-      const opened = await lanceSpan("openTable", () => db.openTable(name));
+      const opened = await openLanceTable(name, () => db.openTable(name), lanceNamespace(uri));
       const { config } = lanceSession();
       if (config.prewarmIndex || config.prewarmData) {
         lastPrewarm.set(key, Date.now());
@@ -117,15 +209,23 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
       return opened;
     });
     tables.set(key, table);
+    evictLeastRecentlyUsed();
   }
   try {
     const opened = await table;
     refreshPrewarm(key, name, opened);
-    return opened;
-  } catch {
-    tables.delete(key);
-    missingTables.set(key, Date.now() + MISSING_TABLE_TTL_MS);
-    return null;
+    return { table: opened, failed: false };
+  } catch (error) {
+    if (tables.get(key) === table) tables.delete(key);
+    // A workspace without a table keeps no connection open either.
+    releaseConnectionIfUnused(key);
+    if (isLanceTableNotFound(error)) {
+      if (missingTables.size >= 4 * maxOpenTables()) pruneMissingTables();
+      missingTables.set(key, Date.now() + missingTableTtlMs());
+      return { table: null, failed: false };
+    }
+    console.warn(`[search] lancedb openTable failed table=${name}: ${lanceOpenFailure(error)}`);
+    return { table: null, failed: true };
   }
 }
 
@@ -137,12 +237,61 @@ function refreshPrewarm(key: string, name: string, table: lancedb.Table): void {
   void prewarmTable(table, name, { prewarmIndex: true, prewarmData: false });
 }
 
-function dropTable(uri: string, name: string): void {
+/**
+ * Searches already holding an evicted or dropped handle may still be querying
+ * it: close it (and its connection) only after they have had time to finish.
+ */
+const CLOSE_GRACE_MS = 60_000;
+function closeLater(close: () => void): void {
+  setTimeout(close, CLOSE_GRACE_MS).unref();
+}
+
+/** One table per workspace database: a connection with no cached table goes too. */
+function releaseConnectionIfUnused(tableKey: string): void {
+  const connKey = tableKey.slice(0, tableKey.lastIndexOf("\u0000"));
+  const connection = connections.get(connKey);
+  if (!connection || [...tables.keys()].some((other) => other.startsWith(`${connKey}\u0000`))) return;
+  connections.delete(connKey);
+  closeLater(() => void connection.then((db) => db.close()).catch(() => undefined));
+}
+
+function evictLeastRecentlyUsed(): void {
+  const max = maxOpenTables();
+  for (const [key, table] of tables) {
+    if (tables.size <= max) return;
+    tables.delete(key);
+    lastPrewarm.delete(key);
+    closeLater(() => void table.then((handle) => handle.close()).catch(() => undefined));
+    releaseConnectionIfUnused(key);
+  }
+}
+
+function pruneMissingTables(now = Date.now()): void {
+  for (const [key, until] of missingTables) if (until <= now) missingTables.delete(key);
+}
+
+/** Eligible documents but no table: their vectors are not in this workspace's database. */
+const missingWithDocumentsLoggedAt = new Map<string, number>();
+function noteMissingTableWithDocuments(uri: string, documents: number): void {
+  countSearchEvent("lanceTableMissing");
+  const now = Date.now();
+  if (now - (missingWithDocumentsLoggedAt.get(uri) ?? 0) < 10 * 60_000) return;
+  if (missingWithDocumentsLoggedAt.size > 10_000) missingWithDocumentsLoggedAt.clear();
+  missingWithDocumentsLoggedAt.set(uri, now);
+  console.warn(`[search] lancedb table missing for ${documents} vector-ready documents namespace=${lanceNamespace(uri)}`);
+}
+
+/** Drops the handle a failed query used, unless another search already reopened it. */
+function dropTable(uri: string, name: string, failed: lancedb.Table): void {
   const key = `${connectionKey(uri)}\u0000${name}`;
   const table = tables.get(key);
-  tables.delete(key);
-  lastPrewarm.delete(key);
-  void table?.then((handle) => handle.close()).catch(() => undefined);
+  if (!table) return;
+  void table.then((handle) => {
+    if (handle !== failed || tables.get(key) !== table) return;
+    tables.delete(key);
+    lastPrewarm.delete(key);
+    closeLater(() => handle.close());
+  }).catch(() => undefined);
 }
 
 export function resetLanceDbConnectionForTests(): void {
@@ -151,6 +300,7 @@ export function resetLanceDbConnectionForTests(): void {
   tables.clear();
   connections.clear();
   missingTables.clear();
+  missingWithDocumentsLoggedAt.clear();
   lastPrewarm.clear();
   if (sessionState) clearInterval(sessionState.timer);
   sessionState = undefined;
@@ -162,6 +312,11 @@ export interface LanceDbSearchHit {
   /** Position within the document; maps a hit on a dedup source to the copy's chunk. */
   chunkIndex: number | null;
   score: number;
+  /** Native searches (`hydrate`): the row's text and hydration columns, when the table has them. */
+  text?: string | null;
+  runId?: string | null;
+  pageNumber?: number | null;
+  hydration?: string | null;
 }
 
 type LanceDbRow = {
@@ -169,7 +324,29 @@ type LanceDbRow = {
   documentId: string;
   chunkIndex?: number | null;
   _distance: number;
+  _score?: number;
+  text?: string | null;
+  runId?: string | null;
+  pageNumber?: number | null;
+  hydration?: string | null;
 };
+
+function hydratedFields(row: LanceDbRow): Pick<LanceDbSearchHit, "text" | "runId" | "pageNumber" | "hydration"> {
+  return {
+    ...(row.text !== undefined ? { text: row.text } : {}),
+    ...(row.runId !== undefined ? { runId: row.runId } : {}),
+    ...(row.pageNumber !== undefined ? { pageNumber: row.pageNumber } : {}),
+    ...(row.hydration !== undefined ? { hydration: row.hydration } : {}),
+  };
+}
+
+interface LanceTarget { uri: string; name: string; documentIds?: string[] }
+
+/** The one table a search may read: this workspace's database for the query's embedding space. */
+function searchTarget(args: { orgId: string; workspaceId: string; embeddingModel: string; dimension: number; documentIds?: string[] }): LanceTarget {
+  const location = VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, args.orgId, args.workspaceId, args.embeddingModel, args.dimension);
+  return { uri: location.uri, name: location.table, documentIds: args.documentIds };
+}
 
 function documentIdSet(documentIds?: string[]): Set<string> | null {
   if (!documentIds || documentIds.length === 0) {
@@ -190,24 +367,48 @@ export function filterLanceDbRowsByDocumentIds(
 }
 
 /**
- * Search the exact LanceDB table for a given organization.
+ * Warm the tables a vector search will read while the query is still being embedded (or rewritten):
+ * open the handle, refresh a stale version and load the schema/capabilities, so the nearest-neighbour
+ * query that follows does not start with those storage round trips. Best effort; never throws.
+ */
+export async function warmLanceDbSearch(args: { orgId: string; workspaceId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
+  if (!args.orgId.trim() || !args.workspaceId.trim()) return;
+  const started = performance.now();
+  try {
+    const target = searchTarget(args);
+    const table = await getTable(target.uri, target.name);
+    if (table) await Promise.all([table.version(), args.hydrate ? lanceTableCapabilities(table) : resultColumns(table)]);
+    countSearchEvent("lanceWarm");
+  } catch {
+    // The search itself reopens or drops the handle on failure.
+  } finally {
+    recordSearchPhase("lanceWarm", performance.now() - started);
+  }
+}
+
+/**
+ * Search one workspace's LanceDB database.
  *
- * The table name is derived from the authoritative org id resolved from
- * workspace access. Callers cannot provide a namespace or table prefix, so a
- * malformed/missing namespace cannot widen the ANN scan to another tenant.
+ * The location is derived from the authoritative org and workspace ids
+ * resolved from workspace access. Callers cannot provide a namespace or table
+ * prefix, so a malformed/missing namespace cannot widen the ANN scan to
+ * another workspace or tenant.
  */
 export async function lanceDbVectorSearch(args: {
   orgId: string;
-  embeddingModel?: string;
-  /** Only documents whose persisted index matches the query model/dimension. */
-  legacyDocumentIds?: string[];
+  workspaceId: string;
+  embeddingModel: string;
   queryVector: number[];
   documentIds?: string[];
   limit: number;
   /** strict-privacy never reads or writes the result cache. */
   privacyMode?: PrivacyMode;
+  /** Also return text and hydration columns (native search) where the table has them. */
+  hydrate?: boolean;
+  /** Extra Lance SQL filter, e.g. a page range; only applied to tables with hydration columns. */
+  where?: string | null;
 }): Promise<LanceDbSearchHit[]> {
-  if (!args.orgId.trim()) {
+  if (!args.orgId.trim() || !args.workspaceId.trim()) {
     return [];
   }
 
@@ -216,20 +417,11 @@ export async function lanceDbVectorSearch(args: {
   lanceDbQueryTuning(args.limit, 0, refineFactor);
 
   // Read per search so tests and config reloads see the current LANCEDB_URI.
-  const { root } = resolveLanceDbConfig();
-  const targets: Array<{ uri: string; name: string; documentIds?: string[] }> = [];
-  if (args.embeddingModel) {
-    const location = VectorNamespaceManager.getEmbeddingLocation(root, args.orgId, args.embeddingModel, args.queryVector.length);
-    targets.push({ uri: location.uri, name: location.table, documentIds: args.documentIds });
-    // Exact previous layout only; no prefix scans or cross-tenant discovery.
-    targets.push({ uri: root, name: VectorNamespaceManager.getEmbeddingTableName(args.orgId, args.embeddingModel, args.queryVector.length), documentIds: args.documentIds });
-    if (args.legacyDocumentIds?.length) {
-      targets.push({ uri: root, name: VectorNamespaceManager.getTableName(args.orgId), documentIds: args.legacyDocumentIds });
-    }
-  } else {
-    targets.push({ uri: root, name: VectorNamespaceManager.getTableName(args.orgId), documentIds: args.documentIds });
-  }
+  // One exact workspace database; no prefix scans or cross-tenant discovery.
+  const targets = [searchTarget({ ...args, dimension: args.queryVector.length })];
+  const variant = args.hydrate || args.where ? JSON.stringify([args.hydrate ?? false, args.where ?? null]) : undefined;
   const opened = await Promise.all(targets.map(async (target) => ({ ...target, table: await getTable(target.uri, target.name) })));
+  for (const target of opened) if (!target.table && target.documentIds?.length) noteMissingTableWithDocuments(target.uri, target.documentIds.length);
 
   // Result cache (off unless SEARCH_RESULT_CACHE_MAX_ENTRIES > 0). The key holds each
   // table's version, so any write produces a new key. table.version() reads the open
@@ -258,6 +450,7 @@ export async function lanceDbVectorSearch(args: {
         refineFactor: refineFactor ?? undefined,
         embeddingModel: args.embeddingModel,
         tuning: present.map((target) => lanceDbQueryTuning(args.limit, target.documentIds?.length ?? 0, refineFactor)),
+        variant,
       });
       const cached = cache.get(cacheKey);
       const span = startDependencySpan("lancedb.result_cache", {
@@ -283,22 +476,23 @@ export async function lanceDbVectorSearch(args: {
     if (!table) return [];
     try {
       // Filter before nearest-neighbor selection. Overfetching a global top-k
-      // and filtering afterward can miss every scoped document when another
-      // workspace occupies the first 1,000 neighbors in this org's table.
+      // and filtering afterward can miss every scoped document when other
+      // documents (another run, tag or folder) occupy the first neighbors.
+      const capabilities = args.hydrate || args.where ? await lanceTableCapabilities(table) : null;
+      // A page filter needs the pageNumber column; a table without it cannot honor the filter.
+      if (args.where && !capabilities?.hydrationColumns) return [];
       const query = table.vectorSearch(args.queryVector).column("vector")
-        .select(await resultColumns(table)).limit(args.limit);
-      if (documentIds?.length) {
-        const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
-        query.where(`"documentId" IN (${literals.join(", ")})`);
-      }
+        .select(capabilities && args.hydrate ? nativeColumns(capabilities, "_distance") : await resultColumns(table)).limit(args.limit);
+      const filter = andFilters(documentIdFilter(documentIds), args.where);
+      if (filter) query.where(filter);
       const tuning = lanceDbQueryTuning(args.limit, documentIds?.length ?? 0, refineFactor);
       if (tuning.ef !== undefined) query.ef(tuning.ef);
       if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
       // Retain an independent scope check at the storage boundary.
-      return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray())) as LanceDbRow[], documentIds);
+      return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray(), uri)) as LanceDbRow[], documentIds);
     } catch {
       failed = true;
-      dropTable(uri, name);
+      dropTable(uri, name, table);
       return [];
     }
   }))).flat();
@@ -316,6 +510,7 @@ export async function lanceDbVectorSearch(args: {
       documentId: row.documentId,
       chunkIndex: typeof row.chunkIndex === "number" ? row.chunkIndex : null,
       score: 1 / (1 + (row._distance ?? 0)),
+      ...hydratedFields(row),
     });
     if (results.length >= args.limit) break;
   }
@@ -325,12 +520,64 @@ export async function lanceDbVectorSearch(args: {
   return results;
 }
 
-export function getOrgLanceDbPrefix(orgId: string): string {
-  return VectorNamespaceManager.getTableName(orgId);
+/** Why a native keyword search handed over to Postgres FTS. */
+export type LanceFtsFallbackReason = "open-failed" | "no-table" | "no-fts-index" | "no-hydration-columns";
+
+/**
+ * BM25 full-text search over the chunk `text` column with LanceDB's native
+ * FTS index, filtered to the eligible documents before ranking (like the
+ * vector prefilter), so the top `limit` are exact BM25 top-k over the whole
+ * scope rather than a sample. Returns `indexed: false` when an existing
+ * target table has no FTS index yet: the caller then uses Postgres FTS.
+ */
+export async function lanceDbFullTextSearch(args: {
+  orgId: string;
+  workspaceId: string;
+  embeddingModel: string;
+  dimension: number;
+  query: string;
+  documentIds: string[];
+  limit: number;
+  where?: string | null;
+}): Promise<{ indexed: boolean; hits: LanceDbSearchHit[]; fallback?: LanceFtsFallbackReason; table?: string }> {
+  if (!args.orgId.trim() || !args.workspaceId.trim() || !args.query.trim() || args.documentIds.length === 0) return { indexed: true, hits: [] };
+  const targets = [searchTarget(args)];
+  const states = await Promise.all(targets.map(async (target) => ({ ...target, ...await openTarget(target.uri, target.name) })));
+  const failed = states.find((target) => target.failed);
+  // A table that failed to open may hold the documents' rows: let Postgres FTS answer.
+  if (failed) return { indexed: false, hits: [], fallback: "open-failed", table: failed.name };
+  const opened = states.filter((target): target is typeof target & { table: lancedb.Table } => target.table !== null);
+  // Callers pass vector-ready documents, so their rows should exist somewhere: no table means Postgres.
+  if (opened.length === 0) return { indexed: false, hits: [], fallback: "no-table" };
+  const capabilities = await Promise.all(opened.map((target) => lanceTableCapabilities(target.table).catch(() => null)));
+  const unindexed = capabilities.findIndex((caps) => !caps?.fullTextIndex);
+  if (unindexed >= 0) return { indexed: false, hits: [], fallback: "no-fts-index", table: opened[unindexed]!.name };
+  const unhydrated = capabilities.findIndex((caps) => args.where && !caps!.hydrationColumns);
+  if (unhydrated >= 0) return { indexed: false, hits: [], fallback: "no-hydration-columns", table: opened[unhydrated]!.name };
+  // A failing query throws to the caller (Postgres FTS answers); the shared table handle stays open.
+  const rows = (await Promise.all(opened.map(async ({ uri, documentIds, table }, index) => {
+    const caps = capabilities[index]!;
+    const query = table.query().fullTextSearch(args.query, { columns: "text" })
+      .select(nativeColumns(caps, "_score")).limit(args.limit);
+    const filter = andFilters(documentIdFilter(documentIds), args.where);
+    if (filter) query.where(filter);
+    return filterLanceDbRowsByDocumentIds((await lanceSpan("fts", () => query.toArray(), uri)) as LanceDbRow[], documentIds);
+  }))).flat();
+  rows.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+  const seen = new Set<string>();
+  const hits: LanceDbSearchHit[] = [];
+  for (const row of rows) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    hits.push({ id: row.id, documentId: row.documentId, chunkIndex: typeof row.chunkIndex === "number" ? row.chunkIndex : null,
+      score: row._score ?? 0, ...hydratedFields(row) });
+    if (hits.length >= args.limit) break;
+  }
+  return { indexed: true, hits };
 }
 
-function lanceSpan<T>(operation: string, run: () => Promise<T>): Promise<T> {
-  const attributes = { "db.system.name": "lancedb",
+function lanceSpan<T>(operation: string, run: () => Promise<T>, uri?: string): Promise<T> {
+  const attributes = { "db.system.name": "lancedb", ...(uri ? { "db.namespace": lanceNamespace(uri) } : {}),
     "docslurp.dependency.type": "vector", "docslurp.dependency.provider": "lancedb",
     "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" };
   // Searches also report their own S3 request counts by object class (non-zero only with LANCEDB_S3_TRACE).

@@ -1,4 +1,5 @@
 import "./env.js";
+import { validateEncryptionConfiguration } from "./lib/encryption.js";
 
 import { existsSync } from "node:fs";
 
@@ -48,6 +49,55 @@ function readNumber(value: string | undefined, fallback: number): number {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readList(value: string | undefined): string[] | undefined {
+  const items = value?.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  return items?.length ? items : undefined;
+}
+
+/**
+ * Web Capabilities (search, fetch, map, crawl) through third-party providers.
+ * Off unless WEB_TOOLS_ENABLED=true; a provider is used only when its key is set.
+ */
+function resolveWebConfig() {
+  const strategy = readEnv(process.env.WEB_PROVIDER_STRATEGY);
+  return {
+    enabled: readBoolean(process.env.WEB_TOOLS_ENABLED, false),
+    /** Offer webSearch/webFetch to the chat assistant (guarded; never crawl, map or ingest). */
+    chatEnabled: readBoolean(process.env.WEB_TOOLS_CHAT_ENABLED, true),
+    strategy: (strategy === "round-robin" || strategy === "ordered" ? strategy : "cheapest") as "cheapest" | "round-robin" | "ordered",
+    order: readList(process.env.WEB_PROVIDER_ORDER) ?? ["jina", "firecrawl", "exa", "tavily"],
+    perCapability: {
+      search: readList(process.env.WEB_PROVIDERS_SEARCH),
+      fetch: readList(process.env.WEB_PROVIDERS_FETCH),
+      map: readList(process.env.WEB_PROVIDERS_MAP),
+      crawl: readList(process.env.WEB_PROVIDERS_CRAWL),
+    },
+    /** Provider calls per web call (failover and render escalation steps). */
+    maxAttempts: Math.max(1, Math.min(6, readNumber(process.env.WEB_PROVIDER_MAX_ATTEMPTS, 4))),
+    /** Never try an option estimated at this many times the cheapest eligible option, or more. */
+    maxCostRatio: Math.max(1, readNumber(process.env.WEB_MAX_COST_RATIO, 15)),
+    /** Same-option retries after a transient (5xx/network) failure. */
+    transientRetries: Math.max(0, Math.min(3, readNumber(process.env.WEB_TRANSIENT_RETRIES, 1))),
+    /** Options switched off, as provider.option (e.g. "exa.live,firecrawl.rendered-wait"). */
+    disabledOptions: readList(process.env.WEB_DISABLED_OPTIONS) ?? [],
+    keys: {
+      tavily: readEnv(process.env.TAVILY_API_KEY),
+      exa: readEnv(process.env.EXA_API_KEY),
+      firecrawl: readEnv(process.env.FIRECRAWL_API_KEY),
+      jina: readEnv(process.env.JINA_API_KEY),
+    },
+    pricing: {
+      tavilyUsdPerCredit: readNumber(process.env.TAVILY_USD_PER_CREDIT, 0.008),
+      firecrawlUsdPerCredit: readNumber(process.env.FIRECRAWL_USD_PER_CREDIT, 0.00099),
+      jinaUsdPerMillionTokens: readNumber(process.env.JINA_USD_PER_MILLION_TOKENS, 0.05),
+    },
+    /** Web calls per organization per minute, across surfaces. */
+    orgPerMinute: Math.max(1, readNumber(process.env.WEB_TOOLS_ORG_PER_MINUTE, 60)),
+    cacheTtlMs: Math.max(0, readNumber(process.env.WEB_CACHE_TTL_SECONDS, 900)) * 1000,
+    cacheMaxEntries: Math.max(0, readNumber(process.env.WEB_CACHE_MAX_ENTRIES, 500)),
+  };
 }
 
 function readBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -128,6 +178,10 @@ function validateProductionSecrets(): void {
   assertProductionSecret("BETTER_AUTH_SECRET", process.env.BETTER_AUTH_SECRET, { minLength: 32 });
   assertProductionSecret("CREDENTIALS_ENCRYPTION_KEY", process.env.CREDENTIALS_ENCRYPTION_KEY, { minLength: 32 });
   assertProductionSecret("SECRETS_ENCRYPTION_KEY", process.env.SECRETS_ENCRYPTION_KEY, { minLength: 32 });
+  if (process.env.NODE_ENV === "production") {
+    validateEncryptionConfiguration("CREDENTIALS_ENCRYPTION_KEY");
+    validateEncryptionConfiguration("SECRETS_ENCRYPTION_KEY");
+  }
   assertProductionSecret("OAUTH_TOKEN_ENCRYPTION_KEY", process.env.OAUTH_TOKEN_ENCRYPTION_KEY, {
     required: Boolean(process.env.GITHUB_CLIENT_ID || process.env.GOOGLE_CLIENT_ID),
     minLength: 32,
@@ -140,7 +194,7 @@ const storage = resolveObjectStorageConfig();
 
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
-  /** Public chat APIs (/v1/search/chat, /v1/chat, chat completions) may run the bounded search agent. */
+  /** Public chat APIs (/v1/chat, its stream, chat completions) may run the bounded search agent. */
   publicChatAgentEnabled: readBoolean(process.env.DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED, true),
   webMcpEnabled: readBoolean(process.env.DOCSLURP_WEBMCP_ENABLED, true),
   port: readNumber(process.env.PORT, 8787),
@@ -159,15 +213,16 @@ export const env = {
   lancedb: resolveLanceDbConfig(process.env, storage),
   maxUploadBytes: readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
   /**
-   * Cap for the buffered multipart path (POST /v1/ingest/bulk). Hono's
+   * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct
-   * upload sessions (/v1/ingest/direct/sessions), which go straight to storage.
+   * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.
    */
   maxMultipartUploadBytes: Math.min(
     readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
     readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
   ),
   remoteIngestComplexFormatsEnabled: readBoolean(process.env.REMOTE_INGEST_COMPLEX_FORMATS_ENABLED, false),
+  web: resolveWebConfig(),
   metricsSecret: process.env.METRICS_SECRET?.trim() || null,
   mcpServerId: process.env.MCP_SERVER_ID ?? "docslurp-mcp"
 };

@@ -375,8 +375,16 @@ export function startWorkerFleetRefresher(env: Env = process.env): void {
   if (!capabilityGateEnabled(env)) return;
   if (!Object.values(configuredGatedFlags(env)).some(Boolean)) return;
   const intervalMs = readMs(env, "WORKER_CAPABILITY_CACHE_MS", 15_000, 1_000, 5 * 60_000);
-  void workerFleet().resolve();
-  refresher = setInterval(() => void withBackgroundSpan("api.worker-fleet-refresh", () => workerFleet().resolve()), intervalMs);
+  const refresh = () => {
+    // Never let a failed refresh (database or Temporal blip) become an unhandled rejection.
+    Promise.resolve()
+      .then(() => withBackgroundSpan("api.worker-fleet-refresh", () => workerFleet().resolve()))
+      .catch((error: unknown) => {
+        console.warn(`[worker-fleet] refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  };
+  refresh();
+  refresher = setInterval(refresh, intervalMs);
   refresher.unref?.();
 }
 

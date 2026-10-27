@@ -1,7 +1,9 @@
 beautifulsoup4
 ebooklib
 openpyxl
-Pillow>=12.3.0,<13
+# Pillow 13 fixes native image decoder and encoder security advisories.
+Pillow>=13.0.0,<14
 python-pptx
 trafilatura
 xlsx2csv==0.8.6
+defusedxml==0.7.1

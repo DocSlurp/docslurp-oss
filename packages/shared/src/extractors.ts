@@ -111,12 +111,6 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages"], costClass: "local-cpu" },
   },
   {
-    id: "docling", kind: "document", label: "Docling",
-    description: "Local PDF document converter.",
-    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
-    capabilities: { formats: ["pdf"], produces: ["markdown"], costClass: "local-cpu" },
-  },
-  {
     id: "poppler-text", kind: "document", label: "Poppler text",
     description: "Local PDF text extraction with Poppler.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/text"], scope: "document" }],

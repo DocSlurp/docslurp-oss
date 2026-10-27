@@ -1,3 +1,4 @@
+import { BILLABLE_UNIT_METRICS, UNIT_CHARGE_PROVIDER } from "@docslurp/shared";
 import { sql, type SqlClient } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 
@@ -157,19 +158,27 @@ export async function orgDailyUsage(
   return rows.map((row) => ({ date: row.date, ...toTotals(row) }));
 }
 
-export type SpendCategory = "compute" | "ai" | "storage" | "other";
+export type SpendCategory = "ingest" | "storage" | "search" | "chat" | "other";
 
 /** Usage Event provider/metric written by the daily storage meter. */
-export const STORAGE_USAGE_PROVIDER = "docslurp";
-export const STORAGE_USAGE_METRIC = "storage-daily";
+export const STORAGE_USAGE_PROVIDER = UNIT_CHARGE_PROVIDER;
+export const STORAGE_USAGE_METRIC = BILLABLE_UNIT_METRICS.storage;
+
+/** Ingest spend: pages, media minutes and the optional per-document features. */
+const INGEST_UNIT_METRICS = [
+  BILLABLE_UNIT_METRICS.fastPage,
+  BILLABLE_UNIT_METRICS.richPage,
+  BILLABLE_UNIT_METRICS.mediaMinutes,
+  BILLABLE_UNIT_METRICS.documentSummary,
+  BILLABLE_UNIT_METRICS.structuredFields,
+  BILLABLE_UNIT_METRICS.knowledgeGraph,
+  BILLABLE_UNIT_METRICS.propositions,
+];
 
 /**
- * Spend (cents = credits) attributed to an org since `since`, split into the
- * billing categories the dashboard shows. Classification:
- *  - storage: the daily storage meter's events
- *  - compute: worker `local-compute` events
- *  - other:   platform fees (`docslurp` provider) and `heuristic` rows
- *  - ai:      everything else (LLM, vision, embedding providers)
+ * Credits charged to an org since `since`, by the price-card category the
+ * billing page shows. Only billable unit events carry cost (provider and
+ * compute events are recorded at 0), so `other` is normally 0.
  */
 export async function orgSpendByCategory(
   orgId: string,
@@ -179,21 +188,63 @@ export async function orgSpendByCategory(
   const rows = await client<{ category: SpendCategory; cost_cents: number }[]>`
     select
       case
-        when au.provider = ${STORAGE_USAGE_PROVIDER} and au.metric = ${STORAGE_USAGE_METRIC} then 'storage'
-        when au.provider = 'local-compute' then 'compute'
-        when au.provider in ('docslurp', 'heuristic') then 'other'
-        else 'ai'
+        when au.metric = any(${INGEST_UNIT_METRICS}::text[]) then 'ingest'
+        when au.metric = any(${[STORAGE_USAGE_METRIC, BILLABLE_UNIT_METRICS.extractRetention]}::text[]) then 'storage'
+        when au.metric = ${BILLABLE_UNIT_METRICS.search} then 'search'
+        when au.metric = ${BILLABLE_UNIT_METRICS.chatAnswer} then 'chat'
+        else 'other'
       end as category,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents
     from ${attributedUsage(since, client)} au
     where au.org_id = ${orgId}
     group by 1
   `;
-  const totals: Record<SpendCategory, number> = { compute: 0, ai: 0, storage: 0, other: 0 };
+  const totals: Record<SpendCategory, number> = { ingest: 0, storage: 0, search: 0, chat: 0, other: 0 };
   for (const row of rows) {
     totals[row.category] = Number(row.cost_cents ?? 0);
   }
-  return { ...totals, total: totals.compute + totals.ai + totals.storage + totals.other };
+  return { ...totals, total: totals.ingest + totals.storage + totals.search + totals.chat + totals.other };
+}
+
+export interface OrgUnitUsage {
+  searches: number;
+  searchCredits: number;
+  chatAnswers: number;
+  chatCredits: number;
+  fastPages: number;
+  /** Rich pages, including media minutes counted as Rich pages. */
+  richPages: number;
+  ingestCredits: number;
+}
+
+/**
+ * Units and credits the price card charged an org since `since` (the billing
+ * forecast's last-30-day pace). Unit events record the count in `amount`:
+ * searches and chat answers as 1 per call, pages as billed pages.
+ */
+export async function orgUnitUsage(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<OrgUnitUsage> {
+  const rows = await client<{ metric: string; amount: number; cost_cents: number; events: number }[]>`
+    select au.metric,
+      coalesce(sum(au.amount), 0)::double precision as amount,
+      coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
+      count(distinct au.id)::int as events
+    from ${attributedUsage(since, client)} au
+    where au.org_id = ${orgId}
+      and au.metric = any(${[...INGEST_UNIT_METRICS, BILLABLE_UNIT_METRICS.search, BILLABLE_UNIT_METRICS.chatAnswer]}::text[])
+    group by au.metric
+  `;
+  const by = new Map(rows.map((row) => [row.metric, { amount: Number(row.amount ?? 0), cost: Number(row.cost_cents ?? 0), events: Number(row.events ?? 0) }]));
+  const get = (metric: string) => by.get(metric) ?? { amount: 0, cost: 0, events: 0 };
+  const ingestCredits = INGEST_UNIT_METRICS.reduce((sum, metric) => sum + get(metric).cost, 0);
+  return {
+    searches: get(BILLABLE_UNIT_METRICS.search).events,
+    searchCredits: get(BILLABLE_UNIT_METRICS.search).cost,
+    chatAnswers: get(BILLABLE_UNIT_METRICS.chatAnswer).events,
+    chatCredits: get(BILLABLE_UNIT_METRICS.chatAnswer).cost,
+    fastPages: get(BILLABLE_UNIT_METRICS.fastPage).amount,
+    richPages: get(BILLABLE_UNIT_METRICS.richPage).amount + get(BILLABLE_UNIT_METRICS.mediaMinutes).amount,
+    ingestCredits,
+  };
 }
 
 export interface UsageAggregate {
@@ -499,4 +550,61 @@ export async function runUsageCostSummaries(
     group by au.run_id
   `;
   return new Map(rows.map((row) => [row.run_id, summarizeRunUsageCost(row)]));
+}
+
+export interface ExtractUsageTotals {
+  /** Extracts created in the window. */
+  extracts: number;
+  /** Pages they stored (settled extracts only). */
+  pages: number;
+  /** Credits charged for their runs: ingest units, features and extended retention. */
+  costCents: number;
+  /** Of which extended retention. */
+  retentionCents: number;
+  /** Rate-card estimate of unbilled worker compute on their runs (as summarizeRunUsageCost). */
+  computeCostCents: number;
+  /** pages / dollars charged; null without charges. */
+  pagesPerDollar: number | null;
+}
+
+/**
+ * Extract mode's own usage and cost, separable from uploads: every usage event
+ * of an extract's run (also after the run is deleted, through source_run_id),
+ * scoped to the org. Extract runs are workspace_runs with extract_id; the
+ * extracts row outlives them, so the figures survive expiry.
+ */
+export async function extractUsageTotals(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<ExtractUsageTotals> {
+  const window = since === null ? client`true` : since === "month" ? client`e.created_at >= date_trunc('month', now())` : client`e.created_at >= ${since}`;
+  const [row] = await client<{ extracts: number; pages: number; cost_cents: number; retention_cents: number; compute_cents: number }[]>`
+    with scoped as (
+      select e.id, e.run_id, e.pages, e.created_at from extracts e where e.org_id = ${orgId} and ${window}
+    ),
+    usage as (
+      select
+        coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
+        coalesce(sum(au.cost_cents) filter (where au.metric = ${BILLABLE_UNIT_METRICS.extractRetention}), 0)::double precision as retention_cents,
+        coalesce(sum((au.metadata ->> 'effectiveCostCents')::double precision) filter (
+          where au.provider = 'local-compute' and coalesce(au.metadata ->> 'billable', 'false') <> 'true'
+        ), 0)::double precision as compute_cents
+      from usage_attribution au
+      join scoped on scoped.run_id = au.source_run_id
+      -- Bounded by org and time (no usage predates its extract) instead of scanning the view's
+      -- run expression across the org's whole history.
+      where au.org_id = ${orgId} and au.created_at >= (select min(created_at) from scoped)
+    )
+    select (select count(*)::int from scoped) as extracts,
+      (select coalesce(sum(pages), 0)::int from scoped) as pages,
+      usage.cost_cents, usage.retention_cents, usage.compute_cents
+    from usage
+  `;
+  const cost = Number(row?.cost_cents ?? 0);
+  const pages = Number(row?.pages ?? 0);
+  return {
+    extracts: Number(row?.extracts ?? 0),
+    pages,
+    costCents: cost,
+    retentionCents: Number(row?.retention_cents ?? 0),
+    computeCostCents: Number(row?.compute_cents ?? 0),
+    pagesPerDollar: cost > 0 ? pages / (cost / 100) : null,
+  };
 }

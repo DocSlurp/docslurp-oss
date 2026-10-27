@@ -1,0 +1,54 @@
+diff --git a/src/connection.js b/src/connection.js
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..965edc9bf601f7899a6c9c5c798c9e97a33a98f6 100644
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -22,6 +22,14 @@ const Sync = b().S().end()
+     , DescribeUnnamed = b().D().str('S').str(b.N).end()
+     , noop = () => { /* noop */ }
+ 
++// DocSlurp patch: remember the parameter types the server reported for a statement text, so an unnamed
++// statement (prepare: false) with parameters needs one round trip instead of two (Parse/Describe/Flush,
++// wait, Bind/Execute/Sync) after its first use. Nothing is kept server side, so it is safe behind a
++// transaction-mode pooler. Disable with POSTGRES_PARAM_TYPE_CACHE=off.
++const paramTypeCache = new Map()
++const PARAM_TYPE_CACHE_MAX = 4096
++const paramTypeCacheEnabled = process.env.POSTGRES_PARAM_TYPE_CACHE !== 'off'
++
+ const retryRoutines = new Set([
+   'FetchPreparedStatement',
+   'RevalidateCachedQuery',
+@@ -235,10 +243,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     q.onlyDescribe && (delete statements[q.signature])
+     q.parameters = q.parameters || parameters
+     q.prepared = q.prepare && q.signature in statements
+-    q.describeFirst = q.onlyDescribe || (parameters.length && !q.prepared)
++    q.typeCacheKey = paramTypeCacheEnabled && !q.prepare && !q.onlyDescribe && parameters.length ? types + '\0' + string : null
++    const knownTypes = q.typeCacheKey && paramTypeCache.get(q.typeCacheKey)
++    q.describeFirst = q.onlyDescribe || (parameters.length && !q.prepared && !knownTypes)
+     q.statement = q.prepared
+       ? statements[q.signature]
+-      : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
++      : { string, types: knownTypes ? knownTypes.slice() : types, name: q.prepare ? statementId + statementCount++ : '' }
+ 
+     typeof options.debug === 'function' && options.debug(id, string, parameters, types)
+   }
+@@ -630,6 +640,10 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       !query.statement.types[i] && (query.statement.types[i] = x.readUInt32BE(7 + i * 4))
+ 
+     query.prepare && (statements[query.signature] = query.statement)
++    if (query.typeCacheKey && !paramTypeCache.has(query.typeCacheKey)) {
++      paramTypeCache.size >= PARAM_TYPE_CACHE_MAX && paramTypeCache.delete(paramTypeCache.keys().next().value)
++      paramTypeCache.set(query.typeCacheKey, Array.from({ length }, (_, i) => query.statement.types[i] || 0))
++    }
+     query.describeFirst && !query.onlyDescribe && (write(prepared(query)), query.describeFirst = false)
+   }
+ 
+@@ -813,6 +827,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     if (query) {
+       (query.cursorFn || query.describeFirst) && write(Sync)
+       errorResponse = Errors.postgres(parseError(x))
++      // A syntax, undefined-object or datatype error may mean the cached parameter types went stale (DDL).
++      query.typeCacheKey && String(errorResponse.code).startsWith('42') && paramTypeCache.delete(query.typeCacheKey)
+     } else {
+       errored(Errors.postgres(parseError(x)))
+     }

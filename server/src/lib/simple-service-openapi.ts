@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "./search-input.js";
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
-import { searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
+import { chatRetrievalOverridesSchema, searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const json = (schema: object) => ({ "application/json": { schema } });
@@ -11,14 +11,13 @@ const serviceSecurity = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const keySecurity = [{ bearerAuth: [] }];
 const scopedQuery = z.toJSONSchema(searchInputSchema);
 const minScoreDescription = "Relevance floor, 0..1: drop results whose raw match strength is lower, and report noMatch when none remain. 0 disables it. Omitted: the workspace's retrieval default, else SEARCH_MIN_SCORE (0.1).";
-const workspaceRef = { type: "string", description: "Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace." };
+const workspaceRef = { type: "string", maxLength: 256, description: "Workspace ID, slug or name. Names match by slug, so \"Legal Contracts\", \"legal-contracts\" and \"LEGAL CONTRACTS\" are the same workspace; former slugs of renamed workspaces keep working. Omitted (or \"default\"): the organization default workspace. No match: 404 workspace_not_found naming the slug looked up." };
 const uploadTags = { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 100 }, description: "Case-sensitive document labels; trimmed and deduplicated. Commas and NUL are not allowed. Applied to every accepted file." };
 const uploadTarget = {
   tags: uploadTags,
-  workspaceId: { ...workspaceRef, description: "Append to this workspace (slug, former slug, UUID, or \"default\"). Omitted without newWorkspace, workspaceName or templateKey: the organization default workspace." },
-  newWorkspace: { type: "boolean", description: "Create a new self-titled workspace instead of using the default workspace. Multipart sends the string \"true\"." },
-  workspaceName: { type: "string", description: "Create a new workspace with this name." },
-  templateKey: { type: "string", description: "Create a new workspace from this template." },
+  workspace: { ...workspaceRef, description: "Upload into this workspace: an ID, slug or name (names match by slug). A slug or name that matches none of your workspaces creates one with that display name, using its slug when free. Omitted without newWorkspace or templateKey: the organization default workspace." },
+  newWorkspace: { type: "boolean", description: "Without workspace: create a new self-titled workspace instead of using the default workspace. Multipart sends the string \"true\"." },
+  templateKey: { type: "string", description: "Template for a workspace this request creates. Without workspace: create a new self-titled workspace from it." },
   orgId: { type: "string", description: "Session callers only: target this organization's default workspace. API keys use their organization." },
 };
 const errors = {
@@ -37,6 +36,12 @@ const openAiErrors = {
   "404": { description: "Resource not found in your organization" },
   "429": { description: "Rate limit reached" },
 };
+
+/** A zod schema as a nested JSON Schema (without the top-level `$schema` marker). */
+function nestedSchema(schema: z.ZodType) {
+  const { $schema: _marker, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
 
 export const simpleServiceSchemas = {
   SearchResult: z.toJSONSchema(searchResultSchema),
@@ -118,6 +123,10 @@ export const simpleServiceSchemas = {
       max_completion_tokens: { type: "integer", minimum: 1, maximum: 16384 },
       max_tokens: { type: "integer", minimum: 1, maximum: 16384, description: "Alias; cannot be combined with max_completion_tokens" },
       n: { const: 1 }, user: { type: "string", maxLength: 256 },
+      tool_choice: { enum: ["auto", "none"], default: "auto", description: "auto: the workspace agent may call its own search, web and settings tools before answering. none: a direct grounded answer from one retrieval and one model call (lower latency and fewer tokens; still streams). Client-defined tools are not supported, so `tools` and other tool_choice forms are rejected with 400." },
+      docslurp: { type: "object", additionalProperties: false, description: "DocSlurp extension (extra_body in OpenAI SDKs).", properties: {
+        retrieval: { ...nestedSchema(chatRetrievalOverridesSchema), description: "Retrieval overrides for this request only, as retrieval on POST /v1/chat. Example: { \"parentRetrieval\": false } cites matched chunks without whole parent pages." },
+      } },
     },
   },
   ChatCompletion: {
@@ -159,7 +168,7 @@ const canonicalServicePaths = {
   } },
   "/v1/search": {
     get: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, parameters: [
-      { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspaceId", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
+      { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspace", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
       { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
@@ -167,12 +176,6 @@ const canonicalServicePaths = {
   "/v1/chat": { post: {
     tags: ["chat"], summary: "Ask a grounded workspace question", security: serviceSecurity,
     description: "Parallel requests may use independent conversations. Await each reply before sending the next turn with the same sessionId; concurrent turns in one conversation have no ordering guarantee.",
-    requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
-    responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
-  } },
-  "/v1/search/chat": { post: {
-    deprecated: true,
-    tags: ["search"], summary: "Compatibility alias for POST /v1/chat", security: serviceSecurity,
     requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },

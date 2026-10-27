@@ -8,10 +8,13 @@ import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { cleanupTempFile } from "../tools/storage.js";
+import { documentArtifactRoot } from "../lib/artifact-root.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
+import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
+import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -33,6 +36,8 @@ export interface RasterCacheOptions {
   /** Max parallel native renders (one document handle per lane). */
   concurrency?: number;
 }
+
+let rasterEngineUnavailableReported = false;
 
 const defaultLoadEngine = async (): Promise<NativePdfEngine | null> => {
   const loaded = await loadNativePdfEngine();
@@ -138,6 +143,7 @@ export interface RasterPageArtifact {
   mimeType: string;
   /** Engine that produced (or, on a cache hit, would have produced) this raster. */
   engine?: RasterEngineName;
+  /** Requested density; oversized pages are bounded before allocation. */
   dpi?: number;
 }
 
@@ -152,7 +158,7 @@ export interface RenderedRasterPage {
 }
 
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
-type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "run">;
+type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run">;
 
 /**
  * Durable selected-page raster Module. Callers provide page numbers and get
@@ -174,8 +180,19 @@ export class PdfRasterCache {
 
   private async resolveEngine(): Promise<{ name: RasterEngineName; engine: NativePdfEngine | null }> {
     if (this.requestedEngine !== "native-pdf") return { name: "pdftoppm", engine: null };
-    const engine = await (this.options.loadEngine ?? defaultLoadEngine)().catch(() => null);
-    return engine ? { name: "native-pdf", engine } : { name: "pdftoppm", engine: null };
+    const engine = await (this.options.loadEngine ?? defaultLoadEngine)().catch((error: unknown) => {
+      logNativePdfFallback("raster-engine", error, "pdftoppm");
+      return null;
+    });
+    if (!engine) {
+      // Once per process: the requested engine is a process setting, so repeating it per page adds nothing.
+      if (!rasterEngineUnavailableReported) {
+        rasterEngineUnavailableReported = true;
+        logNativePdfFallback("raster-engine", new NativePdfError("NATIVE_PDF_UNAVAILABLE", "PDF_RASTER_ENGINE=native-pdf but the engine is unavailable"), "pdftoppm");
+      }
+      return { name: "pdftoppm", engine: null };
+    }
+    return { name: "native-pdf", engine };
   }
 
   /**
@@ -204,7 +221,9 @@ export class PdfRasterCache {
         signal: args.signal,
       });
       return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
-    } catch {
+    } catch (error) {
+      if (args.signal?.aborted) throw error;
+      logNativePdfFallback(`raster-clip page=${args.pageNumber}`, error, "full-page render and crop");
       return null;
     }
   }
@@ -241,10 +260,10 @@ export class PdfRasterCache {
 
     // Engines get separate key spaces so an A/B run never mixes their pixels.
     const resolved = isPdf ? await this.resolveEngine() : { name: "pdftoppm" as RasterEngineName, engine: null };
-    const dpiDir = resolved.name === "native-pdf" ? `${dpi}dpi-native-pdf` : `${dpi}dpi`;
+    const dpiDir = resolved.name === "native-pdf" ? `v2-${dpi}dpi-native-pdf` : `v2-${dpi}dpi`;
     const keys = new Map(pageNumbers.map((pageNumber) => [
       pageNumber,
-      `${args.document.userId}/${args.runId}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
+      `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
     ]));
     let engineName: RasterEngineName = resolved.name;
     const existing = new Map<number, number | null>();
@@ -273,7 +292,7 @@ export class PdfRasterCache {
           });
         } catch (error) {
           if (args.signal?.aborted) throw error;
-          console.warn(`[raster] native-pdf render failed, falling back to pdftoppm: ${error instanceof Error ? error.message : String(error)}`);
+          logNativePdfFallback("raster-render", error, "pdftoppm");
         }
         // Only rendering failures may select another engine. Storage or consumer
         // failures must not cause duplicate writes or change artifact provenance.
@@ -290,7 +309,7 @@ export class PdfRasterCache {
         // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
         engineName = "pdftoppm";
         for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${args.document.userId}/${args.runId}/images/${args.document.id}/${dpi}dpi/page-${pageNumber}.${extension}`);
+          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
         }
         await Promise.all(pageNumbers.map(async (pageNumber) => {
           existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
@@ -301,14 +320,22 @@ export class PdfRasterCache {
         : [];
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
-        for (const range of contiguousPageRanges(pdftoppmPages)) {
+        for (const selectedPage of pdftoppmPages) {
+          const range = { first: selectedPage, last: selectedPage };
+          const sizePlan = await this.runner.pdfPageSizes(source.path, selectedPage, selectedPage);
+          if (!sizePlan.available) throw new Error("pdfinfo unavailable for bounded rasterization");
+          const sizeResult = await this.runner.run(sizePlan, args.signal);
+          const size = sizeResult.stdout.match(/(?:Page\s+\d+\s+size|Page size):\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
+          if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+          const renderDpi = boundedRasterDpi(Number(size[1]), Number(size[2]), dpi);
           const prefix = path.join(scratch, `page-${range.first}-${range.last}`);
           const plan = await this.runner.renderPdfPageRange(
             source.path,
             prefix,
             range.first,
             range.last,
-            dpi,
+            renderDpi,
+            boundedRasterEdge(Number(size[1]), Number(size[2]), renderDpi),
           );
           if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
           await this.runner.run(plan, args.signal);

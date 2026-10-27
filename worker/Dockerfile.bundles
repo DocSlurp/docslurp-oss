@@ -14,6 +14,7 @@ WORKDIR /src
 COPY worker/requirements-base.txt worker/requirements-base.lock.txt worker/requirements-bundle-*.txt worker/vendor-bundles.json ./worker/
 COPY scripts/build-worker-venv.sh ./scripts/build-worker-venv.sh
 COPY scripts/vendor-bundles/build.sh ./scripts/vendor-bundles/build.sh
+COPY scripts/uv-installer.lock.txt ./scripts/uv-installer.lock.txt
 RUN bash scripts/build-worker-venv.sh /app/.venv worker/requirements-base.lock.txt worker/requirements-base.txt
 ARG BUNDLE
 RUN test -n "${BUNDLE}" && bash scripts/vendor-bundles/build.sh "${BUNDLE}" /out /src

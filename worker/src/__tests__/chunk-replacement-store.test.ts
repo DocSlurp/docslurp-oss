@@ -59,7 +59,9 @@ describe("chunk replacement on a retried embed", () => {
   });
 
   it("drops only this document's chunks outside the replacement set", async () => {
-    await store.deleteStaleDocumentChunks("d1", ["d1-000", "d1-001"]);
+    expect(await store.staleDocumentChunkIds("d1", ["d1-000", "d1-001"])).toEqual(["d1-002"]);
+    const stale = await store.deleteStaleDocumentChunks("d1", ["d1-000", "d1-001"]);
+    expect(stale).toEqual(["d1-002"]);
     expect(await sql`select id from document_chunks where document_id = 'd1' order by id`)
       .toEqual([{ id: "d1-000" }, { id: "d1-001" }]);
     expect(await sql`select id from document_chunks where document_id = 'd2' order by id`)

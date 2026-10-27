@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { defaultPageRouterConfig, type Assignment, type PageRouterMode, type RoutePlan } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPageRouterConfig, type Assignment, type PageRouterMode, type RoutePlan } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Document, WorkspaceRun } from "../models.js";
@@ -9,6 +9,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { HeuristicRouter } from "../routing/routers/heuristic.js";
 import { buildRuntimeCatalog } from "../routing/runtime.js";
+import { assemblePlan } from "../routing/planner.js";
 import { BIG_BUDGET, makePage } from "../routing/testing.js";
 import { RenderImagesStage } from "./render-images.js";
 import { VisionExtractStage, type VisionPageOutput } from "./vision-extract.js";
@@ -44,8 +45,9 @@ function stateWith(plan: RoutePlan | null, mode: PageRouterMode | undefined, ext
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
       preserveImages: true, visionFallback: true, privacyMode: "standard", maxCostCents: null,
-      vision: { forceAllPages: false, maxPagesPerDocument: 4, modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" },
-      pageRouter: { ...defaultPageRouterConfig, mode },
+      vision: { forceAllPages: false, maxPagesPerDocument: 4, modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}` },
+      // These execution tests deliberately exercise cost-only routing. Defaults are tested below.
+      pageRouter: { ...defaultPageRouterConfig, marginFloor: 0, mode },
       ...extra,
     },
   } as unknown as WorkspaceRun, [document]);
@@ -188,5 +190,37 @@ describe("vision-extract with the page router", () => {
     ({ stage, state } = make(single));
     spy(stage);
     expect(await stage.planPageTasks(state)).toEqual([]);
+  });
+});
+
+describe("default positive margin floor fails closed", () => {
+  it.each(["extract-text", "math", "table"] as const)("refuses a budget-stripped %s plan before render or vision", async (role) => {
+    const base = await planWith([asg(1, hostedVlms[0]!.id, role)]);
+    // Exercise the real guard with the default .5 floor, rather than hand-editing assignments.
+    const assignment = asg(1, hostedVlms[0]!.id, role);
+    const primary = { targetId: assignment.targetId, costUsd: 0.002, billedUsd: 0, latencyMs: 1000, latencyP95Ms: 2000, pPass: 0.9, pPassLowerBound: 0.9 };
+    const { plan, guard } = assemblePlan({
+      documentId: "doc", runId: "run", routerId: base.routerId, routerKind: base.routerKind,
+      mode: "active", objective: "cost-quality", policyVersion: base.policyVersion,
+      planned: [{ assignment, billedUsd: 0, latencyP95Ms: 2000, primary, alternatives: [] }],
+      budget: { limitUsd: 1, marginFloor: defaultPageRouterConfig.marginFloor }, catalog: targets,
+    });
+    expect(guard.deferred).toHaveLength(1);
+    expect(plan.assignments).toEqual([]);
+    const state = stateWith(plan, "active", { pageRouter: { ...defaultPageRouterConfig, mode: "active" } });
+    const renderSelectedPages = vi.fn(async () => []);
+    const render = new RenderImagesStage({ renderSelectedPages } as unknown as PdfRasterCache, storageFor(plan), { pageRouterMode: "active" });
+    vi.spyOn(render as unknown as { loadRasterRequest(): Promise<null> }, "loadRasterRequest").mockResolvedValue(null);
+    await expect(render.run(state)).rejects.toThrow("page-router-incomplete");
+    expect(renderSelectedPages).not.toHaveBeenCalled();
+    const vision = new VisionExtractStage({} as CommandRunner, storageFor(plan), { pageRouterMode: "active" } as Config, {} as never);
+    await expect((vision as unknown as { loadRoutedExecution(s: WorkflowState, d: Document): Promise<unknown> }).loadRoutedExecution(state, document)).rejects.toThrow("page-router-incomplete");
+    expect(state.usageLedger.pendingCount).toBe(0);
+    // A resumed run with a zero floor must also reject the already stripped artifact.
+    state.run.pipeline.pageRouter!.marginFloor = 0;
+    plan.chunkEstimate.budget.marginFloor = 0;
+    await expect(render.run(state)).rejects.toThrow("budget guard removed content");
+    await expect((vision as unknown as { loadRoutedExecution(s: WorkflowState, d: Document): Promise<unknown> }).loadRoutedExecution(state, document)).rejects.toThrow("budget guard removed content");
+    expect(state.usageLedger.pendingCount).toBe(0);
   });
 });

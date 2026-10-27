@@ -69,7 +69,8 @@ Variables each provider reads. Secret values are never logged or included in err
 | `MODAL_TOKEN_ID` | modal | required | Modal API token id. Secret. |
 | `MODAL_TOKEN_SECRET` | modal | required | Modal API token secret. Secret. |
 | `DOCSLURP_MODAL_APP` | modal | `docslurp-parsers` | Modal app that owns the sandboxes. Created if missing. |
-| `DOCSLURP_MODAL_IMAGE` | modal | `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` in release images; required otherwise | Image the sandboxes run. It must contain the parser binaries. |
+| `DOCSLURP_MODAL_IMAGE` | modal | `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` in release images; required otherwise | Image the sandboxes run. It must contain the parser binaries. Accepts a digest-pinned reference (`repo@sha256:<digest>`). |
+| `DOCSLURP_MODAL_IMAGE_DIGEST` | modal | unset | `sha256:<digest>` that pins the image (the default or `DOCSLURP_MODAL_IMAGE`) by digest instead of its mutable tag. Must match a digest already in `DOCSLURP_MODAL_IMAGE`. |
 | `DOCSLURP_MODAL_REGISTRY_SECRET` | modal | unset | Name of a Modal Secret holding `REGISTRY_USERNAME` and `REGISTRY_PASSWORD`, for pulling a private image. |
 | `DOCSLURP_MODAL_CPU` | modal | `2` | Requested CPU cores per sandbox. |
 | `DOCSLURP_MODAL_MEMORY_MB` | modal | `4096` | Requested memory in MiB per sandbox. |
@@ -89,7 +90,7 @@ Modal runs each activity's parser commands in a remote sandbox. Use it when the 
 
 1. Create a Modal API token and set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` on the worker. Keep them in your secret store, not in the repository.
 2. Set `DOCSLURP_PARSER_SANDBOX=modal`.
-3. Choose the image. Release worker images set `DOCSLURP_VERSION`, and the default image is `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>`, which `.github/workflows/worker-images.yml` publishes on the same release tag (see [Releases](../releases.md)). A worker run from source or a local image build has no `DOCSLURP_VERSION`, so `DOCSLURP_MODAL_IMAGE` is required there; without it the worker stops at start with `Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE`. Modal pulls the image without credentials, so the GHCR package must be public. For a private image, create a Modal Secret with `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` and set `DOCSLURP_MODAL_REGISTRY_SECRET` to its name.
+3. Choose the image. Release worker images set `DOCSLURP_VERSION`, and the default image is `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>`, which `.github/workflows/worker-images.yml` publishes on the same release tag (see [Releases](../releases.md)). A worker run from source or a local image build has no `DOCSLURP_VERSION`, so `DOCSLURP_MODAL_IMAGE` is required there; without it the worker stops at start with `Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE`. Modal pulls the image without credentials, so the GHCR package must be public. For a private image, create a Modal Secret with `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` and set `DOCSLURP_MODAL_REGISTRY_SECRET` to its name. For production, verify the release image's cosign signature and pin it by digest with `DOCSLURP_MODAL_IMAGE_DIGEST=sha256:<digest>` (the image becomes `ghcr.io/docslurp/worker-full@sha256:<digest>`, so a re-pushed tag cannot change what runs); see [Verifying worker images](security.md#verifying-worker-images).
 4. Start the worker. The probe loads the `modal` package and opens the app (`DOCSLURP_MODAL_APP`, created if it does not exist).
 
 How it behaves:
@@ -108,7 +109,7 @@ How it behaves:
 [sandbox-usage] provider=modal cpu_seconds=<n> memory_gb_seconds=<n> activity=<id>
 ```
 
-The Modal SDK does not report actual usage. The figures are the requested CPU and memory multiplied by wall time, which is what Modal bills. For each command, including one that fails or is aborted, the worker also records one usage event with provider `modal` and metric `sandbox_compute` in the running stage's usage ledger, tagged with the stage's scope. The event carries the estimated provider cost in `metadata.effectiveCostCents` and is marked `costRollup: "included"` and `billable: false`, so it never adds customer credits, even with `DOCSLURP_BILL_COMPUTE=true`. A command run outside a pipeline stage (for example from a CLI) only logs the line.
+The Modal SDK does not report actual usage. The figures are the requested CPU and memory multiplied by wall time, which is what Modal bills. For each command, including one that fails or is aborted, the worker also records one usage event with provider `modal` and metric `sandbox_compute` in the running stage's usage ledger, tagged with the stage's scope. The event carries the estimated provider cost in `metadata.effectiveCostCents` and is marked `costRollup: "included"` and `billable: false`, so it never adds customer credits (compute is never billed; customers pay per page). A command run outside a pipeline stage (for example from a CLI) only logs the line.
 
 While a Modal command runs, the worker reports progress to the stage's stall watchdog every 30 seconds, up to the command's own time limit. Long remote parses are not aborted as hung. Remote stdout and stderr are capped at `WORKER_COMMAND_MAX_OUTPUT_BYTES`, as local commands are.
 

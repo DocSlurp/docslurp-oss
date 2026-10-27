@@ -14,12 +14,13 @@ Design: [deferred search profiles](superpowers/specs/2026-10-12-deferred-search-
 
 `map` and `visual` are PDF-only for now. Indexed pages are never thrown away: a per-page ledger records what is mapped, embedded, parsed and indexed, independent of the mode.
 
-## Plan defaults
+## Defaults
 
-- **Free plan:** `map`. Free accounts can pick `visual` (never a default: no plan, template or credit balance selects it for you). `full` is allowed while the organization can spend credits (including starter credits); otherwise the API returns 402 with `code: "credits_required_for_full_index"`.
-- **Paid plans or purchased credits:** `full`. `map` and `visual` are always available.
+- **Every organization** starts with `full`. `map` and `visual` are explicit, cheaper choices open to everyone (`visual` is never a default: no template or credit balance selects it for you). The default does not depend on what an organization has bought. Indexing work is admitted against the credit balance like any other spend, so an organization with no credits gets the usual 402 (`credit_exhausted`) when the work starts.
 
-The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the workspace setting, the workspace template's recommendation, then the plan default. The mode is stored per document, so one workspace can hold documents ingested under different modes.
+Pages are billed as they are indexed, at the same per-page prices as `full` (5 credits per 1,000 text pages, 250 per 1,000 pages read by OCR or embedded as images). A page is billed once, whether a query or a full index materializes it.
+
+The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the workspace setting, the workspace template's recommendation, then the organization default. The mode is stored per document, so one workspace can hold documents ingested under different modes.
 
 ## Switching modes
 
@@ -83,7 +84,7 @@ curl -X POST https://docslurp.io/v1/search \
   -H "Authorization: Bearer $DOCSLURP_CLIENT_KEY" \
   -H "X-DocSlurp-Capability: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"q":"limitation of liability","workspaceId":"ws_01hxyz"}'
+  -d '{"q":"limitation of liability","workspace":"ws_01hxyz"}'
 ```
 
 The token is AES-256-GCM sealed and expires within one hour (`ttlSeconds` defaults to and is capped at 3600).
@@ -151,4 +152,4 @@ The query must be embedded by the same model as the pages.
 
 ## Configuration
 
-See `.env.example`: `DOCSLURP_DEFERRED_PROFILES`, `TEMPORAL_MATERIALIZE_TASK_QUEUE`, `WORKER_MATERIALIZE_CONCURRENCY`, `DOCSLURP_PAGE_MAPPED_FEE_USD`, `DOCSLURP_PAGE_EMBEDDED_FEE_USD` (both cost-only and `0` until priced), `DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS`, `DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE` and `GOOGLE_GENERATIVE_AI_API_KEY`.
+See `.env.example`: `DOCSLURP_DEFERRED_PROFILES`, `TEMPORAL_MATERIALIZE_TASK_QUEUE`, `WORKER_MATERIALIZE_CONCURRENCY`, `DOCSLURP_PAGE_MAPPED_FEE_USD` (internal cost only, never billed), `DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS` (per-page budget estimate; defaults to the Rich page price), `DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE` and `GOOGLE_GENERATIVE_AI_API_KEY`.

@@ -8,7 +8,7 @@ import argparse
 import posixpath
 import re
 import zipfile
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 from decimal import Decimal, DecimalException
 from xlsx_formula_context import render_formula_rows, MAX_FORMULAS
 
@@ -42,7 +42,8 @@ class Context:
         self.read_bytes += info.file_size
         if info.file_size > MAX_PART_BYTES or self.read_bytes > MAX_CONTEXT_BYTES:
             raise ValueError('Office context XML exceeds byte limit')
-        return ET.fromstring(self.archive.read(name))
+        data = self.archive.read(name)
+        return ET.fromstring(data, forbid_dtd=True)
 
     def emit(self, kind, location, value):
         if value is None or value == '':
@@ -113,7 +114,7 @@ def spreadsheet_context(context, names):
                          ('row', 'hyperlink', 'dataValidation', 'mergeCell', 'autoFilter', 'pane')}
         formula_tag, value_tag = '{%s}f' % S, '{%s}v' % S
         with context.archive.open(part) as source:
-            for _, node in ET.iterparse(source, events=('end',)):
+            for _, node in ET.iterparse(source, events=('end',), forbid_dtd=True):
                 if node.tag not in retained_tags:
                     continue
                 kind = local(node.tag)

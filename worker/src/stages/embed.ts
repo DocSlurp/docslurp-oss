@@ -10,6 +10,9 @@ import { checkDedup, completeDocumentPages, emitDocumentPageProgress, hashConten
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
+import { deleteLanceDbRecords } from "./lancedb-writer.js";
+import { workspaceVectorLocation } from "./lancedb-location.js";
 import { detectLanguage, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import {
   asEmbeddingReuseStore,
@@ -53,9 +56,13 @@ type ChunkInsertStore = {
     contentHash?: string;
     pipelineVersion?: string;
   }>) => Promise<void>;
-  /** Drops the document's chunk rows outside the replacement set (a retry that produced fewer chunks). */
-  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<void>;
+  /** The document's chunk ids outside the replacement set (a retry that produced fewer chunks). */
+  staleDocumentChunkIds?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[]>;
+  /** Drops the document's chunk rows outside the replacement set; returns their ids. */
+  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[] | void>;
   markDocumentLexicalSearchable?: (documentId: string) => Promise<void>;
+  /** deleteStaleDocumentChunks and markDocumentLexicalSearchable as one transaction in one round trip. */
+  finalizeDocumentChunks?: (documentId: string, keepChunkIds: readonly string[], markSearchable: boolean) => Promise<void>;
 };
 
 const DEFAULT_MAX_EMBED_WINDOW_PAGES = 100;
@@ -67,7 +74,8 @@ export class EmbedStage implements Stage {
   constructor(
     private readonly runner: CommandRunner,
     private readonly storage: ArtifactStore,
-    private readonly config: Config
+    private readonly config: Config,
+    private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords
   ) {}
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
@@ -115,7 +123,7 @@ export class EmbedStage implements Stage {
           );
 
           if (extracted.schemaArtifact) {
-            const schemaKey = `${document.userId}/${state.run.id}/json-schema/${document.id}.json`;
+            const schemaKey = `${runArtifactRoot(state.run, document.userId)}/json-schema/${document.id}.json`;
             await this.storage.putJson(schemaKey, extracted.schemaArtifact);
             state.artifactLedger.recordDocument(document.id, "json-schema", this.storage.uri(schemaKey));
           }
@@ -143,7 +151,7 @@ export class EmbedStage implements Stage {
             orgId: state.run.orgId,
             seedArtifactUris: [priorEmbeddingsUri],
           });
-          const artifactKey = `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
+          const artifactKey = `${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`;
           const preamblesEnabled = state.run.pipeline.contextualChunkPreambles !== false;
           let contextKey: string | undefined;
           let reusedDocumentContext: string | undefined;
@@ -268,14 +276,16 @@ export class EmbedStage implements Stage {
             }
           }
           if (existingUri) {
-            await this.materializeChunksFromArtifact({
+            const artifactUri = await this.materializeChunksFromArtifact({
               state,
               document,
               artifactUri: existingUri,
-              contentHash
+              contentHash,
+              chunkDrafts,
+              extracted,
             });
             return {
-              artifactUri: existingUri,
+              artifactUri,
               stats: { deduplicated: true }
             };
           }
@@ -409,7 +419,7 @@ export class EmbedStage implements Stage {
           if (publishBeforeEmbedding) {
             // All source chunks are durable before the readiness marker. Vector
             // availability remains governed by the later index stage.
-            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion });
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion, vectorSpace: tunedProfile });
           }
           const freshVectors = new Map<string, number[]>();
           const embeddedVectors: number[][] = Array.from({ length: embeddingInputs.length });
@@ -669,7 +679,7 @@ export class EmbedStage implements Stage {
           await this.recordReuseRefs(state, this.storage.uri(key), chunks, artifact.documentContext?.key);
 
           if (!publishBeforeEmbedding) {
-            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion });
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion, vectorSpace: tunedProfile });
           }
 
           if (lateChunkingEnabled) {
@@ -825,24 +835,70 @@ export class EmbedStage implements Stage {
     }
   }
 
-  // TODO(chunk-id ownership, pre-existing, flag-independent): a deduplicated artifact
-  // carries the chunk ids of the document that first produced it (`<sourceDoc>-NNN`),
-  // and materializeChunks upserts them `on conflict (id) do update set document_id`,
-  // so this document's rows take over (steal) the source document's chunk rows
-  // instead of getting `<thisDoc>-NNN` ids. Fix by rewriting the id prefix (as the
-  // embedding-reuse path does for artifact.chunks) before materializing.
+  /** Reuse vectors while keeping artifact, chunk and citation ownership document-local. */
   private async materializeChunksFromArtifact(args: {
     state: WorkflowState;
     document: WorkflowState["documents"][number];
     artifactUri: string;
     contentHash: string;
-  }): Promise<void> {
+    chunkDrafts: CanonicalChunk[];
+    extracted: Awaited<ReturnType<typeof extractTextForEmbedding>>;
+  }): Promise<string> {
     const key = keyFromStorageUri(args.artifactUri, this.storage.bucket);
     if (!key) {
       throw new Error(`unable to materialize deduplicated chunks from external artifact URI: ${args.artifactUri}`);
     }
 
-    const artifact = await this.storage.getJson<EmbeddingArtifact>(key);
+    const original = await this.storage.getJson<EmbeddingArtifact>(key);
+    const canonicalDocumentUri = args.state.artifactLedger.readDocument(args.document.id, "canonical-document") ?? null;
+    const artifact: EmbeddingArtifact = {
+      ...original,
+      documentId: args.document.id,
+      source: { ...original.source, filename: args.document.filename, mimeType: args.document.mimeType },
+      chunks: original.chunks.map((chunk) => {
+        const current = args.chunkDrafts[chunk.index];
+        if (!current) throw new Error(`deduplicated chunk ${chunk.index} has no current source chunk`);
+        // Vectors and contextualized text are reusable. Locations and evidence
+        // belong to this extraction, even when the visible text is identical.
+        const evidence = {
+          headingPath: current.headingPath,
+          pageNumber: current.pageNumber,
+          pageNumbers: current.pageNumbers,
+          blockIds: current.blockIds,
+          blockTypes: current.blockTypes,
+          evidenceType: current.evidenceType,
+          canonicalDocumentUri,
+          tableGranularity: current.tableGranularity ?? null,
+          tableRowIndex: current.tableRowIndex ?? null,
+          tableRowCount: current.tableRowCount ?? null,
+          tableColumnNames: current.tableColumnNames ?? [],
+          tableColumnTypes: current.tableColumnTypes ?? [],
+          tableCells: current.tableCells ?? [],
+          tableCell: current.tableCell ?? null,
+          regionBoxes: current.regionBoxes ?? [],
+          regions: current.regions ?? current.regionBoxes ?? [],
+          regionCoordinateSpace: current.regionCoordinateSpace ?? null,
+          sourceTrace: {
+            ...current.sourceTrace,
+            canonicalDocumentUri,
+            parserArtifactUri: current.sourceTrace?.parserArtifactUri ?? args.extracted.canonicalDocument?.source.parserArtifactUri ?? null,
+            sourceArtifactUri: current.sourceTrace?.sourceArtifactUri ?? args.extracted.canonicalDocument?.source.artifactUri ?? null,
+            blockIds: current.blockIds,
+            pageNumbers: current.pageNumbers,
+            extractor: args.extracted.extractor,
+          },
+        };
+        return {
+          ...chunk,
+          ...evidence,
+          id: `${args.document.id}-${chunk.index.toString().padStart(3, "0")}`,
+          metadata: { ...chunk.metadata, ...evidence, documentId: args.document.id,
+            source: args.extracted.extractor, locator: current.locator ?? null, overlapIndex: current.overlapIndex ?? 0 },
+        };
+      }),
+    };
+    const ownKey = `${runArtifactRoot(args.state.run, args.document.userId)}/embeddings/${args.document.id}.json`;
+    await this.storage.putJson(ownKey, artifact);
     const pipelineVersion = createHash("sha256")
       .update(JSON.stringify(pipelineVersionFeatures(args.state.run.pipeline)))
       .digest("hex")
@@ -853,8 +909,10 @@ export class EmbedStage implements Stage {
       document: args.document,
       chunks: artifact.chunks,
       contentHash: args.contentHash,
-      pipelineVersion
+      pipelineVersion,
+      vectorSpace: artifact.embedding,
     });
+    return this.storage.uri(ownKey);
   }
 
   private async materializeChunks(args: {
@@ -863,6 +921,8 @@ export class EmbedStage implements Stage {
     chunks: EmbeddingArtifact["chunks"];
     contentHash: string;
     pipelineVersion: string;
+    /** The embedding space the document's LanceDB rows live in. */
+    vectorSpace?: { model: string; dimensions: number };
   }): Promise<void> {
     if (!args.state.store || !("insertChunks" in args.state.store)) {
       return;
@@ -883,14 +943,32 @@ export class EmbedStage implements Stage {
       pipelineVersion: args.pipelineVersion
     }));
     const store = args.state.store as ChunkInsertStore;
-    await store.insertChunks(dbChunks);
-    if (dbChunks.length > 0) {
-      // Ids are `<document>-<index>`, so a retry with fewer chunks leaves the old
-      // tail behind; drop it before the marker makes the set servable.
-      await store.deleteStaleDocumentChunks?.(args.document.id, dbChunks.map((chunk) => chunk.id));
-      // Keyword search can serve the chunks from here on, ahead of the index stage.
-      await store.markDocumentLexicalSearchable?.(args.document.id);
+    // Ids are `<document>-<index>`, so a retry with fewer or zero chunks leaves the old
+    // tail behind; drop it before the marker makes the set servable.
+    const keep = dbChunks.map((chunk) => chunk.id);
+    // An earlier attempt may have indexed those chunks: native search serves
+    // LanceDB rows without re-reading Postgres, so drop them there first.
+    // A failed delete fails the stage while Postgres still lists the ids, so
+    // the retry deletes them again. The stale read does not depend on the insert
+    // (kept ids are excluded from it), so both go out in one round trip.
+    const [, stale] = await Promise.all([
+      store.insertChunks(dbChunks),
+      args.vectorSpace && args.state.run.orgId
+        ? store.staleDocumentChunkIds?.(args.document.id, keep).then((ids) => ids ?? [])
+        : undefined,
+    ]).then(([inserted, ids]) => [inserted, ids ?? []] as const);
+    if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
+      const location = workspaceVectorLocation(args.state.run, args.vectorSpace);
+      await this.deleteVectors(location.uri, location.table, stale);
+      args.state.staleVectorIds.set(args.document.id, stale);
     }
+    // Keyword search can serve the chunks from here on, ahead of the index stage.
+    if (store.finalizeDocumentChunks) {
+      await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
+      return;
+    }
+    await store.deleteStaleDocumentChunks?.(args.document.id, keep);
+    if (dbChunks.length > 0) await store.markDocumentLexicalSearchable?.(args.document.id);
   }
 }
 

@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 
 import {
+  UNIT_CHARGE_PROVIDER,
+  unitChargeMetadata,
+  type BillableUnitMetric,
   buildPricedAiUsageLedgerEvent,
   estimateAiUsageCostCents,
   formatAiUsageConsoleLog,
@@ -12,6 +15,7 @@ import {
   type AiUsagePricing,
 } from "@docslurp/shared";
 import { sql, type SqlClient } from "../db.js";
+import { currentChatTurn, trackChatTurnWrite, type ChatTurnContext } from "./chat-turn-context.js";
 import { currentRequestApiKeyId } from "./request-context.js";
 
 /**
@@ -130,6 +134,48 @@ export async function recordCostEvent(args: {
   `;
   if (rows.length > 0) recordUsageReceipt(event, { ...args.scope, ...metadata });
   return rows.length > 0;
+}
+
+/** A billable price-card unit (search, chat answer). See BILLABLE_UNIT_METRICS. */
+export interface UnitChargeInput {
+  /** Deterministic id makes a retried write idempotent. */
+  id: string;
+  metric: BillableUnitMetric;
+  /** Units the user can see: 1 per search or chat answer, pages for ingest. */
+  amount: number;
+  unit: string;
+  credits: number;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Log and persist one billable unit charge (PRICE_CARD): the only kind of
+ * event that debits customer credits, besides the worker's page charges and
+ * the storage meter. Written through the same path as AI events, so a chat
+ * turn's charges are stamped with the turn and refunded with it when the
+ * answer is never delivered.
+ */
+export async function recordUnitCharge(args: {
+  userId: string;
+  scope: UsageScope;
+  charge: UnitChargeInput;
+  client?: UsageClient;
+}): Promise<UsageEvent> {
+  const { charge } = args;
+  const event: UsageEvent = {
+    id: charge.id,
+    provider: UNIT_CHARGE_PROVIDER,
+    model: "price-card",
+    metric: charge.metric,
+    amount: charge.amount,
+    unit: charge.unit,
+    costCents: Math.max(0, charge.credits),
+    inputTokens: 0,
+    outputTokens: 0,
+    metadata: { ...usageTraceContext(), ...unitChargeMetadata(charge.metadata) },
+  };
+  console.log(`[usage] ${charge.metric} amount=${charge.amount} unit=${charge.unit} credits=${event.costCents}`);
+  return await insertUsageEvent(args.client ?? sql, args.userId, args.scope, event);
 }
 
 export interface UsageLedger extends UsageRecorder {
@@ -253,47 +299,49 @@ function logUsage({ id, ...input }: UsageInput): UsageEvent {
   return event;
 }
 
-const ORG_PLAN_TTL_MS = 30_000;
-const orgPlanCache = new Map<string, { planId: string | null; expiresAt: number }>();
-
-/**
- * Plan of the org the event bills, for the plan-neutral AI credit factor on
- * bonus plans. Looked up with the same org resolution the insert uses. A failed
- * lookup bills the base price rather than blocking the usage write.
- */
-async function resolveBilledPlanId(client: UsageClient, scope: UsageScope, columns: ScopeColumns): Promise<string | null> {
-  const cached = scope.orgId ? orgPlanCache.get(scope.orgId) : undefined;
-  if (cached && cached.expiresAt > Date.now()) return cached.planId;
-  try {
-    const rows = await client`select o.plan_id from organizations o where o.id = ${resolvedOrgId(client, scope, columns)}`;
-    const planId = Array.isArray(rows) && typeof rows[0]?.plan_id === "string" ? rows[0].plan_id : null;
-    if (scope.orgId && planId) orgPlanCache.set(scope.orgId, { planId, expiresAt: Date.now() + ORG_PLAN_TTL_MS });
-    return planId;
-  } catch {
-    return null;
-  }
-}
-
-/** Test hook: forget cached org plans. */
-export function clearOrgPlanCache(): void {
-  orgPlanCache.clear();
-}
-
-async function insertUsageEvent(
+function insertUsageEvent(
   client: UsageClient,
   userId: string,
   scope: UsageScope,
   logged: UsageEvent,
 ): Promise<UsageEvent> {
+  const turn = currentChatTurn();
+  if (!turn) return writeUsageEvent(client, userId, scope, logged, null);
+  return trackChatTurnWrite(turn, writeUsageEvent(client, userId, scope, logged, turn));
+}
+
+/**
+ * Stamp the chat turn on an event. Once the turn has failed (and refunds are
+ * on), a late event, such as a tool search finishing after the error response,
+ * is recorded at its provider cost but bills no credits.
+ */
+function stampChatTurn(event: UsageEvent, turn: ChatTurnContext | null): UsageEvent {
+  if (!turn) return event;
+  const metadata: Record<string, unknown> = { ...event.metadata, chatTurnId: turn.id };
+  if (turn.status !== "failed" || !turn.refundOnFailure) return { ...event, metadata };
+  return {
+    ...event,
+    costCents: 0,
+    metadata: { ...metadata, billable: false, chatTurnRefund: { reason: "undelivered", credits: Math.max(0, event.costCents), late: true } },
+  };
+}
+
+async function writeUsageEvent(
+  client: UsageClient,
+  userId: string,
+  scope: UsageScope,
+  logged: UsageEvent,
+  turn: ChatTurnContext | null,
+): Promise<UsageEvent> {
   const columns = scopeColumns(scope, stampUsageScope(logged.metadata, scope));
-  const planId = await resolveBilledPlanId(client, scope, columns);
-  const event = planId ? { ...priceAiUsageEvent(logged, { planId }), id: logged.id } : logged;
+  const event = stampChatTurn(logged, turn);
   const metadata = stampUsageScope(event.metadata, scope);
+  const id = event.id ?? randomUUID();
   await client`
     with recorded as (
       insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, input_tokens, output_tokens, metadata, org_id, workspace_id, api_key_id)
       values (
-        ${event.id ?? randomUUID()},
+        ${id},
         ${userId},
         ${scope.runId ?? null},
         ${event.provider},
@@ -315,14 +363,73 @@ async function insertUsageEvent(
     select enqueue_org_credit_debit(
       recorded.org_id, recorded.cost_cents, ${userId}, 'usage',
       ${scope.runId ?? null}, recorded.workspace_id,
-      ${JSON.stringify({ sessionId: scope.sessionId ?? null, metric: event.metric })}::text::jsonb
+      ${JSON.stringify({ sessionId: scope.sessionId ?? null, metric: event.metric, ...(turn ? { chatTurnId: turn.id, usageEventId: id } : {}) })}::text::jsonb
     )
     from recorded
     where recorded.org_id is not null
       and recorded.cost_cents > 0 and ${metadata.billable !== false}
   `;
   recordUsageReceipt(event, { ...scope, ...metadata });
+  if (turn) {
+    const providerCost = Number(metadata.providerCostCents);
+    const refund = metadata.chatTurnRefund as { credits?: unknown } | undefined;
+    turn.events.push({
+      id,
+      creditCents: metadata.billable === false ? 0 : Math.max(0, event.costCents),
+      waivedCreditCents: typeof refund?.credits === "number" ? refund.credits : 0,
+      providerCostCents: Number.isFinite(providerCost) ? Math.max(0, providerCost) : 0,
+    });
+  }
   return event;
+}
+
+export interface VoidedChatTurnUsage {
+  orgId: string;
+  /** Credits the voided events had debited (pending or already flushed). */
+  credits: number;
+  eventIds: string[];
+}
+
+/**
+ * Void the credits a chat turn's Usage Events billed: `cost_cents` drops to 0
+ * and the original credits move to `metadata.chatTurnRefund`, so spend read
+ * through usage_attribution no longer counts them while the provider cost
+ * (`metadata.providerCostCents`) stays for our own accounting. Rows are
+ * matched by primary key (the ids the turn wrote, ChatTurnContext.events) and
+ * must also carry the turn id, so no index on the metadata is needed. Only
+ * events that enqueued a debit are touched, and a voided event is never
+ * matched again (concurrent voids serialize on the row lock), so a repeated
+ * call voids nothing. Run it inside the refund transaction
+ * (services/billing/chat-turn-billing.ts), which settles the pending and
+ * flushed debits these credits correspond to.
+ */
+export async function voidChatTurnUsage(
+  client: UsageClient,
+  args: { turnId: string; eventIds: readonly string[]; reason: string },
+): Promise<VoidedChatTurnUsage[]> {
+  if (args.eventIds.length === 0) return [];
+  const rows = await (client as SqlClient)<{ org_id: string; credits: string; event_ids: string[] }[]>`
+    with voided as (
+      update usage_events ue
+      set cost_cents = 0,
+        metadata = ue.metadata || jsonb_build_object(
+          'billable', false,
+          'chatTurnRefund', jsonb_build_object('reason', ${args.reason}::text, 'credits', ue.cost_cents)
+        )
+      where ue.id = any(${[...new Set(args.eventIds)]}::text[])
+        and ue.metadata ->> 'chatTurnId' = ${args.turnId}
+        and ue.org_id is not null
+        and ue.run_id is null
+        and ue.cost_cents > 0
+        and coalesce(ue.metadata ->> 'billable', 'true') <> 'false'
+      returning ue.id, ue.org_id, (ue.metadata #>> '{chatTurnRefund,credits}')::numeric as credits
+    )
+    select org_id, sum(credits)::text as credits, array_agg(id order by id) as event_ids
+    from voided
+    group by org_id
+    order by org_id
+  `;
+  return rows.map((row) => ({ orgId: row.org_id, credits: Number(row.credits), eventIds: [...row.event_ids] }));
 }
 
 interface ScopeColumns {

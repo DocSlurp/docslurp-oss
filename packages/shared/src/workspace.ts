@@ -1,3 +1,4 @@
+import { workspaceSettingsProposalSchema } from "./workspace-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
 import { indexingModeSchema } from "./deferred-indexing.js";
@@ -69,12 +70,14 @@ export const workspaceSchema = z.object({
   name: z.string(),
   templateKey: workspaceTemplateKeySchema.nullable().default(null),
   systemPrompt: z.string().max(2000).nullable().default(null),
+  /** Generate reusable document summaries to improve search results. One-time generation and embedding cost per processed document version; reprocessing can incur it again. */
+  summaries: z.boolean().default(true),
   pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
-  monthlyBudgetCents: z.number().int().nonnegative().nullable().default(null),
+  monthlyBudgetCents: z.number().int().nonnegative().max(2_147_483_647).nullable().default(null),
   /** Days before a run's artifacts are purged; null keeps them. */
   artifactRetentionDays: z.number().int().positive().nullable().default(null),
-  /** Days before a run record is deleted (after its artifacts are purged); null keeps it. */
-  runRetentionDays: z.number().int().positive().nullable().default(null),
+  /** Days from ingestion before documents, artifacts and their run expire; null keeps them indefinitely. */
+  runRetentionDays: z.number().int().positive().nullable().default(30),
   /**
    * Current corpus: completed documents that have not been superseded by a
    * newer version (what search serves). A re-ingest never double counts.
@@ -184,9 +187,12 @@ export const organizationSchema = z.object({
   createdByUserId: z.string().nullable(),
   creditBalanceCents: z.number().default(0),
   memberRole: organizationRoleSchema,
-  planId: z.string().nullable().default(null),
-  /** Versions kept per document chain on paid plans; null uses the plan default. */
+  /** Has ever received a paid grant (top-up, auto top-up, adjustment, promo). */
+  funded: z.boolean().default(false),
+  /** Versions kept per document chain; null uses DEFAULT_RETAINED_VERSIONS. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /** China-based model providers may serve the org's requests (DeepSeek, GLM and similar open models often cost about half there). */
+  allowChinaProviders: z.boolean().default(true),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -300,22 +306,56 @@ export type WorkspaceChatWholeCorpusDebug = z.infer<
 >;
 
 /** Search-agent budgets for one /v1/chat turn. Non-admin callers may only lower them. */
-export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4 } as const;
+export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6 } as const;
 export const CHAT_AGENT_LIMIT_MAXIMUMS = { maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 } as const;
+/**
+ * Dynamic step budget: a turn gets this many model steps (final answer
+ * included). It continues past them, up to maxSteps, only while each tool step
+ * adds new evidence and the turn's input tokens stay under
+ * CHAT_AGENT_EXTENSION_INPUT_TOKENS. Every step resends the whole history, so
+ * late steps cost the most (production 2026-10: 4-step turns averaged 142k
+ * input tokens, 8-step turns 545k).
+ */
+export const CHAT_AGENT_BASE_STEPS = 4;
+export const CHAT_AGENT_EXTENSION_INPUT_TOKENS = 150_000;
 export type ChatAgentLimitName = keyof typeof CHAT_AGENT_LIMIT_DEFAULTS;
 
 export const chatAgentLimitsInputSchema = z.object({
-  /** Model steps (calls), including the final answer step. Default 6. */
+  /** Model steps (calls), including the final answer step. Default: CHAT_AGENT_BASE_STEPS, extended up to 8 while searches add evidence; a set value is a fixed budget. */
   maxSteps: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxSteps).optional(),
-  /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 12. */
+  /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 16. */
   maxToolCalls: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxToolCalls).optional(),
-  /** Upper bound for the search tool's parallel `queries` concurrency. Default 4. */
+  /** Upper bound for the search tool's parallel `queries` concurrency. Default 6. */
   searchConcurrency: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.searchConcurrency).optional(),
+  /**
+   * false: answer directly from one retrieval and one model call, without the
+   * agent's tool loop (no search, web or settings tools). Fastest and cheapest;
+   * the step and tool-call limits then do not apply. Omitted or true: the
+   * agent decides which tools to call.
+   */
+  tools: z.boolean().optional(),
+  /**
+   * Web tools (webSearch, webFetch) for this turn. false: never offered.
+   * Omitted or true: offered when the deployment, the workspace's
+   * `pipeline.webTools` and its privacy mode allow them; a request cannot
+   * enable them past those policies.
+   */
+  web: z.boolean().optional(),
+  /**
+   * Suggestions mode: the agent watches for ingestion and search problems
+   * (zero or weak results, failed or still-processing files, degraded
+   * extraction) and proposes specific workspace-setting changes. A proposal
+   * never applies itself; the user confirms each one with Apply. Default off
+   * for API callers; the DocSlurp app turns it on unless the user switches it off.
+   */
+  suggestions: z.boolean().optional(),
 }).strict();
 export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;
 
 export const chatAgentLimitsSchema = z.object({
   maxSteps: z.number().int().positive(),
+  /** Steps before the turn must show progress to continue; equals maxSteps when the caller set maxSteps. */
+  baseSteps: z.number().int().positive().optional(),
   maxToolCalls: z.number().int().positive(),
   searchConcurrency: z.number().int().positive(),
   /** Requested limits lowered to the defaults because the caller is not an admin. */
@@ -330,9 +370,11 @@ export type ChatAgentLimits = z.infer<typeof chatAgentLimitsSchema>;
  * - `no_evidence`: every search the agent ran returned zero results.
  * - `step_limit`: the step budget ended the loop while the model was still calling tools.
  * - `tool_call_limit`: at least one tool call was refused by the tool-call budget.
+ * - `deadline`: the turn's time budget ran low, so tools were disabled and the answer
+ *   was forced from the evidence gathered so far (or cut off at the deadline). HTTP 200.
  * - `timeout` / `error`: the turn failed (traces only; the HTTP response is an error).
  */
-export const CHAT_AGENT_STOP_REASONS = ["answered", "answered_without_citations", "no_evidence", "step_limit", "tool_call_limit", "timeout", "error"] as const;
+export const CHAT_AGENT_STOP_REASONS = ["answered", "answered_without_citations", "no_evidence", "step_limit", "tool_call_limit", "deadline", "timeout", "error"] as const;
 export const chatAgentStopReasonSchema = z.enum(CHAT_AGENT_STOP_REASONS);
 export type ChatAgentStopReason = z.infer<typeof chatAgentStopReasonSchema>;
 
@@ -347,6 +389,41 @@ export const chatAgentStepUsageSchema = z.object({
   toolCalls: z.array(z.string()),
 });
 export type ChatAgentStepUsage = z.infer<typeof chatAgentStepUsageSchema>;
+
+/** Search-agent turns: the time budget that applied and how the answer was reached. */
+export const chatAgentTimeBudgetDebugSchema = z.object({
+  turnDeadlineMs: z.number().int().positive(),
+  stepTimeoutMs: z.number().int().positive(),
+  toolTimeoutMs: z.number().int().positive(),
+  finalReserveMs: z.number().int().nonnegative(),
+  /** Time from the request reaching chat to the answer. */
+  elapsedMs: z.number().nonnegative(),
+  /**
+   * `loop`: the agent answered on its own. `forced`: the final-answer reserve
+   * started, so tools were disabled for the last step. `from_evidence`: a model
+   * step ran out of time and one extra no-tools call answered from the evidence.
+   * `partial`: the deadline cut the final answer off; the text so far is returned.
+   */
+  finalAnswer: z.enum(["loop", "forced", "from_evidence", "partial"]),
+  /** Model calls cancelled at their step budget. */
+  stepTimeouts: z.number().int().nonnegative(),
+  /** Tool calls cancelled at their tool budget (the model got a `tool_timeout` result). */
+  toolTimeouts: z.number().int().nonnegative(),
+  /** Tool calls refused because the final-answer reserve had started (`deadline` result). */
+  toolCallsAfterDeadline: z.number().int().nonnegative(),
+});
+export type ChatAgentTimeBudgetDebug = z.infer<typeof chatAgentTimeBudgetDebugSchema>;
+
+/**
+ * Agent modes a turn ran with. `web`: "on" (web tools offered), "off" (the
+ * request turned them off) or "unavailable" (requested, but the deployment,
+ * workspace setting, privacy mode or key scope does not allow them).
+ */
+export const chatAgentModesSchema = z.object({
+  web: z.enum(["on", "off", "unavailable"]),
+  suggestions: z.boolean(),
+});
+export type ChatAgentModes = z.infer<typeof chatAgentModesSchema>;
 
 export const workspaceChatDebugSchema = z.object({
   /** Search-agent turns only: the `model` the caller asked for (null when omitted). */
@@ -366,16 +443,19 @@ export const workspaceChatDebugSchema = z.object({
   stopReason: chatAgentStopReasonSchema.optional(),
   stepUsage: z.array(chatAgentStepUsageSchema).optional(),
   limits: chatAgentLimitsSchema.optional(),
+  timeBudget: chatAgentTimeBudgetDebugSchema.optional(),
+  modes: chatAgentModesSchema.optional(),
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),
+    settingsProposal: workspaceSettingsProposalSchema.optional(),
     /** Search calls: the query strings the model sent (its own words, never document text). */
     queries: z.array(z.string()).optional(),
     resultCount: z.number().int().nonnegative().optional(),
     zeroHit: z.boolean().optional(),
     /** Distinct pages of the evidence this call returned. */
     evidencePages: z.array(z.object({ documentId: z.string(), pageNumber: z.number().int().nullable() })).optional(),
-    /** Failed calls: `tool_call_limit`, `invalid_arguments`, `aborted`, `exception`, the tool's error code or `http_<status>`. */
+    /** Failed calls: `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's error code or `http_<status>`. */
     errorCode: z.string().optional(),
     /** Provider cost (USD cents) the tool reported for its own work. */
     costCents: z.number().nonnegative().optional(),
@@ -465,6 +545,8 @@ export const chatRetrievalOverridesSchema = z.object({
   enableGraphExpansion: z.boolean().optional(),
   enableCommunityExpansion: z.boolean().optional(),
   graphHops: z.number().int().min(1).max(3).optional(),
+  /** false: cite matched chunks only, without attaching each hit's whole parent page text. Smaller prompts and faster retrieval. */
+  parentRetrieval: z.boolean().optional(),
 }).strict();
 export type ChatRetrievalOverrides = z.infer<typeof chatRetrievalOverridesSchema>;
 
@@ -690,11 +772,15 @@ export const createWorkspaceSchema = z.object({
   userId: z.string().default("demo-user"),
   orgId: z.string().optional(),
   name: z.string().trim().min(1).max(120),
+  /** Preferred slug. Invalid or reserved: a generated one; taken by another workspace: suffixed. */
+  slug: z.string().trim().min(1).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
+  /** Enabled by default. Adds a one-time per-document processing cost to improve search results; privacy/template restrictions still apply. */
+  summaries: z.boolean().default(true),
   pipeline: pipelineFeaturesSchema.optional(),
 });
-export type CreateWorkspaceInput = z.infer<typeof createWorkspaceSchema>;
+export type CreateWorkspaceInput = z.input<typeof createWorkspaceSchema>;
 
 export const updateWorkspaceSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
@@ -702,8 +788,10 @@ export const updateWorkspaceSchema = z.object({
   slug: z.string().trim().min(3).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.nullable().optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
+  /** Generate and cache document summaries for better search. Backfill/reprocessing can incur generation and embedding costs; omission preserves the current setting. */
+  summaries: z.boolean().optional(),
   pipeline: pipelineFeaturesSchema.optional(),
-  monthlyBudgetCents: z.number().int().min(0).nullable().optional(),
+  monthlyBudgetCents: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
   /** Null (or 0) keeps artifacts indefinitely. */
   artifactRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
   /** Null (or 0) keeps runs indefinitely. */
@@ -715,7 +803,7 @@ export const updateWorkspaceSchema = z.object({
   apply: z.enum(["new-uploads", "reindex"]).optional(),
   /** Skip the confirm dialog for re-index-queuing changes; also the default `apply` for recommended changes. */
   autoConfirmReindex: z.boolean().optional(),
-  /** Versions kept per document chain (paid plans); null inherits the organization setting. */
+  /** Versions kept per document chain; null inherits the organization setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
 });
 export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;

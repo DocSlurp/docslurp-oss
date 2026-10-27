@@ -21,7 +21,7 @@ describe("MCP estimate tools", () => {
     expect(plan("fullIndexEstimate", { documentIds: ["a"] })).toEqual(["/v1/workspaces/w1/full-index/estimate", { documentIds: ["a"] }]);
     expect(plan("indexingModeEstimate", { mode: "map" })).toEqual(["/v1/workspaces/w1/indexing-mode/estimate", { mode: "map" }]);
     expect(plan("graphRebuildEstimate", {})).toEqual(["/v1/workspaces/w1/graph/jobs/estimate", {}]);
-    expect(plan("uploadEstimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }] })).toEqual(["/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }], workspaceId: "w1" }]);
+    expect(plan("uploadEstimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }] })).toEqual(["/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }], workspace: "w1" }]);
   });
 
   it("rejects invalid input and skips workspace resolution for run and document targets", () => {
@@ -46,8 +46,9 @@ describe("MCP estimate tools", () => {
     expect(ids(["ingest"])).not.toContain("updateEstimate");
     expect(ids(["workspaces:manage"])).toEqual(expect.arrayContaining(["updateEstimate", "indexingModeEstimate", "graphRebuildEstimate"]));
     expect(ids(["workspaces:manage"], "client")).not.toContain("updateEstimate");
+    expect(ids(["ingest"])).toContain("reprocessEstimate");
+    expect(ids(["ingest"], "client")).not.toContain("reprocessEstimate");
     // Session-only estimates are never offered to keys, whatever their scopes.
-    expect(ids(["search", "ingest", "workspaces:manage"])).not.toContain("reprocessEstimate");
     expect(ids(["search", "ingest", "workspaces:manage"])).not.toContain("searchSettingsEstimate");
   });
 });

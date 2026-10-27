@@ -22,13 +22,14 @@ const updatePreferencesSchema = z.object({
 });
 
 const readAllSchema = z.object({
-  workspaceId: z.string().optional()
+  /** Workspace ID, slug or name; omitted marks every workspace's notifications read. */
+  workspace: z.string().max(256).optional()
 });
 
 export const notificationsRoutes = new Hono()
   .get("/inbox", async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspaceId"));
+    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"));
     const event = c.req.query("event") as Parameters<typeof listNotificationInbox>[0]["event"];
     const limit = Number(c.req.query("limit") ?? "25");
     const inbox = await listNotificationInbox({
@@ -57,7 +58,7 @@ export const notificationsRoutes = new Hono()
     const body = c.req.valid("json");
     const updatedCount = await markAllNotificationsRead({
       userId,
-      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), body.workspaceId)
+      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), body.workspace)
     });
 
     return c.json({ updatedCount });

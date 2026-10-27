@@ -21,8 +21,9 @@ import {
   applyWorkspacePipelineOverrides,
   defaultPipelineFeatures,
   getWorkspaceTemplate,
-  isDefaultWorkspaceAlias,
   normalizePipelineFeatures,
+  parseWorkspaceInput,
+  type WorkspaceInputRef,
   type PipelineFeatureOverrides,
   type PipelineFeatures,
   type WorkspaceRecord,
@@ -31,6 +32,7 @@ import {
 } from "@docslurp/shared";
 
 import { env } from "../config.js";
+import { isReservedCanonicalId } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { deleteUploadedObject, uploadFile, uploadFileStream } from "../lib/storage.js";
 import { isSupportedUploadMimeType, resolveUploadMimeType } from "../lib/upload-policy.js";
@@ -44,7 +46,8 @@ import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDef
 import { updateWorkspaceSearchSettingsForUser } from "./search-controls.js";
 import { getUserSettings } from "./user-settings.js";
 import { deleteWorkspaceData } from "./data-deletion.js";
-import { createWorkspace, ensureDefaultWorkspace, getWorkspace, resolveWorkspaceRef } from "./workspaces.js";
+import { workspaceInputNotFoundError } from "./default-workspace.js";
+import { createWorkspace, ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "./workspaces.js";
 
 /** The run kind doubles as the source kind; it picks the validation policy. */
 export type WorkspaceIntakeKind =
@@ -53,13 +56,14 @@ export type WorkspaceIntakeKind =
   | "url-ingest"
   | "connector-sync";
 
-export type WorkspaceIntakeStatusCode = 400 | 404 | 409 | 413 | 415 | 422 | 500;
+export type WorkspaceIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 500;
 
 export class WorkspaceIntakeError extends Error {
   constructor(
     message: string,
     readonly statusCode: WorkspaceIntakeStatusCode,
     readonly issues?: Array<{ path: string; message: string; code: string }>,
+    readonly code?: "remote_format_disabled",
   ) {
     super(message);
     this.name = "WorkspaceIntakeError";
@@ -75,7 +79,7 @@ export class WorkspaceIntakeError extends Error {
 export type WorkspaceIntakeContent =
   | { bytes: Buffer }
   | { stream: Readable; contentLength?: number }
-  | { storedKey: string }
+  | { storedKey: string; /** Object-store size verified by the server, never a client declaration. */ verifiedSizeBytes?: number }
   | { rejected: WorkspaceIntakeError };
 
 export interface WorkspaceIntakeItem {
@@ -102,14 +106,22 @@ export interface WorkspaceIntakeRequest {
   userId: string;
   orgId?: string | null;
   /**
-   * Append to this workspace. When null, the org's default workspace receives
-   * the items unless `newWorkspace`, `workspaceName`, or `templateKey` asks for
-   * a fresh self-titled workspace.
+   * The public `workspace` value: a workspace UUID, slug, former slug or name
+   * (see parseWorkspaceInput). A UUID must exist; a slug or name that matches
+   * none of the caller's workspaces creates one with that display name and
+   * slug. Omitted: the org's default workspace, unless `newWorkspace` or
+   * `templateKey` asks for a fresh self-titled workspace. "default" always
+   * means the default workspace.
    */
-  workspaceId: string | null;
+  workspace?: string | null;
+  /** Without `workspace`: a fresh self-titled workspace instead of the default. Ignored when `workspace` is given. */
   newWorkspace?: boolean;
-  workspaceName?: string | null;
   templateKey?: WorkspaceTemplateKey;
+  /**
+   * An API key's workspace allowlist. A restricted key only ever resolves
+   * workspaces inside it and can never create one.
+   */
+  allowedWorkspaceIds?: readonly string[] | null;
   /**
    * Per-request overrides, merged onto the workspace pipeline. Template-locked
    * settings always keep the template's value.
@@ -121,6 +133,7 @@ export interface WorkspaceIntakeRequest {
    * (treated as `full`) while DOCSLURP_DEFERRED_PROFILES is off.
    */
   indexingMode?: IndexingMode;
+  runId?: string;
   apiKeyId?: string | null;
   kind: WorkspaceIntakeKind;
   items: Iterable<WorkspaceIntakeItem> | AsyncIterable<WorkspaceIntakeItem>;
@@ -129,6 +142,18 @@ export interface WorkspaceIntakeRequest {
   /** Sources that skip files themselves (connectors) may legitimately yield nothing. */
   mayBeEmpty?: boolean;
   audit?: WorkspaceIntakeAudit;
+  /**
+   * Extract mode: sources and every derived asset go under the extract's
+   * storage prefix and are deleted when its retention ends (services/extracts.ts).
+   */
+  extract?: IntakeExtract;
+}
+
+/** The extract a request belongs to; server-created, never read from HTTP input. */
+export interface IntakeExtract {
+  id: string;
+  /** extracts/<org>/<extract>, without a trailing slash. */
+  storagePrefix: string;
 }
 
 export interface StoredIntakeFile {
@@ -158,11 +183,12 @@ export interface RejectedIntakeFile {
   filename: string;
   /** HTTP status the file would have produced on its own. */
   statusCode: number;
-  code: "unsupported_type" | "file_too_large" | "unreadable_source" | "rejected";
+  code: "unsupported_type" | "remote_format_disabled" | "file_too_large" | "unreadable_source" | "rejected";
   message: string;
 }
 
 function rejectionCode(error: WorkspaceIntakeError): RejectedIntakeFile["code"] {
+  if (error.code === "remote_format_disabled") return error.code;
   if (error.statusCode === 415) return "unsupported_type";
   if (error.statusCode === 413) return "file_too_large";
   return "rejected";
@@ -181,12 +207,18 @@ export interface RawSourceStorage {
 }
 
 export interface WorkspaceIntakeRecords {
-  findWorkspace(workspaceId: string, userId: string): Promise<WorkspaceRecord | null>;
+  /** A workspace the scope may use that a UUID, slug or name names (see findWorkspaceForInput). */
+  findWorkspace(
+    ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>,
+    scope: WorkspaceInputScope,
+  ): Promise<WorkspaceRecord | null>;
   defaultWorkspace(args: { userId: string; orgId?: string | null }): Promise<WorkspaceRecord>;
   createWorkspace(args: {
     userId: string;
     orgId?: string;
     name: string;
+    /** Preferred slug (a `workspace` value's slug); suffixed when another workspace holds it. */
+    slug?: string;
     templateKey?: WorkspaceTemplateKey;
     /** Upload overrides for the new workspace's pipeline (merged onto its template). */
     pipeline?: PipelineFeatureOverrides;
@@ -197,8 +229,10 @@ export interface WorkspaceIntakeRecords {
     workspaceId: string;
     kind: WorkspaceIntakeKind;
     pipeline: PipelineFeatures;
-    apiKeyId?: string | null;
+    runId?: string;
+  apiKeyId?: string | null;
     files: StoredIntakeFile[];
+    extract?: IntakeExtract;
   }): Promise<CreatedRun>;
   /** Remove a workspace this request created when intake failed before any run existed. */
   discardWorkspace(workspaceId: string): Promise<void>;
@@ -227,9 +261,9 @@ export const objectStorage: RawSourceStorage = {
 };
 
 export const postgresIntakeRecords: WorkspaceIntakeRecords = {
-  async findWorkspace(workspaceRef, userId) {
-    const ref = await resolveWorkspaceRef(workspaceRef);
-    return await getWorkspace(ref?.id ?? workspaceRef, userId);
+  async findWorkspace(ref, scope) {
+    const found = await findWorkspaceForInput(ref, scope);
+    return found ? await getWorkspace(found.id, scope.userId) : null;
   },
   defaultWorkspace: ensureDefaultWorkspace,
   async createWorkspace({ autoNamed, pipeline: overrides, ...args }) {
@@ -238,7 +272,7 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     const defaults = await getUserSettings(args.userId).then((settings) => settings.general, () => null);
     const template = getWorkspaceTemplate(args.templateKey ?? null);
     const base = seedPipelineFromProcessingDefaults(
-      normalizePipelineFeatures(template?.pipeline ?? defaultPipelineFeatures),
+      normalizePipelineFeatures(template?.pipeline ?? { ...defaultPipelineFeatures, summarize: true }),
       defaults,
     );
     const pipeline = applyWorkspacePipelineOverrides(base, overrides, template);
@@ -246,6 +280,7 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     const { indexingMode, ...pipelineWithoutMode } = pipeline;
     const workspace = await createWorkspace({
       ...args,
+      summaries: pipeline.summarize,
       pipeline: overrides?.indexingMode !== undefined ? pipeline : (pipelineWithoutMode as typeof pipeline),
     });
     const searchSeed = seedSearchSettingsFromProcessingDefaults(defaults);
@@ -337,13 +372,19 @@ export function admitIntakeFile(
   kind: WorkspaceIntakeKind,
 ): { filename: string; mimeType: string } {
   const verdict = screenIntakeFile(file, kind);
-  if (!verdict.ok) throw new WorkspaceIntakeError(verdict.message, verdict.statusCode);
+  if (!verdict.ok) throw new WorkspaceIntakeError(verdict.message, verdict.statusCode, undefined, verdict.reason === "parser-surface" ? "remote_format_disabled" : undefined);
   return verdict;
 }
 
-/** The one raw-object key layout. `filename` must already be sanitized. */
-export function rawSourceKey(userId: string, filename: string): string {
-  return `${userId}/${randomUUID()}/raw/${randomUUID()}-${filename}`;
+/**
+ * The one raw-object key layout. The filename is sanitized here so a caller
+ * that forgets cannot inject `..` segments. Extract sources live under the
+ * extract's prefix so its sweep removes them with everything else.
+ */
+export function rawSourceKey(userId: string, filename: string, extract?: IntakeExtract | null): string {
+  const safe = sanitizeUploadFilename(filename, "upload.bin");
+  if (extract) return `${extract.storagePrefix}/raw/${randomUUID()}-${safe}`;
+  return `${userId}/${randomUUID()}/raw/${randomUUID()}-${safe}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +478,10 @@ async function storeItem(
   written: string[],
 ): Promise<StoredIntakeFile> {
   if ("rejected" in item.content) throw item.content.rejected;
+  // Server-minted identities only (lib/canonical-id.ts); a source adapter that passes one through is refused per file.
+  if (item.canonicalId && isReservedCanonicalId(item.canonicalId)) {
+    throw new WorkspaceIntakeError(`${sanitizeUploadFilename(item.filename)}: canonicalId must not start with docslurp: (reserved)`, 400);
+  }
   const admitted = admitIntakeFile(
     { filename: item.filename, mimeType: item.mimeType, sizeBytes: declaredSize(item) },
     request.kind,
@@ -451,9 +496,15 @@ async function storeItem(
     ...(item.path ? { path: item.path } : {}),
   });
   const { content } = item;
-  if ("storedKey" in content) return stored(content.storedKey);
+  if ("storedKey" in content) {
+    // An extract only takes sources already inside its own prefix; anything else would outlive it.
+    if (request.extract && !content.storedKey.startsWith(`${request.extract.storagePrefix}/`)) {
+      throw new WorkspaceIntakeError(`${admitted.filename} was not uploaded for this extract`, 400);
+    }
+    return stored(content.storedKey, content.verifiedSizeBytes);
+  }
 
-  const key = rawSourceKey(request.userId, admitted.filename);
+  const key = rawSourceKey(request.userId, admitted.filename, request.extract);
   written.push(key);
   if ("bytes" in content) {
     await storage.put(key, content, admitted.mimeType);
@@ -481,16 +532,41 @@ async function storeItem(
   return stored(key, measuredBytes);
 }
 
-async function findTargetWorkspace(
-  request: WorkspaceIntakeRequest & { workspaceId: string },
+/**
+ * The workspace an intake lands in, resolved before any bytes are read: an
+ * existing workspace, or what to create (name and preferred slug) when the
+ * request asks for a new one or names one that does not exist yet.
+ */
+async function resolveIntakeTarget(
+  request: WorkspaceIntakeRequest,
   records: WorkspaceIntakeRecords,
-): Promise<WorkspaceRecord> {
-  const workspace = await records.findWorkspace(request.workspaceId, request.userId);
-  if (!workspace) throw new WorkspaceIntakeError("Workspace not found.", 404);
-  if (request.orgId && workspace.orgId !== request.orgId) {
-    throw new WorkspaceIntakeError("Workspace does not belong to the requested organization", 404);
+): Promise<{ existing: WorkspaceRecord } | { create: { name?: string; slug?: string } }> {
+  const ref = parseWorkspaceInput(request.workspace);
+  if (ref.kind === "invalid") {
+    throw new WorkspaceIntakeError(ref.message, 400, [{ path: "workspace", message: "workspace must contain a letter or digit", code: "invalid_value" }]);
   }
-  return workspace;
+  const scope: WorkspaceInputScope = { userId: request.userId, orgId: request.orgId ?? null, allowedWorkspaceIds: request.allowedWorkspaceIds ?? null };
+  const restricted = (request.allowedWorkspaceIds?.length ?? 0) > 0;
+  const create = (target: { name?: string; slug?: string }) => {
+    if (restricted) {
+      throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
+    }
+    return { create: target };
+  };
+
+  if (ref.kind === "default") {
+    // An explicit "default" always means the default workspace; an omitted one unless a new workspace is asked for.
+    const explicit = Boolean(request.workspace?.trim());
+    if (!explicit && (request.newWorkspace || request.templateKey)) return create({});
+    return { existing: await records.defaultWorkspace({ userId: request.userId, orgId: request.orgId }) };
+  }
+  if (ref.kind === "id") {
+    const existing = await records.findWorkspace(ref, scope);
+    if (!existing) throw workspaceInputNotFoundError({ id: ref.id });
+    return { existing };
+  }
+  const existing = await records.findWorkspace(ref, scope);
+  return existing ? { existing } : create({ name: ref.name, slug: ref.slug });
 }
 
 /** Every file was rejected: fail the request, naming each file. */
@@ -500,13 +576,7 @@ function allRejectedError(rejected: RejectedIntakeFile[]): WorkspaceIntakeError 
   const message = rejected.length === 1
     ? rejected[0]!.message
     : `None of the ${rejected.length} files could be accepted: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
-  return new WorkspaceIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code })));
-}
-
-export function wantsNewWorkspace(
-  request: Pick<WorkspaceIntakeRequest, "newWorkspace" | "workspaceName" | "templateKey">,
-): boolean {
-  return Boolean(request.newWorkspace || request.workspaceName || request.templateKey);
+  return new WorkspaceIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code })), rejected.every(file => file.code === "remote_format_disabled") ? "remote_format_disabled" : undefined);
 }
 
 /**
@@ -529,16 +599,10 @@ export async function intakeIntoWorkspace(
   let created: CreatedRun;
 
   try {
-    // An explicit target is checked before any bytes are read or stored. The
-    // reserved "default" ID always means the org's default workspace.
-    const explicitWorkspaceId = isDefaultWorkspaceAlias(request.workspaceId) ? null : request.workspaceId;
-    const existing = explicitWorkspaceId
-      ? await findTargetWorkspace({ ...request, workspaceId: explicitWorkspaceId }, records)
-      : isDefaultWorkspaceAlias(request.workspaceId)
-        ? await records.defaultWorkspace({ userId: request.userId, orgId: request.orgId })
-      : wantsNewWorkspace(request)
-        ? null
-        : await records.defaultWorkspace({ userId: request.userId, orgId: request.orgId });
+    // The target is resolved before any bytes are read or stored.
+    const target = await resolveIntakeTarget(request, records);
+    const existing = "existing" in target ? target.existing : null;
+    const toCreate = "create" in target ? target.create : {};
 
     const files: StoredIntakeFile[] = [];
     for await (const item of request.items) {
@@ -563,13 +627,14 @@ export async function intakeIntoWorkspace(
         userId: request.userId,
         orgId: request.orgId ?? undefined,
         name:
-          request.workspaceName ??
+          toCreate.name ??
           (request.urls?.length
             ? inferWorkspaceTitleFromUrls(request.urls)
             : inferWorkspaceTitleFromFilenames(files.map((file) => file.filename))),
+        ...(toCreate.slug ? { slug: toCreate.slug } : {}),
         templateKey: request.templateKey,
         pipeline: request.indexingMode ? { ...request.pipeline, indexingMode: request.indexingMode } : request.pipeline,
-        autoNamed: !request.workspaceName,
+        autoNamed: !toCreate.name,
       }));
     if (!existing) createdWorkspaceId = workspace.id;
     // A new workspace already carries the overrides; an existing one merges them.
@@ -590,7 +655,9 @@ export async function intakeIntoWorkspace(
         kind: request.kind,
         pipeline,
         apiKeyId: request.apiKeyId,
+        runId: request.runId,
         files,
+        ...(request.extract ? { extract: request.extract } : {}),
       });
     } catch (error) {
       if (!(error instanceof AllSourcesUnreadableError)) throw error;
@@ -634,6 +701,7 @@ export async function intakeIntoWorkspace(
     metadata: {
       count: documents.length,
       mode: request.kind,
+      ...(request.extract ? { extractId: request.extract.id } : {}),
       ...(request.urls
         ? { urlCount: request.urls.length, urlOrigins: auditUrlOrigins(request.urls) }
         : {}),

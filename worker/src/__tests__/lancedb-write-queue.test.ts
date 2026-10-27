@@ -213,6 +213,19 @@ describe("LanceDbWriteQueue", () => {
     expect(maintain).toHaveBeenCalledWith(dir, TABLE, expect.objectContaining({ maxIndexSegments: undefined }));
   }, 30_000);
 
+  it("sweeps a registered table after its outbox rows are gone, from the table's own location", async () => {
+    const maintain = vi.fn(async () => ({ ok: true, rows: 10, optimizedMs: 1, indexCreated: false }));
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const background = { enabled: true, mode: "background" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 20_000, optimizeIntervalMs: 300_000 };
+    await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("sw-1", makeDocument("sw-1", 10), 10));
+    const key = `${dir}#${TABLE}`;
+    expect(await sql`select lance_uri, lance_table from vector_index_tables where table_key = ${key}`).toEqual([{ lance_uri: dir, lance_table: TABLE }]);
+    await sql`delete from vector_index_outbox where table_key = ${key}`;
+    expect(await queue({ maintain, maintenance: background, pool }).sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    expect(maintain).toHaveBeenCalledWith(dir, TABLE, expect.anything());
+  }, 30_000);
+
   it("background mode returns once rows are committed and runs maintenance in the pool", async () => {
     const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
     let release!: () => void;
@@ -278,7 +291,7 @@ describe("lanceDbMaintenanceSettings write-path tuning", () => {
   it("defaults to the queued writer with 10-minute version retention", async () => {
     const { lanceDbMaintenanceSettings, DEFAULT_LANCEDB_CADENCE } = await import("../stages/lancedb-maintenance.js");
     const defaults = lanceDbMaintenanceSettings(new URLSearchParams(), {});
-    expect(defaults).toMatchObject({ writeMode: "queued", versionRetentionMs: 600_000, optimizeEveryRows: DEFAULT_LANCEDB_CADENCE.optimizeEveryRows, queueBatchDocuments: 256 });
+    expect(defaults).toMatchObject({ writeMode: "queued", versionRetentionMs: 600_000, vectorIndexMinRows: 1_000, optimizeEveryRows: DEFAULT_LANCEDB_CADENCE.optimizeEveryRows, queueBatchDocuments: 256 });
     const tuned = lanceDbMaintenanceSettings(new URLSearchParams("writeMode=direct&versionRetentionMinutes=30&queueBatchRecords=5000"), {});
     expect(tuned).toMatchObject({ writeMode: "direct", versionRetentionMs: 1_800_000, queueBatchRecords: 5_000 });
     expect(lanceDbMaintenanceSettings(new URLSearchParams("writeMode=direct"), { LANCEDB_WRITE_MODE: "queued" }).writeMode).toBe("queued");

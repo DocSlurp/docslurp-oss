@@ -147,7 +147,7 @@ describe("chatWorkspace", () => {
     generateAnthropicText.mockReset();
     generateAnthropicDocumentText.mockReset();
     configureSearchFromChat.mockReset();
-    configureSearchFromChat.mockResolvedValue(buildSearchSettings());
+    configureSearchFromChat.mockResolvedValue({ settings: buildSearchSettings(), changes: [], unchanged: [], workspaceScopeRequested: false });
     refineWorkspaceNames.mockReset();
     refineWorkspaceNames.mockResolvedValue(undefined);
     getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
@@ -226,6 +226,28 @@ describe("chatWorkspace", () => {
     },
   );
 
+  it("tells the agent exactly which search setting the message changed, and that it is thread-only", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    const settings = buildSearchSettings();
+    configureSearchFromChat.mockResolvedValue({
+      settings: { ...settings, retrievalDefaults: { ...settings.retrievalDefaults, useRerank: true } },
+      changes: [{ field: "useRerank", before: false, after: true }], unchanged: [], workspaceScopeRequested: false,
+    });
+    runChatMcpAgent.mockResolvedValue({ answer: "I turned reranking on for this chat.", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Please turn on search reranking for this workspace", history: [],
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      const { workspaceInstructions } = runChatMcpAgent.mock.calls[0]![0] as { workspaceInstructions: string };
+      expect(workspaceInstructions).toContain("useRerank false→true (this thread only; workspace defaults unchanged)");
+      expect(workspaceInstructions).not.toContain("already been processed");
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
   it.each([false, true])("honors the trusted agent entrypoint permission (%s) with a verified actor and key", async (allowAgentTools) => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
@@ -244,6 +266,26 @@ describe("chatWorkspace", () => {
         expect(runChatMcpAgent).not.toHaveBeenCalled();
         expect(hybridSearch).toHaveBeenCalledOnce();
       }
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
+  it("answers directly with agent.tools false and passes parentRetrieval through to retrieval", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, results: [], reason: "empty-workspace", stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowAgentTools: true, allowConfiguration: false,
+        agent: { tools: false }, retrieval: { parentRetrieval: false },
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      expect(runChatMcpAgent).not.toHaveBeenCalled();
+      expect(hybridSearch).toHaveBeenCalledOnce();
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ parentRetrieval: false }));
     } finally {
       if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
     }
@@ -280,7 +322,7 @@ describe("chatWorkspace", () => {
         model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
         actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
       expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
-        limits: { maxSteps: 10, maxToolCalls: 12, searchConcurrency: 8, clamped: [] } }));
+        limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
       expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
     } finally {
       if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
@@ -309,12 +351,12 @@ describe("chatWorkspace", () => {
       if (allowed) {
         await turn("inception/mercury-3");
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "inception/mercury-3",
-          limits: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
+          limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
       } else {
         await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
         await turn();
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
-          limits: { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
+          limits: { maxSteps: 8, baseSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
       }
     } finally {
       for (const [name, value] of [["OPENROUTER_API_KEY", previous.key], ["DOCSLURP_CHAT_EVAL_MODELS", previous.models], ["DOCSLURP_CHAT_EVAL_ORG_IDS", previous.orgs]] as const) {
@@ -538,13 +580,16 @@ describe("chatWorkspace", () => {
     const usageInserts = sqlMock.mock.calls.filter(([strings]) =>
       Array.isArray(strings) && strings.join(" ").includes("insert into usage_events"),
     );
-    expect(usageInserts).toHaveLength(2);
+    expect(usageInserts).toHaveLength(3);
     expect(usageInserts.map((call) => [call[6], call[10], call[11]])).toEqual([
       ["embed-query", 7, 0],
       ["workspace-chat", 10, 4],
+      // The billable unit: one chat answer at its model tier (provider events above bill 0).
+      ["chat-answer", 0, 0],
     ]);
-    // Both search and chat spend are stamped with the org scope.
-    for (const call of usageInserts) {
+    expect(JSON.parse(String(usageInserts[2]![12]))).toMatchObject({ billable: true, unitCharge: true, workspaceId: "ws-1" });
+    // Both search and chat provider spend are stamped with the org scope.
+    for (const call of usageInserts.slice(0, 2)) {
       expect(JSON.parse(String(call[12]))).toMatchObject({
         workspaceId: "ws-1",
         orgId: "org-1",
@@ -672,6 +717,34 @@ describe("chatWorkspace", () => {
     expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
     const persisted = sqlMock.mock.calls.some((call) => call.slice(1).includes("assistant"));
     expect(persisted).toBe(false);
+  });
+
+  it("runs a nested grounded answer's model call under the calling agent turn's signal", async () => {
+    sqlMock.mockResolvedValue([]);
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "chunk-limit-exceeded", results: [],
+      stats: { documentCount: 1, chunkCount: 30, tokenEstimate: 15000, charEstimate: 40000, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    hybridSearch.mockResolvedValue({
+      sessionId: "search-1",
+      results: [{
+        text: "workspace excerpt", score: 1, parentText: "workspace excerpt",
+        citation: { documentId: "doc-1", filename: "doc.pdf", pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] },
+      }],
+    });
+    generateAnthropicDocumentText.mockResolvedValue({ text: "answer [1]", usage: { inputTokens: 10, outputTokens: 4 }, sources: [] });
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const { runInChatAgentContext } = await import("../lib/chat-agent-context.js");
+    const turn = new AbortController();
+    await runInChatAgentContext("chat-turn", () => chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what changed?", allowAgentTools: false }), turn.signal);
+    expect(generateAnthropicDocumentText).toHaveBeenCalledWith(expect.objectContaining({ signal: turn.signal }));
+
+    generateAnthropicDocumentText.mockClear();
+    turn.abort();
+    await expect(runInChatAgentContext("chat-turn", () => chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what changed?", allowAgentTools: false }), turn.signal))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
   });
 
   it("returns processing availability when chat runs before indexes are ready", async () => {
@@ -1012,6 +1085,85 @@ describe("chatWorkspace", () => {
     );
     expect(hybridSearch).not.toHaveBeenCalled();
   });
+
+  it("includes summaries beyond eight files and discloses incomplete coverage", async () => {
+    const { startMigratedPostgres } = await import("@docslurp/worker/testing");
+    const { default: postgres } = await import("postgres");
+    const database = await startMigratedPostgres();
+    const db = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
+    try {
+      await db`insert into "user" (id, name, email) values ('user-1', 'Test', 'summary@example.test')`;
+      await db`insert into organizations (id, name, slug, created_by_user_id)
+        values ('org-1', 'Test', 'test', 'user-1')`;
+      await db`insert into workspaces (id, org_id, user_id, name)
+        values ('ws-1', 'org-1', 'user-1', 'Test'), ('ws-2', 'org-1', 'user-1', 'Other')`;
+      await db`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+        values ('run-1', 'org-1', 'user-1', 'ws-1', 'upload', 'completed', 'complete', '{}')`;
+      for (let index = 1; index <= 12; index++) {
+        await db`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+          values (${`doc-${index}`}, 'org-1', 'user-1', 'ws-1', 'run-1',
+            ${`file-${String(index).padStart(2, "0")}.pdf`}, 'application/pdf', ${`raw/${index}`}, 'completed')`;
+        await db`insert into document_summaries (id, document_id, run_id, user_id, summary)
+          values (${`summary-${index}`}, ${`doc-${index}`}, 'run-1', 'user-1', ${`Distinct subject ${index}.`})`;
+      }
+      await db`insert into document_summaries (id, document_id, run_id, user_id, summary, created_at)
+        values ('old-summary', 'doc-12', 'run-1', 'user-1', 'Obsolete subject.', '2000-01-01')`;
+      sqlMock.mockImplementation(async (strings, ...values) => {
+        if (!strings.join(" ").includes("from document_summaries")) return [];
+        const query = strings.reduce((text: string, part: string, index: number) =>
+          text + (index ? `$${index}` : "") + part, "");
+        return await db.unsafe(query, values);
+      });
+      getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+      loadWorkspaceWholeCorpusContext.mockResolvedValue({
+        eligible: false, reason: "chunk-limit-exceeded", results: [],
+        stats: { documentCount: 12, chunkCount: 120, tokenEstimate: 100000, charEstimate: 400000,
+          maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+      });
+      generateAnthropicDocumentText.mockResolvedValue({
+        text: "The final document covers distinct subject 12 [12].",
+        usage: { inputTokens: 100, outputTokens: 10 }, sources: [],
+      });
+      process.env.ANTHROPIC_API_KEY = "test-key";
+      const request = { workspaceId: "ws-1", userId: "user-1",
+        query: "Summarize this workspace", allowConfiguration: false };
+      const response = await chatWorkspace(request);
+      expect(response.citations).toHaveLength(12);
+      expect(generateAnthropicDocumentText.mock.calls[0]?.[0].documents.at(-1).text)
+        .toBe("Distinct subject 12.");
+      expect(response.answer).not.toContain("Partial workspace overview");
+      expect(hybridSearch).not.toHaveBeenCalled();
+
+      // Missing and oversized summaries must be disclosed. Excluded documents
+      // must appear in neither the evidence nor its coverage denominator.
+      for (const id of ["missing", "oversized", "blocked", "superseded", "other"]) {
+        await db`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, superseded_at)
+          values (${id}, 'org-1', 'user-1', ${id === "other" ? "ws-2" : "ws-1"}, 'run-1',
+            ${`z-${id}.pdf`}, 'application/pdf', ${`raw/${id}`},
+            ${id === "blocked" ? "pii_blocked" : "completed"}, ${id === "superseded" ? new Date() : null})`;
+        await db`insert into document_summaries (id, document_id, run_id, user_id, summary)
+          values (${`summary-${id}`}, ${id}, 'run-1', 'user-1',
+            ${id === "missing" ? "  " : id === "oversized" ? "x".repeat(60_001) : "Excluded content."})`;
+      }
+      const onTextDelta = vi.fn();
+      const partial = await chatWorkspace({ ...request, onTextDelta });
+      expect(partial.citations).toHaveLength(12);
+      expect(partial.answer).toContain("using summaries for 12 of 14 current documents");
+      expect(partial.answer).toContain("Documents without a stored summary: 1");
+      expect(partial.answer).toContain("Summaries omitted by the context budget: 1");
+      expect(onTextDelta.mock.calls[0]?.[0]).toContain("Partial workspace overview");
+      expect(generateAnthropicDocumentText.mock.calls.at(-1)?.[0].system)
+        .toContain("Do not present this as complete workspace coverage");
+
+      generateAnthropicDocumentText.mockRejectedValue(new Error("model unavailable"));
+      const fallback = await chatWorkspace(request);
+      expect(fallback.debug.fallback).toBe(true);
+      expect(fallback.answer).toContain("using summaries for 12 of 14 current documents");
+    } finally {
+      await db.end();
+      await database.stop();
+    }
+  }, 120_000);
 
   it("answers summary prompts from whole indexed corpus when document summaries are unavailable", async () => {
     sqlMock.mockResolvedValue([]);

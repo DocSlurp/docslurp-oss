@@ -13,7 +13,10 @@ export interface WorkspaceRun {
   id: string;
   orgId: string | null;
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
-  orgPlanId?: string | null;
+  /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
+  orgFunded?: boolean;
+  /** False when the org turned off China-based model providers. */
+  orgAllowChinaProviders?: boolean;
   userId: string;
   workspaceId?: string;
   kind: string;
@@ -37,6 +40,9 @@ export interface WorkspaceRun {
   stats: JsonMap;
   artifacts: Record<string, string>;
   claimId: string | null;
+  /** Extract runs (workspace_runs.extract_id) write every artifact under this prefix instead of <user>/<run>. */
+  storagePrefix?: string | null;
+  extractId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -53,6 +59,8 @@ export interface Document {
   pageCount: number;
   createdAt: Date;
   updatedAt: Date;
+  /** Set for documents of an extract run: the run's storage prefix (see runArtifactRoot). */
+  artifactRoot?: string | null;
 }
 
 export interface UsageEvent {

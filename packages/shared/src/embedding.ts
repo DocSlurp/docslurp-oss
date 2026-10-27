@@ -315,6 +315,51 @@ const embeddingModelEntries = [
   ["llm://transformers.js/Xenova/all-mpnet-base-v2", "MPNet Base v2", "local", "local", "transformers.js", "Xenova/all-mpnet-base-v2", 768, 16, false, ["local", "quality"]],
 ] as const;
 
+/**
+ * How token vectors become one embedding. `mean` averages them (the
+ * historical default for every local model); `cls` takes the first token, which
+ * is how BGE models (bge-m3, bge-*-en-v1.5) are trained and what hosted bge-m3
+ * returns. Local routes choose with `?pooling=`; hosted routes return their
+ * provider's pooling and accept only that value.
+ */
+export const embeddingPoolingSchema = z.enum(["mean", "cls"]);
+export type EmbeddingPooling = z.infer<typeof embeddingPoolingSchema>;
+
+/** Pooling hosted providers apply (they ignore any pooling option): DeepInfra serves bge-m3 CLS-pooled. */
+const HOSTED_EMBEDDING_POOLING: Record<string, EmbeddingPooling> = {
+  "llm://deepinfra/BAAI/bge-m3": "cls",
+};
+
+/** The catalog key of an embedding route: the URI without its query (`?pooling=cls`). */
+export function embeddingModelBaseUri(modelUri: string): string {
+  const query = modelUri.indexOf("?");
+  return query === -1 ? modelUri : modelUri.slice(0, query);
+}
+
+/** Pooling a local route runs with: `?pooling=` when given, else mean (the vectors existing indexes hold). */
+export function localEmbeddingPooling(modelUri: string): EmbeddingPooling {
+  const query = modelUri.indexOf("?");
+  const value = query === -1 ? null : new URLSearchParams(modelUri.slice(query + 1)).get("pooling");
+  return value === "cls" ? "cls" : "mean";
+}
+
+/** Why a route's `?pooling=` cannot be honoured, or null. */
+export function embeddingPoolingProblem(modelUri: string): string | null {
+  const query = modelUri.indexOf("?");
+  if (query === -1) return null;
+  const value = new URLSearchParams(modelUri.slice(query + 1)).get("pooling");
+  if (value === null) return null;
+  if (!embeddingPoolingSchema.safeParse(value).success) return `Unknown pooling "${value}": use mean or cls`;
+  const base = embeddingModelBaseUri(modelUri);
+  const provider = base.slice("llm://".length).split("/")[0]?.toLowerCase() ?? "";
+  if (provider === "transformers.js") return null;
+  if (isLocalModelProvider(provider)) return `${base} pools on its server; remove ?pooling=`;
+  const native = HOSTED_EMBEDDING_POOLING[base];
+  if (!native) return `${base} returns its provider's pooling; remove ?pooling=`;
+  if (native !== value) return `${base} is ${native}-pooled by the provider; ?pooling=${value} cannot be honoured`;
+  return null;
+}
+
 export const embeddingModelCatalogByUri = Object.fromEntries(
   embeddingModelEntries.map(([
     uri,
@@ -345,7 +390,7 @@ export const embeddingModelCatalogByUri = Object.fromEntries(
 const reducedDimensionLocalProviders = new Set(["vllm", "ollama", "lmstudio", "transformers.js"]);
 
 export function supportsReducedEmbeddingDimensions(modelUri: string): boolean {
-  const known = embeddingModelCatalogByUri[modelUri];
+  const known = embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)];
   if (known) {
     return (known.provider === "openai" && known.supportsCustomDimensions) || known.runtime === "local";
   }
@@ -412,7 +457,7 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
       baseUrl: lookup.ok ? lookup.route.baseUrl : null,
     };
   }
-  const known = embeddingModelCatalogByUri[config.modelUri];
+  const known = embeddingModelCatalogByUri[embeddingModelBaseUri(config.modelUri)];
   const openAiCompatibleLocal = ["ollama", "vllm", "lmstudio"].includes(parsed.provider);
   const defaultBaseUrl =
     parsed.provider === "ollama" ? "http://127.0.0.1:11434/v1" :
@@ -461,7 +506,14 @@ export const visionRuntimeSchema = z.enum([
 ]);
 export type VisionRuntime = z.infer<typeof visionRuntimeSchema>;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-export const DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-3.1-flash-lite";
+/**
+ * The hosted vision model behind the default profile (`good-fast-hosted`). Switching the default is a one-line
+ * change here: the profile label and description, the default config and the default-derived values follow.
+ * It must be a hosted `visionModelCatalog` id (checked by the catalog tests).
+ */
+// Tuned DeepSeek V4.1 Flash 1017 (US-hosted routes): best quality tier, fastest and cheaper per page than Gemini 3.1
+// Flash Lite on the 2026-10-22 vision holdout. Roll back without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
+export const DEFAULT_OPENROUTER_VISION_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 /** Opt-in hosted vision route; OpenRouter list price verified 2026-10-20 ($0.15/M input, $0.50/M output). */
 export const NEMOTRON_SUPER_VL_VISION_MODEL = "nvidia/nemotron-3.5-super-vl";
 export const DEFAULT_LOCAL_OCR_MODEL = "microsoft/Florence-2-base-ft";
@@ -525,16 +577,16 @@ export const visionModelCatalog = [
     tokenPricing: null,
   },
   {
-    id: DEFAULT_OPENROUTER_VISION_MODEL,
-    uri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
+    id: "google/gemini-3.1-flash-lite",
+    uri: "llm://openrouter/google/gemini-3.1-flash-lite",
     label: "Gemini 3.1 Flash Lite",
     target: "hosted",
     tags: ["hosted", "speed", "quality"],
     runtime: "openai-compatible",
     description:
-      "Default OpenRouter multimodal fallback for low-latency, high-volume page extraction.",
+      "OpenRouter multimodal model for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
-    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-25" },
   },
   {
     id: "google/gemini-2.5-flash-lite",
@@ -546,7 +598,7 @@ export const visionModelCatalog = [
     description:
       "Ultra-low-cost OpenRouter multimodal option for lightweight page rescue.",
     estimatedCostPerPageCents: 0.25,
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-25" },
   },
   {
     id: NEMOTRON_SUPER_VL_VISION_MODEL,
@@ -560,7 +612,69 @@ export const visionModelCatalog = [
     // Conservative like the Gemini entry. A 3-page smoke measured 0.02-0.07 cents per page (1.2k-3.2k input
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
-    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+  },
+  // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
+  // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
+  {
+    id: "deepseek/deepseek-v4.1-flash-1017",
+    uri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017",
+    label: "DeepSeek V4.1 Flash 1017",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (MIT) DeepSeek multimodal snapshot via US-hosted providers; Markdown/LaTeX page transcription.",
+    // Measured 0.103 cents per page (2026-10-22 select split, docs/model-configuration.md). The token prices are the
+    // pinned US route's (Together, Fireworks, Parasail: $0.30/$1.20 per 1M, OpenRouter endpoints checked 2026-10-26),
+    // not the $0.15/$0.60 model list price, which is DeepSeek's own China-hosted endpoint and is never used. At list
+    // price the SELF_HOSTED_PAGE_TOKENS formula gave 0.0705 cents, 32% under the measurement (the 2026-10-26 margin
+    // audit); at the route price it gives 0.141 cents, a conservative bound for flat-tier eligibility.
+    estimatedCostPerPageCents: 0.103,
+    tokenPricing: {
+      inputUsdPerMillion: 0.3,
+      outputUsdPerMillion: 1.2,
+      checked: "2026-10-26",
+      basis: "pinned-route",
+      providers: ["together", "fireworks", "parasail"],
+    },
+  },
+  {
+    id: "xiaomi/mimo-v2.6-flash",
+    uri: "llm://openrouter/xiaomi/mimo-v2.6-flash",
+    label: "MiMo V2.6 Flash",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
+    estimatedCostPerPageCents: 0.056,
+    tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-25" },
+  },
+  {
+    id: "openai/gpt-6-luna",
+    uri: "llm://openrouter/openai/gpt-6-luna",
+    label: "GPT-6 Luna",
+    target: "hosted",
+    tags: ["hosted", "cost", "quality"],
+    runtime: "openai-compatible",
+    description:
+      "OpenAI GPT-6 Luna on OpenRouter; opt-in low-cost page extraction with high-detail images and a content-filter retry route.",
+    estimatedCostPerPageCents: 0.061,
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+  },
+  {
+    id: "z-ai/glm-5.3-flash",
+    uri: "llm://openrouter/z-ai/glm-5.3-flash",
+    label: "GLM 5.3 Flash",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in page extraction.",
+    // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
+    estimatedCostPerPageCents: 0.073,
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
   },
   {
     id: "gpt-4.1-mini",
@@ -572,7 +686,7 @@ export const visionModelCatalog = [
     description:
       "Hosted remote fallback for difficult pages when local models miss the quality bar.",
     estimatedCostPerPageCents: 3,
-    tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-25" },
   },
 ] as const;
 
@@ -606,7 +720,17 @@ export const visionModelCatalogByUri = Object.fromEntries(
   visionModelCatalog.map((entry) => [entry.uri, entry]),
 ) as Record<string, VisionModelPreset>;
 
-export type VisionTokenPricing = { inputUsdPerMillion: number; outputUsdPerMillion: number; checked: string };
+export type VisionTokenPricing = {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+  checked: string;
+  /**
+   * `pinned-route`: the highest price among the OpenRouter providers the model's vision profile pins with fallbacks off
+   * (`providers`), used when that route costs more than the model's list price. Absent: the OpenRouter list price.
+   */
+  basis?: "pinned-route";
+  providers?: readonly string[];
+};
 
 /** List token price of a cataloged hosted vision model (by id or `llm://` URI); null for local or unknown models. */
 export function visionModelTokenPricing(idOrUri: string): VisionTokenPricing | null {
@@ -623,6 +747,9 @@ export function visionListPriceCents(
   if (!pricing) return null;
   return (usage.inputTokens * pricing.inputUsdPerMillion + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
 }
+
+/** The profile a workspace gets when it picks no vision model or profile. */
+export const DEFAULT_VISION_PROFILE = "good-fast-hosted" satisfies VisionProfileKey;
 
 export const visionProfileKeySchema = z.enum([
   "cheapest-local",
@@ -677,7 +804,8 @@ export const visionProfileCatalog = {
   },
   "good-fast-hosted": {
     label: "Good + fast hosted",
-    description: "Default hosted Gemini route balancing extraction quality and latency.",
+    // Derived from the default model's catalog entry so switching DEFAULT_OPENROUTER_VISION_MODEL needs no copy edits.
+    description: `Default hosted route (${visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].label}) balancing extraction quality and latency.`,
     tags: ["quality", "speed", "hosted"],
     config: {
       profile: "good-fast-hosted",
@@ -903,7 +1031,7 @@ export const parserPlaybookCatalog: Record<
   "layout-aware": {
     label: "Dynamic",
     description:
-      "Prefer docling/native-pdf; align blocks with parser geometry.",
+      "Prefer kreuzberg/native-pdf; align blocks with parser geometry.",
     est: { costCentsPer100Pages: 10, latencySecPer100Pages: 180 },
     guidance: {
       preferLayoutMarkdown: true,
@@ -954,11 +1082,13 @@ export const embeddingConfigSchema = z
     const defaults = embeddingProfileCatalog[value.profile].config;
     const modelUri = value.modelUri ?? defaults.modelUri;
     if (!llmModelUriSchema.safeParse(modelUri).success) return;
+    const poolingProblem = embeddingPoolingProblem(modelUri);
+    if (poolingProblem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["modelUri"], message: poolingProblem });
     if (parseLlmModelUri(modelUri).provider === "openrouter" && parseLlmModelUri(modelUri).params.has("baseUrl")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["modelUri"], message: "OpenRouter embedding routes use the fixed official endpoint" });
     }
     if (value.dimensions !== undefined) {
-      const model = embeddingModelCatalogByUri[modelUri];
+      const model = embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)];
       if (!supportsReducedEmbeddingDimensions(modelUri) || (model && value.dimensions > model.dimensions)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dimensions"], message: "Custom dimensions require a supported OpenAI embedding model, a local transformers.js model, or a local OpenAI-compatible server (vLLM, Ollama, LM Studio), and cannot exceed the model's native dimensions" });
       }
@@ -1009,7 +1139,7 @@ export const defaultEmbeddingConfig: EmbeddingConfig = {
 
 export const visionConfigSchema = z
   .object({
-    profile: visionProfileKeySchema.default("good-fast-hosted"),
+    profile: visionProfileKeySchema.default(DEFAULT_VISION_PROFILE),
     target: modelTargetSchema.optional(),
     modelUri: llmModelUriSchema.optional(),
     prompt: z.string().trim().min(1).max(200).default("<OCR>"),
@@ -1067,13 +1197,67 @@ export const visionConfigSchema = z
 export type VisionConfig = z.infer<typeof visionConfigSchema>;
 
 export const defaultVisionConfig: VisionConfig = {
-  ...visionProfileCatalog["good-fast-hosted"].config,
+  ...visionProfileCatalog[DEFAULT_VISION_PROFILE].config,
   prompt: "<OCR>",
   maxPagesPerDocument: 4,
   forceAllPages: false,
   remoteFallbackModelUri: null,
   benchmarkProfile: "difficult-pages",
 };
+
+/** Env var that replaces the default hosted vision model (a global switch and kill switch). */
+export const VISION_MODEL_URI_ENV = "DOCSLURP_VISION_MODEL_URI";
+
+const reportedVisionOverrideErrors = new Set<string>();
+
+/**
+ * The validated `DOCSLURP_VISION_MODEL_URI` value, or null when unset or invalid. It must be an `llm://` URI of a
+ * hosted model in `visionModelCatalog`: uncataloged models would be priced at the generic fallback rates and
+ * under-count spend. An invalid value is reported once and ignored, so a typo never breaks ingestion.
+ */
+export function readVisionModelUriOverride(
+  env: Record<string, string | undefined> = process.env,
+  onError: (message: string) => void = (message) => console.error(message),
+): string | null {
+  const raw = env[VISION_MODEL_URI_ENV]?.trim();
+  if (!raw) return null;
+  const entry = llmModelUriSchema.safeParse(raw).success ? visionModelCatalogByUri[raw] : undefined;
+  if (entry?.target === "hosted") return entry.uri;
+  if (!reportedVisionOverrideErrors.has(raw)) {
+    reportedVisionOverrideErrors.add(raw);
+    onError(
+      `[config] ${VISION_MODEL_URI_ENV}=${raw} ignored: expected one of ${
+        visionModelCatalog.filter((model) => model.target === "hosted").map((model) => model.uri).join(", ")
+      }`,
+    );
+  }
+  return null;
+}
+
+export function resetVisionModelUriOverrideReports(): void {
+  reportedVisionOverrideErrors.clear();
+}
+
+/**
+ * Applies `DOCSLURP_VISION_MODEL_URI` to a pipeline whose vision config is still the built-in default (default
+ * profile, its own model URI). A non-default profile or any other model URI is an explicit choice and wins, and
+ * non-standard privacy modes are left untouched. Call where a run or preview consumes a stored pipeline; never
+ * before persisting one, or the override would be saved as if the workspace had chosen it.
+ */
+export function applyDefaultVisionOverride<T extends { vision: VisionConfig; privacyMode?: string }>(
+  pipeline: T,
+  env: Record<string, string | undefined> = process.env,
+  onError?: (message: string) => void,
+): T {
+  const override = readVisionModelUriOverride(env, onError);
+  if (!override) return pipeline;
+  if (pipeline.privacyMode && pipeline.privacyMode !== "standard") return pipeline;
+  const defaults = visionProfileCatalog[DEFAULT_VISION_PROFILE].config;
+  const { vision } = pipeline;
+  if (vision.profile !== DEFAULT_VISION_PROFILE || vision.modelUri !== defaults.modelUri) return pipeline;
+  if (override === vision.modelUri) return pipeline;
+  return { ...pipeline, vision: { ...vision, modelUri: override, target: "hosted" } };
+}
 
 export type VisionExecutionConfig = {
   target: ModelTarget;

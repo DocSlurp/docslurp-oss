@@ -16,8 +16,14 @@ import type {
   WorkspaceChatFallbackReason,
 } from "@docslurp/shared";
 import {
+  BILLABLE_UNIT_METRICS,
+  PRICE_CARD,
+  searchCredits,
   deferredProfilesEnabled,
   citationLocatorSchema,
+  indexConfigHash,
+  indexConfigOf,
+  type PipelineFeatures,
   MAX_LOCATOR_BOXES,
   resolveEmbeddingRoute,
   normalizePageNumber,
@@ -25,9 +31,21 @@ import {
 } from "@docslurp/shared";
 
 import { sql, type SqlClient } from "../db.js";
+import { recordUnitCharge } from "../lib/ai-usage.js";
+import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
-import { lanceDbVectorSearch } from "../search/lancedb.js";
+import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
+import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
+import {
+  loadEligibleDocuments,
+  matchesServingHash,
+  nativeScopeSupported,
+  scopeEligibleDocuments,
+  type EligibleDocument,
+} from "../search/eligible-documents.js";
+import { reciprocalRankFusion } from "../search/rrf.js";
+import type { IndexConfigMap } from "../search/index-serving.js";
 import { servedVectorSearch, type IndexServing } from "../search/index-serving.js";
 import { embedQuery } from "../search/session-planner.js";
 import type { SearchFilters } from "../search/filters.js";
@@ -50,7 +68,8 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
-import { withSearchSlot } from "../search/search-limiter.js";
+import { currentSearchAdmissionGroup, withSearchSlot, type SearchAdmission } from "../search/search-limiter.js";
+import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import {
   boundedSearchQuery,
   currentSearchSignal,
@@ -742,11 +761,12 @@ async function vectorSearch(
   if (!access) return [];
 
   const embedding = resolveEmbeddingRoute(serving?.embedding ?? (await loadWorkspacePipeline(workspaceId)).embedding);
-  // Persisted model/dimension metadata prevents legacy tables from mixing vector spaces.
-  // Dedup copies (same content re-ingested) own no LanceDB rows: their vectors
-  // stay keyed by the document that was embedded. Walk deduped_from to that
-  // owner so copies are searchable, then map hits to the copy's chunk with the
-  // same chunk index.
+  // Persisted model/dimension metadata keeps vector spaces apart.
+  // Dedup copies (same content re-ingested) in the owner's workspace own no
+  // LanceDB rows: their vectors stay keyed by the document that was embedded.
+  // Walk deduped_from to that owner so copies are searchable, then map hits to
+  // the copy's chunk with the same chunk index. A copy in another workspace
+  // has its own rows in this workspace's database and is hit directly.
   const docRows = await sql<{ id: string; owner_id: string }[]>`
     with recursive current_docs as (
       select distinct d.id from documents d
@@ -764,7 +784,8 @@ async function vectorSearch(
       union all
       select chain.id, d.id, d.deduped_from_document_id, chain.depth + 1
       from chain join documents d on d.id = chain.next
-      where chain.depth < 8
+      -- Stop at the workspace boundary: only this workspace's database is searched.
+      where chain.depth < 8 and d.workspace_id = ${workspaceId}
     )
     select distinct on (chain.id) chain.id, chain.node as owner_id
     from chain
@@ -788,11 +809,11 @@ async function vectorSearch(
 
   const limit = options.limit ?? 20;
 
-  // ANN search across LanceDB shard tables
+  // ANN search in this workspace's LanceDB database
   const hits = await lanceDbVectorSearch({
     orgId: access.orgId,
+    workspaceId,
     embeddingModel: embedding.model,
-    legacyDocumentIds: searchDocumentIds,
     queryVector,
     documentIds: searchDocumentIds,
     limit,
@@ -801,9 +822,30 @@ async function vectorSearch(
 
   if (hits.length === 0) return [];
 
-  // Hydrate full chunk data from PostgreSQL (metadata, heading_path, etc.):
-  // own chunks by id, dedup copies by (copy document, chunk index).
   const currentIds = new Set(documentIds);
+  const rowsByHit = await hydrateHitsFromPostgres(hits, currentIds, copiesByOwner, workspaceId, options);
+  // Preserve LanceDB ranking order
+  const seen = new Set<string>();
+  return hits.flatMap((hit) => (rowsByHit.get(hit.id) ?? []).flatMap((row) => {
+    if (seen.has(row.id)) return [];
+    seen.add(row.id);
+    return [mapChunk(row, hit.score)];
+  }));
+}
+
+/**
+ * Chunk rows for LanceDB hits from PostgreSQL (metadata, heading_path, etc.):
+ * own chunks by id, dedup copies by (copy document, chunk index). One query.
+ */
+async function hydrateHitsFromPostgres(
+  hits: LanceDbSearchHit[],
+  currentIds: ReadonlySet<string>,
+  copiesByOwner: ReadonlyMap<string, string[]>,
+  workspaceId: string,
+  options: SearchOptions,
+): Promise<Map<string, ChunkRow[]>> {
+  const rowsByHit = new Map<string, ChunkRow[]>();
+  if (hits.length === 0) return rowsByHit;
   const ownHitIds = hits.filter((hit) => currentIds.has(hit.documentId)).map((hit) => hit.id);
   const copyPairs = hits.flatMap((hit) => currentIds.has(hit.documentId) || hit.chunkIndex === null
     ? []
@@ -828,16 +870,203 @@ async function vectorSearch(
     where d.workspace_id = ${workspaceId}
       and ${whereClause}
   `;
-
-  // Preserve LanceDB ranking order
-  const rowsByHit = new Map<string, ChunkRow[]>();
   for (const row of rows) rowsByHit.set(row.hit_id, [...(rowsByHit.get(row.hit_id) ?? []), row]);
+  return rowsByHit;
+}
+
+/**
+ * Native (SEARCH_LANCEDB_NATIVE) hydration: a hit on a document in scope
+ * whose row carries the hydration columns becomes a chunk with no Postgres
+ * read. Rows without them (tables not backfilled yet) and hits that serve
+ * dedup copies are hydrated from Postgres in one query. Order and scores
+ * follow `hits`; `score(hit, index)` sets each chunk's score.
+ */
+async function hydrateNativeHits(args: {
+  hits: LanceDbSearchHit[];
+  documents: ReadonlyMap<string, EligibleDocument>;
+  copiesByOwner: ReadonlyMap<string, string[]>;
+  workspaceId: string;
+  options: SearchOptions;
+  score: (hit: LanceDbSearchHit, index: number) => number;
+}): Promise<SearchChunk[]> {
+  const rowsByHit = new Map<string, ChunkRow[]>();
+  const misses: LanceDbSearchHit[] = [];
+  let stale = 0;
+  for (const hit of args.hits) {
+    const document = args.documents.get(hit.documentId);
+    const hydration = decodeLanceChunkHydration(hit.hydration);
+    const copies = args.copiesByOwner.get(hit.documentId);
+    // A correction reindex rewrites a document's chunks under new ids and
+    // leaves its LanceDB rows stale (lanceStale, from the cached set): those
+    // hits hydrate from Postgres, which drops chunks that no longer exist.
+    if (document?.lanceStale) stale += 1;
+    if (document && !document.lanceStale && hydration && typeof hit.text === "string" && hit.chunkIndex !== null && hydration.runId === document.runId) {
+      rowsByHit.set(hit.id, [{
+        id: hit.id, document_id: hit.documentId, run_id: hydration.runId, chunk_index: hit.chunkIndex, text: hit.text,
+        heading_path: hydration.headingPath, page_number: hydration.pageNumber, token_estimate: hydration.tokenEstimate,
+        rank: 0, filename: document.filename, metadata: hydration.metadata,
+      }]);
+      if (copies?.length) misses.push(hit);
+    } else {
+      misses.push(hit);
+    }
+  }
+  if (stale > 0) countSearchEvent("nativeHydrationStale");
+  if (misses.length > 0) {
+    countSearchEvent("nativeHydrationPostgres");
+    const fromPostgres = await hydrateHitsFromPostgres(misses, new Set(args.documents.keys()), args.copiesByOwner, args.workspaceId, args.options);
+    for (const [hitId, rows] of fromPostgres) rowsByHit.set(hitId, [...(rowsByHit.get(hitId) ?? []), ...rows.filter((row) => !(rowsByHit.get(hitId) ?? []).some((own) => own.id === row.id))]);
+  }
   const seen = new Set<string>();
-  return hits.flatMap((hit) => (rowsByHit.get(hit.id) ?? []).flatMap((row) => {
+  return args.hits.flatMap((hit, index) => (rowsByHit.get(hit.id) ?? []).flatMap((row) => {
     if (seen.has(row.id)) return [];
     seen.add(row.id);
-    return [mapChunk(row, hit.score)];
+    return [mapChunk(row, args.score(hit, index))];
   }));
+}
+
+/** Eligible documents in scope for a native search, with the dedup copy → owner map LanceDB hits resolve through. */
+function nativeSearchScope(documents: EligibleDocument[]): {
+  byId: Map<string, EligibleDocument>; copiesByOwner: Map<string, string[]>; searchDocumentIds: string[];
+} {
+  const byId = new Map(documents.map((document) => [document.id, document]));
+  const copiesByOwner = new Map<string, string[]>();
+  for (const document of documents) {
+    if (!document.ownerId || document.ownerId === document.id) continue;
+    copiesByOwner.set(document.ownerId, [...(copiesByOwner.get(document.ownerId) ?? []), document.id]);
+  }
+  return { byId, copiesByOwner, searchDocumentIds: [...new Set([...byId.keys(), ...copiesByOwner.keys()])] };
+}
+
+interface NativeSearchContext {
+  workspaceId: string;
+  orgId: string;
+  pipeline: PipelineFeatures;
+  indexConfigs: IndexConfigMap;
+  privacyMode?: PrivacyMode;
+}
+
+/**
+ * Vector search with eligibility from the cached set and hydration from the
+ * LanceDB row. Null when the request needs the Postgres path (chunk-level
+ * filters).
+ */
+async function nativeVectorSearch(
+  queryVector: number[],
+  context: NativeSearchContext,
+  options: SearchOptions,
+  serving: IndexServing | null,
+): Promise<SearchChunk[] | null> {
+  if (!nativeScopeSupported(options.filters)) return null;
+  const embedding = resolveEmbeddingRoute(serving?.embedding ?? context.pipeline.embedding);
+  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: queryVector.length }));
+  const documents = scopeEligibleDocuments(set, options.filters, options.runId)
+    .filter((document) => document.vectorReady && matchesServingHash(document, serving?.hash));
+  if (documents.length === 0) return [];
+  const scope = nativeSearchScope(documents);
+  const hits = await timePhase("vecLance", () => lanceDbVectorSearch({
+    orgId: context.orgId,
+    workspaceId: context.workspaceId,
+    embeddingModel: embedding.model,
+    queryVector,
+    documentIds: scope.searchDocumentIds,
+    limit: options.limit ?? 20,
+    privacyMode: context.privacyMode,
+    hydrate: true,
+  }));
+  return await timePhase("vecHydrate", () => hydrateNativeHits({ hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
+    workspaceId: context.workspaceId, options, score: (hit) => hit.score }));
+}
+
+const NATIVE_FALLBACK_LOG_INTERVAL_MS = 10 * 60_000;
+const nativeFallbackLogged = new Map<string, number>();
+
+/**
+ * Native keyword search fell back to Postgres FTS for a whole org (a table
+ * without an FTS index, one that failed to open, ...): logged at most every
+ * ten minutes per org and reason, so a deploy ahead of the backfill shows
+ * which orgs still need it.
+ */
+function logNativeLexicalFallback(orgId: string, reason: string, table: string | undefined): void {
+  const key = `${orgId}\u0000${reason}`;
+  const now = Date.now();
+  if ((nativeFallbackLogged.get(key) ?? 0) > now) return;
+  if (nativeFallbackLogged.size > 10_000) nativeFallbackLogged.clear();
+  nativeFallbackLogged.set(key, now + NATIVE_FALLBACK_LOG_INTERVAL_MS);
+  console.warn(`[search] native keyword search fell back to Postgres FTS org=${orgId} reason=${reason}${table ? ` table=${table}` : ""}`);
+}
+
+/** False for queries using websearch_to_tsquery operators BM25 cannot honour: "quoted phrases" and -negation. */
+export function nativeLexicalQuerySupported(query: string): boolean {
+  return !/"[^"]*[^"\s][^"]*"/.test(query) && !/(?:^|\s)-[\p{L}\p{N}"]/u.test(query);
+}
+
+/**
+ * Keyword search as BM25 top-k from LanceDB's FTS index over the eligible
+ * documents, exact over the whole scope (no candidate sample, unlike the
+ * Postgres branch's SEARCH_LEXICAL_CANDIDATES cap). Documents served by
+ * keyword search before they have vectors (early lexical) are not in LanceDB
+ * yet: Postgres FTS covers just those and the lists are fused. Null when the
+ * request needs the Postgres path: chunk-level filters, several index configs,
+ * or a table without an FTS index.
+ */
+async function nativeTextSearch(
+  query: string,
+  userId: string,
+  context: NativeSearchContext,
+  options: SearchOptions,
+): Promise<SearchChunk[] | null> {
+  if (!nativeScopeSupported(options.filters)) return null;
+  // The BM25 index has no positions and its query is plain terms: a quoted
+  // phrase would match its words anywhere and `-term` would boost the term.
+  // websearch_to_tsquery honours both, so those queries keep the Postgres path.
+  if (!nativeLexicalQuerySupported(query)) {
+    countSearchEvent("nativeLexicalOperators");
+    return null;
+  }
+  const currentHash = indexConfigHash(indexConfigOf(context.pipeline));
+  if (Object.keys(context.indexConfigs).some((hash) => hash !== currentHash)) return null;
+  const embedding = resolveEmbeddingRoute(context.pipeline.embedding);
+  const limit = options.limit ?? 20;
+  const set = await loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions });
+  const inScope = scopeEligibleDocuments(set, options.filters, options.runId);
+  const native = inScope.filter((document) => document.vectorReady && !document.lanceStale);
+  // Postgres FTS covers documents not in LanceDB yet (early lexical) and those whose rows are stale.
+  const tail = inScope.filter((document) => (document.lexical && !document.vectorReady) || (document.vectorReady && document.lanceStale));
+  let nativeChunks: SearchChunk[] = [];
+  if (native.length > 0) {
+    const scope = nativeSearchScope(native);
+    let result: Awaited<ReturnType<typeof lanceDbFullTextSearch>>;
+    try {
+      result = await lanceDbFullTextSearch({
+        orgId: context.orgId, workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
+        documentIds: scope.searchDocumentIds, limit,
+      });
+    } catch (error) {
+      if (isSearchAborted(error)) throw error;
+      countSearchEvent("nativeLexicalError");
+      return null;
+    }
+    if (!result.indexed) {
+      countSearchEvent("nativeLexicalUnindexed");
+      logNativeLexicalFallback(context.orgId, result.fallback ?? "no-fts-index", result.table);
+      return null;
+    }
+    // OR-semantics BM25: relevance is judged by term coverage, like the Postgres OR backoff.
+    nativeChunks = (await hydrateNativeHits({ hits: result.hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
+      workspaceId: context.workspaceId, options, score: (_hit, index) => 1 / (60 + index + 1) }))
+      .map((chunk) => ({ ...chunk, lexicalMatch: "partial" as const }));
+  }
+  if (tail.length === 0) return nativeChunks;
+  countSearchEvent("nativeLexicalTail");
+  const requested = new Set(options.filters?.documentIds ?? []);
+  const tailIds = tail.map((document) => document.id).filter((id) => requested.size === 0 || requested.has(id));
+  if (tailIds.length === 0) return nativeChunks;
+  const tailChunks = await textSearch(query, userId, { ...options, filters: { ...options.filters, documentIds: tailIds } });
+  if (nativeChunks.length === 0) return tailChunks;
+  if (tailChunks.length === 0) return nativeChunks;
+  return reciprocalRankFusion([nativeChunks, tailChunks]).slice(0, limit)
+    .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1) }));
 }
 
 const lexicalBackoffStopWords = new Set([
@@ -1309,12 +1538,24 @@ export function stripNulBytes(value: string): string {
   return value.replaceAll("\u0000", "");
 }
 
-function withSearchSlotTimed<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+/** Workspace → org, learned from completed setups, so admission can share slots fairly per org. */
+const workspaceOrgs = new Map<string, string>();
+
+function searchAdmission(options: SearchOptions): SearchAdmission {
+  const workspaceId = options.filters?.workspaceId?.trim();
+  return {
+    tenant: workspaceId ? workspaceOrgs.get(workspaceId) ?? `workspace:${workspaceId}` : null,
+    // One chat agent turn (or API batch) holds at most SEARCH_MAX_SLOTS_PER_TURN slots.
+    group: currentChatSessionId() ?? currentSearchAdmissionGroup(),
+  };
+}
+
+function withSearchSlotTimed<T>(signal: AbortSignal | undefined, fn: () => Promise<T>, admission: SearchAdmission): Promise<T> {
   const started = performance.now();
   return withSearchSlot(signal, () => {
     recordSearchPhase("queue", performance.now() - started);
     return fn();
-  });
+  }, admission);
 }
 
 export async function hybridSearch(rawQuery: string, userId: string, options: SearchOptions = {}): Promise<SearchResponse> {
@@ -1330,9 +1571,13 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     // Search SQL is cancelled when the request (or chat turn) aborts (search/query-bounds.ts).
     const signal = currentSearchSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
     const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
-      withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }))));
+      withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }), searchAdmission(options))));
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
+    // Price card: one search per root query (sub-searches of decomposition and
+    // multi-hop are part of it); LLM query strategies count as llmSearchMultiplier.
+    // Searches a chat turn runs are part of the chat answer's price.
+    if (!options.rootSessionId && !currentChatTurn()) await chargeSearch(result, userId, activity.id);
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,
       inputTokens: result.usageEvents?.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0),
       outputTokens: result.usageEvents?.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0),
@@ -1344,12 +1589,43 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
   }
 }
 
+/**
+ * Bill one completed root search (PRICE_CARD.searchPer1k). A search that ran an
+ * LLM query strategy (HyDE, rewrite, stepback, compression, self-query,
+ * decomposition: any call with output tokens) counts as llmSearchMultiplier
+ * searches. Query embeddings and strategy tokens are our cost, recorded
+ * non-billable by the Search Session journal.
+ */
+async function chargeSearch(result: SearchResponse, userId: string, searchId: string): Promise<void> {
+  const workspaceId = result.availability?.scope?.workspaceId;
+  if (!workspaceId) return;
+  const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
+  try {
+    await recordUnitCharge({
+      userId,
+      scope: { workspaceId, sessionId: result.sessionId },
+      charge: {
+        id: `search:${searchId}`,
+        metric: BILLABLE_UNIT_METRICS.search,
+        amount: 1,
+        unit: "search",
+        credits: searchCredits(1, { llmStrategies }),
+        metadata: { llmStrategies, searchUnits: llmStrategies ? PRICE_CARD.llmSearchMultiplier : 1 },
+      },
+    });
+  } catch (error) {
+    // A failed charge never fails the search the user already has.
+    console.error(`[search] charge failed session=${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function executeHybridSearch(
   query: string,
   userId: string,
   options: SearchOptions = {},
 ): Promise<SearchResponse> {
   const setup = await timePhase("setup", () => resolveSearchSetup(userId, options));
+  if (workspaceOrgs.size < 50_000) workspaceOrgs.set(setup.normalizedScope.workspaceId, `org:${setup.normalizedScope.orgId}`);
   const wholeCorpusFallback = async (filters = setup.resolvedOptions.filters): Promise<SearchResult[]> => {
     const corpusCtx = await loadWorkspaceWholeCorpusContext({
       workspaceId: setup.normalizedScope.workspaceId,
@@ -1364,12 +1640,37 @@ async function executeHybridSearch(
     return corpusCtx.eligible ? corpusCtx.results : [];
   };
 
+  const native: NativeSearchContext | null = setup.lanceNative
+    ? { workspaceId: setup.normalizedScope.workspaceId, orgId: setup.normalizedScope.orgId, pipeline: setup.workspacePipeline,
+        indexConfigs: setup.indexConfigs, privacyMode: setup.privacyMode }
+    : null;
+  const nativeVectorOrLegacy = (vector: number[], options: SearchOptions, serving: IndexServing | null) => native
+    ? nativeVectorSearch(vector, native, options, serving).then((chunks) => chunks ?? vectorSearch(vector, userId, native.workspaceId, options, serving, setup.privacyMode))
+    : vectorSearch(vector, userId, setup.normalizedScope.workspaceId, options, serving, setup.privacyMode);
+  const nativeTextOrLegacy = (text: string, options: SearchOptions) => native
+    ? nativeTextSearch(text, userId, native, options).then((chunks) => chunks ?? textSearch(text, userId, options))
+    : textSearch(text, userId, options);
+  // Native search skips page branches the cached coverage says have nothing to serve.
+  const pageOnlyDocuments = setup.availabilityRow?.page_only_documents;
+  const skipProgressive = Boolean(native) && pageOnlyDocuments === 0;
+  const pageOnlyCompleted = async (): Promise<boolean> => {
+    if (!native) return true;
+    const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
+    const set = await loadEligibleDocuments({ workspaceId: native.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions });
+    return set.pageOnlyCompletedDocuments > 0;
+  };
+
   return runSearchSession({
     query,
     userId,
     options: setup.resolvedOptions,
     setup,
     adapters: {
+      parallelRetrieval: Boolean(native),
+      warmVectorIndex: native && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
+        const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
+        void warmLanceDbSearch({ orgId: native.orgId, workspaceId: native.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
+      } : undefined,
       buildAvailability: (chunks, effectiveOptions) =>
         buildSearchAvailability(
           setup.availabilityRow,
@@ -1388,20 +1689,23 @@ async function executeHybridSearch(
           queryVector,
           query,
           deps: {
-            search: (vector, serving) => vectorSearch(vector, userId, workspaceId, options, serving, setup.privacyMode),
+            search: (vector, serving) => native && workspaceId === native.workspaceId
+              ? nativeVectorOrLegacy(vector, options, serving)
+              : vectorSearch(vector, userId, workspaceId, options, serving, setup.privacyMode),
             embed: (text, embedding) => embedQuery(text, embedding, setup.session, setup.privacyMode, workspaceId, setup.normalizedScope.orgId),
             diagnostic: (name, value) => setup.session.recordDiagnostic(name, value as never),
           },
         })),
-      textSearch: ({ query, userId, options }) =>
-        timePhase("text", () => textSearch(query, userId, options)),
+      textSearch: ({ query, options }) =>
+        timePhase("text", () => nativeTextOrLegacy(query, options)),
       graphNeighborSearch: ({ query, workspaceId, options }) =>
         timePhase("graph", () => graphNeighborSearch(query, workspaceId, options)),
       communitySummarySearch: ({ query, workspaceId, options }) =>
         timePhase("community", () => communitySummarySearch(query, workspaceId, options)),
-      progressivePageSearch: ({ query, userId, options }) =>
-        timePhase("progressive", () => progressivePageSearch(query, userId, options)),
-      completedPageSearch,
+      progressivePageSearch: ({ query, userId, options }) => skipProgressive
+        ? Promise.resolve([])
+        : timePhase("progressive", () => progressivePageSearch(query, userId, options)),
+      completedPageSearch: async (args) => args.shouldSearch && await pageOnlyCompleted() ? completedPageSearch(args) : [],
       wholeCorpusFallback,
       ...(deferredProfilesEnabled()
         ? {

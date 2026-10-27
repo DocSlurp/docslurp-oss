@@ -16,7 +16,7 @@ type ApiKeyRow = {
   key_type: string | null;
   allowed_domains: string[] | null;
   scopes: string[];
-  rate_limit_rpm: number;
+  rate_limit_rpm: number | null;
   rate_limit_ppd: number;
   rate_limits: unknown;
   workspace_ids: string[] | null;
@@ -28,13 +28,23 @@ type ApiKeyRow = {
   pages_today?: number;
 };
 
-export const defaultApiKeyScopes = ["ingest", "search", "artifacts"] as const;
-/** Client (browser) keys are search-only unless the creator opts in to more. */
+/**
+ * `search` returns passages; `chat` generates answers (a model call on the
+ * owner's credits) through /v1/chat, /v1/chat/completions and the MCP chat tool.
+ */
+export const defaultApiKeyScopes = ["ingest", "search", "chat", "artifacts"] as const;
+/** Client (browser) keys are search-only unless the creator opts in to more (`chat`, or the sensitive scopes below). */
 export const defaultClientApiKeyScopes = ["search"] as const;
-/** Scopes a public client key may hold only with an explicit opt-in and a workspace allowlist. */
-export const sensitiveClientApiKeyScopes = ["ingest", "artifacts"] as const;
-/** Opt-in scopes; never granted by default. workspaces:manage renames workspaces and changes their settings. */
-export const supportedApiKeyScopes = [...defaultApiKeyScopes, "organizations:read", "organizations:manage", "workspaces:manage"] as const;
+/**
+ * Scopes a public client key may hold only with an explicit opt-in and a workspace allowlist.
+ * `web` lets a client key use the paid web tools (search, fetch, map, crawl); see lib/web-tool-access.ts.
+ */
+export const sensitiveClientApiKeyScopes = ["ingest", "artifacts", "web"] as const;
+/**
+ * Opt-in scopes; never granted by default. workspaces:manage renames workspaces and changes their settings.
+ * `web` is client-key only: server keys use web tools through `search`.
+ */
+export const supportedApiKeyScopes = [...defaultApiKeyScopes, "web", "organizations:read", "organizations:manage", "workspaces:manage"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -46,7 +56,8 @@ export interface ApiKey {
   keyType: ApiKeyType;
   allowedDomains: string[];
   scopes: string[];
-  rateLimitRpm: number;
+  /** Optional requests-per-minute cap below the plan's per-category limits; null means the plan's limits. */
+  rateLimitRpm: number | null;
   rateLimitPpd: number;
   /** Custom request and spend limits; see packages/shared/src/rate-limits.ts. */
   rateLimits: ApiKeyRateLimitRule[];
@@ -184,7 +195,8 @@ export async function createApiKey(
   userId: string,
   name: string,
   limits?: {
-    rpm?: number;
+    /** Requests-per-minute cap; omitted or null leaves the key on the plan's limits. */
+    rpm?: number | null;
     ppd?: number;
     rateLimits?: ApiKeyRateLimitRule[];
     scopes?: string[];
@@ -217,7 +229,7 @@ export async function createApiKey(
     const [row] = await tx<ApiKeyRow[]>`
       insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy)
       values (${id}, ${userId}, ${orgId}, ${keyHash}, ${name}, ${keyType}, ${tx.array(allowedDomains)},
-        ${tx.array(scopes)}, ${limits?.rpm ?? 60}, ${limits?.ppd ?? 10000},
+        ${tx.array(scopes)}, ${limits?.rpm ?? null}, ${limits?.ppd ?? 10000},
         ${tx.json(apiKeyRateLimitRulesSchema.parse(limits?.rateLimits ?? []) as never)}, ${tx.array(workspaceIds)},
         ${tx.json(materializationPolicyOverridesSchema.parse(limits?.materializationPolicy ?? {}) as never)})
       returning *`;
@@ -297,8 +309,17 @@ export async function revokeOrganizationApiKeys(orgId: string, userId: string): 
 
 function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role: string) {
   if (scopes.some(scope => !(supportedApiKeyScopes as readonly string[]).includes(scope))) throw new OrganizationError(400, "invalid_key_scope", "Unsupported API key scope");
+  if (keyType !== "client" && scopes.includes("web")) {
+    throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search");
+  }
   if (keyType === "client" && scopes.includes("workspaces:manage")) {
     throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage workspaces");
+  }
+  // `workspaces:manage` changes workspace configuration, so a key that carries it
+  // must be minted by an organization owner/admin. The per-workspace edit check
+  // on the route is the second layer. Security finding SEC-2026-10-01.
+  if (keyType !== "client" && scopes.includes("workspaces:manage") && !["owner", "admin"].includes(role)) {
+    throw new OrganizationError(403, "organization_forbidden", "Workspace management keys require organization admin access");
   }
   if (!scopes.some(scope => scope.startsWith("organizations:"))) return;
   if (keyType === "client") throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot access organizations");
@@ -309,7 +330,7 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
 type KeyTransaction = postgres.TransactionSql<Record<string, postgres.PostgresType>>;
 
 /**
- * A public client key that can upload or read raw artifacts is a standing
+ * A public client key that can upload, read raw artifacts or spend credits on web tools is a standing
  * credential in someone's page source. Allow it only when the creator opts in
  * and binds the key to specific workspaces.
  */
@@ -373,7 +394,7 @@ export class ApiKeyTypeChangeError extends Error {
 }
 
 export async function updateApiKey(id: string, userId: string, updates: {
-  name?: string; scopes?: string[]; rateLimitRpm?: number; rateLimitPpd?: number; rateLimits?: ApiKeyRateLimitRule[]; keyType?: ApiKeyType; allowedDomains?: string[];
+  name?: string; scopes?: string[]; rateLimitRpm?: number | null; rateLimitPpd?: number; rateLimits?: ApiKeyRateLimitRule[]; keyType?: ApiKeyType; allowedDomains?: string[];
   workspaceIds?: string[]; allowClientSensitiveScopes?: boolean; materializationPolicy?: Partial<MaterializationPolicy>;
 }): Promise<ApiKey | null> {
   return await withOwnedKeyLock(id, userId, async (tx, existing, role) => {
@@ -396,7 +417,7 @@ export async function updateApiKey(id: string, userId: string, updates: {
       name = coalesce(${updates.name ?? null}, name), allowed_domains = coalesce(${normalizedAllowedDomains ? tx.array(normalizedAllowedDomains) : null}, allowed_domains),
       scopes = coalesce(${updates.scopes ? tx.array(nextScopes) : null}, scopes),
       workspace_ids = ${tx.array(nextWorkspaceIds)},
-      rate_limit_rpm = coalesce(${updates.rateLimitRpm ?? null}, rate_limit_rpm), rate_limit_ppd = coalesce(${updates.rateLimitPpd ?? null}, rate_limit_ppd),
+      rate_limit_rpm = case when ${updates.rateLimitRpm !== undefined} then ${updates.rateLimitRpm ?? null}::int else rate_limit_rpm end, rate_limit_ppd = coalesce(${updates.rateLimitPpd ?? null}, rate_limit_ppd),
       rate_limits = coalesce(${updates.rateLimits ? tx.json(apiKeyRateLimitRulesSchema.parse(updates.rateLimits) as never) : null}::jsonb, rate_limits),
       materialization_policy = coalesce(${updates.materializationPolicy ? tx.json(materializationPolicyOverridesSchema.parse(updates.materializationPolicy) as never) : null}::jsonb, materialization_policy)
       where id = ${id} and user_id = ${userId} and revoked_at is null returning *`;
@@ -431,7 +452,8 @@ export interface ValidatedKey {
   keyType: ApiKeyType;
   allowedDomains: string[];
   scopes: string[];
-  rateLimitRpm: number;
+  /** Optional requests-per-minute cap; null (or 0) means the plan's limits apply. */
+  rateLimitRpm: number | null;
   rateLimitPpd: number;
   rateLimits: ApiKeyRateLimitRule[];
   /** Workspace allowlist; empty means every workspace the owner can reach in `orgId`. */

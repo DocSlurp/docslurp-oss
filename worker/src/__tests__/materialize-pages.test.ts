@@ -2,7 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
 import { defaultPipelineFeatures } from "@docslurp/shared";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
 import { ensurePageRows } from "../deferred/page-ledger.js";
@@ -10,6 +10,7 @@ import { materializePageRange, type PageMaterializerDeps, type PageMaterializerO
 import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -128,7 +129,8 @@ describe("materializePageRange", () => {
     expect(result.indexed).toEqual([1, 2]);
     const ledger = (h.usage as unknown as { pending: Array<{ metric: string; unit: string }> }).pending;
     expect(ledger.filter((e) => e.metric === "page-analysis" && e.unit === "page")).toHaveLength(1);
-    expect(result.costCredits).toBeGreaterThanOrEqual(2);
+    // Customer credits: the OCR-read page bills Rich, the text-layer page Fast; provider cost is not billed.
+    expect(result.costCredits).toBeCloseTo(0.25 + 0.005, 6);
   });
 
   it("never chunks or writes a PII-blocked page", async () => {
@@ -211,6 +213,23 @@ describe("materializePageRange", () => {
     expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "vision down" });
   });
 
+  it("records the summed spend of a page rejected on every attempt in the usage ledger", async () => {
+    const rejected = new VisionOutputRejectedError("rejected after 2 attempts", [], 2400, 640, 1.5);
+    rejected.route = { model: "vision-x", provider: "openrouter" };
+    const h = harness({ 1: LONG, 2: "" }, { async ocrPage() { throw rejected; } });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const result = await materializePageRange(h.deps, input(h, [1, 2]));
+    expect(result.failed).toEqual([{ page: 2, reason: "rejected after 2 attempts" }]);
+    expect(result.costCredits).toBeLessThan(1.5); // the rejected page adds no customer charge; its provider spend stays in metadata
+    const events = (h.usage as unknown as { pending: Array<{ metric: string; model: string; inputTokens: number; outputTokens: number; costCents: number; metadata: Record<string, unknown> }> }).pending;
+    const event = events.find((e) => e.metric === "page-analysis-attempt");
+    expect(event).toMatchObject({ model: "vision-x", inputTokens: 2400, outputTokens: 640, metadata: { outcome: "rejected", billable: false, documentId: "d1", pageNumber: 2 } });
+    expect(event!.costCents).toBe(0);
+    expect(event!.metadata?.providerCostCents).toBeGreaterThanOrEqual(1.5);
+    expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]") && String(l).includes("model=vision-x"))).toHaveLength(1);
+    log.mockRestore();
+  });
+
   it("removes stale chunk rows when a page re-chunks to fewer chunks", async () => {
     const many = Array.from({ length: 4 }, (_, i) => `# Part ${i}\n\n${LONG} ${i}`).join("\n\n");
     const h = harness({ 1: many });
@@ -240,12 +259,13 @@ describe("materializePageRange", () => {
       },
     });
     const result = await materializePageRange(h.deps, input(h, [1, 2, 3]));
-    // page 2 OCR (empty -> failed) + two embedding batches; page 3 threw before billing.
+    // page 2 OCR (empty -> failed) + two embedding batches; page 3 threw before indexing.
     const recorded = (h.usage as unknown as { pending: Array<{ metric: string; costCents: number }> }).pending;
     expect(recorded.filter((e) => e.metric === "embedding-tokens")).toHaveLength(2);
     expect(recorded.filter((e) => e.metric === "page-analysis")).toHaveLength(1);
-    expect(result.costCredits).toBeCloseTo(recorded.reduce((sum, e) => sum + e.costCents, 0), 4);
-    expect(result.costCredits).toBeGreaterThan(5 + 7 + 7 - 0.001);
+    // Provider events bill 0; the OCR-read page bills one Rich page even though it then failed.
+    expect(recorded.reduce((sum, e) => sum + e.costCents, 0)).toBe(0);
+    expect(result.costCredits).toBeCloseTo(0.25, 6);
     expect(result.indexed).toEqual([]);
     expect(result.failed.map((f) => f.page)).toEqual([1, 2, 3]);
   });

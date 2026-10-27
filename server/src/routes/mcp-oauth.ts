@@ -114,7 +114,7 @@ mcpOAuthRoutes.post("/authorize", async (c) => {
     // No raw server key is returned or persisted; only a random unguessable hash.
     const clientName = (await db.query("SELECT name FROM mcp_oauth_clients WHERE id=$1", [request.client_id])).rows[0]?.name ?? "MCP client";
     await db.query(`INSERT INTO api_keys(id,user_id,org_id,key_hash,name,key_type,allowed_domains,scopes,rate_limit_rpm,rate_limit_ppd)
-      VALUES($1,$2,$3,$4,$5,'server',ARRAY[]::text[],$6::text[],120,10000)`,
+      VALUES($1,$2,$3,$4,$5,'server',ARRAY[]::text[],$6::text[],NULL,10000)`,
       [keyId, actor.userId, orgId, oauthHash(secret("internal")), `OAuth: ${clientName}`, request.scopes]);
     await db.query(`INSERT INTO mcp_oauth_grants(id,client_id,user_id,org_id,resource,scopes,api_key_id) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, [grant, request.client_id, actor.userId, orgId, request.resource, JSON.stringify(request.scopes), keyId]);
     await db.query(`INSERT INTO mcp_oauth_tokens(hash,grant_id,kind,redirect_uri,challenge,expires_at) VALUES($1,$2,'code',$3,$4,now()+interval '2 minutes')`, [oauthHash(code), grant, request.redirect_uri, request.challenge]);

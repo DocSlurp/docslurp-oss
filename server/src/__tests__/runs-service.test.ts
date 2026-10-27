@@ -18,13 +18,20 @@ vi.mock("../db.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  canEditWorkspace: vi.fn(() => true),
+  canContributeToWorkspace: vi.fn(() => true),
   getWorkspaceAccess: getWorkspaceAccessMock,
   listAccessibleWorkspaceIds: listAccessibleWorkspaceIdsMock
 }));
 
 vi.mock("../lib/request-context.js", () => ({
   currentRequestId: currentRequestIdMock
+}));
+
+vi.mock("../lib/file-urls.js", () => ({
+  fileUrlForArtifact: (uri: string) => ({
+    url: `/v1/files/sealed-${Buffer.from(uri).length}/${uri.split("/").pop()}`,
+    expiresAt: "2026-01-01T00:00:00.000Z"
+  })
 }));
 
 vi.mock("../services/billing/credits.js", () => ({
@@ -45,6 +52,7 @@ const {
   buildRunProcessingPreview,
   shouldFailStaleProcessingRun,
   listRuns,
+  listRunEventsForRunId,
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
@@ -58,6 +66,23 @@ function createRun(input: { userId: string; workspaceId: string; kind: string; t
   const { totalDocuments: _total, ...rest } = input;
   return createRunCreation({ sql: sqlMock as never, start: runCreationStart }).create({ ...rest, sources: { kind: "files", files: [] } });
 }
+
+describe("run events", () => {
+  const row = (id: string, eventType: string) => ({
+    id, user_id: "u", run_id: "run-1", document_id: "doc-1", stage_name: "extract-markdown", event_type: eventType,
+    status: "completed", message: null, progress: {}, stats: {}, payload: {}, created_at: "2026-10-25T04:48:00.000Z",
+  });
+
+  it("skips an event type the schema does not know instead of failing the whole history", async () => {
+    sqlMock.mockReset();
+    sqlMock.mockResolvedValue([row("e1", "document.completed"), row("e2", "document.some_future_event"), row("e3", "document.plausibility_warning")]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const events = await listRunEventsForRunId({ runId: "run-1" });
+    expect(events.map(event => event.id)).toEqual(["e1", "e3"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("document.some_future_event"), expect.anything());
+    warn.mockRestore();
+  });
+});
 
 describe("createRun", () => {
   beforeEach(() => {
@@ -176,7 +201,7 @@ describe("run preview", () => {
   it("builds a recommended preview profile from file metadata and workspace history", () => {
     const preview = buildRunProcessingPreview({
       request: {
-        workspaceId: "ws-1",
+        workspace: "ws-1",
         pipeline: defaultPipelineFeatures,
         files: [
           {
@@ -215,6 +240,27 @@ describe("run preview", () => {
     expect(preview.recommended.parserPlaybook).toBe("layout-aware");
     expect(preview.options.some((option) => option.recommended)).toBe(true);
     expect(preview.topSignals).toContain("table-heavy inputs favor layout-aware extraction");
+  });
+
+  it("prices the DOCSLURP_VISION_MODEL_URI override like the worker does", () => {
+    const request = {
+      workspaceId: "ws-1",
+      pipeline: defaultPipelineFeatures,
+      files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000 }],
+      urls: [],
+    };
+    const cost = () => buildRunProcessingPreview({ request, historyRows: [] }).recommended;
+    const baseline = cost();
+    vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/z-ai/glm-5.3-flash");
+    try {
+      const overridden = cost();
+      expect(overridden.estimatedCost.maxCents).toBeLessThan(baseline.estimatedCost.maxCents);
+      // An invalid value is ignored and the default pricing stays.
+      vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/vendor/uncataloged");
+      expect(cost().estimatedCost.maxCents).toBe(baseline.estimatedCost.maxCents);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -315,3 +361,4 @@ describe("run resource and cost rollups", () => {
     expect(summarizeRunUsageCost(null).costCents).toBe(0);
   });
 });
+

@@ -7,7 +7,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 const { lanceDbVectorSearch } = vi.hoisted(() => ({
   lanceDbVectorSearch: vi.fn<typeof import("../search/lancedb.js").lanceDbVectorSearch>().mockResolvedValue([]),
 }));
-vi.mock("../search/lancedb.js", () => ({ lanceDbVectorSearch }));
+vi.mock("../search/lancedb.js", () => ({ lanceDbVectorSearch, warmLanceDbSearch: vi.fn(async () => {}) }));
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -191,6 +191,8 @@ it.each([
       values (${id + '-vector'}, ${id}, 'lancedb', 'test', ${id}, ${embedding.model}, 3)
       on conflict do nothing`;
   }
+  // The fixture adds vectors without the run_events hint a worker sends; drop cached eligibility (native search).
+  (await import("../search/eligible-documents.js")).resetEligibleDocumentCachesForTests();
   lanceDbVectorSearch.mockClear();
   const result = await search.hybridSearch("budget", "u", {
     filters: { workspaceId: "w", tags: ["finance"], ...filters },
@@ -203,6 +205,6 @@ it.each([
   expect(result.results.some((hit) => hit.text.includes("Selected evidence"))).toBe(true);
   expect(lanceDbVectorSearch).toHaveBeenCalledOnce();
   expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
-    documentIds: ["selected"], legacyDocumentIds: ["selected"], queryVector: [1, 0, 0],
+    documentIds: ["selected"], workspaceId: "w", queryVector: [1, 0, 0],
   }));
 });

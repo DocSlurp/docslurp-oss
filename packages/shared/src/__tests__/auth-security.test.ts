@@ -3,11 +3,31 @@ import { describe, expect, it } from "vitest";
 import { BETTER_AUTH_CLIENT_IP_HEADER, resolveBetterAuthBaseUrl, createBetterAuthSecurityOptions } from "../auth-security.js";
 
 describe("email authentication policy", () => {
+  it("uses the provider's verified email without requiring another local confirmation", () => {
+    expect(createBetterAuthSecurityOptions({}).account.accountLinking).toEqual({
+      enabled: true, disableImplicitLinking: false, allowDifferentEmails: false,
+      requireLocalEmailVerified: false, trustedProviders: [],
+    });
+  });
   it.each([{}, { RESEND_API_KEY: "key" }, { EMAIL_FROM: "DocSlurp <auth@example.com>" }, { RESEND_API_KEY: " ", EMAIL_FROM: "sender@example.com" }])("disables registration without a complete sender configuration", env => {
     expect(createBetterAuthSecurityOptions(env).emailAndPassword).toEqual({ enabled: true, disableSignUp: true, requireEmailVerification: true });
   });
   it("requires verification when a sender is configured", () => {
     expect(createBetterAuthSecurityOptions({ RESEND_API_KEY: "key", EMAIL_FROM: "DocSlurp <auth@example.com>" }).emailAndPassword).toEqual({ enabled: true, disableSignUp: false, requireEmailVerification: true });
+  });
+});
+
+describe("session revocation", () => {
+  it("checks the session row on every request instead of trusting a cached session cookie", () => {
+    expect(createBetterAuthSecurityOptions({}).session.cookieCache).toEqual({ enabled: false });
+  });
+
+  it("keeps active users signed in for 30 idle days while requiring a fresh session for sensitive changes", () => {
+    expect(createBetterAuthSecurityOptions({}).session).toMatchObject({
+      expiresIn: 60 * 60 * 24 * 30,
+      updateAge: 60 * 60 * 24,
+      freshAge: 60 * 60
+    });
   });
 });
 

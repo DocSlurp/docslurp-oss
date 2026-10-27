@@ -28,15 +28,14 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
-import {
-  type ArtifactStore,
-  cleanupTempFile,
-  keyFromStorageUri,
-} from "../tools/storage.js";
-import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
+import { executeVisionRuntime, rejectedVisionUsageInput, visionCall } from "../tools/vision-runtime.js";
+import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { maxInt } from "./utils.js";
+import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
 import {
   reconcileCanonicalArtifacts,
   type CanonicalReconciliationDecision,
@@ -78,6 +77,10 @@ export interface VisionPageOutput {
   costCents: number;
   /** Provider finish reason (`stop`, `length`, ...) when the runtime reported one. */
   finishReason?: string | null;
+  /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
+  servedModel?: string;
+  /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
+  modelSwap?: { requested: string; served: string; provider: string | null };
 }
 
 export class VisionExtractStage implements Stage {
@@ -188,7 +191,7 @@ export class VisionExtractStage implements Stage {
           return;
         }
 
-        const key = `${document.userId}/${state.run.id}/vision/${document.id}.json`;
+        const key = `${runArtifactRoot(state.run, document.userId)}/vision/${document.id}.json`;
         const pages = maxInt(1, document.pageCount);
         const artifactSlot = `${document.id}:vision`;
         const playbook = this.resolveParserPlaybook(state, document.id);
@@ -399,6 +402,8 @@ export class VisionExtractStage implements Stage {
                 fallbackUsed: page.fallbackUsed,
                 fallbackReason: page.fallbackReason,
                 costCents: page.costCents,
+                ...(page.servedModel ? { servedModel: page.servedModel } : {}),
+                ...(page.modelSwap ? { modelSwap: page.modelSwap } : {}),
                 text: page.text,
               })),
             });
@@ -417,6 +422,7 @@ export class VisionExtractStage implements Stage {
                   runtime: page.runtime,
                   model: page.model,
                   fallbackUsed: page.fallbackUsed,
+                  ...(page.modelSwap ? { modelSwap: page.modelSwap } : {}),
                 },
               });
             }
@@ -946,7 +952,7 @@ export class VisionExtractStage implements Stage {
         return { output, error: null };
       } catch (error) {
         const message = toError(error).message;
-        this.recordFailedVisionAttempt(state, document, vision, page, message);
+        this.recordFailedVisionAttempt(state, document, vision, page, message, error);
         return { output: null, error };
       } finally {
         await cleanupTempFile(imagePath);
@@ -1027,6 +1033,8 @@ export class VisionExtractStage implements Stage {
         text: result.text,
         costCents: this.calculateVisionCost(result),
         ...(result.finishReason !== undefined ? { finishReason: result.finishReason } : {}),
+        ...(result.servedModel ? { servedModel: result.servedModel } : {}),
+        ...(result.modelSwap ? { modelSwap: result.modelSwap } : {}),
       };
       const usageEvent = state.usageLedger.record({
           provider: result.provider ?? (result.baseUrl?.includes("openrouter.ai") ? "openrouter" : result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
@@ -1049,6 +1057,8 @@ export class VisionExtractStage implements Stage {
             outcome: result.text.trim() ? "completed" : "empty-output",
             fallbackUsed: result.fallbackUsed,
             usageSource: result.usageSource,
+            ...(result.servedModel ? { servedModel: result.servedModel } : {}),
+            ...(result.modelSwap ? { modelSwap: result.modelSwap } : {}),
           },
         },
       );
@@ -1066,9 +1076,28 @@ export class VisionExtractStage implements Stage {
     vision: VisionConfig,
     page: RasterPageArtifact,
     reason: string,
+    error?: unknown,
   ): void {
     const route = resolveVisionRoute(vision);
-    state.usageLedger.enqueue(
+    // Both attempts of a rejected page were billed: record that spend (one [ai-usage] line) instead of a zero-cost marker.
+    const rejected = findVisionOutputRejected(error);
+    if (rejected) {
+      const costCents = rejected.costCents ?? this.calculateVisionCost({
+        model: route.model, runtime: route.runtime, baseUrl: route.baseUrl,
+        inputTokens: rejected.inputTokens, outputTokens: rejected.outputTokens,
+      });
+      const input = rejectedVisionUsageInput(rejected, costCents, route.model);
+      state.usageLedger.record({
+        ...input,
+        metadata: {
+          ...input.metadata,
+          documentId: document.id,
+          pageNumber: page.pageNumber,
+          rasterArtifactUri: page.artifactUri,
+          runtime: route.runtime,
+        },
+      });
+    } else state.usageLedger.enqueue(
       buildFailedVisionAttemptUsage({
         documentId: document.id,
         pageNumber: page.pageNumber,
@@ -1223,10 +1252,10 @@ export class VisionExtractStage implements Stage {
       });
     }
 
-    const reconciledCanonicalKey = `${document.userId}/${state.run.id}/canonical-reconciled/${document.id}.json`;
-    const reconciledContractKey = `${document.userId}/${state.run.id}/extraction-reconciled/${document.id}.contract.json`;
-    const reconciledMarkdownKey = `${document.userId}/${state.run.id}/markdown-reconciled/${document.id}.md`;
-    const reconciliationKey = `${document.userId}/${state.run.id}/canonical-reconciliation/${document.id}.json`;
+    const reconciledCanonicalKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciled/${document.id}.json`;
+    const reconciledContractKey = `${runArtifactRoot(state.run, document.userId)}/extraction-reconciled/${document.id}.contract.json`;
+    const reconciledMarkdownKey = `${runArtifactRoot(state.run, document.userId)}/markdown-reconciled/${document.id}.md`;
+    const reconciliationKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciliation/${document.id}.json`;
     await this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument);
     await this.storage.putJson(reconciledContractKey, reconciled.extractionContract);
     await this.storage.putBytes(
@@ -1257,6 +1286,11 @@ export class VisionExtractStage implements Stage {
       "markdown",
       this.storage.uri(reconciledMarkdownKey),
     );
+    // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
+    await refreshSummaryEvidence({
+      storage: this.storage, ledger: state.artifactLedger, document,
+      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
+    });
     state.artifactLedger.recordDocument(
       document.id,
       "canonical-reconciliation",
@@ -1300,8 +1334,9 @@ export class VisionExtractStage implements Stage {
 
     // Without a provider charge (OpenAI direct never returns one; OpenRouter BYOK may not), price cataloged
     // hosted models at their own list price. The generic COST_PER_1K_* fallback is in cents per 1k tokens
-    // (defaults $0.10/M input, $0.30/M output), below every cataloged hosted list price, so this raises
-    // receipt-less charges to list price; it never lowers them.
+    // (defaults $0.10/M input, $0.30/M output), below most cataloged hosted list prices, so this usually raises
+    // receipt-less charges to list price; the cheapest entries (GLM 5.3 Flash) list below the fallback and
+    // are priced at their real, lower list price.
     return (
       visionListPriceCents(result.model, result) ??
         (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +

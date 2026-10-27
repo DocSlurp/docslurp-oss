@@ -46,23 +46,23 @@ A watch timeout does not cancel processing, so don't upload the file again just 
 
 ## Build a workspace over time
 
-Every command picks its workspace from `--workspace`, then `DOCSLURP_WORKSPACE_ID`, then `default` (your organization's default workspace). Uploads keep adding to that one workspace.
+Every command picks its workspace from `--workspace`, then `DOCSLURP_WORKSPACE`, then `default` (your organization's default workspace). Uploads keep adding to that one workspace. `--workspace` takes a workspace ID, slug or name: `'Legal contracts'`, `legal-contracts` and `LEGAL CONTRACTS` are the same workspace.
 
-To keep documents separate, upload with `--new-workspace`, `--workspace-name <name>` or `--template <key>`. Without a name, the new workspace titles itself from its content and gets a slug such as `amber-falcon-ridge`, which you can rename through the API. Then refer to it by slug. UUIDs and former slugs also work; see [Workspaces](https://docslurp.io/docs/http#workspaces).
+To keep documents separate, upload with `--workspace '<name>'`: the first upload creates a workspace with that name (slug `legal-contracts` for `'Legal contracts'`) and later commands find it by the same name or slug. `--new-workspace` (or `--template <key>` alone) creates a workspace that titles itself from its content and gets a slug such as `amber-falcon-ridge`, which you can rename through the API. Former slugs and UUIDs also work; see [Workspaces](https://docslurp.io/docs/http#workspaces).
 
 ```bash
 docslurp upload ./benefits.pdf ./onboarding.docx --watch --timeout 600
 docslurp search 'benefits eligibility'
 
 docslurp upload ./contracts/*.pdf --new-workspace --watch
-docslurp upload ./contracts/*.pdf --workspace-name 'Legal contracts' --template legal-contracts
+docslurp upload ./contracts/*.pdf --workspace 'Legal contracts' --template legal-contracts
 docslurp ingest-url https://example.com/handbook.pdf --workspace legal-contracts --watch
-export DOCSLURP_WORKSPACE_ID='legal-contracts'   # Use the slug the upload printed, or pass --workspace per command.
+export DOCSLURP_WORKSPACE='legal-contracts'      # The name or the slug the upload printed; or pass --workspace per command.
 docslurp search 'termination notice'
 docslurp search 'benefits eligibility' --workspace default
 ```
 
-- `--new-workspace`, `--workspace-name` and `--template` create a workspace only without `--workspace`; an explicit `--workspace` always wins. Template keys: `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
+- Uploads and `ingest-url` create the `--workspace` you name when none matches (applying `--template`, if given); other commands answer workspace not found. `--new-workspace` applies only without `--workspace`. Template keys: `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - Shell globs such as `./manuals/*.pdf` work because your shell expands them. The CLI takes file paths; it doesn't import directories recursively or read uploads from stdin.
 - Files are sent as file-backed blobs, so the CLI doesn't load every file into memory.
 
@@ -117,7 +117,7 @@ Create `queries.json`:
 docslurp search --queries-file queries.json --concurrency 2 --json > batch.json
 ```
 
-- The file holds **1 to 20** query strings or search input objects. Objects can set their own `workspaceId`.
+- The file holds **1 to 20** query strings or search input objects. Objects can set their own `workspace`.
 - `--concurrency` is **1 to 4**, default **4**.
 - Results stay in input order. Check each result's `ok` before reading its `data`.
 - If some queries fail, the successful results are still printed, but the command exits with status 1. Under `set -e`, handle that exit before reading the file.
@@ -148,8 +148,11 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 
 | Command | What it does | Options |
 | --- | --- | --- |
-| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace`, or `--new-workspace` / `--workspace-name` / `--template`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
+| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace <id|slug|name>` (created if no workspace matches), or `--new-workspace`; `--template`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
 | `ingest-url <urls...>` | Fetch and ingest URLs, then print the workspace and run IDs | Same workspace options as `upload`, `--watch` |
+| `extract <files...|urls...>` | Upload files or ingest URLs (not both) whose files and outputs are deleted when the retention window ends; prints the extract ID and deletion time | Same options as `upload`; `--retention-days <n>` (longer than the free 48 hours is charged as storage), `--no-email`, `--download <markdown|all>` |
+| `extract-status <extract-id>` | Print an extract's status, pages, download state and deletion time | `--json` |
+| `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (server key with `artifacts`) | None |
 | `full-index` | Index every remaining page of a workspace (or one document) | `--workspace`, `--document`, `--estimate`, `--watch` |
 | `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
@@ -163,7 +166,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `import-search-compat <export.json>` | Normalize and import Algolia, Elastic or legacy search configuration | `--workspace`, `--source`, `--out` |
 | `--license` | Print the license and notice | None |
 
-- Only **search and chat** support `--json`; upload, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
+- Only **search, chat and extract-status** support `--json`; upload, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
 - `--context` and `--json` can't be combined.
 - Search is scoped to a workspace (the default one unless you set another). `--run` is not supported.
 
@@ -173,7 +176,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | --- | --- | --- |
 | `--api-key <key>` | `DOCSLURP_API_KEY` | Required for API commands |
 | `--api-url <origin>` | `DOCSLURP_URL` | `https://docslurp.io` (don't add `/v1`) |
-| `--workspace <slug\|id>` | `DOCSLURP_WORKSPACE_ID` | `default`, your organization's default workspace. `--new-workspace`, `--workspace-name` or `--template` on `upload`/`ingest-url` creates a new one instead. |
+| `--workspace <id\|slug\|name>` | `DOCSLURP_WORKSPACE` | `default`, your organization's default workspace. On `upload`/`ingest-url` a name that matches no workspace creates it; `--new-workspace` or `--template` without `--workspace` creates a self-titled one. |
 | `--timeout <seconds>` | None | 30 seconds per API request; 300 seconds per watch |
 
 Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to upload, status, runs, search and chat, not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests.
@@ -208,7 +211,7 @@ docslurp import-search-compat export.json \
 | HTTP 403 | Check your workspace access and the key's scopes: `ingest` for uploads, `search` for search and chat. |
 | Watch timed out | Run `docslurp status RUN_ID --watch`. The run may still be processing. |
 | Run failed, paused, cancelled or dead-lettered | Check its status and the workspace in the dashboard before uploading again. |
-| Search returns nothing or too little | Check `availability` in `search --json`, and confirm the workspace (`--workspace` or `DOCSLURP_WORKSPACE_ID`, else `default`). |
+| Search returns nothing or too little | Check `availability` in `search --json`, and confirm the workspace (`--workspace` or `DOCSLURP_WORKSPACE`, else `default`). |
 | `Unexpected token` when parsing stdout | Add `--json` to search or chat. Progress output is text, not JSON. |
 | Some batch queries failed | Check each result's `ok`. Successful results are still in the JSON output. |
 

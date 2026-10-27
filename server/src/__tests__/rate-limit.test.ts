@@ -31,7 +31,7 @@ function buildIpLimitedApp(now: () => number) {
   return app;
 }
 
-function actorForApiKey(keyId: string, rateLimitRpm = 60, extra: Partial<Extract<RequestActor, { type: "apiKey" }>["apiKey"]> = {}): RequestActor {
+function actorForApiKey(keyId: string, rateLimitRpm: number | null = null, extra: Partial<Extract<RequestActor, { type: "apiKey" }>["apiKey"]> = {}): RequestActor {
   return {
     type: "apiKey",
     userId: "user-1",
@@ -67,7 +67,7 @@ function buildActorLimitedApp(actor: RequestActor, now: () => number) {
   }));
   app.get("/v1/search", (c) => c.json({ ok: true }));
   app.get("/v1/documents", (c) => c.json({ ok: true }));
-  app.post("/v1/ingest", (c) => c.json({ ok: true }));
+  app.post("/v1/uploads", (c) => c.json({ ok: true }));
   return app;
 }
 
@@ -77,6 +77,12 @@ describe("api rate limit middleware", () => {
   beforeEach(() => {
     currentTime = 1_000;
     vi.unstubAllEnvs();
+    // Generic limiter assertions exercise unbilled copy. The hosted billing
+    // links group below explicitly enables Stripe and verifies decorated copy.
+    vi.stubEnv("STRIPE_SECRET_KEY", "");
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("DOCSLURP_BILL_")) vi.stubEnv(key, "false");
+    }
     vi.stubEnv("API_RATE_LIMIT_REDIS_REST_URL", "");
     vi.stubEnv("API_RATE_LIMIT_REDIS_REST_TOKEN", "");
     vi.stubEnv("API_RATE_LIMIT_REDIS_URL", "");
@@ -96,8 +102,8 @@ describe("api rate limit middleware", () => {
     expect(second.status).toBe(200);
     expect(second.headers.get("X-RateLimit-Remaining")).toBe("0");
     expect(second.headers.get("X-RateLimit-Limit")).toBe("2");
-    expect(second.headers.get("RateLimit-Policy")).toBe('"free-read";q=2;w=1, "ip-burst";q=200;w=10');
-    expect(second.headers.get("RateLimit")).toBe('"free-read";r=0;t=2, "ip-burst";r=198;t=9');
+    expect(second.headers.get("RateLimit-Policy")).toBe('"account-read";q=2;w=1, "ip-burst";q=200;w=10');
+    expect(second.headers.get("RateLimit")).toBe('"account-read";r=0;t=2, "ip-burst";r=198;t=9');
 
     const limited = await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.10" } });
 
@@ -117,8 +123,8 @@ describe("api rate limit middleware", () => {
     const limited = await app.request("/v1/ok", { headers });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("Retry-After")).toBe("2");
-    expect(limited.headers.get("RateLimit-Policy")).toContain('"free-read"');
-    expect(limited.headers.get("RateLimit")).toContain('"free-read";r=0');
+    expect(limited.headers.get("RateLimit-Policy")).toContain('"account-read"');
+    expect(limited.headers.get("RateLimit")).toContain('"account-read";r=0');
     expect(limited.headers.get("X-RateLimit-Remaining")).toBe("0");
   });
 
@@ -173,7 +179,7 @@ describe("api rate limit middleware", () => {
     const input = consume.mock.calls[0]![0];
     expect(input.blockKey).toBe("shared:{ip:203.0.113.12}:block");
     expect(input.counters.map((counter) => counter.key)).toEqual([
-      "shared:{ip:203.0.113.12}:free-read:1000",
+      "shared:{ip:203.0.113.12}:account-read:1000",
       "shared:{ip:203.0.113.12}:ip-burst:10000",
     ]);
   });
@@ -209,11 +215,11 @@ describe("api rate limit middleware", () => {
 
     const limitedSearch = await app.request("/v1/search", { headers });
     expect(limitedSearch.status).toBe(429);
-    await expect(limitedSearch.json()).resolves.toMatchObject({ error: { code: "rate_limited", details: { category: "search", policy: "free-search" } } });
+    await expect(limitedSearch.json()).resolves.toMatchObject({ error: { code: "rate_limited", details: { category: "search", policy: "account-search" } } });
 
     const read = await app.request("/v1/documents", { headers });
     expect(read.status).toBe(200);
-    expect(read.headers.get("RateLimit-Policy")).toContain('"free-read"');
+    expect(read.headers.get("RateLimit-Policy")).toContain('"account-read"');
   });
 
   it("limits authenticated API keys by key id instead of shared IP", async () => {
@@ -226,16 +232,16 @@ describe("api rate limit middleware", () => {
     const limited = await firstKeyApp.request("/v1/search", { headers });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("X-RateLimit-Limit")).toBe("1");
-    expect(limited.headers.get("RateLimit-Policy")).toBe('"free-search";q=1;w=60');
+    expect(limited.headers.get("RateLimit-Policy")).toBe('"account-search";q=1;w=60');
 
     const otherKey = await secondKeyApp.request("/v1/search", { headers });
     expect(otherKey.status).toBe(200);
     expect(otherKey.headers.get("X-RateLimit-Remaining")).toBe("0");
   });
 
-  it("uses distinct free, paid, and self-hosted limit profiles", async () => {
-    const freeApp = buildActorLimitedApp(actorForApiKey("free-key", 60), () => currentTime);
-    const paidApp = buildActorLimitedApp(actorForApiKey("paid-key", 1_000), () => currentTime);
+  it("gives every account the same table, and self-hosted its own higher one", async () => {
+    const starterApp = buildActorLimitedApp(actorForApiKey("starter-key"), () => currentTime);
+    const fundedApp = buildActorLimitedApp(actorForApiKey("funded-key", 1_000, { orgId: "org-funded" }), () => currentTime);
     const selfHostedApp = new Hono();
     selfHostedApp.use("*", async (c, next) => {
       c.set("requestActor", {
@@ -254,14 +260,14 @@ describe("api rate limit middleware", () => {
     }));
     selfHostedApp.get("/v1/documents", (c) => c.json({ ok: true }));
 
-    const free = await freeApp.request("/v1/search");
-    const paid = await paidApp.request("/v1/search");
+    const starter = await starterApp.request("/v1/search");
+    const funded = await fundedApp.request("/v1/search");
     const selfHosted = await selfHostedApp.request("/v1/documents");
 
-    expect(free.headers.get("X-RateLimit-Limit")).toBe("60");
-    expect(free.headers.get("RateLimit-Policy")).toContain('"free-search"');
-    expect(paid.headers.get("X-RateLimit-Limit")).toBe("600");
-    expect(paid.headers.get("RateLimit-Policy")).toContain('"paid-search"');
+    // Billing state never picks the table: a starter and a funded org get identical limits.
+    expect(starter.headers.get("X-RateLimit-Limit")).toBe("600");
+    expect(starter.headers.get("RateLimit-Policy")).toContain('"account-search";q=600');
+    expect(funded.headers.get("RateLimit-Policy")).toContain('"account-search";q=600');
     expect(selfHosted.headers.get("X-RateLimit-Limit")).toBe("6000");
     expect(selfHosted.headers.get("RateLimit-Policy")).toContain('"self-hosted-read"');
   });
@@ -269,18 +275,18 @@ describe("api rate limit middleware", () => {
   it("never lets the legacy global API_RATE_LIMIT_MAX_REQUESTS override category policies", async () => {
     vi.stubEnv("API_RATE_LIMIT_MAX_REQUESTS", "600");
     vi.stubEnv("API_RATE_LIMIT_WINDOW_MS", "1000");
-    const freeApp = buildActorLimitedApp(actorForApiKey("legacy-free-key", 60), () => currentTime);
-    const paidApp = buildActorLimitedApp(actorForApiKey("legacy-paid-key", 1_000), () => currentTime);
+    const uploadApp = buildActorLimitedApp(actorForApiKey("legacy-upload-key", 1_000), () => currentTime);
+    const searchApp = buildActorLimitedApp(actorForApiKey("legacy-search-key", 1_000, { orgId: "org-funded" }), () => currentTime);
     const ipApp = new Hono();
     ipApp.use("*", createApiRateLimit({ profile: "ip", keyPrefix: "legacy-ip", now: () => currentTime }));
-    ipApp.post("/v1/ingest", (c) => c.json({ ok: true }));
+    ipApp.post("/v1/uploads", (c) => c.json({ ok: true }));
 
-    const free = await freeApp.request("/v1/ingest", { method: "POST" });
-    const paid = await paidApp.request("/v1/search");
-    const ip = await ipApp.request("/v1/ingest", { method: "POST", headers: { "x-forwarded-for": "203.0.113.40" } });
+    const upload = await uploadApp.request("/v1/uploads", { method: "POST" });
+    const search = await searchApp.request("/v1/search");
+    const ip = await ipApp.request("/v1/uploads", { method: "POST", headers: { "x-forwarded-for": "203.0.113.40" } });
 
-    expect(free.headers.get("RateLimit-Policy")).toContain('"free-upload";q=20;w=60');
-    expect(paid.headers.get("RateLimit-Policy")).toContain('"paid-search";q=600;w=60');
+    expect(upload.headers.get("RateLimit-Policy")).toContain('"account-upload";q=120;w=60');
+    expect(search.headers.get("RateLimit-Policy")).toContain('"account-search";q=600;w=60');
     expect(ip.headers.get("RateLimit-Policy")).toContain('"ip-upload";q=90;w=60');
   });
 
@@ -389,12 +395,12 @@ describe("api rate limit middleware", () => {
   });
 
   it("enforces a key's custom request windows across categories", async () => {
-    const actor = actorForApiKey("custom-key", 1_000, { rateLimits: [{ metric: "requests", limit: 2, windowSeconds: 3_600 }] });
+    const actor = actorForApiKey("custom-key", 1_000, { orgId: "org-funded", rateLimits: [{ metric: "requests", limit: 2, windowSeconds: 3_600 }] });
     const app = buildActorLimitedApp(actor, () => currentTime);
 
     const first = await app.request("/v1/search");
-    expect(first.headers.get("RateLimit-Policy")).toBe('"paid-search";q=600;w=60, "key-requests-1h";q=2;w=3600');
-    expect(first.headers.get("RateLimit")).toBe('"paid-search";r=599;t=59, "key-requests-1h";r=1;t=3599');
+    expect(first.headers.get("RateLimit-Policy")).toBe('"account-search";q=600;w=60, "key-requests-1h";q=2;w=3600');
+    expect(first.headers.get("RateLimit")).toBe('"account-search";r=599;t=59, "key-requests-1h";r=1;t=3599');
     expect(first.headers.get("X-RateLimit-Limit")).toBe("2");
     expect((await app.request("/v1/documents")).status).toBe(200);
 
@@ -423,10 +429,142 @@ describe("api rate limit middleware", () => {
     apiKeyPagesToday.mockResolvedValue(10);
     const app = buildActorLimitedApp(actorForApiKey("pages-key", 60, { rateLimitPpd: 10 }), () => currentTime);
 
-    const upload = await app.request("/v1/ingest", { method: "POST" });
+    const upload = await app.request("/v1/uploads", { method: "POST" });
     expect(upload.status).toBe(429);
     await expect(upload.json()).resolves.toMatchObject({ error: { code: "daily_page_limit", details: { category: "upload" } } });
     expect((await app.request("/v1/search")).status).toBe(200);
+  });
+
+  describe("one table for every account", () => {
+    function sessionApp(userId: string) {
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("requestActor", { type: "session", userId, sessionId: `session-${userId}`, user: { id: userId, email: "", name: "User" } });
+        await next();
+      });
+      app.use("*", createApiRateLimit({ identity: "actor", keyPrefix: "session-plan", now: () => currentTime }));
+      app.post("/v1/chat", (c) => c.json({ ok: true }));
+      return app;
+    }
+
+    it("gives any organization's default key the full account table", async () => {
+      const app = buildActorLimitedApp(actorForApiKey("starter-default"), () => currentTime);
+      app.post("/v1/chat", (c) => c.json({ ok: true }));
+      expect((await app.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"account-search";q=600;w=60');
+      expect((await app.request("/v1/chat", { method: "POST" })).headers.get("RateLimit-Policy")).toBe('"account-chat-ai";q=120;w=60');
+      expect((await app.request("/v1/uploads", { method: "POST" })).headers.get("RateLimit-Policy")).toContain('"account-upload";q=120;w=60');
+    });
+
+    it("gives a signed-in session the same table", async () => {
+      const chat = await sessionApp("any-user").request("/v1/chat", { method: "POST" });
+      expect(chat.headers.get("RateLimit-Policy")).toBe('"account-chat-ai";q=120;w=60');
+    });
+
+    it("lets an explicit key rpm cap every category below the table", async () => {
+      const app = buildActorLimitedApp(actorForApiKey("capped", 30, { orgId: "org-funded" }), () => currentTime);
+      app.post("/v1/chat", (c) => c.json({ ok: true }));
+      expect((await app.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"account-search";q=30;w=60');
+      expect((await app.request("/v1/chat", { method: "POST" })).headers.get("RateLimit-Policy")).toBe('"account-chat-ai";q=30;w=60');
+      const zero = buildActorLimitedApp(actorForApiKey("zero-cap", 0), () => currentTime);
+      expect((await zero.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"account-search";q=600;w=60');
+    });
+
+    it("never raises a limit above the table when a key's rpm is raised", async () => {
+      const app = buildActorLimitedApp(actorForApiKey("raised", 10_000), () => currentTime);
+      expect((await app.request("/v1/search")).headers.get("RateLimit-Policy")).toContain('"account-search";q=600;w=60');
+      expect((await app.request("/v1/documents")).headers.get("RateLimit-Policy")).toContain('"account-read";q=1500;w=60');
+    });
+
+    it("honors per-category env overrides, and the old default-profile switch no longer changes anything", async () => {
+      vi.stubEnv("API_RATE_LIMIT_ACCOUNT_SEARCH_MAX", "7");
+      const overridden = buildActorLimitedApp(actorForApiKey("override-account", 1_000), () => currentTime);
+      expect((await overridden.request("/v1/search")).headers.get("RateLimit-Policy")).toContain('"account-search";q=7;w=60');
+      vi.unstubAllEnvs();
+      vi.stubEnv("API_RATE_LIMIT_DEFAULT_PROFILE", "paid");
+      const legacy = buildActorLimitedApp(actorForApiKey("legacy-switch", 1_000), () => currentTime);
+      expect((await legacy.request("/v1/search")).headers.get("RateLimit-Policy")).toContain('"account-search";q=600;w=60');
+    });
+  });
+
+  describe("limit links", () => {
+    beforeEach(() => {
+      vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_links");
+      vi.stubEnv("APP_URL", "https://docslurp.io");
+    });
+
+    it("links any account's rate limit to billing and docs, never a buy-credits nudge", async () => {
+      for (const orgId of [undefined, "org-funded"]) {
+        const app = buildActorLimitedApp(actorForApiKey(`account-links-${orgId ?? "starter"}`, 1, orgId ? { orgId } : {}), () => currentTime);
+        await app.request("/v1/search");
+        const limited = await app.request("/v1/search");
+        expect(limited.status).toBe(429);
+        expect(limited.headers.get("Link")).toBe('<https://docslurp.io/app/billing>; rel="payment", <https://docslurp.io/docs/http#rate-limits-and-headers>; rel="help"');
+        const body = await limited.json() as { error: { message: string; details: Record<string, unknown> } };
+        expect(body.error.message).toBe("Please wait a moment before trying again. Rate limits: https://docslurp.io/docs/http#rate-limits-and-headers");
+        expect(body.error.details.account).toBeUndefined();
+        expect(body.error.details).toMatchObject({
+          policy: "account-search",
+          links: { billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#rate-limits-and-headers" },
+        });
+        expect((body.error.details.links as Record<string, string>).buyCredits).toBeUndefined();
+      }
+    });
+
+    it("links key spend and daily page limits to the API key settings", async () => {
+      apiKeySpendCents.mockResolvedValue(600);
+      const spend = buildActorLimitedApp(actorForApiKey("spend-links", 60, { rateLimits: [{ metric: "spend", limit: 500, windowSeconds: 86_400 }] }), () => currentTime);
+      const spent = await (await spend.request("/v1/search")).json() as { error: { message: string; details: { links: Record<string, string> } } };
+      expect(spent.error.details.links.apiKeys).toBe("https://docslurp.io/app/api-keys");
+      expect(spent.error.message).toContain("https://docslurp.io/app/api-keys");
+
+      apiKeyPagesToday.mockResolvedValue(10);
+      const pages = buildActorLimitedApp(actorForApiKey("pages-links", 60, { rateLimitPpd: 10 }), () => currentTime);
+      const capped = await (await pages.request("/v1/uploads", { method: "POST" })).json() as { error: { code: string; details: { links: Record<string, string> } } };
+      expect(capped.error).toMatchObject({ code: "daily_page_limit", details: { links: { apiKeys: "https://docslurp.io/app/api-keys", buyCredits: "https://docslurp.io/app/billing#bl-topup" } } });
+    });
+
+    it("only links the docs for IP-level limits", async () => {
+      const headers = { "x-forwarded-for": "203.0.113.90" };
+      const ipApp = new Hono();
+      ipApp.use("*", createApiRateLimit({ profile: "ip", maxRequests: 1, keyPrefix: "ip-links", now: () => currentTime }));
+      ipApp.get("/v1/ok", (c) => c.json({ ok: true }));
+      await ipApp.request("/v1/ok", { headers });
+      const body = await (await ipApp.request("/v1/ok", { headers })).json() as { error: { details: { links: Record<string, string> } } };
+      expect(body.error.details.links).toEqual({ docs: "https://docslurp.io/docs/http#rate-limits-and-headers" });
+    });
+
+    it("keeps links on protocol surfaces' flat 429 body", async () => {
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        c.set("requestActor", actorForApiKey("protocol-links", 1));
+        await next();
+      });
+      app.use("*", createApiRateLimit({ identity: "actor", keyPrefix: "protocol-links", now: () => currentTime }));
+      app.all("*", (c) => c.json({ ok: true }));
+      await app.request("/v1/chat/completions", { method: "POST" });
+      const limited = await app.request("/v1/chat/completions", { method: "POST" });
+      const flat = await limited.json() as Record<string, unknown>;
+      expect(flat).toMatchObject({ code: "rate_limited", policy: "account-chat-ai", links: { billing: "https://docslurp.io/app/billing" } });
+      expect(flat.account).toBeUndefined();
+    });
+
+    it("omits links on self-hosted deployments and on deployments without billing", async () => {
+      vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "self-hosted");
+      const selfHosted = buildActorLimitedApp(actorForApiKey("self-hosted-links", 1), () => currentTime);
+      await selfHosted.request("/v1/search");
+      const limited = await selfHosted.request("/v1/search");
+      expect(limited.headers.get("Link")).toBeNull();
+      const body = await limited.json() as { error: { message: string; details: Record<string, unknown> } };
+      expect(body.error.message).toBe("Too many requests");
+      expect(body.error.details.links).toBeUndefined();
+
+      vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "");
+      vi.stubEnv("STRIPE_SECRET_KEY", "");
+      const unbilled = buildActorLimitedApp(actorForApiKey("unbilled-links", 1), () => currentTime);
+      await unbilled.request("/v1/search");
+      const unbilledBody = await (await unbilled.request("/v1/search")).json() as { error: { details: Record<string, unknown> } };
+      expect(unbilledBody.error.details.links).toBeUndefined();
+    });
   });
 
   it("classifies upload, search, chat/AI, read-only, write, and webhook endpoints", () => {
@@ -434,7 +572,9 @@ describe("api rate limit middleware", () => {
     expect(classifyRateLimitCategory("POST", "/v1/uploads/bulk")).toBe("upload");
     expect(classifyRateLimitCategory("POST", "/v1/uploads/direct/sessions")).toBe("upload");
     expect(classifyRateLimitCategory("GET", "/v1/search")).toBe("search");
-    expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("chat-ai");
+    // The stream answers with a model too: it must not fall into the cheaper search bucket.
+    expect(classifyRateLimitCategory("GET", "/v1/chat/stream")).toBe("chat-ai");
+    expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/chat")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/chat/completions")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/workspaces/ws-1/chat")).toBe("chat-ai");

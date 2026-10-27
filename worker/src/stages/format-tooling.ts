@@ -4,6 +4,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export class FormatToolingStage implements Stage {
   readonly name = "format-tooling";
@@ -16,7 +17,7 @@ export class FormatToolingStage implements Stage {
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const normalizedFormat = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? "unknown";
-      const key = `${document.userId}/${state.run.id}/format-tooling/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/format-tooling/${document.id}.json`;
       const artifactSlot = `${document.id}:format-tooling`;
 
       await runDocumentStage(state, document, this.name, artifactSlot, "format toolchain manifest ready", async () => {
@@ -55,7 +56,6 @@ export class FormatToolingStage implements Stage {
         { tool: "pdftotext", profile: "fast-text-layer", plan: () => this.runner.extractText(sourceKey) },
         { tool: "pdftohtml", profile: "fast-text-layer", plan: () => this.runner.extractHtml(sourceKey) },
         { tool: "native-pdf", profile: "layout-aware-markdown", plan: async () => ({ available: (await resolveNativePdfEngine(this.runner)) !== null }) },
-        { tool: "docling", profile: "layout-aware-markdown", plan: () => this.runner.doclingMarkdown(sourceKey, ".") },
         { tool: "ocrmypdf", profile: "ocr-rescue", plan: () => this.runner.ocrPdf(sourceKey, "out.pdf") }
       );
     } else if (format === "office-word" || format === "office-other") {

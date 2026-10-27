@@ -196,7 +196,7 @@ export class LanceDbWriteQueue {
       }
       if (state.leaseFree) {
         const holder = `${this.workerId}:${randomUUID()}`;
-        if (await this.tryAcquireWriteLease(tableKey, holder)) {
+        if (await this.tryAcquireWriteLease(tableKey, holder, job.uri, job.table)) {
           const drained = await this.lead(tableKey, job.uri, job.table, holder);
           outcome.drains += 1;
           outcome.batches += drained.batches;
@@ -247,14 +247,15 @@ export class LanceDbWriteQueue {
    */
   async sweepDueMaintenance(limit = 50): Promise<number> {
     if (!this.deps.maintenance.enabled) return 0;
+    // The table's own location; the outbox only for rows registered before migration 0083.
     const rows = await this.sql<{ table_key: string; lance_uri: string; lance_table: string }[]>`
-      select t.table_key, o.lance_uri, o.lance_table
+      select t.table_key, coalesce(t.lance_uri, o.lance_uri) as lance_uri, coalesce(t.lance_table, o.lance_table) as lance_table
       from vector_index_tables t
-      cross join lateral (
+      left join lateral (
         select lance_uri, lance_table from vector_index_outbox o
-        where o.table_key = t.table_key order by o.id desc limit 1
-      ) o
-      where ${this.dueSql()}
+        where t.lance_uri is null and o.table_key = t.table_key order by o.id desc limit 1
+      ) o on true
+      where ${this.dueSql()} and coalesce(t.lance_uri, o.lance_uri) is not null
       order by t.last_optimized_at nulls first
       limit ${limit}`;
     let scheduled = 0;
@@ -329,12 +330,14 @@ export class LanceDbWriteQueue {
     };
   }
 
-  private async tryAcquireWriteLease(tableKey: string, holder: string): Promise<boolean> {
+  /** Also records where the table lives, so the maintenance sweep can find it without the outbox. */
+  private async tryAcquireWriteLease(tableKey: string, holder: string, uri: string, table: string): Promise<boolean> {
     const rows = await this.sql`
-      insert into vector_index_tables (table_key, write_holder, write_expires_at, updated_at)
-      values (${tableKey}, ${holder}, now() + (${this.settings.leaseTtlMs} * interval '1 millisecond'), now())
+      insert into vector_index_tables (table_key, lance_uri, lance_table, write_holder, write_expires_at, updated_at)
+      values (${tableKey}, ${uri}, ${table}, ${holder}, now() + (${this.settings.leaseTtlMs} * interval '1 millisecond'), now())
       on conflict (table_key) do update set
-        write_holder = excluded.write_holder, write_expires_at = excluded.write_expires_at, updated_at = now()
+        write_holder = excluded.write_holder, write_expires_at = excluded.write_expires_at,
+        lance_uri = excluded.lance_uri, lance_table = excluded.lance_table, updated_at = now()
       where vector_index_tables.write_expires_at < now()
       returning table_key`;
     return rows.length > 0;
@@ -368,6 +371,7 @@ export class LanceDbWriteQueue {
     }, Math.max(1_000, Math.floor(this.settings.leaseTtlMs / 3)));
     renew.unref?.();
     try {
+      let renewBeforeNextBatch = false;
       while (!leaseLost) {
         const pending = await this.sql<{
           id: string | number; generation: number; document_id: string; run_id: string | null; org_id: string | null;
@@ -379,6 +383,7 @@ export class LanceDbWriteQueue {
           order by id
           limit ${this.settings.maxBatchDocuments}`;
         if (pending.length === 0) break;
+        if (renewBeforeNextBatch && !(await this.renewWriteLease(tableKey, holder))) break;
         const batch: VectorOutboxRow[] = [];
         let records = 0;
         for (const row of pending) {
@@ -399,7 +404,8 @@ export class LanceDbWriteQueue {
         documents += await this.commitBatch(tableKey, uri, table, batch);
         batches += 1;
         if (Date.now() - started >= this.settings.maxLeadMs) break;
-        if (!(await this.renewWriteLease(tableKey, holder))) break;
+        // Renew only when another batch is waiting; the empty read below ends the drain without a renewal.
+        renewBeforeNextBatch = true;
       }
     } finally {
       clearInterval(renew);
@@ -460,11 +466,14 @@ export class LanceDbWriteQueue {
     const ids = rows.map((row) => row.id);
     const generations = rows.map((row) => row.generation);
     // A row re-enqueued (generation bumped) during the write stays pending for the next batch.
+    // One statement: rows are marked and the table's counters advance together.
     await this.sql`
-      update vector_index_outbox o set status = 'written', written_at = now(), attempts = o.attempts + 1, last_error = null
-      from (select unnest(${ids}::bigint[]) as id, unnest(${generations}::int[]) as generation) v
-      where o.id = v.id and o.generation = v.generation and o.status = 'pending'`;
-    await this.sql`
+      with written as (
+        update vector_index_outbox o set status = 'written', written_at = now(), attempts = o.attempts + 1, last_error = null
+        from (select unnest(${ids}::bigint[]) as id, unnest(${generations}::int[]) as generation) v
+        where o.id = v.id and o.generation = v.generation and o.status = 'pending'
+        returning 1
+      )
       update vector_index_tables set
         rows_since_optimize = rows_since_optimize + ${records},
         commits_since_optimize = commits_since_optimize + 1,

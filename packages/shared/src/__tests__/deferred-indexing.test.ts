@@ -4,7 +4,7 @@ import {
   DEFAULT_SERVER_MATERIALIZATION_POLICY,
   classifyTemperature,
   compilePipelinePlan,
-  defaultIndexingModeForPlan,
+  DEFAULT_INDEXING_MODE,
   estimatePageEmbedCredits,
   isBillingEnforced,
   workspaceTemplates,
@@ -56,18 +56,8 @@ describe("narrowMaterializationPolicy", () => {
 });
 
 describe("defaults and helpers", () => {
-  it("picks indexing mode from plan", () => {
-    expect(defaultIndexingModeForPlan({ planId: "free", hasPurchasedCredits: false })).toBe("map");
-    expect(defaultIndexingModeForPlan({ planId: "free", hasPurchasedCredits: true })).toBe("full");
-    expect(defaultIndexingModeForPlan({ planId: "gold", hasPurchasedCredits: false })).toBe("full");
-    expect(defaultIndexingModeForPlan({ planId: null, hasPurchasedCredits: false })).toBe("map");
-  });
-  it("never defaults to visual for any plan, with or without credits", () => {
-    for (const planId of [null, undefined, "free", "starter", "gold", "enterprise", "unknown"]) {
-      for (const hasPurchasedCredits of [false, true]) {
-        expect(defaultIndexingModeForPlan({ planId, hasPurchasedCredits })).not.toBe("visual");
-      }
-    }
+  it("indexes fully by default for every organization", () => {
+    expect(DEFAULT_INDEXING_MODE).toBe("full");
   });
   it("no workspace template opts into page-image embedding", () => {
     expect(workspaceTemplates.length).toBeGreaterThan(0);

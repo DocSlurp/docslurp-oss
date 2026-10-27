@@ -1,4 +1,6 @@
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
+import type { PreloadedRunState } from "../db/store.js";
+import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
@@ -92,6 +94,17 @@ export interface StageRuntime {
    * to the unsharded stage activity that follows the shards.
    */
   documentIds?: readonly string[];
+  /**
+   * Read the run's pause/cancel request in the stage-completion checkpoint and report it as
+   * StageOutput.controlRequested, so a stage group does not spend a round trip asking between stages.
+   */
+  readControlState?: boolean;
+  /**
+   * Read the next stage's opening reads (run, documents, checkpoints) in the stage-completion checkpoint
+   * and report them as StageOutput.preloaded; a stage group passes them to its next stage as `preloaded`.
+   */
+  preloadRunState?: boolean;
+  preloaded?: PreloadedRunState;
   /** Called after a failure checkpoint with the stage's ordinary failure total. */
   onStageFailure?(failure: { classification: StageFailureClass; ordinaryFailures: number | undefined }): void;
 }
@@ -99,13 +112,16 @@ export interface StageRuntime {
 export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "ordinary";
 
 export type LoadRunOptions = {
-  totalStages?: number;
+  /** Fixed, or derived from the loaded run (e.g. its pipeline's stage count). */
+  totalStages?: number | ((run: WorkflowState["run"]) => number);
   /** Hydrate stage checkpoints from the store (default true). */
   hydrate?: boolean;
   /** Apply the worker's configured document concurrency. */
   docConcurrency?: number;
   /** Workflow-accumulated artifacts that fill gaps in the persisted Run (DB wins). */
   artifacts?: Record<string, string>;
+  /** The run, documents and checkpoints already read at the previous stage's completion (same activity). */
+  preloaded?: PreloadedRunState;
 };
 
 /**
@@ -121,20 +137,33 @@ export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?:
 
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
-  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState">,
+  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState"> & {
+    /** Reads the run's stage checkpoints so they travel beside the run and document reads. */
+    readStageStates?(runId: string): Promise<unknown>;
+  },
   runId: string,
   options: LoadRunOptions = {},
 ): Promise<WorkflowState> {
-  const [run, documents] = await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
+  // The checkpoint read needs only the run id: issue it with the other two reads (one
+  // round trip on separate pooled connections instead of two in sequence).
+  const stageStates = options.preloaded
+    ? Promise.resolve(options.preloaded.stageStates)
+    : options.hydrate !== false ? store.readStageStates?.(runId) : undefined;
+  stageStates?.catch(() => undefined);
+  const [run, documents] = options.preloaded
+    ? [options.preloaded.run, options.preloaded.documents]
+    : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
-  if (options.totalStages !== undefined) state.totalStages = options.totalStages;
+  if (options.totalStages !== undefined) {
+    state.totalStages = typeof options.totalStages === "function" ? options.totalStages(state.run) : options.totalStages;
+  }
   for (const [key, value] of Object.entries(options.artifacts ?? {})) {
     if (!state.artifactLedger.read(key)) {
       state.artifactLedger.record(key, value);
     }
   }
-  if (options.hydrate !== false) await store.hydrateState(state);
+  if (options.hydrate !== false) await (stageStates ? (store.hydrateState as (state: WorkflowState, stageStates?: unknown) => Promise<void>)(state, stageStates) : store.hydrateState(state));
   return state;
 }
 
@@ -182,13 +211,21 @@ export function createStageExecution(deps: {
    */
   async function startRun(input: InitRunInput): Promise<InitRunOutput> {
     const loadOptions = { docConcurrency: config.workerDocConcurrency, hydrate: false };
+    // Checkpoints are read beside the run and documents; seeding reused stages rewrites them, so
+    // a partial run reads them again afterwards.
+    const prefetch = (store as { readStageStates?(runId: string): Promise<unknown> }).readStageStates;
+    let stageStates = prefetch?.call(store, input.runId);
+    stageStates?.catch(() => undefined);
     let state = await loadRunState(store, input.runId, loadOptions);
     const plan = compilePipelinePlan(state.run.pipeline);
     if (plan.reusedStages.length > 0) {
       await seedReusedStages(input.runId, plan);
       state = await loadRunState(store, input.runId, loadOptions);
+      stageStates = undefined;
     }
-    await store.hydrateState(state);
+    await (stageStates
+      ? (store.hydrateState as (state: WorkflowState, stageStates?: unknown) => Promise<void>)(state, stageStates)
+      : store.hydrateState(state));
     const { run, documents } = state;
 
     // Mark run as processing
@@ -244,7 +281,11 @@ export function createStageExecution(deps: {
    * A failed stage is checkpointed as failed and rethrown; worker
    * interruptions are rethrown without a failure checkpoint so a retry resumes.
    */
-  async function runStage(input: StageInput, runtime: StageRuntime): Promise<StageOutput> {
+  function runStage(input: StageInput, runtime: StageRuntime): Promise<StageOutput> {
+    return extendDbTraceLabel(input.stageName, () => runStageUntraced(input, runtime));
+  }
+
+  async function runStageUntraced(input: StageInput, runtime: StageRuntime): Promise<StageOutput> {
     const { stageName, runId, artifacts } = input;
 
     const stage = stageMap.get(stageName);
@@ -258,6 +299,7 @@ export function createStageExecution(deps: {
       docConcurrency: config.workerDocConcurrency,
       totalStages: input.totalStages,
       artifacts,
+      preloaded: runtime.preloaded,
     });
     const shard = runtime.documentIds !== undefined;
     if (runtime.documentIds) state.beginShard(runtime.documentIds);
@@ -526,7 +568,10 @@ export function createStageExecution(deps: {
       }
 
       // Also checkpoints progress (and this stage's usage) in the same transaction.
-      await store.completeRunStage(state, stageName, "", stageStats);
+      const completion = await store.completeRunStage(state, stageName, "", stageStats,
+        runtime.readControlState || runtime.preloadRunState
+          ? { readControlState: runtime.readControlState, preloadRunState: runtime.preloadRunState }
+          : undefined) as { controlRequested?: boolean; preloaded?: PreloadedRunState } | undefined;
 
       // Emit a run.progress event on stage completion so dashboard gets a fresh snapshot
       await store.appendEvent(
@@ -544,6 +589,8 @@ export function createStageExecution(deps: {
         artifacts: newArtifacts,
         usage,
         stats: stageStats,
+        ...(completion?.controlRequested === undefined ? {} : { controlRequested: completion.controlRequested }),
+        ...(completion?.preloaded ? { preloaded: completion.preloaded } : {}),
       };
     } catch (caught) {
       // A stall abort surfaces as whatever the stage threw on abort; report the hang itself.
@@ -608,9 +655,7 @@ export function createStageExecution(deps: {
 
   /** Mark a Run completed, emit run.completed, and notify emails/webhooks. */
   async function completeRun(input: CompleteRunInput): Promise<void> {
-    const state = await loadRunState(store, input.runId, { hydrate: false });
-    state.totalStages = getPipelineStageOrder(state.run.pipeline).length;
-    await store.hydrateState(state);
+    const state = await loadRunState(store, input.runId, { totalStages: (run) => getPipelineStageOrder(run.pipeline).length });
 
     // A Run with some failed Documents still completes (the count is in its
     // stats). It fails only when no Document could succeed.

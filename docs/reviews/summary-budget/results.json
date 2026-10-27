@@ -1,0 +1,379 @@
+{
+  "observedAt": "2026-10-21T04:33:28.565Z",
+  "model": "qwen/qwen3.5-flash-02-23",
+  "completedGenerations": 179,
+  "providerReceiptUsd": 0.028343705,
+  "unreceipted": "One interrupted in-flight request; $0.02 conservative allowance, not an actual charge. Earlier insufficient-credits rejection returned no usage receipt.",
+  "approvedBudgetUsd": 6,
+  "originalConfiguration": {
+    "n": 10,
+    "boulderMentions": 3,
+    "samplingDisclosure": 10,
+    "truncated": 10,
+    "meanInputTokens": 2858.7,
+    "meanOutputTokens": 371.2,
+    "costUsd": 0.0028232750000000005
+  },
+  "nonReasoningMatrix": {
+    "observedAt": "2026-10-21T04:31:45.723Z",
+    "total": {
+      "n": 150,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 153,
+        "max": 212
+      },
+      "latencySeconds": {
+        "median": 1.7882702299999946,
+        "p95": 2.6038197789999975,
+        "max": 3.5533301989999893
+      },
+      "inputTokensMean": 1590.68,
+      "providerUsd": 0.021417629999999997,
+      "explicitSamplingLanguage": 43
+    },
+    "byCap": {
+      "256": {
+        "n": 50,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 154,
+          "max": 212
+        },
+        "latencySeconds": {
+          "median": 1.7882702299999946,
+          "p95": 2.6038197789999975,
+          "max": 3.1905327640000034
+        },
+        "inputTokensMean": 1590.68,
+        "providerUsd": 0.007165209999999999,
+        "explicitSamplingLanguage": 13
+      },
+      "384": {
+        "n": 50,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 146,
+          "max": 198
+        },
+        "latencySeconds": {
+          "median": 1.7570277319999876,
+          "p95": 2.6046173100000014,
+          "max": 3.532362441000001
+        },
+        "inputTokensMean": 1590.68,
+        "providerUsd": 0.007094750000000001,
+        "explicitSamplingLanguage": 15
+      },
+      "512": {
+        "n": 50,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 154,
+          "max": 185
+        },
+        "latencySeconds": {
+          "median": 1.8504912869999972,
+          "p95": 2.477641868000006,
+          "max": 3.5533301989999893
+        },
+        "inputTokensMean": 1590.68,
+        "providerUsd": 0.0071576700000000005,
+        "explicitSamplingLanguage": 15
+      }
+    },
+    "byCandidate": {
+      "baseline": {
+        "n": 30,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 146,
+          "max": 189
+        },
+        "latencySeconds": {
+          "median": 1.6774654390000068,
+          "p95": 2.1842533840000105,
+          "max": 2.46710478400001
+        },
+        "inputTokensMean": 1934,
+        "providerUsd": 0.004929339999999998,
+        "explicitSamplingLanguage": 6
+      },
+      "pages10-bytes10000": {
+        "n": 30,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 151,
+          "max": 190
+        },
+        "latencySeconds": {
+          "median": 1.766532349999994,
+          "p95": 2.329344487999973,
+          "max": 2.700483229999998
+        },
+        "inputTokensMean": 1093.2,
+        "providerUsd": 0.00330018,
+        "explicitSamplingLanguage": 11
+      },
+      "pages20-bytes10000": {
+        "n": 30,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 150,
+          "max": 183
+        },
+        "latencySeconds": {
+          "median": 1.8986601329999977,
+          "p95": 2.425611720000001,
+          "max": 2.675320854999998
+        },
+        "inputTokensMean": 1229.8,
+        "providerUsd": 0.0035678500000000004,
+        "explicitSamplingLanguage": 10
+      },
+      "pages10-bytes20000": {
+        "n": 30,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 155,
+          "max": 212
+        },
+        "latencySeconds": {
+          "median": 1.9517590819999895,
+          "p95": 3.1905327640000034,
+          "max": 3.532362441000001
+        },
+        "inputTokensMean": 1774.8,
+        "providerUsd": 0.004661800000000001,
+        "explicitSamplingLanguage": 5
+      },
+      "pages20-bytes20000": {
+        "n": 30,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 159,
+          "max": 190
+        },
+        "latencySeconds": {
+          "median": 1.7612463029999998,
+          "p95": 2.411249061000002,
+          "max": 3.5533301989999893
+        },
+        "inputTokensMean": 1921.6,
+        "providerUsd": 0.0049584600000000005,
+        "explicitSamplingLanguage": 11
+      }
+    },
+    "largeDocuments": {
+      "baseline": {
+        "n": 12,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 161,
+          "max": 189
+        },
+        "latencySeconds": {
+          "median": 1.841567256999988,
+          "p95": 2.037710954,
+          "max": 2.037710954
+        },
+        "inputTokensMean": 4124.5,
+        "providerUsd": 0.003720209999999999,
+        "explicitSamplingLanguage": 6
+      },
+      "pages10-bytes10000": {
+        "n": 12,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 151,
+          "max": 190
+        },
+        "latencySeconds": {
+          "median": 1.7987383719999999,
+          "p95": 2.043290023000009,
+          "max": 2.043290023000009
+        },
+        "inputTokensMean": 1931,
+        "providerUsd": 0.00198952,
+        "explicitSamplingLanguage": 8
+      },
+      "pages20-bytes10000": {
+        "n": 12,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 154,
+          "max": 181
+        },
+        "latencySeconds": {
+          "median": 1.9540966530000006,
+          "p95": 2.2210836769999878,
+          "max": 2.2210836769999878
+        },
+        "inputTokensMean": 2272.5,
+        "providerUsd": 0.0022636899999999996,
+        "explicitSamplingLanguage": 9
+      },
+      "pages10-bytes20000": {
+        "n": 12,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 165,
+          "max": 212
+        },
+        "latencySeconds": {
+          "median": 2.0672502380000006,
+          "p95": 3.532362441000001,
+          "max": 3.532362441000001
+        },
+        "inputTokensMean": 3635,
+        "providerUsd": 0.0033638800000000005,
+        "explicitSamplingLanguage": 3
+      },
+      "pages20-bytes20000": {
+        "n": 12,
+        "errors": 0,
+        "truncated": 0,
+        "outputTokens": {
+          "median": 163,
+          "max": 190
+        },
+        "latencySeconds": {
+          "median": 2.0085517350000153,
+          "p95": 3.5533301989999893,
+          "max": 3.5533301989999893
+        },
+        "inputTokensMean": 4002,
+        "providerUsd": 0.0036387000000000004,
+        "explicitSamplingLanguage": 11
+      }
+    },
+    "limitations": [
+      "Pilot latency excludes S3 reads and embedding. Two repetitions do not estimate production tail latency reliably.",
+      "Sampling-language regex is a transparency indicator, not a factuality or retrieval-quality score.",
+      "Two related catalogs and three synthetic short documents are not a representative benchmark."
+    ]
+  },
+  "catalogIndicators": {
+    "baseline": {
+      "n": 12,
+      "boulderMentions": 12,
+      "samplingDisclosure": 6,
+      "truncated": 0,
+      "meanInputTokens": 4124.5,
+      "meanOutputTokens": 161.25,
+      "costUsd": 0.003720209999999999
+    },
+    "pages10-bytes10000": {
+      "n": 12,
+      "boulderMentions": 0,
+      "samplingDisclosure": 8,
+      "truncated": 0,
+      "meanInputTokens": 1931,
+      "meanOutputTokens": 154.91666666666666,
+      "costUsd": 0.00198952
+    },
+    "pages20-bytes10000": {
+      "n": 12,
+      "boulderMentions": 0,
+      "samplingDisclosure": 9,
+      "truncated": 0,
+      "meanInputTokens": 2272.5,
+      "meanOutputTokens": 157.41666666666666,
+      "costUsd": 0.0022636899999999996
+    },
+    "pages10-bytes20000": {
+      "n": 12,
+      "boulderMentions": 1,
+      "samplingDisclosure": 3,
+      "truncated": 0,
+      "meanInputTokens": 3635,
+      "meanOutputTokens": 169.41666666666666,
+      "costUsd": 0.0033638800000000005
+    },
+    "pages20-bytes20000": {
+      "n": 12,
+      "boulderMentions": 1,
+      "samplingDisclosure": 11,
+      "truncated": 0,
+      "meanInputTokens": 4002,
+      "meanOutputTokens": 165.75,
+      "costUsd": 0.0036387000000000004
+    }
+  },
+  "refinedByPages": {
+    "10": {
+      "n": 8,
+      "boulderMentions": 8,
+      "samplingDisclosure": 7,
+      "truncated": 0,
+      "meanInputTokens": 2320.75,
+      "meanOutputTokens": 148,
+      "costUsd": 0.0015146299999999999
+    },
+    "20": {
+      "n": 8,
+      "boulderMentions": 8,
+      "samplingDisclosure": 8,
+      "truncated": 0,
+      "meanInputTokens": 2594.5,
+      "meanOutputTokens": 157.625,
+      "costUsd": 0.0016769999999999999
+    }
+  },
+  "examples": [
+    {
+      "text": "The 2024–25 University Catalog, published by the Office of the Registrar for the University of Colorado and revised in September 2024, outlines academic requirements, course descriptions, and degree programs across diverse disciplines. The document details specific curricula including certificate requirements in French/Italian studies and Civil Rights/Racial Justice, alongside major offerings in Dance, Mechanical Engineering, Environmental Studies, Aerospace Engineering Sciences, Computer Science (Robotics), and Mechanical Engineering (Control Systems). It lists core and elective courses with credit hours, prerequisites, and learning outcomes for undergraduate and graduate levels, while also providing faculty profiles and references to study abroad opportunities, reflecting the institution's comprehensive educational structure for the 2024–25 academic year.",
+      "document": "catalog-2024",
+      "candidate": "pages10-bytes10000",
+      "cap": 256,
+      "outputTokens": 151,
+      "finishReason": "stop"
+    },
+    {
+      "text": "This document is a sampled excerpt from the 2024–25 University Catalog for the University of Colorado Boulder, prepared by the Office of the Registrar and revised in September 2024. The content outlines academic programs across diverse disciplines including Anthropology, Applied Mathematics, Chemistry, Cinema Studies, Philosophy, Finance, and Women and Gender Studies, detailing Bachelor of Arts degrees, minors, certificates, and graduate Master of Arts requirements. Specific sections provide course descriptions, credit hour structures, four-year study plans, and faculty listings with institutional affiliations, while the text explicitly notes that the provided overview is based on a stratified sample of pages rather than an exhaustive representation of the full 2,721-page publication.",
+      "document": "catalog-2024",
+      "candidate": "front3-stratified10-seed1-bytes10000",
+      "cap": 256,
+      "outputTokens": 147,
+      "finishReason": "stop"
+    }
+  ],
+  "assessment": {
+    "supported": [
+      "The tested Qwen configuration needs explicit reasoning control: 10/10 default outputs truncated; 169/169 non-reasoning outputs completed.",
+      "256 output tokens sufficed for all 50 main-matrix calls at that cap and all 16 refined calls; observed main-matrix maximum across all caps was 212.",
+      "A 10000-byte evidence budget can preserve identity and explicit sampling disclosure when opening metadata/contents are retained; naive even-spacing failed this identity test."
+    ],
+    "notEstablished": [
+      "An optimal production timeout: generation timings exclude object storage, embedding, cold starts and load.",
+      "An optimal or universal page count/byte budget; only two related real catalogs and three short synthetic fixtures were evaluated.",
+      "Search relevance uplift, comprehensive factuality, rare-topic recall or multilingual quality.",
+      "Production page-range read cost: this prototype fully extracts PDFs offline. A bounded version-bound page offset index is required before implementation."
+    ],
+    "confounds": [
+      "The refined experiment changes front-matter anchoring, seeded selection, whitespace normalization, and explicit disclosure instruction together. Improvement cannot be attributed to a single change.",
+      "The repeated matrix follows a fixed order and uses one provider/model during one short time window. Latency is descriptive, not an SLA.",
+      "Identity and disclosure are string indicators, not complete summary-quality scores."
+    ],
+    "recommendation": [
+      "Use explicit non-reasoning mode for the tested model and refuse truncated summaries before embedding/indexing, while preserving usage receipts.",
+      "Treat 256 output tokens and 10000 UTF-8 evidence bytes as supported pilot candidates, not universal optima.",
+      "Preserve opening identity/contents evidence plus seeded stratified page excerpts; include total pages, exact page positions and clipping/omission metadata.",
+      "Retain full one/two-page documents when they fit; generate no page-level summaries.",
+      "Do not replace the 120-second safety guard with another supposedly calibrated number until end-to-end stage traces under load exist."
+    ]
+  }
+}

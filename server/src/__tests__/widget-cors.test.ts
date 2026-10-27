@@ -11,6 +11,14 @@ function app() {
   return app;
 }
 describe("widget CORS", () => {
+  it("does not reflect origins when a keyed widget request is rejected downstream", async () => {
+    const rejected = new Hono().use("*", serviceCors([trusted]));
+    rejected.post("/v1/search", c => c.json({ error: "Rejected key" }, 403));
+    const response = await rejected.request("/v1/search", { method: "POST", headers: { Origin: "https://customer.example", Authorization: "Bearer dslp_pub_rejected" } });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(response.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
   it("treats the app's own origin as first-party on hostnames outside the allowlist", async () => {
     const own = new Hono().use("*", serviceCors([trusted]));
     own.post("/v1/ingest/bulk", (c) => c.json({ ok: true }));
@@ -71,6 +79,16 @@ describe("widget CORS", () => {
   it("requires a bearer key on actual cross-site widget requests", async () => {
     const response = await app().request("/v1/search", { method: "POST", headers: { Origin: "https://customer.example", Cookie: "session=secret" } });
     expect(response.status).toBe(403);
+  });
+  it("guards the chat stream like the rest of chat: keyed widgets get CORS, cross-site cookies get 403", async () => {
+    const stream = new Hono().use("*", serviceCors([trusted]));
+    stream.get("/v1/chat/stream", (c) => c.text("data: {}\n\n"));
+    const cookie = await stream.request("/v1/chat/stream?q=hi", { headers: { Origin: "https://sibling.docslurp.io", Cookie: "session=fixture" } });
+    expect(cookie.status).toBe(403);
+    const keyed = await stream.request("/v1/chat/stream?q=hi", { headers: { Origin: "https://customer.example", Authorization: "Bearer dslp_pub_widget" } });
+    expect(keyed.status).toBe(200);
+    expect(keyed.headers.get("Access-Control-Allow-Origin")).toBe("https://customer.example");
+    expect(keyed.headers.get("Access-Control-Allow-Credentials")).toBeNull();
   });
   it("keeps credential management restricted to trusted origins", async () => {
     const response = await app().request("/v1/api-keys", { headers: { Origin: "https://customer.example" } });

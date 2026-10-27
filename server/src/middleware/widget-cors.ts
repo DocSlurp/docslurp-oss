@@ -11,7 +11,7 @@ export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
     const trusted = !origin || trustedOrigins.includes(origin) || isSameOrigin(origin, c.req.url);
     const compatKeyRoute = /^\/compat\/algolia\/1\/indexes\//.test(c.req.path);
     const searchCompatRoute = /^\/compat\/(?:meilisearch\/indexes\/[^/]+\/search|typesense\/(?:collections\/[^/]+\/documents\/search|multi_search)|pagefind\/[^/]+\/search)$/.test(c.req.path);
-    const publicKeyRoute = /^\/v1\/chat\/?$/.test(c.req.path) || compatKeyRoute || searchCompatRoute || /^\/v1\/(?:search(?:\/|$)|ingest(?:\/|$)|documents(?:\/|$)|models$|chat\/completions$|runs\/[^/]+\/progress$)/.test(c.req.path);
+    const publicKeyRoute = /^\/v1\/chat\/?$/.test(c.req.path) || compatKeyRoute || searchCompatRoute || /^\/v1\/(?:search(?:\/|$)|ingest(?:\/|$)|documents(?:\/|$)|models$|chat\/(?:completions|stream)$|runs\/[^/]+\/progress$)/.test(c.req.path);
     let validOrigin = false;
     try {
       validOrigin = Boolean(origin && /^https?:\/\/[^/]+$/.test(origin) && new URL(origin).origin === origin);
@@ -21,7 +21,7 @@ export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
     if (widget && c.req.method !== "OPTIONS" && !hasKey) {
       return middlewareErrorResponse(c, 403, "forbidden", "Browser integrations require an API key");
     }
-    return cors({
+    const response = await cors({
       origin: widget ? origin : trustedOrigins,
       credentials: trusted,
       allowMethods: widget ? ["GET", "POST", "OPTIONS"] : ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
@@ -29,6 +29,12 @@ export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
       exposeHeaders: ["WWW-Authenticate", "MCP-Protocol-Version", "MCP-Session-Id", "Idempotency-Replayed", "Retry-After", "X-Request-ID", "traceparent", "RateLimit", "RateLimit-Policy", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-DocSlurp-Spend"],
       maxAge: 600,
     })(c, next);
+    // A reflected origin is only useful after the actual keyed request passes auth.
+    if (widget && c.req.method !== "OPTIONS" && c.res.status >= 400) {
+      c.res.headers.delete("Access-Control-Allow-Origin");
+      c.res.headers.delete("Access-Control-Allow-Credentials");
+    }
+    return response;
   };
 }
 

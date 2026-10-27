@@ -3,9 +3,11 @@ import { memoryAdapter } from "better-auth/adapters/memory";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBetterAuthSecurityOptions } from "@docslurp/shared/auth-security";
 import { createAuthEmailOptions } from "../lib/auth-email.js";
+import { safeErrorResponse } from "@docslurp/shared/error-response";
+import { beforeOAuthAccountCreate } from "../lib/oauth-account-linking.js";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
-function setup(enabled: boolean) {
+function setup(enabled: boolean, oauthVerified = true) {
   vi.stubEnv("RESEND_API_KEY", enabled ? "test-key" : "");
   vi.stubEnv("EMAIL_FROM", enabled ? "auth@example.com" : "");
   const database: Record<string, any[]> = { user: [], session: [], account: [], verification: [] };
@@ -21,6 +23,20 @@ function setup(enabled: boolean) {
     ...createAuthEmailOptions(process.env),
     database: memoryAdapter(database),
     secret: "a-long-and-local-only-test-secret-12345",
+    socialProviders: { google: {
+      clientId: "local-test", clientSecret: "local-test",
+      verifyIdToken: async token => token === "signed-test-token",
+      getUserInfo: async () => ({
+        user: { email: account.email, name: account.name, emailVerified: oauthVerified },
+        data: {
+          sub: "google-owner", aud: "local-test", azp: "local-test",
+          iss: "https://accounts.google.com", iat: 1_790_000_000, exp: 1_790_003_600,
+          email: account.email, email_verified: oauthVerified, name: account.name,
+          given_name: "Verification", family_name: "check", picture: "",
+        },
+      }),
+    } },
+    databaseHooks: { account: { create: { before: beforeOAuthAccountCreate } } },
   });
   const post = (path: string, body: object) => auth.handler(new Request(`http://localhost:4321/api/auth${path}`, {
     method: "POST", headers: { "Content-Type": "application/json", Origin: "http://localhost:4321" }, body: JSON.stringify(body),
@@ -30,6 +46,52 @@ function setup(enabled: boolean) {
 const account = { name: "Verification check", email: "verification@example.com", password: "testpassword" };
 
 describe("real email verification endpoints", () => {
+  it("links verified OAuth email without another email code and removes the unverified password", async () => {
+    const flow = setup(true);
+    await flow.post("/sign-up/email", account);
+    const id = flow.database.user[0].id;
+    const response = await flow.post("/sign-in/social", { provider: "google", idToken: { token: "signed-test-token" } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toContain("session_token");
+    expect(flow.database.user).toHaveLength(1);
+    expect(flow.database.user[0]).toMatchObject({ id, emailVerified: true });
+    expect(flow.database.account).toHaveLength(1);
+    expect(flow.database.account[0]).toMatchObject({ userId: id, providerId: "google" });
+    expect(flow.transport).toHaveBeenCalledTimes(1); // Only the original password signup.
+    expect((await flow.post("/sign-in/email", account)).ok).toBe(false);
+  });
+
+  it("does not merge an OAuth identity whose provider has not verified the email", async () => {
+    const flow = setup(true, false);
+    await flow.post("/sign-up/email", account);
+    const response = await flow.post("/sign-in/social", { provider: "google", idToken: { token: "signed-test-token" } });
+    expect(response.ok).toBe(false);
+    expect(flow.database.account).toHaveLength(1);
+    expect(flow.database.account[0].providerId).toBe("credential");
+    expect(flow.database.user[0].emailVerified).toBe(false);
+  });
+
+  it("signs up through verified OAuth without sending an email confirmation", async () => {
+    const flow = setup(true);
+    const response = await flow.post("/sign-in/social", { provider: "google", idToken: { token: "signed-test-token" } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toContain("session_token");
+    expect(flow.database.user[0].emailVerified).toBe(true);
+    expect(flow.transport).not.toHaveBeenCalled();
+  });
+  it("rejects repeated signups, including email case variants, without synthetic IDs", async () => {
+    const flow = setup(true);
+    expect((await flow.post("/sign-up/email", account)).status).toBe(200);
+    for (const email of [account.email, account.email.toUpperCase()]) {
+      const response = await safeErrorResponse(await flow.post("/sign-up/email", { ...account, email }), undefined, () => "");
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "EMAIL_ALREADY_REGISTERED", message: "This email is already registered. Sign in or reset your password." });
+      expect(response.headers.get("set-cookie")).toBeNull();
+    }
+    expect(flow.database.user).toHaveLength(1);
+    expect(flow.database.account).toHaveLength(1);
+    expect(flow.transport).toHaveBeenCalledTimes(1);
+  });
   it("withholds sessions until a correct one-use code verifies the account", async () => {
     const flow = setup(true);
     const signup = await flow.post("/sign-up/email", account);

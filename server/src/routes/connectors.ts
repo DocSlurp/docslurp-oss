@@ -1,12 +1,15 @@
+import { assertSafeExternalUrl } from "../lib/network-security.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { randomUUID, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   createConnectorSchema,
+  s3ConfigSchema, s3CredentialsSchema, googleDriveConfigSchema, googleDriveCredentialsSchema,
+  notionConfigSchema, notionCredentialsSchema, confluenceConfigSchema, confluenceCredentialsSchema,
   defaultPipelineFeatures,
   updateConnectorSchema,
   type PipelineFeatures,
@@ -15,7 +18,7 @@ import {
 
 import { sql } from "../db.js";
 import { env } from "../config.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 import { validationErrorResponse, type ValidationErrorSource } from "../lib/validation.js";
 import { getConnectorAdapter } from "../services/connectors/index.js";
 import { canManageWorkspace, getWorkspaceAccess } from "../services/organizations.js";
@@ -27,33 +30,12 @@ import {
 } from "../services/workspace-intake.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
-function getEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("CREDENTIALS_ENCRYPTION_KEY");
-}
-
 function encryptCredentials(credentials: Record<string, unknown>): string {
-  const key = getEncryptionKey();
-  const iv = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const plaintext = JSON.stringify(credentials);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf-8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  // Format: iv:tag:ciphertext (all hex)
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("CREDENTIALS_ENCRYPTION_KEY", JSON.stringify(credentials));
 }
 
 function decryptCredentials(encryptedStr: string): Record<string, unknown> {
-  const key = getEncryptionKey();
-  const parts = encryptedStr.split(":");
-  if (parts.length !== 3) throw new Error("Invalid encrypted credentials format");
-  const [ivHex, tagHex, ciphertextHex] = parts as [string, string, string];
-  const iv = Buffer.from(ivHex, "hex");
-  const tag = Buffer.from(tagHex, "hex");
-  const ciphertext = Buffer.from(ciphertextHex, "hex");
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return JSON.parse(decrypted.toString("utf-8")) as Record<string, unknown>;
+  return JSON.parse(openSecret("CREDENTIALS_ENCRYPTION_KEY", encryptedStr)) as Record<string, unknown>;
 }
 
 // Unknown or unimplemented connector types fail the shared enum here, so they
@@ -82,6 +64,23 @@ function toSqlJson(value: unknown): Parameters<typeof sql.json>[0] {
   return JSON.parse(JSON.stringify(value ?? {})) as Parameters<typeof sql.json>[0];
 }
 
+const connectorSchemas = {
+  s3: { config: s3ConfigSchema, credentials: s3CredentialsSchema },
+  'google-drive': { config: googleDriveConfigSchema, credentials: googleDriveCredentialsSchema },
+  notion: { config: notionConfigSchema, credentials: notionCredentialsSchema },
+  confluence: { config: confluenceConfigSchema, credentials: confluenceCredentialsSchema },
+};
+
+async function validatedSettings(type: string, config: Record<string, unknown>, credentials: Record<string, unknown>) {
+  const schemas = connectorSchemas[type as keyof typeof connectorSchemas];
+  if (!schemas) throw new Error("Unsupported connector type");
+  const parsedConfig = schemas.config.parse(config);
+  const parsedCredentials = schemas.credentials.parse(credentials);
+  if ('endpoint' in parsedConfig && parsedConfig.endpoint) await assertSafeExternalUrl(parsedConfig.endpoint);
+  if ('baseUrl' in parsedCredentials) await assertSafeExternalUrl(parsedCredentials.baseUrl);
+  return { config: parsedConfig, credentials: parsedCredentials };
+}
+
 function rowToConnector(row: ConnectorRow): WorkspaceConnector {
   return {
     id: row.id,
@@ -89,7 +88,7 @@ function rowToConnector(row: ConnectorRow): WorkspaceConnector {
     type: row.type as WorkspaceConnector["type"],
     name: row.name,
     status: row.status as WorkspaceConnector["status"],
-    config: row.config ?? {},
+    config: connectorSchemas[row.type as keyof typeof connectorSchemas]?.config.safeParse(row.config).data ?? {},
     lastSyncAt: row.last_sync_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -197,7 +196,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
     await intakeIntoWorkspace({
       userId: wsInfo.user_id,
       orgId: wsInfo.org_id,
-      workspaceId: row.workspace_id,
+      workspace: row.workspace_id,
       pipeline: wsInfo.pipeline ?? defaultPipelineFeatures,
       kind: "connector-sync",
       items: connectorItems(),
@@ -230,7 +229,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
     await sql`
       update connector_sync_log
       set status = 'failed', finished_at = now(), files_added = ${filesAdded}, files_updated = ${filesUpdated},
-          error_message = ${error instanceof Error ? error.message : String(error)}
+          error_message = ${"connector sync failed"}
       where id = ${syncLogId}
     `;
     await sql`
@@ -318,11 +317,14 @@ export const connectorsRoutes = new Hono()
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
-    const credentialsEncrypted = encryptCredentials(body.credentials);
+    let settings;
+    try { settings = await validatedSettings(body.type, body.config, body.credentials); }
+    catch { return apiStatusError(c, 422, "Invalid connector settings: use valid credentials and a public HTTPS endpoint", { code: "invalid_request" }); }
+    const credentialsEncrypted = encryptCredentials(settings.credentials);
 
     const rows = await sql<ConnectorRow[]>`
       insert into workspace_connectors (id, workspace_id, type, name, credentials_encrypted, config, status)
-      values (${randomUUID()}, ${workspaceId}, ${body.type}, ${body.name}, ${credentialsEncrypted}, ${sql.json(toSqlJson(body.config))}, 'active')
+      values (${randomUUID()}, ${workspaceId}, ${body.type}, ${body.name}, ${credentialsEncrypted}, ${sql.json(toSqlJson(settings.config))}, 'active')
       returning id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
     `;
 
@@ -339,16 +341,23 @@ export const connectorsRoutes = new Hono()
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
+    const existing = await sql<ConnectorRow[]>`select * from workspace_connectors where id = ${connectorId} and workspace_id = ${workspaceId}`;
+    if (!existing[0]) return apiStatusError(c, 404, "Connector not found");
+    let settings;
+    try {
+      settings = await validatedSettings(existing[0].type, body.config ?? existing[0].config,
+        body.credentials ?? decryptCredentials(existing[0].credentials_encrypted));
+    } catch { return apiStatusError(c, 422, "Invalid connector settings: use valid credentials and a public HTTPS endpoint", { code: "invalid_request" }); }
     const now = new Date().toISOString();
     if (body.name !== undefined) {
       await sql`update workspace_connectors set name = ${body.name}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
     }
     if (body.credentials !== undefined) {
-      const enc = encryptCredentials(body.credentials);
+      const enc = encryptCredentials(settings.credentials);
       await sql`update workspace_connectors set credentials_encrypted = ${enc}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
     }
     if (body.config !== undefined) {
-      await sql`update workspace_connectors set config = ${sql.json(toSqlJson(body.config))}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
+      await sql`update workspace_connectors set config = ${sql.json(toSqlJson(settings.config))}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
     }
     if (body.status !== undefined) {
       await sql`update workspace_connectors set status = ${body.status}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
@@ -411,8 +420,9 @@ export const connectorsRoutes = new Hono()
     }
 
     // Kick off sync asynchronously
-    void runConnectorSync(row, syncLogId).catch(async (err) => {
-      console.error(`[connector-sync] connector=${connectorId} error=${err instanceof Error ? err.message : String(err)}`);
+    void runConnectorSync(row, syncLogId).catch(() => {
+      // Provider error bodies can carry tenant data; log the event, not the message.
+      console.error(`[connector-sync] connector=${connectorId} failed`);
     });
 
     return c.json({ syncLogId, status: "running" }, 202);

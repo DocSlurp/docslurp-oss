@@ -87,23 +87,42 @@ function docsHtml(specUrl: string): string {
           for (const [path, operations] of paths) {
             const card = document.createElement("article");
             card.className = "card";
-            const methods = Object.entries(operations).map(([method, meta]) => {
-              const summary = meta.summary || "";
-              return \`<p><strong>\${method.toUpperCase()}</strong> <code>\${path}</code><br/><span class="muted">\${summary}</span></p>\`;
-            }).join("");
-            card.innerHTML = \`<div class="path">\${path}</div>\${methods}\`;
+            const heading = document.createElement("div");
+            heading.className = "path";
+            heading.textContent = path;
+            card.appendChild(heading);
+            for (const [method, meta] of Object.entries(operations)) {
+              const p = document.createElement("p");
+              const strong = document.createElement("strong");
+              strong.textContent = method.toUpperCase();
+              const code = document.createElement("code");
+              code.textContent = path;
+              const span = document.createElement("span");
+              span.className = "muted";
+              span.textContent = meta.summary || "";
+              p.append(strong, " ", code, document.createElement("br"), span);
+              card.appendChild(p);
+            }
             container.appendChild(card);
           }
 
           const raw = document.createElement("section");
           raw.className = "card";
           raw.style.marginTop = "1rem";
-          raw.innerHTML = "<h2>Raw spec</h2><pre></pre>";
-          raw.querySelector("pre").textContent = JSON.stringify(spec, null, 2);
+          const h2 = document.createElement("h2");
+          h2.textContent = "Raw spec";
+          const pre = document.createElement("pre");
+          pre.textContent = JSON.stringify(spec, null, 2);
+          raw.append(h2, pre);
           document.querySelector("main").appendChild(raw);
         })
         .catch((error) => {
-          container.innerHTML = "<article class='card'><p>We couldn’t load the API documentation. Please refresh and try again.</p></article>";
+          const fallback = document.createElement("article");
+          fallback.className = "card";
+          const message = document.createElement("p");
+          message.textContent = "We couldn’t load the API documentation. Please refresh and try again.";
+          fallback.appendChild(message);
+          container.replaceChildren(fallback);
         });
     </script>
   </body>

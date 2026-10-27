@@ -40,7 +40,6 @@ class MockRunCreationBlockedError extends Error {
 
 vi.mock("../services/runs.js", () => ({
   controlRun: vi.fn(),
-  exportRun: vi.fn(),
   getRun: getRunMock,
   getRunProcessingPreview: getRunProcessingPreviewMock,
   getRunProgress: getRunProgressMock,
@@ -74,9 +73,6 @@ vi.mock("../services/audit-log.js", () => ({
   appendAuditLog: vi.fn()
 }));
 
-vi.mock("../services/run-forensics.js", () => ({
-  getRunForensics: vi.fn()
-}));
 
 vi.mock("../services/run-lifecycle.js", () => ({
   runLifecycle: { start: async (run: { id: string; pipeline: unknown }) => {
@@ -98,7 +94,7 @@ vi.mock("../lib/request-context.js", async () => {
   };
 });
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), getWorkspace: getWorkspaceMock }));
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), getWorkspace: getWorkspaceMock }));
 
 const { runsRoutes } = await import("../routes/runs.js");
 
@@ -187,7 +183,7 @@ describe("runsRoutes validation", () => {
     });
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "conflict" } });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "missing_stage_artifacts" } });
     expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed" });
   });
 
@@ -246,11 +242,11 @@ describe("runsRoutes validation", () => {
 
 
 describe("API-key run reads", () => {
-  function keyApp(scopes = ["ingest"]) {
+  function keyApp(scopes = ["ingest"], keyType = "server") {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionUser", { id: "user-1", email: "", name: "API key" });
-      c.set("apiKey", { userId: "user-1", orgId: "org-1", scopes } as never);
+      c.set("apiKey", { userId: "user-1", orgId: "org-1", scopes, keyType } as never);
       await next();
     });
     return app.route("/runs", runsRoutes);
@@ -264,7 +260,13 @@ describe("API-key run reads", () => {
     listRunsMock.mockReset();
     getRunMock.mockResolvedValue({ id: "run-1", workspaceId: "ws-1", orgId: "org-1" });
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
-    getRunProgressMock.mockResolvedValue({ run: { id: "run-1", status: "completed" } });
+    getRunProgressMock.mockResolvedValue({ run: { id: "run-1", workspaceId: "ws-1", status: "completed" } });
+  });
+  it.each(["/runs", "/runs/activity/stream", "/runs/run-1/progress", "/runs/run-1/events"])("rejects public-key metadata access at %s", async (path) => {
+    const response = await keyApp(["search"], "public").request(path);
+    expect(response.status).toBe(403);
+    expect(listRunsMock).not.toHaveBeenCalled();
+    expect(getRunMock).not.toHaveBeenCalled();
   });
   it("allows an ingest key to observe its run completion", async () => {
     const response = await keyApp().request("/runs/run-1/progress");
@@ -280,6 +282,33 @@ describe("API-key run reads", () => {
   it("requires a service scope for run reads", async () => {
     expect((await keyApp([]).request("/runs/run-1/progress")).status).toBe(403);
     expect(getRunProgressMock).not.toHaveBeenCalled();
+  });
+  it("rejects a browser/client key on run reads even with a service scope (SEC-2026-10-ROUND3-01)", async () => {
+    expect((await keyApp(["search"], "client").request("/runs")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/activity/stream")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/run-1/progress")).status).toBe(403);
+    expect(listRunsMock).not.toHaveBeenCalled();
+  });
+  it("lets an ingest server key reprocess its own runs, and nobody else", async () => {
+    reprocessRunMock.mockReset();
+    reprocessRunMock.mockResolvedValue({ run: { id: "run-2", orgId: "org-1", workspaceId: "ws-1" }, deferredReason: null });
+    const post = (app: ReturnType<typeof keyApp>, path = "/runs/run-1/reprocess") => app.request(path, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ stageFrom: "extract-markdown" }),
+    });
+    expect((await post(keyApp(["search"]))).status).toBe(403);
+    expect((await post(keyApp(["artifacts"]))).status).toBe(403);
+    expect((await post(keyApp(["ingest"], "client"))).status).toBe(403);
+    getWorkspaceMock.mockResolvedValueOnce({ id: "ws-1", orgId: "org-2" });
+    expect((await post(keyApp())).status).toBe(404);
+    expect(reprocessRunMock).not.toHaveBeenCalled();
+    expect((await post(keyApp())).status).toBe(201);
+    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "extract-markdown" });
+    expect((await post(keyApp(["search"]), "/runs/run-1/reprocess/estimate")).status).toBe(403);
+    const { listRouteAuthModes } = await import("../lib/route-auth.js");
+    const modes = Object.fromEntries(listRouteAuthModes(runsRoutes).map((route) => [`${route.method} ${route.path}`, route.mode]));
+    expect(modes["POST /:runId/reprocess"]).toBe("apiKey");
+    expect(modes["POST /:runId/reprocess/estimate"]).toBe("apiKey");
+    expect(modes["POST /:runId/control"] ?? "session").toBe("session");
   });
   it("filters run lists to the key organization", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);

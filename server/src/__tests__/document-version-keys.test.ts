@@ -29,7 +29,7 @@ beforeAll(async () => {
     resolveSourceMetadata: async (file: { sourceKey: string }) => ({ pageCount: 1, sourceSha256: `sha-${file.sourceKey}` }),
   }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values ('o1', 'Org', 'org', 'u1', 100000, 'gold')`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 100000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W1'), ('w2', 'o1', 'u1', 'W2')`;
   ({ runCreation } = await import("../services/run-creation.js"));

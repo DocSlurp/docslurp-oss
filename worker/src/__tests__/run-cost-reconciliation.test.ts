@@ -54,7 +54,16 @@ afterAll(async () => {
 function ai(state: WorkflowState, metric: string, model: string, inputTokens: number, outputTokens: number, documentId?: string) {
   state.usageLedger.record({
     provider: "openrouter", model, metric, inputTokens, outputTokens,
-    metadata: documentId ? { documentId } : {},
+    // A page read (page-analysis) of page 1 also bills one Rich page.
+    metadata: documentId ? { documentId, pageNumber: 1 } : {},
+  });
+}
+
+/** A billable price-card unit (AI and compute events bill 0 credits). */
+function unit(state: WorkflowState, credits: number, stage: string) {
+  state.usageLedger.enqueue({
+    provider: "docslurp", model: "price-card", metric: "ingest-page-fast", amount: 1, unit: "page",
+    costCents: credits, metadata: { billable: true, unitCharge: true, stage },
   });
 }
 
@@ -88,10 +97,7 @@ describe("run cost reconciliation", () => {
             // Checkpoint per document, as long stages do: flushes the buffer mid-stage.
             await store.updateProgress(state);
           }
-          state.usageLedger.enqueue({
-            provider: "docslurp", model: "page-base-fee", metric: "page-base-fee", amount: 8, unit: "page",
-            costCents: 0.4, metadata: {},
-          });
+          unit(state, 0.4, "vision-extract");
         },
       },
       {
@@ -112,6 +118,7 @@ describe("run cost reconciliation", () => {
         name: "document-summary",
         async run(state) {
           ai(state, "document-summary", "qwen/qwen3.5-flash-02-23", 4_000, 300);
+          unit(state, 0.3, "document-summary");
           await store.updateProgress(state);
           if (failSummaryOnce) {
             failSummaryOnce = false;
@@ -130,16 +137,18 @@ describe("run cost reconciliation", () => {
     }
     // A retried stage (group): attempt 1 checkpoints spend, then fails.
     await expect(execution.runStage(input("document-summary"), runtime(1))).rejects.toThrow("provider returned 500");
-    const failedAttemptCents = await persistedCents("metric = 'document-summary'");
+    const failedAttemptCents = await persistedCents("metric = 'ingest-page-fast' and metadata->>'stage' = 'document-summary'");
     expect(failedAttemptCents).toBeGreaterThan(0);
     tallies.push((await execution.runStage(input("document-summary"), runtime(2))).usage);
 
     const total = await persistedCents();
     const kinds = await db.query<{ metric: string }>("select distinct metric from usage_attribution where run_id = 'r1' order by 1");
     expect(kinds.rows.map((row) => row.metric)).toEqual([
-      "contextual-chunk-preamble", "document-summary", "embedding-tokens", "page-analysis", "page-base-fee",
+      "contextual-chunk-preamble", "document-summary", "embedding-tokens", "ingest-page-fast", "ingest-page-rich", "page-analysis",
       "parser-process", "worker-stage",
     ]);
+    // Only price-card units carry credits.
+    expect(await persistedCents("metric not like 'ingest-page-%'")).toBe(0);
     expect(await persistedCents("metric = 'parser-process'")).toBe(0);
 
     // Every completed activity reports exactly what it persisted, so the

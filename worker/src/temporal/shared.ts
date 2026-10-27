@@ -33,6 +33,10 @@ export interface StageOutput {
   stats: Record<string, unknown>;
   /** Stage groups only: how many of the group's stages ran (fewer when it yielded to a pause). */
   stagesRun?: number;
+  /** Set when the stage ran with readControlState: the run's pause/cancel request at its completion checkpoint. */
+  controlRequested?: boolean;
+  /** In-process only (a stage group's next stage); never part of an activity result. */
+  preloaded?: import("../db/store.js").PreloadedRunState;
 }
 
 export interface UsageSummary {

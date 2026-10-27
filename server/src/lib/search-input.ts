@@ -4,14 +4,20 @@ import { parseFilters } from "../search/filters.js";
 
 const id = z.string().trim().min(1).max(256);
 const filter = z.string().max(4096).optional();
+// A date filter is cast to timestamptz in SQL, so validate it here: an
+// unparseable value would otherwise reach Postgres and surface as a 500.
+const dateFilter = z.string().trim().max(64).optional()
+  .refine((value) => value === undefined || value === "" || !Number.isNaN(Date.parse(value)), {
+    message: "Expected an ISO-8601 date",
+  });
 // A query of only NUL bytes is empty once they are stripped before the Postgres lookups.
 const query = z.string().trim().min(1).max(16000).refine((value) => value.replaceAll("\u0000", "").trim().length > 0);
-const workspaceRef = id.optional().describe("Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace.");
+const workspaceRef = id.optional().describe("Workspace ID, slug or name (names match by slug, so \"Legal Contracts\" finds legal-contracts). Omitted: the organization default workspace.");
 
 export const searchInputSchema = z.object({
   q: query,
   /** Omitted: the organization's default workspace. */
-  workspaceId: workspaceRef,
+  workspace: workspaceRef,
   orgId: id.optional(),
   runId: id.optional(),
   documentId: id.optional(),
@@ -24,8 +30,8 @@ export const searchInputSchema = z.object({
   pageTo: filter,
   language: filter,
   heading: filter,
-  dateFrom: filter,
-  dateTo: filter,
+  dateFrom: dateFilter,
+  dateTo: dateFilter,
   hyde: z.boolean().optional(),
   rerank: z.boolean().optional(),
   candidateDepth: searchCandidateDepthSchema.optional(),
@@ -67,7 +73,7 @@ export function searchFormError(input: Record<string, unknown>): string | undefi
 }
 export const workspaceChatInputSchema = z.object({
   q: query,
-  workspaceId: workspaceRef,
+  workspace: workspaceRef,
   orgId: id.optional(),
   sessionId: id.optional(),
   model: id.optional(),

@@ -8,6 +8,8 @@ import {
   apiErrorEnvelopeSchema,
   isApiErrorCode,
   publicApiErrorDetails,
+  publicApiErrorLinks,
+  publicApiErrorMessage,
   publicApiErrorEnvelope,
 } from "../api-error.js";
 import { safeErrorResponse } from "../error-response.js";
@@ -87,12 +89,12 @@ describe("publicApiErrorDetails", () => {
     expect(publicApiErrorDetails({
       issues: [{ path: ["a", 1], message: "echoes secret input" }],
       retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
-      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5, secret: "x" },
+      directUpload: { createSession: "/v1/uploads/direct/sessions", maxFileBytes: 5, secret: "x" },
       sql: "select secret", stack: "private",
     })).toEqual({
       issues: [{ path: "a.1", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }],
       retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
-      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5 },
+      directUpload: { createSession: "/v1/uploads/direct/sessions", maxFileBytes: 5 },
     });
   });
   it("drops labels that are not plain identifiers and non-finite numbers", () => {
@@ -123,5 +125,45 @@ describe("safeErrorResponse for the native API", () => {
   it("leaves the legacy shape alone when not native", async () => {
     const res = await safeErrorResponse(Response.json({ error: "x", code: "workspace_not_found" }, { status: 404 }), "r");
     expect(await res.json()).toMatchObject({ code: "workspace_not_found", requestId: "r" });
+  });
+});
+
+describe("limit links", () => {
+  const links = {
+    buyCredits: "https://docslurp.io/app/billing#buy-credits",
+    autoTopUp: "https://docslurp.io/app/billing#auto-top-up",
+    billing: "https://docslurp.io/app/billing",
+    docs: "https://docslurp.io/docs/http#rate-limits-and-headers",
+  };
+
+  it("keeps only known keys with absolute http(s) URLs and never an upgrade link", () => {
+    expect(publicApiErrorLinks({ ...links, upgrade: "https://docslurp.io/pricing", evil: "https://x", apiKeys: "javascript:alert(1)" })).toEqual(links);
+    expect(publicApiErrorLinks({ billing: "https://a b" })).toBeUndefined();
+    // Plan labels (account, plan) are never public detail fields.
+    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links });
+  });
+
+  it("never tells a rate-limited caller to buy credits; points credit errors at buying credits and auto top-up", () => {
+    expect(publicApiErrorMessage("rate_limited", { account: "account", links })).not.toContain("buy credits");
+    expect(publicApiErrorMessage("rate_limited", { account: "starter", links })).not.toContain("buy credits");
+    expect(publicApiErrorMessage("credit_exhausted", { links })).toBe(
+      "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#buy-credits, or turn on auto top-up at https://docslurp.io/app/billing#auto-top-up.",
+    );
+    expect(publicApiErrorMessage("credit_exhausted", { links: { buyCredits: links.buyCredits } })).toBe(
+      "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#buy-credits.",
+    );
+    for (const code of ["rate_limited", "credit_exhausted", "org_budget_paused"] as const) {
+      expect(publicApiErrorMessage(code)).toBe(API_ERROR_PUBLIC_MESSAGES[code]);
+    }
+  });
+});
+
+describe("domain error codes", () => {
+  it("every code a route can surface has reviewed public copy", async () => {
+    const { API_ERROR_CODES, API_ERROR_PUBLIC_MESSAGES } = await import("../api-error.js");
+    for (const code of API_ERROR_CODES) expect(API_ERROR_PUBLIC_MESSAGES[code], code).toMatch(/\S/);
+    for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "source_not_reusable", "missing_stage_artifacts", "workspace_forbidden"]) {
+      expect(API_ERROR_CODES).toContain(code);
+    }
   });
 });

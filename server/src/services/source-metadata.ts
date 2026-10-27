@@ -96,12 +96,23 @@ export function estimateNonPdfPageCount(
   return Math.max(1, estimatedByLines, estimatedByChars);
 }
 
+const PDFINFO_ENV = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C" } as const;
+
 async function runPdfInfo(filePath: string): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
+    // pdfinfo parses uploader-supplied bytes. It inherits a minimal environment
+    // (no app secrets) and runs in the temp directory holding the single input
+    // file, so a malformed file cannot read our configuration from
+    // /proc/self/environ. The process is still inside the API container: the
+    // container drops all capabilities and is non-root (docker-compose.prod.yml),
+    // and page-count extraction is slated to move into the sandboxed worker.
+    // See security finding SEC-2026-10-03.
     const child = spawn("pdfinfo", [filePath], {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
       killSignal: "SIGKILL",
+      env: PDFINFO_ENV,
+      cwd: path.dirname(filePath),
     });
 
     let stdout = "";

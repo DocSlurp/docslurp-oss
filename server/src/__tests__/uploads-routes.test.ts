@@ -8,6 +8,14 @@ import { withTestSession } from "./helpers/session-app.js";
 import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-intake-fakes.js";
 
 // URL safety checks resolve hosts; keep them independent of live DNS.
+
+// safeExternalFetch sends through undici's own fetch; route it to the global
+// that each test stubs.
+vi.mock("undici", async (importOriginal) => ({
+  ...await importOriginal<typeof import("undici")>(),
+  fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+}));
+
 vi.mock("node:dns/promises", () => ({
   lookup: vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]),
 }));
@@ -87,7 +95,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
   it("appends to the targeted workspace with its pipeline when no override is sent", async () => {
     const pipeline = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
     const { app, fakes } = setup([fakeWorkspace({ id: "ws-1", pipeline })]);
-    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspaceId: "ws-1" }));
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "ws-1" }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0]).toMatchObject({ workspaceId: "ws-1", pipeline });
   });
@@ -99,10 +107,30 @@ describe("uploadsRoutes over Workspace Intake", () => {
     expect(fakes.objects.size).toBe(0);
   });
 
-  it("returns 404 for an unknown target workspace", async () => {
-    const { app } = setup([]);
-    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspaceId: "missing" }));
+  it("creates a workspace named by an unmatched workspace value, then appends to it by name", async () => {
+    const { app, fakes } = setup([]);
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "Field Notes" }));
+    expect(response.status).toBe(201);
+    expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Field Notes", autoNamed: false })]);
+    const again = await app.request("/uploads/bulk", bulk([text("more.txt")], { workspace: "field notes" }));
+    expect(again.status).toBe(201);
+    expect(fakes.createdWorkspaces).toHaveLength(1);
+    expect(fakes.runs.map((run) => run.workspaceId)).toEqual([fakes.runs[0].workspaceId, fakes.runs[0].workspaceId]);
+  });
+
+  it("returns 404 for an unknown target workspace UUID", async () => {
+    const { app, fakes } = setup([]);
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "33333333-3333-4333-8333-333333333333" }));
     expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "workspace_not_found" } });
+    expect(fakes.createdWorkspaces).toEqual([]);
+  });
+
+  it("answers 400 for a workspace value with no letters or digits", async () => {
+    const { app, fakes } = setup();
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "!!!" }));
+    expect(response.status).toBe(400);
+    expect(fakes.runs).toEqual([]);
   });
 
   it("returns field-level issues for invalid pipeline JSON before run creation", async () => {
@@ -119,7 +147,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     const { app } = setup();
     const response = await app.request(
       "/uploads/url",
-      json({ workspaceId: "ws-1", urls: ["https://example.com/contracts.txt"], pipeline: { embed: false, indexVectors: true } }),
+      json({ workspace: "ws-1", urls: ["https://example.com/contracts.txt"], pipeline: { embed: false, indexVectors: true } }),
     );
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
@@ -133,15 +161,15 @@ describe("uploadsRoutes over Workspace Intake", () => {
       headers: { "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "content-length": "9" },
     })));
     const { app } = setup();
-    const response = await app.request("/uploads/url", json({ workspaceId: "ws-1", urls: ["https://example.com/report.docx"] }));
+    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/report.docx"] }));
     expect(response.status).toBe(415);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
   });
 
   it("reports what URL ingest fetched", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain", "content-length": "5" } })));
     const { app } = setup();
-    const response = await app.request("/uploads/url", json({ workspaceId: "ws-1", urls: ["https://example.com/contracts.txt?token=secret"] }));
+    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/contracts.txt?token=secret"] }));
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({ ingested: [{ filename: "contracts.txt", mimeType: "text/plain" }] });
   });
@@ -149,7 +177,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
   it("defaults URL canonical IDs to the URL and accepts per-URL overrides", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/url", json({ workspaceId: "ws-1", urls: [
+    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: [
       "https://example.com/products/#pricing",
       { url: "https://example.com/products.mdx", canonicalId: "/products" },
     ] }));
@@ -160,10 +188,10 @@ describe("uploadsRoutes over Workspace Intake", () => {
 
   it("carries multipart canonical IDs onto stored files", async () => {
     const { app, fakes } = setup();
-    let response = await app.request("/uploads/bulk", bulk([text("products.md")], { workspaceId: "ws-1", canonicalId: "/products" }));
+    let response = await app.request("/uploads/bulk", bulk([text("products.md")], { workspace: "ws-1", canonicalId: "/products" }));
     expect(response.status).toBe(201);
     response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], {
-      workspaceId: "ws-1", canonicalIds: JSON.stringify({ "b.md": "/b" }),
+      workspace: "ws-1", canonicalIds: JSON.stringify({ "b.md": "/b" }),
     }));
     expect(response.status).toBe(201);
     expect(fakes.runs.map((run) => run.files.map((file) => file.canonicalId ?? null))).toEqual([["/products"], [null, "/b"]]);
@@ -172,18 +200,18 @@ describe("uploadsRoutes over Workspace Intake", () => {
   it("carries folder paths onto stored files and rejects '..' with 400", async () => {
     const { app, fakes } = setup();
     let response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], {
-      workspaceId: "ws-1", paths: JSON.stringify(["docs/a", ""]),
+      workspace: "ws-1", paths: JSON.stringify(["docs/a", ""]),
     }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].files.map((file) => file.path ?? "")).toEqual(["docs/a", ""]);
-    response = await app.request("/uploads/bulk", bulk([text("a.md")], { workspaceId: "ws-1", path: "x/../y" }));
+    response = await app.request("/uploads/bulk", bulk([text("a.md")], { workspace: "ws-1", path: "x/../y" }));
     expect(response.status).toBe(400);
     expect(fakes.runs).toHaveLength(1);
   });
 
   it("rejects canonical IDs that do not line up with the uploaded files", async () => {
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], { workspaceId: "ws-1", canonicalId: "/a" }));
+    const response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], { workspace: "ws-1", canonicalId: "/a" }));
     expect(response.status).toBe(400);
     expect(fakes.runs).toEqual([]);
   });
@@ -212,7 +240,7 @@ describe("upload tags", () => {
   it("normalizes tags before applying them to every accepted file", async () => {
     const { app, fakes } = setup();
     const response = await app.request("/uploads/bulk", bulk([text("a.txt"), text("b.txt")], {
-      workspaceId: "ws-1", tags: JSON.stringify([" finance ", "finance", "FY26"]),
+      workspace: "ws-1", tags: JSON.stringify([" finance ", "finance", "FY26"]),
     }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].files.map((file) => file.tags)).toEqual([["finance", "FY26"], ["finance", "FY26"]]);
@@ -229,7 +257,7 @@ describe("upload tags", () => {
   it("carries URL upload tags into intake", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { headers: { "content-type": "text/plain" } })));
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/url", json({ workspaceId: "ws-1", urls: ["https://example.com/notes.txt"], tags: ["research"] }));
+    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/notes.txt"], tags: ["research"] }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].files[0].tags).toEqual(["research"]);
   });

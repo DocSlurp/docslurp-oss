@@ -5,13 +5,21 @@ import { scanVideo, prepareVideoFrame, describeVideoChunk } from "./video-proces
 import { LeasedMediaProvider, leasedMediaProvider } from "./capacity/runtime.js";
 import type { CapacityLeaseStore } from "./capacity/types.js";
 import { createHash } from "node:crypto";
-import { DOCUMENT_FAILURE_MARKERS } from "@docslurp/shared";
+import {
+  BILLABLE_UNIT_METRICS,
+  DOCUMENT_FAILURE_MARKERS,
+  UNIT_CHARGE_PROVIDER,
+  mediaRichPages,
+  pageCredits,
+  unitChargeMetadata,
+} from "@docslurp/shared";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { mediaConfig, type MediaConfig } from "./config.js";
 import { configuredMediaProvider } from "./providers.js";
 import { inspectMedia, prepareAudioChunk } from "./prepare.js";
@@ -40,6 +48,26 @@ export function chunkPlan(state: WorkflowState, documentId: string, provider: { 
   return plan;
 }
 
+/**
+ * Bill a transcribed media file by its duration (PRICE_CARD): an audio minute
+ * is one Rich page, a video minute whose frames were read is three, rounded up
+ * per file. Provider transcription and frame costs are recorded but bill 0.
+ * One charge per (run, document); the id makes a retried checkpoint a no-op.
+ */
+export function chargeMediaMinutes(state: WorkflowState, documentId: string, kind: "audio" | "video", durationSeconds: number): void {
+  const slot = `media-charge:${documentId}`;
+  if (state.artifactLedger.read(slot)) return;
+  const pages = mediaRichPages(kind, durationSeconds);
+  if (pages <= 0) return;
+  state.usageLedger.enqueue({
+    id: `media:${state.run.id}:${documentId}`,
+    provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.mediaMinutes,
+    amount: pages, unit: "page", costCents: pageCredits("rich", pages), inputTokens: 0, outputTokens: 0,
+    metadata: unitChargeMetadata({ documentId, kind, durationSeconds, minutes: Math.ceil(durationSeconds / 60) }),
+  });
+  state.artifactLedger.record(slot, String(pages));
+}
+
 export async function extractMedia(args: { state: WorkflowState; document: Document; runner: CommandRunner;
   storage: ArtifactStore; journal?: MediaJournal; capacityStore?: CapacityLeaseStore; signal?: AbortSignal }) {
   const { state, document, runner, storage, signal } = args;
@@ -57,14 +85,14 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
     const source = await storage.downloadToTempFile(document.sourceKey, "source.media", { maxBytes: config.maxSourceBytes });
     try {
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
-      // A silent video (screen recording) has nothing to transcribe, so its frames are the only evidence:
-      // read them without the workspace opt-in. Videos with audio still need pipeline.mediaVideo.enabled.
+      // Missing workspace configuration opts in; explicit false wins even for silent video.
+      // Platform, privacy, budget and durable quota checks still apply.
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
-        && (state.run.pipeline.mediaVideo?.enabled === true || !hasAudio);
+        && state.run.pipeline.mediaVideo?.enabled !== false;
       if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
-      const policy = hasVideo ? videoPolicy(state.run.orgPlanId, duration, state.run.pipeline.mediaVideo) : undefined;
+      const policy = hasVideo ? videoPolicy(duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {
-        if (!args.journal.admitVideo) throw new Error("Video requires durable organization quota admission");
+        if (!args.journal.admitVideo) throw new Error("Video requires durable admission");
         await args.journal.admitVideo(scope, duration, visualEnabled ? policy.frames : 0);
       }
       // Until capacity reservations support a document ledger, reject this combination
@@ -110,13 +138,14 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
         }
       }
       const coverage = visualSegments.length ? (hasAudio ? "audio-and-sampled-visual" : "sampled-visual-only") : "audio-track-only";
+      chargeMediaMinutes(state, document.id, visualSegments.length ? "video" : "audio", duration);
       const mediaKind = hasVideo ? "video" as const : "audio" as const;
       const sourceArtifactUri = storage.uri(document.sourceKey);
       const { text, canonical } = buildMediaCanonicalDocument({ documentId: document.id, mediaKind, durationSeconds: duration, segments,
         visualSegments, sourceArtifactUri, extractor: `media:${provider.id}` });
       const summary = buildMediaSummary({ mediaKind, durationSeconds: duration, segments, visualSegments, coverage, costUsd, diarized: speakerTurns.length > 0,
         diarization: diarization?.status, diarizationReason: diarization?.reason });
-      const prefix = `${document.userId}/${state.run.id}/media/${document.id}`;
+      const prefix = `${runArtifactRoot(state.run, document.userId)}/media/${document.id}`;
       await storage.putBytes(`${prefix}.md`, Buffer.from(text), "text/markdown; charset=utf-8");
       await storage.putJson(`${prefix}.json`, { documentId: document.id, provider: provider.id, model: provider.model,
         durationSeconds: duration, segments, speakerTurns, visualSegments, scanStats, samplingVersion: "video-gray96-v1", coverage, summary,

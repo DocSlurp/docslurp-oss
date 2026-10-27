@@ -17,20 +17,20 @@ DocSlurp is a multi-tenant document ingestion and retrieval service. The core te
 
 ### LanceDB vector isolation
 
-LanceDB vector storage uses storage-layer tenant isolation. Each organization's text chunk embeddings are written to exactly one live LanceDB table:
+LanceDB vector storage uses storage-layer tenant isolation. Every workspace has its own LanceDB database per embedding space, and its text chunk embeddings are written only there:
 
 ```text
-chunks_org_<sha256(org_id)[0:32]>
+<LANCEDB_URI>/<org_id>/<workspace_id>/vectors-<url-encoded model>-<dimensions>/chunks.lance
 ```
 
-The raw organization id is never embedded in the table name. The table name is derived by `VectorNamespaceManager` in `packages/shared/src/vector-namespace.ts`, and both worker indexing (`worker/src/stages/index-vectors.ts`) and server search (`server/src/search/lancedb.ts`) use that shared contract.
+The location is derived by `VectorNamespaceManager` in `packages/shared/src/vector-namespace.ts`, which rejects any org or workspace id that is not a single safe path segment. Worker indexing (`worker/src/stages/index-vectors.ts`, through `worker/src/stages/lancedb-location.ts`), purge and cleanup, and server search (`server/src/search/lancedb.ts`) all use that shared contract.
 
-The query path does not accept a user-supplied vector namespace, table name, or table prefix. Search first resolves workspace access in Postgres, extracts the authoritative `orgId`, opens only that exact LanceDB table, and then hydrates hits back through workspace-scoped Postgres document/chunk queries. A missing org id fails closed and returns no vector hits.
+The query path does not accept a user-supplied vector namespace, table name, or path. Search first resolves workspace access in Postgres, takes the authoritative `orgId` and the requested `workspaceId`, opens only that workspace's database, and then hydrates hits back through workspace-scoped Postgres document/chunk queries. A missing org or workspace id fails closed and returns no vector hits; a worker without both refuses to write.
 
-Archives and malformed lookalike tables, such as `chunks_org_<hash>_archived_<timestamp>` or `chunks_org_<hash>_malformed`, are not live search tables.
+A deduplicated document in another workspace than its source gets its own rows in its own workspace's database; vector rows are never shared across workspaces. Deleting a workspace drops its databases whole.
 
 ### Defense in depth
 
-Workspace search also applies Postgres scoping during result hydration, so LanceDB hits must correspond to completed documents inside the requested workspace before they are returned. This is defense in depth; LanceDB table isolation is the primary vector-store tenant boundary.
+Workspace search also applies Postgres scoping during result hydration, so LanceDB hits must correspond to completed documents inside the requested workspace before they are returned. This is defense in depth; per-workspace LanceDB databases are the primary vector-store tenant boundary.
 
 Findings and remediation status are tracked in a private registry.

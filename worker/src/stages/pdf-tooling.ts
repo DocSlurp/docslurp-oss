@@ -6,6 +6,7 @@ import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner, CommandPlan } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export class PdfToolingStage implements Stage {
   readonly name = "pdf-tooling";
@@ -17,7 +18,7 @@ export class PdfToolingStage implements Stage {
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/pdf-tooling/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/pdf-tooling/${document.id}.json`;
       const artifactSlot = `${document.id}:pdf-tooling`;
 
       await runDocumentStage(
@@ -51,8 +52,8 @@ export class PdfToolingStage implements Stage {
               mimeType: document.mimeType,
               sourceKey: document.sourceKey,
               pageCount,
-              pageImagesKey: `${document.userId}/${state.run.id}/images/${document.id}/manifest.json`,
-              pageManifestKey: `${document.userId}/${state.run.id}/pages/${document.id}/manifest.json`
+              pageImagesKey: `${runArtifactRoot(state.run, document.userId)}/images/${document.id}/manifest.json`,
+              pageManifestKey: `${runArtifactRoot(state.run, document.userId)}/pages/${document.id}/manifest.json`
             },
             tableDetection: {
               hasTablePages: tableDetection.hasTablePages,
@@ -68,7 +69,7 @@ export class PdfToolingStage implements Stage {
               {
                 id: "layout-aware-markdown",
                 summary: "Use layout-preserving extractors when markdown fidelity matters.",
-                tools: ["native-pdf", "docling", "unstructured"]
+                tools: ["native-pdf", "unstructured"]
               },
               {
                 id: "ocr-rescue",
@@ -205,9 +206,6 @@ export class PdfToolingStage implements Stage {
       ocrPdf,
       unstructuredFast,
       unstructuredHiRes,
-      doclingMarkdown,
-      doclingJson,
-      doclingVlm,
       nativePdf,
       unpdfExtract,
       transformersJsClip,
@@ -222,9 +220,6 @@ export class PdfToolingStage implements Stage {
       this.runner.ocrPdf(document.sourceKey, "ocr-output.pdf"),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-fast.json", "fast"),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-hi-res.json", "hi_res"),
-      this.runner.doclingMarkdown(document.sourceKey, "docling"),
-      this.runner.doclingJson(document.sourceKey, "docling"),
-      this.runner.doclingVlm(document.sourceKey, "docling-vlm"),
       this.nativePdfPlan(),
       this.runner.unpdfExtract(document.sourceKey, "unpdf.json"),
       this.runner.transformersJsClip(
@@ -270,18 +265,6 @@ export class PdfToolingStage implements Stage {
         commands: {
           "partition-fast": unstructuredFast,
           "partition-hi-res": unstructuredHiRes
-        }
-      },
-      {
-        id: "docling",
-        tier: "layout-markdown",
-        kind: "python-cli",
-        bestFor: ["document structure", "markdown/json export", "optional VLM path"],
-        tradeoffs: ["larger dependency footprint", "VLM mode is slower than the standard pipeline"],
-        commands: {
-          markdown: doclingMarkdown,
-          json: doclingJson,
-          vlm: doclingVlm
         }
       },
       {

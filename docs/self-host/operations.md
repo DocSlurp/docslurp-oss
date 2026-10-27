@@ -3,6 +3,82 @@
 Commands on this page run from the repository root, with the stack started as
 described in [Docker Compose install](docker-compose.md).
 
+## Automatic upload completion and Tigris notifications
+
+Direct upload sessions finalize automatically. For known-size multipart uploads,
+the API reconciler lists stored parts, checks every part number and size, and
+assembles the object. Unknown-size streams must send an end-of-stream completion
+with their final byte count; the SDK does this after every part succeeds. The SDK
+then polls session status for the accepted run. Acceptance means ingestion has
+started or is queued; it does not mean extraction has finished. There is no separate client
+confirmation required to start ingestion.
+
+The API runs the reconciler every 15 seconds, in bounded batches, with per-session
+backoff (up to 30 seconds for incomplete uploads, five minutes after errors).
+Unfinished transfers expire after 24 hours and become `aborted`; sessions already
+starting ingestion continue recovery. It also verifies single-PUT objects,
+so self-hosted S3/MinIO installations do not require webhooks. Keep the API process
+running; a process that sleeps between requests cannot execute background sweeps.
+Allow up to two additional on-demand database connections per API process for
+upload advisory locks, beyond `DATABASE_POOL_MAX` and existing listener/probe
+connections. These locks use a separate pool so finalization cannot exhaust the
+query pool while waiting for its own queries.
+
+For a bucket-specific custom domain, set
+`DOCSLURP_STORAGE_PUBLIC_BUCKET_URL=https://f.docslurp.io` (or your own HTTPS
+bucket origin). Upload URLs are signed for that host and omit the bucket name
+from their path. Internal storage access continues using the configured S3
+endpoint. The web app permits this origin in its upload connection policy.
+Keep the custom-domain CNAME DNS-only, pointing directly to Tigris, as required
+for Tigris TLS issuance/renewal. This storage URL is separate from the API's
+webhook receiver URL.
+
+For Tigris, notifications bring a pending session forward in the reconciliation
+schedule. Configure these **after applying migrations and deploying the receiver**:
+
+1. Set `DOCSLURP_TIGRIS_UPLOAD_WEBHOOK_SECRET` to a long random secret in the API
+   runtime. Use the same value as the notification token; do not use an S3 admin
+   key as the webhook token.
+2. Open the bucket's **Settings → Notifications** in the
+   [Tigris console](https://console.storage.dev/).
+3. Set the webhook URL to `https://YOUR_API_HOST/webhooks/tigris/uploads`.
+   The hosted DocSlurp URL is `https://docslurp.io/webhooks/tigris/uploads`.
+4. Select **Token authentication**, entering only the configured secret in the
+   token field. Tigris sends it as the standard `Authorization: Bearer <token>`
+   header; no custom HTTP headers are required.
+5. Set this filter to exclude generated artifacts and unrelated events:
+
+   ```sql
+   WHERE `key` REGEXP "^[^/]+/[^/]+/raw/" AND (`Event-Type` = "OBJECT_CREATED_PUT" OR `Event-Type` = "OBJECT_CREATED_MULTIPART")
+   ```
+
+6. Enable notifications and save. Upload a small file and a multipart file;
+   verify their session results point to a single ingestion run each. A repeated
+   notification must not create another run.
+
+The receiver authenticates the bearer token, matches the configured storage
+bucket and registered source keys, and persists a reconciliation nudge before
+acknowledging. It never trusts notification byte counts as proof of completion.
+Do not configure a localhost URL in Tigris; use a publicly reachable development
+API or rely on reconciliation locally. Missing secret returns 503; invalid token
+returns 401. A successful authenticated empty `{"events":[]}` request returns
+200 and can check receiver reachability without ingesting anything.
+
+Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` for `status`,
+`error`, per-file state and `result`. A timeout after bytes were uploaded does
+not imply failure: retain the session ID and check it before submitting again.
+Look for `[upload-reconcile]` errors when handoff stalls. Configure the bucket's
+incomplete-multipart lifecycle expiry as a final safety net: a process crash
+between provider multipart creation and saving its upload ID can leave an orphan
+that the database cannot identify. Normal expired/failed sessions abort known
+multipart IDs and queue delayed raw-object cleanup.
+
+Tigris delivers at least once, may deliver out of order, and retries requests
+that do not receive a 2xx response within ten seconds. See the official
+[object notification documentation](https://www.tigrisdata.com/docs/buckets/object-notifications/).
+
+For client examples and recovery behavior, see [upload completion](../api-sdk.md#upload-completion).
+
 ## Backups and restore
 
 Three things hold your data:
@@ -141,6 +217,39 @@ server and worker start. Watch its exit status and the server logs. Breaking sch
 changes are possible while DocSlurp is pre-release; read release notes before
 upgrading and keep a rollback backup (see [Backups and restore](#backups-and-restore)).
 
+### Moving to per-workspace LanceDB databases (migration 0082)
+
+Vectors used to live in org-level tables
+(`<LANCEDB_URI>/<orgId>/vectors/<model>/<dims>`, `chunks_org_…`). Every
+workspace now has its own database,
+`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dims>`, and search reads
+only that one. Until existing rows are moved, vector search returns nothing
+for documents indexed before the upgrade (keyword search still works; the API
+counts `lanceTableMissing` and logs `[search] lancedb table missing`).
+
+1. Stop ingest (or let runs finish), then upgrade the server and worker
+   together. Migration 0082 repoints pending queued vector writes at their
+   workspace database and marks old org-deletion cleanup rows.
+2. Move the rows, without re-embedding, from the worker image:
+   `node worker/dist/stages/lancedb-relocate-cli.js --all --dry-run`, then
+   without `--dry-run`, with ingest still stopped. It routes each row to its
+   document's workspace (dedup copies in another workspace get their own
+   rebound rows), keeps only rows whose chunk still exists, appends without
+   replacing rows already in the workspace database, then builds the vector
+   and full-text indexes. Reruns converge. Rows of deleted documents and
+   replaced chunks stay behind (`orphan_rows`, `stale_rows`).
+   It registers every table it maintains for the maintenance sweep; after
+   changing `vectorIndexMinRows`, rerun with `--maintain-all` to index tables
+   that already crossed the new threshold.
+3. Resume ingest, check search in a few workspaces, then rerun with
+   `--drop-legacy` to delete the org-level tables (they hold chunk text). It
+   drops only after a run that read every row and had no error. Deleting an
+   org queues its org-level tables for the cleanup sweep too.
+
+Rolling back the code reads the org-level tables again, which miss anything
+indexed after the upgrade: keep them until step 3 and reprocess documents
+uploaded since.
+
 ## Monitoring
 
 - `GET /health` returns `{"ok":true,...}` while the server process is up. The
@@ -196,6 +305,7 @@ This is scaling on a single host, not a multi-host design.
 | `Invalid sandbox configuration; missing required: MODAL_TOKEN_ID, MODAL_TOKEN_SECRET` (provider `modal`) | The tokens are unset. | Set both on the worker. Invalid number settings are reported the same way, by variable name. |
 | `parser isolation unavailable: ...` with a Modal error, or `modal client rejected configuration` (provider `modal`) | Modal rejected the token, or the app could not be opened. The message is Modal's error with token values redacted. | Check the token pair and `DOCSLURP_MODAL_APP` in the Modal dashboard. |
 | `Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE (DOCSLURP_VERSION is unset, ...)` (provider `modal`) | The worker runs from source or a local image build, which has no release version to pick the default image from. | Set `DOCSLURP_MODAL_IMAGE` to an image that contains the parser binaries. |
+| `Invalid sandbox configuration; invalid: DOCSLURP_MODAL_IMAGE_DIGEST (...)` or `invalid: DOCSLURP_MODAL_IMAGE (digest must be sha256:<64 hex>)` (provider `modal`) | The digest is not `sha256:` plus 64 lowercase hex characters, or it differs from the digest already in `DOCSLURP_MODAL_IMAGE`. | Copy the digest from the `worker-images.yml` run summary or `docker buildx imagetools inspect`, after verifying it ([Verifying worker images](security.md#verifying-worker-images)). Set it in one place, or the same value in both. |
 | Activities fail with `modal sandbox creation failed: ...` although the worker started (provider `modal`) | The start-up probe only checks the token and app; it does not pull the image. A wrong `DOCSLURP_MODAL_IMAGE`, a private GHCR package, or a missing `DOCSLURP_MODAL_REGISTRY_SECRET` shows up at the first activity that runs a parser. `probe-cli` and `check-worker-prerequisites.mjs --sandbox` skip the binary checks for Modal, so they do not catch it either. | Check the image name and that Modal can pull it: make the GHCR package public, or set `DOCSLURP_MODAL_REGISTRY_SECRET`. |
 | `parser sandbox provider 'none' is not allowed in production` | `DOCSLURP_PARSER_SANDBOX=none` with `NODE_ENV=production`. | Choose a real provider, or set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` knowing parsers then run on the host. |
 | `Unknown DOCSLURP_PARSER_SANDBOX provider` | Typo in the provider id. | Use `bubblewrap`, `landlock`, `modal` or `none`. |
@@ -203,3 +313,19 @@ This is scaling on a single host, not a multi-host design.
 | Full worker shows `[worker-start] installing deferred Python deps` for a long time | With no vendor bundle source, the full worker pip-installs several GB on first boot. | Wait, or set `DOCSLURP_VENDOR_BUNDLE_BASE_URL`. See [Worker image and vendor bundles](../worker-image.md). |
 | Storage errors after you edited `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` | MinIO, the server and the worker all read these as one credential. They disagree until every service is recreated. | Recreate them together with `up -d`. If errors continue, change the keys back. |
 | Postgres rejects the new password after you edited `POSTGRES_PASSWORD` | Postgres sets its password only when the volume is first created. | Change it inside Postgres with `ALTER USER docslurp PASSWORD '...'`, then update `POSTGRES_PASSWORD` and the `DATABASE_URL` password to match and run `up -d`. |
+
+## Export cleanup
+
+Zip exports (`POST /v1/exports`) are built by the worker: exports under 250 MB on the `docslurp-document-export` task queue and larger, emailed ones on `docslurp-document-export-large` (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` and `TEMPORAL_LARGE_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker), one slot each per worker. Set `WORKER_DOCUMENT_EXPORTS=off` on workers that scale in or restart often, so exports run on long-lived machines; streaming a 2 GB export peaks around 185 MB of worker memory. Exports are stored under `exports/<orgId>/<workspaceId>/<exportId>/`, one zip per attempt. Each link lives seven days from when the export is ready. Downloads redirect to a two-minute presigned storage link, so the bucket's public endpoint (`DOCSLURP_STORAGE_PUBLIC_BUCKET_URL`, when set) must serve signed GETs; the link sets the download filename and `Cache-Control: private, no-store`. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend (five attempts with backoff), when the worker has woken the app via `WORKER_APP_KEEPALIVE_URL`, deletes objects whose seven days have passed or whose document, workspace or requester was deleted (including organization and account deletion), and marks exports unfinished after ten hours as failed. Exports hold at most 65,000 files (zip without ZIP64); past that, page-by-page Markdown is left out and the README says so. Look for `[document-export]` log lines.
+
+As a backstop, add a bucket lifecycle rule that expires objects under the `exports/` prefix after 8 days, so a stopped sweep never leaves exports behind:
+
+```json
+{ "Rules": [{ "ID": "expire-exports", "Status": "Enabled", "Filter": { "Prefix": "exports/" }, "Expiration": { "Days": 8 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 } }] }
+```
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --endpoint-url "$S3_ENDPOINT" --lifecycle-configuration file://lifecycle.json
+```
+
+Merge this rule into any existing lifecycle configuration (such as incomplete-multipart expiry) rather than replacing it.

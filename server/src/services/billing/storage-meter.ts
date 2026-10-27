@@ -1,4 +1,4 @@
-import { CREDIT_RATE_CARD, dailyStorageCredits, getPlan, type PlanId } from "@docslurp/shared";
+import { PRICE_CARD, dailyStorageCredits, daysInUtcMonth, unitChargeMetadata } from "@docslurp/shared";
 import { sql, type SqlClient } from "../../db.js";
 import { recordCostEvent } from "../../lib/ai-usage.js";
 import { STORAGE_USAGE_METRIC, STORAGE_USAGE_PROVIDER } from "../usage-attribution.js";
@@ -31,7 +31,9 @@ export function utcDay(now: Date): string {
 }
 
 /**
- * Charge one day of storage per org per UTC day (design gotcha 10). The
+ * Charge one day of storage per org per UTC day (design gotcha 10) at
+ * PRICE_CARD.storageGbMonth / days in the month, on every stored byte
+ * (objects + indexes; no included GB). The
  * storage_meter_days primary key makes each (org, day) charge idempotent
  * across sweeps and instances; the Usage Event id is derived from the same
  * key, and credits are debited only when the event row is new.
@@ -43,8 +45,8 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
   const day = utcDay(options.now ?? new Date());
   // Usage is attributed to the creator, or to an owner once the creator's
   // account is deleted. Deleted orgs have no workspaces left to meter.
-  const orgs = await sql<{ id: string; plan_id: PlanId; created_by_user_id: string }[]>`
-    select o.id, o.plan_id, coalesce(o.created_by_user_id, (
+  const orgs = await sql<{ id: string; created_by_user_id: string }[]>`
+    select o.id, coalesce(o.created_by_user_id, (
       select om.user_id from org_memberships om
       where om.org_id = o.id and om.role = 'owner'
       order by om.created_at limit 1
@@ -71,14 +73,13 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
   return { metered: orgs.length, charged };
 }
 
-async function meterOrgDay(org: { id: string; plan_id: PlanId; created_by_user_id: string }, day: string): Promise<boolean> {
-  const plan = getPlan(org.plan_id);
-  const storage = await getOrgStorage(org.id);
-  const charge = dailyStorageCredits({
-    objectBytes: storage.objectBytes,
-    indexBytes: storage.indexBytes,
-    includedGb: plan.includedStorageGb,
-  });
+async function meterOrgDay(org: { id: string; created_by_user_id: string }, day: string): Promise<boolean> {
+  // Extract documents are billed by their own retention window (services/extracts.ts), never daily.
+  const storage = await getOrgStorage(org.id, sql, { excludeExtracts: true });
+  const bytes = storage.objectBytes + storage.indexBytes;
+  const daysInMonth = daysInUtcMonth(day);
+  const credits = dailyStorageCredits(bytes, daysInMonth);
+  const charge = { totalCredits: credits };
 
   return sql.begin(async (tx) => {
     const client = tx as unknown as SqlClient;
@@ -100,28 +101,20 @@ async function meterOrgDay(org: { id: string; plan_id: PlanId; created_by_user_i
         provider: STORAGE_USAGE_PROVIDER,
         model: "storage-meter",
         metric: STORAGE_USAGE_METRIC,
-        amount: charge.billableObjectGb + charge.billableIndexGb,
+        amount: bytes / BYTES_PER_GB,
         unit: "gb-day",
         costCents: charge.totalCredits,
-        metadata: {
+        metadata: unitChargeMetadata({
           day,
-          planId: plan.id,
-          includedGb: plan.includedStorageGb,
+          daysInMonth,
+          storageGbMonth: PRICE_CARD.storageGbMonth,
           objectBytes: storage.objectBytes,
           indexBytes: storage.indexBytes,
           sourceBytes: storage.sourceBytes,
           pages: storage.pages,
-          objectGb: storage.objectBytes / BYTES_PER_GB,
-          indexGb: storage.indexBytes / BYTES_PER_GB,
-          billableObjectGb: charge.billableObjectGb,
-          billableIndexGb: charge.billableIndexGb,
-          objectCredits: charge.objectCredits,
-          indexCredits: charge.indexCredits,
-          rateCardVersion: CREDIT_RATE_CARD.version,
           // Artifact and index bytes are estimated from page counts.
           estimate: true,
-          billable: true,
-        },
+        }),
       },
     });
     if (!recorded) {

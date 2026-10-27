@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  defaultIndexingModeForPlan,
+  pageCredits,
   deferredProfilesEnabled,
   effectiveIndexingMode,
   estimatePageEmbedCredits,
@@ -18,7 +18,7 @@ import {
 import { sql } from "../db.js";
 import { nextVersionNumber } from "./version-number.js";
 import type { RequestActor } from "../lib/request-actor.js";
-import { admitRunSpend, canSpend, SpendBlockedError } from "./billing/spend-guard.js";
+import { admitRunSpend, SpendBlockedError } from "./billing/spend-guard.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
@@ -33,7 +33,6 @@ export class IndexingModeError extends Error {
       | "too_many_documents"
       | "index_in_progress"
       | "visual_mode_privacy"
-      | "credits_required_for_full_index"
       | "full_index_not_allowed"
       | "document_not_found"
       | "nothing_to_index"
@@ -49,27 +48,7 @@ export { effectiveIndexingMode };
 /** Credits per page of full indexing, for estimates only; billing uses actual usage. */
 export function fullIndexCreditsPerPage(): number {
   const parsed = Number.parseFloat(process.env.DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE ?? "");
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0.1;
-}
-
-/**
- * Org default for new workspaces: free plan without purchased credits defers
- * (`map`); a paid plan or any purchased (top-up / auto-recharge / subscription)
- * credit grant indexes fully. Starter and promo grants do not count.
- */
-export async function defaultIndexingModeForOrg(orgId: string): Promise<IndexingMode> {
-  if (!deferredProfilesEnabled()) return "full";
-  const [row] = await sql<{ plan_id: string | null; purchased: boolean }[]>`
-    select o.plan_id,
-      exists (
-        select 1 from credit_grants g
-        where g.org_id = o.id
-          and g.source in ('subscription', 'topup', 'auto_recharge')
-          and g.credits - g.reversed_credits > 0
-      ) as purchased
-    from organizations o where o.id = ${orgId}
-  `;
-  return defaultIndexingModeForPlan({ planId: row?.plan_id, hasPurchasedCredits: row?.purchased ?? false });
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : pageCredits("fast", 1);
 }
 
 export function hasPrivatePageEmbedder(): boolean {
@@ -112,6 +91,8 @@ async function unindexedPages(workspaceId: string, documentIds?: string[]): Prom
     where d.workspace_id = ${workspaceId}
       and d.status = 'completed' and d.superseded_at is null
       and d.indexing_mode <> 'full'
+      -- Extract documents expire with their extract; a full-index version would outlive it.
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
       ${documentIds ? sql`and d.id = any(${documentIds})` : sql``}
     order by d.created_at, d.id
   `;
@@ -152,6 +133,7 @@ export async function estimateModeSwitch(
     from documents d
     where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
       and d.indexing_mode <> 'full'
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
       ${to === "visual"
         ? sql`and d.page_count > (select count(*) from document_page_states s where s.document_id = d.id and s.embedded_at is not null)`
         : sql`and not exists (select 1 from document_maps m where m.document_id = d.id)`}
@@ -204,6 +186,8 @@ async function liveDocs(workspaceId: string, ids: string[]): Promise<SourceDoc[]
     select d.id, d.org_id, d.user_id, d.workspace_id, d.filename, d.mime_type, d.source_key, d.extraction_mode,
       d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.run_id
     from documents d where d.workspace_id = ${workspaceId} and d.id = any(${ids})
+      -- Never a source for new versions: extract documents expire with their extract.
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
     order by d.created_at, d.id
   `;
 }
@@ -349,8 +333,8 @@ export async function requestFullIndex(args: FullIndexArgs): Promise<{ runId: st
 export type ModeSwitchResult = { runIds: string[]; pipelines: Map<string, PipelineFeatures> };
 
 /**
- * Validates a requested mode before it is saved: visual needs privacy/PII
- * clearance; `full` on a plan that defaults to deferred needs spendable credits.
+ * Validates a requested mode before it is saved: visual needs privacy/PII clearance. Every mode is open to every
+ * organization; credits are checked when the indexing work is admitted, not here.
  * `current` is null when creating a workspace.
  */
 export async function validateModeChoice(args: {
@@ -359,18 +343,7 @@ export async function validateModeChoice(args: {
   currentMode: IndexingMode | null;
   nextPipeline: Pick<PipelineFeatures, "indexingMode" | "privacyMode" | "piiPolicy">;
 }): Promise<void> {
-  const next = args.nextPipeline.indexingMode;
-  if (next === "visual") assertVisualModeAllowed(args.nextPipeline);
-  if (next === "full" && args.currentMode !== "full" && deferredProfilesEnabled()) {
-    const mode = await defaultIndexingModeForOrg(args.orgId);
-    if (mode === "map" && !(await canSpend(args.orgId, args.workspaceId))) {
-      throw new IndexingModeError(
-        "Full indexing needs credits. Add credits or upgrade your plan.",
-        402,
-        "credits_required_for_full_index",
-      );
-    }
-  }
+  if (args.nextPipeline.indexingMode === "visual") assertVisualModeAllowed(args.nextPipeline);
 }
 
 export async function validateModeSwitch(args: { current: WorkspaceRecord; nextPipeline: PipelineFeatures }): Promise<void> {

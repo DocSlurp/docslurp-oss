@@ -2,12 +2,13 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-import { drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
+import * as lanceConnection from "../stages/lancedb-connection.js";
+import { deleteLanceDbDocumentRows, artifactOwner, drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
 
 
 let db: PGlite;
@@ -26,7 +27,7 @@ beforeAll(async () => {
     sql = postgres(`postgres://postgres@127.0.0.1:${served.port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
   }
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, retain_document_versions) values ('o1', 'Org', 'org', 'u1', 1)`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
 }, 60_000);
 
@@ -37,6 +38,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  vi.restoreAllMocks();
   await sql`delete from documents`;
   await sql`delete from kg_nodes`;
   await sql`delete from workspace_runs`;
@@ -99,7 +101,6 @@ const options = (deleteVectorRows: DeleteVectorRows, graceSeconds = 0) => ({
   deleteSources: false,
   lancedbRoot: "/tmp/lance",
   deleteVectorRows,
-  billingEnforced: true,
 });
 
 describe("superseded version purge", () => {
@@ -153,7 +154,7 @@ describe("superseded version purge", () => {
 
     expect(result).toEqual({ purged: 1, failed: 0 });
     expect(deleted.sort()).toEqual(["u1/run-1/images/v1/150dpi/page-1.png", "u1/run-1/markdown/v1.md"]);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/vectors/model%2Fx/4", table: "chunks", documentIds: ["v1"] }]);
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["v1"] }]);
     const [v1] = await sql`select purged_at is not null as purged, superseded_by_document_id from documents where id = 'v1'`;
     expect(v1).toEqual({ purged: true, superseded_by_document_id: "v2" });
     expect(await sql`select document_id from document_chunks order by document_id`).toEqual([{ document_id: "v2" }]);
@@ -208,6 +209,33 @@ describe("superseded version purge", () => {
     expect(deleted).toEqual([]);
     expect(vectorDeletes).toBe(0);
     expect(await sql`select document_id from document_chunks where document_id = 'v1'`).toEqual([]);
+  });
+
+  it("deletes a version's vectors when only a copy in another workspace remains, but keeps its artifacts", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await sql`insert into workspaces(id, org_id, user_id, name) values ('w2', 'o1', 'u1', 'W2') on conflict do nothing`;
+    await sql`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+      values ('run-w2', 'o1', 'u1', 'w2', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
+    `;
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    // The copy owns its own rows in w2's database.
+    await sql`
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+      values ('copy', 'o1', 'u1', 'w2', 'run-w2', 'products.mdx', 'text/markdown', 'k', 'completed', 'v1')
+    `;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+
+    const vectorDeletes: Array<{ uri: string; documentIds: readonly string[] }> = [];
+    const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
+    expect(await purgeSupersededDocuments(sql, storage, options(async ({ uri, documentIds }) => { vectorDeletes.push({ uri, documentIds }); })))
+      .toEqual({ purged: 1, failed: 0 });
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", documentIds: ["v1"] }]);
+    // The copy's stage states still point at v1's artifacts.
+    expect(deleted).toEqual([]);
   });
 
   it("keeps storage artifacts a partial reprocess reuses but deletes the old vectors", async () => {
@@ -367,8 +395,36 @@ describe("superseded version purge", () => {
     expect(await drainDocumentCleanupQueue(sql, storage, options(async (args) => { vectorDeletes.push(args); })))
       .toEqual({ purged: 1, failed: 0 });
     expect(deleted.sort()).toEqual(["u1/run-1/images/deleted/page-1.png", "u1/run-1/markdown/deleted.md", "u1/src/raw/deleted.pdf"]);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/vectors/model%2Fx/4", table: "chunks", documentIds: ["deleted"] }]);
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["deleted"] }]);
     expect(await sql`select id from kg_nodes`).toEqual([]);
+    expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
+  });
+
+  it("compacts LanceDB history away when an expired extract's vectors are deleted", async () => {
+    const ext = `ext_${"d".repeat(32)}`;
+    await sql`
+      insert into document_cleanup_queue (document_id, org_id, user_id, workspace_id, run_id, source_key,
+        delete_source, keep_shared_artifacts, vector_targets, artifact_uris, kg_node_ids)
+      values ('extract-doc', 'o1', 'u1', 'w', null, ${`extracts/o1/${ext}/raw/x.pdf`}, true, false,
+        '[{"backend":"lancedb","embeddingModel":"model/x","dimension":4}]'::jsonb, '{}', '{}')
+    `;
+    const vectorDeletes: Parameters<DeleteVectorRows>[0][] = [];
+    const { storage } = fakeStorage([`extracts/o1/${ext}/raw/x.pdf`]);
+    const optimize = vi.fn().mockRejectedValueOnce(new Error("history prune failed")).mockResolvedValue({
+      compaction: { fragmentsRemoved: 1 }, prune: { oldVersionsRemoved: 1, bytesRemoved: 8 },
+    });
+    const table = { delete: vi.fn(), optimize, countRows: async () => 0, listIndices: async () => [], close: vi.fn() };
+    vi.spyOn(lanceConnection, "connectLanceDb").mockResolvedValue({
+      tableNames: async () => ["chunks"], openTable: async () => table, close: vi.fn(),
+    } as unknown as import("@lancedb/lancedb").Connection);
+    const remove: DeleteVectorRows = async (args) => { vectorDeletes.push(args); await deleteLanceDbDocumentRows(args); };
+    expect(await drainDocumentCleanupQueue(sql, storage, options(remove))).toEqual({ purged: 0, failed: 1 });
+    expect(await sql`select document_id, last_error from document_cleanup_queue`)
+      .toEqual([{ document_id: "extract-doc", last_error: "history prune failed" }]);
+    vectorDeletes.length = 0;
+    expect(await drainDocumentCleanupQueue(sql, storage, options(remove))).toEqual({ purged: 1, failed: 0 });
+    expect(optimize).toHaveBeenCalledTimes(2);
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["extract-doc"], purgeHistory: true }]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });
 
@@ -381,5 +437,18 @@ describe("superseded version purge", () => {
     const failing = await drainDocumentCleanupQueue(sql, storage, options(async () => { throw new Error("lance down"); }));
     expect(failing.failed).toBeGreaterThan(0);
     expect(await sql`select attempts > 0 as retried, last_error from document_cleanup_queue`).toEqual([{ retried: true, last_error: "lance down" }]);
+  });
+});
+
+describe("artifactOwner", () => {
+  it("reads <user>/<run>/ and three-segment extract roots, never an org-wide extracts/<org>/ prefix", () => {
+    expect(artifactOwner("user-1/run-1/markdown/doc-1.md")).toEqual({ prefix: "user-1/run-1/", documentId: "doc-1" });
+    const ext = `ext_${"a".repeat(32)}`;
+    expect(artifactOwner(`extracts/org-1/${ext}/markdown/doc-1.md`)).toEqual({ prefix: `extracts/org-1/${ext}/`, documentId: "doc-1" });
+    expect(artifactOwner(`extracts/org-1/${ext}/images/doc-1/v2-150dpi/page-1.png`)).toEqual({ prefix: `extracts/org-1/${ext}/`, documentId: "doc-1" });
+    // Malformed extract keys are refused rather than widened.
+    expect(artifactOwner("extracts/org-1/markdown/doc-1.md")).toBeNull();
+    expect(artifactOwner("extracts/org-1/not-an-extract/markdown/doc-1.md")).toBeNull();
+    expect(artifactOwner(`extracts/../${ext}/markdown/doc-1.md`)).toBeNull();
   });
 });

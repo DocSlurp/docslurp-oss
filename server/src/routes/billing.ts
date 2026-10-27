@@ -5,21 +5,17 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 
 import {
-  CREDIT_RATE_CARD,
   EXAMPLE_CORPORA,
   MAX_TOPUP_CENTS,
   MIN_TOPUP_CENTS,
-  SERVICE_PLANS,
-  autoRechargeSettingsSchema,
-  paidPlanIdSchema,
-  rateCardExtras,
+  autoTopUpSettingsSchema,
+  billingPrices,
 } from "@docslurp/shared";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   BillingNotConfiguredError,
   BillingRequestError,
   attachPaymentMethod,
-  createPlanCheckout,
   createPortalSession,
   createSetupIntent,
   createTopUpCheckout,
@@ -39,13 +35,10 @@ import { listOrganizations } from "../services/organizations.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
+import { authenticatedByRoute } from "../lib/route-auth.js";
+import { extractUsageTotals } from "../services/usage-attribution.js";
 
 const orgOnlySchema = z.object({ orgId: z.string().optional() });
-
-const planCheckoutSchema = z.object({
-  orgId: z.string().optional(),
-  planId: paidPlanIdSchema,
-});
 
 const topUpCheckoutSchema = z.object({
   orgId: z.string().optional(),
@@ -54,7 +47,7 @@ const topUpCheckoutSchema = z.object({
 
 const autoRechargeUpdateSchema = z.intersection(
   z.object({ orgId: z.string().optional() }),
-  autoRechargeSettingsSchema,
+  autoTopUpSettingsSchema,
 );
 
 const attachPaymentMethodSchema = z.object({
@@ -116,9 +109,13 @@ function parseLimit(value: string | undefined, fallback: number): number {
 
 export const billingRoutes = new Hono()
   // ---------------------------------------------------------------- catalog
-  .get("/plans", (c) =>
-    c.json({ plans: SERVICE_PLANS, rateCard: CREDIT_RATE_CARD, ...rateCardExtras(), examples: EXAMPLE_CORPORA }),
-  )
+  // Public price list (no auth, see authenticatedByRoute below): the per-unit
+  // price card, credit packs, top-up limits, starter credits, worker ceilings,
+  // chat model tiers and the reference corpora for the pricing page.
+  .get("/prices", (c) => {
+    c.header("Cache-Control", "public, max-age=300");
+    return c.json({ ...billingPrices(), examples: EXAMPLE_CORPORA });
+  })
 
   // ---------------------------------------------------------------- reads
   .get("/overview", async (c) => {
@@ -134,7 +131,8 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ creditBalanceCents: 0 });
+      // Same answer as /overview and /ledger: a foreign or unknown org is not found.
+      return apiStatusError(c, 404, "No organization found");
     }
     const credits = await getAvailableCredits(org.id);
     return c.json({ creditBalanceCents: credits.available, orgId: org.id });
@@ -152,7 +150,8 @@ export const billingRoutes = new Hono()
     });
     return c.json({ entries });
   })
-  .get("/auto-recharge", async (c) => {
+  // Auto top-up settings (off by default). `/auto-recharge` is the former name of the same route.
+  .get("/:setting{auto-top-up|auto-recharge}", async (c) => {
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
@@ -162,28 +161,6 @@ export const billingRoutes = new Hono()
   })
 
   // ---------------------------------------------------------------- Stripe flows
-  .post("/subscription/checkout", zValidator("json", planCheckoutSchema, validationHook), async (c) => {
-    const userId = c.get("sessionUser").id;
-    const { orgId, planId } = c.req.valid("json");
-    const org = await resolveBillingOrganization(userId, orgId);
-    if (!org) {
-      return apiStatusError(c, 404, "No organization found");
-    }
-    if (!billingRoles.has(org.memberRole)) {
-      return apiStatusError(c, 403, "Forbidden");
-    }
-    try {
-      const result = await createPlanCheckout({
-        orgId: org.id,
-        planId,
-        idempotencyKey: c.req.header("Idempotency-Key")?.trim() || undefined,
-      });
-      await audit(c, org, userId, "billing.subscription.checkout_started", { planId, kind: result.kind });
-      return c.json({ url: result.url });
-    } catch (error) {
-      return billingError(c, error, "Failed to create checkout");
-    }
-  })
   .post("/portal", zValidator("json", orgOnlySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId } = c.req.valid("json");
@@ -195,6 +172,7 @@ export const billingRoutes = new Hono()
       return apiStatusError(c, 403, "Forbidden");
     }
     try {
+      // Invoices and saved payment methods only; there are no plans to manage.
       const result = await createPortalSession({ orgId: org.id });
       await audit(c, org, userId, "billing.portal.opened");
       return c.json(result);
@@ -224,7 +202,7 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to create top-up checkout");
     }
   })
-  .put("/auto-recharge", zValidator("json", autoRechargeUpdateSchema, validationHook), async (c) => {
+  .put("/:setting{auto-top-up|auto-recharge}", zValidator("json", autoRechargeUpdateSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId, ...settings } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
@@ -236,14 +214,14 @@ export const billingRoutes = new Hono()
     }
     try {
       const saved = await updateAutoRechargeSettings({ orgId: org.id, userId, settings });
-      await audit(c, org, userId, "billing.auto_recharge.updated", saved);
+      await audit(c, org, userId, "billing.auto_top_up.updated", saved);
       return c.json(saved);
     } catch (error) {
       // Enabling without a payment method is a 400 even when Stripe is unconfigured locally.
       if (error instanceof BillingRequestError && error.code === "payment_method_required") {
         return apiStatusError(c, 400, error.message, { code: error.code });
       }
-      return billingError(c, error, "Failed to update auto-recharge");
+      return billingError(c, error, "Failed to update auto top-up");
     }
   })
 
@@ -255,6 +233,16 @@ export const billingRoutes = new Hono()
       return apiStatusError(c, 404, "No organization found");
     }
     return c.json(await getUsageBreakdown(org.id));
+  })
+  // Extract mode on its own: extracts, pages, credits charged (retention included) and pages per $1.
+  .get("/usage/extracts", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
+    if (!org) {
+      return apiStatusError(c, 404, "No organization found");
+    }
+    const since = c.req.query("window") === "all" ? null : "month";
+    return c.json({ window: since ?? "all", ...(await extractUsageTotals(org.id, since)) });
   })
   .get("/usage/jobs", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -392,3 +380,6 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to detach payment method");
     }
   });
+
+// The price list is public: anyone may read prices without signing in.
+authenticatedByRoute(billingRoutes, ["GET /prices"]);

@@ -1,0 +1,24 @@
+✔ multi-premise answer requires cited pages and actual successful searches (3.582829ms)
+✔ search-many, nested chat, and claimed search prose do not count as actual search calls (0.440047ms)
+✔ negative control rejects unsupported affirmative answer (0.493535ms)
+✔ runner sends question only, records failures, and never retries (2.170899ms)
+✔ runner requires explicit bounds before network access (0.75634ms)
+✔ a cited chunk spanning multiple verified physical pages supports each page, but invented span pages fail (0.43414ms)
+✔ valid multi-page metadata does not require a fabricated scalar page anchor (0.508699ms)
+✔ current search id counts; historical aliases and prose do not (0.285138ms)
+✔ direct media evidence requires its real tool, permits zero searches, and rejects fallback search (0.535582ms)
+✔ unsupported capability can honestly use zero tools but cannot invent a tool or completion (0.504718ms)
+✔ failed tool cannot be scored as a successful grounded answer or soft abstention (0.290911ms)
+✔ typed blocking errors score separately from model evidence; unexpected status, missing and duplicate cases fail (2.211232ms)
+✔ runner never sends gold/scenario labels to the model and records explicit scripted provenance (0.234872ms)
+✔ scorer CLI exits nonzero for failed or missing cases and refuses overwriting evidence (332.355102ms)
+✔ runner rejects unresolved document bindings and mixed provenance before network access (0.3818ms)
+✔ malformed gold cannot turn negative bounds or empty batches into a pass (0.511851ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 460.22318

@@ -12,6 +12,7 @@ import { createStageExecution } from "../pipeline/stage-execution.js";
 import { withWorkerSlot } from "../temporal/activities.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
+import { startPgWireProxy } from "../test/pg-wire-proxy.mjs";
 
 /**
  * Counts the Postgres transactions and statements one document run costs on
@@ -29,22 +30,26 @@ const config = { workerDocConcurrency: 1, workerAdaptiveTuning: false } as Confi
 
 let db: PGlite;
 let server: PGLiteSocketServer;
+let proxy: Awaited<ReturnType<typeof startPgWireProxy>>;
 let url: string;
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
-    insert into organizations(id, name, slug, created_by_user_id, worker_slots) values ('o1', 'Org', 'org', 'u1', 8);
+    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 1000000);
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
-  const port = served.port;
-  url = `postgres://postgres@127.0.0.1:${port}/postgres`;
+  // Every statement goes through the wire counter. Its 1 ms one-way delay lets back-to-back writes of
+  // one burst count as one round trip ("flight") deterministically, whatever the CPU load.
+  proxy = await startPgWireProxy({ targetPort: served.port, delayMs: 1 });
+  url = `postgres://postgres@127.0.0.1:${proxy.port}/postgres`;
 }, 120_000);
 
 afterAll(async () => {
+  await proxy?.close();
   await server?.stop();
   await db?.close();
 });
@@ -168,6 +173,48 @@ async function runOneDocument(store: Store, runId: string): Promise<void> {
   await execution.completeRun({ runId });
 }
 
+/**
+ * The same stages as one stage-group activity (runPipelineStages): one worker slot, and each stage's
+ * completion checkpoint also reads the control state and the next stage's opening reads.
+ */
+async function runOneDocumentGrouped(store: Store, runId: string): Promise<void> {
+  const execution = createStageExecution({ store, stages, config });
+  const runtime = { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, heartbeatIntervalMs: 3_600_000 };
+  await execution.startRun({ runId, totalStages: STAGES.length });
+  await withWorkerSlot(store, { runId, kind: "stage", enabled: true }, async () => {
+    let preloaded: Awaited<ReturnType<typeof execution.runStage>>["preloaded"];
+    let controlRequested: boolean | undefined;
+    for (const [position, stageName] of STAGES.entries()) {
+      // A real group yields when the run is paused; this one keeps going so both variants do the same work.
+      if (position > 0) void (controlRequested ?? await store.hasRunControlRequest(runId));
+      const output = await execution.runStage({ stageName, runId, totalStages: STAGES.length, artifacts: {} },
+        { ...runtime, readControlState: true, preloadRunState: position < STAGES.length - 1, preloaded });
+      controlRequested = output.controlRequested;
+      preloaded = output.preloaded;
+    }
+  });
+  await execution.completeRun({ runId });
+}
+
+/** Statements, transactions and serial round trips one run costs, read through the wire counter. */
+async function measureRun(store: Store, run: (store: Store, runId: string) => Promise<void>, runId: string) {
+  await seedRun(runId);
+  const counter = instrument(store);
+  proxy.reset();
+  await run(store, runId);
+  await store.flushRunEvents();
+  const wire = proxy.stats();
+  return { counter, wire };
+}
+
+// 2026-10-23 (perf/fewer-db-roundtrips), this 10-page run with one activity per stage: 57.0 serial round
+// trips and 24.3 statements per page before; 18.1 and 23.1 after (31.3 with only the parameter-type cache).
+// Budgets sit ~10% above today's counts: the wire counter splits a burst if the CPU stalls between writes.
+const ROUND_TRIPS_PER_PAGE_BUDGET = 20;
+const STATEMENTS_PER_PAGE_BUDGET = 24;
+// The same stages as one stage group: 14.9 after.
+const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;
+
 describe("database statement budget per page", () => {
   it("one 10-page document run stays within its transaction budget", async () => {
     const store = new Store(url, 60_000, {
@@ -184,19 +231,21 @@ describe("database statement budget per page", () => {
       await seedRun("run-warm");
       await runOneDocument(store, "run-warm");
 
-      await seedRun("run-1");
-      const counter = instrument(store);
-      await runOneDocument(store, "run-1");
-      await store.flushRunEvents();
+      const { counter, wire } = await measureRun(store, runOneDocument, "run-1");
       const perPage = { transactions: counter.transactions / PAGES, statements: counter.statements / PAGES };
       console.log(`[statement-budget] run transactions=${counter.transactions} statements=${counter.statements} notifies=${counter.notifies} ` +
-        `perPage=${perPage.transactions.toFixed(1)}/${perPage.statements.toFixed(1)}`);
+        `perPage=${perPage.transactions.toFixed(1)}/${perPage.statements.toFixed(1)} ` +
+        `wire statements=${wire.statements} roundTrips=${wire.flights} roundTripsPerPage=${(wire.flights / PAGES).toFixed(1)}`);
       for (const [kind, count] of [...counter.byKind.entries()].sort((a, b) => b[1] - a[1])) {
         console.log(`[statement-budget]   ${String(count).padStart(3)}  ${kind}`);
       }
 
       // Before (2026-10-09 code): 312 transactions (31.2/page), 342 statements, 78 NOTIFY-bearing commits.
       expect(perPage.transactions).toBeLessThanOrEqual(15);
+      // Serial round trips: a pipelined transaction or a statement with cached parameter types is one;
+      // sql.begin costs BEGIN, each awaited statement and COMMIT; an uncached statement with parameters is two.
+      expect(wire.flights / PAGES).toBeLessThanOrEqual(ROUND_TRIPS_PER_PAGE_BUDGET);
+      expect(perPage.statements).toBeLessThanOrEqual(STATEMENTS_PER_PAGE_BUDGET);
       // Includes the byte-limited chunks in the terminal event flush and the
       // terminal webhook-outbox statement, independently of timed delivery.
       expect(counter.notifies).toBeLessThanOrEqual(10);
@@ -205,7 +254,7 @@ describe("database statement budget per page", () => {
       expect(counter.pendingDebits).toBeGreaterThan(0);
       expect(counter.orgRowTouches).toEqual([]);
 
-      // The flusher applies them: pools fall by exactly the run's billable usage.
+      // The flusher applies them: the balance falls by exactly the run's billable unit charges.
       // (Read through the store's connection: PGlite serves one session.)
       const sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
       const read = async () => {
@@ -214,7 +263,7 @@ describe("database statement budget per page", () => {
             (select coalesce(sum(cost_cents), 0) from usage_events where run_id in ('run-warm', 'run-1')
               and coalesce(metadata->>'billable', 'true') <> 'false')::text as cost,
             pending_org_debit_credits('o1')::text as pending,
-            (select included_credits_remaining + credit_balance_cents from organizations where id = 'o1')::text as balance`;
+            (select credit_balance_cents from organizations where id = 'o1')::text as balance`;
         return { cost: Number(row!.cost), pending: Number(row!.pending), balance: Number(row!.balance) };
       };
       const before = await read();
@@ -230,6 +279,34 @@ describe("database statement budget per page", () => {
         "select event_type from workspace_run_events where run_id = 'run-1' order by created_at, id");
       expect(rows.at(-1)?.event_type).toBe("run.completed");
       expect(rows.length).toBeGreaterThan(20);
+    } finally {
+      await store.close();
+    }
+  }, 60_000);
+
+  it("a stage group costs fewer round trips than one activity per stage", async () => {
+    const store = new Store(url, 60_000, {
+      poolMax: 1,
+      workerSlots: { ttlMs: 60_000, globalCap: 0, defaultOrgSlots: 2 },
+      runEvents: { flushMs: 120_000, maxBuffered: 20_000 },
+    });
+    try {
+      await seedRun("run-warm-2");
+      await runOneDocumentGrouped(store, "run-warm-2");
+      const single = await measureRun(store, runOneDocument, "run-sep");
+      const grouped = await measureRun(store, runOneDocumentGrouped, "run-grp");
+      console.log(`[statement-budget] per-stage activities roundTrips=${single.wire.flights} statements=${single.wire.statements}; ` +
+        `one group roundTrips=${grouped.wire.flights} statements=${grouped.wire.statements}`);
+      for (const [kind, count] of [...grouped.counter.byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)) {
+        console.log(`[statement-budget] grouped ${String(count).padStart(3)}  ${kind}`);
+      }
+      expect(grouped.wire.flights).toBeLessThan(single.wire.flights * 0.85);
+      expect(grouped.wire.flights / PAGES).toBeLessThanOrEqual(GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET);
+      // Same work, same statements (reads moved into the completion checkpoint, not added).
+      expect(grouped.wire.statements).toBeLessThanOrEqual(single.wire.statements);
+      const { rows } = await db.query<{ event_type: string }>(
+        "select event_type from workspace_run_events where run_id = 'run-grp' order by created_at, id");
+      expect(rows.at(-1)?.event_type).toBe("run.completed");
     } finally {
       await store.close();
     }

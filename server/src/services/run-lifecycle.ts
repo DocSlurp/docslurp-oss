@@ -242,6 +242,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       await tx`
         delete from document_run_stage_states
         where run_id = ${runId} and status <> 'completed'
+          and document_id in (select id from documents where run_id = ${runId}
+            and superseded_at is null and status <> 'cancelled')
       `;
       await tx`
         delete from workspace_run_stage_states
@@ -258,7 +260,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
               ) then d.lexical_searchable_at
               else null
             end
-        where d.run_id = ${runId} and d.status <> 'completed'
+        where d.run_id = ${runId} and d.status not in ('completed', 'cancelled')
+          and d.superseded_at is null
       `;
       return await tx<{ id: string }[]>`
         update workspace_runs
@@ -286,13 +289,15 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     const [row] = await sql.begin(async (tx) => {
       const [locked] = await tx<{ status: string; failed: number }[]>`
         select status,
-               (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed') as failed
+               (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null) as failed
         from workspace_runs where id = ${run.id} for update
       `;
       if (locked?.status !== "completed" || !(locked.failed > 0)) return [];
       const failedStages = await tx<{ stage_name: string }[]>`
-        select distinct stage_name from document_run_stage_states
-        where run_id = ${run.id} and status = 'failed'
+        select distinct s.stage_name from document_run_stage_states s
+        join documents d on d.id = s.document_id
+        where s.run_id = ${run.id} and s.status = 'failed'
+          and d.superseded_at is null and d.status = 'failed'
       `;
       const earliest = Math.min(
         ...failedStages.map((stage) => stageOrder.indexOf(stage.stage_name)).filter((index) => index >= 0),
@@ -301,6 +306,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       await tx`
         delete from document_run_stage_states
         where run_id = ${run.id} and status <> 'completed'
+          and document_id in (select id from documents where run_id = ${run.id}
+            and superseded_at is null and status = 'failed')
       `;
       const rerunStages = stageOrder.slice(earliest);
       if (rerunStages.length > 0) {
@@ -320,7 +327,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
               ) then d.lexical_searchable_at
               else null
             end
-        where d.run_id = ${run.id} and d.status = 'failed'
+        where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null
       `;
       return await tx<{ id: string }[]>`
         update workspace_runs
@@ -417,6 +424,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     `;
     if (!row) return null;
 
+    await sql`select retire_replaced_pending_documents(${runId})`;
     await sql`
       update document_run_stage_states
       set status = 'failed', error = ${input.message}, updated_at = now()
@@ -425,6 +433,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     await sql`
       update documents d
       set status = case
+            when d.superseded_at is not null then 'cancelled'
             when exists (
               select 1 from document_run_stage_states s
               where s.document_id = d.id and s.run_id = d.run_id and s.status = 'failed'
@@ -432,7 +441,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
             else 'queued'
           end,
           updated_at = now()
-      where d.run_id = ${runId} and d.status not in ('completed', 'failed', 'pii_blocked')
+      where d.run_id = ${runId} and d.status not in ('completed', 'failed', 'pii_blocked', 'cancelled')
     `;
 
     const payload = sql.json(JSON.parse(JSON.stringify({ ...(input.payload ?? {}), ...plan.eventPayload })));

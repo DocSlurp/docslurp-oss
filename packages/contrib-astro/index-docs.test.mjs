@@ -19,9 +19,10 @@ test('uses canonical page identity, isolated workspace and public ingestion/prog
   const fetchMock = async (url, init) => {
     calls.push({ url, init });
     assert.equal(init.headers.Authorization, 'Bearer private-index-key');
-    if (url.endsWith('/v1/workspaces')) return Response.json({ workspaces: [{ id: 'docs-id', name: 'DocSlurp documentation' }] });
-    if (url.endsWith('/v1/ingest/bulk')) {
-      assert.equal(init.body.get('workspaceId'), 'docs-id');
+    if (url.endsWith('/v1/uploads/bulk')) {
+      // The name goes to the server, which finds the workspace or creates it on the first build.
+      assert.equal(init.body.get('workspace'), 'DocSlurp documentation');
+      assert.equal(init.body.get('newWorkspace'), null);
       assert.deepEqual(JSON.parse(init.body.get('canonicalIds')), ['https://docslurp.io/docs/sdk']);
       assert.equal(init.body.getAll('files')[0].name, docFilename('/docs/sdk'));
       assert.deepEqual(JSON.parse(init.body.get('pipeline')), { visionFallback: false, preserveImages: false, summarize: true });
@@ -30,12 +31,16 @@ test('uses canonical page identity, isolated workspace and public ingestion/prog
     assert.equal(url, 'https://docslurp.io/v1/runs/run-id/progress');
     return Response.json({ run: { id: 'run-id', status: 'completed' } });
   };
-  assert.deepEqual(await indexDocs(corpus, { apiUrl: 'https://docslurp.io', workspaceName: 'DocSlurp documentation' }, 'private-index-key', fetchMock), { workspaceId: 'docs-id', runId: 'run-id' });
-  assert.equal(calls.length, 3);
+  assert.deepEqual(await indexDocs(corpus, { apiUrl: 'https://docslurp.io' }, 'private-index-key', fetchMock), { workspaceId: 'docs-id', runId: 'run-id' });
+  assert.equal(calls.length, 2);
 });
-test('refuses ambiguous workspaces and reports upstream errors without credentials', async () => {
-  await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', workspaceName: 'Docs' }, 'secret', async () => Response.json({ workspaces: [{ name: 'Docs' }, { name: 'Docs' }] })), /Multiple docs workspaces/);
-  await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io' }, 'secret', async () => new Response('secret', { status: 401 })), /^Error: DocSlurp \/v1\/workspaces: HTTP 401$/);
+test('targets a configured workspace ID, slug or name and reports upstream errors without credentials', async () => {
+  const sent = [];
+  await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', workspace: 'product-manuals' }, 'secret', async (url, init) => {
+    sent.push(init.body.get('workspace'));
+    return new Response('secret', { status: 401 });
+  }), /^Error: DocSlurp \/v1\/uploads\/bulk: HTTP 401$/);
+  assert.deepEqual(sent, ['product-manuals']);
 });
 test('crawls only listed docs routes on the site origin and refuses redirects', async () => {
   const seen = [];

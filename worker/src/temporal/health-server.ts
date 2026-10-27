@@ -10,6 +10,7 @@
  */
 
 import { createServer, type Server } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 
 export type WorkerRunState = "INITIALIZED" | "RUNNING" | "STOPPED" | "STOPPING" | "DRAINING" | "DRAINED" | "FAILED";
 export type PollerState = "POLLING" | "SHUTDOWN" | "FAILED";
@@ -51,6 +52,8 @@ export function startWorkerHealthServer(args: {
   host?: string;
   health: () => WorkerHealth;
   metrics?: () => Promise<string>;
+  /** Overrides WORKER_METRICS_SECRET; when set, /metrics requires `Authorization: Bearer <secret>`. */
+  metricsSecret?: string;
 }): Server {
   const server = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
@@ -65,6 +68,19 @@ export function startWorkerHealthServer(args: {
       return;
     }
     if (path === "/metrics" && args.metrics) {
+      // /metrics is private (6PN only) but can be gated with a bearer secret by
+      // setting WORKER_METRICS_SECRET; the default keeps the scraper working
+      // (SEC-2026-10-10).
+      const required = (args.metricsSecret ?? process.env.WORKER_METRICS_SECRET ?? "").trim();
+      if (required) {
+        const provided = /^Bearer\s+(.+)$/i.exec(req.headers["authorization"] ?? "")?.[1] ?? "";
+        const a = Buffer.from(provided);
+        const b = Buffer.from(required);
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
+          res.writeHead(401).end();
+          return;
+        }
+      }
       args.metrics().then((body) => {
         res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
         res.end(req.method === "HEAD" ? undefined : body);

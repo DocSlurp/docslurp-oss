@@ -11,6 +11,18 @@ const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), e
 export { parseArtifactUri, type ParsedArtifactUri };
 
 /**
+ * The storage URI must address this deployment's bucket. Callers also verify the
+ * requesting user may read the underlying document, but asserting the bucket here
+ * means a future caller that forgets that check still cannot read another bucket.
+ * Security finding SEC-2026-10-21.
+ */
+function assertArtifactBucket(parsed: ParsedArtifactUri): void {
+  if (parsed.bucket !== env.s3Bucket) {
+    throw new Error("artifact bucket mismatch");
+  }
+}
+
+/**
  * Opens an artifact for streaming through the file proxy (routes/files.ts).
  * Range and If-None-Match pass through to storage, so media seeking and 304
  * revalidation work without buffering. Aborting `signal` (client disconnect)
@@ -21,6 +33,7 @@ export async function openArtifactObject(uri: string, options: { range?: string;
   if (!parsed) {
     throw new Error("unsupported artifact uri");
   }
+  assertArtifactBucket(parsed);
   return await s3Client.send(
     new GetObjectCommand({
       Bucket: parsed.bucket,
@@ -37,6 +50,7 @@ export async function getArtifactText(uri: string, maxBytes = 32 * 1024 * 1024):
   if (!parsed) {
     throw new Error("unsupported artifact uri");
   }
+  assertArtifactBucket(parsed);
 
   const response = await s3Client.send(
     new GetObjectCommand({

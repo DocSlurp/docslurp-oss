@@ -5,5 +5,6 @@
 export { applyRemainingMigrations, createMigratedDatabase } from "./test/migrated-db.js";
 export { serveOnRandomPort, startMigratedPostgres } from "./test/migrated-postgres.js";
 export { drainDocumentCleanupQueue, drainStorageCleanupQueue, type SupersededPurgeOptions } from "./db/superseded-purge.js";
+export { legacyEmbeddingLocations, legacyOrgTable } from "./stages/lancedb-legacy-layout.js";
 export { buildCanonicalChunksFromDocument } from "./lib/canonical-document.js";
 export { buildMediaCanonicalDocument } from "./media/canonical.js";

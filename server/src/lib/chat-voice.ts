@@ -1,3 +1,5 @@
+import { startTelemetrySpan } from "@docslurp/shared/observability";
+import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { MastraVoice } from "@mastra/core/voice";
 import { z } from "zod";
 import { assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, lookupPrivateModelRoute, privacyModeAllowsHosted, readProviderCharge, type PrivacyMode } from "@docslurp/shared";
@@ -61,13 +63,27 @@ export function wavDurationSeconds(bytes: Uint8Array): number | undefined {
   return undefined;
 }
 
-function validateRecording(audio: unknown): Blob {
+// The hosted model (OpenRouter `microsoft/mai-transcribe-2`) rejects webm and
+// m4a with a provider 400, and private endpoints receive a `.wav` upload, so
+// every path takes PCM WAV only. Rejecting other formats here returns a clean
+// 415 the client can act on instead of a paid round-trip that ends in a 502.
+const WAV_MIME_TYPES = new Set(["audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"]);
+
+/** RIFF/WAVE container check, so a mislabeled webm or m4a never reaches the provider. */
+export function isWavRecording(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < 12) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getUint32(0, false) === 0x52494646 && view.getUint32(8, false) === 0x57415645;
+}
+
+async function validateRecording(audio: unknown): Promise<{ audio: Blob; bytes: Uint8Array<ArrayBuffer> }> {
   if (!(audio instanceof Blob) || audio.size === 0) throw new ChatVoiceError("Record some audio first.", 400);
   if (audio.size > CHAT_VOICE_MAX_BYTES) throw new ChatVoiceError("Recording exceeds the 8 MB limit.", 413);
-  if (!["audio/wav", "audio/x-wav"].includes(audio.type.split(";")[0].trim().toLowerCase())) {
-    throw new ChatVoiceError("Unsupported recording format. Use PCM WAV audio.", 415);
-  }
-  return audio;
+  const unsupported = () => new ChatVoiceError("Unsupported recording format. Send 16-bit PCM WAV audio (audio/wav).", 415);
+  if (!WAV_MIME_TYPES.has(audio.type.split(";")[0].trim().toLowerCase())) throw unsupported();
+  const bytes = new Uint8Array(await audio.arrayBuffer());
+  if (!isWavRecording(bytes)) throw unsupported();
+  return { audio, bytes };
 }
 
 /** Mastra's text-only listen contract, with provider usage persisted before returning.
@@ -93,9 +109,11 @@ export class WorkspaceChatVoice extends MastraVoice {
     throw new Error("Workspace voice supports speech input only");
   }
 
-  async listen(audio: unknown): Promise<string> {
+  async listen(input: unknown): Promise<string> {
+    // Validate before any privacy, spend or provider work: a bad format is the caller's to fix.
+    const { audio, bytes } = await validateRecording(input);
     const privateModel = privateSttModelFor(this.privacyMode);
-    if (privateModel) return await this.listenPrivate(validateRecording(audio), privateModel);
+    if (privateModel) return await this.listenPrivate(audio, bytes, privateModel);
     const apiKey = resolveOpenRouterApiKey()?.trim();
     if (!apiKey) throw new ChatVoiceError("Voice input is not configured. You can still type your message.", 503);
     // Audio is workspace input; refuse before reading it when the workspace forbids hosted providers.
@@ -110,23 +128,30 @@ export class WorkspaceChatVoice extends MastraVoice {
       );
     }
     assertProviderAllowed(this.privacyMode, { provider: "openrouter", model: CHAT_VOICE_MODEL, operation: "api.chat.transcription", target: "hosted" });
-    audio = validateRecording(audio);
-    if (!(audio instanceof Blob)) throw new ChatVoiceError("Record some audio first.", 400);
 
+    await assertCanSpend(this.context.scope.orgId, this.context.scope.workspaceId);
     const body = JSON.stringify({
       model: CHAT_VOICE_MODEL,
-      input_audio: { data: Buffer.from(await audio.arrayBuffer()).toString("base64"), format: "wav" },
+      input_audio: { data: Buffer.from(bytes).toString("base64"), format: "wav" },
       response_format: "json",
     });
+    const providerStarted = performance.now();
+    const span = startTelemetrySpan("docslurp.chat", "chat.transcribe.provider", {
+      "gen_ai.request.model": CHAT_VOICE_MODEL, "docslurp.audio.bytes": audio.size,
+      "docslurp.audio.format": "wav",
+    }, { kind: "client" });
     let response: Response;
     try {
-      response = await fetch("https://openrouter.ai/api/v1/audio/transcriptions", {
+      response = await span.run(() => fetch("https://openrouter.ai/api/v1/audio/transcriptions", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body,
         signal: AbortSignal.timeout(60_000),
-      });
+      }));
+      span.set({ "http.response.status_code": response.status });
+      span.end(response.ok ? undefined : new Error("SpeechProviderError"));
     } catch (cause) {
+      span.end(cause);
       throw new ChatVoiceError("Transcription could not connect. Try again or type your message.", 502, { cause });
     }
     if (!response.ok) {
@@ -156,6 +181,8 @@ export class WorkspaceChatVoice extends MastraVoice {
           generationId: response.headers.get("x-generation-id"),
           tokenUsageReported: usage.input_tokens !== undefined && usage.output_tokens !== undefined,
           audioBytes: audio.size,
+          audioFormat: "wav",
+          providerResponseMs: Math.round(performance.now() - providerStarted),
         },
       },
     });
@@ -166,7 +193,7 @@ export class WorkspaceChatVoice extends MastraVoice {
    * OpenAI-compatible `/audio/transcriptions` on the operator's private
    * endpoint (multipart upload). Strict-privacy writes the audit row first.
    */
-  private async listenPrivate(audio: Blob, modelUri: string): Promise<string> {
+  private async listenPrivate(audio: Blob, bytes: Uint8Array<ArrayBuffer>, modelUri: string): Promise<string> {
     let call: Awaited<ReturnType<typeof authorizePrivateModelCall>>;
     try {
       call = await authorizePrivateModelCall({
@@ -180,7 +207,7 @@ export class WorkspaceChatVoice extends MastraVoice {
       console.error(`[chat-voice] private_transcription_refused model=${modelUri} error=${error instanceof Error ? error.message : String(error)}`);
       throw new ChatVoiceError("Voice input is unavailable. You can still type your message.", 503, { cause: error });
     }
-    const bytes = new Uint8Array(await audio.arrayBuffer());
+    await assertCanSpend(this.context.scope.orgId, this.context.scope.workspaceId);
     const form = new FormData();
     form.append("file", new Blob([bytes], { type: "audio/wav" }), "recording.wav");
     form.append("model", call.model);

@@ -1,5 +1,6 @@
 import { reportPublicError } from "../../lib/public-errors.js";
-import { publicErrorForStatus } from "@docslurp/shared";
+import { upgradeLinkHeader, upgradeLinksFor } from "../../lib/upgrade-links.js";
+import { publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { TransactionSql } from "postgres";
@@ -22,7 +23,7 @@ import { fleetSupportsNow, taskQueueForOrgKey } from "../worker-fleet.js";
  * chat completions, MCP answers and automation, and AI search strategies.
  *
  * An org may spend while
- *  - available credits (included + prepaid - pending debits) are above 0,
+ *  - available credits (prepaid balance - pending debits) are above 0,
  *  - neither the workspace nor the org is paused by its monthly budget, and
  *  - the workspace belongs to the org (entitlement; see spendBlockReason).
  * The rule is the `org_spend_status()` SQL function (migration 0044), which the
@@ -70,6 +71,9 @@ export class SpendBlockedError extends Error {
   constructor(
     message: string,
     readonly code: SpendBlockedCode,
+    /** Whether the org's auto top-up is on, so the 402 omits the "turn on auto top-up" link. */
+    readonly autoTopUpOn = false,
+    readonly spendDetails: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "SpendBlockedError";
@@ -82,7 +86,10 @@ export function isSpendBlockedError(error: unknown): error is SpendBlockedError 
 
 export interface SpendStatus {
   orgId: string;
-  planId: string;
+  /** Has ever had a paid grant (organizations.funded_at). */
+  funded: boolean;
+  /** Auto top-up is on for the org. */
+  autoTopUpOn?: boolean;
   available: number;
   reserved: number;
   workspaceBudgetPaused: boolean;
@@ -117,7 +124,8 @@ export async function loadSpendStatus(
   const client = (options.client ?? sql) as SqlClient;
   const [row] = await client<{
     org_id: string;
-    plan_id: string;
+    funded: boolean;
+    auto_top_up_on: boolean | null;
     available: string | number;
     reserved: string | number;
     workspace_budget_paused: boolean;
@@ -125,7 +133,8 @@ export async function loadSpendStatus(
     workspace_in_org: boolean;
     has_credit_grants: boolean | null;
   }[]>`
-    select s.*, org_has_credit_grants(s.org_id) as has_credit_grants
+    select s.*, org_has_credit_grants(s.org_id) as has_credit_grants,
+      (select o.auto_recharge_enabled from organizations o where o.id = s.org_id) as auto_top_up_on
     from org_spend_status(
       ${orgId ?? null}::text,
       ${workspaceId ?? null}::text,
@@ -135,7 +144,8 @@ export async function loadSpendStatus(
   if (!row) return null;
   return {
     orgId: row.org_id,
-    planId: row.plan_id,
+    funded: row.funded === true,
+    autoTopUpOn: row.auto_top_up_on === true,
     available: Number(row.available),
     reserved: Number(row.reserved),
     workspaceBudgetPaused: row.workspace_budget_paused,
@@ -151,9 +161,8 @@ export function spendBlockReason(
   kind: SpendKind = "job",
   config: ChatCreditReserveConfig = resolveChatCreditReserveConfig(),
 ): { code: SpendBlockedCode; message: string } | null {
-  // Entitlement: a billing org that owns the workspace. No plan gates AI
-  // features today (unknown plan ids resolve to Free, and Free spends its
-  // starter credits), so the plan only matters through credits and budgets.
+  // Entitlement: a billing org that owns the workspace. Nothing else gates AI
+  // features: starter orgs spend their starter credits like anyone else.
   if (!status || !status.workspaceInOrg) {
     return {
       code: "plan_not_entitled",
@@ -179,17 +188,17 @@ export function spendBlockReason(
   // House orgs (BILLING_EXEMPT_ORG_IDS) are metered but never credit-gated.
   if (isBillingExemptOrg(status.orgId)) return null;
   if (kind === "interactive") {
-    const overdraft = chatCreditOverdraft(status.planId, status.hasCreditGrants === true, config);
+    const overdraft = chatCreditOverdraft(status.funded, status.hasCreditGrants === true, config);
     if (status.available - status.reserved > -overdraft) return null;
     return {
       code: "credit_exhausted",
       message:
         `Out of credits (balance: ${status.available.toFixed(2)}` +
         (overdraft > 0 ? `, chat may go ${overdraft.toFixed(2)} below zero` : "") +
-        "). Buy credits, enable auto-recharge or upgrade your plan at /app/billing to continue.",
+        "). Buy credits or turn on auto top-up at /app/billing to continue.",
     };
   }
-  const reserve = chatCreditReserve(status.planId, config);
+  const reserve = chatCreditReserve(status.funded, config);
   const spendable = status.available - status.reserved - reserve;
   if (spendable > 0) return null;
   return {
@@ -198,7 +207,7 @@ export function spendBlockReason(
       `Out of credits for processing (available: ${status.available.toFixed(2)}` +
       (status.reserved > 0 ? `, held by in-flight runs: ${status.reserved.toFixed(2)}` : "") +
       (reserve > 0 ? `, kept for chat and search: ${reserve.toFixed(2)}` : "") +
-      "). Buy credits, enable auto-recharge or upgrade your plan at /app/billing to continue.",
+      "). Buy credits or turn on auto top-up at /app/billing to continue.",
   };
 }
 
@@ -217,7 +226,7 @@ async function admitInteractive(
   config: ChatCreditReserveConfig,
 ): Promise<{ code: SpendBlockedCode; message: string } | null> {
   if (isBillingExemptOrg(status.orgId)) return null;
-  const allowance = chatCreditOverdraft(status.planId, status.hasCreditGrants === true, config);
+  const allowance = chatCreditOverdraft(status.funded, status.hasCreditGrants === true, config);
   if (status.available - status.reserved > allowance + config.holdCredits) return null;
   const hold = options.hold === false ? 0 : config.holdCredits;
   const client = (options.client ?? sql) as SqlClient;
@@ -242,7 +251,7 @@ async function admitInteractive(
     message:
       `Out of credits (balance: ${available.toFixed(2)}, held by runs and chats in progress: ${Number(row?.held ?? 0).toFixed(2)}` +
       (allowance > 0 ? `, chat may go ${allowance.toFixed(2)} below zero` : "") +
-      "). Buy credits, enable auto-recharge or upgrade your plan at /app/billing to continue.",
+      "). Buy credits or turn on auto top-up at /app/billing to continue.",
   };
 }
 
@@ -267,7 +276,7 @@ export async function assertCanSpend(
 ): Promise<void> {
   if (spendGuardsSkipped()) return;
   const reason = await spendDecision(orgId, workspaceId, options);
-  if (reason) throw new SpendBlockedError(reason.message, reason.code);
+  if (reason) throw new SpendBlockedError(reason.message, reason.code, reason.autoTopUpOn === true, reason.details);
 }
 
 /** Non-throwing form, for paths that degrade instead of failing (search strategies). */
@@ -284,13 +293,16 @@ async function spendDecision(
   orgId: string | null | undefined,
   workspaceId: string | null | undefined,
   options: SpendCheckOptions,
-): Promise<{ code: SpendBlockedCode; message: string } | null> {
+): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean; details?: Record<string, unknown> } | null> {
   const kind = options.kind ?? "job";
   const config = resolveChatCreditReserveConfig();
   const status = await loadSpendStatus(orgId, workspaceId, { client: options.client });
-  const reason = spendBlockReason(status, kind, config);
-  if (reason || kind !== "interactive" || !status) return reason;
-  return await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config);
+  const reason = spendBlockReason(status, kind, config)
+    ?? (kind === "interactive" && status ? await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config) : null);
+  return reason ? { ...reason, autoTopUpOn: status?.autoTopUpOn === true,
+    details: { spendKind: kind,
+      availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
+      chatReserveCredits: status ? chatCreditReserve(status.funded, config) : 0 } } : null;
 }
 
 /**
@@ -314,14 +326,15 @@ export async function admitRunSpend<T>(
   return (await sql.begin(async (tx) => {
     if (guarded) {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
-      const reason = spendBlockReason(
-        await loadSpendStatus(orgId, workspaceId, {
-          client: tx,
-          // Leases replace the per-run reservation: `reserved` holds them all.
-          runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
-        }),
-      );
-      if (reason) throw new SpendBlockedError(reason.message, reason.code);
+      const status = await loadSpendStatus(orgId, workspaceId, {
+        client: tx,
+        // Leases replace the per-run reservation: `reserved` holds them all.
+        runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
+      });
+      const reason = spendBlockReason(status);
+      if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { spendKind: "job",
+        availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
+        chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
     }
     const admitted = await admit(tx);
     // The run's first lease, under the same advisory lock (re-entrant).
@@ -366,10 +379,14 @@ export async function admissionBlock(
   );
 }
 
-/** JSON 402 body for a blocked spend. */
+/** JSON 402 body for a blocked spend, with billing links on hosted deployments. */
 export function spendBlockedResponse(c: Context, error: SpendBlockedError) {
   reportPublicError(error, { status: 402 });
-  return c.json({ error: publicErrorForStatus(402), code: error.code }, 402);
+  const links = upgradeLinksFor(error.code, { autoTopUpOn: error.autoTopUpOn });
+  const header = upgradeLinkHeader(links);
+  if (header) c.header("Link", header);
+  const details = publicApiErrorDetails(error.spendDetails);
+  return c.json({ error: publicErrorForStatus(402), code: error.code, ...(details ? { details } : {}), ...(links ? { links } : {}) }, 402);
 }
 
 /** Hono onError: 402 for blocked spend, Hono's defaults otherwise. */

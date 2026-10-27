@@ -1,3 +1,5 @@
+import { leadingFrontmatterLineCount, plainHeadingText } from "../lib/markdown-structure.js";
+
 export interface ChunkMeta {
   text: string;
   headingPath: string[];
@@ -94,11 +96,22 @@ function parseSections(text: string): Section[] {
     }
   }
 
-  for (const line of lines) {
-    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    if (headingMatch) {
+  // A leading metadata block is not content and must not become a heading.
+  const startLine = leadingFrontmatterLineCount(lines);
+  let fence: string | null = null;
+
+  for (const line of lines.slice(startLine)) {
+    // Lines inside fenced code (shell comments, Markdown samples) are never headings.
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      if (fence === null) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+    }
+    const headingMatch = fence === null && !fenceMatch ? line.match(/^(#{1,6})\s+(.+)$/) : null;
+    if (headingMatch && plainHeadingText(headingMatch[2]!)) {
       const level = headingMatch[1]!.length;
-      const headingText = headingMatch[2]!.trim();
+      const headingText = plainHeadingText(headingMatch[2]!);
 
       // Determine if this heading starts a new section
       const isTopLevel = level <= 2;

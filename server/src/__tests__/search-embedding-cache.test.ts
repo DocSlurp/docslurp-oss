@@ -82,10 +82,14 @@ describe("query embedding through the search planner", () => {
   const embedding = defaultEmbeddingConfig;
 
   function plan(query: string, orgId = "org-a", privacyMode: "standard" | "local-only" | "strict-privacy" = "standard") {
-    return collectSearchTimings(() => prepareSearchSessionRetrievalPlan({
-      query, userId: "u", options: {} as never, effectiveOptions: {} as never, workspaceId: "ws", orgId,
-      workspaceSettings: {}, embedding, privacyMode, session: session as never,
-    }));
+    // The planner starts the embedding without awaiting it; the vector leg awaits it. Settle it here.
+    return collectSearchTimings(async () => {
+      const planned = await prepareSearchSessionRetrievalPlan({
+        query, userId: "u", options: {} as never, effectiveOptions: {} as never, workspaceId: "ws", orgId,
+        workspaceSettings: {}, embedding, privacyMode, session: session as never,
+      });
+      return { ...planned, queryVector: await planned.queryVector };
+    });
   }
 
   beforeEach(() => {

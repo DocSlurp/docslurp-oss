@@ -117,10 +117,10 @@ describe("development seed sign-in", () => {
 });
 
 describe("HTML sign-in policy", () => {
-  const submit = (headers: Record<string, string> = { Origin: "http://localhost:4321" }) =>
+  const submit = (headers: Record<string, string> = { Origin: "http://localhost:4321" }, redirectTo = "/app") =>
     app.fetch(new Request("http://localhost:4321/api/session/sign-in", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", ...headers },
-      body: new URLSearchParams({ email: "user@example.com", password: "testpassword", redirectTo: "/app" }),
+      body: new URLSearchParams({ email: "user@example.com", password: "testpassword", redirectTo }),
     }));
   beforeEach(() => { mocks.handler.mockReset(); mocks.sso.mockReset(); mocks.sso.mockResolvedValue(null); });
 
@@ -131,6 +131,12 @@ describe("HTML sign-in policy", () => {
     expect(response.headers.get("location")).toBe("http://localhost:4321/app");
     expect(response.headers.get("set-cookie")).toContain("session_token=verified");
     expect(mocks.handler.mock.calls[0][0].url).toBe("http://localhost:4321/api/auth/sign-in/email");
+  });
+
+  it.each(["/\\evil.example", "/\t/evil.example", "//evil.example"])("keeps the post-sign-in redirect on this origin for %j", async (redirectTo) => {
+    mocks.handler.mockResolvedValue(new Response("{}", { headers: { "Set-Cookie": "better-auth.session_token=verified; HttpOnly" } }));
+    const response = await submit(undefined, redirectTo);
+    expect(response.headers.get("location")).toBe("http://localhost:4321/app");
   });
 
   it("does not turn an auth rejection into a session", async () => {

@@ -67,17 +67,18 @@ describe("splitMaterializeRanges", () => {
   });
 });
 
-describe("page fees", () => {
-  const old = process.env.DOCSLURP_PAGE_BASE_FEE_USD;
-  beforeEach(() => { process.env.DOCSLURP_PAGE_BASE_FEE_USD = "0.01"; }); // 1 cent per page
-  afterEach(() => { process.env.DOCSLURP_PAGE_BASE_FEE_USD = old; delete process.env.DOCSLURP_DEFERRED_PROFILES; });
+describe("page charges", () => {
+  afterEach(() => { delete process.env.DOCSLURP_DEFERRED_PROFILES; });
+  const fast = (pages: number) => (pages * 5) / 1000;
 
-  it("upload runs charge every document when the flag is off", async () => {
+  it("upload runs charge every document's pages as Fast when the flag is off", async () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`delete from usage_events where run_id = 'up'`);
-    await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
-    const rows = await db.query<{ amount: number }>(`select amount from usage_events where run_id = 'up'`);
-    expect(rows.rows.map((r) => Number(r.amount))).toEqual([20]);
+    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
+    expect(charges).toMatchObject({ fastPages: 20, richPages: 0 });
+    const rows = await db.query<{ id: string; metric: string; amount: number; cost_cents: number }>(`select id, metric, amount, cost_cents from usage_events where run_id = 'up'`);
+    expect(rows.rows.map((r) => [r.id, r.metric, Number(r.amount)])).toEqual([["fast:up", "ingest-page-fast", 20]]);
+    expect(Number(rows.rows[0]!.cost_cents)).toBeCloseTo(fast(20), 9);
   });
 
   it("upload runs charge only full-mode documents when the flag is on", async () => {
@@ -89,18 +90,39 @@ describe("page fees", () => {
     expect(rows.rows.map((r) => Number(r.amount))).toEqual([3]);
   });
 
-  it("charges each materialized page once per run", async () => {
-    expect(await recordMaterializedPageFee(sql, "m1", "d1", [3, 4, 5])).toBeCloseTo(3);
-    expect(await recordMaterializedPageFee(sql, "m1", "d1", [4, 5, 6])).toBeCloseTo(1);
+  it("charges pages a vision model read as Rich (once) and the rest Fast, scans and images Rich", async () => {
+    delete process.env.DOCSLURP_DEFERRED_PROFILES;
+    await db.exec(`
+      delete from usage_events where run_id = 'up';
+      insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, amount, unit, cost_cents, metadata)
+        values ('rich:up:full:1', 'u1', 'up', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0.25, '{"documentId":"full","pageNumber":1}');
+      insert into document_page_facts (document_id, page_number, text_bytes, image_count) values ('mapped', 1, 0, 1), ('mapped', 2, 0, 2);
+    `);
+    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
+    // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 scans; d1: 12 text pages.
+    expect(charges).toMatchObject({ fastPages: 2 + 3 + 12, richPages: 2 });
+    expect(charges.credits).toBeCloseTo(fast(17) + 2 * 0.25, 9);
+    await db.exec(`delete from document_page_facts where document_id = 'mapped'; update documents set mime_type = 'image/png' where id = 'full'`);
+    await db.exec(`delete from usage_events where run_id = 'up' and id <> 'rich:up:full:1'`);
+    const image = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
+    // An image file's pages are read as images: the 2 not yet charged bill Rich.
+    expect(image).toMatchObject({ fastPages: 17, richPages: 2 });
+    await db.exec(`update documents set mime_type = 'application/pdf' where id = 'full'; delete from usage_events where run_id = 'up'`);
+  });
+
+  it("charges each materialized page once per run as Fast, skipping pages OCR already charged Rich", async () => {
+    expect(await recordMaterializedPageFee(sql, "m1", "d1", [3, 4, 5])).toBeCloseTo(fast(3), 9);
+    expect(await recordMaterializedPageFee(sql, "m1", "d1", [4, 5, 6])).toBeCloseTo(fast(1), 9);
+    expect(await recordMaterializedPageFee(sql, "m1", "d1", [10, 11], new Set([10, 11]))).toBe(0);
     const rows = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' order by id`);
     expect(rows.rows.map((r) => r.id)).toEqual(["m1:d1:3", "m1:d1:4", "m1:d1:5", "m1:d1:6"]);
     const [run] = (await db.query<{ spent_cents: string }>(`select spent_cents from workspace_runs where id = 'm1'`)).rows;
-    expect(Number(run!.spent_cents)).toBeCloseTo(4);
+    expect(Number(run!.spent_cents)).toBeCloseTo(fast(4), 9);
   });
 
   it("never bills a page twice when another run bills it between this run's read and write", async () => {
     await ensurePageRows(sql, "d1", 12);
-    await db.exec(`delete from usage_events where metric = 'page-base-fee' and run_id in ('m1','m2'); update document_page_states set fee_billed_run = null, fee_billed_at = null where document_id = 'd1'`);
+    await db.exec(`delete from usage_events where metric = 'ingest-page-fast' and run_id in ('m1','m2'); update document_page_states set fee_billed_run = null, fee_billed_at = null where document_id = 'd1'`);
     let competitor: Promise<number> | null = null;
     // Simulates run m2 getting in just before m1 reads its run row (after m1's page-state work): both run
     // inside one transaction here, standing in for the row locks that serialize them in Postgres.
@@ -119,14 +141,9 @@ describe("page fees", () => {
     });
     expect(competitor).not.toBeNull();
     const billed = await db.query<{ page: number; n: number }>(
-      `select (metadata->>'page')::int as page, count(*)::int as n from usage_events where metric = 'page-base-fee' and run_id in ('m1','m2') group by 1 order by 1`);
+      `select (metadata->>'page')::int as page, count(*)::int as n from usage_events where metric = 'ingest-page-fast' and run_id in ('m1','m2') group by 1 order by 1`);
     expect(billed.rows).toEqual([{ page: 7, n: 1 }, { page: 8, n: 1 }, { page: 9, n: 1 }]);
-    expect(total + (await competitor!)).toBeCloseTo(3);
-  });
-
-  it("charges nothing at a zero rate", async () => {
-    process.env.DOCSLURP_PAGE_BASE_FEE_USD = "0";
-    expect(await recordMaterializedPageFee(sql, "m2", "d1", [1])).toBe(0);
+    expect(total + (await competitor!)).toBeCloseTo(fast(3), 9);
   });
 });
 
@@ -208,7 +225,6 @@ describe("runMaterializeRange activity", () => {
 
   beforeEach(async () => {
     await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states; delete from usage_events where run_id in ('m1','m2');`);
-    process.env.DOCSLURP_PAGE_BASE_FEE_USD = "0.01";
   });
 
   it("renews the run's lease while pages materialize so only a dead worker leaves it stale", async () => {
@@ -246,7 +262,7 @@ describe("runMaterializeRange activity", () => {
       await db.exec(`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
         values ('${id}', 'o1', 'u1', 'w', 'up', '${id}.pdf', 'application/pdf', 'k-${id}', 'completed', 6, 'map')`);
     };
-    const usageRows = async () => (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'm2' and metric = 'page-base-fee'`)).rows[0]!.n;
+    const usageRows = async () => (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'm2' and metric = 'ingest-page-fast'`)).rows[0]!.n;
 
     it("stops cleanly, without throwing or billing, when the document is already gone", async () => {
       await db.exec(`update workspace_runs set status = 'processing' where id = 'm2'`);
@@ -293,7 +309,7 @@ describe("runMaterializeRange activity", () => {
     expect(result.indexed).toEqual([3, 4, 5]);
     expect(result.failed).toEqual([]);
     expect(polls).toBe(1);
-    const fees = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' and metric = 'page-base-fee' order by id`);
+    const fees = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' and metric = 'ingest-page-fast' order by id`);
     expect(fees.rows.map((r) => r.id)).toEqual(["m1:d1:3", "m1:d1:4", "m1:d1:5"]);
     await completeMaterializeRun(sql, "m1", result);
     const [run] = (await db.query<{ status: string; pages_processed: number }>(`select status, pages_processed from workspace_runs where id = 'm1'`)).rows;
@@ -310,7 +326,7 @@ describe("runMaterializeRange activity", () => {
     // A second run touching the same indexed pages (and a direct re-bill attempt) charges nothing.
     await runMaterializeRange(deps() as never, input("m2", [3, 4, 5]));
     expect(await recordMaterializedPageFee(sql, "m2", "d1", [3, 4])).toBe(0);
-    const fees = await db.query<{ id: string }>(`select id from usage_events where metric = 'page-base-fee' and run_id in ('m1','m2') order by id`);
+    const fees = await db.query<{ id: string }>(`select id from usage_events where metric = 'ingest-page-fast' and run_id in ('m1','m2') order by id`);
     expect(fees.rows.map((r) => r.id)).toEqual(["m1:d1:3", "m1:d1:4", "m2:d1:5"]);
     await db.exec(`delete from usage_events where run_id = 'm2'`);
   });
@@ -322,7 +338,7 @@ describe("runMaterializeRange activity", () => {
       sleep: async () => { await db.exec(`update document_page_states set claim_expires_at = now() - interval '1 second' where document_id = 'd1' and page_number = 8`); },
     }) as never, input("m1", [8]));
     expect(result.indexed).toEqual([8]);
-    const fees = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' and metric = 'page-base-fee'`);
+    const fees = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' and metric = 'ingest-page-fast'`);
     expect(fees.rows.map((r) => r.id)).toEqual(["m1:d1:8"]);
   });
 
@@ -331,7 +347,7 @@ describe("runMaterializeRange activity", () => {
     await markPagesIngested(sql, "d1", 12, "full-index");
     const result = await runMaterializeRange(deps() as never, input("m1", [2, 3]));
     expect(result.indexed).toEqual([2, 3]);
-    const fees = await db.query(`select id from usage_events where run_id = 'm1' and metric = 'page-base-fee'`);
+    const fees = await db.query(`select id from usage_events where run_id = 'm1' and metric = 'ingest-page-fast'`);
     expect(fees.rows).toHaveLength(0);
   });
 
@@ -389,7 +405,7 @@ describe("runMaterializeRange activity", () => {
     await ensurePageRows(sql, "d1", 12);
     await runMaterializeRange(deps() as never, input("m1", [3, 4, 5]));
     await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
-    const total = await db.query<{ amount: string }>(`select amount from usage_events where metric = 'page-base-fee' and run_id in ('m1', 'fi')`);
+    const total = await db.query<{ amount: string }>(`select amount from usage_events where metric = 'ingest-page-fast' and run_id in ('m1', 'fi')`);
     expect(total.rows.map((r) => Number(r.amount)).reduce((a, b) => a + b, 0)).toBe(12);
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);

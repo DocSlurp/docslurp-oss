@@ -20,7 +20,6 @@ NAME="${1:?bundle name}"
 OUT="${2:?output dir}"
 REPO="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BASE_VENV="${DOCSLURP_BUNDLE_BASE_VENV:-/app/.venv}"
-UV_VERSION="${DOCSLURP_BUNDLE_UV_VERSION:-0.13.0}"
 REQUIREMENTS="${REPO}/worker/requirements-bundle-${NAME}.txt"
 # Fixed build path: bytecode records its source path, so a random temp dir would
 # make every build's archive differ.
@@ -40,9 +39,9 @@ PY_MINOR="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_i
 PLATFORM="linux-${ARCH}-py${PY_MINOR}"
 mkdir -p "${OUT}" "${SITE}" "${ROOT}/bin" "${ROOT}/models"
 
-# Pinned uv in a throwaway venv (not shipped).
+# Pinned, hash-checked uv (scripts/uv-installer.lock.txt) in a throwaway venv (not shipped).
 python3 -m venv /tmp/uv-venv
-/tmp/uv-venv/bin/pip install --quiet --no-cache-dir --only-binary=:all: "uv==${UV_VERSION}"
+/tmp/uv-venv/bin/pip install --quiet --no-cache-dir --only-binary=:all: --require-hashes -r "${REPO}/scripts/uv-installer.lock.txt"
 UV=/tmp/uv-venv/bin/uv
 
 # Drop the GUI OpenCV build (needs libGL); the headless wheel provides the same cv2 module.
@@ -109,7 +108,6 @@ import os, sys
 _root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(_root, "site-packages"))
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("DOCLING_ARTIFACTS_PATH", os.path.join(_root, "models", "docling"))
 from ${module} import ${func} as _main
 sys.exit(_main())
 SHIM
@@ -119,18 +117,6 @@ SHIM
 export PYTHONPATH="${SITE}"
 export HF_HOME="${ROOT}/models/hf"
 case "${NAME}" in
-  docling)
-    write_shim docling docling.cli.main app
-    # Layout, table structure and OCR models; the VLM pipeline's weights are not included.
-    "${BASE_VENV}/bin/python" -c "from docling.cli.tools import app; app()" models download --output-dir "${ROOT}/models/docling" layout tableformer rapidocr
-    # Keep one copy of each model, matching docling's CLI defaults: torch layout
-    # model (not the ONNX twin), TableFormer "accurate" (not "fast"), RapidOCR
-    # torch weights (docling's default RapidOCR backend when torch is present; not the
-    # .onnx copies). The offline smoke test below fails if a default needs a removed file.
-    rm -rf "${ROOT}/models/docling/docling-project--docling-layout-heron-onnx" \
-           "${ROOT}/models/docling/docling-project--docling-models/model_artifacts/tableformer/fast"
-    find "${ROOT}/models/docling/RapidOcr" -name '*.onnx' -delete
-    ;;
   unstructured)
     # hi_res layout detection model (unstructured-inference default), pre-fetched for the network-less sandbox.
     "${BASE_VENV}/bin/python" - <<'PY'
@@ -179,12 +165,6 @@ out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\
 open(sys.argv[1], "wb").write(out)
 PY
 case "${NAME}" in
-  docling)
-    HOME="${SMOKE_HOME}" HF_HUB_OFFLINE=1 DOCLING_ARTIFACTS_PATH="${ROOT}/models/docling" timeout 600 \
-      "${BASE_VENV}/bin/python" "${ROOT}/bin/docling" --from pdf --to md --output "${SMOKE}" "${SMOKE}/smoke.pdf"
-    grep -q "Vendor bundle smoke test" "${SMOKE}/smoke.md"
-    echo "[bundle] docling offline conversion ok"
-    ;;
   unstructured)
     HOME="${SMOKE_HOME}" PYTHONPATH="${SITE}" HF_HUB_OFFLINE=1 HF_HOME="${ROOT}/models/hf" timeout 600 "${BASE_VENV}/bin/python" - "${SMOKE}/smoke.pdf" <<'PY'
 import sys

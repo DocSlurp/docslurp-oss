@@ -1,4 +1,5 @@
 import { instrumentPostgres } from "@docslurp/shared/observability";
+import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { isUtf8 } from "node:buffer";
 
 import postgres from "postgres";
@@ -11,6 +12,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import {
   PII_BLOCKED_DOCUMENT_STATUS,
   type PiiMatch,
@@ -21,6 +23,7 @@ import {
 import { createPiiTextScanner, redactCanonicalDocument, redactJsonText, type PiiTextScanner } from "../lib/pii-redaction.js";
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
+import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
 
 export interface PiiDetectionArtifact {
   documentId: string;
@@ -88,7 +91,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 10,
-  }), databaseUrl);
+  }), databaseUrl, { onStatement: dbTraceStatementHook() });
   return {
     async recordDetections(documentId, runId, matches, redacted) {
       // A rescan of the same run replaces its detections instead of duplicating them.
@@ -187,7 +190,7 @@ export class PiiDetectStage implements Stage {
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const artifactSlot = `${document.id}:pii-detect`;
-      const artifactKey = `${document.userId}/${state.run.id}/pii/${document.id}.json`;
+      const artifactKey = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.json`;
 
       await runDocumentStage(
         state,
@@ -324,12 +327,26 @@ export class PiiDetectStage implements Stage {
       }
       if (fallbackResult && fallbackResult.matches.length > 0) {
         // Embed, summary and page index read the markdown slot before the source file.
-        const key = `${document.userId}/${state.run.id}/pii/${document.id}.redacted.md`;
+        const key = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.redacted.md`;
         await this.storage.streamText(key, fallbackResult.redacted, "text/markdown");
         ledger.recordDocument(document.id, "markdown", this.storage.uri(key));
         redactedArtifacts.push("markdown");
         servableUris.add(this.storage.uri(key));
       }
+      // Summary evidence holds excerpts of the pre-redaction extraction. Rebuild
+      // it from the redacted markdown now in the slot (or delete it when that
+      // text is unreadable) so unredacted text never reaches the summary model
+      // or survives in storage.
+      const currentMarkdown = fallbackResult && fallbackResult.matches.length > 0
+        ? fallbackResult.redacted
+        : markdown
+          ? (markdownResult && markdownResult.matches.length > 0 ? markdownResult.redacted : markdown.text)
+          : null;
+      const evidence = await refreshSummaryEvidence({
+        storage: this.storage, ledger, document,
+        text: currentMarkdown, sourceUri: ledger.readDocument(document.id, "markdown"),
+      });
+      if (evidence !== "absent") redactedArtifacts.push("summary-evidence");
     }
 
     // Under redact_artifacts the scanned sources are now clean (redacted or

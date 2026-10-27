@@ -33,13 +33,13 @@ DocSlurp is organized around three jobs. Each one reads and writes the same work
 
 DocSlurp treats `Organization -> Workspace -> Run -> Document` as the retrieval boundary chain. Postgres remains the source of truth for membership, workspace scope, document status, chunk metadata, and result hydration.
 
-LanceDB stores ANN vectors behind a storage-layer tenant boundary:
+LanceDB stores ANN vectors behind a storage-layer tenant boundary: one database per workspace and embedding space.
 
-- `packages/shared/src/vector-namespace.ts` owns the naming contract through `VectorNamespaceManager`.
-- The live table for an organization is `chunks_org_<sha256(org_id)[0:32]>`.
-- `worker/src/stages/index-vectors.ts` writes LanceDB vectors only to the table derived from `state.run.orgId`.
-- `server/src/search/lancedb.ts` opens only the exact table derived from the org id returned by workspace access checks.
-- Search callers cannot provide a LanceDB namespace, table name, or table prefix.
-- Blank org ids fail closed, and lookalike/archive table names are not considered live tenant tables.
+- `packages/shared/src/vector-namespace.ts` owns the layout through `VectorNamespaceManager`: `<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dimensions>/chunks.lance`. Different models, even with equal dimensions, never share a database.
+- `worker/src/stages/index-vectors.ts` (and the embed stage, deferred page materialization and purge) resolve the location from the run's `orgId` and `workspaceId` through `worker/src/stages/lancedb-location.ts`, and refuse to write without both.
+- `server/src/search/lancedb.ts` opens only the database derived from the org id returned by workspace access checks and the searched workspace.
+- Search callers cannot provide a LanceDB namespace, table name, or path; blank or unsafe org and workspace ids fail closed.
+- Dedup copies share their source's rows only inside the source's workspace. A copy in another workspace is indexed into its own workspace's database from the source's embedding artifact (no new embedding cost).
+- Deleting a workspace queues its databases for a whole drop (`storage_cleanup_queue` `vector_table` entries).
 
-This means a malformed namespace parameter, missing namespace parameter, or table-prefix bug cannot widen a vector query across organizations. PostgreSQL workspace-scoped hydration remains in place as a second boundary after ANN retrieval.
+This means a malformed scope, a document-filter bug or a missing namespace cannot widen a vector query to another workspace or organization. PostgreSQL workspace-scoped hydration remains in place as a second boundary after ANN retrieval.

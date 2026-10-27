@@ -41,7 +41,7 @@ export class NotionConnectorAdapter implements ConnectorAdapter {
       let cursor: string | undefined;
       do {
         const response = await this.notionFetch(
-          `/databases/${config.databaseId}/query`,
+          `/databases/${encodeURIComponent(config.databaseId)}/query`,
           creds.integrationToken,
           {
             method: "POST",
@@ -127,7 +127,7 @@ export class NotionConnectorAdapter implements ConnectorAdapter {
 
     // Fetch page blocks and serialize to markdown-like text
     const response = await this.notionFetch(
-      `/blocks/${fileRef.id}/children?page_size=100`,
+      `/blocks/${encodeURIComponent(fileRef.id)}/children?page_size=100`,
       creds.integrationToken
     );
 

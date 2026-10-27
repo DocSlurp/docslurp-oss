@@ -12,7 +12,7 @@ import {
 import { sql } from "../db.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 
-type SettingsRow = {
+export type SettingsRow = {
   workspace_id: string;
   user_id: string;
   typo_tolerance: boolean;
@@ -26,14 +26,19 @@ type SettingsRow = {
   compat_metadata: Record<string, unknown> | null;
 };
 
-export async function getWorkspaceSearchSettings(workspaceId: string, userId: string): Promise<WorkspaceSearchSettings> {
-  const [row] = await sql<SettingsRow[]>`
+export async function getWorkspaceSearchSettings(workspaceId: string, userId: string, client: typeof sql = sql): Promise<WorkspaceSearchSettings> {
+  const [row] = await client<SettingsRow[]>`
     select workspace_id, user_id, typo_tolerance, dedupe_by_filename, ranking_rules, boosts, pinned_results, synonyms, compat_settings, rules, compat_metadata
     from workspace_search_settings
     where workspace_id = ${workspaceId}
     limit 1
   `;
 
+  return parseWorkspaceSearchSettingsRow(row, workspaceId, userId);
+}
+
+/** Settings from a workspace_search_settings row (defaults without one); shared with the one-query search setup. */
+export function parseWorkspaceSearchSettingsRow(row: SettingsRow | undefined, workspaceId: string, userId: string): WorkspaceSearchSettings {
   if (!row) {
     return workspaceSearchSettingsSchema.parse({
       ...defaultWorkspaceSearchSettings,
@@ -62,7 +67,7 @@ export async function getWorkspaceSearchSettings(workspaceId: string, userId: st
   });
 }
 
-export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSettings): Promise<void> {
+export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSettings, client: typeof sql = sql): Promise<void> {
   const parsed = workspaceSearchSettingsSchema.parse(settings);
   const rankingRulesJson = JSON.parse(JSON.stringify(parsed.rankingRules)) as Record<string, unknown>;
   const boostsJson = JSON.parse(JSON.stringify(parsed.boosts)) as Record<string, unknown>;
@@ -78,7 +83,7 @@ export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSet
     }
   })) as Record<string, unknown>;
 
-  await sql`
+  await client`
     insert into workspace_search_settings (
       workspace_id, user_id, typo_tolerance, dedupe_by_filename, ranking_rules, boosts, pinned_results, synonyms, compat_settings, rules, compat_metadata
     ) values (
@@ -86,13 +91,13 @@ export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSet
       ${parsed.userId},
       ${parsed.typoTolerance},
       ${parsed.dedupeByFilename},
-      ${sql.json(rankingRulesJson as Parameters<typeof sql.json>[0])},
-      ${sql.json(boostsJson as Parameters<typeof sql.json>[0])},
-      ${sql.json(pinnedResultsJson as Parameters<typeof sql.json>[0])},
-      ${sql.json(synonymsJson as Parameters<typeof sql.json>[0])},
-      ${sql.json(compatSettingsJson as Parameters<typeof sql.json>[0])},
-      ${sql.json(rulesJson as Parameters<typeof sql.json>[0])},
-      ${sql.json(compatMetadataJson as Parameters<typeof sql.json>[0])}
+      ${client.json(rankingRulesJson as Parameters<typeof sql.json>[0])},
+      ${client.json(boostsJson as Parameters<typeof sql.json>[0])},
+      ${client.json(pinnedResultsJson as Parameters<typeof sql.json>[0])},
+      ${client.json(synonymsJson as Parameters<typeof sql.json>[0])},
+      ${client.json(compatSettingsJson as Parameters<typeof sql.json>[0])},
+      ${client.json(rulesJson as Parameters<typeof sql.json>[0])},
+      ${client.json(compatMetadataJson as Parameters<typeof sql.json>[0])}
     )
     on conflict (workspace_id) do update set
       user_id = excluded.user_id,
@@ -161,16 +166,38 @@ export async function updateWorkspaceSearchSettingsForUser(args: {
   userId: string;
   input: UpdateWorkspaceSearchSettingsInput;
 }): Promise<WorkspaceSearchSettings | null> {
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
-  if (!access || !canEditWorkspace(access, args.userId)) {
-    return null;
-  }
+  return mutateWorkspaceSearchSettingsForUser({ ...args, mutate: current => mergeWorkspaceSearchSettings(current, args.input) });
+}
 
-  const current = await getWorkspaceSearchSettings(args.workspaceId, args.userId);
-  const next = mergeWorkspaceSearchSettings(current, args.input);
+/** Serialize every read/merge/write, including first inserts, with proposal Apply. */
+export async function mutateWorkspaceSearchSettingsForUser(args: {
+  workspaceId: string;
+  userId: string;
+  mutate: (current: WorkspaceSearchSettings) => WorkspaceSearchSettings;
+}): Promise<WorkspaceSearchSettings | null> {
+  return await sql.begin(async tx => {
+    const client = tx as unknown as typeof sql;
+    await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${args.workspaceId}`}, 0))`;
+    const access = await getWorkspaceAccess(args.workspaceId, args.userId, client);
+    if (!access || !canEditWorkspace(access, args.userId)) return null;
+    const current = await getWorkspaceSearchSettings(args.workspaceId, args.userId, client);
+    const next = args.mutate(current);
+    await upsertWorkspaceSearchSettings(next, client);
+    await client`update workspaces set updated_at=now() where id=${args.workspaceId}`;
+    return next;
+  });
+}
 
-  await upsertWorkspaceSearchSettings(next);
-  return next;
+/**
+ * Whether this user may change a workspace's search configuration. The session
+ * route already enforces this (updateWorkspaceSearchSettingsForUser); the
+ * compatibility routes (Algolia/Meilisearch/Typesense/Pagefind) must enforce the
+ * same rule, or a read-only workspace member can rewrite settings through an API
+ * key they are allowed to create. Security finding SEC-2026-10-01.
+ */
+export async function userCanEditWorkspaceSettings(workspaceId: string, userId: string): Promise<boolean> {
+  const access = await getWorkspaceAccess(workspaceId, userId);
+  return access !== null && canEditWorkspace(access, userId);
 }
 
 export function applySearchControls(args: {

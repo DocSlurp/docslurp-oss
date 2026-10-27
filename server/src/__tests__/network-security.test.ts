@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   tlsConnect: vi.fn(),
   agentOptions: [] as Array<{ connect: Function }>,
   agentClose: vi.fn(),
+  // Delegates to the (stubbable) global so the response-shaping tests below can
+  // drive it, while still recording that undici's own fetch was used.
+  undiciFetch: vi.fn((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)),
 }));
 
 vi.mock("node:dns/promises", () => ({
@@ -20,6 +23,7 @@ vi.mock("node:tls", () => ({
 }));
 
 vi.mock("undici", () => ({
+  fetch: mocks.undiciFetch,
   Agent: class Agent {
     constructor(options: { connect: Function }) {
       mocks.agentOptions.push(options);
@@ -40,7 +44,18 @@ describe("network-security", () => {
     mocks.tlsConnect.mockReset();
     mocks.agentOptions.length = 0;
     mocks.agentClose.mockReset();
+    mocks.undiciFetch.mockClear();
     vi.unstubAllGlobals();
+  });
+
+  it("sends through undici's fetch with the pinned Agent, not Node's global fetch", async () => {
+    // Node 24's global fetch bundles undici 7, whose handlers the undici 8 Agent
+    // rejects ("invalid onRequestStart method"); pairing them broke all egress.
+    mocks.lookup.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    await (await safeExternalFetch("https://example.com/file")).text();
+    expect(mocks.undiciFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.undiciFetch.mock.calls[0]![1]).toMatchObject({ redirect: "error", dispatcher: expect.any(Object) });
   });
 
   afterEach(() => {
@@ -162,5 +177,53 @@ describe("network-security", () => {
       servername: "example.com",
     }));
     expect(callbackSocket).toBe(socket);
+  });
+
+  it("dials 443 when undici passes an empty default port", async () => {
+    mocks.lookup.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    const socket = new EventEmitter();
+    mocks.tlsConnect.mockReturnValue(socket);
+
+    await safeExternalFetch("https://example.com/file");
+    const connect = mocks.agentOptions[0]!.connect;
+    const connected = new Promise<void>((resolve) => {
+      connect({ hostname: "example.com", protocol: "https:", port: "" }, () => resolve());
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.emit("secureConnect");
+    await connected;
+
+    expect(mocks.tlsConnect).toHaveBeenCalledWith(expect.objectContaining({ host: "93.184.216.34", port: 443 }));
+  });
+
+  it("falls back to the next vetted address when the first one fails to connect", async () => {
+    mocks.lookup.mockResolvedValue([
+      { address: "2606:4700::1111", family: 6 },
+      { address: "93.184.216.34", family: 4 },
+    ]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    const unreachable = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const reachable = new EventEmitter();
+    mocks.tlsConnect.mockReturnValueOnce(unreachable).mockReturnValueOnce(reachable);
+
+    await safeExternalFetch("https://example.com/file");
+    const connect = mocks.agentOptions[0]!.connect;
+    let result: { error: Error | null; socket: unknown } | undefined;
+    const connected = new Promise<void>((resolve) => {
+      connect({ hostname: "example.com", protocol: "https:", port: "" }, (error: Error | null, socket: unknown) => {
+        result = { error, socket };
+        resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    unreachable.emit("error", Object.assign(new Error("connect ENETUNREACH"), { code: "ENETUNREACH" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    reachable.emit("secureConnect");
+    await connected;
+
+    expect(unreachable.destroy).toHaveBeenCalled();
+    expect(mocks.tlsConnect).toHaveBeenLastCalledWith(expect.objectContaining({ host: "93.184.216.34", port: 443 }));
+    expect(result).toEqual({ error: null, socket: reachable });
   });
 });

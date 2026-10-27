@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
-import { apiKeyRateLimitPolicyName, type ApiErrorCode, type ApiKeyRateLimitRule } from "@docslurp/shared";
+import { apiKeyRateLimitPolicyName, publicApiErrorMessage, type ApiErrorCode, type ApiKeyRateLimitRule } from "@docslurp/shared";
 import type { Context, MiddlewareHandler } from "hono";
 import { createClient } from "redis";
 import { middlewareErrorResponse } from "../lib/api-error.js";
+import { isSelfHostedDeployment, withUpgradeLinks } from "../lib/upgrade-links.js";
 
 import { requestIp } from "../lib/request-context.js";
 import { apiKeyPagesToday } from "../services/api-key-usage.js";
@@ -25,20 +26,26 @@ import { apiKeySpendCents } from "../services/usage-attribution.js";
  *  1. Per IP: a temporary block (penalty box), a short burst window and the
  *     IP's per-category limit. Bursts over the burst limit and repeated invalid
  *     credentials put the IP in the penalty box.
- *  2. Per API key or user: the plan's per-category limit (capped by the key's
- *     requests-per-minute), the key's custom request windows, its daily page
- *     cap for uploads and its spend windows for cost-incurring requests.
+ *  2. Per API key or user: the per-category limit of the org's table (capped by the key's
+ *     requests-per-minute when one is set), the key's custom request windows, its daily page
+ *     cap for uploads and its spend windows for cost-incurring requests. Every
+ *     account shares one table whatever its billing state; a key's own settings
+ *     only lower it.
  *
  * Responses carry the IETF `RateLimit-Policy` / `RateLimit` fields
  * (draft-ietf-httpapi-ratelimit-headers) for every policy that applied, plus
  * the widely used `X-RateLimit-Limit/Remaining/Reset` for the tightest one.
+ * Every 429 on a hosted deployment carries `details.links` (billing, docs) and
+ * a `Link` header.
  */
 
-type RedisClient = ReturnType<typeof createClient>;
+// Infer the concrete RESP version selected by redis instead of the generic factory.
+const createRateLimitRedisClient = (url: string) => createClient({ url });
+type RedisClient = ReturnType<typeof createRateLimitRedisClient>;
 
 type RateLimitIdentityMode = "ip" | "actor";
 export type RateLimitCategory = "upload" | "search" | "chat-ai" | "read" | "write" | "webhook";
-export type RateLimitProfile = "ip" | "free" | "paid" | "self-hosted";
+export type RateLimitProfile = "ip" | "account" | "self-hosted";
 
 export type RateLimitOptions = {
   windowMs?: number;
@@ -117,15 +124,10 @@ const defaultPolicies: Record<RateLimitProfile, RateLimitPolicy> = {
     write: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 300 },
     webhook: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 600 },
   },
-  free: {
-    upload: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 20 },
-    search: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 60 },
-    "chat-ai": { windowMs: DEFAULT_WINDOW_MS, maxRequests: 20 },
-    read: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 300 },
-    write: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
-    webhook: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
-  },
-  paid: {
+  // One table for every account, whatever its billing state: abuse protection
+  // only. Spend stays bounded by credits and budgets, and the IP layer and
+  // per-key caps still apply.
+  account: {
     upload: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
     search: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 600 },
     "chat-ai": { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
@@ -331,7 +333,7 @@ class RedisSlidingWindowStore extends FallbackStore {
   private async connect(): Promise<RedisClient> {
     if (this.client?.isOpen) return this.client;
     if (!this.connectPromise) {
-      const client = createClient({ url: this.url });
+      const client = createRateLimitRedisClient(this.url);
       client.on("error", (error) => {
         if (!this.clientErrorLogged) {
           this.clientErrorLogged = true;
@@ -406,11 +408,6 @@ function readGuardInt(name: string, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function readBoolean(value: string | undefined): boolean {
-  const normalized = value?.trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
-}
-
 function envName(value: string): string {
   return value.replace(/-/g, "_").toUpperCase();
 }
@@ -438,23 +435,7 @@ function rateLimitEnabled(): boolean {
   return !["0", "false", "off", "no"].includes(normalized ?? "");
 }
 
-function isSelfHostedDeployment(): boolean {
-  const configuredProfile = process.env.API_RATE_LIMIT_DEFAULT_PROFILE?.trim().toLowerCase();
-  if (configuredProfile === "self-hosted" || configuredProfile === "self_hosted") return true;
-  const deploymentMode = process.env.DOCSLURP_DEPLOYMENT_MODE?.trim().toLowerCase();
-  return deploymentMode === "self-hosted"
-    || deploymentMode === "self_hosted"
-    || readBoolean(process.env.DOCSLURP_SELF_HOSTED)
-    || readBoolean(process.env.SELF_HOSTED);
-}
-
-function defaultProfile(): RateLimitProfile {
-  const configured = process.env.API_RATE_LIMIT_DEFAULT_PROFILE?.trim().toLowerCase();
-  if (configured === "paid") return "paid";
-  if (configured === "self-hosted" || configured === "self_hosted") return "self-hosted";
-  return isSelfHostedDeployment() ? "self-hosted" : "free";
-}
-
+/** API_RATE_LIMIT_DEFAULT_PROFILE=paid gives every account the paid table (internal or single-tenant hosts). */
 function getDefaultStore(): RateLimitStore {
   if (defaultStore) return defaultStore;
 
@@ -502,16 +483,18 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
 
   if (normalizedPath.startsWith("/webhooks/")) return "webhook";
   if ((normalizedPath.startsWith("/v1/ingest") || normalizedPath === "/v1/uploads" || normalizedPath.startsWith("/v1/uploads/"))) return "upload";
+  if (normalizedPath === "/v1/extracts" || normalizedPath.startsWith("/v1/extracts/")) return "upload";
   if (
-    normalizedPath.startsWith("/v1/search/chat")
-    || normalizedPath === "/v1/chat"
-    || normalizedPath === "/v1/chat/completions"
+    // /v1/chat, its stream and the OpenAI-compatible /v1/chat/completions all spend on a model.
+    normalizedPath === "/v1/chat"
+    || normalizedPath.startsWith("/v1/chat/")
     || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
   ) {
     return "chat-ai";
   }
   if (
     normalizedPath.startsWith("/v1/search")
+    || normalizedPath.startsWith("/v1/web/")
     || normalizedPath.startsWith("/v1/suggest")
     || normalizedPath.startsWith("/compat/algolia")
     || normalizedPath.startsWith("/v1/mcp")
@@ -536,15 +519,15 @@ function envOverrideLimit(profile: RateLimitProfile, category: RateLimitCategory
   };
 }
 
-function resolveProfile(c: Context, configuredProfile: RateLimitProfile | undefined): RateLimitProfile {
+/**
+ * The limit table for a request: the middleware's own profile (IP layer),
+ * self-hosted, or the one table every account shares. Billing state never
+ * picks the table. A key's `rateLimitRpm` only caps it (resolveLimit).
+ */
+function resolveProfile(configuredProfile: RateLimitProfile | undefined): RateLimitProfile {
   if (configuredProfile) return configuredProfile;
   if (isSelfHostedDeployment()) return "self-hosted";
-  const actor = c.get("requestActor");
-  if (actor?.type === "apiKey") {
-    return actor.apiKey.rateLimitRpm > defaultPolicies.free.search.maxRequests ? "paid" : "free";
-  }
-  if (actor?.type === "session") return defaultProfile();
-  return "free";
+  return "account";
 }
 
 function resolveLimit(
@@ -560,13 +543,15 @@ function resolveLimit(
   const policy: CategoryLimit | undefined = defaultPolicies[profile]?.[category];
   const override = envOverrideLimit(profile, category);
   let maxRequests = options.maxRequests ?? override.maxRequests ?? policy?.maxRequests
-    ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_MAX_REQUESTS) ?? defaultPolicies.free.read.maxRequests;
+    ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_MAX_REQUESTS) ?? defaultPolicies.account.read.maxRequests;
   const windowMs = options.windowMs ?? override.windowMs ?? policy?.windowMs
     ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_WINDOW_MS) ?? DEFAULT_WINDOW_MS;
 
   const actor = c.get("requestActor");
-  if (actor?.type === "apiKey" && options.identity === "actor") {
-    maxRequests = Math.min(maxRequests, actor.apiKey.rateLimitRpm);
+  // A key's requests-per-minute is an optional cap: only an explicit value lowers the plan's limit.
+  const keyCap = actor?.type === "apiKey" ? actor.apiKey.rateLimitRpm : null;
+  if (options.identity === "actor" && typeof keyCap === "number" && keyCap > 0) {
+    maxRequests = Math.min(maxRequests, keyCap);
   }
 
   return { maxRequests: Math.max(1, maxRequests), windowMs: Math.max(1, windowMs) };
@@ -632,10 +617,15 @@ function writePolicyHeaders(c: Context, states: PolicyState[]): void {
 
 type RateLimitCode = Extract<ApiErrorCode, "rate_limited" | "spend_limit_exceeded" | "daily_page_limit" | "ip_temporarily_blocked">;
 
-/** 429 in the error envelope (the legacy `{ error, code }` body on protocol surfaces) with `Retry-After`. */
+/**
+ * 429 in the error envelope (the legacy `{ error, code }` body on protocol
+ * surfaces) with `Retry-After`, plus billing links and the copy that
+ * points at them on hosted deployments.
+ */
 function tooManyRequests(c: Context, code: RateLimitCode, message: string, details: { retryAfterSeconds: number } & Record<string, unknown>): Response {
   c.header("Retry-After", String(details.retryAfterSeconds));
-  return middlewareErrorResponse(c, 429, code, message, details);
+  const linked = withUpgradeLinks(code, details) ?? details;
+  return middlewareErrorResponse(c, 429, code, linked.links ? publicApiErrorMessage(code, linked) : message, linked);
 }
 
 function blockedResponse(c: Context, blockedMs: number): Response {
@@ -648,7 +638,7 @@ type NamedCounter = RateLimitCounter & { name: string };
 
 async function consumeCounters(
   c: Context,
-  args: { identity: string; keyPrefix: string; counters: NamedCounter[]; now: number; countDenied: boolean; store: RateLimitStore; category: RateLimitCategory },
+  args: { identity: string; keyPrefix: string; counters: NamedCounter[]; now: number; countDenied: boolean; store: RateLimitStore; category: RateLimitCategory; profile: RateLimitProfile },
 ): Promise<Response | null> {
   // The identity is a hash tag, so every key of one call lives on one Redis Cluster slot.
   const base = `${args.keyPrefix}:{${safeIdentityPart(args.identity)}}`;
@@ -664,10 +654,13 @@ async function consumeCounters(
     const state = states[result.denied]!;
     const penaltyMs = counters[result.denied]?.penaltyMs ?? 0;
     if (penaltyMs > 0) return blockedResponse(c, penaltyMs);
-    return tooManyRequests(c, "rate_limited", "Too many requests", { category: args.category, policy: state.name, retryAfterSeconds: state.retryAfterSeconds });
+    return tooManyRequests(c, "rate_limited", "Too many requests", {
+      category: args.category, policy: state.name, retryAfterSeconds: state.retryAfterSeconds,
+    });
   }
   return null;
 }
+
 
 function keyPrefixFor(options: RateLimitOptions): string {
   return options.keyPrefix ?? process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api";
@@ -682,7 +675,7 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
 
   const now = (options.now ?? Date.now)();
   const category = classifyRateLimitCategory(c.req.method, c.req.path);
-  const profile = resolveProfile(c, options.profile);
+  const profile = resolveProfile(options.profile);
   const limit = resolveLimit(c, category, profile, options);
   const store = options.store ?? getDefaultStore();
   const counters: NamedCounter[] = [{ name: `${profile}-${category}`, key: "", limit: limit.maxRequests, windowMs: limit.windowMs }];
@@ -700,7 +693,7 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
       });
     }
     // Count denied IP traffic so a flood cannot slip through at the limit's edge.
-    return await consumeCounters(c, { identity, keyPrefix: keyPrefixFor(options), counters, now, countDenied: true, store, category });
+    return await consumeCounters(c, { identity, keyPrefix: keyPrefixFor(options), counters, now, countDenied: true, store, category, profile });
   }
 
   const actor = c.get("requestActor");
@@ -713,7 +706,7 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
     const quota = await checkApiKeyQuotas(c, apiKey, category, now);
     if (quota) return quota;
   }
-  return await consumeCounters(c, { identity, keyPrefix: keyPrefixFor(options), counters, now, countDenied: false, store, category });
+  return await consumeCounters(c, { identity, keyPrefix: keyPrefixFor(options), counters, now, countDenied: false, store, category, profile });
 }
 
 type ApiKeyQuotaSubject = {

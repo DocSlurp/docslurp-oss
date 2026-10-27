@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -31,11 +31,13 @@ afterAll(async () => {
   await db?.close();
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 beforeEach(async () => {
   await sql`delete from documents`;
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
-  await sql`update organizations set plan_id = 'free', retain_document_versions = null where id = 'o1'`;
+  await sql`update organizations set retain_document_versions = null where id = 'o1'`;
   await sql`update workspaces set retain_document_versions = null where id = 'w'`;
   await sql`update organizations set retention_changed_at = null, retention_swept_at = null`;
   await sql`update workspaces set retention_changed_at = null, retention_swept_at = null`;
@@ -74,9 +76,9 @@ const storage = {
   async deleteKeys() {},
 };
 
-async function sweep(deleteVectorRows: DeleteVectorRows = async () => {}, billingEnforced = true) {
+async function sweep(deleteVectorRows: DeleteVectorRows = async () => {}) {
   return purgeSupersededDocuments(sql, storage, {
-    graceSeconds: 0, batchSize: 50, deleteSources: false, lancedbRoot: "/tmp/lance", deleteVectorRows, billingEnforced,
+    graceSeconds: 0, batchSize: 50, deleteSources: false, lancedbRoot: "/tmp/lance", deleteVectorRows,
   });
 }
 
@@ -92,7 +94,6 @@ async function states() {
 
 describe("retention-aware superseded purge", () => {
   it("a config re-index replaces its source without taking a retention slot", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sweep();
     expect((await states()).v1).toMatchObject({ purged: false, archived: true });
@@ -116,24 +117,13 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("an ordinary new upload still archives the previous version and purges the oldest", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(3);
     await sweep();
     const s = await states();
     expect([s.v1!.purged, s.v2!.archived, s.v3!.archived]).toEqual([true, true, false]);
   });
 
-  it("free plan keeps only the current version", async () => {
-    await sql`update organizations set retain_document_versions = 5 where id = 'o1'`;
-    await seedChain(3);
-    await sweep();
-    const s = await states();
-    expect([s.v1!.purged, s.v2!.purged, s.v3!.purged]).toEqual([true, true, false]);
-    expect(s.v2!.archived).toBe(false);
-  });
-
-  it("paid default keeps current plus one archived version with pages but no search data", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
+  it("the default keeps current plus one archived version with pages but no search data", async () => {
     await seedChain(3);
     const deletes: string[] = [];
     const result = await sweep(async (a) => { deletes.push(...a.documentIds); });
@@ -149,7 +139,7 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("org setting 5 archives four versions", async () => {
-    await sql`update organizations set plan_id = 'gold', retain_document_versions = 5 where id = 'o1'`;
+    await sql`update organizations set retain_document_versions = 5 where id = 'o1'`;
     await seedChain(6);
     await sweep();
     const s = await states();
@@ -159,7 +149,7 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("lowering retention purges the extra archived versions on the next sweep", async () => {
-    await sql`update organizations set plan_id = 'silver', retain_document_versions = 5 where id = 'o1'`;
+    await sql`update organizations set retain_document_versions = 5 where id = 'o1'`;
     await seedChain(5);
     await sweep();
     expect((await states()).v2!.archived).toBe(true);
@@ -171,7 +161,7 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("workspace override wins over the org setting", async () => {
-    await sql`update organizations set plan_id = 'silver', retain_document_versions = 5 where id = 'o1'`;
+    await sql`update organizations set retain_document_versions = 5 where id = 'o1'`;
     await sql`update workspaces set retain_document_versions = 1 where id = 'w'`;
     await seedChain(3);
     await sweep();
@@ -180,7 +170,6 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("keeps dedup-shared vector rows while copies are live", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sql`
       insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
@@ -194,7 +183,6 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("archived versions keep no search data and stay superseded, so search paths exclude them", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sql`insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, workspace_id, org_id)
       values ('v1', 1, 'img', 8, decode('00','hex'), decode('00','hex'), 1, 'w', 'o1')`;
@@ -209,7 +197,6 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("failed newest uploads do not take a retention slot", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
       values ('bad', 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'k', 'failed', '/chain', '2026-02-01')`;
@@ -218,32 +205,24 @@ describe("retention-aware superseded purge", () => {
     expect((await states()).v1).toMatchObject({ archived: true, purged: false });
   });
 
-  it("SQL keep rule matches effectiveRetainedVersions across the plan/setting matrix", async () => {
+  it("SQL keep rule matches effectiveRetainedVersions across the setting matrix", async () => {
     const settings = [null, 1, 3, 100];
-    for (const plan of ["free", "silver", "gold", "platinum"]) {
-      for (const org of settings) {
-        for (const ws of settings) {
-          await sql`delete from documents`;
-          await sql`update organizations set plan_id = ${plan}, retain_document_versions = ${org} where id = 'o1'`;
-          await sql`update workspaces set retain_document_versions = ${ws} where id = 'w'`;
-          const keep = effectiveRetainedVersions({ planId: plan, orgSetting: org, workspaceSetting: ws, billingEnforced: true });
-          for (const billingEnforced of [true, false]) {
-            await sql`delete from documents`;
-            const expected = effectiveRetainedVersions({ planId: plan, orgSetting: org, workspaceSetting: ws, billingEnforced });
-            await seedChain(5);
-            await sweep(async () => {}, billingEnforced);
-            const s = await states();
-            const live = ["v1", "v2", "v3", "v4", "v5"].filter((id) => !s[id]!.purged).length;
-            expect(live, `${plan} org=${org} ws=${ws} billing=${billingEnforced}`).toBe(Math.min(5, expected));
-          }
-          void keep;
-        }
+    for (const org of settings) {
+      for (const ws of settings) {
+        await sql`delete from documents`;
+        await sql`update organizations set retain_document_versions = ${org} where id = 'o1'`;
+        await sql`update workspaces set retain_document_versions = ${ws} where id = 'w'`;
+        const expected = effectiveRetainedVersions({ orgSetting: org, workspaceSetting: ws });
+        await seedChain(5);
+        await sweep();
+        const s = await states();
+        const live = ["v1", "v2", "v3", "v4", "v5"].filter((id) => !s[id]!.purged).length;
+        expect(live, `org=${org} ws=${ws}`).toBe(Math.min(5, expected));
       }
     }
   }, 120_000);
 
   it("already-archived chains produce no actions and a single query per sweep", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     for (let i = 0; i < 30; i += 1) await seedChain(2, `/c${i}`, `c${i}-`);
     await sweep();
     expect(await sql`select count(*)::int as n from documents where archived_at is not null`).toEqual([{ n: 30 }]);
@@ -258,12 +237,12 @@ describe("retention-aware superseded purge", () => {
         return pending;
       },
     }) as typeof sql;
-    expect(await retentionActions(counting, 0, 50, { billingEnforced: true })).toEqual([]);
+    expect(await retentionActions(counting, 0, 50)).toEqual([]);
     expect(queries).toBe(1);
   }, 60_000);
 
   it("archived versions keep counting toward org storage; purging removes them", async () => {
-    await sql`update organizations set plan_id = 'silver', retain_document_versions = 2 where id = 'o1'`;
+    await sql`update organizations set retain_document_versions = 2 where id = 'o1'`;
     await seedChain(3);
     const live = await getOrgStorage("o1", sql);
     expect(live).toMatchObject({ sourceBytes: 10, pages: 2 });
@@ -284,7 +263,6 @@ describe("retention-aware superseded purge", () => {
   }
 
   it("a queued re-index child takes no slot and evicts no archived version", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sweep();
     await insertVersion("child", "queued", "2026-01-05", { reindexOf: "v2" });
@@ -296,7 +274,6 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("a blocked re-index child takes no slot and evicts no archived version", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sweep();
     await insertVersion("child", "blocked", "2026-01-05", { reindexOf: "v2" });
@@ -305,7 +282,6 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("a superseded failed version is purged and never takes a slot", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(1);
     await insertVersion("v2", "failed", "2026-01-02");
     await seedChainTail();
@@ -317,13 +293,20 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("a cancelled re-index child superseded by a chained change is purged, not archived", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sweep();
     await insertVersion("child", "cancelled", "2026-01-03", { reindexOf: "v2" });
     await insertVersion("v4", "queued", "2026-01-04");
     await sql`update documents set status = 'completed' where id = 'v4'`;
-    await sql`update documents set superseded_at = now(), superseded_by_document_id = 'v4' where id = 'child'`;
+    await sql.begin(async tx => {
+      const client = tx as unknown as postgres.Sql<Record<string, unknown>>;
+      await client`update documents set superseded_at = now(), superseded_by_document_id = 'v4' where id = 'child'`;
+      // now() is fixed within this transaction. Equality is not past the
+      // strict grace cutoff, even when graceSeconds is zero.
+      expect(await retentionActions(client, 0, 50)).not.toContainEqual({ id: "child", action: "purge" });
+      await client`update documents set superseded_at = now() - interval '1 second' where id = 'child'`;
+      expect(await retentionActions(client, 0, 50)).toContainEqual({ id: "child", action: "purge" });
+    });
     await sweep();
     const s = await states();
     expect(s.child).toMatchObject({ purged: true, archived: false });
@@ -332,7 +315,7 @@ describe("retention-aware superseded purge", () => {
   });
 
   it("unchanged archived chains are not candidates; a setting change makes them candidates until swept", async () => {
-    await sql`update organizations set plan_id = 'silver', retain_document_versions = 3 where id = 'o1'`;
+    await sql`update organizations set retain_document_versions = 3 where id = 'o1'`;
     for (let i = 0; i < 20; i += 1) await seedChain(2, `/c${i}`, `c${i}-`);
     await sweep();
     await sweep(); // an idle sweep marks the creation-time setting change as applied
@@ -349,51 +332,31 @@ describe("retention-aware superseded purge", () => {
     expect(await candidates()).toBe(0); // nothing non-purged remains to examine
   }, 60_000);
 
-  it("without billing enforcement the free plan honours settings and defaults to two versions", async () => {
-    await seedChain(3);
-    await sweep(async () => {}, false);
-    let s = await states();
-    expect([s.v1!.purged, s.v2!.archived, s.v3!.archived]).toEqual([true, true, false]);
-    await sql`delete from documents`;
-    await sql`update organizations set retain_document_versions = 3 where id = 'o1'`;
-    await seedChain(4);
-    await sweep(async () => {}, false);
-    s = await states();
-    expect([s.v1!.purged, s.v2!.archived, s.v3!.archived, s.v4!.archived]).toEqual([true, true, true, false]);
-  });
-
-  it("with billing enforced the free plan still keeps one version", async () => {
-    await sql`update organizations set retain_document_versions = 3 where id = 'o1'`;
-    await seedChain(3);
-    await sweep(async () => {}, true);
-    const s = await states();
-    expect([s.v1!.purged, s.v2!.purged, s.v3!.purged]).toEqual([true, true, false]);
-  });
-
   async function seedChainTail() {
     // v3: a completed upload after the failed v2, superseding it.
     await insertVersion("v3", "queued", "2026-01-03");
     await sql`update documents set status = 'completed' where id = 'v3'`;
   }
 
-  it("without an explicit option the sweep follows billing_runtime, not the worker's env", async () => {
-    const run = async () => purgeSupersededDocuments(sql, storage, { graceSeconds: 0, batchSize: 50, deleteSources: false, lancedbRoot: "/tmp/lance", deleteVectorRows: async () => {} });
-    await sql`update billing_runtime set metering_enforced = true`;
-    await seedChain(3);
-    await run();
-    let s = await states();
-    expect([s.v1!.purged, s.v2!.purged, s.v3!.purged]).toEqual([true, true, false]);
-    await sql`delete from documents`;
-    await sql`update billing_runtime set metering_enforced = false`;
+  it("retention follows organization settings regardless of billing environment overrides", async () => {
+    // Billing-service imports can load the developer's .env. Retention is now
+    // independent of billing, so neither override mode may change the keep count.
     await sql`update organizations set retain_document_versions = 3 where id = 'o1'`;
-    await seedChain(4);
-    await run();
-    s = await states();
-    expect([s.v1!.purged, s.v2!.archived, s.v3!.archived, s.v4!.archived]).toEqual([true, true, true, false]);
+    for (const enforced of [false, true]) {
+      vi.stubEnv("STRIPE_SECRET_KEY", enforced ? "test-retention-key" : "");
+      for (const key of Object.keys(process.env).filter((key) => key.startsWith("DOCSLURP_BILL_"))) {
+        vi.stubEnv(key, String(enforced));
+      }
+      vi.stubEnv("DOCSLURP_BILL_COMPUTE", String(enforced));
+      await sql`delete from documents`;
+      await seedChain(4);
+      await sweep();
+      const s = await states();
+      expect([s.v1!.purged, s.v2!.archived, s.v3!.archived, s.v4!.archived]).toEqual([true, true, true, false]);
+    }
   });
 
   it("purges archived predecessors after the current version is deleted", async () => {
-    await sql`update organizations set plan_id = 'silver' where id = 'o1'`;
     await seedChain(2);
     await sweep();
     await sweep();

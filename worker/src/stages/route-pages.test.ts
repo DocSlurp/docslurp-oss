@@ -180,7 +180,7 @@ describe("RoutePagesStage", () => {
 
   it("shadow writes the plan artifact, per-page decision rows and one chunk estimate, and records decision usage", async () => {
     const storage = makeStorage();
-    const state = makeState({ mode: "shadow", pageRouter: fitted });
+    const state = makeState({ mode: "shadow", pageRouter: { ...fitted, marginFloor: 0 } });
     const client = fakeClient();
     await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, {
       probe, catalog, health: health(), decisionClient: ({ onUsage }) => ({
@@ -228,12 +228,13 @@ describe("RoutePagesStage", () => {
     expect(usage.length).toBeGreaterThan(0);
     expect(usage.map((e) => e.metric).sort()).toEqual(["page-route-decision", "page-route-decision-canary"]);
     expect(decisions[1]!.metadata).toMatchObject({ decisionServedBy: "cloudflare/clef-flash", decisionChain: [{ model: "cloudflare/clef-flash", outcome: "served" }] });
-    expect(state.usageLedger.pendingBillableCents).toBeGreaterThan(0);
+    expect(usage.some((e) => Number(e.metadata?.providerCostCents) > 0)).toBe(true);
+    expect(state.usageLedger.pendingBillableCents).toBe(0);
   });
 
   it("does not touch rasters, vision selection or other artifacts in shadow", async () => {
     const storage = makeStorage();
-    const state = makeState({ mode: "shadow", pageRouter: { router: "heuristic" } });
+    const state = makeState({ mode: "shadow", pageRouter: { router: "heuristic", marginFloor: 0 } });
     await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, { probe, catalog }).run(state);
     // Only the plan slot is written; nothing for images/vision/classification.
     expect(Object.keys(state.artifactLedger.all())).toEqual(["doc:page-route-plan"]);
@@ -268,12 +269,12 @@ describe("RoutePagesStage", () => {
     expect(ask).not.toHaveBeenCalled();
     const plan = routePlanSchema.parse(storage.putJson.mock.calls[0]![1]);
     expect(plan.routerKind).toBe("baseline");
-    expect(plan.assignments.every((a) => !a.targetId.startsWith("vlm:"))).toBe(true);
+    expect(plan.assignments.every((a) => testCatalog().find(t => t.id === a.targetId)?.availability.privacyClass !== "hosted")).toBe(true);
   });
 
   it("fails open: a probe error records page-route-error and writes no plan", async () => {
     const storage = makeStorage();
-    const state = makeState({ mode: "active", pageRouter: { router: "heuristic" } });
+    const state = makeState({ mode: "active", pageRouter: { router: "heuristic", marginFloor: 0 } });
     await new RoutePagesStage(storage, envCfg("active"), sources, undefined, {
       probe: async () => { throw new Error("probe exploded"); }, catalog,
     }).run(state);
@@ -570,4 +571,16 @@ describe("layout shadow integration", () => {
     setup.observer.observe = vi.fn(async () => { controller.abort(new Error("cancelled")); throw controller.signal.reason; });
     await expect(setup.run(true, controller.signal)).rejects.toThrow("cancelled");
   });
+});
+
+it("refuses the active default .5 floor before probing, model calls or receipts", async () => {
+  const storage = makeStorage();
+  const state = makeState({ mode: "active" });
+  const client = fakeClient();
+  expect(state.run.pipeline.pageRouter!.marginFloor).toBe(0.5);
+  await expect(new RoutePagesStage(storage, envCfg("active"), sources, undefined, { probe, catalog, decisionClient: () => client }).run(state)).rejects.toThrow("page-router-incomplete");
+  expect(probe).not.toHaveBeenCalled();
+  expect(client.ask).not.toHaveBeenCalled();
+  expect(storage.putJson).not.toHaveBeenCalled();
+  expect(state.usageLedger.pendingCount).toBe(0);
 });

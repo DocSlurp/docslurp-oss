@@ -109,6 +109,25 @@ describe("ArtifactStore object inspection", () => {
     });
   }
 
+  it("bounds range reads and rejects ignored, oversized or incomplete responses", async () => {
+    const store = createStore();
+    const body = (chunks: Buffer[]) => ({
+      transformToWebStream: () => Readable.toWeb(Readable.from(chunks)), destroy: vi.fn(),
+    });
+    const send = vi.fn().mockResolvedValue({ ContentRange: "bytes 10-13/100", ContentLength: 4, Body: body([Buffer.from("text")]) });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    expect((await store.getByteRange("doc.md", 10, 13)).toString()).toBe("text");
+    expect(send.mock.calls[0]![0].input.Range).toBe("bytes=10-13");
+    const ignoredBody = body([Buffer.alloc(100)]);
+    send.mockResolvedValueOnce({ ContentLength: 100, Body: ignoredBody });
+    await expect(store.getByteRange("doc.md", 10, 13)).rejects.toBeInstanceOf(StorageReadError);
+    expect(ignoredBody.destroy).toHaveBeenCalled();
+    send.mockResolvedValueOnce({ ContentRange: "bytes 10-13/100", Body: body([Buffer.alloc(3), Buffer.alloc(3)]) });
+    await expect(store.getByteRange("doc.md", 10, 13)).rejects.toBeInstanceOf(StorageObjectTooLargeError);
+    send.mockResolvedValueOnce({ ContentRange: "bytes 10-13/100", Body: body([Buffer.alloc(3)]) });
+    await expect(store.getByteRange("doc.md", 10, 13)).rejects.toBeInstanceOf(StorageReadError);
+  });
+
   it("never PUTs a body of unknown length (regression: x-amz-decoded-content-length undefined)", async () => {
     const { writeFile, mkdtemp } = await import("node:fs/promises");
     const { createReadStream } = await import("node:fs");
@@ -334,5 +353,17 @@ describe("large artifact JSON streaming", () => {
     expect(JSON.parse(Buffer.concat(buffers).toString())).toEqual(JSON.parse(JSON.stringify(value)));
     expect(Math.max(...buffers.map(buffer => buffer.length))).toBeLessThan(4096);
     expect(Buffer.concat(buffers).length).toBeGreaterThan(1_000_000);
+  });
+});
+
+describe("run artifact roots", () => {
+  it("keeps <user>/<run> for ordinary runs and the extract prefix for extract runs", async () => {
+    const { runArtifactRoot, documentArtifactRoot } = await import("../tools/storage.js");
+    expect(runArtifactRoot({ id: "run-1" }, "user-1")).toBe("user-1/run-1");
+    expect(runArtifactRoot({ id: "run-1", storagePrefix: null }, "user-1")).toBe("user-1/run-1");
+    expect(runArtifactRoot({ id: "run-1", storagePrefix: "extracts/org-1/ext_1" }, "user-1")).toBe("extracts/org-1/ext_1");
+    expect(documentArtifactRoot({ userId: "user-1", runId: "run-1" })).toBe("user-1/run-1");
+    expect(documentArtifactRoot({ userId: "user-1", runId: "run-1" }, "run-2")).toBe("user-1/run-2");
+    expect(documentArtifactRoot({ userId: "user-1", runId: "run-1", artifactRoot: "extracts/org-1/ext_1" }, "run-2")).toBe("extracts/org-1/ext_1");
   });
 });

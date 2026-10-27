@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
-import { cancelOrgSubscription } from "./billing/customers.js";
 import { cancelWorkspaceRuns, deleteWorkspaceData, type DataDeletionDeps } from "./data-deletion.js";
 
 /**
@@ -31,14 +30,11 @@ export class OffboardingError extends Error {
 }
 
 export interface OffboardingDeps extends DataDeletionDeps {
-  /** Cancels the org's Stripe subscription; must be a no-op when there is none. */
-  cancelSubscription: (orgId: string) => Promise<unknown>;
 }
 
 export const defaultOffboardingDeps: OffboardingDeps = {
   sql: defaultSql,
   cancelWorkflow: (runId) => signalPipelineCancel(runId),
-  cancelSubscription: (orgId) => cancelOrgSubscription(orgId),
 };
 
 export const DELETED_ORGANIZATION_NAME = "Deleted organization";
@@ -107,18 +103,9 @@ export async function purgeOrganization(
   options: { skipBilling?: boolean } = {},
 ): Promise<OrganizationDeletionResult> {
   const { sql } = deps;
-  // Billing first: if Stripe refuses, nothing has been deleted yet.
-  if (!options.skipBilling) {
-    try {
-      await deps.cancelSubscription(orgId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === "billing_not_configured") {
-        throw new OffboardingError(503, "billing_not_configured", "Billing is not configured, so the subscription cannot be cancelled");
-      }
-      throw new OffboardingError(502, "subscription_cancel_failed", `Could not cancel the subscription: ${message}`);
-    }
-  }
+  // No subscription to cancel (prepaid credits only). Auto top-up is turned off
+  // with the tombstone below, so no further charge can start.
+  void options;
 
   // Tombstone and access removal in one transaction: the org disappears for
   // every member and credential at once.
@@ -164,27 +151,25 @@ export async function purgeOrganization(
     `;
   }
 
-  // Drop the org's LanceDB tables whole instead of deleting rows document by
-  // document; the per-document sweep skips tables queued here.
+  // Each workspace's LanceDB databases are queued for a whole drop by
+  // deleteWorkspaceData; the per-document sweep skips tables queued there.
+  // Org-level tables from before per-workspace databases (not yet removed by
+  // the relocation CLI's --drop-legacy) hold this org's chunk text too.
   await sql`
     insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
-    select 'vector_table', ${orgId}, ${orgId} || '|' || vi.embedding_model || '|' || vi.dimension,
-      jsonb_build_object('embeddingModel', vi.embedding_model, 'dimension', vi.dimension), ${reason}
+    select 'vector_table', ${orgId}, ${orgId} || '|legacy|' || vi.embedding_model || '|' || vi.dimension,
+      jsonb_build_object('legacyLayout', true, 'embeddingModel', vi.embedding_model, 'dimension', vi.dimension), ${reason}
     from vector_indexes vi
     join documents d on d.id = vi.document_id
-    join workspaces w on w.id = d.workspace_id
-    where w.org_id = ${orgId} and vi.backend = 'lancedb'
+    where d.org_id = ${orgId} and vi.backend = 'lancedb'
     group by vi.embedding_model, vi.dimension
     on conflict (kind, target) do nothing
   `;
   await sql`
     insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
-    select distinct 'vector_table', ${orgId}, o.table_key, jsonb_build_object('uri', o.lance_uri, 'table', o.lance_table), ${reason}
-    from vector_index_outbox o
-    where o.org_id = ${orgId}
+    values ('vector_table', ${orgId}, ${orgId} || '|legacy', jsonb_build_object('legacyLayout', true), ${reason})
     on conflict (kind, target) do nothing
   `;
-
   let documents = 0;
   for (const workspaceId of workspaceIds) {
     documents += (await deleteWorkspaceData(workspaceId, deps)).documents;

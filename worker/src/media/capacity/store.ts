@@ -31,7 +31,7 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${args.scope.orgId}))`;
       // Credit leases other runs hold (migration 0052) are spoken for, and the
       // chat reserve (0053) is not for jobs.
-      const [status] = await tx<{ plan_id: string | null; available: number; leased: number; workspace_in_org: boolean; org_budget_paused: boolean; workspace_budget_paused: boolean }[]>`
+      const [status] = await tx<{ funded: boolean | null; available: number; leased: number; workspace_in_org: boolean; org_budget_paused: boolean; workspace_budget_paused: boolean }[]>`
         select s.*, org_outstanding_credit_leases(${args.scope.orgId}, 'run', ${args.scope.runId}) as leased
         from org_spend_status(${args.scope.orgId}, ${args.scope.workspaceId}, 0) s`;
       const [pending] = await tx<{ org_reserved: number; run_reserved: number }[]>`select
@@ -44,7 +44,7 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
             from remote_media_jobs where usage_settled = false or cost_state = 'disputed'
         ) reservations`;
       if (!status?.workspace_in_org || status.org_budget_paused || status.workspace_budget_paused ||
-        (Number(status.available) - Number(status.leased) - jobCreditReserve(status.plan_id) < reserved * 100 + Number(pending.org_reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Capacity spend admission denied");
+        (Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) < reserved * 100 + Number(pending.org_reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Capacity spend admission denied");
       const [run] = await tx<{ spent: number }[]>`select spent_cents as spent from workspace_runs
         where id = ${args.scope.runId} and org_id = ${args.scope.orgId} and workspace_id = ${args.scope.workspaceId}
         and coalesce(control_state, '') not in ('paused','pause_requested','cancelled','cancel_requested','dead-letter')`;

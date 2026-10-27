@@ -9,59 +9,72 @@ import { createInterface } from "node:readline";
 const DEFAULT_API_URL = "https://docslurp.io";
 
 function resolveApiUrl(flags: Record<string, string | boolean>): string {
-  return String(flags.apiUrl ?? (process.env.DOCSLURP_URL?.trim() || DEFAULT_API_URL)).replace(/\/+$/, "");
+  const value = String(flags.apiUrl ?? (process.env.DOCSLURP_URL?.trim() || DEFAULT_API_URL)).replace(/\/+$/, "");
+  const url = new URL(value);
+  if (url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) throw new Error("API URL requires HTTPS; HTTP is allowed only on localhost for development.");
+  return value;
 }
-
-/** --workspace, then DOCSLURP_WORKSPACE_ID, then "default" (the organization's default workspace). */
-function resolveWorkspaceId(flags: Record<string, string | boolean>): string {
-  const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
-  return explicit || process.env.DOCSLURP_WORKSPACE_ID?.trim() || "default";
-}
-
-type IntakeTarget = { newWorkspace: boolean; templateKey?: string; workspaceId?: string; workspaceName?: string };
 
 /**
- * Where an upload or URL ingest lands. --workspace wins. Otherwise
- * --new-workspace, --workspace-name or --template creates a workspace (an
- * existing one would ignore the name and template), and anything else goes to
- * DOCSLURP_WORKSPACE_ID or "default".
+ * --workspace, then DOCSLURP_WORKSPACE, then "default" (the organization's
+ * default workspace). A workspace is an ID, slug or name; names match by slug.
+ */
+function resolveWorkspace(flags: Record<string, string | boolean>): string {
+  const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
+  return explicit || process.env.DOCSLURP_WORKSPACE?.trim() || "default";
+}
+
+type IntakeTarget = { newWorkspace: boolean; templateKey?: string; workspace?: string };
+
+/**
+ * Where an upload or URL ingest lands. --workspace wins: the server finds the
+ * workspace by ID, slug or name, or creates it from the name (with --template
+ * applied). Otherwise --new-workspace or --template creates a self-titled
+ * workspace, and anything else goes to DOCSLURP_WORKSPACE or "default".
  */
 function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTarget {
-  const workspaceName = typeof flags.workspaceName === "string" && flags.workspaceName.trim() ? flags.workspaceName.trim() : undefined;
   const templateKey = typeof flags.template === "string" && flags.template.trim() ? flags.template.trim() : undefined;
   const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
-  if (explicit) return { newWorkspace: false, workspaceId: explicit, workspaceName, templateKey };
-  if (flags.newWorkspace === true || workspaceName || templateKey) return { newWorkspace: true, workspaceName, templateKey };
-  return { newWorkspace: false, workspaceId: resolveWorkspaceId(flags) };
+  if (explicit) return { newWorkspace: false, workspace: explicit, templateKey };
+  if (flags.newWorkspace === true || templateKey) return { newWorkspace: true, templateKey };
+  return { newWorkspace: false, workspace: resolveWorkspace(flags) };
 }
 
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--workspace <slug|id> | --new-workspace | --workspace-name <name> | --template <key>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--workspace <slug|id> | --new-workspace | --workspace-name <name> | --template <key>] [--watch] [--api-url <url>]
-  docslurp full-index [--workspace <slug|id>] [--document <id>] [--estimate] [--watch]
+  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--watch] [--api-url <url>]
+  docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
+  docslurp extract-status <extractId> [--json]
+  docslurp extract-download <extractId>
+  docslurp full-index [--workspace <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--api-url <url>]
-  docslurp search <query> [--workspace <slug|id>] [--min-score <0..1>] [--json | --context]
-  docslurp search --queries-file <queries.json> [--workspace <slug|id>] [--concurrency <1..4>] [--json | --context]
-  docslurp chat <question> [--workspace <slug|id>] [--session <id>] [--json]
+  docslurp search <query> [--workspace <id|slug|name>] [--min-score <0..1>] [--json | --context]
+  docslurp search --queries-file <queries.json> [--workspace <id|slug|name>] [--concurrency <1..4>] [--json | --context]
+  docslurp chat <question> [--workspace <id|slug|name>] [--session <id>] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]
   docslurp --license
   docslurp migrate-algolia-synonyms <export.json> [--out <glossary.json>]
-  docslurp import-search-compat <export.json> --workspace <slug|id> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
+  docslurp import-search-compat <export.json> --workspace <id|slug|name> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
 
 API commands require DOCSLURP_API_KEY or --api-key <key>.
-DOCSLURP_URL overrides the hosted service. Without --workspace or DOCSLURP_WORKSPACE_ID,
+DOCSLURP_URL overrides the hosted service. Without --workspace or DOCSLURP_WORKSPACE,
 commands use the "default" workspace: your organization's default workspace.
-Workspaces accept a slug (e.g. legal-contracts), a UUID, or "default". Uploads and URL
-ingests create a new workspace only with --new-workspace (self-titled from the content),
---workspace-name <name> or --template <key>; --workspace always targets an existing one.
+--workspace takes a workspace ID, slug or name: "Legal Contracts" and legal-contracts are
+the same workspace. Uploads and URL ingests into a name that matches no workspace create
+it with that name (and --template, if given); other commands answer workspace not found.
+--new-workspace (or --template alone) uploads into a fresh self-titled workspace.
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
+extract works like upload (files) or ingest-url (URLs), but the files and every output are
+deleted when the retention window ends: 48 hours free by default, --retention-days for longer
+(charged as storage). It emails a sign-in download link when done unless --no-email is set;
+extract-download prints a two-minute signed URL for the results zip.
 
 Copyright 2025-2026 DocSlurp, Inc. and contributors. No warranty.
 You may redistribute this CLI under SSPL-1.0; an Apache-2.0 grant applies
@@ -101,15 +114,15 @@ async function migrateAlgoliaSynonymsCommand(inputPath: string, outPath: string)
 async function importSearchCompatCommand(inputPath: string, flags: Record<string, string | boolean>): Promise<void> {
   const raw = await readFile(inputPath, "utf8");
   const payload = JSON.parse(raw) as Record<string, unknown>;
-  const workspaceId = resolveWorkspaceId(flags);
-  if (!workspaceId) {
+  const workspace = resolveWorkspace(flags);
+  if (!workspace) {
     throw new Error("--workspace is required");
   }
 
   const source = String(flags.source ?? detectCompatSource(payload));
   const normalized = normalizeCompatImportPayload({
     source,
-    workspaceId,
+    workspace,
     payload
   });
 
@@ -140,7 +153,7 @@ async function importSearchCompatCommand(inputPath: string, flags: Record<string
   }
 
   const result = await response.json() as { imported: Record<string, number> };
-  console.log(`Imported ${source} compatibility payload into workspace ${workspaceId}.`);
+  console.log(`Imported ${source} compatibility payload into workspace ${workspace}.`);
   console.log(JSON.stringify(result.imported, null, 2));
 }
 
@@ -156,7 +169,7 @@ function detectCompatSource(payload: Record<string, unknown>): "algolia" | "elas
 
 function normalizeCompatImportPayload(args: {
   source: string;
-  workspaceId: string;
+  workspace: string;
   payload: Record<string, unknown>;
 }) {
   if (args.source === "elastic") {
@@ -171,7 +184,7 @@ function normalizeCompatImportPayload(args: {
 
     return {
       source: "elastic",
-      workspaceId: args.workspaceId,
+      workspace: args.workspace,
       settings: {
         searchableAttributes,
         attributesForFaceting: Object.keys(properties)
@@ -195,7 +208,7 @@ function normalizeCompatImportPayload(args: {
   if (args.source === "legacy-parser") {
     return {
       source: "legacy-parser",
-      workspaceId: args.workspaceId,
+      workspace: args.workspace,
       settings: args.payload.settings ?? {},
       synonyms: args.payload.synonyms ?? {},
       rules: args.payload.rules ?? [],
@@ -206,7 +219,7 @@ function normalizeCompatImportPayload(args: {
 
   return {
     source: "algolia",
-    workspaceId: args.workspaceId,
+    workspace: args.workspace,
     indexName: typeof args.payload.indexName === "string" ? args.payload.indexName : undefined,
     settings: args.payload.settings ?? {},
     synonyms: args.payload.synonyms ?? [],
@@ -227,10 +240,15 @@ function parseCliArgs(argv: string[]) {
     if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate") {
       flags[arg.slice(2)] = true;
       i++;
+    } else if (arg === "--no-email") {
+      flags.noEmail = true;
+      i++;
     } else if (arg === "--new-workspace") {
       flags.newWorkspace = true;
       i++;
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--workspace-name" || arg === "--template" || arg === "--document" || arg === "--stage-from") {
+    } else if (arg === "--workspace-name" || arg === "--workspace-id") {
+      throw new Error(`${arg} was removed: pass a workspace ID, slug or name with --workspace (a name that matches no workspace is created on upload).`);
+    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -291,12 +309,15 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
 }
 
 /** Create a direct upload session, PUT each file (or its parts), complete, then confirm. Returns the confirm response. */
-async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>): Promise<Response> {
+async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<Response> {
   const field = (name: string) => (typeof fields.get(name) === "string" ? String(fields.get(name)) : undefined);
   const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const created = await apiFetch("/v1/uploads/direct/sessions", flags, json({
-    ...(field("workspaceId") ? { workspaceId: field("workspaceId") } : {}),
+  // Extract sessions are created under /v1/extracts and continue on the shared upload session routes.
+  const created = await apiFetch(`${intake.base}/direct/sessions`, flags, json({
+    ...intake.fields,
+    ...(field("workspace") ? { workspace: field("workspace") } : {}),
     ...(field("newWorkspace") === "true" ? { newWorkspace: true } : {}),
+    ...(field("templateKey") ? { templateKey: field("templateKey") } : {}),
     files: files.map(({ blob, name }) => ({
       filename: name, mimeType: blob.type || mimeTypeForPath(name), sizeBytes: blob.size,
       ...(field("canonicalId") ? { canonicalId: field("canonicalId") } : {}),
@@ -337,26 +358,30 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   }
 }
 
-async function uploadCommand(files: string[], flags: Record<string, string | boolean>): Promise<void> {
+/** Upload, or extract mode: the same transports against /v1/extracts plus the retention fields. */
+type IntakeMode = { base: "/v1/uploads" | "/v1/extracts"; fields: Record<string, string | number | boolean> };
+const UPLOAD_MODE: IntakeMode = { base: "/v1/uploads", fields: {} };
+
+async function uploadCommand(files: string[], flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<void> {
   if (files.length === 0) {
     console.error("Error: at least one file path required");
     process.exitCode = 1;
     return;
   }
 
-  if (flags.estimate === true) {
+  if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const sized = await Promise.all(files.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
-    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}) }, flags);
+    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspace ? { workspace: target.workspace } : {}) }, flags);
     return;
   }
 
   const formData = new FormData();
+  for (const [name, value] of Object.entries(intake.fields)) formData.append(name, String(value));
 
   const target = resolveIntakeTarget(flags);
-  if (target.workspaceId) formData.append("workspaceId", target.workspaceId);
+  if (target.workspace) formData.append("workspace", target.workspace);
   if (target.newWorkspace) formData.append("newWorkspace", "true");
-  if (target.workspaceName) formData.append("workspaceName", target.workspaceName);
   if (target.templateKey) formData.append("templateKey", target.templateKey);
   if (typeof flags.canonicalId === "string") {
     // Re-uploading with the same canonical ID replaces the previous version in search.
@@ -380,8 +405,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   // larger uploads go straight to storage through a direct upload session.
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
-    ? await uploadDirect(blobs, formData, flags)
-    : await apiFetch("/v1/uploads/bulk", flags, {
+    ? await uploadDirect(blobs, formData, flags, intake)
+    : await apiFetch(`${intake.base}/bulk`, flags, {
       method: "POST",
       body: formData
     });
@@ -437,7 +462,7 @@ function printJob(job: JobStatus): void {
 
 async function fullIndexCommand(flags: Record<string, string | boolean>): Promise<void> {
   const document = typeof flags.document === "string" && flags.document ? flags.document : undefined;
-  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/workspaces/${encodeURIComponent(resolveWorkspaceId(flags))}/full-index`;
+  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/workspaces/${encodeURIComponent(resolveWorkspace(flags))}/full-index`;
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, {}, flags);
   await startWork(base, {}, flags);
 }
@@ -461,14 +486,15 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
     process.exitCode = 1;
     return;
   }
-  const result = await response.json() as { runId?: string; id?: string; job?: JobStatus };
+  // Reprocess answers the run itself, or { run, warnings } when its start was deferred.
+  const result = await response.json() as { runId?: string; id?: string; run?: { id?: string }; job?: JobStatus };
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
-    const runId = result.runId ?? result.id;
+    const runId = result.runId ?? result.id ?? result.run?.id;
     if (runId) console.log(`Run ID:    ${runId}`);
     if (result.job) printJob(result.job);
   }
-  const runId = result.runId ?? result.id;
+  const runId = result.runId ?? result.id ?? result.run?.id;
   if (flags.watch === true && runId) await statusCommand(runId, flags);
 }
 
@@ -552,28 +578,36 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
   process.exitCode = 1;
 }
 
-type IntakeResult = { job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[] };
+type IntakeResult = {
+  job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[];
+  extract?: { id: string; expiresAt: string; paidRetention: boolean; notifyEmail: boolean };
+};
 
 async function printIntakeResult(response: Response, flags: Record<string, string | boolean>): Promise<void> {
   const result = await response.json() as IntakeResult;
   console.log(`Workspace: ${result.workspace.name} (${result.workspace.slug ?? result.workspace.id})`);
   console.log(`Run ID:    ${result.run.id}`);
   console.log(`Documents: ${result.documents.length}`);
+  if (result.extract) {
+    console.log(`Extract:   ${result.extract.id}`);
+    console.log(`Deleted:   ${result.extract.expiresAt}${result.extract.paidRetention ? " (extended retention, charged as storage)" : ""}`);
+    if (result.extract.notifyEmail) console.log("You'll get an email with a download link when it finishes.");
+  }
   if (result.job) printJob(result.job);
   for (const warning of result.warnings ?? []) console.error(`Warning: ${warning}`);
   if (flags.watch === true) await statusCommand(result.run.id, flags);
 }
 
-async function ingestUrlCommand(urls: string[], flags: Record<string, string | boolean>): Promise<void> {
+async function ingestUrlCommand(urls: string[], flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<void> {
   if (urls.length === 0) {
     console.error("Error: at least one URL required");
     process.exitCode = 1;
     return;
   }
-  const response = await apiFetch("/v1/uploads/url", flags, {
+  const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags) }),
+    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...intake.fields }),
   });
   if (!response.ok) {
     console.error(publicHttpError(response.status));
@@ -581,6 +615,64 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     return;
   }
   await printIntakeResult(response, flags);
+}
+
+/** `docslurp extract`: files or URLs (not both), with the retention options. */
+async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
+  const fields: Record<string, string | number | boolean> = {};
+  if (typeof flags.retentionDays === "string") {
+    const days = Number(flags.retentionDays);
+    if (!Number.isInteger(days) || days < 1) throw new Error("--retention-days must be a whole number of days.");
+    fields.retentionDays = days;
+  }
+  if (flags.noEmail === true) fields.notifyEmail = false;
+  if (typeof flags.download === "string") {
+    if (flags.download !== "markdown" && flags.download !== "all") throw new Error("--download must be markdown or all.");
+    fields.download = flags.download;
+  }
+  const intake: IntakeMode = { base: "/v1/extracts", fields };
+  const urls = inputs.filter((input) => /^https?:\/\//i.test(input));
+  if (urls.length > 0 && urls.length !== inputs.length) throw new Error("Pass either files or URLs to extract, not both.");
+  if (urls.length > 0) await ingestUrlCommand(urls, flags, intake);
+  else await uploadCommand(inputs, flags, intake);
+}
+
+async function extractStatusCommand(extractId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  if (!extractId) throw new Error("Extract ID required.");
+  const response = await apiFetch(`/v1/extracts/${encodeURIComponent(extractId)}`, flags);
+  if (response.status === 410) {
+    console.error("This extract has expired and its files and outputs were deleted.");
+    process.exitCode = 1;
+    return;
+  }
+  if (!response.ok) {
+    console.error(publicHttpError(response.status));
+    process.exitCode = 1;
+    return;
+  }
+  const { extract } = await response.json() as { extract: { id: string; status: string; expiresAt: string; pages: number | null; download: { status: string; url: string | null } } };
+  if (flags.json === true) {
+    console.log(JSON.stringify(extract, null, 2));
+    return;
+  }
+  console.log(`Extract:  ${extract.id}`);
+  console.log(`Status:   ${extract.status}`);
+  console.log(`Pages:    ${extract.pages ?? "-"}`);
+  console.log(`Download: ${extract.download.status}${extract.download.url ? ` (docslurp extract-download ${extract.id})` : ""}`);
+  console.log(`Deleted:  ${extract.expiresAt}`);
+}
+
+/** Prints the two-minute signed URL; the API key goes only to DocSlurp, never to storage. */
+async function extractDownloadCommand(extractId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  if (!extractId) throw new Error("Extract ID required.");
+  const response = await apiFetch(`/v1/extracts/${encodeURIComponent(extractId)}/download`, flags, { redirect: "manual" });
+  const location = response.headers.get("location");
+  if (response.status >= 300 && response.status < 400 && location) {
+    console.log(location);
+    return;
+  }
+  console.error(response.status === 410 ? "This extract has expired and its files and outputs were deleted." : publicHttpError(response.status));
+  process.exitCode = 1;
 }
 
 function renderBar(current: number, total: number, width = 20): string {
@@ -737,9 +829,9 @@ function printSearch(data: CliSearchResponse, flags: Record<string, string | boo
 }
 
 async function searchCommand(query: string, flags: Record<string, string | boolean>): Promise<void> {
-  const workspaceId = resolveWorkspaceId(flags);
+  const workspace = resolveWorkspace(flags);
   if (flags.json && flags.context) throw new Error("Choose --json or --context.");
-  if (flags.run) throw new Error("Search uses --workspace <id>; --run is no longer supported.");
+  if (flags.run) throw new Error("Search uses --workspace <id|slug|name>; --run is no longer supported.");
   if (flags.queriesFile) {
     if (query) throw new Error("Use a query or --queries-file, not both.");
     const inputs: unknown = JSON.parse(await readFile(String(flags.queriesFile), "utf8"));
@@ -747,8 +839,8 @@ async function searchCommand(query: string, flags: Record<string, string | boole
     const queries = inputs.map((input) => {
       const value = typeof input === "string" ? { q: input } : input;
       if (!value || typeof value !== "object" || typeof value.q !== "string" || !value.q.trim()) throw new Error("Each query must be a nonempty string or an object with q.");
-      const target = value.workspaceId ?? workspaceId;
-      return typeof target === "string" && target.trim() ? { ...value, workspaceId: target } : value;
+      const target = value.workspace ?? workspace;
+      return typeof target === "string" && target.trim() ? { ...value, workspace: target } : value;
     });
     const concurrency = Number(flags.concurrency ?? 4);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error("--concurrency must be an integer from 1 to 4.");
@@ -768,7 +860,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   const rawMinScore = flags.minScore === undefined ? undefined : String(flags.minScore).trim();
   const minScore = rawMinScore === undefined ? undefined : rawMinScore === "" ? Number.NaN : Number(rawMinScore);
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
-  const params = new URLSearchParams({ q: query, ...(workspaceId ? { workspaceId } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
+  const params = new URLSearchParams({ q: query, ...(workspace ? { workspace } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw new Error(publicHttpError(response.status));
   const data = await response.json() as CliSearchResponse;
@@ -776,12 +868,12 @@ async function searchCommand(query: string, flags: Record<string, string | boole
 }
 
 async function chatCommand(question: string, flags: Record<string, string | boolean>): Promise<void> {
-  const workspaceId = resolveWorkspaceId(flags);
+  const workspace = resolveWorkspace(flags);
   if (!question.trim()) throw new Error("Chat question required.");
   if (flags.context || flags.queriesFile || flags.concurrency) throw new Error("Chat accepts one question; batch/context options are for search.");
   const response = await apiFetch("/v1/chat", flags, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: question, ...(workspaceId ? { workspaceId } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
+    body: JSON.stringify({ q: question, ...(workspace ? { workspace } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
   });
   if (!response.ok) throw new Error(publicHttpError(response.status));
   const data = await response.json() as { answer: string; sessionId: string; citations: CliSearchResponse["results"]; usage?: unknown; availability?: { message?: string | null } };
@@ -869,7 +961,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
         respond({
           protocolVersion: ["2024-11-05", "2025-03-26", "2025-06-18"].includes(envelope.params.protocolVersion)
             ? envelope.params.protocolVersion : "2025-06-18",
-          serverInfo: { name: "docslurp-mcp", version },
+          serverInfo: { name: "docslurp-mcp", title: "DocSlurp", version },
           capabilities: { tools: {}, resources: {}, prompts: {} }
         });
         continue;
@@ -880,7 +972,11 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
         case "tools/list": {
           const result = await get("/v1/mcp/tools");
           respond({ tools: result.tools.map((tool: any) => ({
-            name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema
+            name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema,
+            ...(tool.annotations && { annotations: {
+              title: tool.title, readOnlyHint: tool.annotations.readOnly, destructiveHint: tool.annotations.destructive,
+              idempotentHint: tool.annotations.idempotent, openWorldHint: tool.annotations.openWorld
+            } })
           })) });
           break;
         }
@@ -920,7 +1016,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
           break;
         }
         case "prompts/list":
-          respond({ prompts: [{ name: "workspace-grounded-answer", description: "Answer using workspace evidence and citations" }] });
+          respond({ prompts: [{ name: "workspace-grounded-answer", title: "Workspace grounded answer", description: "Answer using workspace evidence and citations" }] });
           break;
         case "prompts/get": {
           if (envelope.params?.name !== "workspace-grounded-answer") { invalid("Unknown prompt name"); break; }
@@ -959,6 +1055,15 @@ async function main(): Promise<void> {
       break;
     case "ingest-url":
       await ingestUrlCommand(positional, flags);
+      break;
+    case "extract":
+      await extractCommand(positional, flags);
+      break;
+    case "extract-status":
+      await extractStatusCommand(positional[0], flags);
+      break;
+    case "extract-download":
+      await extractDownloadCommand(positional[0], flags);
       break;
     case "full-index":
       await fullIndexCommand(flags);

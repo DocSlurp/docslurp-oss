@@ -1,19 +1,19 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { SAML, ValidateInResponseTo, type CacheItem, type CacheProvider } from "@node-saml/node-saml";
 import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
-import { setCookie } from "hono/cookie";
+import { Hono, type Context } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
 import { parseStringPromise } from "xml2js";
 import { z } from "zod";
 
 import { sql } from "../db.js";
 import { auth } from "../lib/auth.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 import { requestIp } from "../lib/request-context.js";
-import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
+import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
 import {
   claimSsoDomain,
   loadOrgSsoDomain,
@@ -26,6 +26,9 @@ import {
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
+import { safeRedirectPath } from "../lib/safe-redirect.js";
+import { issueSsoSession } from "../lib/sso-enforcement.js";
+import { createSsoUnlinkedPass, SSO_UNLINKED_PASS_COOKIE, SSO_UNLINKED_PASS_TTL_SECONDS } from "../lib/sso-unlinked-pass.js";
 
 const ssoConfigSchema = z.object({
   providerType: z.enum(["saml", "oidc"]).nullable().optional(),
@@ -84,6 +87,14 @@ const oidcTrustedEndpointHosts = new Set(
     .map((host) => host.trim().toLowerCase())
     .filter(Boolean)
 );
+/**
+ * Endpoint hosts that well-known IdPs publish on a different host from their
+ * issuer. They are trusted only for that issuer, so another IdP's metadata
+ * can't borrow them. Microsoft Entra keeps its endpoints on the issuer's host.
+ */
+const knownIssuerEndpointHosts: Record<string, readonly string[]> = {
+  "https://accounts.google.com": ["oauth2.googleapis.com", "www.googleapis.com"]
+};
 const ssoRateLimitWindowMs = Number.parseInt(process.env.SSO_RATE_LIMIT_WINDOW_MS ?? "60000", 10);
 const ssoRateLimitMax = Number.parseInt(process.env.SSO_RATE_LIMIT_MAX ?? "30", 10);
 const ssoRateLimitBuckets = new Map<string, { resetAt: number; count: number }>();
@@ -182,17 +193,8 @@ function validateConfig(config: SsoConfig): string | null {
   return null;
 }
 
-function getSsoSecretEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY");
-}
-
 function encryptSsoClientSecret(secret: string): string {
-  const key = getSsoSecretEncryptionKey();
-  const iv = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("SECRETS_ENCRYPTION_KEY", secret);
 }
 
 function decryptSsoClientSecret(encrypted: string | null | undefined): string | null {
@@ -200,17 +202,13 @@ function decryptSsoClientSecret(encrypted: string | null | undefined): string | 
     return null;
   }
 
-  const parts = encrypted.split(":");
-  if (parts.length !== 3) {
+  try {
+    return openSecret("SECRETS_ENCRYPTION_KEY", encrypted);
+  } catch {
+    // A malformed or undecryptable value is treated as "no stored secret" so a
+    // bad row cannot take down the SSO config read.
     return null;
   }
-  const [ivHex, tagHex, ciphertextHex] = parts as [string, string, string];
-  const decipher = createDecipheriv("aes-256-gcm", getSsoSecretEncryptionKey(), Buffer.from(ivHex, "hex"));
-  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertextHex, "hex")),
-    decipher.final()
-  ]).toString("utf8");
 }
 
 function resolveStoredSsoConfig(raw: SsoConfig | null): SsoConfig {
@@ -259,15 +257,29 @@ async function requireOrgAdmin(orgId: string, userId: string): Promise<void> {
   }
 }
 
+/**
+ * The IdP metadata (fetched from an admin-supplied URL) failed a check. The
+ * message describes the IdP's public document, so it is safe to return to the
+ * org admin who configured it.
+ */
+class SsoMetadataError extends Error {
+  override name = "SsoMetadataError";
+}
+
 async function fetchOidcMetadata(metadataUrl: string): Promise<OidcMetadata> {
   const safeMetadataUrl = await assertSafeExternalUrl(metadataUrl);
   const resp = await safeExternalFetch(safeMetadataUrl, { signal: AbortSignal.timeout(8_000) });
   if (!resp.ok) {
-    throw new Error(`Metadata endpoint returned HTTP ${resp.status}`);
+    throw new SsoMetadataError(`Metadata endpoint returned HTTP ${resp.status}`);
   }
-  const json = (await resp.json()) as Partial<OidcMetadata>;
-  if (!json.issuer || !json.authorization_endpoint || !json.token_endpoint || !json.jwks_uri) {
-    throw new Error("Metadata document missing required OIDC fields (issuer, authorization_endpoint, token_endpoint, jwks_uri)");
+  let json: Partial<OidcMetadata>;
+  try {
+    json = (await resp.json()) as Partial<OidcMetadata>;
+  } catch {
+    throw new SsoMetadataError("Metadata URL did not return a JSON OpenID Connect discovery document");
+  }
+  if (!json || typeof json !== "object" || !json.issuer || !json.authorization_endpoint || !json.token_endpoint || !json.jwks_uri) {
+    throw new SsoMetadataError("Metadata document missing required OIDC fields (issuer, authorization_endpoint, token_endpoint, jwks_uri)");
   }
   return await assertSafeOidcEndpoints({
     issuer: json.issuer,
@@ -285,15 +297,15 @@ function pemFromX509(value: string): string {
 
 function assertSafeSamlMetadataXml(xml: string): void {
   if (Buffer.byteLength(xml, "utf8") > samlMetadataMaxBytes) {
-    throw new Error("SAML metadata document is too large");
+    throw new SsoMetadataError("SAML metadata document is too large");
   }
   if (/<!\s*(doctype|entity)\b/i.test(xml)) {
-    throw new Error("SAML metadata must not contain DTD or entity declarations");
+    throw new SsoMetadataError("SAML metadata must not contain DTD or entity declarations");
   }
 
   const disallowedEntity = /&(?!(?:amp|lt|gt|apos|quot|#\d+|#x[0-9a-fA-F]+);)[A-Za-z_][\w.-]*;/;
   if (disallowedEntity.test(xml)) {
-    throw new Error("SAML metadata contains unsupported entity references");
+    throw new SsoMetadataError("SAML metadata contains unsupported entity references");
   }
 }
 
@@ -301,7 +313,7 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
   const safeMetadataUrl = await assertSafeExternalUrl(metadataUrl);
   const resp = await safeExternalFetch(safeMetadataUrl, { signal: AbortSignal.timeout(8_000) });
   if (!resp.ok) {
-    throw new Error(`Metadata endpoint returned HTTP ${resp.status}`);
+    throw new SsoMetadataError(`Metadata endpoint returned HTTP ${resp.status}`);
   }
 
   const xml = await resp.text();
@@ -313,6 +325,8 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
     normalize: false,
     normalizeTags: false,
     trim: true
+  }).catch(() => {
+    throw new SsoMetadataError("Metadata URL did not return a well-formed SAML metadata XML document");
   })) as {
     EntityDescriptor?: Array<{
       $?: { entityID?: string };
@@ -340,7 +354,7 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
     .map((cert) => pemFromX509(cert));
 
   if (!entryPoint || certificates.length === 0) {
-    throw new Error("SAML metadata missing SingleSignOnService location or X509Certificate");
+    throw new SsoMetadataError("SAML metadata missing SingleSignOnService location or X509Certificate");
   }
 
   return {
@@ -390,7 +404,7 @@ function endpointHost(url: string): string {
 function assertTrustedOidcEndpointHost(endpointUrl: string, allowedHosts: Set<string>): void {
   const host = endpointHost(endpointUrl);
   if (!allowedHosts.has(host)) {
-    throw new Error("OIDC metadata endpoint host is not trusted");
+    throw new SsoMetadataError(`OIDC metadata endpoint host ${host} is not the issuer's host or a trusted endpoint host`);
   }
 }
 
@@ -406,10 +420,17 @@ function assertIssuerMatchesMetadataUrl(issuer: string, metadataUrl: string): vo
     const parsed = new URL(metadataUrl);
     actual = `${parsed.origin}${parsed.pathname}`;
   } catch {
-    throw new Error("OIDC metadata issuer is invalid");
+    throw new SsoMetadataError("OIDC metadata issuer is invalid");
   }
   if (expected !== actual) {
-    throw new Error("OIDC metadata issuer does not match the metadata URL");
+    if (issuer.includes("{tenantid}")) {
+      throw new SsoMetadataError(
+        "Microsoft multi-tenant metadata (common/organizations) is not supported; use https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"
+      );
+    }
+    throw new SsoMetadataError(
+      `OIDC metadata issuer ${issuer} does not match the metadata URL; expected the URL to be ${expected}`
+    );
   }
 }
 
@@ -425,8 +446,9 @@ function assertIssuerMatchesMetadataUrl(issuer: string, metadataUrl: string): vo
  * pointed at, so a metadata document can't send our client secret, PKCE
  * verifier or id_token verification to an unrelated host, or reach internal
  * hosts (assertSafeExternalUrl/safeExternalFetch: https only, public IPs).
- * Endpoints must be on the issuer's host, or on a host the operator lists in
- * OIDC_TRUSTED_ENDPOINT_HOSTS (e.g. Google's split token/JWKS hosts).
+ * Endpoints must be on the issuer's host, on a host knownIssuerEndpointHosts
+ * lists for that issuer (Google's split token/JWKS hosts), or on a host the
+ * operator lists in OIDC_TRUSTED_ENDPOINT_HOSTS.
  */
 async function assertSafeOidcEndpoints(metadata: OidcMetadata, metadataUrl: string): Promise<OidcMetadata> {
   assertIssuerMatchesMetadataUrl(metadata.issuer, metadataUrl);
@@ -438,6 +460,7 @@ async function assertSafeOidcEndpoints(metadata: OidcMetadata, metadataUrl: stri
   ]);
   const allowedHosts = new Set([
     endpointHost(safeIssuerUrl),
+    ...(knownIssuerEndpointHosts[metadata.issuer.replace(/\/+$/, "")] ?? []),
     ...oidcTrustedEndpointHosts
   ]);
 
@@ -550,6 +573,40 @@ async function consumeSsoRequest(state: string, provider: "oidc" | "saml"): Prom
   return rows[0] ?? null;
 }
 
+const SSO_STATE_COOKIE = "docslurp_sso_state";
+
+function ssoStateDigest(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
+/**
+ * Binds an SSO flow to the browser that started it (SEC-2026-10-06). The SAML
+ * POST binding is a cross-site form POST, so over HTTPS the cookie must be
+ * SameSite=None to survive it; Lax is the dev/http fallback.
+ */
+function setSsoStateCookie(c: Context, state: string): void {
+  const secure = new URL(inferApiOrigin(c.req.raw)).protocol === "https:";
+  setCookie(c, SSO_STATE_COOKIE, ssoStateDigest(state), {
+    httpOnly: true,
+    sameSite: secure ? "None" : "Lax",
+    secure,
+    path: "/",
+    maxAge: 600,
+  });
+}
+
+/** True only when the callback returns to the browser that started the flow; consumes the cookie. */
+function ssoStateMatchesCookie(c: Context, state: string): boolean {
+  const cookie = getCookie(c, SSO_STATE_COOKIE);
+  if (!cookie) return false;
+  const expected = ssoStateDigest(state);
+  const provided = Buffer.from(cookie);
+  const wanted = Buffer.from(expected);
+  const ok = provided.length === wanted.length && timingSafeEqual(provided, wanted);
+  if (ok) deleteCookie(c, SSO_STATE_COOKIE, { path: "/" });
+  return ok;
+}
+
 interface SsoAssertedIdentity {
   orgId: string;
   provider: "oidc" | "saml";
@@ -561,7 +618,7 @@ interface SsoAssertedIdentity {
 type SsoCompletion =
   | { kind: "signed-in"; userId: string }
   | { kind: "linked"; userId: string }
-  | { kind: "refused"; status: 403; error: string; userFacing?: boolean };
+  | { kind: "refused"; status: 403; error: string; userFacing?: boolean; unlinked?: boolean };
 
 export const ssoNotLinkedMessage =
   "This company sign-in isn't linked to a DocSlurp account yet. Sign in the way you usually do, then link company SSO from the SSO settings page.";
@@ -592,7 +649,7 @@ async function orgHasVerifiedDomain(orgId: string, domain: string | null | undef
  * by an org admin, and the account may predate the SSO connection and belong
  * to other orgs. A session is only issued through a link the user created
  * while signed in (a flow started by POST /:orgId/sso/link). A link flow
- * records the link and issues no session; the user keeps their own.
+ * records the link and replaces any temporary session with a trusted one.
  */
 async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: SsoRequestRow): Promise<SsoCompletion> {
   if (requestRow.link_user_id) {
@@ -643,7 +700,7 @@ async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: S
     limit 1
   `;
   if (!link) {
-    return { kind: "refused", status: 403, error: ssoNotLinkedMessage, userFacing: true };
+    return { kind: "refused", status: 403, error: ssoNotLinkedMessage, userFacing: true, unlinked: true };
   }
   if (!(await isOrgMember(identity.orgId, link.user_id))) {
     return { kind: "refused", status: 403, error: "SSO user is not a member of this organization" };
@@ -659,19 +716,41 @@ async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: S
 async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestRow: SsoRequestRow): Promise<Response> {
   const result = await completeSsoAssertion(identity, requestRow);
   if (result.kind === "refused") {
+    // The IdP just proved this email, and it has no link: let this browser's
+    // next password sign-in skip the domain-wide enforce-SSO redirect so the
+    // user can sign in and link (see sso-unlinked-pass.ts).
+    if (result.unlinked) await setSsoUnlinkedPassCookie(c, identity.email);
     if (result.userFacing) {
       return redirectToApp(c, `/app?authError=${encodeURIComponent(result.error)}&authEmail=${encodeURIComponent(identity.email)}`);
     }
     return apiStatusError(c, result.status, result.error);
   }
   if (result.kind === "linked") {
+    // Replace a temporary linking session after the IdP has proved the link.
+    await issueBetterAuthSession(c, result.userId, identity.orgId);
     return redirectToApp(c, requestRow.redirect_path ?? "/app/sso?linked=1");
   }
-  await issueBetterAuthSession(c, result.userId);
+  await issueBetterAuthSession(c, result.userId, identity.orgId);
   return redirectToApp(c, requestRow.redirect_path ?? "/");
 }
 
-async function issueBetterAuthSession(c: any, userId: string): Promise<void> {
+async function setSsoUnlinkedPassCookie(c: any, email: string): Promise<void> {
+  const authContext = (await auth.$context) as {
+    secret: string;
+    authCookies: { sessionToken: { attributes: { domain?: string; secure: boolean } } };
+  };
+  const { domain, secure } = authContext.authCookies.sessionToken.attributes;
+  setCookie(c, SSO_UNLINKED_PASS_COOKIE, createSsoUnlinkedPass(authContext.secret, email), {
+    httpOnly: true,
+    secure,
+    sameSite: "Lax",
+    path: "/",
+    ...(domain ? { domain } : {}),
+    maxAge: SSO_UNLINKED_PASS_TTL_SECONDS,
+  });
+}
+
+async function issueBetterAuthSession(c: any, userId: string, orgId: string): Promise<void> {
   const authContext = (await auth.$context) as {
     secret: string;
     sessionConfig: { expiresIn: number };
@@ -695,7 +774,8 @@ async function issueBetterAuthSession(c: any, userId: string): Promise<void> {
     };
   };
 
-  const session = await authContext.internalAdapter.createSession(userId);
+  // Tagged as an SSO session: the only kind an enforce-SSO domain accepts.
+  const session = await issueSsoSession((id) => authContext.internalAdapter.createSession(id), userId, orgId);
   if (!session) {
     throw new Error("Unable to create auth session");
   }
@@ -755,14 +835,49 @@ function redirectToApp(c: any, path = "/"): Response {
 }
 
 function sanitizeRedirectPath(value: string | null | undefined): string {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return "/";
+  return safeRedirectPath(value, "/");
+}
+
+const publicNetworkErrorCodes = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH",
+  "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"
+]);
+
+function errorCode(err: unknown): string | null {
+  for (let current: unknown = err, depth = 0; current && depth < 4; current = (current as { cause?: unknown }).cause, depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") return code;
   }
-  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) {
-    return "/";
+  return null;
+}
+
+/**
+ * The connection test exists to tell an admin what is wrong with their IdP
+ * settings, so known failure classes keep their reason. Policy and metadata
+ * errors name only public facts; network failures are reduced to an error code.
+ * Anything else is reported and replaced with the generic public message.
+ */
+function ssoConnectionTestError(err: unknown): string {
+  if (err instanceof SsoMetadataError) {
+    return err.message;
   }
-  return trimmed;
+  if (err instanceof UnsafeExternalUrlError) {
+    return `Metadata URL rejected: ${err.message}`;
+  }
+  const name = (err as { name?: unknown } | null)?.name;
+  if (name === "TimeoutError" || name === "AbortError") {
+    return "Timed out fetching the metadata URL";
+  }
+  const code = errorCode(err);
+  // fetch(redirect: "error") fails with TypeError("fetch failed", { cause: Error("unexpected redirect") }).
+  if (err instanceof TypeError && /redirect/i.test(String((err.cause as { message?: unknown } | undefined)?.message ?? ""))) {
+    return "Metadata URL redirected; use the final metadata URL (redirects are not followed)";
+  }
+  if (code && publicNetworkErrorCodes.has(code)) {
+    return `Could not fetch the metadata URL (${code})`;
+  }
+  return reportPublicError(err);
 }
 
 async function testOidcConnection(metadataUrl: string): Promise<{ ok: boolean; error?: string }> {
@@ -770,7 +885,7 @@ async function testOidcConnection(metadataUrl: string): Promise<{ ok: boolean; e
     await fetchOidcMetadata(metadataUrl);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: reportPublicError(err) };
+    return { ok: false, error: ssoConnectionTestError(err) };
   }
 }
 
@@ -779,7 +894,7 @@ async function testSamlConnection(metadataUrl: string): Promise<{ ok: boolean; e
     await fetchSamlMetadata(metadataUrl);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: reportPublicError(err) };
+    return { ok: false, error: ssoConnectionTestError(err) };
   }
 }
 
@@ -859,7 +974,7 @@ function isSamlReady(config: SsoConfig): boolean {
 async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
   redirectPath: string | null;
   linkUserId?: string | null;
-}): Promise<string> {
+}): Promise<{ url: string; state: string }> {
   const state = createStateToken();
   if (config.providerType === "oidc") {
     const metadata = await fetchOidcMetadata(config.metadataUrl!);
@@ -885,7 +1000,7 @@ async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
     authorizeUrl.searchParams.set("code_challenge", createPkceChallenge(codeVerifier));
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
     if (options.linkUserId) authorizeUrl.searchParams.set("prompt", "login");
-    return authorizeUrl.toString();
+    return { url: authorizeUrl.toString(), state };
   }
 
   const samlMetadata = await fetchSamlMetadata(config.metadataUrl!);
@@ -896,7 +1011,8 @@ async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
     redirectPath: options.redirectPath,
     linkUserId: options.linkUserId ?? null
   });
-  return await createSamlClient(c, org, samlMetadata, state).getAuthorizeUrlAsync(state, undefined, {});
+  const url = await createSamlClient(c, org, samlMetadata, state).getAuthorizeUrlAsync(state, undefined, {});
+  return { url, state };
 }
 
 async function requireVerifiedSsoDomain(org: OrgRow, config: SsoConfig, email: string): Promise<string | null> {
@@ -947,10 +1063,12 @@ export const ssoRoutes = new Hono()
 
     const patch = c.req.valid("json");
     const current = resolveStoredSsoConfig(org.sso_config);
+    // Omitted or the "***" placeholder keeps the stored secret; explicit null
+    // (or an empty string) clears it; any other value replaces it.
     const resolvedSecret =
-      patch.clientSecret === "***"
+      patch.clientSecret === undefined || patch.clientSecret === "***"
         ? (current.clientSecret ?? null)
-        : (patch.clientSecret ?? current.clientSecret ?? null);
+        : (patch.clientSecret || null);
 
     const merged: SsoConfig = {
       providerType: patch.providerType !== undefined ? patch.providerType : (current.providerType ?? null),
@@ -968,6 +1086,20 @@ export const ssoRoutes = new Hono()
     const validationError = validateConfig(merged);
     if (validationError) {
       return apiStatusError(c, 422, validationError);
+    }
+
+    // Vet a new metadata URL at write time (https, no credentials/ports, public
+    // addresses only) instead of waiting for the first fetch, so a disabled
+    // config can't hold an internal URL that a later enable or test would hit.
+    if (merged.metadataUrl && merged.metadataUrl !== (current.metadataUrl ?? null)) {
+      try {
+        await assertSafeExternalUrl(merged.metadataUrl);
+      } catch (err) {
+        if (err instanceof UnsafeExternalUrlError) {
+          return apiStatusError(c, 422, `metadataUrl rejected: ${err.message}`);
+        }
+        return apiStatusError(c, 422, reportPublicError(err));
+      }
     }
 
     let domainRow: Awaited<ReturnType<typeof claimSsoDomain>> | null = null;
@@ -1111,7 +1243,8 @@ export const ssoRoutes = new Hono()
     }
     const body = (await c.req.json().catch(() => ({}))) as { redirect?: unknown };
     const redirectPath = sanitizeRedirectPath(typeof body.redirect === "string" ? body.redirect : "/app/sso?linked=1");
-    const authorizeUrl = await beginSsoFlow(c, org, config, { redirectPath, linkUserId: user.id });
+    const { url: authorizeUrl, state } = await beginSsoFlow(c, org, config, { redirectPath, linkUserId: user.id });
+    setSsoStateCookie(c, state);
     return c.json({ authorizeUrl });
   })
   .delete("/:orgId/sso/link", async (c) => {
@@ -1135,7 +1268,8 @@ export const samlCallbackRoutes = new Hono()
       return apiStatusError(c, 400, "OIDC SSO is not fully configured for this organization");
     }
 
-    const url = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    const { url, state } = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    setSsoStateCookie(c, state);
     return c.redirect(url, 302);
   })
   .get("/oidc/:orgId/callback", async (c) => {
@@ -1143,6 +1277,10 @@ export const samlCallbackRoutes = new Hono()
     const code = c.req.query("code");
     if (!state || !code) {
       return apiStatusError(c, 400, "Missing OIDC code/state callback parameters");
+    }
+
+    if (!ssoStateMatchesCookie(c, state)) {
+      return apiStatusError(c, 400, "Invalid or expired OIDC state");
     }
 
     const requestRow = await consumeSsoRequest(state, "oidc");
@@ -1236,7 +1374,8 @@ export const samlCallbackRoutes = new Hono()
       return apiStatusError(c, 400, "SAML SSO is not fully configured for this organization");
     }
 
-    const url = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    const { url, state } = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    setSsoStateCookie(c, state);
     return c.redirect(url, 302);
   })
   .post("/saml/:orgSlug/callback", async (c) => {
@@ -1256,6 +1395,10 @@ export const samlCallbackRoutes = new Hono()
     const relayState = formData?.get("RelayState");
     if (typeof samlResponse !== "string" || typeof relayState !== "string") {
       return apiStatusError(c, 400, "Missing required SAML callback parameters");
+    }
+
+    if (!ssoStateMatchesCookie(c, relayState)) {
+      return apiStatusError(c, 400, "Invalid or expired SAML RelayState");
     }
 
     const requestRow = await consumeSsoRequest(relayState, "saml");

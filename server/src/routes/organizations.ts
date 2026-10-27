@@ -39,9 +39,8 @@ export const organizationsRoutes = new Hono()
     if (actor.type === "apiKey") {
       const key = actor.apiKey;
       if (key.keyType === "client") return apiStatusError(c, 403, "Organization management requires a server key", { code: "organization_forbidden" });
-      const path = c.req.path.replace(/\/$/, "");
-      const orgId = path.match(/\/organizations(?:\/([^/]+))?$/)?.[1]
-        ?? path.match(/\/organizations\/([^/]+)\//)?.[1];
+      const orgId = c.req.param("orgId")
+        ?? c.req.path.replace(/\/$/, "").match(/\/organizations\/([^/]+)/)?.[1];
       if (c.req.method === "POST" && !orgId) return apiStatusError(c, 403, "Create organizations using session authentication", { code: "session_required" });
       if (orgId && orgId !== key.orgId) return apiStatusError(c, 404, "Organization not found", { code: "organization_not_found" });
       const scopes = c.req.method === "GET" ? ["organizations:read", "organizations:manage"] : ["organizations:manage"];

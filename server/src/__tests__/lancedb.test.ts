@@ -8,35 +8,40 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   filterLanceDbRowsByDocumentIds,
-  getOrgLanceDbPrefix,
   lanceDbVectorSearch,
   resetLanceDbConnectionForTests,
 } from "../search/lancedb.js";
 
 let lancedbDir: string | null = null;
 
-async function createLanceDbTable(
-  tableName: string,
-  records: Array<{
-    id: string;
-    documentId: string;
-    text: string;
-    vector: number[];
-  }>,
-): Promise<void> {
-  const db = await lancedb.connect(lancedbDir!);
-  await db.createTable(tableName, records);
+const MODEL = "provider/small";
+
+type Scope = { orgId?: string; workspaceId?: string; model?: string };
+
+/** Opens (creating) the LanceDB table of one workspace and embedding space. */
+async function openWorkspaceTable(
+  records: Array<Record<string, unknown> & { vector: number[] }>,
+  scope: Scope = {},
+): Promise<{ table: lancedb.Table; close: () => void }> {
+  const location = VectorNamespaceManager.getEmbeddingLocation(
+    lancedbDir!, scope.orgId ?? "org-a", scope.workspaceId ?? "ws-a", scope.model ?? MODEL, records[0]!.vector.length,
+  );
+  const db = await lancedb.connect(location.uri);
+  const table = await db.createTable(location.table, records);
+  return { table, close: () => { table.close(); db.close(); } };
 }
 
-describe("getOrgLanceDbPrefix", () => {
-  it("uses a stable hashed org namespace instead of the raw org id", () => {
-    const prefix = getOrgLanceDbPrefix("org-123");
+async function createLanceDbTable(
+  records: Array<{ id: string; documentId: string; text: string; vector: number[] }>,
+  scope: Scope = {},
+): Promise<void> {
+  (await openWorkspaceTable(records, scope)).close();
+}
 
-    expect(prefix).toMatch(/^chunks_org_[0-9a-f]{32}$/);
-    expect(prefix).not.toContain("org-123");
-    expect(prefix).toBe(getOrgLanceDbPrefix("org-123"));
-  });
-});
+/** A search in org-a / ws-a with the default model unless overridden. */
+function search(args: Omit<Parameters<typeof lanceDbVectorSearch>[0], "orgId" | "workspaceId" | "embeddingModel"> & Partial<Pick<Parameters<typeof lanceDbVectorSearch>[0], "orgId" | "workspaceId" | "embeddingModel">>) {
+  return lanceDbVectorSearch({ orgId: "org-a", workspaceId: "ws-a", embeddingModel: MODEL, ...args });
+}
 
 describe("lanceDbVectorSearch tenant isolation", () => {
   beforeEach(async () => {
@@ -49,147 +54,114 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     resetLanceDbConnectionForTests();
     delete process.env.LANCEDB_URI;
     delete process.env.LANCEDB_REFINE_FACTOR;
+    delete process.env.LANCEDB_MISSING_TABLE_TTL_SECONDS;
+    delete process.env.LANCEDB_MAX_OPEN_TABLES;
     if (lancedbDir) {
       await rm(lancedbDir, { recursive: true, force: true });
       lancedbDir = null;
     }
   });
 
-  it("opens only the exact org table and ignores other org tables or lookalike namespaces", async () => {
-    const orgATable = VectorNamespaceManager.getTableName("org-a");
-    const orgBTable = VectorNamespaceManager.getTableName("org-b");
+  it("opens only the workspace's own database, never another workspace's or org's", async () => {
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "workspace a", vector: [1, 0] }]);
+    await createLanceDbTable([{ id: "chunk-sibling", documentId: "doc-a", text: "same org, other workspace", vector: [1, 0] }], { workspaceId: "ws-b" });
+    await createLanceDbTable([{ id: "chunk-other-org", documentId: "doc-a", text: "other org, same workspace id", vector: [1, 0] }], { orgId: "org-b" });
 
-    await createLanceDbTable(orgATable, [
-      {
-        id: "chunk-a",
-        documentId: "doc-a",
-        text: "tenant a",
-        vector: [1, 0],
-      },
-    ]);
-    await createLanceDbTable(orgBTable, [
-      {
-        id: "chunk-b",
-        documentId: "doc-b",
-        text: "tenant b",
-        vector: [1, 0],
-      },
-    ]);
-    await createLanceDbTable(`${orgATable}_malformed`, [
-      {
-        id: "chunk-lookalike",
-        documentId: "doc-lookalike",
-        text: "lookalike namespace",
-        vector: [1, 0],
-      },
-    ]);
-
-    const hits = await lanceDbVectorSearch({
-      orgId: "org-a",
-      queryVector: [1, 0],
-      limit: 10,
-    });
-
-    expect(hits.map((hit) => hit.id)).toEqual(["chunk-a"]);
+    // Even an unscoped search (no document filter) sees only this workspace's rows.
+    expect((await search({ queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
+    expect((await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
+    expect((await search({ workspaceId: "ws-b", queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-sibling"]);
   });
 
-  it("isolates different embedding models and dimensions within the same org", async () => {
-    const table = (model: string, dimensions: number) => VectorNamespaceManager.getEmbeddingTableName("org-a", model, dimensions);
-    await createLanceDbTable(table("small", 2), [{ id: "small", documentId: "doc-small", text: "small model", vector: [1, 0] }]);
-    await createLanceDbTable(table("other", 2), [{ id: "other", documentId: "doc-other", text: "same dimensions, different model", vector: [1, 0] }]);
-    await createLanceDbTable(table("large", 3), [{ id: "large", documentId: "doc-large", text: "large model", vector: [1, 0, 0] }]);
-    await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
-      { id: "legacy", documentId: "doc-legacy", text: "verified legacy model", vector: [1, 0] },
-      { id: "unverified", documentId: "doc-unverified", text: "unknown legacy model", vector: [1, 0] },
-    ]);
-    const hits = await lanceDbVectorSearch({ orgId: "org-a", embeddingModel: "small", queryVector: [1, 0], legacyDocumentIds: ["doc-legacy"], limit: 10 });
-    expect(hits.map(hit => hit.id).sort()).toEqual(["legacy", "small"]);
-    const large = await lanceDbVectorSearch({ orgId: "org-a", embeddingModel: "large", queryVector: [1, 0, 0], limit: 10 });
-    expect(large.map(hit => hit.id)).toEqual(["large"]);
-  });
-
-  it("searches org/model/dimension directories without mixing tenants or vector spaces", async () => {
-    for (const [org, model, dims, id] of [
-      ["org-a", "provider/small", 2, "wanted"],
-      ["org-b", "provider/small", 2, "other-tenant"],
-      ["org-a", "provider/other", 2, "other-model"],
-      ["org-a", "provider/small", 3, "other-dims"],
+  it("searches workspace/model/dimension databases without mixing vector spaces", async () => {
+    for (const [model, dims, id] of [
+      [MODEL, 2, "wanted"],
+      ["provider/other", 2, "other-model"],
+      [MODEL, 3, "other-dims"],
     ] as const) {
-      const location = VectorNamespaceManager.getEmbeddingLocation(lancedbDir!, org, model, dims);
-      const db = await lancedb.connect(location.uri);
-      const table = await db.createTable(location.table, [{ id, documentId: id, text: id, vector: Array.from({ length: dims }, (_, i) => i === 0 ? 1 : 0) }]);
-      table.close();
-      db.close();
+      await createLanceDbTable([{ id, documentId: id, text: id, vector: Array.from({ length: dims }, (_, i) => i === 0 ? 1 : 0) }], { model });
     }
-    const hits = await lanceDbVectorSearch({ orgId: "org-a", embeddingModel: "provider/small", queryVector: [1, 0], limit: 10 });
-    expect(hits.map(hit => hit.id)).toEqual(["wanted"]);
+    expect((await search({ queryVector: [1, 0], limit: 10 })).map(hit => hit.id)).toEqual(["wanted"]);
+    expect((await search({ queryVector: [1, 0, 0], limit: 10 })).map(hit => hit.id)).toEqual(["other-dims"]);
   });
 
   it("keeps search results on tables the worker has optimized and vector-indexed", async () => {
-    const location = VectorNamespaceManager.getEmbeddingLocation(lancedbDir!, "org-a", "provider/small", 8);
     const vector = (seed: number) => Array.from({ length: 8 }, (_, i) => Math.sin(seed * 7 + i));
-    const db = await lancedb.connect(location.uri);
-    const table = await db.createTable(location.table, Array.from({ length: 40 }, (_, i) => ({
+    const { table, close } = await openWorkspaceTable(Array.from({ length: 40 }, (_, i) => ({
       id: `chunk-${i}`, documentId: `doc-${i % 4}`, text: `chunk ${i}`, vector: vector(i),
     })));
     // Mirrors worker/src/stages/lancedb-maintenance.ts: optimize, then an L2 IVF_HNSW_SQ index.
     await table.optimize();
     await table.createIndex("vector", { config: lancedb.Index.hnswSq({ distanceType: "l2", numPartitions: 1 }), replace: false });
     await table.add([{ id: "late", documentId: "doc-late", text: "unindexed tail", vector: vector(99) }]);
-    table.close();
-    db.close();
+    close();
 
-    const hits = await lanceDbVectorSearch({ orgId: "org-a", embeddingModel: "provider/small", queryVector: vector(7), limit: 3 });
+    const hits = await search({ queryVector: vector(7), limit: 3 });
     expect(hits[0]?.id).toBe("chunk-7");
-    const tail = await lanceDbVectorSearch({ orgId: "org-a", embeddingModel: "provider/small", queryVector: vector(99), documentIds: ["doc-late"], limit: 3 });
+    const tail = await search({ queryVector: vector(99), documentIds: ["doc-late"], limit: 3 });
     expect(tail.map((hit) => hit.id)).toEqual(["late"]);
   });
 
   it("supports opt-in refinement for indexed unscoped/scoped search and the fresh tail", async () => {
     process.env.LANCEDB_REFINE_FACTOR = "16";
-    const db = await lancedb.connect(lancedbDir!);
-    const table = await db.createTable(VectorNamespaceManager.getTableName("org-a"), Array.from({ length: 256 }, (_, i) => ({
+    const { table, close } = await openWorkspaceTable(Array.from({ length: 256 }, (_, i) => ({
       id: `refine-${i}`, documentId: "doc-a", vector: [Math.cos(i), Math.sin(i), 0, 0, 0, 0, 0, 0],
     })));
     try {
       await table.createIndex("vector", { config: lancedb.Index.hnswSq({ distanceType: "l2", numPartitions: 1 }) });
       for (const documentIds of [undefined, ["doc-a"]]) {
-        const hits = await lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0, 0, 0, 0, 0, 0, 0], documentIds, limit: 50 });
+        const hits = await search({ queryVector: [1, 0, 0, 0, 0, 0, 0, 0], documentIds, limit: 50 });
         expect(hits).toHaveLength(50);
         expect(hits[0]?.id).toBe("refine-0");
       }
       await table.add([{ id: "fresh-refined", documentId: "doc-fresh", vector: [0, 0, 1, 0, 0, 0, 0, 0] }]);
       resetLanceDbConnectionForTests();
-      const fresh = await lanceDbVectorSearch({ orgId: "org-a", queryVector: [0, 0, 1, 0, 0, 0, 0, 0], documentIds: ["doc-fresh"], limit: 50 });
+      const fresh = await search({ queryVector: [0, 0, 1, 0, 0, 0, 0, 0], documentIds: ["doc-fresh"], limit: 50 });
       expect(fresh.map(hit => hit.id)).toEqual(["fresh-refined"]);
-    } finally { table.close(); db.close(); }
+    } finally { close(); }
   });
 
   it("reuses table handles across searches and briefly remembers missing tables", async () => {
-    const name = VectorNamespaceManager.getTableName("org-a");
-    expect(await lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0], limit: 10 })).toEqual([]);
-    await createLanceDbTable(name, [{ id: "chunk-a", documentId: "doc-a", text: "tenant a", vector: [1, 0] }]);
+    expect(await search({ queryVector: [1, 0], limit: 10 })).toEqual([]);
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "tenant a", vector: [1, 0] }]);
     // Within the missing-table TTL the absent table is not re-probed on every query.
-    expect(await lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0], limit: 10 })).toEqual([]);
+    expect(await search({ queryVector: [1, 0], limit: 10 })).toEqual([]);
     resetLanceDbConnectionForTests();
-    const first = await lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0], limit: 10 });
-    const second = await lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0], limit: 10 });
+    const first = await search({ queryVector: [1, 0], limit: 10 });
+    const second = await search({ queryVector: [1, 0], limit: 10 });
     expect(first.map(hit => hit.id)).toEqual(["chunk-a"]);
     expect(second).toEqual(first);
   });
 
+  it("finds a new workspace's first rows soon after an earlier search missed its table", async () => {
+    process.env.LANCEDB_MISSING_TABLE_TTL_SECONDS = "0";
+    expect(await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).toEqual([]);
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "first upload", vector: [1, 0] }]);
+    expect((await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
+  });
+
+  it("keeps a bounded number of workspace tables open and reopens evicted ones", async () => {
+    process.env.LANCEDB_MAX_OPEN_TABLES = "1";
+    for (const workspaceId of ["ws-a", "ws-b"]) {
+      await createLanceDbTable([{ id: `chunk-${workspaceId}`, documentId: "doc", text: workspaceId, vector: [1, 0] }], { workspaceId });
+    }
+    for (const workspaceId of ["ws-a", "ws-b", "ws-a"]) {
+      expect((await search({ workspaceId, queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual([`chunk-${workspaceId}`]);
+    }
+  });
+
   it("finds the nearest scoped documents beyond the global 1,000-row cutoff", async () => {
     const documentIds = Array.from({ length: 400 }, (_, i) => `scoped-doc-${i}`);
-    await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
+    await createLanceDbTable([
       ...Array.from({ length: 2_000 }, (_, i) => ({
-        id: `outside-${i}`, documentId: `outside-doc-${i}`, text: "another workspace", vector: [0, i / 100_000],
+        id: `outside-${i}`, documentId: `outside-doc-${i}`, text: "outside the requested scope", vector: [0, i / 100_000],
       })),
       ...documentIds.map((documentId, i) => ({
-        id: `scoped-${i}`, documentId, text: "requested workspace", vector: [1 + i / 400, 0],
+        id: `scoped-${i}`, documentId, text: "requested scope", vector: [1 + i / 400, 0],
       })),
     ]);
 
-    const hits = await lanceDbVectorSearch({ orgId: "org-a", documentIds, queryVector: [0, 0], limit: 3 });
+    const hits = await search({ documentIds, queryVector: [0, 0], limit: 3 });
     expect(hits.map(hit => hit.id)).toEqual(["scoped-0", "scoped-1", "scoped-2"]);
   });
 
@@ -203,54 +175,38 @@ describe("lanceDbVectorSearch tenant isolation", () => {
       id: `chunk-${i}`, documentId: `doc-${i % 200}`, vector: Array.from({ length: 64 }, random),
     }));
     const queryVector = Array.from({ length: 64 }, random);
-    const db = await lancedb.connect(lancedbDir!);
-    const table = await db.createTable(VectorNamespaceManager.getTableName("org-a"), records);
+    const { table, close } = await openWorkspaceTable(records);
     try {
       await table.createIndex("vector", { config: lancedb.Index.hnswSq({ distanceType: "l2", numPartitions: 1 }) });
       // The previous adapter requested 1,000 rows. An all-document scope must
       // not lose its nearest results just because fewer rows cross the boundary.
       const previous = await table.vectorSearch(queryVector).select(["id", "_distance"]).limit(1_000).toArray();
-      const hits = await lanceDbVectorSearch({
-        orgId: "org-a", queryVector, documentIds: Array.from({ length: 200 }, (_, i) => `doc-${i}`), limit: 10,
+      const hits = await search({
+        queryVector, documentIds: Array.from({ length: 200 }, (_, i) => `doc-${i}`), limit: 10,
       });
       expect(hits.map(hit => hit.id)).toEqual(previous.slice(0, 10).map(row => row.id));
     } finally {
-      table.close();
-      db.close();
+      close();
     }
-  });
+  }, 30_000);
 
   it("treats quoted document IDs as literals without widening the scope", async () => {
     const quotedId = "doc' OR '1'='1";
-    await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
+    await createLanceDbTable([
       { id: "other", documentId: "other-doc", text: "outside scope", vector: [1, 0] },
       { id: "quoted", documentId: quotedId, text: "inside scope", vector: [0.9, 0.1] },
     ]);
 
-    const hits = await lanceDbVectorSearch({ orgId: "org-a", documentIds: [quotedId], queryVector: [1, 0], limit: 3 });
+    const hits = await search({ documentIds: [quotedId], queryVector: [1, 0], limit: 3 });
     expect(hits.map(hit => hit.id)).toEqual(["quoted"]);
-    expect(await lanceDbVectorSearch({
-      orgId: "org-a", documentIds: ["missing' OR TRUE --"], queryVector: [1, 0], limit: 3,
-    })).toEqual([]);
+    expect(await search({ documentIds: ["missing' OR TRUE --"], queryVector: [1, 0], limit: 3 })).toEqual([]);
   });
 
-  it("fails closed when the org namespace is missing", async () => {
-    await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
-      {
-        id: "chunk-a",
-        documentId: "doc-a",
-        text: "tenant a",
-        vector: [1, 0],
-      },
-    ]);
+  it("fails closed when the org or workspace namespace is missing", async () => {
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "tenant a", vector: [1, 0] }]);
 
-    await expect(
-      lanceDbVectorSearch({
-        orgId: " ",
-        queryVector: [1, 0],
-        limit: 10,
-      }),
-    ).resolves.toEqual([]);
+    await expect(search({ orgId: " ", queryVector: [1, 0], limit: 10 })).resolves.toEqual([]);
+    await expect(search({ workspaceId: " ", queryVector: [1, 0], limit: 10 })).resolves.toEqual([]);
   });
 });
 

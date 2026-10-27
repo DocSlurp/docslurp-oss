@@ -13,6 +13,7 @@ import {
   rateCardViolations,
   slotCreditsPerHour,
   slotInfraUsdPerHour,
+  slotProvisionedListUsdPerHour,
   staleObservations,
 } from "../infra-costs.js";
 
@@ -101,6 +102,22 @@ describe("break-even math", () => {
     expect(listUsdForBundle({ aiProviderUsd: 1 })).toBeCloseTo(1 + CREDIT_RATE_CARD.aiMarkupPercent / 100);
   });
 
+  it("costs a slot at production packing: 2 per shared-cpu-8x 16 GB host in lax (fly.worker.toml)", () => {
+    expect(WORKER_SLOT.slotsPerHost).toBe(2);
+    expect(slotInfraUsdPerHour()).toBeCloseTo(0.0846, 4);
+    // Cost and list describe the same half host, so a slot's break-even equals the host's.
+    const host = INFRA_COST_OBSERVATIONS.find((observation) => observation.id === WORKER_SLOT.hostObservationId)!;
+    expect(slotProvisionedListUsdPerHour()).toBeCloseTo(listUsdForBundle({ cpuVcpuHour: 4, memoryGbHour: 8 }));
+    expect(slotInfraUsdPerHour() / slotProvisionedListUsdPerHour()).toBeCloseTo(breakEvenUtilization(host.usd, listUsdForBundle({ cpuVcpuHour: 8, memoryGbHour: 16 })));
+  });
+
+  it("records the always-on floor machine as shared-cpu-2x 4 GB", () => {
+    const floor = INFRA_COST_OBSERVATIONS.find((observation) => observation.id === "fly:shared-cpu-2x-4gb:lax")!;
+    expect(floor.capacity).toEqual({ vcpu: 2, memoryGb: 4 });
+    expect(floor.usd).toBeCloseTo(0.0423, 4);
+    expect(INFRA_COST_OBSERVATIONS.some((observation) => observation.id === "fly:shared-cpu-2x-3gb:lax")).toBe(false);
+  });
+
   it("prices a worker slot from its host", () => {
     expect(slotCreditsPerHour()).toBe(WORKER_SLOT.vcpu * CREDIT_RATE_CARD.cpuVcpuHour + WORKER_SLOT.memoryGb * CREDIT_RATE_CARD.memoryGbHour);
     expect(slotInfraUsdPerHour() * WORKER_SLOT.slotsPerHost).toBeCloseTo(
@@ -111,9 +128,10 @@ describe("break-even math", () => {
 
 describe("staleness", () => {
   it("warns about observations older than 45 days", () => {
-    const observedAt = new Date(`${INFRA_COST_OBSERVATIONS[0]!.observedAt}T00:00:00Z`);
-    expect(staleObservations(INFRA_COST_OBSERVATIONS, new Date(observedAt.getTime() + 44 * 86_400_000))).toEqual([]);
-    expect(staleObservations(INFRA_COST_OBSERVATIONS, new Date(observedAt.getTime() + 46 * 86_400_000)).length).toBe(INFRA_COST_OBSERVATIONS.length);
+    const observations = [INFRA_COST_OBSERVATIONS[0]!];
+    const observedAt = new Date(`${observations[0]!.observedAt}T00:00:00Z`);
+    expect(staleObservations(observations, new Date(observedAt.getTime() + 44 * 86_400_000))).toEqual([]);
+    expect(staleObservations(observations, new Date(observedAt.getTime() + 46 * 86_400_000)).length).toBe(observations.length);
     expect(staleObservations([{ ...INFRA_COST_OBSERVATIONS[0]!, observedAt: "unknown" }]).length).toBe(1);
   });
 });

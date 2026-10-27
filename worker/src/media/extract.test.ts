@@ -60,7 +60,7 @@ describe("multimedia extraction pipeline boundary", () => {
     vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:false,hasVideo:true});
     await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
     expect(transcribeChunk).not.toHaveBeenCalled();expect(describeVideoChunk).toHaveBeenCalledTimes(1);
-    expect(f.journal.admitVideo).toHaveBeenCalledWith(expect.objectContaining({orgId:"org"}),2,12);
+    expect(f.journal.admitVideo).toHaveBeenCalledWith(expect.objectContaining({orgId:"org"}),2,24);
     expect(f.storage.putJson).toHaveBeenCalledWith(expect.stringContaining(".json"),expect.objectContaining({coverage:"sampled-visual-only",visualSegments:[expect.objectContaining({id:"doc:visual:0",samples:[0,1]})]}));
     const markdown=f.storage.putBytes.mock.calls[0] as unknown as [string,Buffer];expect(markdown[1].toString()).toBe("[00:00–00:01] On screen: [1s] A visible label");
     const canonical = (f.storage.putJson.mock.calls as unknown as [string, unknown][]).find(c => c[0].endsWith(".canonical.json"))![1] as { blocks: { metadata: Record<string, unknown> }[] };
@@ -68,7 +68,7 @@ describe("multimedia extraction pipeline boundary", () => {
     expect(canonical.blocks[0].metadata).toMatchObject({ mode: "shown", mediaKind: "video", startSeconds: 0, endSeconds: 1, frameSeconds: [0, 1], evidenceId: "doc:visual:0" });
   });
 
-  it("reads a silent video's frames without the workspace opt-in, since there is no audio to transcribe", async () => {
+  it("defaults silent videos to frame reading when workspace configuration is missing", async () => {
     vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
     const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});
     vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:false,hasVideo:true});
@@ -77,9 +77,9 @@ describe("multimedia extraction pipeline boundary", () => {
     expect(f.storage.putJson).toHaveBeenCalledWith(expect.stringContaining(".json"),expect.objectContaining({coverage:"sampled-visual-only"}));
   });
 
-  it("keeps audio-only coverage for a narrated video when the workspace has not opted in", async () => {
+  it("keeps audio-only coverage for a narrated video when explicitly disabled", async () => {
     vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
-    const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});
+    const f=fixture();f.state.run.pipeline.mediaVideo={enabled:false};f.journal.admitVideo=vi.fn(async()=>{});
     vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:true,hasVideo:true});
     await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
     expect(transcribeChunk).toHaveBeenCalledTimes(1);expect(describeVideoChunk).not.toHaveBeenCalled();
@@ -178,5 +178,43 @@ describe("multimedia extraction pipeline boundary", () => {
       await extractMedia({ ...f, storage: f.storage as unknown as ArtifactStore });
       expect(windows()).toEqual([[0, 300], [300, 1]]);
     });
+  });
+});
+
+describe("video workspace defaults and explicit disable", () => {
+  it.each([
+    { enabled: undefined, hasAudio: false }, { enabled: undefined, hasAudio: true },
+    { enabled: true, hasAudio: false }, { enabled: true, hasAudio: true },
+    { enabled: false, hasAudio: false }, { enabled: false, hasAudio: true },
+  ])("enabled=$enabled, audio=$hasAudio preserves the workspace choice", async ({ enabled, hasAudio }) => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED", "true");
+    vi.stubEnv("MEDIA_VIDEO_ENABLED", "true");
+    vi.stubEnv("DEEPINFRA_API_KEY", "test");
+    const f = fixture();
+    if (enabled !== undefined) f.state.run.pipeline.mediaVideo = { enabled };
+    f.journal.admitVideo = vi.fn(async () => {});
+    vi.mocked(inspectMedia).mockResolvedValue({ duration: 2, hasAudio, hasVideo: true });
+    await extractMedia({ ...f, storage: f.storage as unknown as ArtifactStore });
+    expect(describeVideoChunk).toHaveBeenCalledTimes(enabled === false ? 0 : 1);
+    expect(transcribeChunk).toHaveBeenCalledTimes(hasAudio ? 1 : 0);
+    if (enabled === false && !hasAudio) {
+      expect(f.state.documentStage("doc", "extract-markdown")).toMatchObject({ status: "failed", error: DOCUMENT_FAILURE_MARKERS.silentVideo });
+      expect(f.journal.admitVideo).not.toHaveBeenCalled();
+    } else {
+      expect(f.state.documentStage("doc", "extract-markdown")?.status).toBe("completed");
+      expect(f.journal.admitVideo).toHaveBeenCalled();
+    }
+  });
+  it("retains platform and durable quota gates for missing workspace configuration", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED", "true");
+    vi.stubEnv("MEDIA_VIDEO_ENABLED", "true");
+    vi.stubEnv("DEEPINFRA_API_KEY", "test");
+    const f = fixture();
+    f.journal.admitVideo = vi.fn(async () => { throw new Error("video quota exceeded"); });
+    vi.mocked(inspectMedia).mockResolvedValue({ duration: 2, hasAudio: true, hasVideo: true });
+    await extractMedia({ ...f, storage: f.storage as unknown as ArtifactStore });
+    expect(describeVideoChunk).not.toHaveBeenCalled();
+    expect(transcribeChunk).not.toHaveBeenCalled();
+    expect(f.state.documentStage("doc", "extract-markdown")?.status).toBe("failed");
   });
 });

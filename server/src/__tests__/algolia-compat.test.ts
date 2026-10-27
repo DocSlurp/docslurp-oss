@@ -5,7 +5,12 @@ const getWorkspaceMock = vi.fn();
 const hybridSearchMock = vi.fn();
 const getWorkspaceSearchSettingsMock = vi.fn();
 const upsertWorkspaceSearchSettingsMock = vi.fn();
+const userCanEditWorkspaceSettingsMock = vi.fn();
 const sqlMock = vi.fn();
+
+// Scopes carried by the mocked API key; individual tests narrow this to prove the
+// compatibility admin surface requires `workspaces:manage` (SEC-2026-10-01).
+let keyScopes: string[] = ["search", "workspaces:manage"];
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, {
@@ -21,7 +26,7 @@ vi.mock("../middleware/api-key-auth.js", () => ({
       orgId: "org-1",
       keyType: "server",
       allowedDomains: [],
-      scopes: ["search"],
+      scopes: keyScopes,
       rateLimitRpm: 60,
       rateLimitPpd: 10_000
     });
@@ -29,7 +34,7 @@ vi.mock("../middleware/api-key-auth.js", () => ({
   }) as any,
 }));
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null),
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   getWorkspace: getWorkspaceMock
 }));
 
@@ -39,7 +44,13 @@ vi.mock("../services/search.js", () => ({
 
 vi.mock("../services/search-controls.js", () => ({
   getWorkspaceSearchSettings: getWorkspaceSearchSettingsMock,
-  upsertWorkspaceSearchSettings: upsertWorkspaceSearchSettingsMock
+  mutateWorkspaceSearchSettingsForUser: async (args: { workspaceId: string; userId: string; mutate: (current: unknown) => unknown }) => {
+    const current = await getWorkspaceSearchSettingsMock(args.workspaceId, args.userId);
+    const next = args.mutate(current);
+    await upsertWorkspaceSearchSettingsMock(next);
+    return next;
+  },
+  userCanEditWorkspaceSettings: userCanEditWorkspaceSettingsMock
 }));
 
 const { algoliaCompatRoutes } = await import("../routes/algolia-compat.js");
@@ -76,13 +87,16 @@ describe("algolia compat", () => {
 
   beforeEach(() => {
     app = buildApp();
+    keyScopes = ["search", "workspaces:manage"];
     getWorkspaceMock.mockReset();
     hybridSearchMock.mockReset();
     getWorkspaceSearchSettingsMock.mockReset();
     upsertWorkspaceSearchSettingsMock.mockReset();
+    userCanEditWorkspaceSettingsMock.mockReset();
     sqlMock.mockReset();
 
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Demo" });
+    userCanEditWorkspaceSettingsMock.mockResolvedValue(true);
     getWorkspaceSearchSettingsMock.mockResolvedValue({
       workspaceId: "ws-1",
       userId: "demo-user",
@@ -373,6 +387,27 @@ describe("algolia compat", () => {
     }));
   });
 
+  it("denies settings/synonyms/rules/import mutations to a key without the workspaces:manage scope", async () => {
+    keyScopes = ["search"];
+    const auth = { "Content-Type": "application/json", Authorization: "Bearer test" };
+    const settings = await app.request("/compat/algolia/1/indexes/ws-1/settings", { method: "PUT", headers: auth, body: JSON.stringify({ hitsPerPage: 20 }) });
+    const synonyms = await app.request("/compat/algolia/1/indexes/ws-1/synonyms/batch", { method: "POST", headers: auth, body: JSON.stringify({ synonyms: [{ objectID: "s", type: "synonym", synonyms: ["a", "b"] }] }) });
+    const rules = await app.request("/compat/algolia/1/indexes/ws-1/rules/batch", { method: "POST", headers: auth, body: JSON.stringify({ rules: [] }) });
+    const imported = await app.request("/compat/algolia/1/import", { method: "POST", headers: auth, body: JSON.stringify({ workspaceId: "ws-1" }) });
+    expect([settings.status, synonyms.status, rules.status, imported.status]).toEqual([403, 403, 403, 403]);
+    expect(upsertWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("denies mutations when the key owner cannot edit the workspace (viewer regression, SEC-2026-10-01)", async () => {
+    userCanEditWorkspaceSettingsMock.mockResolvedValue(false);
+    const auth = { "Content-Type": "application/json", Authorization: "Bearer test" };
+    const settings = await app.request("/compat/algolia/1/indexes/ws-1/settings", { method: "PUT", headers: auth, body: JSON.stringify({ hitsPerPage: 20 }) });
+    const synonyms = await app.request("/compat/algolia/1/indexes/ws-1/synonyms/batch", { method: "POST", headers: auth, body: JSON.stringify({ synonyms: [{ objectID: "s", type: "synonym", synonyms: ["a", "b"] }] }) });
+    expect([settings.status, synonyms.status]).toEqual([403, 403]);
+    expect(upsertWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
+    expect(userCanEditWorkspaceSettingsMock).toHaveBeenCalledWith("ws-1", "demo-user");
+  });
+
   it("imports migration payloads into workspace search settings", async () => {
     const res = await app.request("/compat/algolia/1/import", {
       method: "POST",
@@ -382,7 +417,7 @@ describe("algolia compat", () => {
       },
       body: JSON.stringify({
         source: "elastic",
-        workspaceId: "ws-1",
+        workspace: "ws-1",
         settings: {
           searchableAttributes: ["body", "title"]
         },

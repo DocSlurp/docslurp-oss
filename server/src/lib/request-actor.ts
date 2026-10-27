@@ -2,7 +2,7 @@ import { addTraceMetadata } from "@docslurp/shared/observability";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-import { apiError, isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
+import { apiError, parseWorkspaceInput, type WorkspaceInputRef, type WorkspaceRecord } from "@docslurp/shared";
 
 import { apiErrorResponse } from "./api-error.js";
 import { auth, appDbPool } from "./auth.js";
@@ -10,10 +10,10 @@ import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
-import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
+import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
 import { validateApiKey, type ValidatedKey } from "../services/api-keys.js";
-import { ensureDefaultWorkspace, getWorkspace, resolveWorkspaceRef } from "../services/workspaces.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
+import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
+import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
 
 export interface SessionUser {
   isAdmin?: boolean;
@@ -68,11 +68,25 @@ export async function resolveApiKeyActor(
   return apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null;
 }
 
-export async function resolveBetterAuthSessionActor(headers: Headers): Promise<SessionRequestActor | null> {
-  const session = await auth.api.getSession({ headers }) as {
-    session: { id: string; userId: string };
-    user: SessionUser;
+/**
+ * Resolves the Better Auth session for a request. Better Auth slides the
+ * session's expiry forward once `updateAge` has passed and issues a refreshed
+ * cookie; pass `responseHeaders` to receive those `Set-Cookie` values so the
+ * caller can forward them. Without forwarding, the database row is extended
+ * but the browser cookie still expires on its original date.
+ */
+export async function resolveBetterAuthSessionActor(
+  headers: Headers,
+  responseHeaders?: Headers
+): Promise<SessionRequestActor | null> {
+  const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
+    headers: Headers | null;
+    response: { session: { id: string; userId: string }; user: SessionUser } | null;
   } | null;
+  const session = result?.response ?? null;
+  if (responseHeaders) {
+    for (const cookie of result?.headers?.getSetCookie() ?? []) responseHeaders.append("set-cookie", cookie);
+  }
 
   if (!session?.user) {
     return null;
@@ -94,6 +108,7 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
   setCurrentRequestApiKeyWorkspaceIds(actor.type === "apiKey" ? actor.apiKey.workspaceIds : null);
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
+  if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
   if (actor.type === "apiKey") {
     c.set("apiKey", actor.apiKey);
@@ -209,11 +224,17 @@ export async function loadActorScopedWorkspace(
   workspaceRef: string,
   actor: RequestActor,
 ): Promise<WorkspaceRecord | null> {
-  const workspaceId = isWorkspaceUuid(workspaceRef)
-    ? workspaceRef
-    : isDefaultWorkspaceAlias(workspaceRef)
+  // A blank reference (e.g. a missing stored ID) is never the default workspace here.
+  if (!workspaceRef?.trim()) return null;
+  const ref = parseWorkspaceInput(workspaceRef);
+  const workspaceId = ref.kind === "id"
+    ? ref.id
+    : ref.kind === "default"
       ? await resolveActorWorkspaceId(actor, null)
-      : (await resolveWorkspaceRef(workspaceRef))?.id ?? workspaceRef;
+      : ref.kind === "slug"
+        ? (await findWorkspaceForInput(ref, actorWorkspaceScope(actor)))?.id
+        : undefined;
+  if (!workspaceId) return null;
   const workspace = await getWorkspace(workspaceId, actor.userId);
   if (!workspace) {
     return null;
@@ -224,6 +245,7 @@ export async function loadActorScopedWorkspace(
   }
 
   addTraceMetadata({ workspaceId: workspace.id, orgId: workspace.orgId });
+  setCurrentRequestOrgId(workspace.orgId);
   return workspace;
 }
 
@@ -252,33 +274,68 @@ export async function assertApiKeyWorkspaceAccess(
 }
 
 /**
- * Resolves the workspace a request targets to its UUID. An explicit UUID, slug
- * or former slug wins; an omitted ID or the reserved "default" lands in the
- * organization's default workspace (the API key's org, the requested org, or
- * the user's personal org). Unknown references pass through so the caller's
- * access check answers 404.
+ * Where an actor's `workspace` values may resolve: an API key only inside its
+ * organization and workspace allowlist; a session inside `orgId` when the
+ * request names one, otherwise any workspace the user can reach.
+ */
+export function actorWorkspaceScope(actor: RequestActor, orgId?: string | null): WorkspaceInputScope {
+  if (actor.type === "apiKey") {
+    return { userId: actor.userId, orgId: actor.apiKey.orgId ?? null, allowedWorkspaceIds: actor.apiKey.workspaceIds ?? null };
+  }
+  return { userId: actor.userId, orgId: orgId?.trim() || null };
+}
+
+/**
+ * Looks up a public `workspace` value (UUID, slug, former slug or name; see
+ * parseWorkspaceInput) among the workspaces the actor may use. Returns the
+ * parsed reference with the match, or `workspace: null` when nothing matches,
+ * so uploads can create the workspace. Omitted and "default" values come back
+ * as `{ kind: "default" }` for the caller's default handling. Throws a 400 for
+ * a value with no letters or digits.
+ */
+export async function lookupActorWorkspace(
+  actor: RequestActor,
+  input: string | null | undefined,
+  orgId?: string | null,
+): Promise<
+  | { ref: { kind: "default" } }
+  | { ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>; workspace: { id: string; orgId: string } | null }
+> {
+  const ref = parseWorkspaceInput(input);
+  if (ref.kind === "invalid") throw invalidWorkspaceInputError(ref.input);
+  if (ref.kind === "default") return { ref };
+  return { ref, workspace: await findWorkspaceForInput(ref, actorWorkspaceScope(actor, orgId)) };
+}
+
+/**
+ * Resolves the workspace a request targets to its UUID. An explicit UUID,
+ * slug, former slug or name wins and must name a workspace the actor can use
+ * (404 `workspace_not_found` naming the slug otherwise); an omitted value or
+ * the reserved "default" lands in the organization's default workspace (the
+ * API key's org, the requested org, or the user's personal org).
  */
 export async function resolveActorWorkspaceId(
   actor: RequestActor,
-  workspaceId?: string | null,
+  workspace?: string | null,
   orgId?: string | null,
 ): Promise<string> {
-  if (workspaceId && !isDefaultWorkspaceAlias(workspaceId)) {
-    const resolved = isWorkspaceUuid(workspaceId) ? workspaceId : (await resolveWorkspaceRef(workspaceId))?.id ?? workspaceId;
-    if (actor.type === "apiKey" && !apiKeyAllowsWorkspace(actor.apiKey, resolved)) {
-      throw new ApiKeyWorkspaceNotAllowedError();
-    }
-    return resolved;
+  const lookup = await lookupActorWorkspace(actor, workspace, orgId);
+  if (lookup.ref.kind !== "default") {
+    const found = "workspace" in lookup ? lookup.workspace : null;
+    if (!found) throw workspaceInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
+    // The lookup is already scoped to the key's allowlist; checked again here as the request boundary.
+    if (actor.type === "apiKey" && !apiKeyAllowsWorkspace(actor.apiKey, found.id)) throw new ApiKeyWorkspaceNotAllowedError();
+    return found.id;
   }
   if (actor.type === "apiKey") {
     const allowlist = actor.apiKey.workspaceIds ?? [];
-    const workspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId: actor.apiKey.orgId });
+    const defaultWorkspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId: actor.apiKey.orgId });
     // A key bound to workspaces defaults to the org default only when it is
     // allowlisted; otherwise to the key's first allowlisted workspace.
-    return allowlist.length === 0 || allowlist.includes(workspace.id) ? workspace.id : allowlist[0]!;
+    return allowlist.length === 0 || allowlist.includes(defaultWorkspace.id) ? defaultWorkspace.id : allowlist[0]!;
   }
-  const workspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId });
-  return workspace.id;
+  const defaultWorkspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId });
+  return defaultWorkspace.id;
 }
 
 /**
@@ -295,7 +352,7 @@ export class ApiKeyWorkspaceNotAllowedError extends HTTPException {
 
 /**
  * The workspace boundary for routes that act on one workspace: resolves a UUID,
- * slug, former slug, `default` or omitted reference (see
+ * slug, former slug, name, `default` or omitted reference (see
  * resolveActorWorkspaceId), then checks the actor can see it. Throws a 404
  * WorkspaceAccessError rather than handing an unknown ID to SQL.
  */

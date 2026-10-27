@@ -62,20 +62,15 @@ export class PostgresMediaJournal implements MediaJournal {
   async admitVideo(scope: Parameters<NonNullable<MediaJournal["admitVideo"]>>[0], duration: number, frames: number) {
     await this.sql.begin(async tx => {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.orgId}))`;
-      const [org] = await tx`select o.plan_id from organizations o join workspace_runs r on r.org_id=o.id join documents d on d.run_id=r.id
-        where o.id=${scope.orgId} and r.id=${scope.runId} and r.workspace_id=${scope.workspaceId} and d.id=${scope.documentId}`;
-      if (!org) throw new Error("Video admission scope mismatch");
-      const policy = videoPolicy(org.plan_id as string, duration);
-      if (!Number.isInteger(frames) || frames < 0 || frames > policy.frames) throw new Error("Video frame budget exceeds tier");
+      const [scoped] = await tx`select 1 from workspace_runs r join documents d on d.run_id=r.id
+        where r.org_id=${scope.orgId} and r.id=${scope.runId} and r.workspace_id=${scope.workspaceId} and d.id=${scope.documentId}`;
+      if (!scoped) throw new Error("Video admission scope mismatch");
+      const policy = videoPolicy(duration);
+      if (!Number.isInteger(frames) || frames < 0 || frames > policy.frames) throw new Error("Video frame budget exceeds the limit");
       const [existing] = await tx`select * from media_video_admissions where document_id=${scope.documentId}`;
       if (existing) {
         if (existing.org_id !== scope.orgId || existing.run_id !== scope.runId || Number(existing.duration_seconds) !== duration || Number(existing.reserved_frames) !== frames) throw new Error("Video admission changed on retry");
         return;
-      }
-      if (policy.tier === "free") {
-        const [used] = await tx`select coalesce(sum(duration_seconds),0) as seconds, coalesce(sum(reserved_frames),0) as frames from media_video_admissions
-          where org_id=${scope.orgId} and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'`;
-        if (Number(used.seconds)+duration > 600 || Number(used.frames)+frames > 60) throw new Error("Free video daily organization quota exhausted");
       }
       await tx`insert into media_video_admissions(document_id,org_id,run_id,duration_seconds,reserved_frames) values (${scope.documentId},${scope.orgId},${scope.runId},${duration},${frames})`;
     });
@@ -84,7 +79,7 @@ export class PostgresMediaJournal implements MediaJournal {
     // Credit leases other runs hold (migration 0052) are spoken for; this
     // run's own lease is what its media spend draws from.
     // The chat reserve (migration 0053) is not for jobs either.
-    const [status] = await tx<{ plan_id: string | null; available: number; leased: number; workspace_in_org: boolean; org_budget_paused: boolean; workspace_budget_paused: boolean }[]>`
+    const [status] = await tx<{ funded: boolean | null; available: number; leased: number; workspace_in_org: boolean; org_budget_paused: boolean; workspace_budget_paused: boolean }[]>`
       select s.*, org_outstanding_credit_leases(${args.scope.orgId}, 'run', ${args.scope.runId}) as leased
       from org_spend_status(${args.scope.orgId}, ${args.scope.workspaceId}, 0) s`;
     const [pending] = await tx<{ reserved: number }[]>`select
@@ -93,7 +88,7 @@ export class PostgresMediaJournal implements MediaJournal {
       coalesce((select sum((case when status='deleted' then fixed_reserve_usd else reserved_usd end) * 100) from remote_capacity_leases
         where scope->>'orgId' = ${args.scope.orgId} and (status <> 'deleted' or fixed_reserve_usd > 0)), 0) as reserved`;
     if (!status?.workspace_in_org || status.org_budget_paused || status.workspace_budget_paused ||
-      (Number(status.available) - Number(status.leased) - jobCreditReserve(status.plan_id) < args.reserveCents + Number(pending.reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Media spend admission denied");
+      (Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) < args.reserveCents + Number(pending.reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Media spend admission denied");
   }
   async complete(id: string, resultKey: string, costCents: number, pricingMismatch = false, accounting?: MediaAccounting, chargedCostCents = costCents) {
     await this.sql`update remote_media_jobs set status = 'completed', result_key = ${resultKey}, cost_cents = ${costCents}, charged_cost_cents = ${chargedCostCents}, pricing_uncertain = ${pricingMismatch}, accounting = ${accounting ? this.sql.json(accounting as unknown as JSONValue) : null}, cost_state = ${accounting?.state ?? 'estimated'}, updated_at = now()

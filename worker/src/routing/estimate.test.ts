@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  aiBilledUsd,
   applyBudgetGuard,
   estimateChunk,
   estimateRouterCost,
@@ -7,6 +8,8 @@ import {
   margin,
   type PlannedAssignment,
 } from "./estimate.js";
+import { priceAiUsageEvent } from "@docslurp/shared";
+import { buildLocalComputeUsageEvent } from "../pipeline/local-compute-cost.js";
 import { makePage, testCatalog } from "./testing.js";
 
 const catalog = testCatalog();
@@ -26,10 +29,10 @@ function planned(id: string, role: "chart-data" | "extract-text", cost: number, 
 }
 
 describe("estimateTargetCost", () => {
-  it("prices hosted VLMs from tokens and catalog pricing, with AI markup in billed", () => {
+  it("prices hosted VLMs from tokens and catalog pricing, without inventing resource revenue", () => {
     const c = estimateTargetCost(t("vlm:openrouter/google/gemini-3.5-flash"), "chart-data", page);
     expect(c.costUsd).toBeGreaterThan(0);
-    expect(c.billedUsd).toBeCloseTo(c.costUsd * 1.2, 10);
+    expect(c.billedUsd).toBe(0);
     const cheap = estimateTargetCost(t("vlm:openrouter/google/gemini-2.5-flash-lite"), "chart-data", page);
     expect(cheap.costUsd).toBeLessThan(c.costUsd);
   });
@@ -48,6 +51,48 @@ describe("estimateTargetCost", () => {
     const region = estimateTargetCost(g, "image-label", { kind: "image", imageIndex: 0 }, makePage({ images: [{ coverage: 0.3 }] })).costUsd;
     expect(region).toBeLessThan(full);
     expect(estimateTargetCost(g, "chart-data", page, undefined, { [g.id]: { cost: 2 } }).costUsd).toBeCloseTo(estimateTargetCost(g, "chart-data", page).costUsd * 2, 10);
+  });
+});
+
+describe("receipt revenue parity", () => {
+  it("does not turn CPU/GPU internal list references into customer revenue", () => {
+    const receipt = buildLocalComputeUsageEvent({
+      metric: "worker-page",
+      observation: { cpuSeconds: 1, memoryGbSeconds: 2, gpuSeconds: 1 },
+      env: { DOCSLURP_BILL_COMPUTE: "true" },
+    });
+    expect(receipt.metadata?.billable).toBe(false);
+    expect(Number(receipt.metadata?.internalListCredits)).toBeGreaterThan(0);
+    for (const target of catalog.filter((x) => ["native", "local-ocr", "local-labeler", "private-vlm"].includes(x.kind))) {
+      for (const scope of [page, { kind: "region", bbox: { x: 0, y: 0, width: 10, height: 10 } } as const]) {
+        const estimate = estimateTargetCost(target, "ocr", scope, undefined, { [target.id]: { cost: 2 } });
+        expect(estimate.costUsd).toBeGreaterThan(0);
+        expect(estimate.billedUsd).toBe(0);
+      }
+    }
+  });
+
+  it("keeps hosted and decision AI estimates consistent with cost-only receipts", () => {
+    const target = t("vlm:openrouter/google/gemini-3.5-flash");
+    const estimate = estimateTargetCost(target, "ocr", page);
+    const receipt = priceAiUsageEvent<{ provider: string; metric: string; costCents: number; metadata?: Record<string, unknown> }>({ provider: "openrouter", metric: "page-analysis", costCents: estimate.costUsd * 100 });
+    expect(receipt.metadata?.billable).toBe(false);
+    expect(receipt.costCents).toBe(0);
+    expect(estimate.billedUsd).toBe(0);
+    expect(aiBilledUsd(estimate.costUsd)).toBe(0);
+    expect(estimateRouterCost({ model: { pricing: { inputUsdPerMTok: 1, outputUsdPerMTok: 0, checkedAt: "x" }, maxQuestionsPerRequest: 128 }, pages: 1, questionsPerPage: 1, pagesPerCall: 1, tilePx: 384 }).billedUsd).toBe(0);
+  });
+
+  it("still defers positive-cost local work at a positive margin floor", () => {
+    const target = t("vlm:private/lightonocr-3");
+    const estimate = estimateTargetCost(target, "ocr", page);
+    const p = planned(target.id, "extract-text", estimate.costUsd);
+    p.billedUsd = estimate.billedUsd;
+    p.primary.billedUsd = estimate.billedUsd;
+    const result = applyBudgetGuard([p], { costUsd: 0, billedUsd: 0 }, { limitUsd: 1, marginFloor: 0.5 });
+    expect(result.deferred).toHaveLength(1);
+    expect(result.planned).toHaveLength(0);
+    expect(result.actions[0]?.action).toBe("defer");
   });
 });
 

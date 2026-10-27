@@ -112,6 +112,7 @@ describe("PdfRasterCache", () => {
       uri(key: string) { return `s3://test/${key}`; },
     };
     const runner = {
+      async pdfPageSizes() { return { binary: "pdfinfo", args: [], available: true }; },
       async renderPdfPageRange() { throw new Error("PDF renderer must not run"); },
       async run() { throw new Error("command runner must not run"); },
     };
@@ -166,11 +167,13 @@ describe("PdfRasterCache", () => {
     };
     const ranges: Array<[number, number]> = [];
     const runner = {
+      async pdfPageSizes() { return { binary: "pdfinfo", args: [], available: true }; },
       async renderPdfPageRange(_source: string, prefix: string, first: number, last: number) {
         ranges.push([first, last]);
         return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
       },
-      async run(plan: { args: string[] }) {
+      async run(plan: { binary?: string; args: string[] }) {
+        if (plan.binary === "pdfinfo") return { stdout: "Page 1 size: 612 x 792 pts", stderr: "" };
         const [prefix, firstText, lastText] = plan.args;
         for (let page = Number(firstText); page <= Number(lastText); page += 1) {
           await writeFile(`${prefix}-${String(page).padStart(digits, "0")}.png`, `page ${page}`);
@@ -200,7 +203,7 @@ describe("PdfRasterCache", () => {
     });
     expect(onRenderedPage.mock.calls.map(([page]) => page.pageNumber)).toEqual([2, 3, 5]);
 
-    expect(ranges).toEqual([[2, 3], [5, 5]]);
+    expect(ranges).toEqual([[2, 2], [3, 3], [5, 5]]);
     expect(first.map((page) => page.pageNumber)).toEqual([2, 3, 5]);
     expect(first.every((page) => !page.cacheHit)).toBe(true);
     expect(second.every((page) => page.cacheHit)).toBe(true);

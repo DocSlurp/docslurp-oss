@@ -1,15 +1,12 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { sql } from "../db.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 import {
   canManageWorkspace,
   getWorkspaceAccess,
   type WorkspaceAccess,
 } from "./organizations.js";
-
-const ALGORITHM = "aes-256-gcm";
-const IV_BYTES = 12;
 
 type WorkspaceSecretRow = {
   id: string;
@@ -50,36 +47,12 @@ type WorkspaceSecretMutationAccessArgs =
   | { access: WorkspaceSecretAccessGrant; userId?: never }
   | { userId: string; access?: never };
 
-function getEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY");
-}
-
 export function encryptSecret(plaintext: string): string {
-  const key = getEncryptionKey();
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv(ALGORITHM, key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  // Format: hex(iv):hex(tag):hex(ciphertext)
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("SECRETS_ENCRYPTION_KEY", plaintext);
 }
 
 export function decryptSecret(stored: string): string {
-  const parts = stored.split(":");
-  if (parts.length !== 3) {
-    throw new Error("Invalid encrypted secret format");
-  }
-
-  const [ivHex, tagHex, ciphertextHex] = parts;
-  const key = getEncryptionKey();
-  const iv = Buffer.from(ivHex, "hex");
-  const tag = Buffer.from(tagHex, "hex");
-  const ciphertext = Buffer.from(ciphertextHex, "hex");
-
-  const decipher = createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
-
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+  return openSecret("SECRETS_ENCRYPTION_KEY", stored);
 }
 
 function mapSecret(row: WorkspaceSecretRow): WorkspaceSecretRecord {

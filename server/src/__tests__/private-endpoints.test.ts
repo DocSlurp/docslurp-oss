@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrivacyModeViolationError, setPrivateModelEndpointRegistryForTests } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({ record: vi.fn(), sql: vi.fn((..._args: unknown[]) => Promise.resolve([])) }));
+vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 
@@ -151,7 +152,7 @@ describe("API private endpoint speech-to-text", () => {
     expect(privateSttModelFor("standard")).toBeUndefined();
     const voice = new WorkspaceChatVoice(context, "strict-privacy");
     expect(await voice.getListener()).toEqual({ enabled: true });
-    expect(await voice.listen(new Blob(["RIFF"], { type: "audio/wav" }))).toBe("Private question?");
+    expect(await voice.listen(new Blob([Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVE")])], { type: "audio/wav" }))).toBe("Private question?");
     const [url, init] = serverFetch.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe(`${BASE_URL}/audio/transcriptions`);
     expect(authOf([url, init])).toBe("Bearer app-secret");

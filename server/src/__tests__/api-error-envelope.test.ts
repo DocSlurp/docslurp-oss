@@ -1,13 +1,13 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { apiErrorResponse, apiStatusError, nativeApiErrors, nativeBodyLimit, nativeErrorHandler, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { apiPublicErrorMiddleware, publicErrorMiddleware } from "../lib/public-errors.js";
 import { ApiKeyWorkspaceNotAllowedError } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
-import { SpendBlockedError, spendAwareErrorHandler } from "../services/billing/spend-guard.js";
+import { SpendBlockedError, spendAwareErrorHandler, spendBlockedResponse } from "../services/billing/spend-guard.js";
 import { validationHook } from "../lib/validation.js";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
@@ -39,7 +39,7 @@ describe("thrown errors inside a native router", () => {
       .get("/forbidden", () => { throw new WorkspaceAccessError(403, "workspace_forbidden", "Default workspace is not accessible"); });
     const app = guarded(router);
     expect((await (await app.request("/org")).json()).error.code).toBe("organization_not_found");
-    expect((await (await app.request("/forbidden")).json()).error.code).toBe("forbidden");
+    expect((await (await app.request("/forbidden")).json()).error.code).toBe("workspace_forbidden");
   });
 
   it("keeps the headers of the error response (Retry-After, WWW-Authenticate)", async () => {
@@ -63,6 +63,10 @@ describe("thrown errors inside a native router", () => {
 });
 
 describe("app-level error handler", () => {
+  // This group checks protocol shape without hosted billing decoration;
+  // the billing-links group below covers the hosted response and its links.
+  beforeEach(() => { vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "self-hosted"); });
+  afterEach(() => { vi.unstubAllEnvs(); });
   function app() {
     const hono = new Hono();
     hono.onError(nativeErrorHandler((error, c) => spendAwareErrorHandler(error, c)));
@@ -74,6 +78,17 @@ describe("app-level error handler", () => {
     hono.get("/v1/chat/completions", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
     return hono;
   }
+
+  it("keeps structured reserve facts while stripping arbitrary provider details", async () => {
+    const hono = app().get("/v1/reserve", () => {
+      throw new SpendBlockedError("provider-private-text", "credit_exhausted", false, { account: "starter", spendKind: "job", availableCredits: 80, chatReserveCredits: 100, secret: "private" });
+    });
+    const body = await (await hono.request("/v1/reserve")).json();
+    expect(body.error.details).toMatchObject({ spendKind: "job", availableCredits: 80, chatReserveCredits: 100 });
+    // Plan labels never reach callers, even if a producer passes one.
+    expect(body.error.details.account).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("private");
+  });
 
   it("answers blocked spend, access errors and crashes in the envelope on native paths", async () => {
     const hono = app();
@@ -94,6 +109,93 @@ describe("app-level error handler", () => {
     const response = await app().request("/v1/chat/completions");
     expect(response.status).toBe(402);
     expect(await response.json()).toMatchObject({ error: PUBLIC_ERROR_MESSAGES.unavailable, code: "credit_exhausted" });
+  });
+});
+
+describe("billing links on 402", () => {
+  beforeEach(() => {
+    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_links");
+    vi.stubEnv("APP_URL", "https://docslurp.io/");
+    vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "");
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  function app() {
+    const hono = new Hono();
+    hono.onError(nativeErrorHandler((error, c) => spendAwareErrorHandler(error, c)));
+    hono.use("*", async (c, next) => { c.set("requestId", "req-links"); await next(); });
+    hono.use("*", apiPublicErrorMiddleware);
+    hono.get("/v1/spend", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
+    hono.get("/v1/budget", () => { throw new SpendBlockedError("Paused", "org_budget_paused"); });
+    hono.get("/v1/full-index", (c) => apiStatusError(c, 402, "Full indexing needs credits", { details: { category: "credits_required_for_full_index" } }));
+    hono.get("/v1/versions", (c) => apiErrorResponse(c, 402, "plan_not_entitled", "Paid plan needed", { category: "upgrade_required" }));
+    hono.get("/v1/mcp", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
+    hono.post("/v1/chat/completions", (c) => c.json({ error: { message: "x", type: "service_unavailable", param: null, code: "credit_exhausted", links: { billing: "https://docslurp.io/app/billing" } } }, 402));
+    return hono;
+  }
+
+  it("adds details.links, a Link header and copy that says where to buy credits", async () => {
+    const response = await app().request("/v1/spend");
+    expect(response.status).toBe(402);
+    expect(response.headers.get("Link")).toContain('<https://docslurp.io/app/billing>; rel="payment"');
+    expect(response.headers.get("Link")).not.toContain("/pricing");
+    const body = await response.json();
+    expect(apiErrorEnvelopeSchema.safeParse(body).success).toBe(true);
+    expect(body).toEqual({ error: {
+      code: "credit_exhausted",
+      message: "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#bl-topup, or turn on auto top-up at https://docslurp.io/app/billing#bl-auto-topup.",
+      details: { links: {
+        billing: "https://docslurp.io/app/billing",
+        buyCredits: "https://docslurp.io/app/billing#bl-topup",
+        autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup",
+        docs: "https://docslurp.io/docs/http#credits-and-budgets",
+      } },
+      requestId: "req-links",
+    } });
+  });
+
+  it("links budget pauses and entitlement errors to billing, never to an upgrade", async () => {
+    const budget = await (await app().request("/v1/budget")).json();
+    expect(budget.error.message).toBe(`${PUBLIC_ERROR_MESSAGES.budgetPaused} Review spend and budgets at https://docslurp.io/app/billing.`);
+    expect(budget.error.details.links).toEqual({ billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#credits-and-budgets" });
+    const versions = await (await app().request("/v1/versions")).json();
+    expect(versions.error).toMatchObject({ code: "plan_not_entitled", details: { category: "upgrade_required", links: { billing: "https://docslurp.io/app/billing" } } });
+    expect(versions.error.details.links.upgrade).toBeUndefined();
+    const fullIndex = await (await app().request("/v1/full-index")).json();
+    expect(fullIndex.error).toMatchObject({ code: "payment_required", details: { links: { buyCredits: "https://docslurp.io/app/billing#bl-topup" } } });
+  });
+
+  it("keeps links on protocol surfaces (MCP's flat body, the OpenAI error object)", async () => {
+    const mcp = await app().request("/v1/mcp");
+    expect(mcp.status).toBe(402);
+    expect(await mcp.json()).toMatchObject({
+      code: "credit_exhausted",
+      error: "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#bl-topup, or turn on auto top-up at https://docslurp.io/app/billing#bl-auto-topup.",
+      links: { buyCredits: "https://docslurp.io/app/billing#bl-topup", autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup" },
+    });
+    const openai = await app().request("/v1/chat/completions", { method: "POST" });
+    expect(await openai.json()).toMatchObject({ error: {
+      message: "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing.",
+      code: "credit_exhausted", links: { billing: "https://docslurp.io/app/billing" },
+    } });
+  });
+
+  it("drops links that are not absolute http(s) URLs", async () => {
+    const hono = new Hono();
+    hono.use("*", apiPublicErrorMiddleware);
+    hono.get("/v1/x", (c) => c.json({ error: { code: "credit_exhausted", message: "x", details: { links: { billing: "javascript:alert(1)", docs: "https://docslurp.io/docs" } } } }, 402));
+    const body = await (await hono.request("/v1/x")).json();
+    expect(body.error.details.links).toEqual({ docs: "https://docslurp.io/docs" });
+  });
+
+  it("sends no links or Link header on self-hosted deployments", async () => {
+    vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "self-hosted");
+    const response = await app().request("/v1/spend");
+    expect(response.headers.get("Link")).toBeNull();
+    expect(await response.json()).toEqual({ error: { code: "credit_exhausted", message: PUBLIC_ERROR_MESSAGES.creditExhausted, requestId: "req-links" } });
+    const hono = new Hono();
+    hono.get("/x", (c) => spendBlockedResponse(c, new SpendBlockedError("Out", "credit_exhausted")));
+    expect(await (await hono.request("/x")).json()).toEqual({ error: PUBLIC_ERROR_MESSAGES.unavailable, code: "credit_exhausted" });
   });
 });
 

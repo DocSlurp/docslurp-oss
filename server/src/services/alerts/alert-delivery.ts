@@ -14,7 +14,8 @@ export interface AlertDeliveryConfig {
   webhookUrl: string | null;
   /**
    * Telegram (the signup-notification bot): TELEGRAM_BOT_TOKEN plus
-   * ALERT_TELEGRAM_CHAT_ID, else TELEGRAM_CHAT_ID. ALERT_TELEGRAM=off disables.
+   * ALERT_TELEGRAM_CHAT_ID, else TELEGRAM_CHAT_ID. Requires NODE_ENV=production.
+   * ALERT_TELEGRAM=off disables even in production.
    */
   telegram?: { token: string; chatId: string } | null;
   format: AlertWebhookFormat;
@@ -32,7 +33,7 @@ export function resolveAlertDeliveryConfig(env: NodeJS.ProcessEnv = process.env,
   const telegramOff = ["0", "false", "off", "no"].includes(env.ALERT_TELEGRAM?.trim().toLowerCase() ?? "");
   return {
     webhookUrl: env.ALERT_WEBHOOK_URL?.trim() || null,
-    telegram: telegramToken && telegramChat && !telegramOff ? { token: telegramToken, chatId: telegramChat } : null,
+    telegram: env.NODE_ENV === "production" && telegramToken && telegramChat && !telegramOff ? { token: telegramToken, chatId: telegramChat } : null,
     format: format === "json" ? "json" : "slack",
     environment: env.ALERT_ENVIRONMENT?.trim() || env.FLY_APP_NAME?.trim() || env.NODE_ENV?.trim() || "development",
     instance,
@@ -97,11 +98,16 @@ export async function deliverAlert(
   config: AlertDeliveryConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  // Tenant funding belongs in its dashboard, never in operator channels.
+  if (notification.id.startsWith("credits-running-low:") || notification.id.startsWith("credit-resume-delayed:")) return;
   const line = formatAlertLogLine(notification, config);
   if (notification.status === "firing") console.error(line);
   else console.log(line);
-  if (config.telegram) await deliverTelegram(notification, config, config.telegram, fetchImpl);
-  if (!config.webhookUrl) return;
+  const telegramDelivered = !config.telegram || await deliverTelegram(notification, config, config.telegram, fetchImpl);
+  if (!config.webhookUrl) {
+    if (!telegramDelivered) throw new Error("Telegram alert delivery incomplete");
+    return;
+  }
   try {
     const response = await fetchImpl(config.webhookUrl, {
       method: "POST",
@@ -115,6 +121,7 @@ export async function deliverAlert(
   } catch (error) {
     console.error(`[alert] webhook delivery failed id=${notification.id} error=${quote(error instanceof Error ? error.message : String(error))}`);
   }
+  if (!telegramDelivered) throw new Error("Telegram alert delivery incomplete");
 }
 
 /** Plain-text Telegram message; failures are logged without the token-bearing URL. */
@@ -123,7 +130,7 @@ async function deliverTelegram(
   config: AlertDeliveryConfig,
   telegram: { token: string; chatId: string },
   fetchImpl: typeof fetch,
-): Promise<void> {
+): Promise<boolean> {
   const text = formatAlertPayload(notification, { ...config, format: "slack" }).text;
   try {
     const response = await fetchImpl(`https://api.telegram.org/bot${telegram.token}/sendMessage`, {
@@ -132,9 +139,13 @@ async function deliverTelegram(
       body: JSON.stringify({ chat_id: telegram.chatId, text: String(text).replace(/[*`]/g, "").slice(0, 4096), disable_web_page_preview: true }),
       signal: AbortSignal.timeout(config.timeoutMs),
     });
-    if (!response.ok) console.error(`[alert] telegram delivery failed id=${notification.id} status=${response.status}`);
+    const result = await response.json().catch(() => null) as { ok?: boolean } | null;
+    if (!response.ok || result?.ok !== true) console.error(`[alert] telegram delivery failed id=${notification.id} status=${response.status}`);
+    else console.log(`[alert] telegram delivered id=${notification.id} status=${notification.status}`);
+    return response.ok && result?.ok === true;
   } catch {
     // The request URL carries the bot token: never log the error.
     console.error(`[alert] telegram delivery failed id=${notification.id}`);
+    return false;
   }
 }

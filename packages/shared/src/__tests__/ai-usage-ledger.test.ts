@@ -85,8 +85,8 @@ describe("AI usage ledger helpers", () => {
         model: "qwen/qwen3.5-flash-02-23",
       }),
     ).toEqual({
-      costPer1kInputTokens: 0.01,
-      costPer1kOutputTokens: 0.03,
+      costPer1kInputTokens: 0.0065,
+      costPer1kOutputTokens: 0.026,
     });
 
     expect(
@@ -97,7 +97,7 @@ describe("AI usage ledger helpers", () => {
         inputTokens: 1200,
         outputTokens: 500,
       }).costCents,
-    ).toBeCloseTo(0.027, 10);
+    ).toBeCloseTo(0.0208, 10);
 
     expect(
       estimateAiUsageCostCents(

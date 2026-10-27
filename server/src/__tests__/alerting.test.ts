@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { QueueSnapshot } from "../services/alerts/alert-rules.js";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("../lib/temporal.js", () => ({ describeTaskQueuePollers: vi.fn(), workerTaskQueues: vi.fn(() => []) }));
@@ -223,7 +224,7 @@ describe("alert evaluator", () => {
     const delivered: Array<{ status: string; id: string }> = [];
     const deps = {
       tryLease: vi.fn(async () => true),
-      readQueue: vi.fn(async () => ({ queueDepth: 2, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: 5_000 })),
+      readQueue: vi.fn(async (): Promise<QueueSnapshot> => ({ queueDepth: 2, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: 5_000 })),
       readMigrations: vi.fn(async () => ({ appliedCount: 2, latestAppliedWhen: 200, journal })),
       readTemporal: vi.fn(async () => ({ ok: true as const, queues: [{ name: "q", type: "activity" as const, pollers: [{ identity: "docslurp-worker-m1-1", lastAccessMs: now }] }] })),
       readHttp: vi.fn(() => ({ total: 0, errors5xx: 0 })),
@@ -241,6 +242,17 @@ describe("alert evaluator", () => {
     }, deps);
     return { instance, deps, delivered, advance: (ms: number) => { now += ms; } };
   }
+
+  it("retries failed Telegram delivery on the next evaluation without a new alert transition", async () => {
+    const deliver = vi.fn().mockRejectedValueOnce(new Error("Telegram failed")).mockResolvedValue(undefined);
+    const { instance, advance } = evaluator({ deliver });
+    await instance.tick(); advance(60000); await instance.tick();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    advance(60000); await instance.tick();
+    expect(deliver).toHaveBeenCalledTimes(2);
+    advance(60000); await instance.tick();
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
 
   it("notifies once after consecutive failures and resolves when the queue drains", async () => {
     const { instance, deps, delivered, advance } = evaluator();

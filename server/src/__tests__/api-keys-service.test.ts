@@ -230,6 +230,12 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     expect(() => assertClientKeySensitiveScopes("client", ["artifacts"], [], true)).toThrow(/limited to specific workspaces/);
     expect(() => assertClientKeySensitiveScopes("client", ["ingest", "artifacts"], ["ws-1"], true)).not.toThrow();
     expect(() => assertClientKeySensitiveScopes("server", ["ingest", "artifacts"], [], false)).not.toThrow();
+    // Web tools spend credits on the open web: opt-in and workspace-bound, like ingest.
+    expect(() => assertClientKeySensitiveScopes("client", ["search", "web"], ["ws-1"], false)).toThrow(/search-only by default/);
+    expect(() => assertClientKeySensitiveScopes("client", ["search", "web"], [], true)).toThrow(/limited to specific workspaces/);
+    expect(() => assertClientKeySensitiveScopes("client", ["search", "web"], ["ws-1"], true)).not.toThrow();
+    // Chat is a plain opt-in scope for answer widgets, not a sensitive one.
+    expect(() => assertClientKeySensitiveScopes("client", ["search", "chat"], [], false)).not.toThrow();
   });
 
   it("rejects allowlisted workspaces outside the key's org", async () => {
