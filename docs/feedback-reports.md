@@ -21,8 +21,9 @@ severity, alerts the team live.
 - **Live alert (high severity only):** the server sends the alert through the
   same channels as operational alerts: Telegram and/or `ALERT_WEBHOOK_URL`. The
   alert carries the reference, org name and ID, user email, category, screen,
-  route, error code, trace ID, request ID, a SigNoz trace link (when
-  `SIGNOZ_UI_URL` is set) and a 280-character excerpt of the message.
+  route, error code, the trace and request IDs (labelled client-reported), a
+  SigNoz trace link (when `SIGNOZ_UI_URL` is set) and a 280-character excerpt
+  of the message.
 
 Normal-severity reports are stored and logged only. They are not emailed.
 
@@ -37,6 +38,9 @@ Check these variables for presence only. Never print their values.
 | `ALERT_ENVIRONMENT` | The environment label in the alert. Defaults to the Fly app name. |
 | `SIGNOZ_UI_URL` | Base URL of the SigNoz UI (https). Alerts then link to `<SIGNOZ_UI_URL>/trace/<traceId>`. |
 | `FEEDBACK_ALERTS=off` | Stores high-severity reports without paging, and leaves operational alerts unchanged. |
+| `FEEDBACK_PAGES_PER_HOUR` | Deployment-wide live pages per rolling hour (default 20). |
+| `FEEDBACK_RETENTION_DAYS`, `FEEDBACK_MAX_REPORTS_PER_ORG` | Retention: reports older than this many days are deleted (default 180), and each org keeps at most this many, newest first (default 5,000). |
+| `TRUST_INBOUND_TRACEPARENT=true` | Join callers' traces. Only for deployments behind a trusted gateway; see Trace IDs. |
 
 If no channel is configured, a high-severity report is stored with
 `alert_status = 'unconfigured'` and the server logs an error. The user sees a
@@ -50,22 +54,34 @@ support queue.
 - **Rate limits** count over a rolling hour: 20 reports per user (across all
   their orgs) and 100 per org. Over either limit, the server answers `429
   rate_limited` with `Retry-After` and stores nothing.
-- **Paging limits** also count over a rolling hour: 3 live pages per user and 10
-  per org. A high-severity report that repeats the same user's text from the
-  last 24 hours does not page either. Case, whitespace and the prefilled `When:`
-  line are ignored when comparing. Such reports are still stored
-  (`alert_status = 'suppressed'` with `alert_suppressed_reason`), and the user
-  sees "The team already has your high-priority report".
+- **Paging limits** also count over a rolling hour: 3 live pages per user, 10
+  per org and `FEEDBACK_PAGES_PER_HOUR` (20) per deployment. A capped report is
+  still stored (`alert_status = 'suppressed'` with `alert_suppressed_reason`),
+  and the user sees "Saved to the support queue; no new live alert because
+  several were sent this hour." When the deployment-wide cap trips, the first
+  capped report of the hour sends one summary page ("N more high-severity
+  reports suppressed this hour") instead of going silent (`summary_paged`).
+- A high-severity report that repeats the same user's text from the last 24
+  hours, after a page that was sent, does not page again, and the user sees
+  "The team already has your high-priority report". Case, whitespace and the
+  prefilled `When:`, `Trace ID:` and `Request ID:` lines are ignored when
+  comparing. A page that failed doesn't count, so a retry can page again
+  within the caps.
 - Counting and inserting run under transaction-scoped advisory locks on the user
   and the org, so concurrent submissions cannot slip past a cap.
 - Messages are capped at 4,000 characters and the request body at 16 KB.
-  Route query strings and fragments are dropped. A malformed trace ID, request
+  Routes are stored as templates: query strings and fragments are dropped,
+  and invite tokens, UUIDs and long opaque segments become `:token` or `:id`. A malformed trace ID, request
   ID, error code or timestamp is discarded, not stored.
 - **Alert text** is plain text. Telegram receives it without a `parse_mode`.
   Slack-style webhooks receive `&`, `<` and `>` entity-escaped, so `<!channel>`
   and `<url|text>` stay literal. Every user-controlled value is flattened to
-  one line, so a report cannot forge alert fields. Control, zero-width and bidi
-  characters are removed, and URLs are defanged (`hxxps[://]example[.]com`).
+  one line, so a report cannot forge alert fields. Control characters, every
+  Unicode format character (`\p{Cf}`: zero-width, bidi, tags and the like),
+  variation selectors, U+00AD, U+061C and U+180E are removed. Links are
+  defanged: schemes become `hxxps[://]`, and every dot between letters or
+  digits becomes `[.]`, which covers domains, IDN TLDs, full-width dots and IP
+  addresses. `@mentions` become `[at]` and leading `/commands` become `[/]`.
 
 ## Tenant scope
 
@@ -79,7 +95,17 @@ reports.
 ## Trace IDs
 
 Every API response carries a W3C `traceparent` header when tracing is active.
-The trace ID is its second field. The CORS policy already exposes this header,
+The trace ID is its second field. The API does not join a caller's trace:
+each request starts a new root span, sampled by the API's own sampler, that
+links to the inbound span and keeps its baggage, so a client cannot choose
+the trace ID or force sampling. The app prefills a trace ID only when the
+response says it was sampled (flags `01`), so the SigNoz link works. The CORS policy already exposes this header,
 and native error envelopes keep their `requestId`. The app records both from
 failed responses and prefills them into the report, so support can open the
 trace without the user ever seeing raw error text.
+
+## Retention
+
+The maintenance sweep purges reports hourly, in batches. It deletes reports
+older than `FEEDBACK_RETENTION_DAYS` (180), then the oldest reports of any org
+over `FEEDBACK_MAX_REPORTS_PER_ORG` (5,000).

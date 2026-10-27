@@ -201,6 +201,19 @@ describe("POST /v1/feedback", () => {
     expect(rows.map((row) => [row.alert_suppressed_reason, row.summary_paged])).toEqual([["global_hourly_cap", true], ["global_hourly_cap", false]]);
   });
 
+  it("purges reports past retention and beyond the per-org cap", async () => {
+    const { purgeFeedbackReports } = await import("../services/feedback-reports.js");
+    await sql`insert into feedback_reports (id, reference, org_id, user_id, category, severity, message, message_hash, created_at)
+      values ('old', 'FB-OLD', 'oa', 'ua', 'bug', 'normal', 'm', 'h', now() - interval '200 days'),
+        ('a1', 'FB-A1', 'oa', 'ua', 'bug', 'normal', 'm', 'h', now() - interval '3 hours'),
+        ('a2', 'FB-A2', 'oa', 'ua', 'bug', 'normal', 'm', 'h', now() - interval '2 hours'),
+        ('a3', 'FB-A3', 'oa', 'ua', 'bug', 'normal', 'm', 'h', now() - interval '1 hour'),
+        ('b1', 'FB-B1', 'ob', 'ub', 'bug', 'normal', 'm', 'h', now() - interval '3 hours')`;
+    expect(await purgeFeedbackReports({ sql: sql as never, env: { FEEDBACK_MAX_REPORTS_PER_ORG: "2" } })).toEqual({ expired: 1, overCap: 1 });
+    const rows = await sql`select id from feedback_reports order by id`;
+    expect(rows.map((row) => row.id)).toEqual(["a2", "a3", "b1"]);
+  });
+
   it("tells the user honestly when the live alert could not be delivered", async () => {
     sendAlert.mockResolvedValue("failed");
     const response = await post({ ...base, severity: "high" });

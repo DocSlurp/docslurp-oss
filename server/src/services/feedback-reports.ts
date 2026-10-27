@@ -482,3 +482,50 @@ export function serverAppVersion(env: NodeJS.ProcessEnv = process.env): string |
   const value = env.DOCSLURP_GIT_SHA?.trim() || env.FLY_IMAGE_REF?.trim() || env.FLY_MACHINE_VERSION?.trim() || null;
   return value ? value.slice(0, 200) : null;
 }
+
+// ---------------------------------------------------------------------------
+// Retention: reports older than FEEDBACK_RETENTION_DAYS (default 180) are
+// deleted, and each org keeps at most FEEDBACK_MAX_REPORTS_PER_ORG (default
+// 5,000), newest first. Batched and run at most hourly per process.
+// ---------------------------------------------------------------------------
+
+export const FEEDBACK_RETENTION_DEFAULTS = Object.freeze({ days: 180, perOrg: 5_000, batch: 1_000, intervalMs: 60 * 60 * 1000 });
+
+function positiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value?.trim());
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export async function purgeFeedbackReports(deps: { sql?: Sql; env?: NodeJS.ProcessEnv } = {}): Promise<{ expired: number; overCap: number }> {
+  const sql = deps.sql ?? defaultSql;
+  const env = deps.env ?? process.env;
+  const days = positiveInt(env.FEEDBACK_RETENTION_DAYS, FEEDBACK_RETENTION_DEFAULTS.days);
+  const perOrg = positiveInt(env.FEEDBACK_MAX_REPORTS_PER_ORG, FEEDBACK_RETENTION_DEFAULTS.perOrg);
+  const batch = FEEDBACK_RETENTION_DEFAULTS.batch;
+  const expired = await sql`
+    delete from feedback_reports where id in (
+      select id from feedback_reports where created_at < now() - make_interval(days => ${days}) limit ${batch}
+    )
+  `;
+  const overCap = await sql`
+    delete from feedback_reports where id in (
+      select id from (
+        select id, row_number() over (partition by org_id order by created_at desc, id desc) as rank
+        from feedback_reports
+        where org_id in (select org_id from feedback_reports group by org_id having count(*) > ${perOrg})
+      ) ranked where rank > ${perOrg} limit ${batch}
+    )
+  `;
+  const result = { expired: expired.count, overCap: overCap.count };
+  if (result.expired || result.overCap) console.log(`[feedback] retention purge expired=${result.expired} over_cap=${result.overCap} days=${days} per_org=${perOrg}`);
+  return result;
+}
+
+let lastPurgeAt = 0;
+
+/** Maintenance-sweep entry: purges at most once an hour per process. */
+export async function sweepFeedbackReports(now = Date.now()): Promise<void> {
+  if (now - lastPurgeAt < FEEDBACK_RETENTION_DEFAULTS.intervalMs) return;
+  lastPurgeAt = now;
+  await purgeFeedbackReports();
+}
