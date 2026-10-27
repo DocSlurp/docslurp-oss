@@ -1,0 +1,390 @@
+{
+  "runId": "069eb2de141c445794b754546e2c079e",
+  "runnerBundleSha256": "81bc95247725bf547c67bb2060bc9ace01d499de622d06d2245594cd57e09ff4",
+  "image": "ghcr.io/docslurp/worker-document-vm@sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+  "indexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+  "request": {
+    "model": "pp-small-onnx",
+    "device": "cpu",
+    "modelId": "PaddlePaddle/PP-DocLayout-S",
+    "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+    "artifactSha256": "ccfa68bc3ae28999c172ed232b036dfc283801225c97949bf1f30186ea929e9d",
+    "inferenceProfileSha256": "402045d01939270ce7a497120f2c569d8bc42764d567b0b66ff311e66e485182"
+  },
+  "syntheticSourceSha256": "a8927b55a9cdc91a76bab7e4de92cd8bf3dbac955ecd7628b17442bed58a4c9c",
+  "startedAt": "2026-10-27T17:36:54.476784+00:00",
+  "limits": {
+    "runtime": "vm",
+    "cpu": [
+      2,
+      2
+    ],
+    "memory": [
+      1024,
+      1024
+    ],
+    "timeout": 1800,
+    "block_network": true,
+    "include_oidc_identity_token": false,
+    "env": {},
+    "secrets": [],
+    "volumes": {},
+    "network_file_systems": {},
+    "gpu": null
+  },
+  "authorization": {
+    "aggregateCapUsd": 20,
+    "maximumVms": 1,
+    "expirySeconds": 1800,
+    "retries": 0,
+    "deploy": false,
+    "sharedSpendLimitInvestigationWaived": true
+  },
+  "sandboxId": "sb-01M5Z704F61QSGXCNTNWZHBJDW",
+  "createInvocations": 1,
+  "checks": [
+    {
+      "name": "prepare",
+      "startedAt": "2026-10-27T17:37:17.261941+00:00",
+      "completedAt": "2026-10-27T17:37:17.499867+00:00",
+      "seconds": 0.23792650387622416,
+      "exitCode": 0,
+      "stdoutBytes": 33,
+      "stderrBytes": 0
+    },
+    {
+      "name": "canonical-before",
+      "startedAt": "2026-10-27T17:37:17.500171+00:00",
+      "completedAt": "2026-10-27T17:37:17.602634+00:00",
+      "seconds": 0.10246800491586328,
+      "exitCode": 0,
+      "stdoutBytes": 87,
+      "stderrBytes": 0
+    },
+    {
+      "name": "layout",
+      "startedAt": "2026-10-27T17:37:17.603008+00:00",
+      "completedAt": "2026-10-27T17:37:18.571975+00:00",
+      "seconds": 0.9689695921260864,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 5275
+    },
+    {
+      "name": "layout-output",
+      "startedAt": "2026-10-27T17:37:18.572288+00:00",
+      "completedAt": "2026-10-27T17:37:18.674118+00:00",
+      "seconds": 0.10183192905969918,
+      "exitCode": 0,
+      "stdoutBytes": 3465,
+      "stderrBytes": 0
+    },
+    {
+      "name": "encode-stage",
+      "startedAt": "2026-10-27T17:37:18.674516+00:00",
+      "completedAt": "2026-10-27T17:37:18.778973+00:00",
+      "seconds": 0.10446321009658277,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "encode-webp",
+      "startedAt": "2026-10-27T17:37:18.779402+00:00",
+      "completedAt": "2026-10-27T17:37:18.918195+00:00",
+      "seconds": 0.13878921302966774,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "decode-stage",
+      "startedAt": "2026-10-27T17:37:18.918493+00:00",
+      "completedAt": "2026-10-27T17:37:19.020230+00:00",
+      "seconds": 0.10173988901078701,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "decode-webp",
+      "startedAt": "2026-10-27T17:37:19.020538+00:00",
+      "completedAt": "2026-10-27T17:37:19.153808+00:00",
+      "seconds": 0.13327196799218655,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "pixel-roundtrip",
+      "startedAt": "2026-10-27T17:37:19.154131+00:00",
+      "completedAt": "2026-10-27T17:37:19.276079+00:00",
+      "seconds": 0.12194999284110963,
+      "exitCode": 0,
+      "stdoutBytes": 141,
+      "stderrBytes": 0
+    },
+    {
+      "name": "missing-modelId",
+      "startedAt": "2026-10-27T17:37:19.276628+00:00",
+      "completedAt": "2026-10-27T17:37:19.378827+00:00",
+      "seconds": 0.10220124805346131,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 330
+    },
+    {
+      "name": "wrong-modelId",
+      "startedAt": "2026-10-27T17:37:19.379283+00:00",
+      "completedAt": "2026-10-27T17:37:19.483997+00:00",
+      "seconds": 0.10471633402630687,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 469
+    },
+    {
+      "name": "missing-revision",
+      "startedAt": "2026-10-27T17:37:19.484451+00:00",
+      "completedAt": "2026-10-27T17:37:19.587790+00:00",
+      "seconds": 0.1033403321634978,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 331
+    },
+    {
+      "name": "wrong-revision",
+      "startedAt": "2026-10-27T17:37:19.588250+00:00",
+      "completedAt": "2026-10-27T17:37:19.690188+00:00",
+      "seconds": 0.1019399450160563,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 470
+    },
+    {
+      "name": "missing-artifactSha256",
+      "startedAt": "2026-10-27T17:37:19.690674+00:00",
+      "completedAt": "2026-10-27T17:37:19.792268+00:00",
+      "seconds": 0.10159702505916357,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 337
+    },
+    {
+      "name": "wrong-artifactSha256",
+      "startedAt": "2026-10-27T17:37:19.792753+00:00",
+      "completedAt": "2026-10-27T17:37:19.895171+00:00",
+      "seconds": 0.10242059594020247,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 476
+    },
+    {
+      "name": "missing-inferenceProfileSha256",
+      "startedAt": "2026-10-27T17:37:19.895642+00:00",
+      "completedAt": "2026-10-27T17:37:20.011398+00:00",
+      "seconds": 0.11575805186294019,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 345
+    },
+    {
+      "name": "wrong-inferenceProfileSha256",
+      "startedAt": "2026-10-27T17:37:20.011869+00:00",
+      "completedAt": "2026-10-27T17:37:20.164843+00:00",
+      "seconds": 0.15297451592050493,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 484
+    },
+    {
+      "name": "wrong-model",
+      "startedAt": "2026-10-27T17:37:20.165343+00:00",
+      "completedAt": "2026-10-27T17:37:20.267811+00:00",
+      "seconds": 0.10247113206423819,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 474
+    },
+    {
+      "name": "wrong-device",
+      "startedAt": "2026-10-27T17:37:20.268253+00:00",
+      "completedAt": "2026-10-27T17:37:20.374258+00:00",
+      "seconds": 0.10600851778872311,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 331
+    },
+    {
+      "name": "stage-malformed",
+      "startedAt": "2026-10-27T17:37:20.374806+00:00",
+      "completedAt": "2026-10-27T17:37:20.477168+00:00",
+      "seconds": 0.10236420994624496,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "reject-malformed",
+      "startedAt": "2026-10-27T17:37:20.477663+00:00",
+      "completedAt": "2026-10-27T17:37:20.597283+00:00",
+      "seconds": 0.11962646688334644,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 509
+    },
+    {
+      "name": "image-reject-malformed",
+      "startedAt": "2026-10-27T17:37:20.598027+00:00",
+      "completedAt": "2026-10-27T17:37:20.703447+00:00",
+      "seconds": 0.10541444085538387,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 262
+    },
+    {
+      "name": "stage-oversized.png",
+      "startedAt": "2026-10-27T17:37:20.703921+00:00",
+      "completedAt": "2026-10-27T17:37:20.807119+00:00",
+      "seconds": 0.10320202494040132,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "reject-oversized.png",
+      "startedAt": "2026-10-27T17:37:20.807633+00:00",
+      "completedAt": "2026-10-27T17:37:20.911749+00:00",
+      "seconds": 0.10411706496961415,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 321
+    },
+    {
+      "name": "image-reject-oversized.png",
+      "startedAt": "2026-10-27T17:37:20.912347+00:00",
+      "completedAt": "2026-10-27T17:37:21.013916+00:00",
+      "seconds": 0.101571582024917,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 129
+    },
+    {
+      "name": "stage-animated.png",
+      "startedAt": "2026-10-27T17:37:21.014411+00:00",
+      "completedAt": "2026-10-27T17:37:21.117337+00:00",
+      "seconds": 0.10292951879091561,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "reject-animated.png",
+      "startedAt": "2026-10-27T17:37:21.117850+00:00",
+      "completedAt": "2026-10-27T17:37:21.222543+00:00",
+      "seconds": 0.10469476506114006,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 321
+    },
+    {
+      "name": "image-reject-animated.png",
+      "startedAt": "2026-10-27T17:37:21.223050+00:00",
+      "completedAt": "2026-10-27T17:37:21.329018+00:00",
+      "seconds": 0.10596986184827983,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 129
+    },
+    {
+      "name": "stage-large",
+      "startedAt": "2026-10-27T17:37:21.329510+00:00",
+      "completedAt": "2026-10-27T17:37:21.431934+00:00",
+      "seconds": 0.1024260378908366,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "reject-large",
+      "startedAt": "2026-10-27T17:37:21.432432+00:00",
+      "completedAt": "2026-10-27T17:37:21.533979+00:00",
+      "seconds": 0.10155014996416867,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 436
+    },
+    {
+      "name": "restore-synthetic",
+      "startedAt": "2026-10-27T17:37:21.534597+00:00",
+      "completedAt": "2026-10-27T17:37:21.636150+00:00",
+      "seconds": 0.10155406617559493,
+      "exitCode": 0,
+      "stdoutBytes": 0,
+      "stderrBytes": 0
+    },
+    {
+      "name": "tamper-copy",
+      "startedAt": "2026-10-27T17:37:21.636634+00:00",
+      "completedAt": "2026-10-27T17:37:21.738818+00:00",
+      "seconds": 0.10218582302331924,
+      "exitCode": 0,
+      "stdoutBytes": 29,
+      "stderrBytes": 0
+    },
+    {
+      "name": "tampered-copy-refused",
+      "startedAt": "2026-10-27T17:37:21.739387+00:00",
+      "completedAt": "2026-10-27T17:37:21.840680+00:00",
+      "seconds": 0.10129670705646276,
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 615
+    },
+    {
+      "name": "canonical-after",
+      "startedAt": "2026-10-27T17:37:21.841227+00:00",
+      "completedAt": "2026-10-27T17:37:21.942667+00:00",
+      "seconds": 0.1014418201521039,
+      "exitCode": 0,
+      "stdoutBytes": 87,
+      "stderrBytes": 0
+    },
+    {
+      "name": "blocked-network",
+      "startedAt": "2026-10-27T17:37:21.943211+00:00",
+      "completedAt": "2026-10-27T17:37:22.045519+00:00",
+      "seconds": 0.10230904608033597,
+      "exitCode": 0,
+      "stdoutBytes": 74,
+      "stderrBytes": 0
+    },
+    {
+      "name": "resources",
+      "startedAt": "2026-10-27T17:37:22.046131+00:00",
+      "completedAt": "2026-10-27T17:37:22.148498+00:00",
+      "seconds": 0.10236907587386668,
+      "exitCode": 0,
+      "stdoutBytes": 104,
+      "stderrBytes": 0
+    }
+  ],
+  "termination": {
+    "verified": true,
+    "requestedAt": "2026-10-27T17:37:22.209982+00:00",
+    "verifiedAt": "2026-10-27T17:37:22.514815+00:00",
+    "providerReturnCode": 137
+  },
+  "providerUsage": {
+    "billedUsd": null,
+    "status": "Per-sandbox billing unavailable in public SDK; coordinator reconciliation required"
+  },
+  "status": "checks-passed",
+  "createRequestedAt": "2026-10-27T17:36:54.939860+00:00",
+  "registryAuthMode": "ephemeral image-pull secret only",
+  "createReturnedAt": "2026-10-27T17:37:16.307395+00:00",
+  "workFinishedAt": "2026-10-27T17:37:22.149019+00:00",
+  "completedAt": "2026-10-27T17:37:22.514828+00:00",
+  "elapsedHostSeconds": 28.03818738600239,
+  "computeEstimateOnlyUsd": 0.0023975454033770644,
+  "computeAllocationCeilingUsdExcludingImportStorageNetwork": 0.153918
+}

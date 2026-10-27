@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 70, in <module>
+    main(json.loads(sys.argv[1]))
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 44, in main
+    with Image.open(io.BytesIO(data)) as image:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/PIL/Image.py", line 3715, in open
+    raise UnidentifiedImageError(msg)
+PIL.UnidentifiedImageError: cannot identify image file <_io.BytesIO object at 0x7fb02ea54db0>

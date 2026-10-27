@@ -1,0 +1,155 @@
+{
+  "runId": "069eb2de141c445794b754546e2c079e",
+  "sandboxId": "sb-01M5Z704F61QSGXCNTNWZHBJDW",
+  "runnerExitCode": 0,
+  "runnerExitCodeSource": "parent execution report",
+  "runnerStatus": "checks-passed",
+  "image": "ghcr.io/docslurp/worker-document-vm@sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+  "indexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+  "request": {
+    "model": "pp-small-onnx",
+    "device": "cpu",
+    "modelId": "PaddlePaddle/PP-DocLayout-S",
+    "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+    "artifactSha256": "ccfa68bc3ae28999c172ed232b036dfc283801225c97949bf1f30186ea929e9d",
+    "inferenceProfileSha256": "402045d01939270ce7a497120f2c569d8bc42764d567b0b66ff311e66e485182"
+  },
+  "runnerBundleSha256": "81bc95247725bf547c67bb2060bc9ace01d499de622d06d2245594cd57e09ff4",
+  "createInvocations": 1,
+  "resourceRequest": {
+    "runtime": "vm",
+    "cpu": [
+      2,
+      2
+    ],
+    "memory": [
+      1024,
+      1024
+    ],
+    "timeout": 1800,
+    "block_network": true,
+    "include_oidc_identity_token": false,
+    "env": {},
+    "secrets": [],
+    "volumes": {},
+    "network_file_systems": {},
+    "gpu": null
+  },
+  "registryAuthMode": "ephemeral image-pull secret only",
+  "timestamps": {
+    "startedAt": "2026-10-27T17:36:54.476784+00:00",
+    "createRequestedAt": "2026-10-27T17:36:54.939860+00:00",
+    "createReturnedAt": "2026-10-27T17:37:16.307395+00:00",
+    "workFinishedAt": "2026-10-27T17:37:22.149019+00:00",
+    "completedAt": "2026-10-27T17:37:22.514828+00:00"
+  },
+  "timingsSeconds": {
+    "createRequestToReturnIncludesLazyImportProvisioning": 21.367535,
+    "commandDurationSum": 4.869860662380233,
+    "checkSequenceWallTime": 4.886557,
+    "hostTotal": 28.03818738600239,
+    "layoutCommand": 0.9689695921260864,
+    "encodeWebpCommand": 0.13878921302966774,
+    "decodeWebpCommand": 0.13327196799218655
+  },
+  "results": {
+    "totalSteps": 36,
+    "successfulSteps": 18,
+    "expectedRefusalSteps": 18,
+    "unexpectedFailures": 0,
+    "expectedRefusals": [
+      "missing-modelId",
+      "wrong-modelId",
+      "missing-revision",
+      "wrong-revision",
+      "missing-artifactSha256",
+      "wrong-artifactSha256",
+      "missing-inferenceProfileSha256",
+      "wrong-inferenceProfileSha256",
+      "wrong-model",
+      "wrong-device",
+      "reject-malformed",
+      "image-reject-malformed",
+      "reject-oversized.png",
+      "image-reject-oversized.png",
+      "reject-animated.png",
+      "image-reject-animated.png",
+      "reject-large",
+      "tampered-copy-refused"
+    ],
+    "layoutRegions": 4,
+    "image": {
+      "width": 800,
+      "height": 1000,
+      "sha256": "a8927b55a9cdc91a76bab7e4de92cd8bf3dbac955ecd7628b17442bed58a4c9c"
+    },
+    "exactWebpPixelRoundtrip": {
+      "exactPixelRoundtrip": true,
+      "width": 800,
+      "height": 1000,
+      "rgbSha256": "5142d0c68cc6d9e168fc9c9dc4ecef5c886cd64ce4ff76db4b57ec396b333b4b"
+    },
+    "canonicalAssetsVerifiedBeforeAndAfter": true
+  },
+  "termination": {
+    "verified": true,
+    "requestedAt": "2026-10-27T17:37:22.209982+00:00",
+    "verifiedAt": "2026-10-27T17:37:22.514815+00:00",
+    "providerReturnCode": 137
+  },
+  "independentPostRunReconciliation": {
+    "source": "parent read-only installed Modal1.6.2 Sandbox.from_id(existing sandbox ID).poll()",
+    "providerReturnCode": 137,
+    "newVmCreated": false,
+    "observedAtUtc": "not supplied; reported after runner completion"
+  },
+  "resourceObservations": {
+    "cpu.max": null,
+    "memory.max": null,
+    "memory.swap.max": null,
+    "pids.max": null,
+    "cpuAffinityCount": 2
+  },
+  "networkObservation": {
+    "outboundConnectionFailed": true,
+    "errorClass": "OSError",
+    "errno": 101
+  },
+  "providerUsage": {
+    "billedUsd": null,
+    "status": "Per-sandbox billing unavailable in public SDK; coordinator reconciliation required"
+  },
+  "costEvidence": {
+    "actualRunBilledUsd": null,
+    "hostElapsedComputeEstimateOnlyUsd": 0.0023975454033770644,
+    "accountAggregateOnly": {
+      "meteredUsd": 0.39871733,
+      "billedUsd": 0,
+      "unchangedFromBeforeRun": true,
+      "source": "parent billing readback; lag unknown; not attributable to this run"
+    },
+    "authorizationAggregateCapUsd": 20,
+    "budgetResult": "actual total not reconciled; no account-delta cost claim"
+  },
+  "signing": {
+    "githubActionsRun": "40551595607",
+    "source": "parent report",
+    "status": "failed before signing",
+    "exactRemoteVerifierWithPat": "passed per parent report",
+    "releaseGateOutstanding": true
+  },
+  "scope": "one live QA runtime:vm attempt, synthetic only; no retries or deployment; no credential source read by evidence collector",
+  "inferenceDiagnostics": {
+    "runtimeVersions": {
+      "onnxruntime": "1.31.0",
+      "cv2": "5.0.0",
+      "numpy": "2.5.4",
+      "PIL": "12.3.0"
+    },
+    "timingsMs": {
+      "preprocess_ms": 14.70368100000008,
+      "inference_ms": 17.03580399999982,
+      "postprocess_ms": 0.09126000000003742
+    }
+  }
+}

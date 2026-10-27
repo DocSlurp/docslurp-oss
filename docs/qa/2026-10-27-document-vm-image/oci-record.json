@@ -1,0 +1,92 @@
+{
+  "archivePath": "/home/dan/.t3/worktrees/docslurp-app/t3-3b555ca8/core/.cache/document-vm-image/final-03aa2c4/document-vm.oci.tar",
+  "archiveBytes": 353474048,
+  "archiveSha256": "46733e0df89522d13a14a295e9cd0749b1f692c0240a1e3d6cccd3169599b842",
+  "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+  "exportedIndexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+  "image": {
+    "digest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+    "configDigest": "sha256:8f703218281562eac36ba0cd6af513daf9f2f0728bb357424734aba477b1697f",
+    "layers": [
+      {
+        "digest": "sha256:ecc510c1e359bdc007b39802570bb7e4dec7d6ebccf357c3201a74299113e05e",
+        "bytes": 29843350
+      },
+      {
+        "digest": "sha256:75b6a36c64a1cf3520fc4b4aae4739d5caa8a6a05c27835a920a61784c9c32f8",
+        "bytes": 1294052
+      },
+      {
+        "digest": "sha256:6912e23eb44595b44dc6d9882b34f305ad6f6e9667cec70b13e5dbc4f8cd97f4",
+        "bytes": 12121637
+      },
+      {
+        "digest": "sha256:bbc5a12237474ec0b23b5051260d56d6436a24d70d9cad961adebe7a037ed813",
+        "bytes": 249
+      },
+      {
+        "digest": "sha256:bd09627e9e3f8b63398c0bb1b0f8b055ebc9266c9f02692dea3357c72a6f6426",
+        "bytes": 72133018
+      },
+      {
+        "digest": "sha256:fba879a1a4378b2fdf22e627e7a90466f861be044351b3425a2aa988479824fa",
+        "bytes": 624
+      },
+      {
+        "digest": "sha256:8e3980578ecfa42e7d1b97cebc01a29898162d4d4cc934d0ee7248769258464e",
+        "bytes": 108536754
+      },
+      {
+        "digest": "sha256:ca28357b86de5a1c40de58ab5cdadfa58471b7acd2b9951ec062b8b1632a33f9",
+        "bytes": 118003658
+      },
+      {
+        "digest": "sha256:0bd034a7d826f4de25f54cb0840cccbdf463850da9adf8a19ebff7da402f63f9",
+        "bytes": 19584
+      },
+      {
+        "digest": "sha256:916b62973c12abe69f6752bb39b3ac91c34f0fb516931171654aef0fac42030b",
+        "bytes": 8897938
+      },
+      {
+        "digest": "sha256:312a8017fa41057496128d9c9e70e3c828aaecd376a86e273d34e5582b34be8f",
+        "bytes": 1459
+      },
+      {
+        "digest": "sha256:5524f70537d7b40bea0f6ad30e0047204ff592f6e1646808fbbca42c06d28b44",
+        "bytes": 4497
+      },
+      {
+        "digest": "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+        "bytes": 32
+      }
+    ]
+  },
+  "attestationBindings": [
+    {
+      "kind": "sbom",
+      "statementSubjectEmpty": true,
+      "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+      "attestationManifestDigest": "sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940",
+      "layerDigest": "sha256:1e0c700f7e1ae1c905962c3026f9d5cc9da07368e6c56ded0f538bad50bd511e",
+      "binding": "verified OCI subject and BuildKit index reference"
+    },
+    {
+      "kind": "provenance",
+      "statementSubjectEmpty": true,
+      "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+      "attestationManifestDigest": "sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940",
+      "layerDigest": "sha256:c6e8969381e3820857b47dfe10f4553de5454a5a55420ff452d7bf689a434871",
+      "binding": "verified OCI subject and BuildKit index reference"
+    }
+  ],
+  "verifiedBlobCount": 20,
+  "testedImageEquality": {
+    "rootfsDiffIdsEqual": true,
+    "runtimeConfigEqual": true,
+    "platformEqual": true,
+    "layerDiffIdsVerified": true,
+    "localImageId": "sha256:283dc50fc21896aa674cd0d5d733e05aef93b711c3696d9677bf014611627af7",
+    "ociConfigDigest": "sha256:8f703218281562eac36ba0cd6af513daf9f2f0728bb357424734aba477b1697f"
+  }
+}

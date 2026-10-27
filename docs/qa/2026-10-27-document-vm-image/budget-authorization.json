@@ -1,0 +1,42 @@
+{
+  "recordedAtUtc": "2026-10-27T17:21:42.577265+00:00",
+  "source": "Latest user: allow 30min, get useful work done; prior allow $20 retained; user accepts account limit and waives shared-spend-limit investigation",
+  "previousTotalCapUsd": 0.05,
+  "currentAggregateTotalCapUsd": 20,
+  "scope": [
+    "exact reviewed image publication",
+    "image import",
+    "provisioning/startup",
+    "storage",
+    "one synthetic Modal VM smoke",
+    "associated network costs"
+  ],
+  "constraints": {
+    "maximumVmCount": 1,
+    "sandboxExpirySeconds": 1800,
+    "retries": 0,
+    "deploymentAuthorized": false,
+    "imageRebuildAuthorized": false
+  },
+  "admission": {
+    "status": "One coordinator-executed live QA attempt passed and terminated; no retry or deployment",
+    "revisedBoundEstablished": false,
+    "vmLaunched": true,
+    "historical005AdmissionFailurePreserved": true,
+    "sharedSpendLimitInvestigationWaived": true,
+    "unknownWorkspaceBudgetIsStopCondition": false,
+    "terminationVerified": true,
+    "liveReceipt": "live-modal-smoke-069eb2de/receipt.json"
+  },
+  "delegation": {
+    "thisImplementationAgent": "Runner preparation and local mock testing only; no credential access or paid calls",
+    "credentialAccessAuthorized": false,
+    "publicationExecutionAuthorized": false,
+    "vmExecutionAuthorized": false
+  },
+  "history": {
+    "previousSandboxExpirySeconds": 60,
+    "previousTotalCapUsd": 0.05,
+    "previous20DollarReassessmentPreservedInGit": true
+  }
+}

@@ -1,0 +1,284 @@
+{
+  "arguments": [
+    "--model",
+    "pp-small-onnx",
+    "--device",
+    "cpu",
+    "--precision",
+    "fp32",
+    "--threads",
+    "2",
+    "--threshold",
+    "0.3",
+    "--visual-classifier",
+    "none",
+    "--onnx-path",
+    "/opt/docslurp/layout/assets/model.onnx",
+    "--revision",
+    "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2"
+  ],
+  "artifactSha256": "ccfa68bc3ae28999c172ed232b036dfc283801225c97949bf1f30186ea929e9d",
+  "detectorMetadata": {
+    "artifact_sha256": "ccfa68bc3ae28999c172ed232b036dfc283801225c97949bf1f30186ea929e9d",
+    "batch_execution": "serial-fixed-1",
+    "color": "RGB",
+    "cuda_cpu_node_fallback_possible": false,
+    "graph_sha256": "33688dbee1c23e34b81777e97cb428eb40f24b242c02b5f623484959e830aec8",
+    "id": "PaddlePaddle/PP-DocLayout-S",
+    "input_specs": [
+      {
+        "name": "image",
+        "shape": [
+          "DynamicDimension.0",
+          3,
+          480,
+          480
+        ],
+        "type": "tensor(float)"
+      },
+      {
+        "name": "scale_factor",
+        "shape": [
+          "DynamicDimension.1",
+          2
+        ],
+        "type": "tensor(float)"
+      }
+    ],
+    "precision": "graph-defined",
+    "provider_options": {
+      "CPUExecutionProvider": {}
+    },
+    "providers": [
+      "CPUExecutionProvider"
+    ],
+    "resize": "opencv-INTER_CUBIC",
+    "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+    "runtime": "onnxruntime",
+    "runtime_versions": {
+      "PIL": "12.3.0",
+      "cv2": "5.0.0",
+      "numpy": "2.5.4",
+      "onnxruntime": "1.31.0"
+    },
+    "threads": 2
+  },
+  "files": [
+    {
+      "path": "LICENSE.Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "model.onnx",
+      "sha256": "33688dbee1c23e34b81777e97cb428eb40f24b242c02b5f623484959e830aec8"
+    },
+    {
+      "path": "model.provenance.json",
+      "sha256": "4372a616bb1fe8c607ac11729d8d3a3bbee8a986a20312dc8ea446ee5b2edb08"
+    },
+    {
+      "path": "source/README.md",
+      "sha256": "d8d4f20e0d2c2e091f87adbf62b99ccbcd5230ef2239ee09dfc3056b0e0999f2"
+    },
+    {
+      "path": "source/config.json",
+      "sha256": "45f5757daf01694c4adba0eba7ff2854caf011f02c91bdbd2ef6eb06d7a0f488"
+    },
+    {
+      "path": "source/inference.json",
+      "sha256": "ac09e931895d4c442e5379ab3b7e9b583baf288e816ab7675ca519da9eb2a9d7"
+    },
+    {
+      "path": "source/inference.pdiparams",
+      "sha256": "491c3382d84ca04d2033afbee0c105942ed82fea392bb4a19170646adebe088a"
+    },
+    {
+      "path": "source/inference.yml",
+      "sha256": "6f690098c438214c67822239a568f0bc2bbe97a8f02fba93e492d4f2c47523c3"
+    }
+  ],
+  "graphSha256": "33688dbee1c23e34b81777e97cb428eb40f24b242c02b5f623484959e830aec8",
+  "inferenceProfileSha256": "402045d01939270ce7a497120f2c569d8bc42764d567b0b66ff311e66e485182",
+  "installedDistributions": [
+    {
+      "name": "flatbuffers",
+      "version": "25.12.19"
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.4"
+    },
+    {
+      "name": "onnxruntime",
+      "version": "1.31.0"
+    },
+    {
+      "name": "opencv-python-headless",
+      "version": "5.0.0.93"
+    },
+    {
+      "name": "packaging",
+      "version": "26.3"
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0"
+    },
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "protobuf",
+      "version": "7.36.2"
+    }
+  ],
+  "license": "Apache-2.0",
+  "model": "pp-small-onnx",
+  "modelId": "PaddlePaddle/PP-DocLayout-S",
+  "python": "3.12.15",
+  "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+  "schemaVersion": 1,
+  "systemPackages": [
+    "adduser\t3.152",
+    "apt\t3.0.3",
+    "base-files\t13.8+deb13u7",
+    "base-passwd\t3.6.7",
+    "bash\t5.2.37-2+b10",
+    "bsdutils\t1:2.41.5-0+deb13u1",
+    "ca-certificates\t20250419",
+    "coreutils\t9.7-3",
+    "dash\t0.5.12-12",
+    "debconf\t1.5.91",
+    "debian-archive-keyring\t2025.1",
+    "debianutils\t5.23.2",
+    "diffutils\t1:3.10-4",
+    "dpkg\t1.22.22",
+    "findutils\t4.10.0-3",
+    "gcc-14-base\t14.2.0-19",
+    "grep\t3.11-4",
+    "gzip\t1.13-1+deb13u1",
+    "hostname\t3.25",
+    "init-system-helpers\t1.69~deb13u1",
+    "libacl1\t2.3.2-2+b1",
+    "libapt-pkg7.0\t3.0.3",
+    "libattr1\t1:2.5.2-3",
+    "libaudit-common\t1:4.0.2-2+deb13u1",
+    "libaudit1\t1:4.0.2-2+deb13u1",
+    "libblkid1\t2.41.5-0+deb13u1",
+    "libbsd0\t0.12.2-2",
+    "libbz2-1.0\t1.0.8-6",
+    "libc-bin\t2.41-12+deb13u4",
+    "libc6\t2.41-12+deb13u4",
+    "libcap-ng0\t0.8.5-4+b1",
+    "libcap2\t1:2.75-10+deb13u1+b3",
+    "libcrypt1\t1:4.4.38-1",
+    "libdb5.3t64\t5.3.28+dfsg2-9",
+    "libdebconfclient0\t0.280",
+    "libdeflate0\t1.23-2",
+    "libdrm-amdgpu1\t2.4.124-2",
+    "libdrm-common\t2.4.124-2",
+    "libdrm-intel1\t2.4.124-2",
+    "libdrm2\t2.4.124-2",
+    "libedit2\t3.1-20250104-1",
+    "libelf1t64\t0.192-4",
+    "libexpat1\t2.9.0-1~deb13u1",
+    "libffi8\t3.4.8-2",
+    "libgbm1\t25.0.7-2+deb13u1",
+    "libgcc-s1\t14.2.0-19",
+    "libgdbm6t64\t1.24-2",
+    "libgif7\t5.2.2-1+deb13u1",
+    "libgl1\t1.7.0-1+b2",
+    "libgl1-mesa-dri\t25.0.7-2+deb13u1",
+    "libglut3.12\t3.4.0-4",
+    "libglvnd0\t1.7.0-1+b2",
+    "libglx-mesa0\t25.0.7-2+deb13u1",
+    "libglx0\t1.7.0-1+b2",
+    "libgmp10\t2:6.3.0+dfsg-3",
+    "libhogweed6t64\t3.10.1-1",
+    "libjbig0\t2.1-6.1+b2",
+    "libjpeg62-turbo\t1:2.1.5-4",
+    "liblastlog2-2\t2.41.5-0+deb13u1",
+    "liblerc4\t4.0.0+ds-5",
+    "libllvm19\t1:19.1.7-3+b1",
+    "liblz4-1\t1.10.0-4",
+    "liblzma5\t5.8.1-1+deb13u1",
+    "libmd0\t1.1.0-2+b1",
+    "libmount1\t2.41.5-0+deb13u1",
+    "libncursesw6\t6.5+20250216-2",
+    "libnettle8t64\t3.10.1-1",
+    "libopengl0\t1.7.0-1+b2",
+    "libpam-modules\t1.7.0-5",
+    "libpam-modules-bin\t1.7.0-5",
+    "libpam-runtime\t1.7.0-5",
+    "libpam0g\t1.7.0-5",
+    "libpciaccess0\t0.17-3+b3",
+    "libpcre2-8-0\t10.46-1~deb13u3",
+    "libpng16-16t64\t1.6.48-1+deb13u6",
+    "libreadline8t64\t8.2-6",
+    "libseccomp2\t2.6.0-2",
+    "libselinux1\t3.8.1-1",
+    "libsemanage-common\t3.8.1-1",
+    "libsemanage2\t3.8.1-1",
+    "libsensors-config\t1:3.6.2-2",
+    "libsensors5\t1:3.6.2-2",
+    "libsepol2\t3.8.1-1",
+    "libsharpyuv0\t1.5.0-0.1",
+    "libsmartcols1\t2.41.5-0+deb13u1",
+    "libsqlite3-0\t3.46.1-7+deb13u2",
+    "libssl3t64\t3.5.7-1~deb13u3",
+    "libstdc++6\t14.2.0-19",
+    "libsystemd0\t257.13-1~deb13u1",
+    "libtiff6\t4.7.0-3+deb13u3",
+    "libtinfo6\t6.5+20250216-2",
+    "libudev1\t257.13-1~deb13u1",
+    "libuuid1\t2.41.5-0+deb13u1",
+    "libvulkan1\t1.4.309.0-1",
+    "libwayland-server0\t1.23.1-3",
+    "libwebp7\t1.5.0-0.1",
+    "libwebpdemux2\t1.5.0-0.1",
+    "libwebpmux3\t1.5.0-0.1",
+    "libx11-6\t2:1.8.12-1",
+    "libx11-data\t2:1.8.12-1",
+    "libx11-xcb1\t2:1.8.12-1",
+    "libxau6\t1:1.0.11-1",
+    "libxcb-dri3-0\t1.17.0-2+b1",
+    "libxcb-glx0\t1.17.0-2+b1",
+    "libxcb-present0\t1.17.0-2+b1",
+    "libxcb-randr0\t1.17.0-2+b1",
+    "libxcb-shm0\t1.17.0-2+b1",
+    "libxcb-sync1\t1.17.0-2+b1",
+    "libxcb-xfixes0\t1.17.0-2+b1",
+    "libxcb1\t1.17.0-2+b1",
+    "libxdmcp6\t1:1.1.5-1",
+    "libxext6\t2:1.3.4-1+b3",
+    "libxi6\t2:1.8.2-1",
+    "libxml2\t2.12.7+dfsg+really2.9.14-2.1+deb13u3",
+    "libxshmfence1\t1.3.3-1",
+    "libxxf86vm1\t1:1.1.4-1+b4",
+    "libxxhash0\t0.8.3-2",
+    "libz3-4\t4.13.3-1",
+    "libzstd1\t1.5.7+dfsg-1",
+    "login\t1:4.16.0-2+really2.41.5-0+deb13u1",
+    "login.defs\t1:4.17.4-2",
+    "mawk\t1.3.4.20250131-1",
+    "mesa-libgallium\t25.0.7-2+deb13u1",
+    "mount\t2.41.5-0+deb13u1",
+    "ncurses-base\t6.5+20250216-2",
+    "ncurses-bin\t6.5+20250216-2",
+    "netbase\t6.5",
+    "openssl\t3.5.7-1~deb13u3",
+    "openssl-provider-legacy\t3.5.7-1~deb13u3",
+    "passwd\t1:4.17.4-2",
+    "perl-base\t5.40.1-6+deb13u1",
+    "readline-common\t8.2-6",
+    "sed\t4.9-2+deb13u1",
+    "sqv\t1.3.0-3+b2",
+    "sysvinit-utils\t3.14-4",
+    "tar\t1.35+dfsg-3.1",
+    "tzdata\t2026c-0+deb13u1",
+    "util-linux\t2.41.5-0+deb13u1",
+    "webp\t1.5.0-0.1",
+    "zlib1g\t1:1.3.dfsg+really1.3.1-1+b1"
+  ]
+}

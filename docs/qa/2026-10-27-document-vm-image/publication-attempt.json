@@ -1,0 +1,55 @@
+{
+  "observedAtUtc": "2026-10-27T16:47:58.114508+00:00",
+  "source": "Parent-reported operational attempt and supplied sanitized publication log; this evidence update did not access credentials or contact GHCR/Modal",
+  "authorization": {
+    "scope": "Exact reviewed image publication and one synthetic Modal runtime:vm sandbox",
+    "sandboxLifetimeSeconds": 60,
+    "automaticRetries": 0,
+    "totalCapUsd": 0.05,
+    "stopIfImportStartupStorageUnbounded": true
+  },
+  "publication": {
+    "tool": "ORAS",
+    "destination": "ghcr.io/docslurp/worker-document-vm:543ce1a333c7828662171ae25fc060b14be29aaf",
+    "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+    "archivePath": "/home/dan/.t3/worktrees/docslurp-app/t3-3b555ca8/core/.cache/document-vm-image/final-03aa2c4/document-vm.oci.tar",
+    "archiveBytes": 353474048,
+    "archiveSha256": "46733e0df89522d13a14a295e9cd0749b1f692c0240a1e3d6cccd3169599b842",
+    "result": "denied: permission_denied: The token provided does not match expected scopes.",
+    "imagePublicationSucceeded": false,
+    "partialBlobUploadConfirmed": false,
+    "oauthWritePackagesDeviceConsent": "requested by parent; no consent result recorded",
+    "temporaryAuthJson": "removed, as reported by parent; no credential file inspected",
+    "sanitizedLogOriginalPath": "/home/dan/tmp/agents/council-image-publish.8_gz59o4/publication.log",
+    "sanitizedLogSha256": "13a3f61d2e2075c1d17b2427b29765d6401cc68ea386f543d1ca6beb302418da"
+  },
+  "admission": {
+    "totalCostBoundEstablished": false,
+    "authorizedCapUsd": 0.05,
+    "knownComputeUsdFor2Cpu1GiB60Seconds": 0.0051306,
+    "knownComputeIsNotTotal": true,
+    "priceSource": "https://modal.com/pricing",
+    "fromRegistryImport": "lazy import during sandbox create, per parent cost review",
+    "timeoutCoverage": "sandbox lifetime; not a proven bound on import/provisioning/startup",
+    "unknowns": [
+      "image cache/import tariff and upper bound",
+      "retained image storage tariff and retention ceiling",
+      "import/provisioning/startup billing and duration ceiling",
+      "storage/network components excluded from environment budget"
+    ],
+    "prohibitedWorkarounds": [
+      "Image.build",
+      "sandbox create as an import probe",
+      "alternate provider or image route",
+      "retry without a bounded aggregate cost proof"
+    ]
+  },
+  "outcome": {
+    "vmCreated": false,
+    "paidVmOrModelSpendReportedUsd": 0,
+    "publicationSucceeded": false,
+    "imageRebuiltOrChanged": false,
+    "registryAccountWideBillingVerified": false,
+    "actionTakenByThisUpdate": "documentation only"
+  }
+}

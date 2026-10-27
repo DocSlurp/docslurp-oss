@@ -1,0 +1,75 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 979B done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#2 DONE 0.5s
+
+#3 [internal] load metadata for docker.io/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+#3 DONE 0.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [ 1/10] FROM docker.io/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+#5 resolve docker.io/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 1.56kB done
+#6 DONE 0.0s
+
+#7 [ 6/10] COPY runtime /opt/docslurp/layout/runtime
+#7 CACHED
+
+#8 [ 8/10] COPY seal.py /opt/docslurp/seal.py
+#8 CACHED
+
+#9 [ 2/10] RUN mkdir -p /job && apt-get update && apt-get install -y --no-install-recommends webp     && rm -rf /var/lib/apt/lists/*
+#9 CACHED
+
+#10 [ 3/10] COPY requirements.lock /opt/docslurp/requirements.lock
+#10 CACHED
+
+#11 [ 4/10] COPY wheels /wheels
+#11 CACHED
+
+#12 [ 5/10] RUN python3 -m pip install --no-cache-dir --no-index --find-links=/wheels --require-hashes -r /opt/docslurp/requirements.lock     && rm -rf /wheels
+#12 CACHED
+
+#13 [ 7/10] COPY assets /opt/docslurp/layout/assets
+#13 CACHED
+
+#14 [ 9/10] RUN python3 /opt/docslurp/seal.py && rm /opt/docslurp/seal.py
+#14 CACHED
+
+#15 [10/10] WORKDIR /job
+#15 CACHED
+
+#16 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#16 resolve docker.io/docker/buildkit-syft-scanner:stable-1 0.1s done
+#16 DONE 0.1s
+
+#16 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#16 CACHED
+
+#17 [linux/amd64] generating sbom using docker.io/docker/buildkit-syft-scanner:stable-1
+#17 0.166 time="2026-10-27T15:34:08Z" level=info msg="starting syft scanner for buildkit v1.12.1"
+#17 DONE 3.2s
+
+#18 exporting to oci image format
+#18 exporting layers done
+#18 exporting manifest sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21 done
+#18 exporting config sha256:8f703218281562eac36ba0cd6af513daf9f2f0728bb357424734aba477b1697f done
+#18 exporting attestation manifest sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940
+#18 exporting attestation manifest sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940 done
+#18 exporting manifest list sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee done
+#18 sending tarball
+#18 sending tarball 5.6s done
+#18 DONE 6.2s
+
+#19 resolving provenance for metadata file
+#19 DONE 0.0s

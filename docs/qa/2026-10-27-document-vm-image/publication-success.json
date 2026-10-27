@@ -1,0 +1,64 @@
+{
+  "observedAtUtc": "2026-10-27T16:55:18.460139+00:00",
+  "source": "Parent-reported authorized publication and read-only registry facts, supplied sanitized ORAS log and independently byte-verified remote JSON; this update performed documentation only",
+  "publication": {
+    "tool": "ORAS",
+    "exitCode": 0,
+    "exitCodeSource": "parent report",
+    "succeeded": true,
+    "destination": "ghcr.io/docslurp/worker-document-vm:543ce1a333c7828662171ae25fc060b14be29aaf",
+    "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+    "indexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+    "archivePath": "/home/dan/.t3/worktrees/docslurp-app/t3-3b555ca8/core/.cache/document-vm-image/final-03aa2c4/document-vm.oci.tar",
+    "archiveBytes": 353474048,
+    "archiveSha256": "46733e0df89522d13a14a295e9cd0749b1f692c0240a1e3d6cccd3169599b842",
+    "remoteRawManifestChecks": [
+      {
+        "file": "remote-image-manifest.json",
+        "sha256": "66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+        "bytes": 2771,
+        "matchesLocalOciBlobExactly": true,
+        "sourcePath": "/home/dan/tmp/agents/council-image-publish.8_gz59o4/66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21.json"
+      },
+      {
+        "file": "remote-index.json",
+        "sha256": "fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+        "bytes": 857,
+        "matchesLocalOciBlobExactly": true,
+        "sourcePath": "/home/dan/tmp/agents/council-image-publish.8_gz59o4/fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee.json"
+      }
+    ],
+    "attestationManifestDigest": "sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940",
+    "originalSbomAndSlsaCopiedUnchanged": "parent report and sanitized copied-blob log; remote index retains exact original attestation manifest reference",
+    "sanitizedLogOriginalPath": "/home/dan/tmp/agents/council-image-publish.8_gz59o4/publication-retry.log",
+    "sanitizedLogSha256": "783796b42b09bb2f523d94a6f20fbce450986a8f1d14749dca52e3617139bbcb"
+  },
+  "accessAndVisibility": {
+    "oauthScopeGrant": "completed by user, write:packages verified by parent",
+    "ghcrPackageVisibility": "private",
+    "packageUrl": "https://github.com/orgs/DocSlurp/packages/container/package/worker-document-vm",
+    "packageVisibilitySource": "parent read-only gh api /orgs/DocSlurp/packages/container/worker-document-vm",
+    "ossRepositoryVisibility": "public, parent read-only confirmation",
+    "visibilityChanged": false,
+    "temporaryRetryAuthJson": "removed in finally, as reported by parent; not inspected here",
+    "credentialValuesAccessedByThisUpdate": false
+  },
+  "pending": {
+    "keylessRegistrySigningCompleted": false,
+    "signingPolicyReview": "parent architect checking policy; separate VM agent preparing manual-signing-only support PR; no signing yet",
+    "vmCreated": true,
+    "imageRebuilt": false,
+    "totalCostBoundEstablished": false,
+    "blocker": "Signing remains a release gate; actual per-run billing reconciliation pending; one-shot live QA completed and terminated",
+    "priorTotalCapUsd": 0.05,
+    "currentAggregateTotalCapUsd": 20
+  },
+  "history": {
+    "originalDeniedAttemptRecord": "publication-attempt.json",
+    "originalDeniedLog": "publication-attempt-denied.txt",
+    "preservedUnchanged": true
+  },
+  "authorizationAtPublicationAttempt": "User authorized exact reviewed image publication and one synthetic 60-second VM, no retries, $0.05 TOTAL cap; VM admission remains conditional and blocked",
+  "currentAuthorizationRecord": "budget-authorization.json",
+  "liveQaReceipt": "live-modal-smoke-069eb2de/receipt.json"
+}

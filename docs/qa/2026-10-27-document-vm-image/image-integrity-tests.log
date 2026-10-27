@@ -1,0 +1,11 @@
+test_missing_duplicate_misbound_and_different_image_fail_closed (test_integrity.ArchiveIntegrity.test_missing_duplicate_misbound_and_different_image_fail_closed) ... ok
+test_valid_bound_artifacts_and_explicit_subject (test_integrity.ArchiveIntegrity.test_valid_bound_artifacts_and_explicit_subject) ... ok
+test_cleanup_failure_is_loud_and_success_names_are_unique (test_integrity.ContainerCleanup.test_cleanup_failure_is_loud_and_success_names_are_unique) ... ok
+test_native_hang_timeout_removes_daemon_container_by_unique_name (test_integrity.ContainerCleanup.test_native_hang_timeout_removes_daemon_container_by_unique_name) ... ok
+test_post_export_graph_lock_is_retained (test_integrity.ConverterAdmission.test_post_export_graph_lock_is_retained) ... ok
+test_tampered_or_unapproved_source_never_starts_converter (test_integrity.ConverterAdmission.test_tampered_or_unapproved_source_never_starts_converter) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.922s
+
+OK

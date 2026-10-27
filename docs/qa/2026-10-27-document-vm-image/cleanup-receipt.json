@@ -1,0 +1,27 @@
+{
+  "taskScratch": "/home/dan/tmp/agents/document-vm-image.1eaZj9",
+  "removed": false,
+  "errors": [
+    {
+      "path": "/home/dan/tmp/agents/document-vm-image.1eaZj9/job-final/.cache",
+      "errorType": "PermissionError"
+    },
+    {
+      "path": "/home/dan/tmp/agents/document-vm-image.1eaZj9/job-final",
+      "errorType": "OSError"
+    },
+    {
+      "path": "/home/dan/tmp/agents/document-vm-image.1eaZj9/job2/.cache",
+      "errorType": "PermissionError"
+    },
+    {
+      "path": "/home/dan/tmp/agents/document-vm-image.1eaZj9/job2",
+      "errorType": "OSError"
+    },
+    {
+      "path": "/home/dan/tmp/agents/document-vm-image.1eaZj9",
+      "errorType": "OSError"
+    }
+  ],
+  "note": "Old guest UID65532 cache directories require privileged removal; sudo -n unavailable. Final OCI and QA evidence retained."
+}

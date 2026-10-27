@@ -1,0 +1,247 @@
+{
+  "scope": "local container packaging only; no production VM proof",
+  "image": "docslurp-document-vm:local",
+  "actualImageProgramSha256": "f2d8515f5919bb437a2ea77f648750ea7b30420b381124312709733d79bad004",
+  "commandPrefix": [
+    "docker",
+    "run",
+    "--rm",
+    "--network=none",
+    "--cpus=2",
+    "--memory=1g",
+    "--memory-swap=1g",
+    "--read-only",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--pids-limit=128",
+    "--user=1000:1000",
+    "-v",
+    "/home/dan/tmp/agents/document-vm-image.1eaZj9/verified-job:/job",
+    "docslurp-document-vm:local"
+  ],
+  "checks": [
+    {
+      "name": "manifest",
+      "exitCode": 0,
+      "seconds": 0.7951069821137935,
+      "stdoutBytes": 7981,
+      "stderrBytes": 0,
+      "expectedSuccess": true
+    },
+    {
+      "name": "synthetic",
+      "exitCode": 0,
+      "seconds": 0.77161929407157,
+      "stdoutBytes": 0,
+      "stderrBytes": 0,
+      "expectedSuccess": true
+    },
+    {
+      "name": "encode-webp",
+      "exitCode": 0,
+      "seconds": 0.7250205781310797,
+      "stdoutBytes": 0,
+      "stderrBytes": 0,
+      "expectedSuccess": true
+    },
+    {
+      "name": "decode-webp",
+      "exitCode": 0,
+      "seconds": 0.9003612659871578,
+      "stdoutBytes": 0,
+      "stderrBytes": 0,
+      "expectedSuccess": true
+    },
+    {
+      "name": "roundtrip-pixels",
+      "exitCode": 0,
+      "seconds": 1.0223986920900643,
+      "stdoutBytes": 0,
+      "stderrBytes": 0,
+      "expectedSuccess": true
+    },
+    {
+      "name": "layout",
+      "exitCode": 0,
+      "seconds": 1.4706880659796298,
+      "stdoutBytes": 0,
+      "stderrBytes": 5275,
+      "expectedSuccess": true
+    },
+    {
+      "name": "wrong-model",
+      "exitCode": 1,
+      "seconds": 0.7126836080569774,
+      "stdoutBytes": 0,
+      "stderrBytes": 474,
+      "expectedSuccess": false
+    },
+    {
+      "name": "wrong-modelId",
+      "exitCode": 1,
+      "seconds": 0.5597688499838114,
+      "stdoutBytes": 0,
+      "stderrBytes": 469,
+      "expectedSuccess": false
+    },
+    {
+      "name": "wrong-revision",
+      "exitCode": 1,
+      "seconds": 0.46865548216737807,
+      "stdoutBytes": 0,
+      "stderrBytes": 470,
+      "expectedSuccess": false
+    },
+    {
+      "name": "wrong-artifactSha256",
+      "exitCode": 1,
+      "seconds": 0.4512838099617511,
+      "stdoutBytes": 0,
+      "stderrBytes": 476,
+      "expectedSuccess": false
+    },
+    {
+      "name": "wrong-inferenceProfileSha256",
+      "exitCode": 1,
+      "seconds": 0.866667796857655,
+      "stdoutBytes": 0,
+      "stderrBytes": 484,
+      "expectedSuccess": false
+    },
+    {
+      "name": "wrong-device",
+      "exitCode": 1,
+      "seconds": 0.7835261919535697,
+      "stdoutBytes": 0,
+      "stderrBytes": 331,
+      "expectedSuccess": false
+    },
+    {
+      "name": "missing-modelId",
+      "exitCode": 1,
+      "seconds": 0.9601362531539053,
+      "stdoutBytes": 0,
+      "stderrBytes": 330,
+      "expectedSuccess": false
+    },
+    {
+      "name": "missing-revision",
+      "exitCode": 1,
+      "seconds": 1.1132352149579674,
+      "stdoutBytes": 0,
+      "stderrBytes": 331,
+      "expectedSuccess": false
+    },
+    {
+      "name": "missing-artifactSha256",
+      "exitCode": 1,
+      "seconds": 0.6168488929979503,
+      "stdoutBytes": 0,
+      "stderrBytes": 337,
+      "expectedSuccess": false
+    },
+    {
+      "name": "missing-inferenceProfileSha256",
+      "exitCode": 1,
+      "seconds": 0.5261759059503675,
+      "stdoutBytes": 0,
+      "stderrBytes": 345,
+      "expectedSuccess": false
+    },
+    {
+      "name": "tampered-model-asset",
+      "exitCode": 1,
+      "seconds": 0.432738799136132,
+      "stdoutBytes": 0,
+      "stderrBytes": 682,
+      "expectedSuccess": false
+    },
+    {
+      "name": "image-reject-malformed",
+      "exitCode": 1,
+      "seconds": 1.0641634638886899,
+      "stdoutBytes": 0,
+      "stderrBytes": 262,
+      "expectedSuccess": false
+    },
+    {
+      "name": "layout-reject-malformed",
+      "exitCode": 1,
+      "seconds": 0.913968893000856,
+      "stdoutBytes": 0,
+      "stderrBytes": 509,
+      "expectedSuccess": false
+    },
+    {
+      "name": "image-reject-oversized.png",
+      "exitCode": 1,
+      "seconds": 0.818346967920661,
+      "stdoutBytes": 0,
+      "stderrBytes": 129,
+      "expectedSuccess": false
+    },
+    {
+      "name": "layout-reject-oversized.png",
+      "exitCode": 1,
+      "seconds": 0.7304279010277241,
+      "stdoutBytes": 0,
+      "stderrBytes": 321,
+      "expectedSuccess": false
+    },
+    {
+      "name": "image-reject-animated.png",
+      "exitCode": 1,
+      "seconds": 0.6164971909020096,
+      "stdoutBytes": 0,
+      "stderrBytes": 129,
+      "expectedSuccess": false
+    },
+    {
+      "name": "layout-reject-animated.png",
+      "exitCode": 1,
+      "seconds": 0.6403940571472049,
+      "stdoutBytes": 0,
+      "stderrBytes": 321,
+      "expectedSuccess": false
+    },
+    {
+      "name": "layout-reject-bytes",
+      "exitCode": 1,
+      "seconds": 0.6843584049493074,
+      "stdoutBytes": 0,
+      "stderrBytes": 436,
+      "expectedSuccess": false
+    },
+    {
+      "name": "readonly",
+      "exitCode": 1,
+      "seconds": 0.45731573994271457,
+      "stdoutBytes": 0,
+      "stderrBytes": 587,
+      "expectedSuccess": false
+    },
+    {
+      "name": "network",
+      "exitCode": 1,
+      "seconds": 0.7090122040826827,
+      "stdoutBytes": 0,
+      "stderrBytes": 317,
+      "expectedSuccess": false
+    },
+    {
+      "name": "limits",
+      "exitCode": 0,
+      "seconds": 0.4794786190614104,
+      "stdoutBytes": 100,
+      "stderrBytes": 0,
+      "expectedSuccess": true
+    },
+    {
+      "name": "local-cancel-and-remove",
+      "exitCode": 137,
+      "seconds": 0.40995687898248434,
+      "containerAbsentAfterCleanup": true,
+      "scope": "local Docker only, not Modal cancellation proof"
+    }
+  ]
+}
