@@ -19,7 +19,7 @@ test('uses canonical page identity, isolated workspace and public ingestion/prog
   const fetchMock = async (url, init) => {
     calls.push({ url, init });
     assert.equal(init.headers.Authorization, 'Bearer private-index-key');
-    if (url.endsWith('/v1/ingest/bulk')) {
+    if (url.endsWith('/v1/uploads/bulk')) {
       // The name goes to the server, which finds the workspace or creates it on the first build.
       assert.equal(init.body.get('workspace'), 'DocSlurp documentation');
       assert.equal(init.body.get('newWorkspace'), null);

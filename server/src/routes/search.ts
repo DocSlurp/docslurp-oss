@@ -208,9 +208,94 @@ async function failChatTurn(turn: ChatTurn, reason: string): Promise<ChatTurnUsa
 
 const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
 
-export const workspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", workspaceChatHandler);
+export const workspaceChatRoutes = new Hono()
+  .use("*", nativeApiErrors)
+  .post("/", workspaceChatHandler)
+  .get("/stream", workspaceChatStreamHandler);
 /** Internal tool target only. Never mount this router as a public agent entrypoint. */
 export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleWorkspaceChat(c, "grounded"));
+
+/**
+ * `GET /v1/chat/stream`: the cited chat answer as server-sent events, for
+ * clients that cannot POST a streaming body (EventSource). The same scoping,
+ * chat settings and spend checks as `POST /v1/chat` apply.
+ */
+async function workspaceChatStreamHandler(c: Context) {
+  const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
+    workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
+    sessionId: c.req.query("sessionId"), model: c.req.query("model") });
+  if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
+  const { q: query, sessionId, model } = parsed.data;
+
+  const userId = c.get("sessionUser").id;
+  const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
+  const forbidden = await denyWorkspaceAccess(c, workspaceId, "chat");
+  if (forbidden) return forbidden;
+  const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
+  if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
+  if (await chatModelRefused(getRequestActor(c), model, workspaceId)) return modelNotAllowed(c);
+  // Refuse before the stream opens, so a blocked spend is a 402.
+  // Pre-check only: chatWorkspace takes the interactive hold.
+  await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
+  c.header("Cache-Control", "no-cache");
+  c.header("X-Accel-Buffering", "no");
+
+  // Validated before the stream opens, so a bad capability is a real 401/403.
+  // Events are chained so they reach the client in order, ahead of `message`.
+  let pendingEvents: Promise<unknown> = Promise.resolve();
+  let sink: (event: MaterializeEvent) => void = () => undefined;
+  const deferred = await deferredRequestContext(c, workspaceId, (event) => sink(event));
+  if ("response" in deferred) return deferred.response;
+
+  const turn = beginChatTurn();
+  return streamSSE(c, (stream) => turn.run(async () => {
+    const abort = new AbortController();
+    stream.onAbort(() => abort.abort());
+    deferred.context.signal = abort.signal;
+    sink = (event) => {
+      pendingEvents = pendingEvents
+        .then(() => stream.writeSSE({ event: event.type, data: JSON.stringify({ documentId: event.documentId, pages: event.pages }) }))
+        .catch(() => undefined);
+    };
+    await stream.writeSSE({
+      event: "status",
+      data: JSON.stringify({
+        stage: "retrieval",
+        message: "Retrieving workspace context"
+      })
+    });
+
+    let response: Awaited<ReturnType<typeof chatWorkspace>>;
+    try {
+      response = await withDeferredContext(deferred.context, () => chatWorkspace({
+        workspaceId,
+        userId,
+        query,
+        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
+        sessionId,
+        model
+      }));
+      await pendingEvents;
+      await stream.writeSSE({
+        event: "message",
+        data: JSON.stringify(response)
+      });
+    } catch (error) {
+      await failChatTurn(turn, chatTurnFailureReason(error, abort.signal.aborted ? abort.signal : c.req.raw.signal));
+      throw error;
+    }
+    // Generated for this client: charged, whether or not it is still connected.
+    turn.delivered();
+    await stream.writeSSE({
+      event: "done",
+      data: JSON.stringify({
+        id: response.id,
+        sessionId: response.sessionId,
+        searchSessionId: response.searchSessionId
+      })
+    });
+  }));
+}
 
 type SearchData = ReturnType<typeof publicSearchResponse>;
 type BatchResult = { ok: true; data: SearchData } | { ok: false; error: { code: string; message: string; status: number } };
@@ -286,83 +371,6 @@ async function retrieve(body: SearchInput & { workspaceId: string }, userId: str
 
 export const searchRoutes = new Hono()
   .use("*", nativeApiErrors)
-  .get("/chat/stream", async (c) => {
-    const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
-      workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
-      sessionId: c.req.query("sessionId"), model: c.req.query("model") });
-    if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
-    const { q: query, sessionId, model } = parsed.data;
-
-    const userId = c.get("sessionUser").id;
-    const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
-    const forbidden = await denyWorkspaceAccess(c, workspaceId, "chat");
-    if (forbidden) return forbidden;
-    const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
-    if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-    if (await chatModelRefused(getRequestActor(c), model, workspaceId)) return modelNotAllowed(c);
-    // Refuse before the stream opens, so a blocked spend is a 402.
-    // Pre-check only: chatWorkspace takes the interactive hold.
-    await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
-    c.header("Cache-Control", "no-cache");
-    c.header("X-Accel-Buffering", "no");
-
-    // Validated before the stream opens, so a bad capability is a real 401/403.
-    // Events are chained so they reach the client in order, ahead of `message`.
-    let pendingEvents: Promise<unknown> = Promise.resolve();
-    let sink: (event: MaterializeEvent) => void = () => undefined;
-    const deferred = await deferredRequestContext(c, workspaceId, (event) => sink(event));
-    if ("response" in deferred) return deferred.response;
-
-    const turn = beginChatTurn();
-    return streamSSE(c, (stream) => turn.run(async () => {
-      const abort = new AbortController();
-      stream.onAbort(() => abort.abort());
-      deferred.context.signal = abort.signal;
-      sink = (event) => {
-        pendingEvents = pendingEvents
-          .then(() => stream.writeSSE({ event: event.type, data: JSON.stringify({ documentId: event.documentId, pages: event.pages }) }))
-          .catch(() => undefined);
-      };
-      await stream.writeSSE({
-        event: "status",
-        data: JSON.stringify({
-          stage: "retrieval",
-          message: "Retrieving workspace context"
-        })
-      });
-
-      let response: Awaited<ReturnType<typeof chatWorkspace>>;
-      try {
-        response = await withDeferredContext(deferred.context, () => chatWorkspace({
-          workspaceId,
-          userId,
-          query,
-          actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
-          sessionId,
-          model
-        }));
-        await pendingEvents;
-        await stream.writeSSE({
-          event: "message",
-          data: JSON.stringify(response)
-        });
-      } catch (error) {
-        await failChatTurn(turn, chatTurnFailureReason(error, abort.signal.aborted ? abort.signal : c.req.raw.signal));
-        throw error;
-      }
-      // Generated for this client: charged, whether or not it is still connected.
-      turn.delivered();
-      await stream.writeSSE({
-        event: "done",
-        data: JSON.stringify({
-          id: response.id,
-          sessionId: response.sessionId,
-          searchSessionId: response.searchSessionId
-        })
-      });
-    }));
-  })
-  .post("/chat", workspaceChatHandler)
   .get("/", async (c) => {
     const query = c.req.query("q");
     if (!query) {
@@ -537,7 +545,7 @@ export const searchRoutes = new Hono()
 /**
  * Non-streaming fallback for deferred search: the candidate pages of a past
  * search session and where each stands in the page ledger. Poll this when
- * `GET /v1/search/chat/stream` is unavailable or a search returned with pages
+ * `GET /v1/chat/stream` is unavailable or a search returned with pages
  * still materializing (`deferred.stoppedBy === "deadline"`).
  */
 export const searchesRoutes = new Hono().get("/:sessionId/materialization", async (c) => {
@@ -577,4 +585,4 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
 
 acceptApiKeys(searchRoutes);
 acceptApiKeys(searchesRoutes);
-acceptApiKeys(workspaceChatRoutes, ["POST /"]);
+acceptApiKeys(workspaceChatRoutes, ["POST /", "GET /stream"]);

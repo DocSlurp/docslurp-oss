@@ -8,6 +8,7 @@ import {
   isBillingEnforced,
   getPrivateModelEndpointRegistry,
   compilePipelinePlan,
+  type ApiErrorCode,
   type CostEstimate,
   type IndexingMode,
   type MaterializationPolicy,
@@ -29,14 +30,14 @@ export class IndexingModeError extends Error {
   constructor(
     message: string,
     readonly status: 400 | 402 | 403 | 404 | 409 | 413,
-    readonly code:
+    readonly code: Extract<ApiErrorCode,
       | "too_many_documents"
       | "index_in_progress"
       | "visual_mode_privacy"
       | "full_index_not_allowed"
       | "document_not_found"
       | "nothing_to_index"
-      | "backfill_not_possible",
+      | "backfill_not_possible">,
   ) {
     super(message);
     this.name = "IndexingModeError";

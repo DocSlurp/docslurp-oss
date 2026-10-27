@@ -21,6 +21,7 @@ import {
   type UpdateWorkspaceGraphInput,
   type WorkspaceGraphStatus,
   type WorkspaceRecord,
+  PUBLIC_ERROR_MESSAGES,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -114,7 +115,8 @@ export function mapGraphJob(row: GraphJobRow, now = Date.now()): GraphJob {
     outputTokens: row.output_tokens,
     costCents: Number(row.cost_cents),
     etaSeconds,
-    error: row.error,
+    // The worker's error text stays in graph_jobs and the worker log; callers get closed copy.
+    error: row.status === "failed" && row.error ? PUBLIC_ERROR_MESSAGES.graphRebuildFailed : null,
     cancelRequested: row.cancel_requested_at !== null,
     createdAt: row.created_at.toISOString(),
     startedAt: row.started_at?.toISOString() ?? null,

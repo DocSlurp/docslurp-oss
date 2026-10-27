@@ -89,12 +89,12 @@ describe("publicApiErrorDetails", () => {
     expect(publicApiErrorDetails({
       issues: [{ path: ["a", 1], message: "echoes secret input" }],
       retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
-      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5, secret: "x" },
+      directUpload: { createSession: "/v1/uploads/direct/sessions", maxFileBytes: 5, secret: "x" },
       sql: "select secret", stack: "private",
     })).toEqual({
       issues: [{ path: "a.1", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }],
       retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
-      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5 },
+      directUpload: { createSession: "/v1/uploads/direct/sessions", maxFileBytes: 5 },
     });
   });
   it("drops labels that are not plain identifiers and non-finite numbers", () => {
@@ -154,6 +154,16 @@ describe("limit links", () => {
     );
     for (const code of ["rate_limited", "credit_exhausted", "org_budget_paused"] as const) {
       expect(publicApiErrorMessage(code)).toBe(API_ERROR_PUBLIC_MESSAGES[code]);
+    }
+  });
+});
+
+describe("domain error codes", () => {
+  it("every code a route can surface has reviewed public copy", async () => {
+    const { API_ERROR_CODES, API_ERROR_PUBLIC_MESSAGES } = await import("../api-error.js");
+    for (const code of API_ERROR_CODES) expect(API_ERROR_PUBLIC_MESSAGES[code], code).toMatch(/\S/);
+    for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "index_in_progress", "workspace_forbidden"]) {
+      expect(API_ERROR_CODES).toContain(code);
     }
   });
 });
