@@ -1,3 +1,4 @@
+import { requestIp } from "../lib/request-context.js";
 import type { Context, MiddlewareHandler } from "hono";
 
 import {
@@ -74,7 +75,8 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
     try {
       actor = await resolveApiKeyActor(authorization, {
         origin: c.req.header("origin"),
-        referer: c.req.header("referer") ?? c.req.header("referrer")
+        referer: c.req.header("referer") ?? c.req.header("referrer"),
+      ip: requestIp(c),
       });
     } catch (error) {
       // A browser key on a website it doesn't allow, or a legacy one without workspaces: say how to fix it, never widen it.

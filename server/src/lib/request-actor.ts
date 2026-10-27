@@ -61,7 +61,7 @@ export function syntheticApiKeySessionUser(apiKey: ValidatedKey): SessionUser {
 
 export async function resolveApiKeyActor(
   authorization: string | undefined,
-  requestContext?: { origin?: string | null; referer?: string | null },
+  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
 ): Promise<ApiKeyRequestActor | null> {
   if (!authorization?.startsWith("Bearer ")) {
     return null;

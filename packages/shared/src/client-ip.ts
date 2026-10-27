@@ -87,7 +87,7 @@ export function parseCidr(raw: string): IpRange | null {
   return { family: ip.family, network: (ip.value >> hostBits) << hostBits, bits };
 }
 
-function inRange(ip: ParsedIp, range: IpRange): boolean {
+export function ipInRange(ip: ParsedIp, range: IpRange): boolean {
   if (ip.family !== range.family) return false;
   const hostBits = BigInt((ip.family === 4 ? 32 : 128) - range.bits);
   return (ip.value >> hostBits) << hostBits === range.network;
@@ -140,11 +140,11 @@ export function trustedProxiesFromEnv(env: Record<string, string | undefined> = 
 }
 
 export function isCloudflarePeer(ip: ParsedIp, proxies: TrustedProxies): boolean {
-  return proxies.cloudflare.some((range) => inRange(ip, range));
+  return proxies.cloudflare.some((range) => ipInRange(ip, range));
 }
 
 export function isTrustedProxy(ip: ParsedIp, proxies: TrustedProxies): boolean {
-  return isCloudflarePeer(ip, proxies) || proxies.other.some((range) => inRange(ip, range));
+  return isCloudflarePeer(ip, proxies) || proxies.other.some((range) => ipInRange(ip, range));
 }
 
 export type HeaderReader = (name: string) => string | null | undefined;

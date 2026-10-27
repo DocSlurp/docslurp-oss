@@ -16,11 +16,14 @@ const PAGES_CACHE_TTL_MS = 15_000;
 
 /** keyId → minute bucket (epoch ms) → requests not yet written. */
 const pendingRequests = new Map<string, Map<number, number>>();
+/** keyId → client address of its latest buffered request. */
+const pendingIps = new Map<string, string>();
 const pagesToday = new Map<string, { pages: number; dayStart: number; expiresAt: number; pending?: Promise<number> }>();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushing: Promise<void> | null = null;
 
-export function recordApiKeyRequest(keyId: string, now = Date.now()): void {
+export function recordApiKeyRequest(keyId: string, now = Date.now(), ip: string | null = null): void {
+  if (ip) pendingIps.set(keyId, ip.slice(0, 64));
   const minute = now - (now % 60_000);
   const buckets = pendingRequests.get(keyId) ?? new Map<number, number>();
   buckets.set(minute, (buckets.get(minute) ?? 0) + 1);
@@ -43,6 +46,8 @@ export async function flushApiKeyUsage(): Promise<void> {
     for (const [minute, count] of buckets) rows.push({ key_id: keyId, minute_bucket: new Date(minute).toISOString(), request_count: count });
   }
   pendingRequests.clear();
+  const ips = [...pendingIps].map(([key_id, ip]) => ({ key_id, ip }));
+  pendingIps.clear();
 
   flushing = (async () => {
     try {
@@ -56,6 +61,12 @@ export async function flushApiKeyUsage(): Promise<void> {
       await sql`
         update api_keys set last_used_at = now()
         where id = any(${sql.array([...new Set(rows.map((row) => row.key_id))])})`;
+      if (ips.length > 0) {
+        await sql`
+          update api_keys k set last_used_ip = r.ip
+          from jsonb_to_recordset(${sql.json(ips as never)}::jsonb) as r(key_id text, ip text)
+          where k.id = r.key_id`;
+      }
     } catch (error) {
       // Statistics only; the limiter's counters are authoritative and unaffected.
       console.error("[api-keys] usage flush failed:", error instanceof Error ? error.message : String(error));

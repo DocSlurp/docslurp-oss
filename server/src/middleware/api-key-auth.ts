@@ -1,3 +1,4 @@
+import { requestIp } from "../lib/request-context.js";
 import type { MiddlewareHandler } from "hono";
 import { middlewareErrorResponse } from "../lib/api-error.js";
 
@@ -29,7 +30,8 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
   try {
     actor = await resolveApiKeyActor(header, {
       origin: c.req.header("origin"),
-      referer: c.req.header("referer") ?? c.req.header("referrer")
+      referer: c.req.header("referer") ?? c.req.header("referrer"),
+      ip: requestIp(c),
     });
   } catch (error) {
     if (!(error instanceof ApiKeyPolicyError)) throw error;
