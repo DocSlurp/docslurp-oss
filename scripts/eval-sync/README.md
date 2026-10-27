@@ -50,6 +50,8 @@ Item IDs hash the dataset name plus case identity, so dataset versions never ove
 
 Langfuse drops C0/C1 control characters from stored JSON. Catalog, layout, query and run payloads therefore store any string containing them as `{ "$asciiJson": "<JSON string literal, ASCII only>" }`; `decodeUnsafe()` in `langfuse.mjs` restores the original value.
 
+Langfuse also stores JSON numbers at about 16 significant digits (`318.76800537109375` reads back as `318.7680053710938`). Readback therefore compares non-integer numbers at 15 significant digits; exact values remain in the source files referenced by path and sha256.
+
 ## Splits and held-out data
 
 Every dataset is split-pure and its name carries the split: catalogs are partitioned into `<prefix>/<split>`. `test`, `holdout` and `heldout` are held out and become `<prefix>/<split>-heldout`. `development`, `calibration`, `train`, `dev`, `probe`, `standards-probe` and `pilot-review` are tuning-readable. Any other split fails until it is classified. Held-out datasets, and runs scored against them, are written only to targets named by `--allow-heldout <target,...>`; otherwise the target fails for those datasets, or skips them with `--exclude-heldout`.

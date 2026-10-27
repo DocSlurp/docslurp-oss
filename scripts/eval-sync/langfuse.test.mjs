@@ -304,3 +304,13 @@ test("council fixes: held-out mirrors, contained paths, split relabelling, polic
   const tricky = { $asciiJson: "\"not a wrapper\"" };
   assert.deepEqual(decodeUnsafe(encodeUnsafe(tricky)), tricky);
 });
+
+test("readback tolerates Langfuse's 16-significant-digit number storage but not real changes", async () => {
+  const { api, state } = fakeLangfuse();
+  const items = buildRecordItems({ name: "n/development", split: "development", records: [{ id: "a", split: "development", input: {}, expectedOutput: { bbox: [318.76800537109375, 1314.6000000000001] }, metadata: {} }], commit: "c" });
+  const lossy = async (path, body, opts) => { const out = await api(path, body, opts); if (path === "/dataset-items" && body) state.items.get(body.id).expectedOutput = { bbox: [318.7680053710938, 1314.6] }; return out; };
+  assert.equal((await syncDataset(lossy, { name: "n/development", split: "development", items, sourceHashes: {}, commit: "c" })).created, 1);
+  assert.equal((await syncDataset(lossy, { name: "n/development", split: "development", items, sourceHashes: {}, commit: "c" })).unchanged, 1);
+  state.items.get(items[0].id).expectedOutput = { bbox: [318.77, 1314.6] };
+  assert.equal((await syncDataset(api, { name: "n/development", split: "development", items, sourceHashes: {}, commit: "c" })).updated, 1);
+});
