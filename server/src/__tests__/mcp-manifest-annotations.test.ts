@@ -10,7 +10,6 @@ describe("capability manifest annotations", () => {
   it("declares hints for every exposed MCP tool", () => {
     const manifest = mcpManifest("https://example.test", ["search", "chat", "ingest"]);
     const expected: Record<string, { readOnly: boolean; idempotent: boolean; consequential: boolean }> = {
-      getWorkspaceSettings: { readOnly: true, idempotent: true, consequential: false },
       listWorkspaces: { readOnly: true, idempotent: true, consequential: false },
       upload: { readOnly: false, idempotent: false, consequential: true },
       extract: { readOnly: false, idempotent: false, consequential: true },
@@ -27,8 +26,9 @@ describe("capability manifest annotations", () => {
     };
     // Settings proposals are first-party-app only: no API key sees them, whatever its scopes.
     const managed = mcpManifest("https://example.test", ["search", "workspaces:manage"], "server");
-    expect(managed.capabilities.some(tool => tool.id === "proposeWorkspaceSettings")).toBe(false);
+    expect(managed.capabilities.some(tool => tool.id === "proposeWorkspaceSettings" || tool.id === "getWorkspaceSettings")).toBe(false);
     const app = mcpManifest("https://example.test", undefined, undefined, { firstPartyApp: true });
+    expect(app.capabilities.find(tool => tool.id === "getWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
     expect(app.capabilities.find(tool => tool.id === "proposeWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
     expect(app.capabilities.some(tool => tool.id === "applySettingsProposal")).toBe(false);
     const tools = manifest.capabilities.filter((capability) => capability.category === "tool");
