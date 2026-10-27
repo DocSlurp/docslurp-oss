@@ -22,6 +22,13 @@ Because the triggers run inside Postgres, every delete path is covered: single
 and bulk document delete, workspace delete, run retention, discarded intake,
 org and account deletion, and a manual `delete` in psql.
 
+Extracts (see [extract.md](extract.md)) write everything under
+`extracts/<org>/<extract>/` instead of `<userId>/<runId>/`. Their `extracts`
+row is a durable expiry record with no foreign keys, so it survives workspace,
+run and account deletion. The API's maintenance sweep deletes an expired
+extract's documents and runs, which fires the triggers above, and then empties
+its prefix. Deleting a workspace expires its extracts at once.
+
 Every workspace has its own LanceDB database per embedding space
 (`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dimensions>`). Workspace
 deletion (`deleteWorkspaceData`, which organization deletion also runs for each

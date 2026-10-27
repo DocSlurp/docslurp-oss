@@ -123,7 +123,7 @@ async function applyAutoTitle(args: { workspaceId: string; currentName: string; 
 /**
  * Names an untitled (`empty`) workspace from its first upload batch, and while
  * the title is still filename-based (`upload`) re-derives it from all of the
- * workspace's live files, so it describes the set rather than the first file.
+ * workspace's completed live files, so it describes the set rather than the first file.
  * Later phases are never touched. Returns the new name when it changed.
  */
 export async function nameWorkspaceFromUpload(args: { workspaceId: string; filenames: string[]; urls?: string[] }): Promise<string | null> {
@@ -146,7 +146,7 @@ export async function nameWorkspaceFromUpload(args: { workspaceId: string; filen
     const documents = await sql<{ filename: string }[]>`
       select filename from documents
       where workspace_id = ${args.workspaceId} and superseded_at is null and purged_at is null and archived_at is null
-        and status not in ('failed', 'cancelled', 'pii_blocked')
+        and status = 'completed'
       order by created_at, id
     `;
     const filenames = [...new Set(documents.map((document) => document.filename))];
@@ -184,19 +184,19 @@ export async function refineWorkspaceNames(workspaceIds: string[], firstMessage?
       (select ds.summary from documents d
         join document_summaries ds on ds.user_id = d.user_id and ds.run_id = d.run_id and ds.document_id = d.id
         where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-          and d.status not in ('failed', 'cancelled', 'pii_blocked') and length(trim(ds.summary)) > 0
+          and d.status = 'completed' and length(trim(ds.summary)) > 0
         order by d.created_at, ds.created_at desc limit 1) as summary,
       case when s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content' then null else coalesce(
         -- Retain extraction-derived titles as a fallback when no summary exists.
         (select d.metadata ->> 'title' from documents d
           where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-          and d.status not in ('failed', 'cancelled', 'pii_blocked') and nullif(btrim(d.metadata ->> 'title'), '') is not null
+          and d.status = 'completed' and nullif(btrim(d.metadata ->> 'title'), '') is not null
           order by d.created_at limit 1),
         c.metadata ->> 'title', c.heading_path[1],
         -- Deferred documents have no chunks until pages are searched; their Index Map supplies a title.
         (select d.metadata ->> 'mapTitle' from documents d
           where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-          and d.status not in ('failed', 'cancelled', 'pii_blocked') and d.metadata ->> 'mapTitle' is not null order by d.created_at limit 1)
+          and d.status = 'completed' and d.metadata ->> 'mapTitle' is not null order by d.created_at limit 1)
       ) end as title
     from workspaces w
     join workspace_search_settings s on s.workspace_id = w.id
@@ -204,7 +204,7 @@ export async function refineWorkspaceNames(workspaceIds: string[], firstMessage?
       select dc.metadata, dc.heading_path from document_chunks dc
       join documents d on d.id = dc.document_id
       where d.workspace_id = w.id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-          and d.status not in ('failed', 'cancelled', 'pii_blocked') and s.compat_metadata -> 'autoTitle' ->> 'phase' <> 'content'
+          and d.status = 'completed' and s.compat_metadata -> 'autoTitle' ->> 'phase' <> 'content'
         and (dc.metadata ->> 'title' is not null or array_length(dc.heading_path, 1) > 0)
       order by d.created_at, dc.chunk_index limit 1
     ) c on true

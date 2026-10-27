@@ -119,6 +119,8 @@ async function loadTargets(
     where d.workspace_id = ${workspaceId}
       and ${LIVE_DOCUMENT}
       and (d.indexing_mode is null or d.indexing_mode = 'full')
+      -- Extract documents are never re-indexed: the new version would outlive the extract.
+      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
       ${options.hashNot ? db`and d.index_config_hash is distinct from ${options.hashNot}` : db``}
       and not exists (
         select 1 from documents child

@@ -16,7 +16,7 @@ import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
-import { lanceDbMaintenanceSettings, requestLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
+import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
 /**
  * Superseded-version purge.
@@ -77,7 +77,17 @@ export interface PurgeStorage {
 }
 
 /** Deletes the rows of the given documents from one LanceDB table (one commit). */
-export type DeleteVectorRows = (args: { uri: string; table: string; documentIds: string[] }) => Promise<void>;
+export type DeleteVectorRows = (args: {
+  uri: string;
+  table: string;
+  documentIds: string[];
+  /**
+   * Also compact the table and prune every older version now (cleanupOlderThan: now), so the
+   * deleted rows' text and vectors leave the bucket instead of lingering in old fragments for
+   * the version-retention window. Set for expired extracts.
+   */
+  purgeHistory?: boolean;
+}) => Promise<void>;
 
 /** Drops a whole LanceDB table (org deletion). Missing tables are not an error. */
 export type DropVectorTable = (args: { uri: string; table: string }) => Promise<void>;
@@ -257,7 +267,7 @@ export function purgeConfig(): SupersededPurgeOptions & { intervalMs: number } {
 }
 
 /** Deletes documents' rows from a LanceDB table, retrying commit conflicts with concurrent writers. */
-export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: tableName, documentIds }) => {
+export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: tableName, documentIds, purgeHistory }) => {
   if (documentIds.length === 0) return;
   for (const documentId of documentIds) {
     if (!SAFE_DOCUMENT_ID.test(documentId)) throw new Error(`Unsafe document id for LanceDB delete: ${documentId}`);
@@ -275,7 +285,12 @@ export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: 
           await table.delete(`"documentId" IN (${ids})`);
         }
         const maintenance = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
-        if (maintenance.enabled) await requestLanceDbMaintenance(uri, tableName, maintenance);
+        if (purgeHistory) {
+          // Keep the durable cleanup row unless compaction and history pruning actually succeed.
+          await requireLanceDbMaintenance(uri, tableName, { ...maintenance, versionRetentionMs: 0 });
+        } else if (maintenance.enabled) {
+          await requestLanceDbMaintenance(uri, tableName, maintenance);
+        }
         return;
       } catch (error) {
         if (attempt >= 4 || !/incompatible transaction|commit conflict/i.test(String(error))) throw error;
@@ -818,18 +833,20 @@ async function cleanDeletedDocuments(
       return location ? [locationKey(location)] : [];
     }),
   );
-  const byTable = new Map<string, { location: VectorLocation; documentIds: Set<string> }>();
+  const byTable = new Map<string, { location: VectorLocation; documentIds: Set<string>; purgeHistory: boolean }>();
   for (const row of vectorOwners) {
     for (const target of row.vector_targets) {
       const location = resolveVectorLocation(options.lancedbRoot, row.org_id, row.workspace_id, target);
       if (!location || droppedTables.has(locationKey(location))) continue;
-      const group = byTable.get(locationKey(location)) ?? { location, documentIds: new Set<string>() };
+      const group = byTable.get(locationKey(location)) ?? { location, documentIds: new Set<string>(), purgeHistory: false };
       group.documentIds.add(row.document_id);
+      // An expired extract's text must not survive in the table's older versions.
+      if (row.source_key?.startsWith("extracts/")) group.purgeHistory = true;
       byTable.set(locationKey(location), group);
     }
   }
-  for (const { location, documentIds } of byTable.values()) {
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds] });
+  for (const { location, documentIds, purgeHistory } of byTable.values()) {
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
   }
 
   const keys = new Set<string>();
@@ -888,8 +905,19 @@ async function cleanDeletedDocuments(
   await client`delete from document_cleanup_queue where document_id = any(${client.array(rows.map((row) => row.document_id))})`;
 }
 
-/** The document a run artifact key belongs to: `<user>/<run>/<kind>/<documentId>[./]...`. */
-function artifactOwner(key: string): { prefix: string; documentId: string } | null {
+/**
+ * The document a run artifact key belongs to: `<user>/<run>/<kind>/<documentId>[./]...`,
+ * or `extracts/<org>/<extract>/<kind>/<documentId>[./]...` for an extract run, whose
+ * root is three segments (read as two, `extracts/<org>/` would span every extract of the org).
+ */
+export function artifactOwner(key: string): { prefix: string; documentId: string } | null {
+  if (key.startsWith("extracts/")) {
+    const [, org, extract, , file] = key.split("/");
+    const documentId = file?.split(".")[0];
+    if (!org || !/^[A-Za-z0-9_-]{1,128}$/.test(org) || !extract || !/^ext_[0-9a-f]{32}$/.test(extract)) return null;
+    if (!documentId || !SAFE_DOCUMENT_ID.test(documentId)) return null;
+    return { prefix: `extracts/${org}/${extract}/`, documentId };
+  }
   const [user, run, , file] = key.split("/");
   const documentId = file?.split(".")[0];
   if (!user || !run || !documentId || !SAFE_DOCUMENT_ID.test(documentId)) return null;

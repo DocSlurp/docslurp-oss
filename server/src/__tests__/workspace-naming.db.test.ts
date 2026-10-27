@@ -134,8 +134,10 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     // The initial SELECT sees the old committed name. applyAutoTitle must wait
     // for this transaction, then reject the stale expected name in the UPDATE.
     automatic = naming.refineWorkspaceNames([workspace.id], candidate === "same" ? "Untitled workspace" : "Annual budget review");
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 10_000;
     for (;;) {
+      // pg_stat_activity is cached within a transaction until explicitly cleared.
+      await connection`select pg_stat_clear_snapshot()`;
       const [row] = await connection`select exists (
         select 1 from pg_stat_activity where application_name = 'workspace-naming-race'
           and wait_event_type = 'Lock' and query like '%update workspaces%'
@@ -152,7 +154,7 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     connection.release();
     await automatic;
   }
-});
+}, 15_000);
 
 it("advances a same-name phase and leaves the workspace timestamp unchanged", async () => {
   const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });
@@ -163,14 +165,14 @@ it("advances a same-name phase and leaves the workspace timestamp unchanged", as
   expect(after!.updated_at).toEqual(before!.updated_at);
 });
 
-it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked"])("excludes %s documents from all naming sources", async (excluded) => {
+it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked", "queued", "processing"])("excludes %s documents from all naming sources", async (excluded) => {
   const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });
   const secret = await addDocument(workspace.id, "secret_merger.pdf");
   await sql`update documents set
     superseded_at = ${excluded === "superseded" ? new Date() : null},
     archived_at = ${excluded === "archived" ? new Date() : null},
     purged_at = ${excluded === "purged" ? new Date() : null},
-    status = ${["failed", "cancelled", "pii_blocked"].includes(excluded) ? excluded : "completed"},
+    status = ${["failed", "cancelled", "pii_blocked", "queued", "processing"].includes(excluded) ? excluded : "completed"},
     metadata = '{"title":"Secret extracted title","mapTitle":"Secret mapped title"}'
     where id = ${secret.id}`;
   await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
