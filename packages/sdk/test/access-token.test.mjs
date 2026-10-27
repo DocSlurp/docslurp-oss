@@ -100,3 +100,14 @@ test("an SSE stream refused with 401 refreshes once and reconnects", async () =>
   assert.deepEqual(sent, ["Bearer dscli_old", "Bearer dscli_new"]);
   assert.equal(events.length, 1);
 });
+
+test("a 401 refresh does not use up a 429/5xx retry", async () => {
+  const statuses = [401, 503, 503];
+  let calls = 0;
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", accessToken: ({ forceRefresh }) => (forceRefresh ? "dscli_new" : "dscli_old"), fetch: async () => {
+    const status = statuses[calls++];
+    return status ? json({}, status) : json({ run: { id: "run" } });
+  } });
+  await client.getRun("run");
+  assert.equal(calls, 4, "one 401 refresh plus two 503 retries, then success");
+});

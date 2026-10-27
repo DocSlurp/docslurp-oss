@@ -890,6 +890,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           refreshedAfter401 = true;
           await response.body?.cancel();
           headers.set("Authorization", `Bearer ${await bearer(true)}`);
+          attempt--; // The token refresh is not one of the 429/5xx retries.
           continue;
         }
         if (retryable && attempt < 2 && [429, 502, 503, 504].includes(response.status)) {
