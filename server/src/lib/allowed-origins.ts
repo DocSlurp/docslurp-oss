@@ -1,3 +1,5 @@
+import { PUBLIC_SUFFIX_RULES } from "./public-suffix-data.js";
+
 /**
  * Browser (client) API key origin allowlist entries.
  *
@@ -8,7 +10,8 @@
  * - `example.com:8443`, `https://*.example.com:8443`  that port only
  *
  * Subdomains are admitted only by an explicit `*.` (a legacy leading `.` means
- * the same). A bare public suffix (`github.io`, `vercel.app`, `co.uk`, `com`)
+ * the same). A bare public suffix from the Public Suffix List, private
+ * section included (`github.io`, `vercel.app`, `co.uk`, `com`)
  * would admit every tenant site on it, so it is refused when a key is saved
  * and never matches at request time.
  *
@@ -23,40 +26,44 @@ export interface AllowedOriginEntry {
   port: string | null;
 }
 
-/**
- * Public suffixes (ICANN second-level registries and private hosting suffixes)
- * where unrelated parties own the sites below, curated from the Public Suffix
- * List. Single-label hosts (`com`, `io`, `app`) are refused separately.
- */
-const PUBLIC_SUFFIXES = new Set([
-  // ICANN second-level registries
-  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk",
-  "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "org.nz", "net.nz",
-  "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "com.br", "net.br", "org.br",
-  "com.cn", "net.cn", "org.cn", "com.mx", "org.mx", "co.in", "net.in", "org.in", "firm.in",
-  "co.za", "org.za", "com.tr", "com.sg", "com.hk", "com.tw", "com.ar", "com.co", "com.pe",
-  "co.il", "org.il", "co.id", "or.id", "com.my", "com.ph", "com.vn", "com.ua", "com.pl", "co.th",
-  "com.es", "com.pt", "co.at", "or.at", "com.ru", "com.sa", "com.eg", "com.ng", "co.ke",
-  // Private hosting suffixes
-  "github.io", "githubusercontent.com", "gitlab.io", "bitbucket.io", "vercel.app", "now.sh",
-  "netlify.app", "netlify.com", "pages.dev", "workers.dev", "r2.dev", "trycloudflare.com",
-  "herokuapp.com", "herokussl.com", "web.app", "firebaseapp.com", "appspot.com", "run.app",
-  "cloudfunctions.net", "azurewebsites.net", "azurestaticapps.net", "cloudapp.net", "windows.net",
-  "cloudfront.net", "amplifyapp.com", "elasticbeanstalk.com", "s3.amazonaws.com", "amazonaws.com",
-  "onrender.com", "fly.dev", "railway.app", "up.railway.app", "deno.dev", "deno.net",
-  "glitch.me", "repl.co", "replit.app", "replit.dev", "surge.sh", "ngrok.io", "ngrok.app",
-  "ngrok-free.app", "ngrok.dev", "loca.lt", "blogspot.com", "wordpress.com", "wpcomstaging.com",
-  "myshopify.com", "webflow.io", "framer.app", "framer.website", "wixsite.com", "squarespace.com",
-  "codesandbox.io", "csb.app", "stackblitz.io", "webcontainer.io", "gitpod.io", "github.dev",
-  "app.github.dev", "preview.app.github.dev", "readthedocs.io", "pythonanywhere.com",
-  "digitaloceanspaces.com", "ondigitalocean.app", "supabase.co", "lovable.app",
-  "carrd.co", "notion.site", "hashnode.dev", "substack.com", "medium.com",
-]);
-
 const LOCAL_HOSTS = new Set(["localhost"]);
 
 function isIpLiteral(host: string): boolean {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.startsWith("[");
+}
+
+let rules: { normal: Set<string>; wildcard: Set<string>; exception: Set<string> } | null = null;
+
+/** The vendored Public Suffix List (lib/public-suffix-data.ts, refreshed by scripts/update-public-suffix-list.mjs). */
+function suffixRules() {
+  if (rules) return rules;
+  const parsed = { normal: new Set<string>(), wildcard: new Set<string>(), exception: new Set<string>() };
+  for (const rule of PUBLIC_SUFFIX_RULES.split("\n")) {
+    if (rule.startsWith("!")) parsed.exception.add(rule.slice(1));
+    else if (rule.startsWith("*.")) parsed.wildcard.add(rule.slice(2));
+    else parsed.normal.add(rule);
+  }
+  rules = parsed;
+  return parsed;
+}
+
+/**
+ * The public suffix of an ASCII host under the PSL algorithm (ICANN and
+ * private rules, so `github.io`, `vercel.app`, `s3.us-east-1.amazonaws.com`
+ * and `blob.core.windows.net` are suffixes). An unlisted TLD is its own suffix.
+ */
+export function publicSuffixOf(host: string): string {
+  const labels = host.toLowerCase().replace(/\.$/, "").split(".");
+  const { normal, wildcard, exception } = suffixRules();
+  let best = labels.at(-1) ?? "";
+  for (let i = labels.length - 1; i >= 0; i--) {
+    const candidate = labels.slice(i).join(".");
+    if (exception.has(candidate)) return labels.slice(i + 1).join(".");
+    if (normal.has(candidate)) best = candidate;
+    const parent = labels.slice(i + 1).join(".");
+    if (i < labels.length - 1 && wildcard.has(parent)) best = candidate;
+  }
+  return best;
 }
 
 /** True when the host is a public suffix (or a single label), so it names no single owner. */
@@ -64,7 +71,7 @@ export function isPublicSuffixHost(host: string): boolean {
   const value = host.toLowerCase().replace(/\.$/, "");
   if (LOCAL_HOSTS.has(value) || isIpLiteral(value)) return false;
   if (!value.includes(".")) return true;
-  return PUBLIC_SUFFIXES.has(value);
+  return publicSuffixOf(value) === value;
 }
 
 export class AllowedOriginError extends Error {}

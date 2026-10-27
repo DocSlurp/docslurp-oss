@@ -9,6 +9,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { isSelfHostedDeployment, withUpgradeLinks } from "../lib/upgrade-links.js";
 
 import { requestIp } from "../lib/request-context.js";
+import { requireTrustedProxy } from "@docslurp/shared/client-ip";
 import { apiKeyPagesToday } from "../services/api-key-usage.js";
 import { apiKeySpendCents } from "../services/usage-attribution.js";
 
@@ -69,6 +70,8 @@ export type RateLimitOptions = {
   identity?: RateLimitIdentityMode;
   profile?: RateLimitProfile;
   store?: RateLimitStore;
+  /** Count the request in this category instead of the one its path implies (protocol surfaces such as MCP tools). */
+  category?: RateLimitCategory;
 };
 
 type CategoryLimit = {
@@ -105,6 +108,8 @@ export type RateLimitConsumeResult = {
   windows: Array<{ previous: number; current: number }>;
   /** Whether this request was added to the counters. */
   counted: boolean;
+  /** The in-memory store is full and this request needed a new counter: denied without counting. */
+  full?: boolean;
 };
 
 export interface RateLimitStore {
@@ -241,99 +246,105 @@ function parseScriptResult(result: unknown, counterCount: number): RateLimitCons
   return { blockedMs: 0, denied: denied - 1, counted: counted === 1, windows };
 }
 
-/** Default cap on in-process limiter entries (~200 bytes each, so roughly 40 MB at the cap). */
+/** Default cap on in-process limiter counters (~200 bytes each, so roughly 40 MB at the cap). */
 export const MEMORY_STORE_DEFAULT_MAX_ENTRIES = 200_000;
 
 /**
- * The per-process limiter. It is bounded: when it holds `maxEntries`, expired
- * entries are swept and then the oldest-written entries are evicted (Map
- * insertion order; every write re-inserts its key). Eviction can forget an
- * idle counter early, never disable limiting, and is logged.
+ * The per-process limiter, bounded without ever weakening a limit:
+ * - one entry per counter (identity + policy), holding its current and
+ *   previous fixed-window counts, so rolling into a new window reuses it;
+ * - penalty-box blocks live in their own map and are never evicted while
+ *   live (each one costs its identity a whole exceeded limit to earn);
+ * - at the cap, expired counters are swept first; if the store is still full,
+ *   a request that needs a new counter (a new identity) is denied rather than
+ *   evicting anyone's live counter. Existing identities keep counting.
  */
 class InMemorySlidingWindowStore implements RateLimitStore {
-  private values = new Map<string, { value: number; expiresAt: number }>();
+  private counters = new Map<string, { bucket: number; current: number; previous: number; expiresAt: number }>();
+  private blocks = new Map<string, number>();
   private lastSweepAt = 0;
-  private evictionLogged = false;
   private lastCapSweepAt = 0;
+  private fullLogged = false;
 
   constructor(private readonly maxEntries = memoryStoreMaxEntries()) {}
 
   get size(): number {
-    return this.values.size;
+    return this.counters.size;
   }
 
-  private write(key: string, entry: { value: number; expiresAt: number }, now: number): void {
-    this.values.delete(key);
-    if (this.values.size >= this.maxEntries) {
-      // A full sweep is O(entries): at most once a second, so a flood at the cap stays cheap.
-      if (now - this.lastCapSweepAt >= 1_000) {
-        this.lastCapSweepAt = now;
-        for (const [existing, value] of this.values) if (value.expiresAt <= now) this.values.delete(existing);
-      }
-      let evicted = 0;
-      for (const existing of this.values.keys()) {
-        if (this.values.size < this.maxEntries) break;
-        this.values.delete(existing);
-        evicted++;
-      }
-      if (evicted > 0 && !this.evictionLogged) {
-        this.evictionLogged = true;
-        console.warn(`[rate-limit] in-memory limiter reached ${this.maxEntries} entries; evicting the oldest counters (set API_RATE_LIMIT_MEMORY_MAX_ENTRIES or configure Redis)`);
-      }
-    }
-    this.values.set(key, entry);
+  get blockCount(): number {
+    return this.blocks.size;
   }
 
   async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
     const { now } = input;
     this.sweep(now);
-    const blockedMs = this.ttl(input.blockKey, now);
-    if (blockedMs > 0) return { blockedMs, denied: -1, counted: false, windows: [] };
+    const blockedUntil = this.blocks.get(input.blockKey) ?? 0;
+    if (blockedUntil > now) return { blockedMs: blockedUntil - now, denied: -1, counted: false, windows: [] };
+
+    const missing = input.counters.filter((counter) => !this.counters.has(counter.key)).length;
+    if (missing > 0 && this.counters.size + missing > this.maxEntries) {
+      if (now - this.lastCapSweepAt >= 1_000) {
+        this.lastCapSweepAt = now;
+        this.sweepCounters(now);
+      }
+      if (this.counters.size + missing > this.maxEntries) {
+        if (!this.fullLogged) {
+          this.fullLogged = true;
+          console.warn(`[rate-limit] in-memory limiter is full (${this.maxEntries} counters); denying new identities until counters expire (set API_RATE_LIMIT_MEMORY_MAX_ENTRIES or configure Redis)`);
+        }
+        return { blockedMs: 0, denied: 0, counted: false, windows: input.counters.map(() => ({ previous: 0, current: 0 })), full: true };
+      }
+    }
 
     let denied = -1;
-    const keys: string[] = [];
     const windows = input.counters.map((counter, index) => {
       const bucket = Math.floor(now / counter.windowMs);
-      const current = this.read(`${counter.key}:${bucket}`, now);
-      const previous = this.read(`${counter.key}:${bucket - 1}`, now);
+      const { previous, current } = this.read(counter.key, bucket, now);
       const overlap = 1 - (now - bucket * counter.windowMs) / counter.windowMs;
       if (denied < 0 && previous * overlap + current + 1 > counter.limit) denied = index;
-      keys.push(`${counter.key}:${bucket}`);
       return { previous, current };
     });
 
     const counted = denied < 0 || input.countDenied;
     if (counted) {
       input.counters.forEach((counter, index) => {
-        const key = keys[index]!;
-        this.write(key, { value: this.read(key, now) + 1, expiresAt: now + counter.windowMs * 2 }, now);
+        const bucket = Math.floor(now / counter.windowMs);
+        const window = windows[index]!;
+        this.counters.set(counter.key, { bucket, previous: window.previous, current: window.current + 1, expiresAt: (bucket + 2) * counter.windowMs });
       });
     }
     const penaltyMs = denied >= 0 ? input.counters[denied]?.penaltyMs ?? 0 : 0;
-    if (penaltyMs > 0) this.write(input.blockKey, { value: 1, expiresAt: now + penaltyMs }, now);
+    if (penaltyMs > 0) this.blocks.set(input.blockKey, Math.max(this.blocks.get(input.blockKey) ?? 0, now + penaltyMs));
     return { blockedMs: 0, denied, counted, windows };
   }
 
-  private read(key: string, now: number): number {
-    const entry = this.values.get(key);
-    return entry && entry.expiresAt > now ? entry.value : 0;
+  private read(key: string, bucket: number, now: number): { previous: number; current: number } {
+    const entry = this.counters.get(key);
+    if (!entry || entry.expiresAt <= now) return { previous: 0, current: 0 };
+    if (entry.bucket === bucket) return { previous: entry.previous, current: entry.current };
+    if (entry.bucket === bucket - 1) return { previous: entry.current, current: 0 };
+    return { previous: 0, current: 0 };
   }
 
-  private ttl(key: string, now: number): number {
-    const entry = this.values.get(key);
-    return entry && entry.expiresAt > now ? entry.expiresAt - now : 0;
+  private sweepCounters(now: number): void {
+    for (const [key, entry] of this.counters) if (entry.expiresAt <= now) this.counters.delete(key);
+    this.fullLogged = this.counters.size >= this.maxEntries && this.fullLogged;
   }
 
   private sweep(now: number): void {
     if (now - this.lastSweepAt < DEFAULT_WINDOW_MS) return;
     this.lastSweepAt = now;
-    for (const [key, entry] of this.values) if (entry.expiresAt <= now) this.values.delete(key);
+    this.sweepCounters(now);
+    for (const [key, until] of this.blocks) if (until <= now) this.blocks.delete(key);
   }
 
   reset(): void {
-    this.values.clear();
+    this.counters.clear();
+    this.blocks.clear();
     this.lastSweepAt = 0;
-    this.evictionLogged = false;
+    this.lastCapSweepAt = 0;
+    this.fullLogged = false;
   }
 }
 
@@ -469,7 +480,7 @@ class UpstashRedisSlidingWindowStore extends FallbackStore {
 }
 
 /** Standalone stores, for tests and tools; the middleware picks one from env. */
-export function createMemoryRateLimitStore(options: { maxEntries?: number } = {}): RateLimitStore & { readonly size: number } {
+export function createMemoryRateLimitStore(options: { maxEntries?: number } = {}): RateLimitStore & { readonly size: number; readonly blockCount: number } {
   return new InMemorySlidingWindowStore(options.maxEntries);
 }
 
@@ -567,6 +578,22 @@ export function rateLimitBackend(): RateLimitBackend {
  * limits apply per instance, so N instances allow N times each limit, and a
  * deploy resets them. Disabled limiting is an error in production.
  */
+/**
+ * Self-hosted: per-visitor limits for browser keys key on the client address,
+ * which is only trustworthy behind a configured proxy. Warn loudly when
+ * browser keys exist and REQUIRE_TRUSTED_PROXY is off. `hasBrowserKeys` is
+ * injected so startup never blocks on the database.
+ */
+export async function warnSelfHostedBrowserKeysWithoutTrustedProxy(
+  hasBrowserKeys: () => Promise<boolean>,
+  log: Pick<Console, "warn"> = console,
+): Promise<boolean> {
+  if (!isSelfHostedDeployment() || requireTrustedProxy()) return false;
+  if (!(await hasBrowserKeys().catch(() => false))) return false;
+  log.warn("[rate-limit] browser (client) API keys exist but REQUIRE_TRUSTED_PROXY is off: per-visitor limits trust the connection's peer address, so a proxy in front makes every visitor share one bucket, and forwarded headers are ignored unless TRUSTED_PROXIES is set. Set TRUSTED_PROXIES and REQUIRE_TRUSTED_PROXY=true.");
+  return true;
+}
+
 export function logRateLimitBackendAtStartup(log: Pick<Console, "log" | "warn" | "error"> = console): RateLimitBackend {
   const backend = rateLimitBackend();
   if (backend === "disabled") {
@@ -751,6 +778,8 @@ async function consumeCounters(
   }));
   const result = await args.store.consume({ blockKey: `${base}:block`, counters, now: args.now, countDenied: args.countDenied });
   if (result.blockedMs > 0) return blockedResponse(c, result.blockedMs);
+  // The per-process store is full and this is a new identity: refused, never let through uncounted.
+  if (result.full) return tooManyRequests(c, "rate_limited", "Too many requests", { category: args.category, policy: "limiter-capacity", retryAfterSeconds: 60 });
 
   const states = counters.map((counter, index) =>
     counterState(counter.name, counter, result.windows[index] ?? { previous: 0, current: 0 }, result.counted, args.now));
@@ -780,7 +809,7 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
   if (!identity) return null;
 
   const now = (options.now ?? Date.now)();
-  const category = classifyRateLimitCategory(c.req.method, c.req.path);
+  const category = options.category ?? classifyRateLimitCategory(c.req.method, c.req.path);
   const profile = resolveProfile(options.profile);
   const limit = resolveLimit(c, category, profile, options);
   const store = options.store ?? getDefaultStore();
@@ -810,10 +839,12 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
       counters.push({ name: apiKeyRateLimitPolicyName(rule), key: "", limit: rule.limit, windowMs: rule.windowSeconds * 1000 });
     }
     // Browser keys: one visitor (IP) gets only a share of the key's budget.
+    // Requests with no client address share one "unknown" visitor bucket, so a
+    // missing address never turns the per-visitor limit off.
     const ip = requestIp(c);
     const visitorLimit = apiKey.keyType !== "server" ? clientVisitorLimit(category) : 0;
-    if (ip && visitorLimit > 0) {
-      counters.push({ name: `client-visitor-${category}`, scope: rateLimitAddress(ip), key: "", limit: visitorLimit, windowMs: DEFAULT_WINDOW_MS });
+    if (visitorLimit > 0) {
+      counters.push({ name: `client-visitor-${category}`, scope: ip ? rateLimitAddress(ip) : "unknown", key: "", limit: visitorLimit, windowMs: DEFAULT_WINDOW_MS });
     }
     const quota = await checkApiKeyQuotas(c, apiKey, category, now);
     if (quota) return quota;
@@ -942,6 +973,16 @@ export async function enforceAuthenticatedApiRateLimit(c: Context): Promise<Resp
   if (!c.get("requestActor") || c.get("rateLimitActorChecked")) return null;
   c.set("rateLimitActorChecked", true);
   return await checkRateLimit(c, { identity: "actor" });
+}
+
+/**
+ * Counts an authenticated request once more as `category`, for a protocol call
+ * that does more than its path suggests: an MCP `chat` tool call runs a model
+ * turn, so it also spends the actor's chat-ai allowance and spend windows.
+ */
+export async function enforceActorCategoryRateLimit(c: Context, category: RateLimitCategory): Promise<Response | null> {
+  if (!c.get("requestActor")) return null;
+  return await checkRateLimit(c, { identity: "actor", category });
 }
 
 export function createApiRateLimit(options: RateLimitOptions = {}): MiddlewareHandler {

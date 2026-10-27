@@ -5,10 +5,13 @@ export type RateLimitCategory = "upload" | "search" | "chat-ai" | "read" | "writ
 /**
  * The address a per-IP limit counts. IPv6 clients usually control a whole /64,
  * so an IPv6 address counts as its /64 prefix; rotating addresses inside it
- * does not escape the limit. IPv4 (and IPv4-mapped IPv6) count as the address.
+ * does not escape the limit. IPv4 counts as the address, and an IPv4-mapped
+ * IPv6 address (`::ffff:192.0.2.1`) as that same IPv4 address.
  */
 export function rateLimitAddress(ip: string): string {
   const value = ip.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  const mapped = /^(?:0{0,4}:){0,5}:?ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
+  if (mapped) return mapped[1]!;
   if (!value.includes(":") || value.includes(".")) return value;
   const [head = "", tail] = value.split("::", 2);
   const left = head ? head.split(":") : [];

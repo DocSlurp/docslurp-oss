@@ -21,7 +21,7 @@ import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
-import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup } from "./middleware/rate-limit.js";
+import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
 import { chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
@@ -307,6 +307,10 @@ export function ensureApiStartup(): Promise<void> {
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
       // Loud when limits are per instance (no Redis) or disabled.
       logRateLimitBackendAtStartup();
+      void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
+        const { sql } = await import("./db.js");
+        return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;
+      });
       emitPostHogApiLog({
         severityText: "info",
         eventName: "docslurp.api.startup_completed",

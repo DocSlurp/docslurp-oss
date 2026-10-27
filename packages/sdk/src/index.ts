@@ -449,6 +449,8 @@ export type ChatInput = {
     tools?: boolean;
     /** false: no web tools this turn. Omitted or true: offered only when the deployment, workspace and key allow them. */
     web?: boolean;
+    /** @deprecated Ignored: settings suggestions are a DocSlurp app feature and never run for API keys. */
+    suggestions?: boolean;
   };
   /** Retrieval overrides for this request only; workspace defaults stay as they are. */
   retrieval?: {
@@ -910,13 +912,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}): AsyncGenerator<RunStreamEvent> {
+  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}): AsyncGenerator<RunStreamEvent> {
     const bound = deadline(positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs"), streamOptions.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const onAbort = () => { void reader?.cancel().catch(() => {}); };
     try {
       bound.signal.throwIfAborted();
-      const headers = new Headers({ Accept: "text/event-stream" });
+      const headers = new Headers({ ...extraHeaders, Accept: "text/event-stream" });
       if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
       const response = await fetchImpl(`${apiUrl}${path}`, {
         headers, credentials: apiKey ? "omit" : "include", signal: bound.signal,
@@ -1606,10 +1608,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const target = inWorkspace(input);
       const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
       if (target.sessionId) params.set("sessionId", target.sessionId);
-      if (target.sessionToken) params.set("sessionToken", target.sessionToken);
       if (target.model) params.set("model", target.model);
       let completed = false;
-      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {
+      // The session grant goes in a header, never the URL.
+      const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
+      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions, grant)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;

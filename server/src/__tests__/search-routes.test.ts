@@ -323,6 +323,59 @@ describe("searchRoutes", () => {
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
 
+  describe("browser-key chat session grants (route level)", () => {
+    const session = "11111111-1111-4111-8111-111111111111";
+    const visitor = () => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org", keyType: "client" as const, allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], workspaceIds: ["ws-chat"] } });
+    beforeEach(() => { process.env.BETTER_AUTH_SECRET ||= "search-routes-session-grant-test-secret"; getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" }); });
+
+    it("round-trips the grant on POST and refuses a session id without it", async () => {
+      const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
+      const app = buildApp(visitor());
+      const post = (body: Record<string, unknown>) => app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", ...body }) });
+      const refused = await post({ sessionId: session });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ error: { code: "chat_session_forbidden" } });
+      expect(chatWorkspace).not.toHaveBeenCalled();
+      const token = sealChatSessionToken({ keyId: "pub-1", workspaceId: "ws-chat", sessionId: session });
+      chatWorkspace.mockResolvedValueOnce({ answer: "Supported", sessionId: session, sessionToken: "next" });
+      const ok = await post({ sessionId: session, sessionToken: token });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ sessionToken: "next" });
+      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, sessionToken: token }));
+      // Another key's grant for the same session id is refused.
+      const foreign = sealChatSessionToken({ keyId: "pub-2", workspaceId: "ws-chat", sessionId: session });
+      expect((await post({ sessionId: session, sessionToken: foreign })).status).toBe(403);
+    });
+
+    it("takes the grant from a header on the stream, refuses a session id without it before the stream opens", async () => {
+      const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
+      const app = buildApp(visitor());
+      const refused = await app.request(`/search/chat/stream?q=test&workspace=ws-chat&sessionId=${session}`);
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ error: { code: "chat_session_forbidden" } });
+      expect(chatWorkspace).not.toHaveBeenCalled();
+      const token = sealChatSessionToken({ keyId: "pub-1", workspaceId: "ws-chat", sessionId: session });
+      // A funded organization for the stream's spend pre-check.
+      sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true, has_credit_grants: true }]);
+      chatWorkspace.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
+      const stream = await app.request(`/search/chat/stream?q=test&workspace=ws-chat&sessionId=${session}`, { headers: { "X-DocSlurp-Chat-Session-Token": token } });
+      expect(stream.status).toBe(200);
+      const text = await stream.text();
+      expect(text).toContain("event: done");
+      expect(text).toContain('"sessionToken":"next"');
+      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, sessionToken: token }));
+    });
+
+    it("refuses a cookie-session GET stream started cross-site (top-level navigation)", async () => {
+      const app = buildApp({ type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "" } });
+      const crossSite = await app.request("/search/chat/stream?q=test&workspace=ws-chat", { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" } });
+      expect(crossSite.status).toBe(403);
+      const foreignOrigin = await app.request("/search/chat/stream?q=test&workspace=ws-chat", { headers: { Origin: "https://evil.example" } });
+      expect(foreignOrigin.status).toBe(403);
+      expect(chatWorkspace).not.toHaveBeenCalled();
+    });
+  });
+
   it("keeps public chat on grounded retrieval when DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED is off", async () => {
     const { env } = await import("../config.js");
     const previous = env.publicChatAgentEnabled;

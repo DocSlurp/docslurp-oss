@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { assertChatSessionGrant } from "../lib/chat-session-tokens.js";
+import { assertChatSessionGrant, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
@@ -152,6 +152,22 @@ async function deferredRequestContext(
   return { context };
 }
 
+/**
+ * For cookie-authenticated GETs that do work: the browser says the request is
+ * same-origin (Fetch Metadata), or its Origin is the API's own origin or an
+ * allowed app origin. Non-browser clients send neither header.
+ */
+function sameOriginBrowserRequest(c: Context): boolean {
+  const origin = c.req.header("Origin");
+  const site = c.req.header("Sec-Fetch-Site");
+  let ownOrigin = "";
+  try { ownOrigin = new URL(c.req.url).origin; } catch { /* keep empty */ }
+  const trustedOrigin = (value: string) => value === ownOrigin || env.corsAllowedOrigins.includes(value);
+  if (origin) return trustedOrigin(origin) && (!site || site === "same-origin" || site === "same-site");
+  if (site) return site === "same-origin";
+  return true;
+}
+
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
 async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   // Lets clients join a turn to its trace (the trace id is the second field).
@@ -290,9 +306,18 @@ async function retrieve(body: SearchInput & { workspaceId: string }, userId: str
 export const searchRoutes = new Hono()
   .use("*", nativeApiErrors)
   .get("/chat/stream", async (c) => {
+    // A GET runs a paid model turn, so a cookie session must not be triggered
+    // cross-site (a top-level navigation or <img> sends Lax cookies).
+    if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
+      return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
+    }
     const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
       workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
-      sessionId: c.req.query("sessionId"), sessionToken: c.req.query("sessionToken") || undefined, model: c.req.query("model") });
+      sessionId: c.req.query("sessionId"),
+      // The header keeps the grant out of URLs (proxy and browser history logs). The
+      // query form is accepted for older clients; request telemetry records only the path.
+      sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || c.req.query("sessionToken") || undefined,
+      model: c.req.query("model") });
     if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
     const { q: query, sessionId, sessionToken, model } = parsed.data;
 

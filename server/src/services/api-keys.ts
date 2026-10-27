@@ -126,12 +126,31 @@ export function assertClientKeyWorkspaces(keyType: ApiKeyType, workspaceIds: str
   }
 }
 
-/** A stored browser key without a workspace allowlist (written before the rule); refused at request time. */
-export class ClientKeyWorkspacesRequiredError extends Error {
+/**
+ * A browser key refused for a reason its owner can fix. Answered with its own
+ * code and copy instead of the generic invalid-key refusal: the key is public
+ * (it sits in page source), so naming the reason reveals nothing secret.
+ */
+export class ApiKeyPolicyError extends Error {
   readonly status = 403;
-  readonly code = "client_key_workspaces_required";
+  constructor(readonly code: "client_key_workspaces_required" | "client_key_origin_not_allowed", message: string) {
+    super(message);
+  }
+}
+
+/** A stored browser key without a workspace allowlist (written before the rule); refused at request time. */
+export class ClientKeyWorkspacesRequiredError extends ApiKeyPolicyError {
   constructor() {
-    super(CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE);
+    super("client_key_workspaces_required", CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE);
+  }
+}
+
+export const CLIENT_KEY_ORIGIN_NOT_ALLOWED_MESSAGE = "This browser API key isn't allowed on this website. Add the site to the key's allowed websites (for example docs.example.com, or *.example.com for its subdomains), or call DocSlurp from your server with a server key.";
+
+/** The request's Origin (or Referer) is not on the browser key's allowed websites. */
+export class ClientKeyOriginNotAllowedError extends ApiKeyPolicyError {
+  constructor() {
+    super("client_key_origin_not_allowed", CLIENT_KEY_ORIGIN_NOT_ALLOWED_MESSAGE);
   }
 }
 
@@ -469,7 +488,7 @@ export async function validateApiKey(
     keyType === "client" &&
     !originMatchesAllowlist(requestContext?.origin != null ? requestContext.origin : requestContext?.referer, allowedDomains)
   ) {
-    return null;
+    throw new ClientKeyOriginNotAllowedError();
   }
   // A browser key written before workspace allowlists were required: refuse it
   // with how to fix it, never widen it to every workspace its owner can reach.

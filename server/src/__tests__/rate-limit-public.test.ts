@@ -79,7 +79,9 @@ describe("public (browser) key limits", () => {
     expect(rateLimitAddress("2001:DB8::1")).toBe("2001:db8:0:0::/64");
     expect(rateLimitAddress("[2001:db8:1:2:3:4:5:6]")).toBe("2001:db8:1:2::/64");
     expect(rateLimitAddress("203.0.113.9")).toBe("203.0.113.9");
-    expect(rateLimitAddress("::ffff:203.0.113.9")).toBe("::ffff:203.0.113.9");
+    // An IPv4-mapped address counts as the IPv4 address, so both forms share a bucket.
+    expect(rateLimitAddress("::ffff:203.0.113.9")).toBe("203.0.113.9");
+    expect(rateLimitAddress("0:0:0:0:0:ffff:203.0.113.9")).toBe("203.0.113.9");
     expect(rateLimitAddress("not-an-ip")).toBe("not-an-ip");
   });
 
@@ -133,19 +135,46 @@ describe("key spend windows", () => {
 });
 
 describe("in-memory limiter fallback", () => {
-  it("stays bounded under a flood of identities and keeps limiting", async () => {
+  it("stays bounded under a flood of identities by denying new ones, never evicting live counters", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    for (let i = 0; i < 3_000; i++) {
-      await store.consume({ blockKey: `b:${i}`, counters: [{ key: `k:${i}`, limit: 5, windowMs: 60_000 }], now: 1_000, countDenied: true });
-    }
+    const consume = (id: string, now = 1_000, limit = 5) => store.consume({ blockKey: `b:${id}`, counters: [{ key: `k:${id}`, limit, windowMs: 60_000 }], now, countDenied: false });
+    // A hot identity that is already at its limit.
+    expect((await consume("hot", 1_000, 2)).denied).toBe(-1);
+    expect((await consume("hot", 1_000, 2)).denied).toBe(-1);
+    let refused = 0;
+    for (let i = 0; i < 3_000; i++) if ((await consume(`flood-${i}`)).full) refused++;
     expect(store.size).toBeLessThanOrEqual(1_000);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("evicting the oldest counters"));
-    // A hot identity is still limited: eviction never turns limiting off.
-    const hot = () => store.consume({ blockKey: "b:hot", counters: [{ key: "k:hot", limit: 2, windowMs: 60_000 }], now: 2_000, countDenied: false });
-    expect((await hot()).denied).toBe(-1);
-    expect((await hot()).denied).toBe(-1);
-    expect((await hot()).denied).toBe(0);
+    expect(refused).toBe(2_001);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("denying new identities"));
+    // The hot identity's counter survived the flood: it is still limited.
+    expect((await consume("hot", 1_000, 2)).denied).toBe(0);
+    // Rolling into the next window reuses its entry, so a known identity keeps working when full.
+    expect((await consume("hot", 61_000, 100)).full).toBeUndefined();
+    warn.mockRestore();
+  });
+
+  it("never un-jails an identity because others filled the store (reviewer repro)", async () => {
+    const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const jail = { blockKey: "b:abuser", counters: [{ key: "k:abuser", limit: 1, windowMs: 60_000, penaltyMs: 900_000 }], now: 1_000, countDenied: true };
+    await store.consume(jail);
+    expect((await store.consume(jail)).denied).toBe(0);
+    for (let i = 0; i < 1_200; i++) await store.consume({ blockKey: `b:${i}`, counters: [{ key: `k:${i}`, limit: 5, windowMs: 60_000 }], now: 2_000, countDenied: true });
+    const after = await store.consume({ ...jail, now: 3_000 });
+    expect(after.blockedMs).toBeGreaterThan(0);
+    expect(store.blockCount).toBe(1);
+    warn.mockRestore();
+  });
+
+  it("answers a new identity at capacity with a 429, never letting it through uncounted", async () => {
+    const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (let i = 0; i < 1_000; i++) await store.consume({ blockKey: `b:${i}`, counters: [{ key: `k:${i}`, limit: 5, windowMs: 60_000 }], now: 1_000, countDenied: true });
+    const app = actorApp(keyActor("server", "newcomer"), store);
+    const refused = await app.request("/v1/chat", from("203.0.113.99"));
+    expect(refused.status).toBe(429);
+    await expect(refused.json()).resolves.toMatchObject({ error: { code: "rate_limited", details: { policy: "limiter-capacity" } } });
     warn.mockRestore();
   });
 
@@ -210,12 +239,61 @@ describe("chat concurrency", () => {
 
   it("caps open chat streams per key and releases on client cancel", async () => {
     vi.stubEnv("API_CHAT_MAX_CONCURRENT_PER_KEY", "1");
-    const { app } = concurrencyApp(keyActor("server", "srv-1"));
+    const { app } = concurrencyApp(keyActor("client", "pub-cancel"));
     const open = await app.request("/v1/chat", from("203.0.113.80"));
     expect(open.status).toBe(200);
     expect((await app.request("/v1/chat", from("203.0.113.81"))).status).toBe(429);
     await open.body!.cancel();
-    expect(chatTurnsInFlight("key:srv-1")).toBe(0);
+    expect(chatTurnsInFlight("key:pub-cancel")).toBe(0);
     expect((await app.request("/v1/chat", from("203.0.113.81"))).status).toBe(200);
+  });
+
+  it("leaves server keys uncapped by default (backend batch callers), and honours a key's own concurrent rule", async () => {
+    const batch = concurrencyApp(keyActor("server", "srv-batch"));
+    for (let i = 0; i < 40; i++) expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
+    const own = keyActor("server", "srv-own");
+    if (own.type === "apiKey") own.apiKey.rateLimits = [{ metric: "concurrent", limit: 2, windowSeconds: 1 }];
+    const capped = concurrencyApp(own);
+    expect((await capped.app.request("/v1/chat", from("198.51.100.2"))).status).toBe(200);
+    expect((await capped.app.request("/v1/chat", from("198.51.100.2"))).status).toBe(200);
+    expect((await capped.app.request("/v1/chat", from("198.51.100.2"))).status).toBe(429);
+  });
+
+  it("reclaims a slot at the hard deadline when the client stops reading", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("CHAT_AGENT_TURN_DEADLINE_MS", "1000");
+      vi.stubEnv("API_CHAT_MAX_CONCURRENT_PER_CLIENT_VISITOR", "1");
+      const { app } = concurrencyApp(keyActor("client", "pub-stall"));
+      const stalled = await app.request("/v1/chat", from("203.0.113.120"));
+      expect(stalled.status).toBe(200);
+      expect((await app.request("/v1/chat", from("203.0.113.120"))).status).toBe(429);
+      // Never read: the slot is released at turn deadline (1 s) + grace (15 s).
+      await vi.advanceTimersByTimeAsync(16_500);
+      expect(chatTurnsInFlight("key:pub-stall:ip:203.0.113.120")).toBe(0);
+      expect((await app.request("/v1/chat", from("203.0.113.120"))).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the slot when the handler throws", async () => {
+    vi.stubEnv("API_CHAT_MAX_CONCURRENT_PER_CLIENT_VISITOR", "1");
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("requestActor", keyActor("client", "pub-throw")); await next(); });
+    app.use("*", chatConcurrencyLimit);
+    app.post("/v1/chat", () => { throw new Error("model provider exploded"); });
+    app.onError((_error, c) => c.json({ error: "failed" }, 500));
+    expect((await app.request("/v1/chat", from("203.0.113.130"))).status).toBe(500);
+    expect(chatTurnsInFlight("key:pub-throw:ip:203.0.113.130")).toBe(0);
+    expect((await app.request("/v1/chat", from("203.0.113.130"))).status).toBe(500);
+  });
+
+  it("counts browser-key requests without a client address in one shared visitor bucket", async () => {
+    vi.stubEnv("API_RATE_LIMIT_CLIENT_VISITOR_CHAT_AI_MAX", "2");
+    const app = actorApp(keyActor("client", "pub-noip"));
+    expect((await app.request("/v1/chat", { method: "POST" })).status).toBe(200);
+    expect((await app.request("/v1/chat", { method: "POST" })).status).toBe(200);
+    expect((await app.request("/v1/chat", { method: "POST" })).status).toBe(429);
   });
 });

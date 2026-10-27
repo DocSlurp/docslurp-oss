@@ -1,9 +1,9 @@
 /**
  * Whether local OCR can run on this worker. Kreuzberg's bundled Tesseract resolves language data from
  * TESSDATA_PREFIX, then from the system locations below, and otherwise from the path of the CI machine that
- * built it, which never exists in a runtime image. The lean worker image ships no Tesseract, so every image
- * OCR there dies with "Error opening data file"; the planner asks first and routes images to vision instead.
- * `Dockerfile.full` installs tesseract-ocr language packs, which this finds under /usr/share/tesseract-ocr.
+ * built it, which never exists in a runtime image. Without language data every image OCR dies with "Error opening
+ * data file", so the planner asks first and routes images to vision instead. Both worker images install
+ * tesseract-ocr language packs, which this finds under /usr/share/tesseract-ocr.
  */
 import { existsSync } from "node:fs";
 import path from "node:path";

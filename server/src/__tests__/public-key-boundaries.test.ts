@@ -11,8 +11,9 @@ vi.mock("../services/api-keys.js", async (importOriginal) => ({ ...(await import
 vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit }));
 vi.mock("../lib/auth.js", () => ({ auth: { api: { getSession: vi.fn(async () => null) } }, appDbPool: {} }));
 
-const { ClientKeyWorkspacesRequiredError } = await import("../services/api-keys.js");
+const { ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError } = await import("../services/api-keys.js");
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
+const { mcpAuth } = await import("../middleware/mcp-auth.js");
 const { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } = await import("../lib/api-key-workspace-scope.js");
 const { resetCapabilityKeyForTests, sealCapabilityToken } = await import("../lib/capability-tokens.js");
 const { assertChatSessionGrant, ChatSessionForbiddenError, chatSessionTokenRefusal, sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
@@ -36,6 +37,24 @@ describe("browser keys need a workspace allowlist", () => {
     const body = await response.json() as { code: string; error: string };
     expect(body.code).toBe("client_key_workspaces_required");
     expect(body.error).toMatch(/workspaceIds/);
+  });
+
+  it("answers a browser key on a website it doesn't allow with its own code and fix, not invalid-key", async () => {
+    validateApiKey.mockRejectedValueOnce(new ClientKeyOriginNotAllowedError());
+    const app = new Hono().use("*", apiKeyAuth).get("/compat/x", (c) => c.json({ ok: true }));
+    const response = await app.request("/compat/x", { headers: { Authorization: "Bearer dslp_pub_wrong_site", Origin: "https://evil.example" } });
+    expect(response.status).toBe(403);
+    const body = await response.json() as { code: string; error: string };
+    expect(body.code).toBe("client_key_origin_not_allowed");
+    expect(body.error).toMatch(/allowed websites/);
+  });
+
+  it.each([ClientKeyWorkspacesRequiredError, ClientKeyOriginNotAllowedError])("refuses a legacy or wrong-site browser key on MCP like any browser key (%o)", async (ErrorType) => {
+    validateApiKey.mockRejectedValueOnce(new ErrorType());
+    const app = new Hono().use("*", mcpAuth).post("/v1/mcp", (c) => c.json({ ok: true }));
+    const response = await app.request("/v1/mcp", { method: "POST", headers: { Authorization: "Bearer dslp_pub_legacy" } });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "A server API key is required" });
   });
 
   it("never treats an empty allowlist as every workspace for a browser key, and refuses other workspaces", () => {
