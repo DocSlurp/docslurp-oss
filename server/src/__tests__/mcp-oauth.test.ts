@@ -68,6 +68,14 @@ describe("MCP OAuth", () => {
     expect(query.mock.calls[0]?.[0]).toContain("JOIN api_keys");
     expect(query.mock.calls[0]?.[0]).toContain("k.revoked_at IS NULL");
   });
+  it("narrows MCP grants by current key scopes and caps", async () => {
+    query.mockResolvedValue({ rows: [{ api_key_id: "key", scopes: ["search", "read"], key_scopes: ["search", "chat"], key_rpm: 3, key_ppd: 9, key_materialization_policy: { maxPagesPerQuery: 2 } }] });
+    expect(await validateMcpToken("token", `${url}/v1/mcp`)).toMatchObject({
+      scopes: ["search"], rateLimitRpm: 3, rateLimitPpd: 9, materializationPolicy: { maxPagesPerQuery: 2 },
+    });
+    query.mockResolvedValue({ rows: [{ scopes: ["search"], key_scopes: null }] });
+    expect((await validateMcpToken("token", `${url}/v1/mcp`))?.scopes).toEqual([]);
+  });
   it("denies token exchange when the linked native key was revoked", async () => {
     query.mockImplementation(async (sql: string) => ({ rows: sql.includes("FOR UPDATE") ? [grant] : [], rowCount: sql.includes("FROM api_keys") ? 0 : 1 }));
     expect((await token({})).status).toBe(400);
