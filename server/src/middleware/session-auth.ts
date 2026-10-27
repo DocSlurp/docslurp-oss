@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 
 import {
+  ApiKeyPolicyError,
   resolveApiKeyActor,
   resolveBetterAuthSessionActor,
   setRequestActor
@@ -69,10 +70,17 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
 
   const authorization = c.req.header("Authorization");
   if (mode === "apiKey" && authorization?.startsWith("Bearer ")) {
-    const actor = await resolveApiKeyActor(authorization, {
-      origin: c.req.header("origin"),
-      referer: c.req.header("referer") ?? c.req.header("referrer")
-    });
+    let actor;
+    try {
+      actor = await resolveApiKeyActor(authorization, {
+        origin: c.req.header("origin"),
+        referer: c.req.header("referer") ?? c.req.header("referrer")
+      });
+    } catch (error) {
+      // A browser key on a website it doesn't allow, or a legacy one without workspaces: say how to fix it, never widen it.
+      if (!(error instanceof ApiKeyPolicyError)) throw error;
+      return middlewareErrorResponse(c, 403, error.code, error.message);
+    }
     if (actor) {
       setRequestActor(c, actor);
       await next();

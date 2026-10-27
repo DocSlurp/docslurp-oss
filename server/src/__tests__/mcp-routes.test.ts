@@ -4,6 +4,10 @@ import type { ValidatedKey } from "../services/api-keys.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 const validateApiKey = vi.fn();
+const validateMcpToken = vi.fn();
+vi.mock("../services/mcp-oauth.js", async (original) => ({
+  ...await original<typeof import("../services/mcp-oauth.js")>(), validateMcpToken,
+}));
 const hybridSearch = vi.fn();
 const chatWorkspace = vi.fn();
 const workspaceChatDisabledBody = vi.fn(async (_workspaceId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
@@ -94,6 +98,7 @@ describe("mcpRoutes", () => {
 
   beforeEach(() => {
     app = buildApp();
+    validateMcpToken.mockReset();
     validateApiKey.mockReset();
     validateApiKey.mockResolvedValue(validatedKey);
     listWorkspaces.mockReset();
@@ -250,28 +255,45 @@ describe("mcpRoutes", () => {
   it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "getJob"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getJob"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
   });
 
   it.each([
-    { keyType: "server" as const, scopes: ["search"], mayPropose: false },
-    { keyType: "server" as const, scopes: ["search", "workspaces:manage"], mayPropose: true },
-    { keyType: "client" as const, scopes: ["search", "workspaces:manage"], mayPropose: false },
-  ])("discovers proposals only for manage-scoped server keys: %j", async ({ keyType, scopes, mayPropose }) => {
+    { keyType: "server" as const, scopes: ["search"] },
+    { keyType: "server" as const, scopes: ["search", "ingest", "chat", "workspaces:manage"] },
+    { keyType: "client" as const, scopes: ["search", "workspaces:manage"] },
+  ])("never lists or runs settings tools for an API key, whatever its scopes: %j", async ({ keyType, scopes }) => {
     validateApiKey.mockResolvedValue({ ...validatedKey, keyType, scopes });
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    if (keyType === "client") {
-      expect(response.status).toBe(403);
-      return;
+    if (keyType === "client") expect(response.status).toBe(403);
+    else {
+      expect(response.status).toBe(200);
+      const ids = (await response.json()).tools.map((tool: { id: string }) => tool.id);
+      for (const name of ["getWorkspaceSettings", "proposeWorkspaceSettings", "applyWorkspaceSettings", "applySettingsProposal"]) expect(ids).not.toContain(name);
     }
-    expect(response.status).toBe(200);
-    const ids = (await response.json()).tools.map((tool: { id: string }) => tool.id);
-    expect(ids).toContain("getWorkspaceSettings");
-    expect(ids.includes("proposeWorkspaceSettings")).toBe(mayPropose);
-    expect(ids).not.toContain("applyWorkspaceSettings");
-    expect(ids).not.toContain("applySettingsProposal");
+    for (const name of ["getWorkspaceSettings", "proposeWorkspaceSettings"]) {
+      const call = await app.request(`/mcp/tools/${name}`, {
+        method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}",
+      });
+      expect(call.status).toBe(keyType === "client" ? 403 : 404);
+    }
+  });
+
+  it("withholds both settings tools from an OAuth token on list, manifest and direct call", async () => {
+    validateMcpToken.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "workspaces:manage"] });
+    const headers = { Authorization: "Bearer dsmcp_test", "Content-Type": "application/json" };
+    const listed = await app.request("/mcp/tools", { headers });
+    expect(listed.status).toBe(200);
+    const ids = (await listed.json()).tools.map((tool: { id: string }) => tool.id);
+    const manifest = await app.request("/mcp/manifest", { headers });
+    const capabilities = (await manifest.json()).capabilities.map((tool: { id: string }) => tool.id);
+    for (const name of ["getWorkspaceSettings", "proposeWorkspaceSettings"]) {
+      expect(ids).not.toContain(name);
+      expect(capabilities).not.toContain(name);
+      expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers, body: "{}" })).status).toBe(404);
+    }
   });
 
   it.each(["null", "[]", "{", '"string"'])("rejects malformed tool bodies with HTTP 400: %s", async (body) => {
@@ -376,8 +398,8 @@ describe("mcpRoutes", () => {
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
-    expect(tools).toHaveLength(14);
-    expect(new Set(tools.map(tool => tool.name)).size).toBe(14);
+    expect(tools).toHaveLength(13);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(13);
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
     for (const name of ["upload", "extract", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
@@ -448,7 +470,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "extract", "getWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "extract", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }

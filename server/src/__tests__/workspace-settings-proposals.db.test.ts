@@ -91,17 +91,20 @@ it("refuses stale pipeline, search state, unsupported fields and invented reproc
   await expect(service.applySettingsProposal({ ...f, token: fresh.token, reprocessExisting: false })).rejects.toMatchObject({ status: 409 });
 });
 
-it("requires live server-key manage scope and honors revocation", async () => {
+it.each(["server", "client"] as const)("refuses %s API keys, even with live workspaces:manage: settings proposals and Apply are DocSlurp-app only", async (keyType) => {
   const f = await fixture();
-  await sql`insert into api_keys(id,user_id,key_hash,name,org_id,scopes) values (${f.id},${f.userId},${f.id},'Test',${f.id},'{search}')`;
-  const actor: RequestActor = { type: 'apiKey', userId: f.userId, apiKey: { keyId: f.id, userId: f.userId, orgId: f.id, keyType: 'server', scopes: ['search','workspaces:manage'], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } };
-  await expect(service.proposeWorkspaceSettings({ ...f, actor, changes })).rejects.toMatchObject({ status: 403 });
-  await sql`update api_keys set scopes='{search,workspaces:manage}' where id=${f.id}`;
-  const proposal = await service.proposeWorkspaceSettings({ ...f, actor, changes });
-  await sql`update api_keys set revoked_at=now() where id=${f.id}`;
-  await expect(service.applySettingsProposal({ ...f, actor, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 403 });
+  await sql`insert into api_keys(id,user_id,key_hash,name,org_id,scopes) values (${f.id},${f.userId},${f.id},'Test',${f.id},'{search,chat,workspaces:manage}')`;
+  const actor: RequestActor = { type: 'apiKey', userId: f.userId, apiKey: { keyId: f.id, userId: f.userId, orgId: f.id, keyType, scopes: ['search','chat','workspaces:manage'], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } };
+  await expect(service.proposeWorkspaceSettings({ ...f, actor, changes })).rejects.toMatchObject({ status: 403, category: "settings_proposal_forbidden" });
+  // A token the app session prepared cannot be applied by the same user's key.
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes });
+  await expect(service.applySettingsProposal({ ...f, actor, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 403, category: "settings_proposal_forbidden" });
+  // A session actor without a resolved Better Auth session id is not the app either.
+  const blank: RequestActor = { ...f.actor, sessionId: "" };
+  await expect(service.applySettingsProposal({ ...f, actor: blank, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 403 });
+  expect(await saved(f.workspaceId)).toMatchObject({ mediaVideo: { enabled: false } });
+  await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true });
 });
-
 
 it("requires separate reprocessing consent and handles legacy NULL index hashes without false stale rejection", async () => {
   const f = await fixture(), pipeline = await saved(f.id);
