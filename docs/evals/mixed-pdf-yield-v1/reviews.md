@@ -262,3 +262,19 @@ Focused validation: 41 invented-input tests pass, including unauthorized-path
 and symlink probes that assert no target hash/read occurs. The CLI now requires
 `seal_v4.py --evidence-index ...` in addition to the approval. A fresh independent
 council must review the fixed commit before promotion.
+
+### Enriched builder checkpoint, not accepted fixtures
+
+Attempt 4's enriched tooling adds world-to-literal/AST/unit/visibility validation,
+Writer fixes, canonical page-content identities and a strict pilot receipt.
+Its reported controls pass, but the native pilot preflight does not meet the
+occupied-glyph geometry contract. The 1,080-page pilot was not generated.
+These mechanisms are retained as a provisional checkpoint, not accepted evidence.
+
+Attempt 5 corrects the distinction between placement containers and expected
+occupied support, with pre-export font-metric witnesses for all 15 enriched
+class/layout contracts. The unchanged matched P parent remains separate. A fresh
+source-blind builder receives a hashed clean bundle: the corrected specification,
+generic mechanisms and the passed P factory; previous enriched writing and
+fixture-reading selftests/preflight scripts are excluded. New attempt 5 work is
+isolated under `worker/test/mixed-pdf-eval/a5/` until reviewed.

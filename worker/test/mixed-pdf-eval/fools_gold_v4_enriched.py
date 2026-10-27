@@ -9,6 +9,33 @@ def sym(name):return dict(op='symbol',name=name)
 def op(kind,*args):return dict(op=kind,args=list(args))
 
 
+E1_CAUSAL=[
+          'A delay between response and observation can change apparent agreement even when the underlying process remains unchanged. Preserve the ordering of interventions so a later comparison can distinguish that delay from a persistent difference in the material or instrument itself.',
+          'Local evidence is useful because a global adjustment can conceal the original disturbance without explaining its cause. The next comparison should preserve the unaffected locations, creating a counterfactual against which the suspected local mechanism can be tested independently.',
+          'The inspected interval defines the reach of this conclusion. An observation outside that interval would require additional evidence, since agreement within a limited operating range does not establish behavior where support conditions or material exposure may differ materially.',
+          'An isolated departure need not invalidate the entire procedure, but it must remain visible during review. Testing a reversible explanation first preserves the unaffected evidence and avoids combining an uncertain diagnosis with an irreversible change to the inspected setup.',
+          'Interventions should remain separable when their consequences can be measured independently. Closing the completed action while preserving the unresolved response produces a clearer handover than treating several observations as one fault with an assumed common explanation.',
+          'A counterexample identifies the limit of a convenient operational shortcut. Retaining it prevents future reviews from mistaking a proxy for the physical condition of interest, especially when the proxy responds more quickly than the material or mechanism under inspection.',
+          'Agreement requires a shared definition of the boundary event rather than retrospective adjustment of observations. Original records should remain intact so a reviewer can reproduce both the earlier discrepancy and its resolution using the same independent evidence.',
+          'A changed starting condition may affect the next observation without implying permanent deterioration. The comparison should therefore preserve that history and separate transient recovery from the sustained response expected under uninterrupted operation in the accepted configuration.',
+          'Improved observation conditions strengthen confidence in the evidence but do not automatically expand the claim that it supports. Retaining a separate check of the unresolved condition avoids turning a procedural improvement into an unsupported conclusion about the whole system.',
+          'A useful handover distinguishes completed actions from remaining uncertainty. The receiving role needs enough evidence to reproduce the accepted condition while continuing the open investigation, without repeating settled work or assuming that every earlier concern has already been resolved.'
+]
+
+E1_ACTION=[
+          'Assign responsibility for the repeat before releasing the present record. The receiving operator should keep the same comparison boundary, retain the raw indications and document any equipment change before collecting additional evidence for the unresolved mechanism.',
+          'Preserve the local mark and unaffected surfaces together. Photographing only the suspected location would lose the comparison needed to judge whether a later intervention removed a specific disturbance or merely changed conditions throughout the inspected setup.',
+          'The scope restriction should accompany the operational handover. A later user needs to know which positions were accessible, which remain untested and what additional fixture or inspection would be required before expanding acceptance beyond the present evidence.',
+          'A reversible test preserves the diagnostic sequence. Record the condition before and after that test, using the same observation event so the result does not combine a mechanical intervention with an unnoticed change in timing or handling.',
+          'Close each supported action using its own evidence reference. Any remaining behavior should carry a separate open item and repeat condition, enabling later reviewers to distinguish a completed correction from an explanation that still requires independent confirmation.',
+          'Keep the counterexample beside the operating rule rather than in an unrelated note. Its conditions define when the shortcut becomes unreliable, and they provide a concrete starting point for the next controlled comparison of the actual response.',
+          'Preserve both original accounts after resolving their different boundary definitions. The reconciled record should show the shared event explicitly, allowing another reviewer to reproduce the alignment without estimating a replacement time or removing an inconvenient original observation.',
+          'Separate the changed starting condition from the sustained operating condition in the next comparison. This prevents a recovery interval from being pooled with stable operation and makes the scope of any resulting acceptance decision reproducible during handover.',
+          'Document the improved observation method before comparing later readings. Its effect should be checked separately from the unresolved material or mechanical state, since better handling can improve evidence quality without proving that the underlying condition itself has changed.',
+          'Name the receiving responsibility and retain the evidence needed for the open test. This closes the administrative handover while keeping technical uncertainty visible, so the next shift can continue the investigation without treating transfer of ownership as experimental resolution.'
+]
+
+
 def enriched_world(family):
     """A seeded causal world, not a renamed copy of prototype paragraphs.
 
@@ -38,12 +65,21 @@ def enriched_world(family):
         observation,cause,action,limit=mechanisms[mindex]
         a=111+((fid*37+p*17)%720);readings=[a+j*9 for j in range(4)];durations=[113+rng.randrange(130) for _ in range(4)]
         lower,upper=readings[0],readings[-1]
-        formats=[
-          f'During this review, {observation}. The {lower} to {upper} unit range describes four positions; {cause}, so extending the conclusion requires a separate comparison under a controlled repeat with the original conditions documented.',
-          f'The four positions yielded {lower} to {upper} units while {observation}. Because {cause}, reviewers retained the original sequence before choosing another intervention; acceptance therefore remains limited to the inspected configuration until a matched repeat is complete.',
-          f'Four observations covered {lower} to {upper} units. Reviewers noted that {observation}, suggesting {cause}; the next comparison must preserve unaffected positions so a localized departure is not mistaken for an established change throughout the complete operating envelope.'
+        qualifications=[
+          'Compare equal thicknesses before assigning a common completion event.',
+          'Use one approach direction throughout the next matched repeat.',
+          'Retain each timestamp beside the transfer record.',
+          'Mark that point before cleaning to preserve the local comparison.',
+          'Keep the clearing event separate from final material acceptance.',
+          'Verify the open group against both retained receipt references.',
+          'Restrain the external loop before repeating the affected return stroke.',
+          'Keep restart history for the next repeat.',
+          'Limit release to positions reached by this fixture.',
+          'Mark storage limits before the next stock count.',
+          'Check maximum movement before permitting unrestricted operation after this change.',
+          'Align both records at the same visible boundary event.'
         ]
-        body1=formats[(fid+p)%3]
+        body1=(observation[0].upper()+observation[1:]+f'. Readings spanned {lower} to {upper} grams; '+cause+'. '+limit[0].upper()+limit[1:]+'. '+qualifications[mindex])
         bank,index=evidence_slots[mindex];body2=PROSE[bank][index][1]
         # Ten unique cause/action pairs; concise evidence and commentary use
         # different phrasing rather than copying a substantive eight-token run.
@@ -51,9 +87,14 @@ def enriched_world(family):
         for ordinal in ['first','second','third','fourth','fifth','sixth','seventh','eighth','ninth','tenth']:
             quote=quote.replace(ordinal+' ', 'current ')
         formula_facts=dict(g=str(Decimal(80+rng.randrange(100))/100),v=str(Decimal(30+rng.randrange(40))/10),h=str(-Decimal(1+rng.randrange(20))/10),u=str(Decimal(10+rng.randrange(20))/10),n=str(Decimal(10+rng.randrange(10))/10),w_1=str(1+rng.randrange(4)),w_2=str(1+rng.randrange(4)),w_3=str(1+rng.randrange(4)),x_1=str(readings[0]),x_2=str(readings[1]),x_3=str(readings[2]))
+        if family['classId']=='E2':
+            for j in range(3):formula_facts[f'x_{j+1}']=str(Decimal(readings[j])+Decimal(j)/10)
         chart_facts=[dict(name=name,xDecimals=[str(i) for i in range(1,9)],yDecimals=[str(40+(i%3-1)*11+rng.randrange(14)) for i in range(8)],unitX='window',unitY='%') for name in ['Baseline','Recheck']]
-        pages.append(dict(number=p+1,lower=lower,upper=upper,readings=readings,durations=durations,ratios=[str((Decimal(x)/Decimal(y)).quantize(Decimal('.1'),rounding=ROUND_HALF_UP)) for x,y in zip(readings,durations)],purpose=['observation','mechanism','qualification','decision','exception','counterexample','reconciliation','qualification','decision','handover'][p],prose=[body1,body2,quote,commentary],formulaFacts=formula_facts,chartFacts=chart_facts,causalModel=dict(observation=observation,cause=cause,action=action,limitation=limit)))
-    return dict(schema='mixed-pdf-world@4',familyId=fid,seed=family['worldSeed'],genre=family['genreSlot'],unit='g',unitCatalog=['g','s','g/s','V','g/V','1','%','window'],title=['Process deviation and response review','Material acceptance and condition record','Instrument transfer and travel review','Stock movement and boundary reconciliation','Field maintenance and response review','Laboratory method and limitation review'][family['genreSlot']],role='Technical review',date='2026-05-%02d'%(1+fid%27),pages=pages)
+        if family['classId']=='E1':
+            final_prose=[body1+' '+E1_CAUSAL[p],body2+' '+E1_ACTION[p],quote,commentary]
+        else:final_prose=[body1,body2,quote,commentary]
+        pages.append(dict(overlayRows=[f'{label} {p+1:02d}' for label in ['Receipt boundary confirmed','Issue timing remains open','Retained movement reference','Earlier tally superseded','Final balance note retained']],finalProse=final_prose,tolerance='0.4',number=p+1,lower=lower,upper=upper,readings=readings,durations=durations,ratios=[str((Decimal(x)/Decimal(y)).quantize(Decimal('.1'),rounding=ROUND_HALF_UP)) for x,y in zip(readings,durations)],purpose=['observation','mechanism','qualification','decision','exception','counterexample','reconciliation','qualification','decision','handover'][p],prose=[body1,body2,quote,commentary],formulaFacts=formula_facts,chartFacts=chart_facts,causalModel=dict(observation=observation,cause=cause,action=action,limitation=limit)))
+    return dict(schema='mixed-pdf-world@4',familyId=fid,seed=family['worldSeed'],genre=family['genreSlot'],unit='g',durationUnit='s',unitCatalog=['g','s','g/s','V','g/V','1','%','window'],title=['Process deviation and response review','Material acceptance and condition record','Instrument transfer and travel review','Stock movement and boundary reconciliation','Field maintenance and response review','Laboratory method and limitation review'][family['genreSlot']],role='Technical review',date='2026-05-%02d'%(1+fid%27),pages=pages)
 
 
 def recipe(spec,family,page,display_prefix):
@@ -94,47 +135,25 @@ def recipe(spec,family,page,display_prefix):
     elif rid=='A':units.update(g='g/V',v='V',h='g');unit='g'
     elif rid=='W':unit='g'
     elif rid=='P':units.update(g='g',v='V',u='V',n='1');unit='g'
-    if family['classId']=='E2':unit='g'
+    if family['classId']=='E2':unit='g';units.update(x_1='g',x_2='g',x_3='g',w_1='1',w_2='1',w_3='1')
     result=evaluate_ast(ast['args'][1],{k:str(v) for k,v in values.items()}).quantize(Decimal('.000001'),rounding=ROUND_HALF_UP)
     values['q']=result;units['q']=unit
     display=display_prefix+literal
-    return dict(display=display,latex=display_prefix.replace(' ',r'\ ')+latex,ast=ast,variables=[dict(symbol=k,valueDecimal=str(values[k]),unit=units[k]) for k in sorted(names)],valueDecimal=str(result),absoluteTolerance=.000001,constraints=['rounding=ROUND_HALF_UP; decimal_places=6','glyph_bindings: underscores indicate subscripts, fraction bar is U+2015','recipe='+('W3' if family['classId']=='E2' else rid)]),latex
+    return dict(display=display,latex=display_prefix.replace(' ',r'\ ')+latex,ast=ast,variables=[dict(symbol=k,valueDecimal=str(values[k]),unit=units[k]) for k in sorted(names)],valueDecimal=str(result),absoluteTolerance=.000001,constraints=(['v interval=[0.1,100] V'] if rid=='P' and family['classId']!='E2' else [])+['rounding=ROUND_HALF_UP; decimal_places=6','glyph_bindings: underscores indicate subscripts, fraction bar is U+2015','recipe='+('W3' if family['classId']=='E2' else rid)]),latex
 
 
 def material(spec,family,world,page,texts,base_table):
     """Every added semantic item is instantiated before the native export."""
     cid=family['classId'];tables={'matrix.table':dict(data=base_table,spans=[],separator=' | ',ruled=False)};formulas={};figures={}
     if cid=='P':return texts,tables,formulas,figures
+    texts['math.constraint']=f'Range {page["number"]:02d}: [{page["lower"]}, {page["upper"]}] g; tolerance +/- 0.4 g'
+    tables['matrix.table']['data'][0][3]='Rate/s'
     if cid=='E1':
         # Extend distinct causal arguments, not a repeated filler notice. Ten
         # different mechanisms remain tied to the underlying observation.
-        extensions=[
-          'A delay between response and observation can change apparent agreement even when the underlying process remains unchanged. Preserve the ordering of interventions so a later comparison can distinguish that delay from a persistent difference in the material or instrument itself.',
-          'Local evidence is useful because a global adjustment can conceal the original disturbance without explaining its cause. The next comparison should preserve the unaffected locations, creating a counterfactual against which the suspected local mechanism can be tested independently.',
-          'The inspected interval defines the reach of this conclusion. An observation outside that interval would require additional evidence, since agreement within a limited operating range does not establish behavior where support conditions or material exposure may differ materially.',
-          'An isolated departure need not invalidate the entire procedure, but it must remain visible during review. Testing a reversible explanation first preserves the unaffected evidence and avoids combining an uncertain diagnosis with an irreversible change to the inspected setup.',
-          'Interventions should remain separable when their consequences can be measured independently. Closing the completed action while preserving the unresolved response produces a clearer handover than treating several observations as one fault with an assumed common explanation.',
-          'A counterexample identifies the limit of a convenient operational shortcut. Retaining it prevents future reviews from mistaking a proxy for the physical condition of interest, especially when the proxy responds more quickly than the material or mechanism under inspection.',
-          'Agreement requires a shared definition of the boundary event rather than retrospective adjustment of observations. Original records should remain intact so a reviewer can reproduce both the earlier discrepancy and its resolution using the same independent evidence.',
-          'A changed starting condition may affect the next observation without implying permanent deterioration. The comparison should therefore preserve that history and separate transient recovery from the sustained response expected under uninterrupted operation in the accepted configuration.',
-          'Improved observation conditions strengthen confidence in the evidence but do not automatically expand the claim that it supports. Retaining a separate check of the unresolved condition avoids turning a procedural improvement into an unsupported conclusion about the whole system.',
-          'A useful handover distinguishes completed actions from remaining uncertainty. The receiving role needs enough evidence to reproduce the accepted condition while continuing the open investigation, without repeating settled work or assuming that every earlier concern has already been resolved.'
-        ]
-        extra=extensions[page['number']-1]
+        extra=E1_CAUSAL[page['number']-1]
         texts['body.1']+=' '+extra
-        action_extensions=[
-          'Assign responsibility for the repeat before releasing the present record. The receiving operator should keep the same comparison boundary, retain the raw indications and document any equipment change before collecting additional evidence for the unresolved mechanism.',
-          'Preserve the local mark and unaffected surfaces together. Photographing only the suspected location would lose the comparison needed to judge whether a later intervention removed a specific disturbance or merely changed conditions throughout the inspected setup.',
-          'The scope restriction should accompany the operational handover. A later user needs to know which positions were accessible, which remain untested and what additional fixture or inspection would be required before expanding acceptance beyond the present evidence.',
-          'A reversible test preserves the diagnostic sequence. Record the condition before and after that test, using the same observation event so the result does not combine a mechanical intervention with an unnoticed change in timing or handling.',
-          'Close each supported action using its own evidence reference. Any remaining behavior should carry a separate open item and repeat condition, enabling later reviewers to distinguish a completed correction from an explanation that still requires independent confirmation.',
-          'Keep the counterexample beside the operating rule rather than in an unrelated note. Its conditions define when the shortcut becomes unreliable, and they provide a concrete starting point for the next controlled comparison of the actual response.',
-          'Preserve both original accounts after resolving their different boundary definitions. The reconciled record should show the shared event explicitly, allowing another reviewer to reproduce the alignment without estimating a replacement time or removing an inconvenient original observation.',
-          'Separate the changed starting condition from the sustained operating condition in the next comparison. This prevents a recovery interval from being pooled with stable operation and makes the scope of any resulting acceptance decision reproducible during handover.',
-          'Document the improved observation method before comparing later readings. Its effect should be checked separately from the unresolved material or mechanical state, since better handling can improve evidence quality without proving that the underlying condition itself has changed.',
-          'Name the receiving responsibility and retain the evidence needed for the open test. This closes the administrative handover while keeping technical uncertainty visible, so the next shift can continue the investigation without treating transfer of ownership as experimental resolution.'
-        ]
-        texts['body.2']+=' '+action_extensions[page['number']-1]
+        texts['body.2']+=' '+E1_ACTION[page['number']-1]
     if cid=='E2':
         rows=[['Record','Readouts','','Rate/s'],['Item-ID','Span-s','Mass-g','Gain-g/s']]
         for i in range(6):

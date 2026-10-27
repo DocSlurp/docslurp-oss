@@ -16,7 +16,7 @@ def mpl():
     import matplotlib
     matplotlib.use('Agg')
     matplotlib.rcParams.update({'font.family':'Liberation Sans','svg.fonttype':'path','pdf.fonttype':42,
-        'mathtext.fontset':'custom','mathtext.rm':'Liberation Sans','mathtext.it':'Liberation Sans','mathtext.bf':'Liberation Sans','mathtext.cal':'Liberation Sans','mathtext.fallback':None,'svg.hashsalt':'fools-gold-v4'})
+        'mathtext.fontset':'custom','mathtext.rm':'Liberation Mono','mathtext.it':'Liberation Mono','mathtext.bf':'Liberation Mono','mathtext.cal':'Liberation Mono','mathtext.fallback':None,'svg.hashsalt':'fools-gold-v4'})
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     return Figure,FigureCanvasAgg
@@ -47,7 +47,7 @@ def math_asset(latex,bbox):
     Figure,Canvas=mpl()
     from matplotlib.mathtext import MathTextParser
     from matplotlib.font_manager import FontProperties
-    result=MathTextParser('path').parse('$'+latex+'$',dpi=72,prop=FontProperties(family='Liberation Sans',size=9))
+    result=MathTextParser('path').parse('$'+latex+'$',dpi=72,prop=FontProperties(family='Liberation Mono',size=9))
     width,height,depth,glyphs,rects=result
     framew=bbox[2]-bbox[0];frameh=bbox[3]-bbox[1]
     if width>framew or height>frameh:raise ValueError('Rich formula exceeds its frozen 24 pt frame')
@@ -63,14 +63,14 @@ def math_asset(latex,bbox):
         font.set_size(size,72);gl=font.load_char(cp)
         advance=gl.linearHoriAdvance/65536
         top=bbox[1]+height-depth-y-asc*size
-        labels.append(dict(text=chr(cp),bbox=[bbox[0]+x,top,bbox[0]+x+max(.01,advance),top+(asc-desc)*size],size=size,fontHash=file_hash(fontpath),fontFamily='Liberation Sans',rotation=0))
+        labels.append(dict(text=chr(cp),bbox=[bbox[0]+x,top,bbox[0]+x+max(.01,advance),top+(asc-desc)*size],size=size,fontHash=file_hash(fontpath),fontFamily='Liberation Mono',rotation=0))
     for x,y,w,h in rects:
         top=bbox[1]+height-depth-y-h
-        labels.append(dict(text='―',bbox=[bbox[0]+x,top,bbox[0]+x+w,top+h],size=9,fontHash=file_hash(font_paths()['sans']),fontFamily='Liberation Sans',rotation=0))
+        labels.append(dict(text='―',bbox=[bbox[0]+x,top,bbox[0]+x+w,top+h],size=9,fontHash=file_hash(font_paths()['mono']),fontFamily='Liberation Mono',rotation=0))
     offset=max(0,bbox[1]-min(label['bbox'][1] for label in labels))
     for label in labels:label['bbox'][1]+=offset;label['bbox'][3]+=offset
     if max(label['bbox'][3] for label in labels)>bbox[3]:raise ValueError('Math glyph support exceeds reserved frame')
-    fig.text(0,(baseline-offset)/frameh,'$'+latex+'$',fontfamily='Liberation Sans',fontsize=9)
+    fig.text(0,(baseline-offset)/frameh,'$'+latex+'$',fontfamily='Liberation Mono',fontsize=9)
     out=BytesIO();fig.savefig(out,format='svg',metadata={'Date':None,'Creator':'matplotlib'})
     return out.getvalue(),labels
 

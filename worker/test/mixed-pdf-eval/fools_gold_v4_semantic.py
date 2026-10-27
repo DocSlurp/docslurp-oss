@@ -226,6 +226,7 @@ def semantic_checks(record,world,family,printed_reference=None,expected_world_ha
         same(record['seed'],family['worldSeed'],'authoring world seed differs')
         same(world['seed'],family['worldSeed'],'world seed differs')
         same(record['layoutId'],family['layoutId'],'layout differs from family contract')
+        same(record['classId'],family['classId'],'class differs from family contract')
         same(record['split'],family['split'],'split differs from family contract')
         same(record['worldHash'],world['worldHash'],'world reference differs')
         same(world['worldHash'],record_hash(world,'worldHash'),'world self hash differs')
@@ -246,7 +247,7 @@ def semantic_checks(record,world,family,printed_reference=None,expected_world_ha
         try:
             facts=worldpages[page['number']];blocks=_page_blocks(page);reference=references.get(page['id'])
             if printed_reference and reference is None:raise ValueError('no immutable printed page reference')
-            if family['classId']!='P':raise ValueError('this world-to-column binding adapter is for P; enriched instances require their own explicit binding contract')
+            if family['classId'] not in ['P','E1','E2','E3','E4','E5']:raise ValueError('unknown binding contract')
             table=blocks['matrix.table'];rule=blocks['math.rule'];interval=blocks['math.constraint']
             duration_unit=world.get('durationUnit','h' if family['layoutId']=='C' else 's')
             reading_unit=world['unit'];rate_unit=reading_unit+'/'+duration_unit
@@ -262,9 +263,12 @@ def semantic_checks(record,world,family,printed_reference=None,expected_world_ha
                 for key,block in blocks.items():
                     same(norm(block['displayText']),norm(reference[key]['displayText']),'printed reference differs for '+key)
             for key,index in [('body.1',0),('body.2',1),('discussion.excerpt',2),('discussion.commentary',3)]:
-                same(norm(blocks[key]['displayText']),norm(facts['prose'][index]),'world prose differs for '+key)
+                same(norm(blocks[key]['displayText']),norm(facts.get('finalProse',facts['prose'])[index]),'world prose differs for '+key)
         check('printed-reference',location,printed_bindings)
         def table_bindings():
+            if family['classId']=='E2':
+                from fools_gold_v4_semantic_enriched import table_e2
+                return table_e2(table,facts)
             expected_rows=len(facts['readings'])
             same(set(cells),{(r,c) for r in range(expected_rows+1) for c in range(4)},'table/world row or column coverage differs')
             same(len(facts['durations']),expected_rows,'duration count differs')
@@ -301,6 +305,9 @@ def semantic_checks(record,world,family,printed_reference=None,expected_world_ha
                 same(cells[(index+1,0)]['unit'],'identifier','identifier has a numeric unit')
         check('table-world-units',table['id'],table_bindings)
         def equation_bindings():
+            if family['classId']!='P':
+                from fools_gold_v4_semantic_enriched import rich_formula
+                return rich_formula(rule,facts,family)
             formula=rule['formula'];literal=printed_quotient(rule['displayText'])
             same(norm(formula['display']),norm(rule['displayText']),'formula display differs')
             same(formula['ast'],literal,'printed quotient operand/order differs from AST')
@@ -351,6 +358,9 @@ def semantic_checks(record,world,family,printed_reference=None,expected_world_ha
             if 'tolerance' in facts:same(tolerance,decimal(facts['tolerance']),'tolerance differs from world fact')
             elif 'tolerance' in world:same(tolerance,decimal(world['tolerance']),'tolerance differs from world fact')
         check('interval-world-literal-units',interval['id'],interval_bindings)
+        if family['classId']!='P':
+            from fools_gold_v4_semantic_enriched import page_extras
+            check('enriched-world-visibility',location,lambda:page_extras(blocks,facts,family))
     return dict(passed=not misses,misses=misses,checkedPages=len(record['pages']),bindingChecks=checks,
-                adapter='v4 P world quantities, printed symbols and column roles; exact unit scales',
+                adapter='v4 P/E1/E2/E3/E4/E5 world/literal/AST/unit/visibility bindings; exact unit scales',
                 printedReferenceAnchored=printed_reference is not None,worldHashAnchored=expected_world_hash is not None)

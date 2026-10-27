@@ -194,6 +194,20 @@ class V4Contracts(unittest.TestCase):
         cls.world=load(CORPUS/'sources/0000/world.json')
         cls.authoring=load(CORPUS/'sources/0000/authoring.json')
 
+    def test_page_content_digest_contract(self):
+        import hashlib,json,re,unicodedata
+        text='Ａlpha Café Ⅰ — STRASSE, Straße; ﬁeld １２. e\u0301'
+        page=dict(id='ignored-id',expectedMarkdown=text)
+        expected='8e47806b8f4105ebf91689f638980c7b8383b8c2ea8761af7ca387943698e736'
+        self.assertEqual(page_content_hash(page),expected)
+        self.assertEqual(page_content_hash(dict(page,id='different-id',hardPercent=100)),expected)
+        pages=[dict(expectedMarkdown=f'Window {i}: mass {101+i} grams.') for i in range(10)]
+        hashes=[page_content_hash(p) for p in pages]
+        self.assertEqual(len(hashes),10)
+        for hard in [0,20,40,60,80,100]:self.assertEqual([page_content_hash(dict(p,hardPercent=hard)) for p in pages],hashes)
+        self.assertNotEqual(hashes,list(reversed(hashes)))
+        self.assertNotEqual(hashes,hashes[:9])
+
     def test_forbid_ungated_expansion(self):
         for stage in ['factorial-pilot','full']:
             with self.assertRaises(ValueError):approve_stage(stage,'a'*64,None,None)

@@ -53,7 +53,15 @@ def main():
                 frame.AnchorPageNo=int(page['id'].split('.p')[1]);frame.Width=mm100(sum(t['columnWidths'])+1);frame.Height=mm100(t['rowHeight']*len(t['data'])+2)
                 frame.FrameIsAutomaticHeight=False
                 frame.HoriOrient=0;frame.HoriOrientRelation=7;frame.HoriOrientPosition=mm100(t['left'])
-                frame.VertOrient=0;frame.VertOrientRelation=7;frame.VertOrientPosition=mm100(t['top']-.15)
+                frame.VertOrient=0;frame.VertOrientRelation=7
+                correction=0
+                if t['kind']=='sans':
+                    # Whole Writer export calibration retained with diagnostic
+                    # before/after glyph reports. Fixed line boxes center the
+                    # font support and add this font's internal leading.
+                    font_height=1.1171875*t['size']
+                    correction=max(0,(t['rowHeight']-font_height)/2)+.116*t['size']
+                frame.VertOrientPosition=mm100(t['top']-.15-correction)
                 frame.Surround=uno.Enum('com.sun.star.text.WrapTextMode','THROUGH')
                 frame.BackTransparent=True
                 frame.FillStyle=uno.Enum('com.sun.star.drawing.FillStyle','NONE')
@@ -81,8 +89,6 @@ def main():
             for w in t['columnWidths'][:-1]:
                 acc+=w;s=TableColumnSeparator();s.Position=round(acc/sum(t['columnWidths'])*total);s.IsVisible=True;separators.append(s)
             table.TableColumnSeparators=tuple(separators)
-            for r0,c0,r1,c1 in t.get('spans',[]):
-                cur=table.createCursorByCellName(chr(65+c0)+str(r0+1));cur.gotoCellByName(chr(65+c1)+str(r1+1),True);cur.mergeRange()
             for r,row in enumerate(t['data']):
                 tr=table.Rows.getByIndex(r);tr.IsAutoHeight=False;tr.Height=mm100(t['rowHeight'])
                 for c,value in enumerate(row):
@@ -98,6 +104,10 @@ def main():
                     cursor.CharKerning=0;cursor.CharAutoKerning=False
                     cursor.ParaTopMargin=0;cursor.ParaBottomMargin=0;cursor.ParaLeftMargin=0;cursor.ParaRightMargin=0
                     spacing=LineSpacing();spacing.Mode=3;spacing.Height=mm100(t['rowHeight']);cursor.ParaLineSpacing=spacing
+            # Fill the rectangular grid before merging. Writer cannot address
+            # arbitrary grid positions after a row contains merged cells.
+            for r0,c0,r1,c1 in t.get('spans',[]):
+                cur=table.createCursorByCellName(chr(65+c0)+str(r0+1));cur.gotoCellByName(chr(65+c1)+str(r1+1),True);cur.mergeRange()
             # Apply the table-wide border after per-cell formatting, preserving
             # explicitly ruled derivatives and truly unruled prototypes.
             table.TableBorder2=table_border

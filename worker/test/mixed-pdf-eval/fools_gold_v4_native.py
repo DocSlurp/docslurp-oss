@@ -177,9 +177,12 @@ def author(spec,family,world,spec_hash):
                             # A cell's own typographic support is smaller than its
                             # layout cell. Full support may have overlapping line
                             # boxes; ink does not overlap the neighboring row.
-                            denom='h' if family['layoutId']=='C' else 's'
+                            denom=world.get('durationUnit','h' if family['layoutId']=='C' else 's')
+                            header=r in shape['header_rows']
+                            cellunit='label' if header else ['identifier',denom,world['unit'],world['unit']+'/'+denom][c]
+                            if t['id']=='discussion.mini-table' and not header:cellunit=['identifier',world['unit'],'label'][c]
                             cells.append(dict(row=r,column=c,rowSpan=1 if span is None else span[2]-r+1,columnSpan=1 if span is None else span[3]-c+1,displayText=val,
-                                              value=val,unit=['identifier',denom,world['unit'],world['unit']+'/'+denom][c] if r else 'label',
+                                              value=val,unit=cellunit,
                                               bboxPt=union_box(g['bboxPt'] for g in meaningful),glyphIds=[g['id'] for g in meaningful],visible=True))
                             drawrow.append(printed);rs.append(printed);xx+=colwidths[c]
                         rowstrings.append(''.join(rs).rstrip());offset+=1

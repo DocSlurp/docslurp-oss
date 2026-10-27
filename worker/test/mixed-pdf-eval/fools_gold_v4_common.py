@@ -24,6 +24,14 @@ def canonical(value):
     return json.dumps(nfc(value),sort_keys=True,separators=(',', ':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
 
 
+def page_content_hash(page):
+    # Provenance interface: NFKC + casefold + Unicode word tokens. Deliberately
+    # use json.dumps defaults (ensure_ascii=True), not NFC canonical(). No IDs,
+    # renderer details or hard-share labels enter this content fingerprint.
+    tokens=re.findall(r'\w+',unicodedata.normalize('NFKC',page['expectedMarkdown']).casefold())
+    return hashlib.sha256(json.dumps(tokens,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
 def sha(data): return hashlib.sha256(data).hexdigest()
 def file_hash(path): return sha(Path(path).read_bytes())
 def record_hash(record, key): return sha(canonical({k:v for k,v in record.items() if k != key}))

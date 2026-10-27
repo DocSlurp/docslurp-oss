@@ -301,8 +301,14 @@ def check_corpus(root,spec):
         expected=spec['file_profile']['case_storage_profiles']['profiles'][(case['hardPercent']//20+case['familyId'])%6]
         if profile['pdfVersion']!=str(expected['version']) or profile['linearized']!=expected['linearized'] or bool(profile['objectStreamCount'])!=expected['object_streams'] or bool(profile['xrefStreamCount'])!=(expected['xref']=='stream'):misses.append(issue('storage-profile',case['id'],dict(expected=expected,actual={k:profile[k] for k in ['pdfVersion','linearized','objectStreamCount','xrefStreamCount']})))
         if profile['encrypted'] or profile['unembeddedFontXrefs']:misses.append(issue('font-or-encryption',case['id'],dict(encrypted=profile['encrypted'],unembedded=profile['unembeddedFontXrefs'])))
-        family=f'{case["familyId"]:04d}';a=load(root/f'sources/{family}/authoring.json');plan=load(root/f'plans/{family}/{case["hardPercent"]}.json');execution=load(root/f'executions/{family}/{case["hardPercent"]}.json');ep=load(root/f'plans/{family}/{case["hardPercent"]}-exclusions.json');ee=load(root/f'executions/{family}/{case["hardPercent"]}-exclusions.json');label=load(root/case['labels'])
+        family=f'{case["familyId"]:04d}';a=load(root/f'sources/{family}/authoring.json');plan=load(root/f'plans/{family}/{case["hardPercent"]}.json');execution=load(root/f'executions/{family}/{case["hardPercent"]}.json');ep=load(root/f'plans/{family}/{case["hardPercent"]}-exclusions.json');ee=load(root/f'executions/{family}/{case["hardPercent"]}-exclusions.json')
+        declared_page_hashes=case.get('pageContentHashes')
+        expected_page_hashes=[page_content_hash(p) for p in a['pages']]
+        if (manifest['stage'] in ['factorial-pilot','full'] or declared_page_hashes is not None) and declared_page_hashes!=expected_page_hashes:
+            misses.append(issue('manifest-page-content-hashes',case['id'],'missing/reordered or inconsistent page fingerprints'))
+            continue
         from fools_gold_v4_semantic import semantic_checks
+        label=load(root/case['labels'])
         world=load(root/f'sources/{family}/world.json');reference=load(root/f'sources/{family}/source-layout.json');contract=spec['dataset']['family_plan'][case['familyId']]
         if file_hash(root/f'sources/{family}/source-layout.json')!=case['sourceLayoutHash']:misses.append(issue('printed-reference-hash',case['id'],'source-layout byte hash differs'))
         if family not in semantic_families:
@@ -401,7 +407,7 @@ def semantic_revalidation_receipt(root,spec_path,spec_md,notes_path,receipt_path
     # The clean-room allowlist is the original Builder inventory, not a recursive
     # directory walk. Never enumerate or read un-inventoried review material.
     code_dir=Path(__file__).parent
-    changed_names=['fools_gold_v4_check.py','fools_gold_v4_semantic.py','fools_gold_v4_selftest.py']
+    changed_names=['fools_gold_v4_check.py','fools_gold_v4_semantic.py','fools_gold_v4_semantic_enriched.py','fools_gold_v4_selftest.py']
     dependency_names=['fools_gold_v4_common.py','fools_gold_build_v4.py']
     code_hashes={name:file_hash(code_dir/name) for name in changed_names}
     dependencies={name:file_hash(code_dir/name) for name in dependency_names}
