@@ -312,6 +312,9 @@ describe("first-party-app settings tools", () => {
     expect(ids("https://x.test", ["search", "chat", "ingest", "workspaces:manage"], "server")).not.toContain("proposeWorkspaceSettings");
     expect(ids("https://x.test", ["search", "chat", "workspaces:manage"], "client", { firstPartyApp: true })).not.toContain("proposeWorkspaceSettings");
     expect(ids("https://x.test", undefined, undefined, { firstPartyApp: true })).toContain("proposeWorkspaceSettings");
+    const cli = ids("https://x.test", ["search", "chat", "ingest", "workspaces:manage"], "server", { audience: "api", firstPartyApp: true });
+    expect(cli).not.toContain("proposeWorkspaceSettings");
+    expect(cli).not.toContain("getWorkspaceSettings");
   });
 });
 

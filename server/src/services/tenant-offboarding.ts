@@ -311,6 +311,7 @@ export async function deleteAccount(
     // Credentials and integrations.
     await client`update mcp_oauth_grants set revoked_at = coalesce(revoked_at, now()) where user_id = ${userId}`;
     await client`delete from mcp_oauth_requests where user_id = ${userId}`;
+    await client`delete from mcp_oauth_device_codes where user_id = ${userId}`;
     await client`
       update api_keys set revoked_at = coalesce(revoked_at, now()), name = 'Deleted key', allowed_domains = '{}'
       where user_id = ${userId}
