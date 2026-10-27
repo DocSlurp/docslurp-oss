@@ -2,8 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants, existsSync } from "node:fs";
-import { lstat, mkdir, open, rename, stat, unlink, type FileHandle } from "node:fs/promises";
-import { homedir } from "node:os";
+import { link, lstat, mkdir, open, readFile, rename, stat, unlink, utimes, type FileHandle } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -174,15 +174,66 @@ async function writeCredentialFile(data: CredentialFile): Promise<void> {
 // Cross-process lock for read-modify-write cycles (and refresh)
 
 const lockScope = new AsyncLocalStorage<boolean>();
-const LOCK_WAIT_MS = 15_000;
-const LOCK_STALE_MS = 60_000;
+/** A held lock's mtime is refreshed every third of this; older means its holder is gone. */
+const lockStaleMs = () => {
+  const configured = Number.parseInt(process.env.DOCSLURP_CREDENTIAL_LOCK_STALE_MS ?? "", 10); // tests only
+  return Number.isFinite(configured) && configured >= 200 ? configured : 30_000;
+};
+
+type LockOwner = { pid: number; host: string; nonce: string };
+
+async function readLockOwner(path: string): Promise<LockOwner | null> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as Partial<LockOwner>;
+    return typeof value.pid === "number" && typeof value.nonce === "string" && typeof value.host === "string" ? value as LockOwner : null;
+  } catch {
+    return null;
+  }
+}
+
+/** False only when the holder is on this host and its pid is gone (a crash or Ctrl-C). */
+function holderAlive(owner: LockOwner): boolean {
+  if (owner.host !== hostname()) return true;
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 /**
- * Runs `fn` holding `credentials.lock` (created with O_EXCL in the private
- * config directory), so two CLI processes cannot interleave a read-modify-write
- * of the credentials file and drop each other's login, and a refresh cannot
- * race another process's refresh of the same login. Re-entrant within one
- * process. A lock older than a minute is from a crashed process and is broken.
+ * Breaks a dead or stale lock without ever removing a live one: rename it to a
+ * private name (atomic; only one waiter wins), then keep it removed only if it
+ * is still the lock we judged dead. If a fresh lock got renamed instead, put
+ * it back.
+ */
+async function breakLock(lock: string, judged: LockOwner | null): Promise<void> {
+  const moved = `${lock}.broken.${process.pid}.${randomBytes(6).toString("hex")}`;
+  try {
+    await rename(lock, moved);
+  } catch {
+    return; // Another waiter broke (or the holder released) it first.
+  }
+  const owner = await readLockOwner(moved);
+  if (judged && owner && owner.nonce !== judged.nonce) {
+    await link(moved, lock).catch(() => {});
+  }
+  await unlink(moved).catch(() => {});
+}
+
+/**
+ * Runs `fn` holding `credentials.lock` in the private config directory, so two
+ * CLI processes cannot interleave a read-modify-write of the credentials file
+ * and drop each other's login, and a refresh cannot race another process's
+ * refresh of the same login. Re-entrant within one process.
+ *
+ * The lock records pid, host and a nonce and is created atomically (link of a
+ * fully written temp file). Its holder refreshes the mtime while it works, so
+ * a long refresh is never mistaken for a stale lock. A waiter breaks the lock
+ * at once when the holder's pid is gone (crash, Ctrl-C), or when the mtime is
+ * older than the stale threshold; it waits at least that long before giving
+ * up. Release unlinks the lock only if it still carries our nonce.
  */
 export async function withCredentialLock<T>(fn: () => Promise<T>): Promise<T> {
   if (lockScope.getStore()) return await fn();
@@ -190,25 +241,45 @@ export async function withCredentialLock<T>(fn: () => Promise<T>): Promise<T> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await assertPrivate(dir, "directory");
   const lock = join(dir, "credentials.lock");
-  const deadline = Date.now() + LOCK_WAIT_MS;
+  const staleMs = lockStaleMs();
+  const me: LockOwner = { pid: process.pid, host: hostname(), nonce: randomBytes(16).toString("hex") };
+  const deadline = Date.now() + staleMs + 10_000;
   for (let delay = 25; ; delay = Math.min(delay * 2, 250)) {
+    const temp = join(dir, `.credentials.lock.${me.nonce}.tmp`);
+    const handle = await open(temp, "wx", 0o600);
     try {
-      const handle = await open(lock, "wx", 0o600);
-      await handle.writeFile(String(process.pid));
+      await handle.writeFile(JSON.stringify(me));
+    } finally {
       await handle.close();
+    }
+    try {
+      await link(temp, lock);
+      await unlink(temp).catch(() => {});
       break;
     } catch (error) {
+      await unlink(temp).catch(() => {});
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const age = await stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0);
-      if (age > LOCK_STALE_MS) { await unlink(lock).catch(() => {}); continue; }
-      if (Date.now() > deadline) throw new CredentialStoreError(`Another docslurp process holds ${lock}. If none is running, delete that file.`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
     }
+    const owner = await readLockOwner(lock);
+    const age = await stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0);
+    // An unreadable owner is a lock mid-creation by an older CLI: judge it by age only.
+    if ((owner && !holderAlive(owner)) || age > staleMs) {
+      await breakLock(lock, owner);
+      continue;
+    }
+    if (Date.now() > deadline) throw new CredentialStoreError(`Another docslurp process holds ${lock}. If none is running, delete that file.`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    void utimes(lock, now, now).catch(() => {});
+  }, Math.max(50, Math.floor(staleMs / 3)));
+  heartbeat.unref();
   try {
     return await lockScope.run(true, fn);
   } finally {
-    await unlink(lock).catch(() => {});
+    clearInterval(heartbeat);
+    if ((await readLockOwner(lock))?.nonce === me.nonce) await unlink(lock).catch(() => {});
   }
 }
 

@@ -482,3 +482,102 @@ test("exec on Windows resolves PATHEXT and runs batch shims through cmd.exe with
   assert.ok(!/[^^]&/.test(shim.args[3]), "an unescaped & would start a second command");
   assert.equal(escapeCmdArgument("a&b"), '^^^"a^^^&b^^^"');
 });
+
+const lockModule = new URL("../dist/auth/credentials.js", import.meta.url).href;
+/** A separate process that takes the credentials lock, logs enter/exit times, and holds it for holdMs. */
+function lockHolder(config, holdMs, log, env = {}) {
+  const script = `
+    import { appendFileSync } from "node:fs";
+    const { withCredentialLock } = await import(${JSON.stringify(lockModule)});
+    await withCredentialLock(async () => {
+      appendFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid, at: "enter", t: Date.now() }) + "\\n");
+      process.stdout.write("locked\\n");
+      await new Promise((resolve) => setTimeout(resolve, ${holdMs}));
+      appendFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid, at: "exit", t: Date.now() }) + "\\n");
+    });`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, XDG_CONFIG_HOME: config, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (data) => { stderr += data; });
+  const locked = new Promise((resolve) => child.stdout.on("data", (data) => { if (String(data).includes("locked")) resolve(); }));
+  const done = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal, stderr })));
+  return { child, locked, done };
+}
+const readLog = async (log) => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+function assertNoOverlap(entries) {
+  const spans = new Map();
+  for (const entry of entries) spans.set(entry.pid, { ...spans.get(entry.pid), [entry.at]: entry.t });
+  const sorted = [...spans.values()].sort((a, b) => a.enter - b.enter);
+  for (let i = 1; i < sorted.length; i++) assert.ok(sorted[i].enter >= sorted[i - 1].exit, `lock holders overlapped: ${JSON.stringify(sorted)}`);
+  return sorted.length;
+}
+
+test("lock: a holder killed with Ctrl-C (SIGINT) does not block the next process", async () => {
+  const box = await sandbox();
+  try {
+    const log = join(box.root, "log");
+    const holder = lockHolder(box.config, 60_000, log);
+    await holder.locked;
+    holder.child.kill("SIGINT");
+    await holder.done;
+    const lockFile = join(box.config, "docslurp", "credentials.lock");
+    assert.ok((await stat(lockFile)).isFile(), "the crashed holder leaves its lock behind");
+    const begin = Date.now();
+    const next = lockHolder(box.config, 10, log);
+    const result = await next.done;
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(Date.now() - begin < 5_000, "a dead holder's lock is broken at once, not after the stale timeout");
+    await assert.rejects(stat(lockFile));
+  } finally { await box.dispose(); }
+});
+
+test("lock: two waiters racing to break a stale lock never hold it together", async () => {
+  const box = await sandbox();
+  try {
+    const dir = join(box.config, "docslurp");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const lockFile = join(dir, "credentials.lock");
+    // A lock from another host (so its pid cannot be checked) whose holder stopped refreshing it.
+    await writeFile(lockFile, JSON.stringify({ pid: 1, host: "some-other-host", nonce: "old" }), { mode: 0o600 });
+    const old = new Date(Date.now() - 10 * 60_000);
+    const { utimes } = await import("node:fs/promises");
+    await utimes(lockFile, old, old);
+    const log = join(box.root, "log");
+    const env = { DOCSLURP_CREDENTIAL_LOCK_STALE_MS: "1000" };
+    const racers = [lockHolder(box.config, 300, log, env), lockHolder(box.config, 300, log, env), lockHolder(box.config, 300, log, env)];
+    for (const racer of racers) assert.equal((await racer.done).code, 0);
+    assert.equal(assertNoOverlap(await readLog(log)), 3);
+  } finally { await box.dispose(); }
+});
+
+test("lock: a holder working longer than the stale threshold keeps its lock", async () => {
+  const box = await sandbox();
+  try {
+    const log = join(box.root, "log");
+    const env = { DOCSLURP_CREDENTIAL_LOCK_STALE_MS: "600" };
+    const long = lockHolder(box.config, 2_500, log, env);
+    await long.locked;
+    const waiter = lockHolder(box.config, 10, log, env);
+    assert.equal((await long.done).code, 0);
+    assert.equal((await waiter.done).code, 0);
+    assert.equal(assertNoOverlap(await readLog(log)), 2);
+  } finally { await box.dispose(); }
+});
+
+test("login warns when the approval grants fewer scopes than requested", async () => {
+  const fake = fakeServer({ deviceScript: ["ok"] }); const url = await fake.start(); const box = await sandbox();
+  try {
+    const result = await cli(["login", "--device", "--scopes", "search read chat ingest"], { url, config: box.config });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /granted only search read\. Not granted: chat ingest/);
+  } finally { await fake.close(); await box.dispose(); }
+});
+
+test("Windows exec treats only PATHEXT extensions as extensions and skips relative PATH entries", async () => {
+  const { resolveWindowsCommand } = await import("../dist/auth/windows-exec.js");
+  const files = new Set(["C:\\py\\python3.11.exe", "bin\\tool.cmd", "C:\\tools\\tool.cmd"]);
+  const exists = (path) => files.has(path);
+  const env = { PATH: "C:\\py;bin;.;C:\\tools", PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+  assert.equal(resolveWindowsCommand("python3.11", env, exists), "C:\\py\\python3.11.exe");
+  assert.equal(resolveWindowsCommand("tool", env, exists), "C:\\tools\\tool.cmd");
+  assert.equal(resolveWindowsCommand("tool", { ...env, PATH: "bin;." }, exists), null);
+});
