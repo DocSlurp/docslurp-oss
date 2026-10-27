@@ -4,6 +4,7 @@ import { z } from "zod";
 import { analyzeSearchSettingsChange, type WorkspaceSettingsProposal, type PipelineFeatures } from "@docslurp/shared";
 import { sql } from "../db.js";
 import type { RequestActor } from "../lib/request-actor.js";
+import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { openSettingsProposal, sealSettingsProposal } from "../lib/settings-proposal-tokens.js";
 import { mergeWorkspaceSearchSettings, getWorkspaceSearchSettings, upsertWorkspaceSearchSettings } from "./search-controls.js";
@@ -25,16 +26,20 @@ export class SettingsProposalError extends Error {
 const identity = (actor: RequestActor) => actor.type === "session"
   ? `session:${actor.userId}:${actor.sessionId}` : `key:${actor.userId}:${actor.apiKey.keyId}`;
 const fail = (status: 400 | 403 | 409 | 410, category: string, message: string): never => { throw new SettingsProposalError(status, category, message); };
+/**
+ * Settings proposals and Apply belong to the first-party DocSlurp app only.
+ * No API key (server or client), MCP token or capability token may prepare or
+ * apply one, so a customer cannot hand this power to its own end users.
+ */
+function assertFirstPartyApp(actor: RequestActor): void {
+  if (!isFirstPartyAppActor(actor)) fail(403, "settings_proposal_forbidden", "Workspace settings changes from chat are available only in the DocSlurp app");
+}
 
 async function authorize(actor: RequestActor, workspaceId: string, sessionId: string, client = sql) {
+  // Rechecked under the configuration lock, like every other authorization.
+  assertFirstPartyApp(actor);
   const access = await getWorkspaceAccess(workspaceId, actor.userId, client);
   if (!access || !canEditWorkspace(access, actor.userId)) return fail(403, "settings_proposal_forbidden", "Workspace editing permission is required");
-  if (actor.type === "apiKey") {
-    const [key] = await client<{ org_id: string; key_type: string; scopes: string[]; workspace_ids: string[] | null }[]>`
-      select org_id,key_type,scopes,workspace_ids from api_keys where id=${actor.apiKey.keyId} and user_id=${actor.userId} and revoked_at is null`;
-    if (!key || key.key_type !== "server" || !key.scopes.includes("workspaces:manage") || key.org_id !== access.orgId
-      || (key.workspace_ids?.length && !key.workspace_ids.includes(workspaceId))) return fail(403, "settings_proposal_forbidden", "A scoped server key with workspaces:manage is required");
-  }
   const [session] = await client<{ id: string }[]>`select id from chat_sessions where id=${sessionId} and user_id=${actor.userId} and workspace_id=${workspaceId}`;
   if (!session) return fail(403, "settings_proposal_forbidden", "The proposal must belong to your workspace conversation");
   return access;
@@ -94,6 +99,7 @@ function searchChanges(planned: Awaited<ReturnType<typeof plan>>, changes: z.inf
   })).filter(change => JSON.stringify(change.before) !== JSON.stringify(change.after));
 }
 export async function proposeWorkspaceSettings(args: { actor: RequestActor; workspaceId: string; sessionId: string; changes: unknown; now?: number }): Promise<WorkspaceSettingsProposal> {
+  assertFirstPartyApp(args.actor);
   const changes = workspaceSettingsProposalInputSchema.shape.changes.parse(args.changes);
   const access = await authorize(args.actor, args.workspaceId, args.sessionId);
   const proposed = await plan(args.actor, args.workspaceId, changes);
@@ -110,6 +116,7 @@ export async function proposeWorkspaceSettings(args: { actor: RequestActor; work
     reprocessRequired: proposed.config.reindex === "required" && proposed.config.targets.length > 0 };
 }
 export async function applySettingsProposal(args: { actor: RequestActor; workspaceId: string; token: string; reprocessExisting: boolean; now?: number }) {
+  assertFirstPartyApp(args.actor);
   const parsed = claimsSchema.safeParse(openSettingsProposal(args.token));
   if (!parsed.success) return fail(403, "settings_proposal_invalid", "Invalid settings proposal");
   const claims = parsed.data;

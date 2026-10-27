@@ -361,4 +361,3 @@ describe("run resource and cost rollups", () => {
     expect(summarizeRunUsageCost(null).costCents).toBe(0);
   });
 });
-

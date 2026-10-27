@@ -94,7 +94,7 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, sessionToken?, model?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations)); an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
 
 ### Model
 
@@ -132,25 +132,20 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
 | `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
 | `web` | workspace setting | boolean | `false` removes `webSearch` and `webFetch` from the turn. Omitted or `true` offers them only when the deployment (`WEB_TOOLS_ENABLED`, `WEB_TOOLS_CHAT_ENABLED`), the workspace's `pipeline.webTools`, its privacy mode and the key's scopes allow them; a request cannot turn them on past those. |
-| `suggestions` | `false` | boolean | Suggestions mode, described below. |
 
-#### Suggestions mode
+#### Settings suggestions are app-only
 
-With `agent: {suggestions: true}` the agent watches the turn's own tool results for ingestion and search problems: a search with no results or only unrelated passages for something the workspace should contain, files reported as failed or still processing (current versions only) when the question's evidence is missing and that file could plausibly hold it, and passage text that is garbled, cut off or missing the table or page the question needs. When it sees one, it adds a short section after the answer that names the likely cause and the evidence, and can prepare up to two specific changes with `proposeWorkspaceSettings` (see [Workspace settings from chat](agent-workspace-settings.md)). A turn with no such signal gets no suggestions section: a question the results fully answer never mentions failed or processing files, the agent never guesses a file's contents or type, and it names a file only after `getUploadStatus` shows it. A proposal never changes anything by itself: a person applies it with **Apply** in the app, or the authenticated apply endpoint. A proposal that cannot be prepared never fails the turn; the answer stands and says so.
+Settings suggestions, settings proposals with **Apply**, and search settings changed by a chat message ("turn on reranking") are features of the DocSlurp app's signed-in chat. They are not part of the API. API keys of any type (server and publishable), the OpenAI-compatible endpoint, MCP and the SDK never get the `getWorkspaceSettings` or `proposeWorkspaceSettings` tools, suggestions mode, or settings changes from messages, so a product built on DocSlurp cannot expose them to its own users. `agent.suggestions` is accepted and ignored, and `debug.modes.suggestions` is always `false`. To change settings from your own code, use `PATCH /v1/workspaces/:id` with a server key that has `workspaces:manage`. See [Workspace settings from chat](agent-workspace-settings.md).
 
-Without suggestions mode the agent still prepares a proposal when the user asks to change a setting, but never volunteers one.
-
-#### Search settings asked for in chat
-
-A chat message such as "turn on reranking" can change the retrieval settings that appear in `retrievalDefaults` (result count, reranking, diversification) for **that chat thread only**; workspace defaults never change from a message. The agent is told exactly what changed (for example `useRerank false→true`, this thread only) and says so, rather than reporting the setting as "already enabled". A message that asks for the whole workspace ("for this workspace", "for everyone", "by default") changes nothing: the agent prepares a workspace-wide `proposeWorkspaceSettings` proposal for the user to **Apply**, and offers a thread-only change on request. Settings are configuration, not document evidence, so the agent never attaches a `[n]` citation to a statement about them. Answers also never include visible self-corrections: the agent works calculations out before it writes.
+Settings are configuration, not document evidence, so the agent never attaches a `[n]` citation to a statement about them. Answers also never include visible self-corrections: the agent works calculations out before it writes.
 
 A caller who stops a turn (Stop in the app, or a client disconnect) is recorded as a cancelled outcome, not a failure: telemetry logs it at INFO and the spans carry `docslurp.outcome=cancelled` (the agent span's `docslurp.chat.stop_reason` is `cancelled`) instead of an `ERROR` status. Timeouts and deadline stops remain errors.
 
-Suggestions mode and `agent.web` are set per request on `POST /v1/chat` (and the SDK's `chat`). They are not available on `GET /v1/chat/stream`, the MCP `chat` tool or `/v1/chat/completions`, which always run with suggestions off and the workspace's web setting. The DocSlurp web app turns suggestions on by default and has **Web** (default off) and **Suggestions** toggles in the composer.
+`agent.web` is set per request on `POST /v1/chat` (and the SDK's `chat`). It is not available on `GET /v1/chat/stream`, the MCP `chat` tool or `/v1/chat/completions`, which use the workspace's web setting.
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
-  -d '{"q": "Why can'"'"'t I find the Q3 renewal terms?", "agent": {"suggestions": true, "web": false}}'
+  -d '{"q": "Why can'"'"'t I find the Q3 renewal terms?", "agent": {"web": false}}'
 ```
 
 The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
@@ -171,7 +166,7 @@ Agent responses add these `debug` fields (other turns omit them):
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
 | `limits` | `{maxSteps, baseSteps, maxToolCalls, searchConcurrency, clamped}` as applied; `baseSteps` is the dynamic step budget |
-| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
+| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is always `false` for API callers (app-only, see above) |
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 
@@ -238,6 +233,17 @@ With OpenTelemetry export on, each agent turn emits spans on the `docslurp.chat`
 The agent span also copies the W3C baggage keys `eval.run_id`, `eval.case_id`, `eval.model` and `eval.arm` from the request's `baggage` header (other keys are ignored; values are capped at 128 characters). `/v1/chat` responses carry a `traceparent` header for the request's trace when tracing is on, so clients can join a turn to its trace.
 
 The `api.search` retrieval spans those calls create carry `docslurp.chat.session_id`, and their `search_sessions.metadata` and search usage events record `chatSessionId`. Metrics: the `docslurp.chat.agent.duration` histogram (seconds, by `gen_ai.request.model` and `docslurp.chat.stop_reason`) and the `docslurp.chat.agent.tool_calls` counter (by `gen_ai.request.model` and `gen_ai.tool.name`).
+
+### Conversations
+
+With a browser (publishable) key, every visitor shares the key, so a `sessionId` alone can't continue a conversation. Each answer also returns a `sessionToken`: a sealed grant for that key, workspace and session, valid for 24 hours. Send it back with `sessionId`: `sessionToken` in the body of `POST /v1/chat`, or the `X-DocSlurp-Chat-Session-Token` header on `GET /v1/search/chat/stream` (the SDK does this; the grant is never read from the URL).
+
+- A `sessionId` with no token, or with an expired one, starts a **fresh session**. This is what widgets deployed before grants send. The old conversation is never looked up or read, and the answer carries a new `sessionId` and `sessionToken`.
+- A token that was tampered with, or issued for another key, workspace or session, gets 403 `chat_session_forbidden` before anything is read.
+
+Keep the token in the visitor's own page state, not in shared storage. Server keys and the app don't need it.
+
+`GET /v1/search/chat/stream` with a signed-in cookie session (not an API key) must be same-origin. The browser has to send `Sec-Fetch-Site: same-origin`, or an `Origin` of the app itself. A request with neither header is refused with 403, which stops a link or `<img>` on another site from starting a paid turn. Safari before 16.4 sends no Fetch Metadata on these requests, so it can't use the stream with a cookie session; use `POST /v1/chat`, or an API key from your server.
 
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 

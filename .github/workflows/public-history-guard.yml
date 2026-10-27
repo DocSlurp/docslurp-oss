@@ -1,0 +1,26 @@
+name: Public history guard
+
+# Detection is after publication. Prevent exposure with server-side push rules.
+# Never delete branches automatically: a ref may advance while this job runs.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: no private history
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check history
+        run: scripts/check-public-history.sh HEAD
+      - name: Test history guard
+        run: node --test scripts/check-public-history.test.mjs

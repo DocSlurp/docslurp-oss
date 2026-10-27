@@ -10,8 +10,11 @@ import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
+export { isFirstPartyAppActor } from "./first-party-app.js";
 import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
-import { validateApiKey, type ValidatedKey } from "../services/api-keys.js";
+import { ApiKeyPolicyError, ClientKeyWorkspacesRequiredError, validateApiKey, type ValidatedKey } from "../services/api-keys.js";
+
+export { ApiKeyPolicyError, ClientKeyWorkspacesRequiredError };
 import { validateOAuthApiToken } from "../services/mcp-oauth.js";
 import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
 import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
