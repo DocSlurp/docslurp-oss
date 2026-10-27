@@ -2,7 +2,34 @@
 import argparse,json,random,statistics
 from collections import defaultdict
 from pathlib import Path
-from contract import file_hash,immutable_json
+from contract import file_hash,identity_hash,immutable_json,validate_policy_receipt
+from optimize import load_panel,summarize,eligible,bootstrap
+
+
+def validated_heldout(run,selection):
+    """Recompute quality from the complete, receipt-bound heldout evidence."""
+    identity=json.loads((run/'evaluation-identity.json').read_text())
+    policy_path=selection/'frozen-policy.json'
+    receipt=json.loads(policy_path.read_text())
+    validate_policy_receipt(receipt,identity,file_hash(Path(__file__).with_name('optimize.py')),file_hash(run/'tune-complete.json'))
+    cases,inventory=load_panel(run,'heldout',identity)
+    policy_hash=file_hash(policy_path)
+    if inventory['policyHash']!=policy_hash:raise RuntimeError('heldout-policy-binding-mismatch')
+    manifest=json.loads((run/'dataset-manifest.json').read_text())
+    required={c['family'] for c in manifest['cases'] if c['split']=='heldout'}
+    if len(required)!=18 or set(inventory['selectedFamilies'])!=required:
+        raise RuntimeError('promotion-requires-complete-heldout-panel')
+    if set(receipt['developmentFamilies']) & required:raise RuntimeError('split-family-overlap')
+    heldout=json.loads((selection/'heldout-report.json').read_text())
+    bindings={'split':'heldout','policy':receipt['policy'],'policyHash':policy_hash,
+              'evaluationIdentityHash':identity_hash(identity),'inventoryHash':file_hash(run/'heldout-complete.json')}
+    if any(heldout.get(k)!=v for k,v in bindings.items()):raise RuntimeError('heldout-report-binding-mismatch')
+    result=summarize(cases,receipt['policy']);strong=summarize(cases,{'mode':'ocr-strong'})
+    uncertainty=bootstrap(result,strong)
+    expected={'result':result,'constraintsPass':eligible(result,strong),
+              'qualityNoninferioritySupported':uncertainty['qualityDifference95CI'][0]>=-.01 and uncertainty['acceptanceDifference95CI'][0]>=-.02}
+    if any(heldout.get(k)!=v for k,v in expected.items()):raise RuntimeError('heldout-report-summary-mismatch')
+    return heldout
 
 def timing_summary(root,policy_hash):
     complete=json.loads((root/'complete.json').read_text())
@@ -41,8 +68,9 @@ def timing_summary(root,policy_hash):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--selection',type=Path,required=True);p.add_argument('--timing',type=Path,required=True)
+    p.add_argument('--run',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);a=p.parse_args()
-    heldout=json.loads((a.selection/'heldout-report.json').read_text())
+    heldout=validated_heldout(a.run,a.selection)
     timing=timing_summary(a.timing,file_hash(a.selection/'frozen-policy.json'))
     absolute_quality=heldout['result']['quality']>=.95 and heldout['result']['passRate']>=.90
     accepted=absolute_quality and heldout['constraintsPass'] and heldout['qualityNoninferioritySupported'] and timing['elapsedSaving95CI'][0]>0

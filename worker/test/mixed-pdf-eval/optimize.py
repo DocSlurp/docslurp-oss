@@ -169,7 +169,11 @@ if __name__=="__main__":
     baselines={name:summarize(selected,{'mode':name}) for name in ['native','ocr-fast','ocr-strong']}
     baselines['20-percent-proxy']=summarize(selected,PROXY)
     uncertainty=bootstrap(result,strong)
-    report={'split':'heldout' if a.heldout_policy else 'tune','policy':policy,'result':result,'baselines':baselines,
+    report={'split':'heldout' if a.heldout_policy else 'tune','policy':policy,
+            'policyHash':sha(a.heldout_policy or a.out/'frozen-policy.json'),
+            'evaluationIdentityHash':identity_hash(identity),
+            'inventoryHash':sha(a.run/('heldout-complete.json' if a.heldout_policy else 'tune-complete.json')),
+            'result':result,'baselines':baselines,
             'constraintsPass':eligible(result,strong),'pointEstimateSpeedImprovement':result['serviceSeconds']<strong['serviceSeconds'],
             'qualityNoninferioritySupported':uncertainty['qualityDifference95CI'][0]>=-.01 and uncertainty['acceptanceDifference95CI'][0]>=-.02,
             'serviceWorkSaving':1-result['serviceSeconds']/max(1e-9,strong['serviceSeconds']),
