@@ -18,6 +18,7 @@ brew install \
   ocrmypdf \
   pandoc \
   poppler \
+  webp \
   python \
   qpdf \
   tesseract \

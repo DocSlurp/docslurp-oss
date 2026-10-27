@@ -1,7 +1,7 @@
 # Dockerfile.lean - Production worker image (fly.worker.toml)
 #
 # Contents: Node 24 + the worker's production node_modules (pnpm deploy, pruned),
-# poppler-utils (with poppler-data CMaps), Tesseract (21 languages, ~107 MiB), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
+# poppler-utils (with poppler-data CMaps), Tesseract (21 languages, ~107 MiB), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
 # with the base parsers (trafilatura, ebooklib, python-pptx,
 # openpyxl, xlsx2csv, Pillow; PDFs use Kreuzberg, Poppler and the optional native-pdf engine). No LibreOffice or ML stacks: Docling and
 # Unstructured come from sha256-pinned vendor bundles fetched on demand
@@ -128,6 +128,7 @@ RUN apt-get update \
        tesseract-ocr-tur \
        tesseract-ocr-ukr \
        tesseract-ocr-vie \
+       webp \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
     && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 

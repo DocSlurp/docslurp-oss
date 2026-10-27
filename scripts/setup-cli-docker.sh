@@ -47,6 +47,7 @@ if command -v apk >/dev/null 2>&1; then
     tesseract-ocr-data-tur \
     tesseract-ocr-data-ukr \
     tesseract-ocr-data-vie \
+    libwebp-tools \
     tiff-tools
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update
@@ -99,6 +100,7 @@ elif command -v apt-get >/dev/null 2>&1; then
     tesseract-ocr-tur \
     tesseract-ocr-ukr \
     tesseract-ocr-vie \
+    webp \
     unrtf
   rm -rf /var/lib/apt/lists/*
 else
