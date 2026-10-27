@@ -547,8 +547,87 @@ describe("upload widget with a fake MCP Apps host", () => {
       api.button("Cancel")!.click();
       await api.settle();
       expect(FakeXhr.all[0]!.aborted).toBe(true);
-      expect(api.text()).toContain("Upload cancelled");
+      expect(api.toolCalls("getUploadStatus")[0]!.params.arguments).toEqual({ sessionId: SESSION_ID });
+      api.answerTool("getUploadStatus", { status: "uploading", result: null });
+      await api.settle();
+      expect(api.text()).toContain("Upload stopped locally");
+      expect(api.text()).not.toContain("Nothing was ingested");
+      expect(api.button("Try again")).toBeUndefined();
       expect(api.toolCalls("completeUpload").length).toBe(0);
+    });
+
+    it("checks a late session response after Cancel without sending any PUTs", async () => {
+      const api = await boot();
+      await handshake(api);
+      api.pickFiles(TWO);
+      await api.settle();
+      api.button(/^Upload \d/)!.click();
+      await api.settle();
+      const call = api.toolCalls("upload")[0]!;
+      api.button("Cancel")!.click();
+      await api.settle();
+      expect(api.text()).toContain("Upload stopped locally");
+      api.answerTool("upload", { sessionId: SESSION_ID, files: descriptors(call.params.arguments) });
+      await api.settle();
+      expect(FakeXhr.all).toHaveLength(0);
+      expect(api.toolCalls("getUploadStatus")[0]!.params.arguments).toEqual({ sessionId: SESSION_ID });
+      api.answerTool("getUploadStatus", { status: "aborted", result: null });
+      await api.settle();
+      expect(api.text()).toContain("server confirmed this upload was aborted");
+      expect(api.button(/^Upload \d/)).toBeDefined();
+    });
+
+    it("retains the session when cancellation status cannot be read", async () => {
+      const api = await boot();
+      await handshake(api);
+      await pickAndUpload(api, TWO);
+      api.button("Cancel")!.click();
+      await api.settle();
+      api.answerTool("getUploadStatus", { error: "Upload session not found" }, true);
+      await api.settle();
+      expect(api.text()).toContain("Upload state unknown");
+      expect(api.text()).not.toContain("Nothing was ingested");
+      expect(api.button("Try again")).toBeUndefined();
+      api.button("Check again")!.click();
+      await api.settle();
+      expect(api.toolCalls("getUploadStatus")[1]!.params.arguments).toEqual({ sessionId: SESSION_ID });
+      expect(api.toolCalls("completeUpload")).toHaveLength(0);
+    });
+
+    it("recovers all files when storage commits before Cancel receives its response", async () => {
+      const api = await boot();
+      await handshake(api);
+      await pickAndUpload(api, TWO);
+      // Storage has accepted the bytes, but neither PUT response has reached the browser.
+      api.button("Cancel")!.click();
+      await api.settle();
+      api.answerTool("getUploadStatus", { status: "confirmed", result: {
+        workspace: WORKSPACE, run: { id: "run_auto" }, documents: [{}, {}]
+      } });
+      await api.settle();
+      expect(api.text()).toContain("Processing in");
+      expect(api.toolCalls("completeUpload")).toHaveLength(0);
+      expect(api.toolCalls("upload")).toHaveLength(1);
+      expect(api.requests("ui/update-model-context")).toHaveLength(1);
+    });
+
+    it("recovers the reconciler's existing run after completeUpload returns 409", async () => {
+      const api = await boot();
+      await handshake(api);
+      await pickAndUpload(api, TWO);
+      FakeXhr.all.forEach(xhr => xhr.succeed());
+      await api.settle();
+      api.answerTool("completeUpload", { error: "Upload session is already confirmed or closed" }, true);
+      await api.settle();
+      expect(api.toolCalls("getUploadStatus")[0]!.params.arguments).toEqual({ sessionId: SESSION_ID });
+      api.answerTool("getUploadStatus", { status: "confirmed", result: {
+        workspace: WORKSPACE, run: { id: "run_auto" }, documents: [{}, {}]
+      } });
+      await api.settle();
+      expect(api.text()).toContain("Processing in");
+      expect(api.toolCalls("upload")).toHaveLength(1);
+      expect(FakeXhr.all).toHaveLength(2);
+      expect(api.toolCalls("getUploadStatus")[1]!.params.arguments.runId).toBe("run_auto");
     });
 
     it("offers no Cancel once completeUpload is in flight, and the run still starts", async () => {
@@ -592,6 +671,8 @@ describe("upload widget with a fake MCP Apps host", () => {
       FakeXhr.all[0]!.succeed();
       await api.settle();
       api.answerTool("completeUpload", { error: "Upload session is already confirmed or closed" }, true);
+      await api.settle();
+      api.answerTool("getUploadStatus", { status: "confirmed", result: null });
       await api.settle();
       expect(api.doc.querySelector("[role=alert]")!.textContent).toContain("may already be running");
       expect(api.button("Try again")).toBeUndefined();

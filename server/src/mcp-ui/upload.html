@@ -663,13 +663,20 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     var run = ++uploadRunId;
     files.forEach(function (f) { f.sent = 0; f.state = 'queued'; f.descId = null; });
     S.phase = 'uploading';
-    S.error = null; S.status = null; S.asked = null; S.pendingComplete = null;
+    S.error = null; S.status = null; S.asked = null; S.pendingComplete = null; S.session = null;
     render();
     var args = { files: files.map(function (f) { return { filename: f.name, mimeType: f.mime, sizeBytes: f.size, singlePart: true }; }) };
     if (S.workspaceId) args.workspace = S.workspaceId;
 
     callTool('upload', args).then(function (data) {
-      if (run !== uploadRunId) return;
+      if (run !== uploadRunId) {
+        var cancelledSession = str(data.sessionId, 64);
+        if (cancelledSession && S.pendingComplete && S.pendingComplete.cancelled) {
+          S.pendingComplete.sessionId = cancelledSession;
+          checkSession(S.pendingComplete, uploadRunId);
+        }
+        return;
+      }
       var descs = Array.isArray(data.files) ? data.files.filter(isObject) : [];
       var sessionId = str(data.sessionId, 64);
       var plan = matchDescriptors(files, descs);
@@ -764,17 +771,17 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
           done(); f.state = 'sent'; f.sent = f.size; renderSoon(); resolve();
         } else if (xhr.status === 403) {
           fail('put', 'The upload link expired or was refused',
-            'Storage refused ' + clean(f.name) + '. Upload links expire after 15 minutes. Nothing was ingested; try again to get fresh links.',
+            'Storage refused ' + clean(f.name) + '. Upload links expire after 15 minutes. Other files may already be stored or ingesting. Check the workspace before retrying.',
             'PUT returned HTTP 403 (signed link expired, or the bucket policy refused it).');
         } else {
-          fail('put', 'Upload stopped', 'Storage rejected ' + clean(f.name) + ' (HTTP ' + xhr.status + '). Nothing was ingested.',
+          fail('put', 'Upload stopped', 'Storage rejected ' + clean(f.name) + ' (HTTP ' + xhr.status + '). Other files may already be stored or ingesting.',
             'PUT ' + clean(f.name) + ' returned HTTP ' + xhr.status + '.');
         }
       };
       xhr.onerror = function () {
         if (run !== uploadRunId) return;
         fail('blocked', 'The app blocked the direct upload',
-          'This app blocked the upload to storage, so no files were created. You can try again, or share links instead.',
+          'No storage response was received. Files may already be stored or ingesting; check the workspace before retrying.',
           'PUT to the storage origin failed before any response (network, CORS or CSP). The storage address may not be on this app’s allowed list, or the bucket does not allow uploads from here.');
       };
       xhr.ontimeout = xhr.onerror;
@@ -786,7 +793,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
   /**
    * Confirm the session. From here the server may already be starting a billable
    * run, so there is no Cancel, and a timeout re-checks the same session
-   * (completeUpload is idempotent per session) instead of re-uploading.
+   * and reads its persisted result instead of re-uploading.
    */
   function finishUpload(files, plan, sessionId, run, mayRetry) {
     S.phase = 'finalizing';
@@ -798,11 +805,28 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     }, function (err) {
       if (run !== uploadRunId) return;
       if (mayRetry && err && !err.toolError) return finishUpload(files, plan, sessionId, run, false);
-      var already = err && err.toolError && /already|confirmed|closed|\b409\b/i.test(err.message || '');
-      setError('complete', already ? 'Ingestion may already be running' : 'Upload sent, but not confirmed',
-        (already ? 'The server says this upload was already confirmed. ' : ((err && err.message) || 'completeUpload failed.') + ' ') +
-        'Your files are uploaded. Check again before uploading anything twice, or ask the assistant to check the workspace.',
-        'The bytes were uploaded; the server did not confirm the session.');
+      return checkSession(S.pendingComplete, run);
+    });
+  }
+
+  // Status is read through the host's existing tenant-scoped tool. A stopped
+  // browser request cannot prove that storage or ingestion was cancelled.
+  function checkSession(pc, run) {
+    S.phase = 'finalizing'; render();
+    return callTool('getUploadStatus', { sessionId: pc.sessionId }).then(function (data) {
+      if (run !== uploadRunId) return;
+      if (isObject(data.result) && isObject(data.result.run) && data.result.run.id) return onCompleted(pc.files, data.result);
+      if (data.status === 'aborted') {
+        S.pendingComplete = null; S.phase = 'confirm';
+        S.notice = 'The server confirmed this upload was aborted.'; render(); return;
+      }
+      setError('complete', pc.cancelled ? 'Upload stopped locally' : 'Ingestion may already be running',
+        'Stored files may still be ingested automatically. Check again before uploading anything twice.', 'Session status: ' + str(data.status, 40));
+    }, function (err) {
+      if (run !== uploadRunId) return;
+      setError('complete', pc.cancelled ? 'Upload state unknown' : 'Upload sent, but not confirmed',
+        'The server could not confirm the session state. Files may already be stored or ingesting. Check again before uploading anything twice, or ask the assistant to check the workspace.',
+        (err && err.message) || 'getUploadStatus failed');
     });
   }
 
@@ -838,18 +862,19 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
 
   function cancelUpload() {
     if (S.phase !== 'uploading') return; // not once completeUpload is in flight
-    uploadRunId += 1;
+    var run = ++uploadRunId;
     teardownXhrs();
-    S.files.forEach(function (f) { f.sent = 0; f.state = 'queued'; });
-    S.phase = 'confirm';
-    S.notice = 'Upload cancelled. Nothing was ingested.';
-    render();
+    S.pendingComplete = { files: validFiles().slice(), sessionId: S.session && S.session.sessionId, cancelled: true };
+    if (S.pendingComplete.sessionId) return checkSession(S.pendingComplete, run);
+    setError('complete', 'Upload stopped locally', 'The server may still be preparing this upload. Its state is not yet known; check again before retrying.', 'Awaiting upload session');
   }
 
   function checkAgain() {
     var pc = S.pendingComplete;
     if (!pc) return;
     var run = ++uploadRunId;
+    if (!pc.sessionId) return setError('complete', 'Upload state unknown', 'Ask the assistant to check the workspace before retrying.', 'No session response received');
+    if (pc.cancelled) return checkSession(pc, run);
     finishUpload(pc.files, pc.plan, pc.sessionId, run, false);
   }
 
