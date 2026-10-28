@@ -10,7 +10,7 @@ Thanks for your interest. DocSlurp is pre-release and moving quickly, so small, 
 - `worker/`: the ingestion pipeline (TypeScript, Temporal)
 - `packages/*`: the SDK (with its `/embed` subpath), CLI, `contrib-*` integrations and compatibility clients; `packages/shared` holds shared contracts
 
-Stack: TypeScript (strict), Hono, Postgres with pgvector, MinIO/S3, Redis, Temporal. Node.js 24 and pnpm 10 are required.
+Stack: TypeScript (strict), Hono, Postgres, MinIO/S3, Redis, Temporal. Node.js 24 and pnpm 10 are required.
 
 ## Development setup
 

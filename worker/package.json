@@ -68,7 +68,6 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.12",
-    "@electric-sql/pglite-pgvector": "0.0.13",
     "@electric-sql/pglite-socket": "0.2.15",
     "@temporalio/testing": "1.24.0",
     "@types/node": "^26.6.5",

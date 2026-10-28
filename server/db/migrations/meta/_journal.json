@@ -666,6 +666,13 @@
       "when": 1792792800900,
       "tag": "0094_admin_user_insights",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1793214455772,
+      "tag": "0095_drop_pgvector_extension",
+      "breakpoints": true
     }
   ]
 }

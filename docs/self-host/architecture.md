@@ -8,7 +8,7 @@ How the pieces of a self-hosted DocSlurp fit together. Design decisions that cut
 flowchart LR
   clients["Clients: REST, SDK, CLI, MCP, OpenAI-compatible chat, embeds"]
   server["Server (Hono, /v1, port 8787)"]
-  pg[("Postgres + pgvector")]
+  pg[("Postgres")]
   redis[("Redis: rate limits, ephemeral")]
   store[("Object storage: S3 or MinIO")]
   lance[("LanceDB vector index under lancedb/")]
@@ -33,7 +33,7 @@ flowchart LR
   worker -.-> ai
 ```
 
-Clients talk only to the server. The server is a Hono API under `/v1` on port 8787. It reads and writes Postgres (with pgvector), uses Redis for rate limits only, and stores raw and derived files in object storage (MinIO in the Compose stack). LanceDB vector indexes live in the same bucket under `lancedb/`. The server starts pipeline runs on Temporal. Workers pick them up, run the ingestion stages, and write results to Postgres, object storage and LanceDB. Workers run file parsers inside a sandbox provider: bubblewrap by default, or landlock or Modal ([providers](sandbox-providers.md)). AI providers are optional (dashed lines): the default local embedding mode needs no provider key, but LLM-powered stages do.
+Clients talk only to the server. The server is a Hono API under `/v1` on port 8787. It reads and writes Postgres (metadata, text and audit; no vectors), uses Redis for rate limits only, and stores raw and derived files in object storage (MinIO in the Compose stack). LanceDB vector indexes live in the same bucket under `lancedb/`. The server starts pipeline runs on Temporal. Workers pick them up, run the ingestion stages, and write results to Postgres, object storage and LanceDB. Workers run file parsers inside a sandbox provider: bubblewrap by default, or landlock or Modal ([providers](sandbox-providers.md)). AI providers are optional (dashed lines): the default local embedding mode needs no provider key, but LLM-powered stages do.
 
 ## Ingest sequence
 

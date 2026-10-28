@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { PGlite } from "@electric-sql/pglite";
-import { vector } from "@electric-sql/pglite-pgvector";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 
 // The migrations live in the server package (server/db/migrations), which owns the
@@ -58,7 +57,7 @@ async function applyMigration(db: PGlite, tag: string): Promise<void> {
 }
 
 /**
- * An in-memory Postgres (PGlite + pgvector) built exactly as every real
+ * An in-memory Postgres (PGlite) built exactly as every real
  * database is: by applying server/db/migrations in journal order. server/db/migrations is the
  * only schema source; there is no snapshot to drift from it. Fails loudly on a
  * journal drizzle-kit would apply differently to an existing database.
@@ -77,7 +76,7 @@ export async function createMigratedDatabase(options: { stopBefore?: string } = 
   const tags = journal.map((entry) => entry.tag);
   const stop = options.stopBefore ? findTag(tags, options.stopBefore) : tags.length;
   if (stop < 0) throw new Error(`Unknown migration ${options.stopBefore}`);
-  const db = new PGlite({ extensions: { vector, pgcrypto } });
+  const db = new PGlite({ extensions: { pgcrypto } });
   for (const tag of tags.slice(0, stop)) await applyMigration(db, tag);
   return db;
 }
