@@ -36,7 +36,7 @@
     "@huggingface/transformers": "^4.3.1",
     "@lancedb/lancedb": "^0.40.0",
     "@mastra/ai-sdk": "^1.11.2",
-    "@mastra/core": "^1.80.0",
+    "@mastra/core": "1.79.0",
     "@modelcontextprotocol/server": "2.4.0",
     "@node-saml/node-saml": "^5.2.0",
     "@openrouter/ai-sdk-provider": "3.1.0",

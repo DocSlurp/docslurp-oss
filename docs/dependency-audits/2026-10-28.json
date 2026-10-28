@@ -118,12 +118,6 @@
     },
     {
       "package": "@docslurp/server",
-      "dependency": "@mastra/core",
-      "before": "^1.79.0",
-      "after": "^1.80.0"
-    },
-    {
-      "package": "@docslurp/server",
       "dependency": "@modelcontextprotocol/server",
       "before": "2.3.1",
       "after": "2.4.0"
@@ -265,6 +259,12 @@
       "dependency": "@electric-sql/pglite-socket",
       "before": "0.2.13",
       "after": "0.2.15"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "katex",
+      "before": "^0.19.0",
+      "after": "^0.19.1"
     }
   ],
   "audits": {
@@ -295,7 +295,7 @@
   "securityChanges": [
     "Override @earendil-works/pi-coding-agent>undici to 8.12.3: pi-coding-agent 1.4.0 still pins undici 8.10.2 exactly, which carries 9 advisories (TLS certificate validation bypass, cross-user cache poisoning, several DoS); server already declares 8.12.3 directly",
     "Override express>body-parser to ^2.4.0 (DoS via trailing bytes, reached through @modelcontextprotocol/sdk express transport)",
-    "Override ajv>fast-uri to ^3.1.9 (URI scheme spoofing, host confusion)",
+    "Override ajv>fast-uri to ^3.1.9 (URI scheme spoofing, host confusion); @modelcontextprotocol/server 2.4.0 inlines its own fast-uri 3.1.8 in dist/ajvProvider-*.mjs, which no override reaches and pnpm audit cannot see. It only resolves $id/$ref in our server-defined schemas, not tool input; track the next SDK release",
     "Node 24.21.0 -> 24.22.1 (2026-10-20 security release) in server and worker images by refreshing node:24-*-slim digests",
     "@node-saml/node-saml 5.1.0 -> 5.2.0: checks idpIssuer on the Response and assertion, rejects multiple Issuers, fixes maxAssertionAgeMs skipping; DocSlurp already passes idpIssuer from IdP metadata and uses only the POST binding",
     "docker/login-action v4.6.0 -> v4.7.0 and github/codeql-action/upload-sarif v4.39.0 -> v4.39.1, pinned by commit SHA"
@@ -304,11 +304,66 @@
     "typescript": "6.0.3: Astro check supports TypeScript 5/6, not 7",
     "openai": "6.49.0: 7.x is a major API change; held with the AI SDK family",
     "opentelemetry": "2.12/0.223/API 1.9.1: 3.0/0.300 is a breaking family change; Langfuse 6 requires SDK 2",
-    "filelock": "3.32.7 in dev-only ML locks: forcing >=4.2.1 downgrades unstructured 0.27.33 -> 0.20.8 (unstructured caps filelock<4)"
+    "filelock": "3.32.7 in dev-only ML locks: forcing >=4.2.1 downgrades unstructured 0.27.33 -> 0.20.8 (unstructured caps filelock<4)",
+    "@mastra/core": "1.79.0: 1.80.0 was ~3h old at audit time and @mastra/* is exempt from minimumReleaseAge; revisit next round"
   },
   "limitations": [
     "ChromaDB 1.5.9 advisories have no published fix; DocSlurp uses HttpClient/PersistentClient for the optional vector backend, not the Chroma HTTP server, and production images do not install it",
     "Worker images were not rebuilt or smoke-tested here; the digest refresh takes effect on the next worker-images run",
     "No production deployment, model download or hosted quality evaluation was run"
-  ]
+  ],
+  "validation": {
+    "observedAt": "2026-10-28T17:30:00Z",
+    "checkout": "standalone core worktree at the audited commit (CI layout)",
+    "typecheck": "passed",
+    "build": "passed",
+    "packageImports": "passed",
+    "packageTests": {
+      "shared": 718,
+      "sdk": 112,
+      "cli": 54,
+      "contribAstro": 5,
+      "contribSearchCompat": 1
+    },
+    "coreScriptTests": {
+      "passed": 116
+    },
+    "serverTests": {
+      "passed": 3103,
+      "skipped": 53,
+      "failed": 0
+    },
+    "workerTests": {
+      "passed": 2070,
+      "skipped": 56,
+      "failed": 2,
+      "failures": "local-artifact-adapters.test.ts 5-second timeouts under full-suite load (same file as the 2026-10-21 audit); passes 4/4 in isolation"
+    },
+    "appRepo": {
+      "typecheck": "passed",
+      "build": "passed",
+      "sitePerformanceBudget": "passed",
+      "appTests": 963,
+      "scriptTests": 142
+    },
+    "notes": "Server tests read the developer .env through findWorkspaceRoot and fail spuriously when one with chat MCP keys is present; results above were run without one"
+  },
+  "councilReview": {
+    "reviewers": [
+      "adversarial reviewer (Claude Opus subagent)",
+      "correctness reviewer (Claude Sonnet subagent)"
+    ],
+    "highSeverity": 0,
+    "resolved": [
+      "@mastra/core 1.80.0 too fresh: held at 1.79.0",
+      "bundled fast-uri 3.1.8 in MCP server: documented above",
+      "katex override mirrored to ^0.19.1"
+    ],
+    "followUps": [
+      "Pre-existing: SAML request cache accepts unconsumed-or-consumed unexpired rows and has a no-op removeAsync, so a captured signed response can be replayed within the request window; implement consumeAsync/saveIfAbsentAsync, set rejectReplayedAssertions, bind InResponseTo to RelayState (sso.ts:517-560)",
+      "Pre-existing: idpIssuer is undefined when IdP metadata lacks entityID, disabling the issuer check; treat missing entityID as an error (sso.ts:364, :968)",
+      "Add a signed SAMLResponse round-trip test with wrong-issuer, multiple-Issuer and unsigned negatives",
+      "Rebuild worker images and run the Doppler guest and corrupt/oversized-PDF smoke tests before deploying"
+    ]
+  }
 }
