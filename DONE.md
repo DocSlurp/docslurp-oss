@@ -1,3 +1,11 @@
+## Error recovery audit (2026-10-28)
+
+Council-reviewed error contracts: allowlisted validation constraints, full Retry-After within SDK deadlines, and safe code-based SDK/CLI messages. No schema, retry eligibility, tenant-scope or deployment change.
+
+- [x] [#219](https://github.com/DocSlurp/docslurp-oss/issues/219) Error recovery: Retain safe validation constraints
+- [x] [#220](https://github.com/DocSlurp/docslurp-oss/issues/220) Error recovery: Honor the SDK’s full Retry-After delay
+- [x] [#221](https://github.com/DocSlurp/docslurp-oss/issues/221) Error recovery: Make SDK and CLI errors explain the actual refusal
+
 - Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
 # Completed
 

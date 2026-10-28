@@ -1139,7 +1139,9 @@ try {
   } else if (error instanceof DocSlurpTimeoutError) {
     console.error("Not finished yet; check this run later", error.run?.id ?? run.id);
   } else if (error instanceof DocSlurpApiError) {
-    console.error("HTTP error", error.status, error.body);
+    console.error(error.message, error.code, error.requestId);
+    // error.body retains raw diagnostics; avoid displaying or logging it publicly.
+    // error.retryAfterSeconds is the remaining server wait when a retry cannot fit.
   }
   throw error; // Let the caller or job runner decide how to recover.
 }
@@ -1154,7 +1156,7 @@ try {
 | Search, batch search, chat, organization writes, raw event streams | None |
 | `streamProgress` in `auto` mode | Switches to polling if the stream fails; each poll retries like a read |
 
-Retries honor `Retry-After`, wait at most five seconds each, and stay within the original request deadline. These rules apply to API requests. Replayable storage PUTs have separate retries: up to two retries for network errors or HTTP 408, 429, 500, 502, 503 and 504. API network errors aren't retried, though `streamProgress` in `auto` mode can fall back to polling. When you abort with a signal, the SDK rejects with the signal's reason.
+Retries honor the full `Retry-After` delay and stay within the original request deadline. If that delay cannot fit, the SDK immediately throws `DocSlurpApiError` with `retryAfterSeconds` (also in `details`) rather than retrying early. These rules apply to API requests. Replayable storage PUTs have separate retries: up to two retries for network errors or HTTP 408, 429, 500, 502, 503 and 504. API network errors aren't retried, though `streamProgress` in `auto` mode can fall back to polling. When you abort with a signal, the SDK rejects with the signal's reason.
 
 ## Workspace discovery and signed uploads
 
