@@ -1,0 +1,369 @@
+{
+  "observedAt": "2026-10-28T16:20:00Z",
+  "sources": [
+    "npm registry audit API via pnpm audit",
+    "pnpm outdated -r",
+    "PyPI advisory service via pip-audit",
+    "Docker Hub image index via docker buildx imagetools inspect",
+    "GitHub releases API for pinned Actions"
+  ],
+  "npmUpdates": [
+    {
+      "package": "docslurp-oss",
+      "dependency": "better-auth",
+      "before": "^1.7.12",
+      "after": "^1.7.14"
+    },
+    {
+      "package": "docslurp-oss",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1154.0",
+      "after": "^3.1157.0"
+    },
+    {
+      "package": "docslurp-oss",
+      "dependency": "dotenv",
+      "before": "^18.0.8",
+      "after": "^18.0.9"
+    },
+    {
+      "package": "docslurp-oss",
+      "dependency": "vite",
+      "before": "^8.3.4",
+      "after": "^8.3.5"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "@hono/node-server",
+      "before": "^2.1.1",
+      "after": "^2.1.5"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "hono",
+      "before": "^4.13.10",
+      "after": "^4.13.14"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "vite",
+      "before": "^8.3.1",
+      "after": "^8.3.5"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "@earendil-works/pi-coding-agent>undici",
+      "before": null,
+      "after": "8.12.3"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "express>body-parser",
+      "before": null,
+      "after": "^2.4.0"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "ajv>fast-uri",
+      "before": null,
+      "after": "^3.1.9"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "@langfuse/otel",
+      "before": "^6.0.1",
+      "after": "^6.0.2"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "@langfuse/tracing",
+      "before": "^6.0.1",
+      "after": "^6.0.2"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "ai",
+      "before": "7.0.148",
+      "after": "7.0.154"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/openai",
+      "before": "4.0.99",
+      "after": "4.0.103"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/otel",
+      "before": "^1.0.148",
+      "after": "^1.0.154"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1154.0",
+      "after": "^3.1157.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@aws-sdk/s3-request-presigner",
+      "before": "^3.1154.0",
+      "after": "^3.1157.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@better-auth/passkey",
+      "before": "1.7.12",
+      "after": "1.7.14"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@modelcontextprotocol/server",
+      "before": "2.3.1",
+      "after": "2.4.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@node-saml/node-saml",
+      "before": "^5.1.0",
+      "after": "^5.2.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@posthog/ai",
+      "before": "^8.14.3",
+      "after": "^8.17.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "ai",
+      "before": "7.0.148",
+      "after": "7.0.154"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "better-auth",
+      "before": "^1.7.12",
+      "after": "^1.7.14"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "dotenv",
+      "before": "^18.0.8",
+      "after": "^18.0.9"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "hono",
+      "before": "^4.13.13",
+      "after": "^4.13.14"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "stripe",
+      "before": "^23.0.0",
+      "after": "^23.0.1"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/react",
+      "before": "^4.0.152",
+      "after": "^4.0.158"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@earendil-works/pi-agent-core",
+      "before": "1.3.0",
+      "after": "1.4.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@earendil-works/pi-ai",
+      "before": "1.3.0",
+      "after": "1.4.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@earendil-works/pi-coding-agent",
+      "before": "1.3.0",
+      "after": "1.4.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@modelcontextprotocol/client",
+      "before": "2.3.1",
+      "after": "2.4.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "jsdom",
+      "before": "30.1.2",
+      "after": "30.1.3"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "typebox",
+      "before": "1.4.2",
+      "after": "1.4.3"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@ai-sdk/anthropic",
+      "before": "4.0.85",
+      "after": "4.0.89"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@ai-sdk/openai",
+      "before": "4.0.99",
+      "after": "4.0.103"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1154.0",
+      "after": "^3.1157.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@llamaindex/liteparse",
+      "before": "2.15.1",
+      "after": "2.17.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "ai",
+      "before": "7.0.148",
+      "after": "7.0.154"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "dotenv",
+      "before": "^18.0.8",
+      "after": "^18.0.9"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite",
+      "before": "0.5.10",
+      "after": "0.5.12"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite-pgvector",
+      "before": "0.0.11",
+      "after": "0.0.13"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite-socket",
+      "before": "0.2.13",
+      "after": "0.2.15"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "katex",
+      "before": "^0.19.0",
+      "after": "^0.19.1"
+    }
+  ],
+  "audits": {
+    "npmBefore": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 4,
+        "high": 5,
+        "critical": 0
+      },
+      "totalDependencies": 1081
+    },
+    "npmAfter": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0
+      }
+    },
+    "python": {
+      "requirements-base.lock.txt": "no known vulnerabilities (production images install only this lock)",
+      "requirements.lock.txt / requirements-fallback.lock.txt": "chromadb 1.5.9 (no fix published), filelock 3.32.7 (fixed in 4.2.1, blocked; see limitations)"
+    }
+  },
+  "securityChanges": [
+    "Override @earendil-works/pi-coding-agent>undici to 8.12.3: pi-coding-agent 1.4.0 still pins undici 8.10.2 exactly, which carries 9 advisories (TLS certificate validation bypass, cross-user cache poisoning, several DoS); server already declares 8.12.3 directly",
+    "Override express>body-parser to ^2.4.0 (DoS via trailing bytes, reached through @modelcontextprotocol/sdk express transport)",
+    "Override ajv>fast-uri to ^3.1.9 (URI scheme spoofing, host confusion); @modelcontextprotocol/server 2.4.0 inlines its own fast-uri 3.1.8 in dist/ajvProvider-*.mjs, which no override reaches and pnpm audit cannot see. It only resolves $id/$ref in our server-defined schemas, not tool input; track the next SDK release",
+    "Node 24.21.0 -> 24.22.1 (2026-10-20 security release) in server and worker images by refreshing node:24-*-slim digests",
+    "@node-saml/node-saml 5.1.0 -> 5.2.0: checks idpIssuer on the Response and assertion, rejects multiple Issuers, fixes maxAssertionAgeMs skipping; DocSlurp already passes idpIssuer from IdP metadata and uses only the POST binding",
+    "docker/login-action v4.6.0 -> v4.7.0 and github/codeql-action/upload-sarif v4.39.0 -> v4.39.1, pinned by commit SHA"
+  ],
+  "compatibilityHolds": {
+    "typescript": "6.0.3: Astro check supports TypeScript 5/6, not 7",
+    "openai": "6.49.0: 7.x is a major API change; held with the AI SDK family",
+    "opentelemetry": "2.12/0.223/API 1.9.1: 3.0/0.300 is a breaking family change; Langfuse 6 requires SDK 2",
+    "filelock": "3.32.7 in dev-only ML locks: forcing >=4.2.1 downgrades unstructured 0.27.33 -> 0.20.8 (unstructured caps filelock<4)",
+    "@mastra/core": "1.79.0: 1.80.0 was ~3h old at audit time and @mastra/* is exempt from minimumReleaseAge; revisit next round"
+  },
+  "limitations": [
+    "ChromaDB 1.5.9 advisories have no published fix; DocSlurp uses HttpClient/PersistentClient for the optional vector backend, not the Chroma HTTP server, and production images do not install it",
+    "Worker images were not rebuilt or smoke-tested here; the digest refresh takes effect on the next worker-images run",
+    "No production deployment, model download or hosted quality evaluation was run"
+  ],
+  "validation": {
+    "observedAt": "2026-10-28T17:30:00Z",
+    "checkout": "standalone core worktree at the audited commit (CI layout)",
+    "typecheck": "passed",
+    "build": "passed",
+    "packageImports": "passed",
+    "packageTests": {
+      "shared": 718,
+      "sdk": 112,
+      "cli": 54,
+      "contribAstro": 5,
+      "contribSearchCompat": 1
+    },
+    "coreScriptTests": {
+      "passed": 116
+    },
+    "serverTests": {
+      "passed": 3103,
+      "skipped": 53,
+      "failed": 0
+    },
+    "workerTests": {
+      "passed": 2070,
+      "skipped": 56,
+      "failed": 2,
+      "failures": "local-artifact-adapters.test.ts 5-second timeouts under full-suite load (same file as the 2026-10-21 audit); passes 4/4 in isolation"
+    },
+    "appRepo": {
+      "typecheck": "passed",
+      "build": "passed",
+      "sitePerformanceBudget": "passed",
+      "appTests": 963,
+      "scriptTests": 142
+    },
+    "notes": "Server tests read the developer .env through findWorkspaceRoot and fail spuriously when one with chat MCP keys is present; results above were run without one"
+  },
+  "councilReview": {
+    "reviewers": [
+      "adversarial reviewer (Claude Opus subagent)",
+      "correctness reviewer (Claude Sonnet subagent)"
+    ],
+    "highSeverity": 0,
+    "resolved": [
+      "@mastra/core 1.80.0 too fresh: held at 1.79.0",
+      "bundled fast-uri 3.1.8 in MCP server: documented above",
+      "katex override mirrored to ^0.19.1"
+    ],
+    "followUps": [
+      "Pre-existing: SAML request cache accepts unconsumed-or-consumed unexpired rows and has a no-op removeAsync, so a captured signed response can be replayed within the request window; implement consumeAsync/saveIfAbsentAsync, set rejectReplayedAssertions, bind InResponseTo to RelayState (sso.ts:517-560)",
+      "Pre-existing: idpIssuer is undefined when IdP metadata lacks entityID, disabling the issuer check; treat missing entityID as an error (sso.ts:364, :968)",
+      "Add a signed SAMLResponse round-trip test with wrong-issuer, multiple-Issuer and unsigned negatives",
+      "Rebuild worker images and run the Doppler guest and corrupt/oversized-PDF smoke tests before deploying"
+    ]
+  }
+}

@@ -12,7 +12,7 @@
 
 # Build stage: compile TypeScript, then produce a self-contained production
 # node_modules for the worker only (no pnpm store, no workspace-root deps).
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS builder
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS builder
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 RUN corepack enable
@@ -32,7 +32,7 @@ RUN \
     && node scripts/prune-worker-node-modules.mjs --dir /prod/worker --arch "$(node -p process.arch)"
 
 # Base Python parsers: wheel-only venv built against the runtime image's python3.
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS python-venv
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS python-venv
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -44,7 +44,7 @@ RUN bash /tmp/build-worker-venv.sh /app/.venv /tmp/req/requirements-base.lock.tx
 # tarball supplied in the build context (gitignored). Absent tarball = no-op (Kreuzberg path).
 # DOCSLURP_NATIVE_PDF=1 requires it (missing or unloadable binding fails the build).
 # Installed in its own stage so the tarball itself never lands in an image layer.
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS native-pdf
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS native-pdf
 ARG DOCSLURP_NATIVE_PDF=
 WORKDIR /app
 COPY scripts/install-native-pdf.mjs ./scripts/install-native-pdf.mjs
@@ -58,7 +58,7 @@ RUN mkdir -p vendor-artifacts/native-pdf \
 # every file are sha256-pinned in scripts/fetch-native-pdf-assets.mjs.
 #   DOCSLURP_NATIVE_PDF_OCR_MODELS=1  PP-OCRv6 small OCR models (~30 MB, Apache-2.0)
 #   DOCSLURP_NATIVE_PDF_CJK_FONTS=1   Noto CJK fallback fonts (~54 MB, OFL-1.1)
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS native-pdf-assets
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS native-pdf-assets
 ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
@@ -68,7 +68,7 @@ RUN node /tmp/fetch-native-pdf-assets.mjs --out /opt/native-pdf \
 # landrun (Landlock sandbox provider, MIT, pinned by worker/sandbox-tools.json). Downloaded for
 # TARGETARCH and sha256-verified. The release binary is dynamically linked and needs glibc >= 2.38:
 # it runs on Debian trixie (this base image) but fails on bookworm, so do not downgrade the base.
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS landrun
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS landrun
 ARG TARGETARCH=amd64
 COPY worker/sandbox-tools.json /tmp/sandbox-tools.json
 RUN node -e ' \
@@ -84,7 +84,7 @@ RUN node -e ' \
     && /usr/local/bin/landrun --version
 
 # Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 
