@@ -1,5 +1,13 @@
 # TODO
 
+- Security council follow-ups (2026-10-28, live Ask AI assessment + council review; app-repo reports in `.scratch/council/`): the F1/F2/F3 fixes are merged on main (PRs #182, #190, #191) and production must be redeployed from current main to close them. Residual items below were found by the adversarial reviewer and remain open:
+  - Gate `GET /v1/uploads/direct/sessions/:sessionId` by key type/scope: a browser key can currently read its own org's upload/run/cost status that the chat surface deliberately hides from public visitors. Add negative tests for client keys. Security boundary: draft PR + council.
+  - webFetch allowlist admits URLs surfaced by same-turn webSearch results: an SEO-planting page can steer the agent's outbound fetch. Require the fetch target to be independent of model-chosen search results (or gate it behind an explicit allowlist/source). Security boundary: draft PR + council.
+  - Observability for dropped instructions: browser-key `system`/`developer` messages are silently filtered on `/v1/chat/completions`; log a denied-instruction event (counted, no content) so operators can see attempted injection.
+  - Add one end-to-end test that pins the composed browser-key chat ToolSet (catalog, toolset and execution layers are tested separately today).
+  - Document an operator warning against embedding a server (`dslp_priv_`) key in a public page; publishable keys only for browsers/embeds.
+  - Hygiene: DONE.md still describes the merged `feat/chat-app-only-settings` hardening as "draft"; update it and note council approval.
+
 - SAML replay (council finding, 2026-10-28): `createSamlRequestCacheProvider` (server/src/routes/sso.ts ~517-560) accepts any unexpired `sso_auth_requests` row without checking `consumed_at`, and `removeAsync` is a no-op, so a captured signed SAMLResponse can be replayed through a fresh RelayState until the row expires. Implement `consumeAsync`/`saveIfAbsentAsync`, set node-saml 5.2's `rejectReplayedAssertions: true`, and bind InResponseTo to the consumed RelayState. Security boundary: draft PR + council.
 
 - SAML issuer check: `idpIssuer: samlMetadata.issuer ?? undefined` (sso.ts:968) disables the issuer check when IdP metadata has no `entityID`; reject such metadata instead. Add a signed SAMLResponse round-trip test with wrong-issuer, multiple-Issuer and unsigned negatives.
