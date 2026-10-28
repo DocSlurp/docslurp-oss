@@ -56,6 +56,9 @@ import { authRoutes } from "./routes/auth.js";
 import { samlCallbackRoutes, ssoRoutes } from "./routes/sso.js";
 import { connectorsRoutes } from "./routes/connectors.js";
 import { adminBillingRoutes } from "./routes/admin-billing.js";
+import { adminUsersRoutes } from "./routes/admin-users.js";
+import { clientSurfaceMiddleware, clientSurfaceRecorder } from "./services/client-surface.js";
+import { drainSearchSessionWrites as drainSessionWrites } from "./search/session.js";
 import { billingRoutes } from "./routes/billing.js";
 import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
@@ -107,7 +110,9 @@ const repoRoot = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
 export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export { forwardRequest } from "./lib/forward-request.js";
 /** Commit pending write-behind search writes (sessions, usage) before the host exits; resolves after `timeoutMs` at most. */
-export { drainSearchSessionWrites } from "./search/session.js";
+export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void> {
+  await Promise.all([drainSessionWrites(timeoutMs), clientSurfaceRecorder.flush()]);
+}
 
 export function createApiApp(): Hono {
   const app = new Hono();
@@ -131,6 +136,9 @@ export function createApiApp(): Hono {
   app.use("*", serviceCors(env.corsAllowedOrigins));
   app.use("/dashboard/*", sessionAuth);
   app.use("/v1/*", sessionAuth);
+  // Records which client surface (web, SDK, CLI, MCP, ...) each user reaches us through.
+  app.use("/v1/*", clientSurfaceMiddleware);
+  app.use("/compat/*", clientSurfaceMiddleware);
   app.use("/v1/*", apiActorRateLimit);
   // In-flight AI chat turns per API key (and per visitor of a browser key), streams included.
   app.use("/v1/*", chatConcurrencyLimit);
@@ -205,6 +213,7 @@ export function createApiApp(): Hono {
   app.route("/v1/workspaces", connectorsRoutes);
   app.route("/v1/billing", billingRoutes);
   app.route("/v1/admin/billing", adminBillingRoutes);
+  app.route("/v1/admin/users", adminUsersRoutes);
   app.route("/v1/workspaces", secretsRoutes);
   app.route("/v1/workspaces", workspaceGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);

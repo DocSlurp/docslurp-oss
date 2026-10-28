@@ -331,6 +331,9 @@ export async function deleteAccount(
     await client`delete from query_suggestions where user_id = ${userId}`;
     await client`delete from search_zero_results where user_id = ${userId}`;
     await client`delete from idempotency_cache where user_id = ${userId}`;
+    // Analytics for the admin directory: the tombstone keeps the user row, so CASCADE never fires.
+    await client`delete from user_signup_attribution where user_id = ${userId}`;
+    await client`delete from user_client_surfaces where user_id = ${userId}`;
     // Better Auth: sessions, credentials, pending verifications.
     await client`delete from "session" where "userId" = ${userId}`;
     await client`delete from "account" where "userId" = ${userId}`;

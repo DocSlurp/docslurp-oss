@@ -2,6 +2,12 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
+// OAuth resources and config.apiUrl derive from the public URL, read at import time; pin it
+// before any import so a developer's .env (dotenv never overrides set values) cannot change it.
+vi.hoisted(() => {
+  for (const name of ["MCP_PUBLIC_URL", "API_URL", "APP_URL", "BETTER_AUTH_URL"]) process.env[name] = "http://localhost:4321";
+});
+
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let oauth: typeof import("../services/mcp-oauth.js");

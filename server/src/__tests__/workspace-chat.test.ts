@@ -2,7 +2,7 @@ import {
   defaultWorkspaceSearchSettings,
   type WorkspaceSearchSettings,
 } from "@docslurp/shared";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 type SqlMock = ReturnType<typeof vi.fn> & {
   unsafe: ReturnType<typeof vi.fn>;
@@ -88,7 +88,8 @@ const { buildFallbackAnswer, buildNativeDocumentInputs, buildSystemInstructions,
   "../services/workspace-chat.js"
 );
 const { createSearchSessionJournal } = await import("../search/session.js");
-const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY"] as const;
+const originalModelKeys = Object.fromEntries(MODEL_KEY_ENV.map(name => [name, process.env[name]]));
 
 function buildSearchSettings(
   overrides: Partial<
@@ -157,10 +158,14 @@ describe("chatWorkspace", () => {
     refineWorkspaceNames.mockReset();
     refineWorkspaceNames.mockResolvedValue(undefined);
     getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
-    if (originalAnthropicApiKey) {
-      process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
-    } else {
-      delete process.env.ANTHROPIC_API_KEY;
+    // Every test starts without a model key; a developer's real key must not switch paths.
+    for (const name of MODEL_KEY_ENV) delete process.env[name];
+  });
+
+  afterAll(() => {
+    for (const name of MODEL_KEY_ENV) {
+      if (originalModelKeys[name] === undefined) delete process.env[name];
+      else process.env[name] = originalModelKeys[name];
     }
   });
 

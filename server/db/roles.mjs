@@ -157,6 +157,8 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   workspace_members: "membership and roles",
   workspace_search_settings: "search (API only)",
   workspace_slugs: "slug history (API only)",
+  user_client_surfaces: "admin user directory analytics (API only)",
+  user_signup_attribution: "admin user directory analytics (API only)",
 });
 
 /** `"name"` with embedded quotes doubled. */

@@ -101,6 +101,8 @@ describe("Telegram signup delivery", () => {
       expect.stringContaining('select name from "user"'),
       expect.stringContaining("as ready"),
       expect.stringContaining("promoted_orgs"),
+      // Account-kind rules (staff/test labelling) run on every sign-in.
+      expect.stringContaining("account_kind_source"),
     ]);
     expect(transport).toHaveBeenCalledTimes(1);
   });
