@@ -7,6 +7,7 @@ import { Pool } from "pg";
 import { notifySignup } from "./signup-notifications.js";
 import { ensureUserAndOrganization } from "../services/account-provisioning.js";
 import { cookieHeaderFromAuthContext, recordSignupAttribution } from "../services/signup-attribution.js";
+import { applyAccountKindRules } from "../services/account-kind.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
@@ -194,6 +195,9 @@ export const auth = betterAuth({
             await ensureUserAndOrganization(pool, { id: session.userId, name: result.rows[0].name ?? "" });
           }
           await admitConfiguredAdminUser(pool, session.userId);
+          // Staff is recognized once the address is verified; analytics only, never blocks sign-in.
+          await applyAccountKindRules(pool, [session.userId])
+            .catch(error => console.warn("[account-kind] not applied", error instanceof Error ? error.message : error));
           // Whether this session passed a second factor, decided by the endpoint
           // that created it (see sessionAssuranceFor), never by request input.
           return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId) } };
@@ -207,6 +211,8 @@ export const auth = betterAuth({
           // First-touch referrer/UTM for the admin user panel; never blocks sign-up.
           await recordSignupAttribution(pool, user.id, cookieHeaderFromAuthContext(ctx))
             .catch(error => console.warn("[signup-attribution] not recorded", error instanceof Error ? error.message : error));
+          await applyAccountKindRules(pool, [user.id])
+            .catch(error => console.warn("[account-kind] not applied", error instanceof Error ? error.message : error));
           await notifySignup({ kind: "account", email: user.email, name: user.name });
         }
       }

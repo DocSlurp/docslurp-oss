@@ -10,6 +10,7 @@ let database: Awaited<ReturnType<typeof createMigratedDatabase>>;
 let server: Awaited<ReturnType<typeof serveOnRandomPort>>["server"];
 let app: Hono;
 let recorder: InstanceType<typeof import("../services/client-surface.js").ClientSurfaceRecorder>;
+let accountKinds: typeof import("../services/account-kind.js");
 let recordSignupAttribution: typeof import("../services/signup-attribution.js").recordSignupAttribution;
 
 beforeAll(async () => {
@@ -23,15 +24,16 @@ beforeAll(async () => {
   const { adminUsersRoutes } = await import("../routes/admin-users.js");
   const { ClientSurfaceRecorder } = await import("../services/client-surface.js");
   ({ recordSignupAttribution } = await import("../services/signup-attribution.js"));
+  accountKinds = await import("../services/account-kind.js");
   recorder = new ClientSurfaceRecorder(() => sql as never, 60_000);
   app = new Hono();
   app.use("*", async (c, next) => { c.set("requestActor", { type: "session", userId: "admin", user: { isAdmin: true } } as never); await next(); });
   app.route("/admin/users", adminUsersRoutes);
 
   await sql`insert into "user" (id, name, email, "emailVerified") values
-    ('u-active', 'Active Builder', 'active@example.test', true),
-    ('u-idle', 'Idle Visitor', 'idle@example.test', false),
-    ('u-gone', 'Gone User', 'gone@example.test', true)`;
+    ('u-active', 'Active Builder', 'active@acme.dev', true),
+    ('u-idle', 'Idle Visitor', 'idle@initech.io', false),
+    ('u-gone', 'Gone User', 'gone@globex.com', true)`;
   await sql`update "user" set deleted_at = now() where id = 'u-gone'`;
   await sql`insert into account (id, "accountId", "providerId", "userId") values
     ('a1', 'gh-1', 'github', 'u-active'), ('a2', 'u-active', 'credential', 'u-active'), ('a3', 'g-2', 'google', 'u-idle')`;
@@ -90,7 +92,7 @@ describe("admin user directory against migrated Postgres", () => {
     expect(await ids("filter=never_uploaded")).toEqual(["u-idle"]);
     expect(await ids("filter=api_key")).toEqual(["u-active"]);
     expect(await ids("surface=mcp")).toEqual(["u-active"]);
-    expect(await ids("q=IDLE@")).toEqual(["u-idle"]);
+    expect(await ids("q=idle@")).toEqual(["u-idle"]);
     expect(await ids("q=%25")).toEqual([]);
     expect(await ids("filter=deleted")).toEqual(["u-gone"]);
     expect(await ids("sort=searches&limit=1")).toEqual(["u-active"]);
@@ -99,8 +101,39 @@ describe("admin user directory against migrated Postgres", () => {
     expect(past).toMatchObject({ total: 2, users: [] });
   });
 
+  it("marks fake, agent-created and staff accounts and keeps manual choices", async () => {
+    await sql`insert into "user" (id, name, email, "emailVerified") values
+      ('u-agent', 'Pressure Test 1', 'pressure-1@docslurp.invalid', true), ('u-staff', 'Staff Person', 'dan@docslurp.io', true)`;
+    const kinds = async () => Object.fromEntries((await sql`select id, account_kind as k, account_kind_source as s from "user"`).map(r => [r.id, `${r.k}/${r.s}`]));
+    // The insert trigger catches reserved domains even for raw SQL inserts.
+    expect(await kinds()).toMatchObject({ "u-active": "customer/default", "u-agent": "test/rule", "u-staff": "customer/default" });
+    vi.stubEnv("STAFF_EMAIL_DOMAINS", "docslurp.io");
+    vi.stubEnv("TEST_ACCOUNT_EMAIL_PATTERNS", "idle@*");
+    expect(await accountKinds.applyAccountKindRules(pool)).toBe(2);
+    expect(await kinds()).toMatchObject({ "u-staff": "staff/rule", "u-idle": "test/rule", "u-active": "customer/default", "u-gone": "customer/default" });
+    // An admin override survives the rules; clearing it hands the account back.
+    await sql`insert into "user" (id, name, email, "emailVerified") values ('admin', 'Seed Admin', 'admin@docslurp.local', true)`;
+    const set = await app.request("/admin/users/u-idle/kind", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "customer", reason: "real prospect" }) });
+    expect(await set.json()).toEqual({ account_kind: "customer", account_kind_source: "admin", account_kind_reason: "real prospect" });
+    expect(await accountKinds.applyAccountKindRules(pool)).toBe(0);
+    expect((await sql`select action, metadata from audit_log where resource_id = 'u-idle'`)[0]).toMatchObject({ action: "admin.account_kind.set", metadata: { kind: "customer", reason: "real prospect" } });
+    await app.request("/admin/users/u-idle/kind", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: null }) });
+    expect((await kinds())["u-idle"]).toBe("test/rule");
+    vi.stubEnv("TEST_ACCOUNT_EMAIL_PATTERNS", "");
+    expect((await (await app.request("/admin/users/reclassify", { method: "POST" })).json()).changed).toBe(1);
+    expect((await kinds())["u-idle"]).toBe("customer/default");
+    expect((await app.request("/admin/users/nobody/kind", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "test" }) })).status).toBe(404);
+    const ids = async (query: string) => (await (await app.request(`/admin/users?${query}`)).json()).users.map((u: { id: string }) => u.id).sort();
+    expect(await ids("kind=test")).toEqual(["admin", "u-agent"]);
+    expect(await ids("kind=staff")).toEqual(["u-staff"]);
+    vi.unstubAllEnvs();
+  });
+
   it("summarizes signups, funnel, surfaces and sources", async () => {
+    const all = await (await app.request("/admin/users/summary?days=7&audience=all")).json();
+    expect(all).toMatchObject({ audience: "all", kinds: { customer: 2, staff: 1, test: 2 }, totals: { users: 5 } });
     const body = await (await app.request("/admin/users/summary?days=7")).json();
+    expect(body.audience).toBe("customers");
     expect(body.totals).toMatchObject({ users: 2, verified: 1, google: 1, github: 1, password: 1, uploaded: 1, searched: 1, api_key: 1, programmatic: 1 });
     expect(body.signupsByDay).toHaveLength(7);
     expect(body.signupsByDay.at(-1)).toMatchObject({ signups: 2, verified: 1 });

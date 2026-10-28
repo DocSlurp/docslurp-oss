@@ -6,6 +6,7 @@ import { apiStatusError } from "../lib/api-error.js";
 import { getRequestActor } from "../lib/request-actor.js";
 import { CLIENT_SURFACES } from "../services/client-surface.js";
 import { avatarUrl, gravatarClient } from "../services/gravatar.js";
+import { ACCOUNT_KINDS, applyAccountKindRules, setAccountKindByAdmin } from "../services/account-kind.js";
 import { userUsageTotals } from "../services/usage-attribution.js";
 
 /**
@@ -33,13 +34,28 @@ export const adminUsersQuerySchema = z.object({
   filter: z.enum(FILTERS).default("all"),
   surface: z.enum(CLIENT_SURFACES).optional(),
   sort: z.enum(SORTS).default("newest"),
+  kind: z.enum([...ACCOUNT_KINDS, "all"]).default("all"),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 }).strict();
 
+/** postgres.js behind the pg-style `query` the account-kind service shares with Better Auth hooks. */
+const pgQuery = {
+  query: async <R>(text: string, params: unknown[] = []) => {
+    const rows = await sql.unsafe(text, params as never[]);
+    return { rows: rows as unknown as R[], rowCount: rows.count };
+  },
+} as never;
+
+const setKindSchema = z.object({
+  kind: z.enum(ACCOUNT_KINDS).nullable(),
+  reason: z.string().trim().max(200).optional(),
+}).strict();
+
 type UserRow = {
   id: string; email: string; name: string; image: string | null;
-  created_at: string; deleted_at: string | null; email_verified: boolean; two_factor_enabled: boolean;
+  created_at: string; deleted_at: string | null;
+  account_kind: string; account_kind_source: string; account_kind_reason: string | null; email_verified: boolean; two_factor_enabled: boolean;
   providers: string[]; passkeys: number;
   org_id: string | null; org_name: string | null; credit_balance_cents: number | null; org_count: number;
   last_active_at: string | null; active_sessions: number;
@@ -86,12 +102,13 @@ function pageOrder(sort: typeof SORTS[number]) {
 adminUsersRoutes.get("/", async (c) => {
   const parsed = adminUsersQuerySchema.safeParse(c.req.query());
   if (!parsed.success) return apiStatusError(c, 400, "Invalid user query");
-  const { q, filter, surface, sort, limit, offset } = parsed.data;
+  const { q, filter, surface, sort, kind, limit, offset } = parsed.data;
   const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
   const where = sql`(${q} = '' or u.email ilike ${like} or u.name ilike ${like} or u.id = ${q})
     ${filter === "deleted" ? sql`` : sql`and u.deleted_at is null`}
     ${filterClause(filter)}
-    ${surface ? sql`and exists (select 1 from user_client_surfaces s where s.user_id = u.id and s.surface = ${surface})` : sql``}`;
+    ${surface ? sql`and exists (select 1 from user_client_surfaces s where s.user_id = u.id and s.surface = ${surface})` : sql``}
+    ${kind === "all" ? sql`` : sql`and u.account_kind = ${kind}`}`;
   const rows = await sql<UserRow[]>`
     with matched as (
       select u.id, u."createdAt" as created_at, ${sortKey(sort)} as sort_key
@@ -104,6 +121,7 @@ adminUsersRoutes.get("/", async (c) => {
       from matched order by ${pageOrder(sort)} limit ${limit} offset ${offset}
     )
     select u.id, u.email, u.name, u.image, u."createdAt" as created_at, u.deleted_at,
+      u.account_kind, u.account_kind_source, u.account_kind_reason,
       u."emailVerified" as email_verified, u."twoFactorEnabled" as two_factor_enabled,
       coalesce((select array_agg(distinct a."providerId" order by a."providerId") from account a where a."userId" = u.id), '{}') as providers,
       (select count(*)::int from passkey p where p."userId" = u.id) as passkeys,
@@ -162,6 +180,13 @@ adminUsersRoutes.get("/", async (c) => {
 
 adminUsersRoutes.get("/summary", async (c) => {
   const days = z.coerce.number().int().min(7).max(365).catch(30).parse(c.req.query("days") ?? 30);
+  // Customer metrics by default; audience=all includes staff and test accounts.
+  const audience = c.req.query("audience") === "all" ? "all" : "customers";
+  const live = audience === "all" ? sql`u.deleted_at is null` : sql`u.deleted_at is null and u.account_kind = 'customer'`;
+  const [kinds] = await sql<{ customer: number; staff: number; test: number }[]>`
+    select count(*) filter (where account_kind = 'customer')::int as customer, count(*) filter (where account_kind = 'staff')::int as staff,
+      count(*) filter (where account_kind = 'test')::int as test
+    from "user" where deleted_at is null`;
   const [totals] = await sql<Record<string, number>[]>`
     select
       count(*)::int as users,
@@ -179,24 +204,24 @@ adminUsersRoutes.get("/summary", async (c) => {
       count(*) filter (where exists (select 1 from api_keys k where k.user_id = u.id and k.revoked_at is null))::int as api_key,
       count(*) filter (where exists (select 1 from user_client_surfaces s where s.user_id = u.id and s.surface in ('sdk', 'cli', 'mcp', 'mcp_stdio', 'api', 'openai_compat', 'search_compat')))::int as programmatic,
       count(*) filter (where exists (select 1 from session se where se."userId" = u.id and se."updatedAt" >= now() - interval '7 days'))::int as active_7d
-    from "user" u where u.deleted_at is null`;
+    from "user" u where ${live}`;
   const signupsByDay = await sql<{ day: string; signups: number; verified: number }[]>`
     select to_char(d.day, 'YYYY-MM-DD') as day,
       count(u.id)::int as signups, count(u.id) filter (where u."emailVerified")::int as verified
     from generate_series(date_trunc('day', now()) - make_interval(days => ${days - 1}), date_trunc('day', now()), interval '1 day') as d(day)
-    left join "user" u on u."createdAt" >= d.day and u."createdAt" < d.day + interval '1 day' and u.deleted_at is null
+    left join "user" u on u."createdAt" >= d.day and u."createdAt" < d.day + interval '1 day' and ${live}
     group by d.day order by d.day`;
   const surfaces = await sql<{ surface: string; users: number; requests: number; active_7d: number }[]>`
     select s.surface, count(distinct s.user_id)::int as users, coalesce(sum(s.request_count), 0)::double precision as requests,
       count(distinct s.user_id) filter (where s.last_seen_at >= now() - interval '7 days')::int as active_7d
-    from user_client_surfaces s join "user" u on u.id = s.user_id and u.deleted_at is null
+    from user_client_surfaces s join "user" u on u.id = s.user_id and ${live}
     group by s.surface order by users desc`;
   const referrers = await sql<{ source: string; users: number }[]>`
     select coalesce(sa.utm_source, sa.referrer_host, '(direct)') as source, count(*)::int as users
     from "user" u left join user_signup_attribution sa on sa.user_id = u.id
-    where u.deleted_at is null
+    where ${live}
     group by 1 order by users desc, source limit 15`;
-  return c.json({ days, totals, signupsByDay, surfaces, referrers });
+  return c.json({ days, audience, kinds, totals, signupsByDay, surfaces, referrers });
 });
 
 /** Public Gravatar profile for one user; needs GRAVATAR_API_KEY. Raw failures go to logs only. */
@@ -212,3 +237,17 @@ adminUsersRoutes.get("/:userId/gravatar", async (c) => {
     return apiStatusError(c, 502, "Gravatar lookup failed");
   }
 });
+
+/** Manual classification (staff / test / customer), or `kind: null` to hand the account back to the rules. */
+adminUsersRoutes.patch("/:userId/kind", async (c) => {
+  const userId = c.req.param("userId");
+  const parsed = setKindSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || userId.length > 200) return apiStatusError(c, 400, "Invalid account kind");
+  const updated = await setAccountKindByAdmin(pgQuery, { adminUserId: getRequestActor(c).userId, userId, kind: parsed.data.kind, reason: parsed.data.reason });
+  if (!updated) return apiStatusError(c, 404, "User not found");
+  const [row] = await sql`select account_kind, account_kind_source, account_kind_reason from "user" where id = ${userId}`;
+  return c.json(row);
+});
+
+/** Re-runs the email rules (after changing STAFF_EMAIL_DOMAINS or TEST_ACCOUNT_EMAIL_PATTERNS); manual choices are kept. */
+adminUsersRoutes.post("/reclassify", async (c) => c.json({ changed: await applyAccountKindRules(pgQuery) }));

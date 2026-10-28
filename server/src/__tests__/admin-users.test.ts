@@ -30,8 +30,8 @@ describe("platform administrator user directory boundary", () => {
     ["an admin's CLI OAuth token", { type: "apiKey", userId: "platform-admin", apiKey: { keyType: "server", oauth: { audience: "api" } } }],
     ["an admin's MCP OAuth token", { type: "apiKey", userId: "platform-admin", apiKey: { keyType: "server", oauth: { audience: "mcp" } } }],
   ])("refuses %s without touching the database", async (_label, actor) => {
-    for (const path of ["/admin/users", "/admin/users/summary", "/admin/users?q=%25", "/admin/users/u1/gravatar"]) {
-      const response = await as(actor).request(path);
+    for (const [path, method] of [["/admin/users", "GET"], ["/admin/users/summary", "GET"], ["/admin/users?q=%25", "GET"], ["/admin/users/u1/gravatar", "GET"], ["/admin/users/u1/kind", "PATCH"], ["/admin/users/reclassify", "POST"]]) {
+      const response = await as(actor).request(path, { method, headers: { "Content-Type": "application/json" }, body: method === "GET" ? undefined : JSON.stringify({ kind: "test" }) });
       expect(response.status).toBe(403);
     }
     expect(mocks.query).not.toHaveBeenCalled();
@@ -53,7 +53,7 @@ describe("platform administrator user directory boundary", () => {
   });
 
   it.each([
-    "limit=500", "limit=0", "offset=-1", "filter=admins", "sort=password", "surface=ftp", "q=" + "x".repeat(201), "unexpected=1",
+    "limit=500", "limit=0", "kind=bot", "offset=-1", "filter=admins", "sort=password", "surface=ftp", "q=" + "x".repeat(201), "unexpected=1",
   ])("rejects invalid query %s", async (query) => {
     expect((await as(admin).request(`/admin/users?${query}`)).status).toBe(400);
     expect(mocks.query).not.toHaveBeenCalled();
