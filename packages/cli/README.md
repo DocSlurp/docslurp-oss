@@ -281,3 +281,6 @@ Pre-release: pin the version you validate in CI. Licensed under SSPL-1.0, with a
 [![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
 
 [17th Street Labs](https://17thstreetlabs.com) is DocSlurp’s primary sponsor.
+
+
+HTTP failures use reviewed messages based on known error codes and include a support request ID when available. With `--json`, HTTP failures are written to stderr as `{ "error": { "status", "code", "message", "requestId", "retryAfterSeconds" } }` (optional fields may be absent), and the command exits nonzero. Raw response diagnostics are never included. Successful command output keeps its existing format.

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
+
 import { readFile } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -167,7 +169,7 @@ async function importSearchCompatCommand(inputPath: string, flags: Record<string
   });
 
   if (!response.ok) {
-    throw new Error(publicHttpError(response.status));
+    throw await responseFailure(response);
   }
 
   const result = await response.json() as { imported: Record<string, number> };
@@ -339,7 +341,7 @@ type DirectUploadDescriptor = {
 async function putToStorage(url: string, body: Blob, contentType?: string): Promise<string | null> {
   // Presigned URL: never send the API key to storage.
   const response = await fetch(url, { method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined });
-  if (!response.ok) throw new Error(publicHttpError(response.status));
+  if (!response.ok) throw await responseFailure(response);
   return response.headers.get("etag");
 }
 
@@ -384,7 +386,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
         complete = { fileId: descriptor.id, parts };
       }
       const done = await apiFetch(`${sessionPath}/files/complete`, flags, json(complete));
-      if (!done.ok) throw new Error(publicHttpError(done.status));
+      if (!done.ok) throw await responseFailure(done);
     }
     return await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
   } catch (error) {
@@ -447,7 +449,7 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
     });
 
   if (!response.ok) {
-    console.error(publicHttpError(response.status));
+    printFailure(await responseFailure(response));
     process.exitCode = 1;
     return;
   }
@@ -476,7 +478,7 @@ function formatEstimate(estimate: CostEstimate): string {
 async function runEstimate(pathname: string, body: unknown, flags: Record<string, string | boolean>): Promise<void> {
   const response = await apiFetch(pathname, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) {
-    console.error(publicHttpError(response.status));
+    printFailure(await responseFailure(response));
     process.exitCode = 1;
     return;
   }
@@ -517,7 +519,7 @@ async function reprocessCommand(runId: string | undefined, flags: Record<string,
 async function startWork(pathname: string, body: unknown, flags: Record<string, string | boolean>): Promise<void> {
   const response = await apiFetch(pathname, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) {
-    console.error(publicHttpError(response.status));
+    printFailure(await responseFailure(response));
     process.exitCode = 1;
     return;
   }
@@ -545,7 +547,7 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
   const fetchJob = async (): Promise<JobStatus | null> => {
     const response = await apiFetch(path, flags);
     if (!response.ok) {
-      console.error(publicHttpError(response.status));
+      printFailure(await responseFailure(response));
       process.exitCode = 1;
       return null;
     }
@@ -645,7 +647,7 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...intake.fields }),
   });
   if (!response.ok) {
-    console.error(publicHttpError(response.status));
+    printFailure(await responseFailure(response));
     process.exitCode = 1;
     return;
   }
@@ -681,7 +683,7 @@ async function extractStatusCommand(extractId: string | undefined, flags: Record
     return;
   }
   if (!response.ok) {
-    console.error(publicHttpError(response.status));
+    printFailure(await responseFailure(response));
     process.exitCode = 1;
     return;
   }
@@ -706,7 +708,7 @@ async function extractDownloadCommand(extractId: string | undefined, flags: Reco
     console.log(location);
     return;
   }
-  console.error(response.status === 410 ? "This extract has expired and its files and outputs were deleted." : publicHttpError(response.status));
+  printFailure(await responseFailure(response));
   process.exitCode = 1;
 }
 
@@ -740,7 +742,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     const response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000));
 
     if (!response.ok) {
-      throw new Error(publicHttpError(response.status));
+      throw await responseFailure(response);
     }
 
     const snapshot = await response.json() as {
@@ -880,7 +882,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
     const concurrency = Number(flags.concurrency ?? 4);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error("--concurrency must be an integer from 1 to 4.");
     const response = await apiFetch("/v1/search", flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ queries, concurrency }) });
-    if (!response.ok) throw new Error(publicHttpError(response.status));
+    if (!response.ok) throw await responseFailure(response);
     const data = await response.json() as { results: Array<{ ok: true; data: CliSearchResponse } | { ok: false; error: { code: string; message: string; status: number } }> };
     if (flags.json) console.log(JSON.stringify(data));
     for (const [index, result] of data.results.entries()) {
@@ -897,7 +899,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
   const params = new URLSearchParams({ q: query, ...(workspace ? { workspace } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
-  if (!response.ok) throw new Error(publicHttpError(response.status));
+  if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;
   if (flags.json) console.log(JSON.stringify(data)); else printSearch(data, flags);
 }
@@ -910,7 +912,7 @@ async function chatCommand(question: string, flags: Record<string, string | bool
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ q: question, ...(workspace ? { workspace } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
   });
-  if (!response.ok) throw new Error(publicHttpError(response.status));
+  if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as { answer: string; sessionId: string; citations: CliSearchResponse["results"]; usage?: unknown; availability?: { message?: string | null } };
   if (flags.json) { console.log(JSON.stringify(data)); return; }
   console.log(data.answer);
@@ -956,7 +958,7 @@ async function mcpFetch(args: {
     await response.body?.cancel();
     response = await send(true);
   }
-  if (!response.ok) throw new Error(publicHttpError(response.status));
+  if (!response.ok) throw await responseFailure(response);
   return await response.json();
 }
 
@@ -1208,18 +1210,24 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  printFailure(error);
   process.exitCode = 1;
 });
 
-/** HTTP bodies may come from a proxy; never display their diagnostic text. */
-function publicHttpError(status: number): string {
-  if (status === 401) return "Please sign in again or check your API key.";
-  if (status === 403) return "You don’t have access to this action. Ask your workspace administrator for help.";
-  if (status === 402 || status === 503) return "This feature is temporarily unavailable. Please try again later.";
-  if (status === 404) return "We couldn’t find what you’re looking for. It may have been moved or removed.";
-  if (status === 413) return "This file is too large. Please choose a smaller file and try again.";
-  if (status === 429) return "Please wait a moment before trying again.";
-  if (status >= 400 && status < 500) return "Please check your request and try again.";
-  return "We couldn’t complete that request. Please try again in a moment.";
+class CliApiError extends Error {
+  constructor(readonly status: number, readonly failure: ReturnType<typeof safeHttpFailure>) {
+    super(failure.message);
+  }
+}
+async function responseFailure(response: Response): Promise<CliApiError> {
+  const body: unknown = await response.json().catch(() => null);
+  const failure = safeHttpFailure(response.status, body);
+  const wait = retryAfterSeconds(response.headers.get("retry-after"));
+  return new CliApiError(response.status, { ...failure, ...(wait === undefined ? {} : { retryAfterSeconds: wait }) });
+}
+function printFailure(error: unknown): void {
+  if (error instanceof CliApiError) {
+    if (process.argv.includes("--json")) console.error(JSON.stringify({ error: { ...error.failure, status: error.status } }));
+    else console.error(error.message + (error.failure.requestId ? ` (request ${error.failure.requestId})` : ""));
+  } else console.error(error instanceof Error ? error.message : String(error));
 }

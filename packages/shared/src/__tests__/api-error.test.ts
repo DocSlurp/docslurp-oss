@@ -167,3 +167,26 @@ describe("domain error codes", () => {
     }
   });
 });
+
+
+describe("reviewed validation constraints", () => {
+  it("retains only reviewed types, formats and finite numeric limits", () => {
+    const safe = publicApiErrorDetails({ issues: [
+      { path: ["title"], code: "too_big", maximum: 80, inclusive: true, origin: "string", message: "secret input", input: "secret" },
+      { path: ["count"], code: "invalid_type", expected: "number", received: "secret" },
+      { path: ["contact"], code: "invalid_format", format: "email", pattern: "secret" },
+      { code: "invalid_value", values: ["secret enum"], message: "secret" },
+      { code: "too_small", minimum: Infinity, origin: "secret schema" },
+      { code: "invalid_type", expected: "secret schema" },
+      { code: "invalid_format", format: "secret schema" },
+    ] });
+    expect(safe?.issues).toMatchObject([
+      { code: "too_big", maximum: 80, inclusive: true, origin: "string" },
+      { code: "invalid_type", expected: "number" },
+      { code: "invalid_format", format: "email" },
+      { code: "invalid_value" }, { code: "invalid_value" }, { code: "invalid_value" }, { code: "invalid_value" },
+    ]);
+    expect(JSON.stringify(safe)).not.toContain("secret");
+    expect(publicApiErrorDetails(safe)).toEqual(safe);
+  });
+});

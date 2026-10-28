@@ -365,3 +365,26 @@ test("extract files go through /v1/extracts/bulk and extract-status reports an e
   assert.equal(gone.code, 1);
   assert.match(gone.stderr, /expired/);
 });
+
+test("HTTP failures print reviewed recovery copy and a safe support ID", async () => {
+  const result = await invoke(["search", "question"], () => ({ status: 403, body: {
+    error: { code: "mfa_required", message: "secret provider text", requestId: "req-safe-1", details: { secret: "private" } },
+  } }));
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /authenticator/);
+  assert.match(result.stderr, /req-safe-1/);
+  assert.doesNotMatch(result.stderr, /secret|private/);
+});
+
+test("--json emits a safe typed HTTP error without raw body diagnostics", async () => {
+  const result = await invoke(["search", "question", "--json"], () => ({ status: 402, body: {
+    error: { code: "credit_exhausted", message: "secret provider text", requestId: "req-safe-2", details: { secret: "private", retryAfterSeconds: 30 } },
+  } }));
+  assert.equal(result.code, 1);
+  const body = JSON.parse(result.stderr);
+  assert.equal(body.error.code, "credit_exhausted");
+  assert.equal(body.error.status, 402);
+  assert.equal(body.error.requestId, "req-safe-2");
+  assert.equal(body.error.retryAfterSeconds, 30);
+  assert.doesNotMatch(result.stderr, /secret|private/);
+});

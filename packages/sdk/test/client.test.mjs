@@ -393,8 +393,8 @@ test("public API error messages hide provider billing and proxy details while re
   await assert.rejects(sdk.getRun("run"), error => {
     assert.equal(error.status, 402);
     assert.deepEqual(error.body, raw);
-    assert.match(error.message, /temporarily unavailable/);
-    assert.doesNotMatch(error.message, /OpenRouter|credits|postgres/);
+    assert.match(error.message, /needs credits/);
+    assert.doesNotMatch(error.message, /OpenRouter|postgres|private-host/);
     return true;
   });
   const malformed = client(async () => new Response("<html>private gateway</html>", { status: 400, headers: { "content-type": "application/json" } }));
