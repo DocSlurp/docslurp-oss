@@ -7,51 +7,71 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 import { createRunLifecycle } from "../services/run-lifecycle.js";
 import type { SqlClient } from "../db.js";
 
-// Real-Postgres check of Run Lifecycle transitions, run inside a throwaway
-// schema that is dropped afterwards. Skipped without a local DB:
+// Real-Postgres check of Run Lifecycle transitions. RUN_LIFECYCLE_DATABASE_URL
+// must point at a disposable local database built by applying
+// server/db/migrations (pnpm db:migrate); server/db/migrations is the only
+// schema source. Each test seeds its own user, organization and workspace with
+// unique ids and deletes them afterwards. Skipped without a local DB:
 //   RUN_LIFECYCLE_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-lifecycle.db
 const databaseUrl = process.env.RUN_LIFECYCLE_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
 
-async function withSchema(run: (sql: SqlClient) => Promise<void>): Promise<void> {
-  const schema = `run_lifecycle_${randomUUID().replaceAll("-", "")}`;
-  const admin = postgres(databaseUrl, { max: 1, prepare: false, onnotice: () => {} });
-  await admin.unsafe(`create schema ${schema}`);
-  const sql = postgres(databaseUrl, {
-    max: 1,
-    prepare: false,
-    onnotice: () => {},
-    connection: { search_path: schema },
-  });
+type Tenant = { userId: string; orgId: string; workspaceId: string; id: (name: string) => string };
+
+async function withTenant(run: (sql: SqlClient, tenant: Tenant) => Promise<void>): Promise<void> {
+  const suffix = randomUUID();
+  const tenant: Tenant = {
+    userId: `rl-user-${suffix}`,
+    orgId: `rl-org-${suffix}`,
+    workspaceId: `rl-ws-${suffix}`,
+    id: (name) => `${name}-${suffix}`,
+  };
+  const sql = postgres(databaseUrl, { max: 1, prepare: false, onnotice: () => {} });
   try {
-    await sql.unsafe(`
-      create table workspace_runs (
-        id text primary key, user_id text not null, status text not null, stage text not null,
-        creation_ready_at timestamptz default now(), creation_expires_at timestamptz,
-        control_state text, control_requested_at timestamptz, error text,
-        stats jsonb not null default '{}', pipeline jsonb not null default '{}',
-        failure_count integer not null default 0, dead_lettered_at timestamptz, dead_letter_reason text,
-        lease_expires_at timestamptz, last_heartbeat_at timestamptz,
-        created_at timestamptz not null default now(), updated_at timestamptz not null default now()
-      );
-      create table documents (id text primary key, run_id text not null, status text not null, updated_at timestamptz, superseded_at timestamptz);
-      create table workspace_run_stage_states (run_id text, stage_name text, status text, primary key (run_id, stage_name));
-      create table document_run_stage_states (
-        run_id text, document_id text, stage_name text, status text, error text, updated_at timestamptz
-      );
-      create function retire_replaced_pending_documents(text) returns void language plpgsql as $$ begin return; end; $$;
-      create table workspace_run_events (
-        id text primary key, user_id text, run_id text, document_id text, stage_name text, event_type text,
-        status text, message text, progress jsonb, stats jsonb, payload jsonb, created_at timestamptz
-      );
-    `);
-    await run(sql as unknown as SqlClient);
+    await sql`insert into "user" (id, name, email) values (${tenant.userId}, 'Run lifecycle', ${`${tenant.userId}@example.test`})`;
+    await sql`insert into organizations (id, name, created_by_user_id) values (${tenant.orgId}, 'Run lifecycle', ${tenant.userId})`;
+    await sql`insert into org_memberships (org_id, user_id, role) values (${tenant.orgId}, ${tenant.userId}, 'owner')`;
+    await sql`insert into workspaces (id, org_id, user_id, name) values (${tenant.workspaceId}, ${tenant.orgId}, ${tenant.userId}, 'Run lifecycle')`;
+    await run(sql as unknown as SqlClient, tenant);
   } finally {
+    // Runs, events, stage states and documents cascade from the workspace.
+    await sql`delete from workspaces where id = ${tenant.workspaceId}`;
+    await sql`delete from organizations where id = ${tenant.orgId}`;
+    await sql`delete from "user" where id = ${tenant.userId}`;
     await sql.end();
-    await admin.unsafe(`drop schema ${schema} cascade`);
-    await admin.end();
   }
+}
+
+async function insertRun(
+  sql: SqlClient,
+  tenant: Tenant,
+  name: string,
+  values: { status: string; stage: string; stats?: Record<string, unknown>; controlState?: string; error?: string; failureCount?: number; deadLetterReason?: string },
+): Promise<string> {
+  const id = tenant.id(name);
+  await sql`
+    insert into workspace_runs (
+      id, org_id, user_id, workspace_id, kind, status, stage, stats, control_state, error, failure_count,
+      dead_letter_reason, creation_ready_at
+    )
+    values (
+      ${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.workspaceId}, 'bulk-upload', ${values.status}, ${values.stage},
+      ${sql.json((values.stats ?? {}) as postgres.JSONValue)}, ${values.controlState ?? null}, ${values.error ?? null},
+      ${values.failureCount ?? 0}, ${values.deadLetterReason ?? null}, now()
+    )
+  `;
+  return id;
+}
+
+async function insertDocument(sql: SqlClient, tenant: Tenant, runId: string, name: string, status: string): Promise<string> {
+  const id = tenant.id(name);
+  await sql`
+    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    values (${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.workspaceId}, ${runId}, ${`${name}.pdf`}, 'application/pdf',
+      ${`${tenant.userId}/raw/${id}.pdf`}, ${status})
+  `;
+  return id;
 }
 
 function lifecycle(sql: SqlClient, startWorkflow = vi.fn(async () => {})) {
@@ -60,11 +80,17 @@ function lifecycle(sql: SqlClient, startWorkflow = vi.fn(async () => {})) {
 
 describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
   it("fails a stuck Run with worker-equivalent bookkeeping and dead-letters at the threshold", async () => {
-    await withSchema(async (sql) => {
-      await sql`insert into workspace_runs (id, user_id, status, stage, stats) values ('run-1', 'user-1', 'queued', 'queued', '{"old":true}')`;
-      await sql`insert into documents (id, run_id, status, updated_at) values ('doc-done', 'run-1', 'completed', now()), ('doc-open', 'run-1', 'queued', now())`;
+    await withTenant(async (sql, tenant) => {
+      const runId = await insertRun(sql, tenant, "run-1", { status: "queued", stage: "queued", stats: { old: true } });
+      const done = await insertDocument(sql, tenant, runId, "doc-done", "completed");
+      const open = await insertDocument(sql, tenant, runId, "doc-open", "queued");
+      const broken = await insertDocument(sql, tenant, runId, "doc-broken", "processing");
+      await sql`
+        insert into document_run_stage_states (run_id, document_id, stage_name, status)
+        values (${runId}, ${broken}, 'parse', 'failed')
+      `;
 
-      const failed = await lifecycle(sql).fail("run-1", {
+      const failed = await lifecycle(sql).fail(runId, {
         stage: "queued",
         message: "stale",
         fromStatuses: ["queued"],
@@ -80,10 +106,19 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
         lastFailure: { stage: "queued", message: "stale", failureCount: 1 },
       });
 
-      const docs = await sql<{ id: string; status: string }[]>`select id, status from documents order by id`;
-      expect(docs).toEqual([{ id: "doc-done", status: "completed" }, { id: "doc-open", status: "failed" }]);
+      // A failed Run fails only Documents with a failed stage and leaves the
+      // rest queued so retry can resume them (291b4261, "Keep a Run going when
+      // one Document fails").
+      const docs = await sql<{ id: string; status: string }[]>`
+        select id, status from documents where run_id = ${runId} order by id
+      `;
+      expect(docs).toEqual([
+        { id: broken, status: "failed" },
+        { id: done, status: "completed" },
+        { id: open, status: "queued" },
+      ]);
       const [event] = await sql<{ event_type: string; payload: Record<string, unknown> }[]>`
-        select event_type, payload from workspace_run_events where run_id = 'run-1'
+        select event_type, payload from workspace_run_events where run_id = ${runId}
       `;
       expect(event).toMatchObject({
         event_type: "run.failed",
@@ -91,51 +126,54 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
       });
 
       // A Run that is no longer queued is not failed again by the sweep.
-      expect(await lifecycle(sql).fail("run-1", { stage: "queued", message: "again", fromStatuses: ["queued"] })).toBeNull();
+      expect(await lifecycle(sql).fail(runId, { stage: "queued", message: "again", fromStatuses: ["queued"] })).toBeNull();
 
       // The second failure reaches the poison threshold.
-      await sql`update workspace_runs set status = 'processing' where id = 'run-1'`;
-      const dead = await lifecycle(sql).fail("run-1", { stage: "parse", message: "boom", fromStatuses: ["processing"] });
+      await sql`update workspace_runs set status = 'processing' where id = ${runId}`;
+      const dead = await lifecycle(sql).fail(runId, { stage: "parse", message: "boom", fromStatuses: ["processing"] });
       expect(dead).toMatchObject({ failure_count: 2, control_state: "dead-letter", dead_letter_reason: "boom" });
     });
   });
 
   it("skips Runs held by an operator control state", async () => {
-    await withSchema(async (sql) => {
-      await sql`insert into workspace_runs (id, user_id, status, stage, control_state) values ('run-p', 'user-1', 'queued', 'queued', 'paused')`;
-      const result = await lifecycle(sql).fail("run-p", {
+    await withTenant(async (sql, tenant) => {
+      const runId = await insertRun(sql, tenant, "run-p", { status: "queued", stage: "queued", controlState: "paused" });
+      const result = await lifecycle(sql).fail(runId, {
         stage: "queued", message: "stale", fromStatuses: ["queued"], skipControlStates: ["paused"],
       });
       expect(result).toBeNull();
-      const [row] = await sql<{ status: string }[]>`select status from workspace_runs where id = 'run-p'`;
+      const [row] = await sql<{ status: string }[]>`select status from workspace_runs where id = ${runId}`;
       expect(row.status).toBe("queued");
     });
   });
 
   it("retries a failed Run from its checkpoints and restarts the workflow", async () => {
-    await withSchema(async (sql) => {
+    await withTenant(async (sql, tenant) => {
+      const runId = await insertRun(sql, tenant, "run-f", {
+        status: "failed", stage: "parse", error: "boom", failureCount: 3, controlState: "dead-letter", deadLetterReason: "boom",
+      });
+      const docA = await insertDocument(sql, tenant, runId, "doc-a", "completed");
+      const docB = await insertDocument(sql, tenant, runId, "doc-b", "failed");
       await sql`
-        insert into workspace_runs (id, user_id, status, stage, error, failure_count, control_state, dead_letter_reason)
-        values ('run-f', 'user-1', 'failed', 'parse', 'boom', 3, 'dead-letter', 'boom')
+        insert into workspace_run_stage_states (run_id, stage_name, status)
+        values (${runId}, 'fetch', 'completed'), (${runId}, 'parse', 'failed')
       `;
-      await sql`insert into documents (id, run_id, status, updated_at) values ('doc-a', 'run-f', 'completed', now()), ('doc-b', 'run-f', 'failed', now())`;
-      await sql`insert into workspace_run_stage_states values ('run-f', 'fetch', 'completed'), ('run-f', 'parse', 'failed')`;
 
       const startWorkflow = vi.fn(async () => {});
-      const outcome = await lifecycle(sql, startWorkflow).retry({ id: "run-f", status: "failed", pipeline: defaultPipelineFeatures });
+      const outcome = await lifecycle(sql, startWorkflow).retry({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
 
       expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
-      expect(startWorkflow).toHaveBeenCalledWith("run-f", defaultPipelineFeatures, { restartExisting: true });
-      const [row] = await sql`select status, stage, error, failure_count, control_state, dead_letter_reason from workspace_runs where id = 'run-f'`;
+      expect(startWorkflow).toHaveBeenCalledWith(runId, defaultPipelineFeatures, { restartExisting: true });
+      const [row] = await sql`select status, stage, error, failure_count, control_state, dead_letter_reason from workspace_runs where id = ${runId}`;
       expect(row).toEqual({ status: "queued", stage: "queued", error: null, failure_count: 0, control_state: null, dead_letter_reason: null });
-      expect(await sql`select stage_name from workspace_run_stage_states where run_id = 'run-f'`).toEqual([{ stage_name: "fetch" }]);
-      expect(await sql`select id, status from documents order by id`).toEqual([
-        { id: "doc-a", status: "completed" },
-        { id: "doc-b", status: "queued" },
+      expect(await sql`select stage_name from workspace_run_stage_states where run_id = ${runId}`).toEqual([{ stage_name: "fetch" }]);
+      expect(await sql`select id, status from documents where run_id = ${runId} order by id`).toEqual([
+        { id: docA, status: "completed" },
+        { id: docB, status: "queued" },
       ]);
 
       // A concurrent retry that lost the race does not restart again.
-      const again = await lifecycle(sql, startWorkflow).retry({ id: "run-f", status: "failed", pipeline: defaultPipelineFeatures });
+      const again = await lifecycle(sql, startWorkflow).retry({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
       expect(again).toEqual({ status: "not-retryable" });
       expect(startWorkflow).toHaveBeenCalledTimes(1);
     });

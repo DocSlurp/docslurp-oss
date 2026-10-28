@@ -1,15 +1,22 @@
 import { Hono } from "hono";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-// DB-backed cases run only when a migrated + seeded database is provided, e.g.
-// CHAT_FEEDBACK_TEST_DATABASE_URL=postgres://docslurp:docslurp@127.0.0.1:55432/docslurp_design
+// DB-backed cases run only when a migrated database is provided, e.g.
+// CHAT_FEEDBACK_TEST_DATABASE_URL=postgres://docslurp:docslurp@127.0.0.1:55432/docslurp_test
+// They seed (and remove) their own user, organization and workspace unless
+// CHAT_FEEDBACK_TEST_USER_ID and CHAT_FEEDBACK_TEST_WORKSPACE_ID name existing rows.
 const testDatabaseUrl = process.env.CHAT_FEEDBACK_TEST_DATABASE_URL?.trim();
 if (testDatabaseUrl) {
   process.env.DATABASE_URL = testDatabaseUrl;
 }
 
-const SEED_USER_ID = process.env.CHAT_FEEDBACK_TEST_USER_ID ?? "seed-admin-user";
-const SEED_WORKSPACE_ID = process.env.CHAT_FEEDBACK_TEST_WORKSPACE_ID ?? "seed-shared-workspace";
+const runSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+const PROVIDED_USER_ID = process.env.CHAT_FEEDBACK_TEST_USER_ID?.trim();
+const PROVIDED_WORKSPACE_ID = process.env.CHAT_FEEDBACK_TEST_WORKSPACE_ID?.trim();
+const SEED_OWN_ROWS = !PROVIDED_USER_ID || !PROVIDED_WORKSPACE_ID;
+const SEED_USER_ID = SEED_OWN_ROWS ? `chat-feedback-user-${runSuffix}` : PROVIDED_USER_ID!;
+const SEED_WORKSPACE_ID = SEED_OWN_ROWS ? `chat-feedback-ws-${runSuffix}` : PROVIDED_WORKSPACE_ID!;
+const SEED_ORG_ID = `chat-feedback-org-${runSuffix}`;
 
 const getWorkspaceMock = vi.fn();
 
@@ -37,7 +44,7 @@ const { sql } = await import("../db.js");
 function buildApp() {
   const app = new Hono();
   app.use("/workspaces/*", async (c, next) => {
-    c.set("sessionUser", { id: SEED_USER_ID, email: "admin@docslurp.local", name: "Admin" });
+    c.set("sessionUser", { id: SEED_USER_ID, email: `${SEED_USER_ID}@example.test`, name: "Admin" });
     await next();
   });
   app.route("/workspaces", workspacesRoutes);
@@ -98,9 +105,24 @@ describe("chat feedback routes", () => {
   describe.skipIf(!testDatabaseUrl)("persistence (real database)", () => {
     const messageId = `test-msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+    beforeAll(async () => {
+      if (!SEED_OWN_ROWS) return;
+      await sql`INSERT INTO "user" (id, name, email) VALUES (${SEED_USER_ID}, 'Chat Feedback', ${`${SEED_USER_ID}@example.test`})`;
+      await sql`INSERT INTO organizations (id, name, slug, created_by_user_id) VALUES (${SEED_ORG_ID}, 'Chat Feedback Org', ${SEED_ORG_ID}, ${SEED_USER_ID})`;
+      await sql`INSERT INTO workspaces (id, org_id, user_id, name) VALUES (${SEED_WORKSPACE_ID}, ${SEED_ORG_ID}, ${SEED_USER_ID}, 'Chat Feedback')`;
+    });
+
     afterAll(async () => {
-      await sql`DELETE FROM chat_message_feedback WHERE message_id = ${messageId}`;
-      await sql.end({ timeout: 5 });
+      try {
+        await sql`DELETE FROM chat_message_feedback WHERE message_id = ${messageId}`;
+        if (SEED_OWN_ROWS) {
+          await sql`DELETE FROM workspaces WHERE id = ${SEED_WORKSPACE_ID}`;
+          await sql`DELETE FROM organizations WHERE id = ${SEED_ORG_ID}`;
+          await sql`DELETE FROM "user" WHERE id = ${SEED_USER_ID}`;
+        }
+      } finally {
+        await sql.end({ timeout: 5 });
+      }
     });
 
     it("upserts ratings, preserves omitted comments, and deletes idempotently", async () => {
