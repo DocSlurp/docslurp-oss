@@ -5,6 +5,7 @@ import { sql } from "../db.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { getRequestActor } from "../lib/request-actor.js";
 import { CLIENT_SURFACES } from "../services/client-surface.js";
+import { avatarUrl, gravatarClient } from "../services/gravatar.js";
 import { userUsageTotals } from "../services/usage-attribution.js";
 
 /**
@@ -13,6 +14,7 @@ import { userUsageTotals } from "../services/usage-attribution.js";
  * design, so it is reachable only from a platform-admin browser session
  * (ADMIN_EMAILS); API keys and OAuth tokens are refused even for an admin.
  * Never exposes credentials, token material, IPs or session user agents.
+ * Avatar URLs are GitHub/Google provider images or Gravatar by email hash.
  */
 export const adminUsersRoutes = new Hono();
 
@@ -36,7 +38,7 @@ export const adminUsersQuerySchema = z.object({
 }).strict();
 
 type UserRow = {
-  id: string; email: string; name: string;
+  id: string; email: string; name: string; image: string | null;
   created_at: string; deleted_at: string | null; email_verified: boolean; two_factor_enabled: boolean;
   providers: string[]; passkeys: number;
   org_id: string | null; org_name: string | null; credit_balance_cents: number | null; org_count: number;
@@ -101,7 +103,7 @@ adminUsersRoutes.get("/", async (c) => {
       select id, row_number() over (order by ${pageOrder(sort)}) as ord
       from matched order by ${pageOrder(sort)} limit ${limit} offset ${offset}
     )
-    select u.id, u.email, u.name, u."createdAt" as created_at, u.deleted_at,
+    select u.id, u.email, u.name, u.image, u."createdAt" as created_at, u.deleted_at,
       u."emailVerified" as email_verified, u."twoFactorEnabled" as two_factor_enabled,
       coalesce((select array_agg(distinct a."providerId" order by a."providerId") from account a where a."userId" = u.id), '{}') as providers,
       (select count(*)::int from passkey p where p."userId" = u.id) as passkeys,
@@ -151,9 +153,9 @@ adminUsersRoutes.get("/", async (c) => {
   return c.json({
     total,
     limit, offset,
-    users: rows.map(({ total: _total, ...row }) => {
+    users: rows.map(({ total: _total, image, ...row }) => {
       const spend = usage.get(row.id);
-      return { ...row, spend_cents: spend?.costCents ?? 0, ai_tokens: spend?.tokens ?? 0 };
+      return { ...row, avatar_url: row.deleted_at ? null : avatarUrl(row.email, image), spend_cents: spend?.costCents ?? 0, ai_tokens: spend?.tokens ?? 0 };
     }),
   });
 });
@@ -195,4 +197,18 @@ adminUsersRoutes.get("/summary", async (c) => {
     where u.deleted_at is null
     group by 1 order by users desc, source limit 15`;
   return c.json({ days, totals, signupsByDay, surfaces, referrers });
+});
+
+/** Public Gravatar profile for one user; needs GRAVATAR_API_KEY. Raw failures go to logs only. */
+adminUsersRoutes.get("/:userId/gravatar", async (c) => {
+  const userId = c.req.param("userId");
+  if (userId.length > 200) return apiStatusError(c, 400, "Invalid user id");
+  const [user] = await sql<{ email: string }[]>`select email from "user" where id = ${userId} and deleted_at is null`;
+  if (!user) return apiStatusError(c, 404, "User not found");
+  try {
+    return c.json(await gravatarClient.lookup(user.email));
+  } catch (error) {
+    console.warn("[gravatar] profile lookup failed", error instanceof Error ? error.message : error);
+    return apiStatusError(c, 502, "Gravatar lookup failed");
+  }
 });

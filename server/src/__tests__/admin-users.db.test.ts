@@ -76,6 +76,8 @@ describe("admin user directory against migrated Postgres", () => {
       attribution: { referrer_host: "news.example", referrer_url: "https://news.example/thread", utm_source: "newsletter", landing_path: "/pricing" },
     });
     expect(active.surfaces.map((s: { surface: string }) => s.surface).sort()).toEqual(["mcp", "sdk"]);
+    expect(active.avatar_url).toMatch(/^https:\/\/gravatar\.com\/avatar\/[0-9a-f]{64}\?s=64&d=404$/);
+    expect(active).not.toHaveProperty("image");
     expect(idle).toMatchObject({ id: "u-idle", email_verified: false, providers: ["google"], documents: 0, api_keys: 0, attribution: null, surfaces: [] });
     expect(JSON.stringify(body)).not.toMatch(/hash-|password|accessToken/i);
   });

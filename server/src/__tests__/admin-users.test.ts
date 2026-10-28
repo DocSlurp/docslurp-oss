@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ query: vi.fn(), usage: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: mocks.query }));
 vi.mock("../services/usage-attribution.js", () => ({ userUsageTotals: mocks.usage }));
+const gravatar = vi.hoisted(() => ({ lookup: vi.fn() }));
+vi.mock("../services/gravatar.js", async (importActual) => ({ ...(await importActual<object>()), gravatarClient: gravatar }));
 vi.mock("../lib/request-actor.js", () => ({ getRequestActor: (c: { get: (key: string) => unknown }) => c.get("requestActor") }));
 const { adminUsersRoutes } = await import("../routes/admin-users.js");
 
@@ -28,12 +30,13 @@ describe("platform administrator user directory boundary", () => {
     ["an admin's CLI OAuth token", { type: "apiKey", userId: "platform-admin", apiKey: { keyType: "server", oauth: { audience: "api" } } }],
     ["an admin's MCP OAuth token", { type: "apiKey", userId: "platform-admin", apiKey: { keyType: "server", oauth: { audience: "mcp" } } }],
   ])("refuses %s without touching the database", async (_label, actor) => {
-    for (const path of ["/admin/users", "/admin/users/summary", "/admin/users?q=%25"]) {
+    for (const path of ["/admin/users", "/admin/users/summary", "/admin/users?q=%25", "/admin/users/u1/gravatar"]) {
       const response = await as(actor).request(path);
       expect(response.status).toBe(403);
     }
     expect(mocks.query).not.toHaveBeenCalled();
     expect(mocks.usage).not.toHaveBeenCalled();
+    expect(gravatar.lookup).not.toHaveBeenCalled();
   });
 
   it("lists users for a platform admin without caching", async () => {
@@ -67,5 +70,22 @@ describe("platform administrator user directory boundary", () => {
     const response = await as(admin).request("/admin/users/summary?days=9999");
     expect(response.status).toBe(200);
     expect((await response.json()).days).toBe(30);
+  });
+
+  it("looks up a live user's Gravatar profile and hides upstream failures", async () => {
+    mocks.query.mockResolvedValueOnce([{ email: "ada@example.test" }]);
+    gravatar.lookup.mockResolvedValueOnce({ status: "found", profile: { displayName: "Ada" } });
+    const ok = await as(admin).request("/admin/users/u1/gravatar");
+    expect(await ok.json()).toEqual({ status: "found", profile: { displayName: "Ada" } });
+    expect(gravatar.lookup).toHaveBeenCalledWith("ada@example.test");
+    mocks.query.mockResolvedValueOnce([]);
+    expect((await as(admin).request("/admin/users/missing/gravatar")).status).toBe(404);
+    mocks.query.mockResolvedValueOnce([{ email: "ada@example.test" }]);
+    gravatar.lookup.mockRejectedValueOnce(new Error("Gravatar profile lookup failed with HTTP 429 secret-detail"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failed = await as(admin).request("/admin/users/u1/gravatar");
+    expect(failed.status).toBe(502);
+    expect(await failed.text()).not.toContain("secret-detail");
+    warn.mockRestore();
   });
 });
