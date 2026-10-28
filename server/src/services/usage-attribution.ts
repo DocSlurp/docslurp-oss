@@ -120,6 +120,26 @@ export async function orgUsageTotals(
   return toTotals(row);
 }
 
+/** Spend and tokens per acting user (platform-admin user panel); users without usage are absent. */
+export async function userUsageTotals(
+  userIds: readonly string[],
+  window: UsageWindow = null,
+  client: SqlClient = sql,
+): Promise<Map<string, UsageTotals>> {
+  if (userIds.length === 0) return new Map();
+  const rows = await client<{ user_id: string; tokens: string; cost_cents: number; event_count: number }[]>`
+    select
+      au.user_id,
+      coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
+      coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
+      count(distinct au.id)::int as event_count
+    from ${attributedUsage(window, client)} au
+    where au.user_id = any(${userIds as string[]})
+    group by au.user_id
+  `;
+  return new Map(rows.map(row => [row.user_id, toTotals(row)]));
+}
+
 /**
  * Cents of usage attributed to one API key since `since`, served by the
  * `usage_events (api_key_id, created_at)` index (migration 0042), so cost

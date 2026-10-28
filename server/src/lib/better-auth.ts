@@ -6,6 +6,7 @@ import { createBetterAuthSecurityOptions, resolveBetterAuthBaseUrl, isEmailAuthC
 import { Pool } from "pg";
 import { notifySignup } from "./signup-notifications.js";
 import { ensureUserAndOrganization } from "../services/account-provisioning.js";
+import { cookieHeaderFromAuthContext, recordSignupAttribution } from "../services/signup-attribution.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
@@ -201,8 +202,11 @@ export const auth = betterAuth({
     },
     user: {
       create: {
-        after: async (user) => {
+        after: async (user, ctx) => {
           await ensureUserAndOrganization(pool, { id: user.id, name: user.name ?? "" });
+          // First-touch referrer/UTM for the admin user panel; never blocks sign-up.
+          await recordSignupAttribution(pool, user.id, cookieHeaderFromAuthContext(ctx))
+            .catch(error => console.warn("[signup-attribution] not recorded", error instanceof Error ? error.message : error));
           await notifySignup({ kind: "account", email: user.email, name: user.name });
         }
       }

@@ -10,6 +10,8 @@ import { authTokenCommand, execCommand, loginCommand, logoutCommand, whoamiComma
 import { resolveAuth, type ResolvedAuth } from "./auth/resolve.js";
 
 const DEFAULT_API_URL = "https://docslurp.io";
+/** Labels CLI requests for DocSlurp usage analytics; it grants nothing. */
+const cliClientTag = "cli";
 
 function resolveApiUrl(flags: Record<string, string | boolean>): string {
   const value = String(flags.apiUrl ?? (process.env.DOCSLURP_URL?.trim() || DEFAULT_API_URL)).replace(/\/+$/, "");
@@ -158,6 +160,7 @@ async function importSearchCompatCommand(inputPath: string, flags: Record<string
     method: "POST",
     headers: {
       Authorization: `Bearer ${await auth.token()}`,
+      "X-DocSlurp-Client": cliClientTag,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(normalized)
@@ -296,6 +299,7 @@ async function apiFetch(
   const send = async (forceRefresh: boolean) => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await auth.token({ forceRefresh })}`);
+    headers.set("X-DocSlurp-Client", cliClientTag);
     return fetch(`${apiUrl}${pathname}`, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
   };
   const response = await send(false);
@@ -941,6 +945,8 @@ async function mcpFetch(args: {
     headers: {
       // Long-running: a stored login refreshes shortly before each expiry.
       Authorization: `Bearer ${await args.auth.token({ forceRefresh })}`,
+      // The stdio MCP server proxies tool calls; label them apart from CLI commands.
+      "X-DocSlurp-Client": "mcp-stdio",
       ...(args.body ? { "Content-Type": "application/json" } : {})
     },
     ...(args.body ? { body: JSON.stringify(args.body) } : {})

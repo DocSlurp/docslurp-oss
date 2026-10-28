@@ -315,6 +315,10 @@ function canonicalIdsOf(input: unknown, options: { canonicalId?: string } | unde
 }
 
 /** Marks the options of an extract() call so the shared upload transports target /v1/extracts. */
+/** Labels requests for DocSlurp usage analytics; it grants nothing. */
+const CLIENT_HEADER = "X-DocSlurp-Client";
+const CLIENT_TAG = "sdk";
+
 const EXTRACT_MODE: unique symbol = Symbol("docslurp.extract");
 
 export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
@@ -930,6 +934,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const headers = new Headers(init.headers);
     const credential = await bearer();
     if (credential) headers.set("Authorization", `Bearer ${credential}`);
+    headers.set(CLIENT_HEADER, CLIENT_TAG);
     // A provider gets one forced refresh after a 401, when the body can be sent again.
     let refreshedAfter401 = typeof tokenSource !== "function" || isStreamBody(init.body);
     const bound = deadline(positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs"), requestOptions.signal);
@@ -1035,6 +1040,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const headers = new Headers({ ...extraHeaders, Accept: "text/event-stream" });
       const credential = await bearer();
       if (credential) headers.set("Authorization", `Bearer ${credential}`);
+      headers.set(CLIENT_HEADER, CLIENT_TAG);
       let response = await fetchImpl(`${apiUrl}${path}`, {
         headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
       });
@@ -1873,6 +1879,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     async getExtractDownloadUrl(extractId: string, options: RequestOptions = {}): Promise<string> {
       const headers = new Headers();
       if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
+      headers.set(CLIENT_HEADER, CLIENT_TAG);
       const bound = deadline(positiveDuration(options.timeoutMs ?? defaultTimeoutMs, "timeoutMs"), options.signal);
       try {
         const response = await fetchImpl(`${apiUrl}/v1/extracts/${encodeURIComponent(extractId)}/download`, {
