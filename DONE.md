@@ -1,6 +1,8 @@
 - Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
 # Completed
 
+- Prevent personal-organization slug collisions from failing first sign-in (2026-10-28): use the fresh organization UUID, retain owner-scoped membership creation, and cover shared user-ID prefixes, occupied slugs, repeat provisioning, deleted identities and hostile display names in migrated-database tests.
+
 - Fix large direct-upload finalization for S3-compatible terminal pagination markers (2026-10-27): honor IsTruncated, reject malformed or nonadvancing pages, retain the scoped object/upload identity, and bound listing by a shared deadline.
 
 - Add optional Doppler PDF extraction in a fresh offline VM (2026-10-27): generic core adapter, bounded transfers and lifecycle, scoped estimated compute usage, scan-preserving empty outputs, and no implicit native reparse of Doppler results. Private binaries and deployment remain in the app repository; owner-approved rollout and merged app pin are pending.
