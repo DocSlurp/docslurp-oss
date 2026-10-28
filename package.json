@@ -43,10 +43,10 @@
   },
   "pnpm": {
     "overrides": {
-      "@hono/node-server": "^2.1.1",
+      "@hono/node-server": "^2.1.5",
       "fast-xml-parser": "^5.5.11",
-      "hono": "^4.13.10",
-      "vite": "^8.3.1",
+      "hono": "^4.13.14",
+      "vite": "^8.3.5",
       "@esbuild-kit/core-utils>esbuild": "^0.28.2",
       "@prisma/config>effect": "^3.22.2",
       "@prisma/config>deepmerge-ts": "^8.0.0",
@@ -57,11 +57,14 @@
       "@modelcontextprotocol/sdk": "^1.31.0",
       "source-map-js": "^1.2.2",
       "smol-toml": "^1.9.0",
-      "katex": "^0.19.0",
+      "katex": "^0.19.1",
       "@opentelemetry/api": "1.9.1",
       "mammoth>argparse": "^2.0.1",
       "@opentelemetry/otlp-exporter-base": "0.223.0",
-      "@opentelemetry/exporter-trace-otlp-http": "0.223.0"
+      "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
+      "@earendil-works/pi-coding-agent>undici": "8.12.3",
+      "express>body-parser": "^2.4.0",
+      "ajv>fast-uri": "^3.1.9"
     },
     "onlyBuiltDependencies": [
       "@prisma/engines",
@@ -78,17 +81,17 @@
     }
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.1154.0",
-    "dotenv": "^18.0.8",
+    "@aws-sdk/client-s3": "^3.1157.0",
+    "dotenv": "^18.0.9",
     "drizzle-kit": "^0.31.11",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vite": "^8.3.4"
+    "vite": "^8.3.5"
   },
   "dependencies": {
-    "better-auth": "^1.7.12",
+    "better-auth": "^1.7.14",
     "postgres": "^3.4.9"
   }
 }

@@ -6,7 +6,7 @@
 # Same pinned base image as worker/Dockerfile.lean, so bundles target the exact
 # python3 + glibc the worker runs. The base venv is rebuilt here with the same
 # script and lock so the bundle can drop packages the image already ships.
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS bundle-build
+FROM node:24-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS bundle-build
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates pandoc python3 python3-venv zstd \
     && rm -rf /var/lib/apt/lists/*
