@@ -247,7 +247,7 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     sourceUrl: "https://neon.com/pricing",
     observedAt: OBSERVED_AT,
     method: "pricing-page",
-    notes: "Postgres storage for pgvector, full-text and graph indexes. Instant restore $0.20/GB-month and compute ($0.106/CU-hour) are extra.",
+    notes: "Postgres storage for metadata, full-text and graph indexes (vectors live in LanceDB). Instant restore $0.20/GB-month and compute ($0.106/CU-hour) are extra.",
   },
   // AI pass-through.
   {

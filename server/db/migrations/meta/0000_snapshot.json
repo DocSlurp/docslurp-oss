@@ -2590,12 +2590,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "vector": {
-          "name": "vector",
-          "type": "vector(384)",
-          "primaryKey": false,
-          "notNull": false
-        },
         "token_estimate": {
           "name": "token_estimate",
           "type": "integer",
@@ -2724,42 +2718,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "document_chunks_vector_idx": {
-          "name": "document_chunks_vector_idx",
-          "columns": [
-            {
-              "expression": "vector",
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops",
-              "isExpression": false
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "ivfflat",
-          "with": {
-            "lists": "100"
-          }
-        },
-        "document_chunks_vector_idx1": {
-          "name": "document_chunks_vector_idx1",
-          "columns": [
-            {
-              "expression": "vector",
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops",
-              "isExpression": false
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "ivfflat",
-          "with": {
-            "lists": "100"
-          }
         }
       },
       "foreignKeys": {
@@ -3698,12 +3656,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "vector": {
-          "name": "vector",
-          "type": "vector(384)",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3758,42 +3710,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "document_summaries_vector_idx": {
-          "name": "document_summaries_vector_idx",
-          "columns": [
-            {
-              "expression": "vector",
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops",
-              "isExpression": false
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "ivfflat",
-          "with": {
-            "lists": "10"
-          }
-        },
-        "document_summaries_vector_idx1": {
-          "name": "document_summaries_vector_idx1",
-          "columns": [
-            {
-              "expression": "vector",
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops",
-              "isExpression": false
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "ivfflat",
-          "with": {
-            "lists": "10"
-          }
         }
       },
       "foreignKeys": {
@@ -4801,12 +4717,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "vector": {
-          "name": "vector",
-          "type": "vector(384)",
-          "primaryKey": false,
-          "notNull": false
-        },
         "token_estimate": {
           "name": "token_estimate",
           "type": "integer",
@@ -4942,42 +4852,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "document_propositions_vector_idx": {
-          "name": "document_propositions_vector_idx",
-          "columns": [
-            {
-              "expression": "vector",
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops",
-              "isExpression": false
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "ivfflat",
-          "with": {
-            "lists": "10"
-          }
-        },
-        "document_propositions_vector_idx1": {
-          "name": "document_propositions_vector_idx1",
-          "columns": [
-            {
-              "expression": "vector",
-              "asc": true,
-              "nulls": "last",
-              "opclass": "vector_cosine_ops",
-              "isExpression": false
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "ivfflat",
-          "with": {
-            "lists": "10"
-          }
         }
       },
       "foreignKeys": {
@@ -9520,12 +9394,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "vector": {
-          "name": "vector",
-          "type": "vector",
-          "primaryKey": false,
-          "notNull": false
         },
         "member_count": {
           "name": "member_count",

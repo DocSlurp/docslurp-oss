@@ -9,8 +9,10 @@ x-lancedb-uri: &lancedb-uri s3://docslurp-files/lancedb
 
 services:
   postgres:
-    # Drizzle owns schema initialization; its baseline requires pgvector.
-    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg17}
+    # Drizzle owns schema initialization. Vectors live in LanceDB, so stock Postgres.
+    # Bookworm keeps glibc 2.36 collations, matching volumes created by the former
+    # pgvector/pgvector:pg17 image (trixie's 2.41 would mismatch their text indexes).
+    image: ${POSTGRES_IMAGE:-postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5}
     environment:
       POSTGRES_DB: docslurp
       POSTGRES_USER: docslurp
