@@ -12,6 +12,7 @@ vi.mock("../services/workspace-chat.js", () => ({
   workspaceChatDisabledBody: vi.fn(async () => null),
 }));
 vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: vi.fn() }));
+vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: vi.fn(async () => undefined) }));
 vi.mock("../services/billing/spend-guard.js", () => ({
   assertCanSpend: vi.fn(async () => undefined),
   canSpend: vi.fn(async () => true),

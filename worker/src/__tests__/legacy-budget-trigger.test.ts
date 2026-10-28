@@ -85,6 +85,37 @@ describe("migration 0096 drop_legacy_budget_trigger", () => {
     await db.close();
   }, 120_000);
 
+  it("leaves budget enforcement to the attribution view, which counts the spend the trigger missed", async () => {
+    const db = await createMigratedDatabase({ stopBefore: "drop_legacy_budget_trigger" });
+    await db.exec(LEGACY_TRIGGER);
+    // Org o1 is over its workspace's 100-cent budget through search and chat only (run_id null);
+    // org o2 is a separate tenant with the same budget and no spend.
+    await db.exec(`
+      insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com'), ('u2', 'V', 'u2@example.com');
+      insert into organizations (id, name, slug, created_by_user_id) values ('o1', 'Org', 'org-1', 'u1'), ('o2', 'Other', 'org-2', 'u2');
+      insert into workspaces (id, org_id, user_id, name, monthly_budget_cents)
+        values ('w1', 'o1', 'u1', 'W', 100), ('w2', 'o2', 'u2', 'X', 100);
+      insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, unit, amount, cost_cents)
+        values ('e1', 'u1', null, 'o1', 'w1', 'openai', 'm', 'chat', 'tokens', 1, 150);
+    `);
+    // The trigger only summed run-joined spend, so it let this over-budget workspace start a run.
+    await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage)
+      values ('r1', 'o1', 'u1', 'w1', 'upload', 'queued', 'queued')`);
+
+    await applyRemainingMigrations(db, "drop_legacy_budget_trigger");
+
+    // enforceLiveBudgetCaps and the worker's budget sweep sum this view for the month.
+    const spend = async (workspaceId: string) =>
+      (await db.query<{ cents: number }>(
+        `select coalesce(sum(cost_cents), 0)::float8 as cents from usage_attribution
+         where workspace_id = $1 and created_at >= date_trunc('month', now())`,
+        [workspaceId],
+      )).rows[0]!.cents;
+    expect(await spend("w1")).toBeGreaterThanOrEqual(100);
+    expect(await spend("w2")).toBe(0);
+    await db.close();
+  }, 120_000);
+
   it("is a no-op on a database built from the migrations", async () => {
     const db = await createMigratedDatabase();
     expect(await triggerCount(db)).toBe(0);

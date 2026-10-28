@@ -148,6 +148,7 @@ type BudgetAlertRow = {
   monthly_budget_cents: number;
   budget_alert_threshold_percent: number;
   budget_alert_level: number;
+  budget_paused: boolean;
   spend_cents: number;
   cost_alert: boolean | null;
 };
@@ -3429,6 +3430,7 @@ export class Store {
         w.monthly_budget_cents,
         w.budget_alert_threshold_percent,
         w.budget_alert_level,
+        w.budget_paused,
         coalesce(spend.cost_cents, 0)::integer as spend_cents,
         np.cost_alert
       from workspaces w
@@ -3455,6 +3457,7 @@ export class Store {
         w.monthly_budget_cents,
         w.budget_alert_threshold_percent,
         w.budget_alert_level,
+        w.budget_paused,
         spend.cost_cents,
         np.cost_alert
       `,
@@ -3466,7 +3469,8 @@ export class Store {
         row.monthly_budget_cents,
         row.budget_alert_threshold_percent,
       );
-      if (nextLevel === row.budget_alert_level) {
+      // A budget change resets budget_paused but not the level, so compare both.
+      if (nextLevel === row.budget_alert_level && row.budget_paused === nextLevel >= 100) {
         continue;
       }
 
@@ -3511,6 +3515,7 @@ export class Store {
         o.monthly_budget_cents,
         o.budget_alert_threshold_percent,
         o.budget_alert_level,
+        o.budget_paused,
         coalesce(spend.cost_cents, 0)::integer as spend_cents,
         np.cost_alert
       from organizations o
@@ -3534,6 +3539,7 @@ export class Store {
         o.monthly_budget_cents,
         o.budget_alert_threshold_percent,
         o.budget_alert_level,
+        o.budget_paused,
         spend.cost_cents,
         np.cost_alert
       `,
@@ -3545,7 +3551,8 @@ export class Store {
         row.monthly_budget_cents,
         row.budget_alert_threshold_percent,
       );
-      if (nextLevel === row.budget_alert_level) {
+      // A budget change resets budget_paused but not the level, so compare both.
+      if (nextLevel === row.budget_alert_level && row.budget_paused === nextLevel >= 100) {
         continue;
       }
 

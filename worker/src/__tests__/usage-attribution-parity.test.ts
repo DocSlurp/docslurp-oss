@@ -122,6 +122,15 @@ describe("worker budget alerts use the same rule", () => {
     ]);
   });
 
+  it("re-pauses an over-budget scope whose budget_paused was cleared without a level change", async () => {
+    // A budget edit clears budget_paused but leaves budget_alert_level at 100.
+    await sql`update organizations set budget_alert_level = 100, budget_paused = false where id = 'org-2'`;
+    await store.processBudgetAlerts();
+    const [org] = await sql<{ level: number; paused: boolean }[]>`
+      select budget_alert_level as level, budget_paused as paused from organizations where id = 'org-2'`;
+    expect(org).toEqual({ level: 100, paused: true });
+  });
+
   it("keeps a deleted workspace's spend in its org budget", async () => {
     await sql`update organizations set budget_alert_level = 0, budget_paused = false, monthly_budget_cents = 20 where id = 'org-1'`;
     await sql`delete from workspaces where id = 'ws-a'`;
