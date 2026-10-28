@@ -36,7 +36,7 @@ export const adminUsersQuerySchema = z.object({
 }).strict();
 
 type UserRow = {
-  id: string; email: string; name: string; image: string | null;
+  id: string; email: string; name: string;
   created_at: string; deleted_at: string | null; email_verified: boolean; two_factor_enabled: boolean;
   providers: string[]; passkeys: number;
   org_id: string | null; org_name: string | null; credit_balance_cents: number | null; org_count: number;
@@ -81,7 +81,7 @@ adminUsersRoutes.get("/", async (c) => {
   const { q, filter, surface, sort, limit, offset } = parsed.data;
   const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
   const rows = await sql<UserRow[]>`
-    select u.id, u.email, u.name, u.image, u."createdAt" as created_at, u.deleted_at,
+    select u.id, u.email, u.name, u."createdAt" as created_at, u.deleted_at,
       u."emailVerified" as email_verified, u."twoFactorEnabled" as two_factor_enabled,
       coalesce((select array_agg(distinct a."providerId" order by a."providerId") from account a where a."userId" = u.id), '{}') as providers,
       (select count(*)::int from passkey p where p."userId" = u.id) as passkeys,
