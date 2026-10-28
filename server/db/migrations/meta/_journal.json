@@ -673,6 +673,13 @@
       "when": 1793214455772,
       "tag": "0095_drop_pgvector_extension",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1793300000000,
+      "tag": "0096_drop_legacy_budget_trigger",
+      "breakpoints": true
     }
   ]
 }
