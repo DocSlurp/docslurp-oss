@@ -405,3 +405,14 @@ test("public API error messages hide provider billing and proxy details while re
     return true;
   });
 });
+
+test("server runtimes label requests with the X-DocSlurp-Client analytics tag", async () => {
+  let seen;
+  const sdk = client(async (_url, init) => {
+    seen = new Headers(init.headers);
+    return new Response(JSON.stringify({ workspaces: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  await sdk.listWorkspaces().catch(() => {});
+  assert.equal(seen.get("x-docslurp-client"), "sdk");
+  assert.equal(seen.get("authorization"), "Bearer key");
+});

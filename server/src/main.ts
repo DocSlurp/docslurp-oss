@@ -1,6 +1,5 @@
 import { serve } from "@hono/node-server";
-import { ensureApiStartup, apiApp } from "./server.js";
-import { drainSearchSessionWrites } from "./search/session.js";
+import { apiApp, drainSearchSessionWrites, ensureApiStartup } from "./server.js";
 
 // transformers.js can leave a rejected shared download promise unhandled when the preferred dtype file is
 // missing and the loader falls back (see lib/ai.ts). A standalone server must log that, not exit.

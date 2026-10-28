@@ -8,6 +8,8 @@ import type { Pool } from "pg";
  * parsed strictly, length-capped and only ever displayed to platform admins.
  */
 export const ATTRIBUTION_COOKIE = "ds_attr";
+/** The app's analytics consent cookie; attribution is analytics, so it needs `granted`. */
+export const ANALYTICS_CONSENT_COOKIE = "docslurp_analytics";
 
 export interface SignupAttribution {
   referrerHost: string | null;
@@ -25,8 +27,8 @@ const MAX_COOKIE_BYTES = 2048;
 
 function text(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
-  // Strip control characters; keep printable text only.
-  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  // Strip control and format characters (bidi overrides, zero-width); keep printable text.
+  const cleaned = value.replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
   return cleaned ? cleaned.slice(0, max) : null;
 }
 
@@ -49,6 +51,20 @@ export function readCookie(header: string | null | undefined, name: string): str
   return null;
 }
 
+/**
+ * Path only, never the query (tokens, emails). Signed-in surfaces collapse to
+ * their first segment (`/app/invites/<token>` → `/app`), and long opaque
+ * segments elsewhere become `:id`.
+ */
+export function landingPath(value: unknown): string | null {
+  const raw = text(value, 1024);
+  if (!raw?.startsWith("/") || raw.startsWith("//")) return null;
+  const path = raw.split(/[?#]/)[0]!;
+  const segments = path.split("/").filter(Boolean);
+  if (segments[0] === "app" || segments[0] === "api" || segments[0] === "oauth") return `/${segments[0]}`;
+  return `/${segments.slice(0, 4).map(segment => (segment.length >= 24 || /\d{6,}/.test(segment) ? ":id" : segment)).join("/")}`.slice(0, 256);
+}
+
 /** Decodes the `ds_attr` cookie value (URI-encoded JSON); null when absent or malformed. */
 export function parseAttributionCookie(value: string | null | undefined): SignupAttribution | null {
   if (!value || value.length > MAX_COOKIE_BYTES) return null;
@@ -59,13 +75,13 @@ export function parseAttributionCookie(value: string | null | undefined): Signup
   const referrer = httpUrl(record.r);
   // Keep only origin + path: query strings on referrers can carry tokens or PII.
   const referrerUrl = referrer ? `${referrer.origin}${referrer.pathname}`.slice(0, 512) : null;
-  const landing = text(record.l, 512);
+  const landing = landingPath(record.l);
   const seen = typeof record.t === "number" && Number.isFinite(record.t) ? new Date(record.t) : null;
   const firstSeenAt = seen && seen.getTime() > Date.UTC(2024, 0, 1) && seen.getTime() <= Date.now() + 86_400_000 ? seen.toISOString() : null;
   const attribution: SignupAttribution = {
     referrerHost: referrer ? referrer.hostname.toLowerCase().slice(0, 253) : null,
     referrerUrl,
-    landingPath: landing?.startsWith("/") ? landing : null,
+    landingPath: landing,
     utmSource: text(record.us, 128),
     utmMedium: text(record.um, 128),
     utmCampaign: text(record.uc, 128),
@@ -87,6 +103,8 @@ export function cookieHeaderFromAuthContext(ctx: unknown): string | null {
 
 /** Stores the first attribution for a new user; later calls never overwrite it. */
 export async function recordSignupAttribution(pool: Pick<Pool, "query">, userId: string, cookieHeader: string | null): Promise<boolean> {
+  // A cookie without analytics consent (planted, or left after withdrawal) is ignored.
+  if (readCookie(cookieHeader, ANALYTICS_CONSENT_COOKIE) !== "granted") return false;
   const attribution = parseAttributionCookie(readCookie(cookieHeader, ATTRIBUTION_COOKIE));
   if (!attribution) return false;
   const result = await pool.query(

@@ -65,14 +65,20 @@ function filterClause(filter: typeof FILTERS[number]) {
   }
 }
 
-function sortClause(sort: typeof SORTS[number]) {
+/** Sort key computed for matching users only, before the per-user aggregates run on one page. */
+function sortKey(sort: typeof SORTS[number]) {
   switch (sort) {
-    case "oldest": return sql`u."createdAt" asc, u.id`;
-    case "last_active": return sql`last_active_at desc nulls last, u.id`;
-    case "documents": return sql`documents desc, u."createdAt" desc, u.id`;
-    case "searches": return sql`searches desc, u."createdAt" desc, u.id`;
-    default: return sql`u."createdAt" desc, u.id`;
+    case "last_active": return sql`(select max(se."updatedAt") from session se where se."userId" = u.id)`;
+    case "documents": return sql`(select count(*) from documents d where d.user_id = u.id)::double precision`;
+    case "searches": return sql`(select count(*) from search_sessions s where s.user_id = u.id)::double precision`;
+    default: return sql`null::double precision`;
   }
+}
+
+function pageOrder(sort: typeof SORTS[number]) {
+  if (sort === "oldest") return sql`created_at asc, id`;
+  if (sort === "newest") return sql`created_at desc, id`;
+  return sql`sort_key desc nulls last, created_at desc, id`;
 }
 
 adminUsersRoutes.get("/", async (c) => {
@@ -80,7 +86,21 @@ adminUsersRoutes.get("/", async (c) => {
   if (!parsed.success) return apiStatusError(c, 400, "Invalid user query");
   const { q, filter, surface, sort, limit, offset } = parsed.data;
   const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+  const where = sql`(${q} = '' or u.email ilike ${like} or u.name ilike ${like} or u.id = ${q})
+    ${filter === "deleted" ? sql`` : sql`and u.deleted_at is null`}
+    ${filterClause(filter)}
+    ${surface ? sql`and exists (select 1 from user_client_surfaces s where s.user_id = u.id and s.surface = ${surface})` : sql``}`;
   const rows = await sql<UserRow[]>`
+    with matched as (
+      select u.id, u."createdAt" as created_at, ${sortKey(sort)} as sort_key
+      from "user" u
+      where ${where}
+    ),
+    counted as (select count(*)::int as total from matched),
+    page as (
+      select id, row_number() over (order by ${pageOrder(sort)}) as ord
+      from matched order by ${pageOrder(sort)} limit ${limit} offset ${offset}
+    )
     select u.id, u.email, u.name, u."createdAt" as created_at, u.deleted_at,
       u."emailVerified" as email_verified, u."twoFactorEnabled" as two_factor_enabled,
       coalesce((select array_agg(distinct a."providerId" order by a."providerId") from account a where a."userId" = u.id), '{}') as providers,
@@ -101,8 +121,9 @@ adminUsersRoutes.get("/", async (c) => {
         'utm_source', sa.utm_source, 'utm_medium', sa.utm_medium, 'utm_campaign', sa.utm_campaign, 'utm_term', sa.utm_term,
         'utm_content', sa.utm_content, 'first_seen_at', sa.first_seen_at)
         from user_signup_attribution sa where sa.user_id = u.id) as attribution,
-      count(*) over ()::int as total
-    from "user" u
+      (select total from counted) as total
+    from page p
+    join "user" u on u.id = p.id
     left join organizations po on po.personal_owner_user_id = u.id
     left join lateral (
       select max(se."updatedAt") as last_active_at, count(*) filter (where se."expiresAt" > now())::int as active_sessions
@@ -121,15 +142,14 @@ adminUsersRoutes.get("/", async (c) => {
         max(k.last_used_at) as api_key_last_used_at
       from api_keys k where k.user_id = u.id and k.revoked_at is null
     ) keys on true
-    where (${q} = '' or u.email ilike ${like} or u.name ilike ${like} or u.id = ${q})
-      ${filter === "deleted" ? sql`` : sql`and u.deleted_at is null`}
-      ${filterClause(filter)}
-      ${surface ? sql`and exists (select 1 from user_client_surfaces s where s.user_id = u.id and s.surface = ${surface})` : sql``}
-    order by ${sortClause(sort)}
-    limit ${limit} offset ${offset}`;
+    order by p.ord`;
   const usage = await userUsageTotals(rows.map(row => row.id), null);
+  // An offset past the end still reports the real total.
+  const total = rows[0]?.total ?? (offset > 0 ? (await sql<{ total: number }[]>`
+    select count(*)::int as total from "user" u
+    where ${where}`)[0]?.total ?? 0 : 0);
   return c.json({
-    total: rows[0]?.total ?? 0,
+    total,
     limit, offset,
     users: rows.map(({ total: _total, ...row }) => {
       const spend = usage.get(row.id);
@@ -162,7 +182,7 @@ adminUsersRoutes.get("/summary", async (c) => {
     select to_char(d.day, 'YYYY-MM-DD') as day,
       count(u.id)::int as signups, count(u.id) filter (where u."emailVerified")::int as verified
     from generate_series(date_trunc('day', now()) - make_interval(days => ${days - 1}), date_trunc('day', now()), interval '1 day') as d(day)
-    left join "user" u on date_trunc('day', u."createdAt") = d.day and u.deleted_at is null
+    left join "user" u on u."createdAt" >= d.day and u."createdAt" < d.day + interval '1 day' and u.deleted_at is null
     group by d.day order by d.day`;
   const surfaces = await sql<{ surface: string; users: number; requests: number; active_7d: number }[]>`
     select s.surface, count(distinct s.user_id)::int as users, coalesce(sum(s.request_count), 0)::double precision as requests,

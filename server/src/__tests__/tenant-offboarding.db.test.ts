@@ -226,6 +226,8 @@ describe("account deletion", () => {
 
   it("purges personal and solo orgs, leaves team orgs with their content, and tombstones the user", async () => {
     await sql`update org_memberships set role = 'owner' where org_id = 'team' and user_id = 'teammate'`;
+    await sql`insert into user_signup_attribution (user_id, referrer_host, utm_source) values ('leaver', 'news.example', 'hn')`;
+    await sql`insert into user_client_surfaces (user_id, surface, request_count) values ('leaver', 'sdk', 3), ('teammate', 'web', 1)`;
     await expect(offboarding.deleteAccount({ userId: "leaver", confirmation: "nope@example.test" }, deps))
       .rejects.toMatchObject({ status: 400 });
 
@@ -243,5 +245,8 @@ describe("account deletion", () => {
     expect(await sql`select id, name from organizations where deleted_at is not null order by id`)
       .toEqual([{ id: "personal", name: "Deleted organization" }, { id: "solo", name: "Deleted organization" }]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([{ document_id: "mine-doc" }]);
+    // The tombstone keeps the user row, so admin-directory analytics are erased explicitly.
+    expect(await sql`select count(*)::int as count from user_signup_attribution`).toEqual([{ count: 0 }]);
+    expect(await sql`select user_id from user_client_surfaces`).toEqual([{ user_id: "teammate" }]);
   });
 });

@@ -38,7 +38,7 @@ describe("platform administrator user directory boundary", () => {
 
   it("lists users for a platform admin without caching", async () => {
     mocks.query.mockImplementation((strings: TemplateStringsArray) =>
-      Promise.resolve(strings.join("").includes("count(*) over ()") ? [{ id: "u1", email: "a@example.test", total: 1 }] : []));
+      Promise.resolve(strings.join("").includes("with matched") ? [{ id: "u1", email: "a@example.test", total: 1 }] : []));
     mocks.usage.mockResolvedValueOnce(new Map([["u1", { costCents: 12.5, tokens: 900, eventCount: 3 }]]));
     const response = await as(admin).request("/admin/users?filter=verified&sort=last_active&limit=10");
     expect(response.status).toBe(200);
@@ -58,9 +58,9 @@ describe("platform administrator user directory boundary", () => {
 
   it("passes search text only as bound parameters with LIKE wildcards escaped", async () => {
     await as(admin).request(`/admin/users?q=${encodeURIComponent("a%_\\'; drop table user;--")}`);
-    const [strings, ...values] = mocks.query.mock.calls.find(([parts]) => (parts as string[]).join("").includes("count(*) over ()"))! as [TemplateStringsArray, ...unknown[]];
-    expect(strings.join("?")).not.toContain("drop table");
-    expect(values).toContain("%a\\%\\_\\\\'; drop table user;--%");
+    const calls = mocks.query.mock.calls as [TemplateStringsArray, ...unknown[]][];
+    expect(calls.map(([strings]) => strings.join("?")).join("\n")).not.toContain("drop table");
+    expect(calls.flatMap(([, ...values]) => values)).toContain("%a\\%\\_\\\\'; drop table user;--%");
   });
 
   it("returns summary with a clamped window", async () => {

@@ -49,9 +49,11 @@ afterAll(async () => { await pool?.end(); await sql?.end(); await server?.stop()
 
 describe("admin user directory against migrated Postgres", () => {
   it("stores attribution once and flushes coalesced surfaces", async () => {
-    const cookie = `ds_attr=${encodeURIComponent(JSON.stringify({ r: "https://news.example/thread?x=1", us: "newsletter", l: "/pricing" }))}`;
+    const consent = "docslurp_analytics=granted; ";
+    expect(await recordSignupAttribution(pool, "u-active", `ds_attr=${encodeURIComponent(JSON.stringify({ us: "no-consent" }))}`)).toBe(false);
+    const cookie = `${consent}ds_attr=${encodeURIComponent(JSON.stringify({ r: "https://news.example/thread?x=1", us: "newsletter", l: "/pricing" }))}`;
     expect(await recordSignupAttribution(pool, "u-active", cookie)).toBe(true);
-    expect(await recordSignupAttribution(pool, "u-active", `ds_attr=${encodeURIComponent(JSON.stringify({ us: "overwrite" }))}`)).toBe(false);
+    expect(await recordSignupAttribution(pool, "u-active", `${consent}ds_attr=${encodeURIComponent(JSON.stringify({ us: "overwrite" }))}`)).toBe(false);
     recorder.record("u-active", "sdk", "sdk"); recorder.record("u-active", "sdk", null); recorder.record("u-active", "mcp", null);
     recorder.record("no-such-user", "api", null);
     await recorder.flush();
@@ -89,6 +91,10 @@ describe("admin user directory against migrated Postgres", () => {
     expect(await ids("q=IDLE@")).toEqual(["u-idle"]);
     expect(await ids("q=%25")).toEqual([]);
     expect(await ids("filter=deleted")).toEqual(["u-gone"]);
+    expect(await ids("sort=searches&limit=1")).toEqual(["u-active"]);
+    expect(await ids("sort=oldest&limit=1&offset=1")).toHaveLength(1);
+    const past = await (await app.request("/admin/users?offset=50")).json();
+    expect(past).toMatchObject({ total: 2, users: [] });
   });
 
   it("summarizes signups, funnel, surfaces and sources", async () => {

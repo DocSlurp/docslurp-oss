@@ -31,3 +31,8 @@ CREATE TABLE IF NOT EXISTS user_client_surfaces (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS user_client_surfaces_surface_idx ON user_client_surfaces (surface, last_seen_at DESC);
+--> statement-breakpoint
+-- Per-user lookups in the admin directory (and account offboarding) scanned these tables.
+CREATE INDEX IF NOT EXISTS documents_user_id_idx ON documents (user_id);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS api_keys_user_id_idx ON api_keys (user_id) WHERE revoked_at IS NULL;
