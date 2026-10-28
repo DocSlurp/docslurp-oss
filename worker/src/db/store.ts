@@ -3431,7 +3431,8 @@ export class Store {
         w.budget_alert_threshold_percent,
         w.budget_alert_level,
         w.budget_paused,
-        coalesce(spend.cost_cents, 0)::integer as spend_cents,
+        -- floor, not the cast's rounding: 99.5 cents must not trip a 100-cent cap (the live check compares exactly).
+        floor(coalesce(spend.cost_cents, 0))::integer as spend_cents,
         np.cost_alert
       from workspaces w
       join "user" u on u.id = w.user_id
@@ -3516,7 +3517,7 @@ export class Store {
         o.budget_alert_threshold_percent,
         o.budget_alert_level,
         o.budget_paused,
-        coalesce(spend.cost_cents, 0)::integer as spend_cents,
+        floor(coalesce(spend.cost_cents, 0))::integer as spend_cents,
         np.cost_alert
       from organizations o
       join "user" u on u.id = o.created_by_user_id
