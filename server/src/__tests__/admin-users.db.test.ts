@@ -103,7 +103,10 @@ describe("admin user directory against migrated Postgres", () => {
 
   it("marks fake, agent-created and staff accounts and keeps manual choices", async () => {
     await sql`insert into "user" (id, name, email, "emailVerified") values
-      ('u-agent', 'Pressure Test 1', 'pressure-1@docslurp.invalid', true), ('u-staff', 'Staff Person', 'dan@docslurp.io', true)`;
+      ('u-agent', 'Pressure Test 1', 'pressure-1@docslurp.invalid', true), ('u-staff', 'Staff Person', 'dan@docslurp.io', true),
+      ('u-upper', 'Upper Case', ' QA@Sub.Example.COM ', true)`;
+    expect((await sql`select account_kind from "user" where id = 'u-upper'`)[0]!.account_kind).toBe("test");
+    await sql`delete from "user" where id = 'u-upper'`;
     const kinds = async () => Object.fromEntries((await sql`select id, account_kind as k, account_kind_source as s from "user"`).map(r => [r.id, `${r.k}/${r.s}`]));
     // The insert trigger catches reserved domains even for raw SQL inserts.
     expect(await kinds()).toMatchObject({ "u-active": "customer/default", "u-agent": "test/rule", "u-staff": "customer/default" });
@@ -121,6 +124,7 @@ describe("admin user directory against migrated Postgres", () => {
     expect((await kinds())["u-idle"]).toBe("test/rule");
     vi.stubEnv("TEST_ACCOUNT_EMAIL_PATTERNS", "");
     expect((await (await app.request("/admin/users/reclassify", { method: "POST" })).json()).changed).toBe(1);
+    expect((await sql`select metadata from audit_log where action = 'admin.account_kind.reclassify'`)[0]!.metadata).toEqual({ changed: 1 });
     expect((await kinds())["u-idle"]).toBe("customer/default");
     expect((await app.request("/admin/users/nobody/kind", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "test" }) })).status).toBe(404);
     const ids = async (query: string) => (await (await app.request(`/admin/users?${query}`)).json()).users.map((u: { id: string }) => u.id).sort();

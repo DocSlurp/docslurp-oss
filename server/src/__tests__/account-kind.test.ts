@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyEmail, isReservedTestEmail, staffEmailDomains, testEmailPatterns } from "../services/account-kind.js";
+import { classifyEmail, globMatches, isReservedTestEmail, staffEmailDomains, testEmailPatterns } from "../services/account-kind.js";
 
 describe("account kind rules", () => {
   it("treats reserved test domains as test accounts (seed, e2e, pressure test)", () => {
@@ -16,7 +16,17 @@ describe("account kind rules", () => {
     expect(classifyEmail("QA+agent7@gmail.com", false, env)?.kind).toBe("test");
     expect(classifyEmail("anyone@mailinator.com", false, env)?.kind).toBe("test");
     expect(classifyEmail("qaXagent@gmail.com", false, env)).toBeNull();
-    expect(testEmailPatterns({ TEST_ACCOUNT_EMAIL_PATTERNS: "a.(b)*@c.d" })[0]!.test("a.(b)zz@c.d")).toBe(true);
+    expect(globMatches(testEmailPatterns({ TEST_ACCOUNT_EMAIL_PATTERNS: "a.(b)*@c.d" })[0]!, "a.(b)zz@c.d")).toBe(true);
+    expect(globMatches(["ab", "ba"], "aba")).toBe(false);
+    expect(globMatches(["", "x", ""], "axb")).toBe(true);
+  });
+
+  it("stays linear on hostile patterns and addresses", () => {
+    const parts = testEmailPatterns({ TEST_ACCOUNT_EMAIL_PATTERNS: "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*" })[0]!;
+    const started = performance.now();
+    expect(globMatches(parts, `${"a".repeat(5_000)}b@x.y`)).toBe(true);
+    expect(globMatches(parts, `${"a".repeat(10)}@${"b".repeat(5_000)}`)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(50);
   });
 
   it("recognizes staff only from a verified address", () => {

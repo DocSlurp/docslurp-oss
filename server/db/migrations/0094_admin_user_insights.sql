@@ -59,7 +59,7 @@ ALTER TABLE "user" ADD CONSTRAINT user_account_kind_source_check CHECK (account_
 -- every seed, e2e and pressure-test identity uses one (*.local, *.invalid, *.test).
 CREATE OR REPLACE FUNCTION docslurp_reserved_test_email(email text) RETURNS boolean
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT lower(split_part(coalesce(email, ''), '@', 2)) ~ '(^|\.)((test|example|invalid|localhost|local)|example\.(com|net|org))$'
+  SELECT lower(split_part(trim(coalesce(email, '')), '@', 2)) ~ '(^|\.)((test|example|invalid|localhost|local)|example\.(com|net|org))$'
 $$;
 --> statement-breakpoint
 -- Runs for every insert, including scripts that write "user" rows directly.

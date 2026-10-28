@@ -250,4 +250,4 @@ adminUsersRoutes.patch("/:userId/kind", async (c) => {
 });
 
 /** Re-runs the email rules (after changing STAFF_EMAIL_DOMAINS or TEST_ACCOUNT_EMAIL_PATTERNS); manual choices are kept. */
-adminUsersRoutes.post("/reclassify", async (c) => c.json({ changed: await applyAccountKindRules(pgQuery) }));
+adminUsersRoutes.post("/reclassify", async (c) => c.json({ changed: await applyAccountKindRules(pgQuery, undefined, getRequestActor(c).userId) }));

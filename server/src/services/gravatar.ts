@@ -9,8 +9,11 @@ import { createHash } from "node:crypto";
  */
 
 const PROFILE_API = "https://api.gravatar.com/v3/profiles/";
-const OAUTH_AVATAR_HOSTS = [/^avatars\.githubusercontent\.com$/, /^[a-z0-9-]+\.googleusercontent\.com$/];
+// Google profile photos live on lh<N>; other googleusercontent hosts serve user-uploaded content.
+const OAUTH_AVATAR_HOSTS = [/^avatars\.githubusercontent\.com$/, /^lh[0-9]+\.googleusercontent\.com$/];
 const CACHE_TTL_MS = 60 * 60 * 1000;
+/** Failures (rate limit, outage) are remembered briefly so repeated clicks do not spend the hourly quota. */
+const ERROR_TTL_MS = 60 * 1000;
 const CACHE_MAX = 1_000;
 
 export function gravatarHash(email: string): string {
@@ -22,7 +25,7 @@ export function avatarUrl(email: string, image: string | null | undefined, size 
   if (image) {
     try {
       const url = new URL(image);
-      if (url.protocol === "https:" && OAUTH_AVATAR_HOSTS.some(host => host.test(url.hostname))) return url.toString();
+      if (url.protocol === "https:" && !url.username && !url.password && OAUTH_AVATAR_HOSTS.some(host => host.test(url.hostname))) return url.toString();
     } catch { /* fall through */ }
   }
   return `https://gravatar.com/avatar/${gravatarHash(email)}?s=${size}&d=404`;
@@ -80,7 +83,7 @@ export function sanitizeGravatarProfile(data: unknown): GravatarProfile {
 }
 
 export class GravatarClient {
-  private cache = new Map<string, { at: number; value: GravatarLookup }>();
+  private cache = new Map<string, { at: number; value?: GravatarLookup; error?: string }>();
   constructor(
     private readonly apiKey: () => string | undefined = () => process.env.GRAVATAR_API_KEY?.trim() || undefined,
     private readonly fetchImpl: typeof fetch = fetch,
@@ -92,19 +95,29 @@ export class GravatarClient {
     if (!key) return { status: "not_configured" };
     const hash = gravatarHash(email);
     const cached = this.cache.get(hash);
-    if (cached && this.now() - cached.at < CACHE_TTL_MS) return cached.value;
-    const response = await this.fetchImpl(`${PROFILE_API}${hash}`, {
-      headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-      redirect: "error",
-      signal: AbortSignal.timeout(5_000),
-    });
+    if (cached?.value && this.now() - cached.at < CACHE_TTL_MS) return cached.value;
+    if (cached?.error && this.now() - cached.at < ERROR_TTL_MS) throw new Error(cached.error);
     let value: GravatarLookup;
-    if (response.status === 404) value = { status: "not_found" };
-    else if (response.ok) value = { status: "found", profile: sanitizeGravatarProfile(await response.json()) };
-    else throw new Error(`Gravatar profile lookup failed with HTTP ${response.status}`);
-    if (this.cache.size >= CACHE_MAX) this.cache.delete(this.cache.keys().next().value!);
-    this.cache.set(hash, { at: this.now(), value });
+    try {
+      const response = await this.fetchImpl(`${PROFILE_API}${hash}`, {
+        headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+        redirect: "error",
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (response.status === 404) value = { status: "not_found" };
+      else if (response.ok) value = { status: "found", profile: sanitizeGravatarProfile(await response.json()) };
+      else throw new Error(`Gravatar profile lookup failed with HTTP ${response.status}`);
+    } catch (error) {
+      this.remember(hash, { at: this.now(), error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+    this.remember(hash, { at: this.now(), value });
     return value;
+  }
+
+  private remember(hash: string, entry: { at: number; value?: GravatarLookup; error?: string }): void {
+    if (!this.cache.has(hash) && this.cache.size >= CACHE_MAX) this.cache.delete(this.cache.keys().next().value!);
+    this.cache.set(hash, entry);
   }
 }
 
