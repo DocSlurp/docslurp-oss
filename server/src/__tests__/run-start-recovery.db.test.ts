@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { describe, expect, it, vi } from "vitest";
 
@@ -8,55 +6,48 @@ import { createRunLifecycle } from "../services/run-lifecycle.js";
 import { createRunStartRecovery } from "../services/run-start-recovery.js";
 import type { SqlClient } from "../db.js";
 
-// Real-Postgres check of run-start recovery (claiming, backoff, SKIP LOCKED),
-// run inside a throwaway schema with the real 0029 migration applied. Skipped
-// without a local DB:
+// Real-Postgres check of run-start recovery (claiming, backoff, SKIP LOCKED).
+// RUN_LIFECYCLE_DATABASE_URL must point at a disposable local database built by
+// applying server/db/migrations (pnpm db:migrate); server/db/migrations is the
+// only schema source. Each test seeds its own user, organization and workspace
+// with unique ids and deletes them afterwards. Recovery sweeps every due Run in
+// the database, so do not point this at a database other processes are using.
 //   RUN_LIFECYCLE_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-start-recovery.db
 const databaseUrl = process.env.RUN_LIFECYCLE_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
 
-const migration = readFileSync(
-  fileURLToPath(new URL("../../db/migrations/0029_run_workflow_start_tracking.sql", import.meta.url)),
-  "utf8",
-);
-
 const temporalDown = new Error(
   "Temporal API client could not connect to Temporal at temporal.example.invalid:7233.\noriginalError=Error: Failed to connect before the deadline",
 );
 
-type Clients = { sql: SqlClient; other: SqlClient };
+type Tenant = { userId: string; orgId: string; workspaceId: string; runId: (name: string) => string };
+type Clients = { sql: SqlClient; other: SqlClient; tenant: Tenant };
 
-async function withSchema(run: (clients: Clients) => Promise<void>): Promise<void> {
-  const schema = `run_start_recovery_${randomUUID().replaceAll("-", "")}`;
-  const admin = postgres(databaseUrl, { max: 1, prepare: false, onnotice: () => {} });
-  await admin.unsafe(`create schema ${schema}`);
-  const connect = () =>
-    postgres(databaseUrl, { max: 2, prepare: false, onnotice: () => {}, connection: { search_path: schema } });
+async function withTenant(run: (clients: Clients) => Promise<void>): Promise<void> {
+  const suffix = randomUUID();
+  const tenant: Tenant = {
+    userId: `rsr-user-${suffix}`,
+    orgId: `rsr-org-${suffix}`,
+    workspaceId: `rsr-ws-${suffix}`,
+    runId: (name) => `${name}-${suffix}`,
+  };
+  const connect = () => postgres(databaseUrl, { max: 2, prepare: false, onnotice: () => {} });
   const sql = connect();
   const other = connect();
   try {
-    await sql.unsafe(`
-      create table workspace_runs (
-        id text primary key, user_id text not null, status text not null, stage text not null,
-        creation_ready_at timestamptz default now(), creation_expires_at timestamptz,
-        control_state text, control_requested_at timestamptz, error text,
-        stats jsonb not null default '{}', pipeline jsonb not null default '{}',
-        failure_count integer not null default 0, dead_lettered_at timestamptz, dead_letter_reason text,
-        lease_expires_at timestamptz, last_heartbeat_at timestamptz,
-        created_at timestamptz not null default now(), updated_at timestamptz not null default now()
-      );
-    `);
-    for (const statement of migration.split("--> statement-breakpoint")) {
-      await sql.unsafe(statement);
-    }
-    await sql.unsafe(`create table documents (id text primary key, run_id text)`);
-    await run({ sql: sql as unknown as SqlClient, other: other as unknown as SqlClient });
+    await sql`insert into "user" (id, name, email) values (${tenant.userId}, 'Run start recovery', ${`${tenant.userId}@example.test`})`;
+    await sql`insert into organizations (id, name, created_by_user_id) values (${tenant.orgId}, 'Run start recovery', ${tenant.userId})`;
+    await sql`insert into org_memberships (org_id, user_id, role) values (${tenant.orgId}, ${tenant.userId}, 'owner')`;
+    await sql`insert into workspaces (id, org_id, user_id, name) values (${tenant.workspaceId}, ${tenant.orgId}, ${tenant.userId}, 'Run start recovery')`;
+    await run({ sql: sql as unknown as SqlClient, other: other as unknown as SqlClient, tenant });
   } finally {
+    // Runs and documents cascade from the workspace.
+    await sql`delete from workspaces where id = ${tenant.workspaceId}`;
+    await sql`delete from organizations where id = ${tenant.orgId}`;
+    await sql`delete from "user" where id = ${tenant.userId}`;
     await sql.end();
     await other.end();
-    await admin.unsafe(`drop schema ${schema} cascade`);
-    await admin.end();
   }
 }
 
@@ -86,13 +77,15 @@ function recovery(sql: SqlClient, temporal: ReturnType<typeof fakeTemporal>) {
   return { lifecycle, recovery: createRunStartRecovery({ sql, lifecycle, config }) };
 }
 
-async function insertRun(sql: SqlClient, id: string, values: { ageMs?: number; status?: string; controlState?: string; started?: boolean } = {}) {
+async function insertRun(sql: SqlClient, tenant: Tenant, name: string, values: { ageMs?: number; status?: string; controlState?: string; started?: boolean } = {}) {
   await sql`
-    insert into workspace_runs (id, user_id, status, stage, control_state, created_at, workflow_started_at)
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
     values (
-      ${id}, 'user-1', ${values.status ?? "queued"}, 'queued', ${values.controlState ?? null},
+      ${tenant.runId(name)}, ${tenant.orgId}, ${tenant.userId}, ${tenant.workspaceId}, 'bulk-upload',
+      ${values.status ?? "queued"}, 'queued', ${values.controlState ?? null},
       now() - (${values.ageMs ?? 0} * interval '1 millisecond'),
-      ${values.started ? sql`now()` : null}
+      ${values.started ? sql`now()` : null},
+      now()
     )
   `;
 }
@@ -111,16 +104,16 @@ vi.spyOn(console, "log").mockImplementation(() => {});
 
 describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
   it("starts a deferred run within seconds once Temporal is reachable", async () => {
-    await withSchema(async ({ sql }) => {
+    await withTenant(async ({ sql, tenant }) => {
       const temporal = fakeTemporal();
       const { lifecycle, recovery: r } = recovery(sql, temporal);
-      await insertRun(sql, "run-deferred");
+      await insertRun(sql, tenant, "run-deferred");
 
       // Intake right after an app restart: Temporal connect deadline.
       temporal.state.down = true;
       const deferredAt = Date.now();
-      await expect(lifecycle.start({ id: "run-deferred", pipeline: {} as never })).resolves.toMatchObject({ status: "deferred" });
-      const pending = await runRow(sql, "run-deferred");
+      await expect(lifecycle.start({ id: tenant.runId("run-deferred"), pipeline: {} as never })).resolves.toMatchObject({ status: "deferred" });
+      const pending = await runRow(sql, tenant.runId("run-deferred"));
       expect(pending.workflow_started_at).toBeNull();
       expect(pending.workflow_start_attempts).toBe(1);
       expect(pending.workflow_start_next_at!.getTime()).toBeGreaterThan(Date.now());
@@ -129,14 +122,14 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
       // forced pass defers again without spending one connect per run.
       expect(await r.sweepOnce()).toMatchObject({ claimed: 0 });
       expect(await r.sweepOnce({ ignoreBackoff: true })).toMatchObject({ claimed: 1, deferred: 1 });
-      expect((await runRow(sql, "run-deferred")).workflow_start_attempts).toBe(2);
+      expect((await runRow(sql, tenant.runId("run-deferred"))).workflow_start_attempts).toBe(2);
 
       // Temporal reachable: the client's connect listener kicks with ignoreBackoff.
       temporal.state.down = false;
       expect(await r.kick({ ignoreBackoff: true })).toMatchObject({ started: 1 });
-      expect(temporal.workflows.has("run-deferred")).toBe(true);
+      expect(temporal.workflows.has(tenant.runId("run-deferred"))).toBe(true);
       expect(Date.now() - deferredAt).toBeLessThan(5_000);
-      const started = await runRow(sql, "run-deferred");
+      const started = await runRow(sql, tenant.runId("run-deferred"));
       expect(started.workflow_started_at).not.toBeNull();
       expect(started.workflow_start_next_at).toBeNull();
 
@@ -148,49 +141,49 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
   });
 
   it("retries on the backoff schedule without a connect event", async () => {
-    await withSchema(async ({ sql }) => {
+    await withTenant(async ({ sql, tenant }) => {
       const temporal = fakeTemporal();
       const { lifecycle, recovery: r } = recovery(sql, temporal);
-      await insertRun(sql, "run-backoff");
+      await insertRun(sql, tenant, "run-backoff");
       temporal.state.down = true;
-      await lifecycle.start({ id: "run-backoff", pipeline: {} as never });
+      await lifecycle.start({ id: tenant.runId("run-backoff"), pipeline: {} as never });
       temporal.state.down = false;
 
       expect(await r.sweepOnce()).toMatchObject({ claimed: 0 });
       // First retry is due after the 2 s base backoff.
-      await sql`update workspace_runs set workflow_start_next_at = now() - interval '1 ms' where id = 'run-backoff'`;
+      await sql`update workspace_runs set workflow_start_next_at = now() - interval '1 ms' where id = ${tenant.runId("run-backoff")}`;
       expect(await r.sweepOnce()).toMatchObject({ claimed: 1, started: 1 });
     });
   });
 
   it("boot pass starts orphaned queued runs and leaves runs that are legitimately waiting", async () => {
-    await withSchema(async ({ sql }) => {
+    await withTenant(async ({ sql, tenant }) => {
       const temporal = fakeTemporal();
       const { recovery: r } = recovery(sql, temporal);
       // Intake request died after creating the run (no start, no deferral marker).
-      await insertRun(sql, "run-orphan", { ageMs: 60_000 });
+      await insertRun(sql, tenant, "run-orphan", { ageMs: 60_000 });
       // Creation still in flight: never eligible, regardless of its age.
-      await insertRun(sql, "run-fresh", { ageMs: 60_000 });
-      await sql`update workspace_runs set creation_ready_at = null, creation_expires_at = now() + interval '5 minutes' where id = 'run-fresh'`;
+      await insertRun(sql, tenant, "run-fresh", { ageMs: 60_000 });
+      await sql`update workspace_runs set creation_ready_at = null, creation_expires_at = now() + interval '5 minutes' where id = ${tenant.runId("run-fresh")}`;
       // Started, waiting for worker slots.
-      await insertRun(sql, "run-waiting", { ageMs: 60_000, started: true });
-      await insertRun(sql, "run-paused", { ageMs: 60_000, controlState: "paused" });
-      await insertRun(sql, "run-processing", { ageMs: 60_000, status: "processing" });
+      await insertRun(sql, tenant, "run-waiting", { ageMs: 60_000, started: true });
+      await insertRun(sql, tenant, "run-paused", { ageMs: 60_000, controlState: "paused" });
+      await insertRun(sql, tenant, "run-processing", { ageMs: 60_000, status: "processing" });
 
       expect(await r.kick()).toMatchObject({ claimed: 1, started: 1 });
-      expect([...temporal.workflows.keys()]).toEqual(["run-orphan"]);
-      expect((await runRow(sql, "run-orphan")).workflow_started_at).not.toBeNull();
+      expect([...temporal.workflows.keys()]).toEqual([tenant.runId("run-orphan")]);
+      expect((await runRow(sql, tenant.runId("run-orphan"))).workflow_started_at).not.toBeNull();
     });
   });
 
   it("never double-starts across concurrent app instances", async () => {
-    await withSchema(async ({ sql, other }) => {
+    await withTenant(async ({ sql, other, tenant }) => {
       const temporal = fakeTemporal();
       temporal.state.delayMs = 20;
       const a = recovery(sql, temporal).recovery;
       const b = recovery(other, temporal).recovery;
       for (let index = 0; index < 40; index += 1) {
-        await insertRun(sql, `run-${index}`, { ageMs: 60_000 });
+        await insertRun(sql, tenant, `run-${index}`, { ageMs: 60_000 });
       }
 
       const [passA, passB] = await Promise.all([a.kick(), b.kick()]);
@@ -199,23 +192,24 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
       // SKIP LOCKED + the claim lease: every run was started exactly once.
       expect(temporal.state.startCalls).toBe(40);
       const [{ pending }] = await sql<{ pending: number }[]>`
-        select count(*)::int as pending from workspace_runs where workflow_started_at is null
+        select count(*)::int as pending from workspace_runs
+        where workspace_id = ${tenant.workspaceId} and workflow_started_at is null
       `;
       expect(pending).toBe(0);
     });
   });
 
   it("treats a racing start as already started", async () => {
-    await withSchema(async ({ sql }) => {
+    await withTenant(async ({ sql, tenant }) => {
       const temporal = fakeTemporal();
       const { lifecycle, recovery: r } = recovery(sql, temporal);
-      await insertRun(sql, "run-race", { ageMs: 60_000 });
+      await insertRun(sql, tenant, "run-race", { ageMs: 60_000 });
       // The intake start succeeded but its marker write was lost.
-      temporal.workflows.set("run-race", Date.now());
+      temporal.workflows.set(tenant.runId("run-race"), Date.now());
       expect(await r.sweepOnce()).toMatchObject({ claimed: 1, started: 1 });
       expect(temporal.workflows.size).toBe(1);
-      expect((await runRow(sql, "run-race")).workflow_started_at).not.toBeNull();
-      await expect(lifecycle.start({ id: "run-race", pipeline: {} as never })).resolves.toEqual({ status: "already-started" });
+      expect((await runRow(sql, tenant.runId("run-race"))).workflow_started_at).not.toBeNull();
+      await expect(lifecycle.start({ id: tenant.runId("run-race"), pipeline: {} as never })).resolves.toEqual({ status: "already-started" });
     });
   });
 });

@@ -43,7 +43,9 @@ describe.skipIf(!redisUrl)("Redis sliding-window rate limit store", () => {
     for (const [offset, countDenied] of steps) {
       const fromRedis = await redis.consume(input(start + offset, countDenied));
       const fromMemory = await memory.consume(input(start + offset, countDenied));
-      expect(fromRedis, `step +${offset}ms`).toEqual(fromMemory);
+      // Only the Redis store marks its answer shared; the per-process store leaves it unset.
+      expect(fromMemory.shared, `step +${offset}ms`).toBeUndefined();
+      expect(fromRedis, `step +${offset}ms`).toEqual({ ...fromMemory, shared: true });
     }
   });
 
@@ -64,7 +66,9 @@ describe.skipIf(!redisUrl)("Redis sliding-window rate limit store", () => {
         ],
       };
       const fromRedis = await redis.consume(input);
-      expect(fromRedis, `step +${offset}ms`).toEqual(await memory.consume(input));
+      const fromMemory = await memory.consume(input);
+      expect(fromMemory.shared, `step +${offset}ms`).toBeUndefined();
+      expect(fromRedis, `step +${offset}ms`).toEqual({ ...fromMemory, shared: true });
       if (fromRedis.denied >= 0) denials += 1;
     }
     expect(denials).toBeGreaterThan(3);
@@ -83,7 +87,7 @@ describe.skipIf(!redisUrl)("Redis sliding-window rate limit store", () => {
         countDenied: false,
         counters: [{ key: `rl-test:{${randomUUID()}}:x`, limit: 1, windowMs: 1_000 }],
       });
-      expect(result).toMatchObject({ blockedMs: 0, denied: -1, counted: true });
+      expect(result).toMatchObject({ blockedMs: 0, denied: -1, counted: true, shared: true });
     } finally {
       await client.quit();
     }

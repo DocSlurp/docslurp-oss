@@ -3,7 +3,7 @@ import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { ExtractionArtifactRef } from "@docslurp/shared";
 import { createLocalArtifactAdapters, availableLocalArtifactAdapters, localArtifactToolAvailability } from "./local-artifact-adapters.js";
 import { executeArtifactGraph } from "./artifact-graph.js";
@@ -12,15 +12,21 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const pdf = path.join(root, "worker/testdata/pdf-fixtures/tables-multipage-financials.pdf");
 
 describe("local artifact adapters", () => {
-  it("declares local tool availability and output limits", async () => {
-    const available = await localArtifactToolAvailability();
-    expect(typeof available.pdftotext).toBe("boolean");
+  // The availability check provisions pandoc into the worker venv on first use
+  // (pip install of pypandoc-binary, ~5 s cold). Do that once, with its own
+  // budget, instead of inside whichever test runs first under the 5 s test
+  // timeout; later checks take milliseconds.
+  let tools: Record<string, boolean>;
+  beforeAll(async () => { tools = await localArtifactToolAvailability(); }, 180_000);
+
+  it("declares local tool availability and output limits", () => {
+    expect(Object.values(tools).every(value => typeof value === "boolean")).toBe(true);
+    expect(typeof tools.pdftotext).toBe("boolean");
     expect(() => createLocalArtifactAdapters({ outputDir: tmpdir(), imageScaleTo: 5000 })).toThrow();
   });
 
-  it("preserves page ancestry across PDF text to Markdown and page render", async () => {
-    const available = await localArtifactToolAvailability();
-    if (!available.pdftotext || !available.pandoc || !available.pdftoppm) return;
+  it("preserves page ancestry across PDF text to Markdown and page render", async (ctx) => {
+    if (!tools.pdftotext || !tools.pandoc || !tools.pdftoppm) ctx.skip();
     const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-local-adapters-"));
     try {
       const bytes = await readFile(pdf);
@@ -43,9 +49,8 @@ describe("local artifact adapters", () => {
       expect(image.placements[0].bbox).toBeUndefined();
     } finally { await rm(scratch, { recursive: true, force: true }); }
   });
-  it("builds document Markdown and a page-associated media map through the graph", async () => {
-    const tools = await localArtifactToolAvailability();
-    if (!tools.pdftotext || !tools.pandoc || !tools.pdfimages) return;
+  it("builds document Markdown and a page-associated media map through the graph", async (ctx) => {
+    if (!tools.pdftotext || !tools.pandoc || !tools.pdfimages) ctx.skip();
     const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-local-graph-"));
     try {
       const sourcePath = path.join(root, "worker/testdata/pdf-fixtures/image-heavy-ocr.pdf");
@@ -76,9 +81,8 @@ describe("local artifact adapters", () => {
     } finally { await rm(scratch, { recursive: true, force: true }); }
   });
 
-  it("produces an empty media map when PDF pages have no embedded images", async () => {
-    const tools = await localArtifactToolAvailability();
-    if (!tools.pdfimages) return;
+  it("produces an empty media map when PDF pages have no embedded images", async (ctx) => {
+    if (!tools.pdfimages) ctx.skip();
     const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-empty-media-"));
     try {
       const bytes = await readFile(pdf);

@@ -24,10 +24,13 @@ describe.skipIf(!databaseUrl)("workspace graph service (database)", () => {
     await sql`insert into "user"(id, name, email) values ('user-graph', 'Graph Owner', 'graph-owner@example.test')`;
     await sql`insert into organizations(id, name, slug, created_by_user_id) values ('org-graph', 'Graph Org', 'graph-org', 'user-graph')`;
     await sql`insert into org_memberships(org_id, user_id, role) values ('org-graph', 'user-graph', 'owner')`;
+    // propositionIndex is a non-graph setting the legal-contracts template
+    // leaves unlocked; summarize is locked off by the template (strict
+    // privacy forbids hosted summaries), so it is seeded as the template has it.
     await sql`
       insert into workspaces(id, org_id, user_id, name, template_key, pipeline)
       values ('ws-graph', 'org-graph', 'user-graph', 'Contracts', 'legal-contracts',
-        ${sql.json({ graphRag: true, summarize: true })})
+        ${sql.json({ graphRag: true, summarize: false, propositionIndex: true })})
     `;
     await sql`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
@@ -75,10 +78,10 @@ describe.skipIf(!databaseUrl)("workspace graph service (database)", () => {
     const status = await service.updateWorkspaceGraph("ws-graph", "user-graph", { depth: "deep", entityTypes: ["party", "clause"] });
     expect(status.config).toEqual({ domain: null, entityTypes: ["party", "clause"], depth: "deep" });
     expect(status.coverage).toMatchObject({ current: 0, stale: 2, missing: 1 });
-    const [workspace] = await sql<{ pipeline: { summarize: boolean; graphRag: boolean } }[]>`
+    const [workspace] = await sql<{ pipeline: { summarize: boolean; graphRag: boolean; propositionIndex: boolean } }[]>`
       select pipeline from workspaces where id = 'ws-graph'
     `;
-    expect(workspace?.pipeline).toMatchObject({ summarize: true, graphRag: true });
+    expect(workspace?.pipeline).toMatchObject({ propositionIndex: true, summarize: false, graphRag: true });
   });
 
   it("queues one rebuild at a time with its estimate, and cancels queued jobs at once", async () => {
