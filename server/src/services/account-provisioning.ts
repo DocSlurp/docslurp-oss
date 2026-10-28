@@ -43,7 +43,8 @@ export async function ensureUserAndOrganization(appDbPool: Pick<Pool, "query" | 
     if (existingOrg.rowCount === 0) {
       const orgId = randomUUID();
       const ownerLabel = user.name.trim().split(/\s+/)[0] || shortId(user.id, 6);
-      const slugBase = slugify(`${ownerLabel}-${shortId(user.id, 6)}`) || `org-${shortId(user.id, 6)}`;
+      // A shared name or user-ID prefix must not make another account fail sign-in.
+      const slugBase = `${slugify(ownerLabel) || "org"}-${orgId}`;
 
       await client.query(
         `
