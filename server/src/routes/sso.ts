@@ -34,6 +34,7 @@ import { validationHook } from "../lib/validation.js";
 import { safeRedirectPath } from "../lib/safe-redirect.js";
 import { issueSsoSession } from "../lib/sso-enforcement.js";
 import { createSsoUnlinkedPass, SSO_UNLINKED_PASS_COOKIE, SSO_UNLINKED_PASS_TTL_SECONDS } from "../lib/sso-unlinked-pass.js";
+import { databaseAuthBudgetStore, hashedBudgetKey, type AuthBudgetStore } from "../lib/auth-rate-limits.js";
 
 const ssoConfigSchema = z.object({
   providerType: z.enum(["saml", "oidc"]).nullable().optional(),
@@ -105,7 +106,8 @@ const knownIssuerEndpointHosts: Record<string, readonly string[]> = {
 };
 const ssoRateLimitWindowMs = Number.parseInt(process.env.SSO_RATE_LIMIT_WINDOW_MS ?? "60000", 10);
 const ssoRateLimitMax = Number.parseInt(process.env.SSO_RATE_LIMIT_MAX ?? "30", 10);
-const ssoRateLimitBuckets = new Map<string, { resetAt: number; count: number }>();
+/** Shared by every app machine (auth_rate_limits); the global API limiter still applies first. */
+let ssoRateLimitStore: AuthBudgetStore = databaseAuthBudgetStore(appDbPool);
 
 function appUrl(): string {
   return process.env.APP_URL ?? "http://localhost:4321";
@@ -493,39 +495,35 @@ async function assertSafeOidcEndpoints(metadata: OidcMetadata, metadataUrl: stri
 
 function ssoRateLimitKey(c: any): string {
   // Same edge-derived address as the API limiter (trusted-proxy resolution, see
-  // lib/client-ip.ts); never a client-controlled header.
+  // lib/client-ip.ts); never a client-controlled header. Hashed before storage.
   const trustedIp = requestIp(c);
   const userAgent = c.req.header("user-agent") ?? "unknown";
   const principal = trustedIp ?? createHash("sha256").update(userAgent).digest("hex").slice(0, 16);
-  return `${principal}:${c.req.method}:${c.req.path}`;
+  return hashedBudgetKey("sso", `${principal}:${c.req.method}:${c.req.path}`);
 }
 
+/** Database errors propagate: a limiter that can't count refuses rather than waving requests through. */
 async function ssoRateLimit(c: any, next: () => Promise<void>) {
   if (ssoRateLimitMax <= 0) {
     await next();
     return;
   }
 
-  const now = Date.now();
-  const key = ssoRateLimitKey(c);
-  const existing = ssoRateLimitBuckets.get(key);
-  const bucket = existing && existing.resetAt > now
-    ? existing
-    : { resetAt: now + ssoRateLimitWindowMs, count: 0 };
-  bucket.count += 1;
-  ssoRateLimitBuckets.set(key, bucket);
-
-  if (bucket.count > ssoRateLimitMax) {
-    const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
-    c.header("Retry-After", String(retryAfterSeconds));
+  const result = await ssoRateLimitStore.consume(ssoRateLimitKey(c), {
+    windowSeconds: Math.max(1, Math.ceil(ssoRateLimitWindowMs / 1000)),
+    max: ssoRateLimitMax,
+  });
+  if (!result.allowed) {
+    c.header("Retry-After", String(result.retryAfterSeconds));
     return apiStatusError(c, 429, "Too many SSO requests");
   }
 
   await next();
 }
 
-export function resetSsoRateLimitBucketsForTests(): void {
-  ssoRateLimitBuckets.clear();
+/** Tests run without the shared table; production always counts in the database. */
+export function setSsoRateLimitStoreForTests(store: AuthBudgetStore): void {
+  ssoRateLimitStore = store;
 }
 
 function createSamlRequestCacheProvider(orgId: string): CacheProvider {

@@ -38,7 +38,7 @@ importers:
   .:
     dependencies:
       better-auth:
-        specifier: ^1.7.14
+        specifier: 1.7.14
         version: 1.7.14(a097ef5dcde9ded72039ef417dfa99cd)
       postgres:
         specifier: ^3.4.9
@@ -218,6 +218,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1157.0
         version: 3.1157.0
+      '@better-auth/core':
+        specifier: 1.7.14
+        version: 1.7.14(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(@opentelemetry/api@1.9.1)(better-call@1.4.4(zod@4.6.7))(jose@6.2.13)(kysely@0.29.7)(nanostores@1.5.5)
       '@better-auth/passkey':
         specifier: 1.7.14
         version: 1.7.14(@better-auth/core@1.7.14(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(@opentelemetry/api@1.9.1)(better-call@1.4.4(zod@4.6.7))(jose@6.2.13)(kysely@0.29.7)(nanostores@1.5.5))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.14(a097ef5dcde9ded72039ef417dfa99cd))(better-call@1.4.4(zod@4.6.7))(nanostores@1.5.5)
@@ -276,7 +279,7 @@ importers:
         specifier: 7.0.154
         version: 7.0.154(zod@4.6.7)
       better-auth:
-        specifier: ^1.7.14
+        specifier: 1.7.14
         version: 1.7.14(a097ef5dcde9ded72039ef417dfa99cd)
       dotenv:
         specifier: ^18.0.9

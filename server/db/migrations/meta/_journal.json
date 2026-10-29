@@ -687,6 +687,13 @@
       "when": 1793300000001,
       "tag": "0097_sensitive_account_access",
       "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1793300000002,
+      "tag": "0098_auth_rate_limits",
+      "breakpoints": true
     }
   ]
 }

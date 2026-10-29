@@ -200,8 +200,9 @@ vi.mock("../lib/auth.js", () => ({
   }
 }));
 
-const { inferApiOrigin, resetSsoRateLimitBucketsForTests, samlCallbackRoutes, ssoRoutes } =
+const { inferApiOrigin, setSsoRateLimitStoreForTests, samlCallbackRoutes, ssoRoutes } =
   await import("../routes/sso.js");
+const { createMemoryAuthBudgetStore } = await import("../lib/auth-rate-limits.js");
 const { setTxtResolverForTests, validateClaimableDomain } = await import("../services/sso-domains.js");
 
 const issuer = "https://idp.acme.com";
@@ -297,7 +298,7 @@ beforeEach(() => {
   safeExternalFetchMock.mockClear();
   vi.stubGlobal("fetch", vi.fn());
   setTxtResolverForTests(null);
-  resetSsoRateLimitBucketsForTests();
+  setSsoRateLimitStoreForTests(createMemoryAuthBudgetStore());
   delete process.env.PUBLIC_API_URL;
   delete process.env.API_URL;
   delete process.env.APP_URL;
@@ -464,6 +465,7 @@ describe("ssoRoutes security hardening", () => {
     process.env.SSO_RATE_LIMIT_MAX = "2";
     vi.resetModules();
     const fresh = await import("../routes/sso.js");
+    fresh.setSsoRateLimitStoreForTests((await import("../lib/auth-rate-limits.js")).createMemoryAuthBudgetStore());
     const app = new Hono().route("/v1/auth", fresh.samlCallbackRoutes);
     process.env.SSO_RATE_LIMIT_MAX = "1000";
 

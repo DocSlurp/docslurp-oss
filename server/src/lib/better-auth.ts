@@ -10,6 +10,8 @@ import { cookieHeaderFromAuthContext, recordSignupAttribution } from "../service
 import { applyAccountKindRules } from "../services/account-kind.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
+import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
+import { databaseAuthBudgetStore, emailRecipientLimitPlugin, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
@@ -175,6 +177,14 @@ export function getDevSeedAccountCredential(id: DevSeedAccountKey): DevSeedAccou
 
 const securityOptions = createBetterAuthSecurityOptions(process.env);
 const emailOptions = createAuthEmailOptions(process.env);
+/** Invalid values fail startup; see auth-breached-password.ts for the outage policy. */
+export const breachedPasswordPolicy = resolveBreachedPasswordPolicy(process.env);
+/**
+ * One password-recovery path: native Email OTP reset. The link-based reset
+ * endpoints have no sender configured, and the deprecated OTP alias would be a
+ * second spelling of the same flow for every policy to track.
+ */
+export const DISABLED_AUTH_PATHS = ["/forget-password/email-otp", "/request-password-reset", "/reset-password"];
 /** Passkey relying party and 2FA settings; invalid passkey origins fail startup. */
 export const mfaConfig = resolveMfaConfig(process.env, securityOptions.baseURL);
 export const auth = betterAuth({
@@ -186,8 +196,14 @@ export const auth = betterAuth({
   trustedOrigins: (request) => developmentTrustedOrigins(securityOptions.trustedOrigins, request),
   baseURL: resolveBetterAuthBaseUrl(process.env),
   ...emailOptions,
+  disabledPaths: DISABLED_AUTH_PATHS,
   // SSO issuance policy and MFA assurance both apply to every new session.
-  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }), ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
+  // The recipient limit follows SSO enforcement: an enforced address is
+  // refused before it spends any email budget.
+  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }),
+    emailRecipientLimitPlugin({ store: databaseAuthBudgetStore(pool), enabled: emailRecipientLimitsEnabled(process.env) }),
+    ...breachedPasswordPlugins(breachedPasswordPolicy),
+    ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
     sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus })],
   session: { ...securityOptions.session, additionalFields: sessionAssuranceFields },
   databaseHooks: {

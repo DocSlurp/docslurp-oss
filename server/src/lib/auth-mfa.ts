@@ -10,6 +10,7 @@ import { twoFactor } from "better-auth/plugins";
 import { serialize, type CookieOptions } from "hono/utils/cookie";
 import type { Pool } from "pg";
 
+import { assertReviewedBetterAuth } from "./auth-compat.js";
 import { hasSensitiveAccess } from "./auth-sensitive-access.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
@@ -419,6 +420,7 @@ export function docslurpTwoFactorPlugin(config: MfaConfig): BetterAuthPlugin {
     backupCodeOptions: { amount: 10, length: 10, storeBackupCodes: "encrypted" },
     accountLockout: { enabled: true, maxFailedAttempts: config.lockout.maxFailedAttempts, durationSeconds: config.lockout.durationSeconds },
   } as Parameters<typeof twoFactor>[0]);
+  assertReviewedBetterAuth("twoFactor hook replacement", plugin.version);
   const after = plugin.hooks?.after ?? [];
   // Fail closed on an upgrade that changes the plugin's hook shape: the
   // replacement below assumes exactly the credential sign-in hook.
@@ -433,7 +435,7 @@ export function docslurpTwoFactorPlugin(config: MfaConfig): BetterAuthPlugin {
 export function docslurpPasskeyPlugin(options: MfaPluginOptions): BetterAuthPlugin {
   const { config, pool } = options;
   const isSsoEnforced = ssoCheck(options);
-  return passkey({
+  const plugin = passkey({
     rpID: config.rpID,
     rpName: config.rpName,
     origin: config.origins,
@@ -465,7 +467,10 @@ export function docslurpPasskeyPlugin(options: MfaPluginOptions): BetterAuthPlug
         await pool.query(`update passkey set "lastUsedAt" = now() where "credentialID" = $1`, [clientData.id]);
       },
     },
-  }) as unknown as BetterAuthPlugin;
+  });
+  // The user-verification checks above depend on what afterVerification reports.
+  assertReviewedBetterAuth("passkey verification hooks", plugin.version);
+  return plugin as unknown as BetterAuthPlugin;
 }
 
 /** The DocSlurp MFA gate (hooks only; no endpoints). */
