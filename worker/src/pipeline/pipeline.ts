@@ -61,6 +61,12 @@ export interface CheckpointStore {
 export interface Stage {
   readonly name: string;
   run(state: WorkflowState, signal?: AbortSignal): Promise<void>;
+  /**
+   * Page-range shard: do the per-page work for only these pages, leaving document checkpoints,
+   * manifests and ledger entries to the unsharded pass that follows (which must find the work
+   * done and skip it). Stages without it reject page-range shards.
+   */
+  runPageRanges?(state: WorkflowState, ranges: ReadonlyMap<string, ReadonlyArray<{ first: number; last: number }>>, signal?: AbortSignal): Promise<void>;
 }
 
 export interface VectorIndex {
