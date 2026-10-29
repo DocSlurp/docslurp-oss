@@ -165,7 +165,8 @@ export async function loadRunState(
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
-  if (store.visionAttempts) state.visionAttempts = store.visionAttempts;
+  // A store-backed run never falls back to a per-process count: without the shared ledger, vision refuses.
+  state.visionAttempts = store.visionAttempts ?? null;
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
   if (options.totalStages !== undefined) {
     state.totalStages = typeof options.totalStages === "function" ? options.totalStages(state.run) : options.totalStages;

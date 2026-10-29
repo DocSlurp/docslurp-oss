@@ -287,7 +287,7 @@ export async function materializePageRange(
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
   // Every OCR request passes the run's vision attempt guard (page bound, rejection breaker, the org's
   // rolling uncharged-attempt bound), beside this materialization's own credit budget.
-  const guardHost = { run, ...(deps.store?.visionAttempts ? { visionAttempts: deps.store.visionAttempts } : {}) };
+  const guardHost = { run, visionAttempts: deps.store?.visionAttempts ?? null };
   await mapLimit(ocrPages, OCR_CONCURRENCY, async (page) => {
     if (spentCents >= budgetCents) {
       released.push(page);

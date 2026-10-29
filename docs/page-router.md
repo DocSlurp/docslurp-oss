@@ -171,7 +171,8 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `VISION_REGION_ATTEMPTS_PER_PAGE` | `12` | integer 0..64 (clamped) | Routed region requests per page per run. |
 | `VISION_BREAKER_MIN_FAILURES` | `20` | integer 1..10000 (clamped) | Failed or rejected requests before the rejection breaker can stop vision for the run. |
 | `VISION_BREAKER_FAILURE_RATE` | `0.25` | 0.01..1 (clamped) | Failed share of the run's requests that trips the breaker. |
-| `VISION_ORG_UNCHARGED_ATTEMPT_LIMIT` | sized per configured model (2388 for the default) | integer 1..100000 (clamped) | Uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs. |
+| `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its route's worst case). |
+| `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529) one vision call may hand back before the wait goes to Temporal. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -236,19 +237,34 @@ cap counts only those charges, but every request sent to a vision provider can c
 failed requests, inline 429/5xx retries, the alternate-route retry, the streaming-to-JSON fallback,
 self-critique and a second read of a page already charged create no new charge. Provider cost data
 cannot bound that (an interrupted stream or a failure before the first chunk reports estimated or no
-usage), so the guard counts requests and reads no cost (`worker/src/lib/vision-attempt-guard.ts`).
+usage), so the guard counts requests, each weighted by the worst case its route can cost, and reads
+no reported cost (`worker/src/lib/vision-attempt-guard.ts`).
 
-Every HTTP request that can reach a vision provider is admitted before it is sent, at the lowest
-common request point: `fetchWithProviderRetry` (each try, inline retries included) and the local
-runtime call, through the `VisionRequestGate` that `executeVisionRuntime` requires (only operator
-benchmarks pass `null`). That covers legacy pages, page-router regions and their refusal fallbacks,
-cascade legs and workspace-model fallbacks, document-map OCR, extract-markdown self-critique and
-deferred page materialization, and every request inside each of them.
+Every HTTP request a vision call made through `executeVisionRuntime` sends is admitted before it is
+sent, at the lowest common request point: `fetchWithProviderRetry` (each try, inline retries
+included; admitted inside its concurrency limiter immediately before `fetch`, so limiter waits,
+timeouts and aborts before sending consume nothing) and the local runtime call, through the
+`VisionRequestGate` that `executeVisionRuntime` requires (only operator benchmarks pass `null`). That
+covers legacy pages, page-router regions and their refusal fallbacks, cascade legs and
+workspace-model fallbacks, document-map OCR, extract-markdown self-critique and deferred page
+materialization, and every request inside each of them. Other model calls are outside it (see the
+end of this section).
+
+Requests the provider refuses before accepting them are handed back and leave every count (page
+bound, breaker, org): 429, 503 and 529, and on a streaming request a 400/404/405/415/422/501, which
+only says the endpoint does not stream (the same request then goes out without streaming; when that
+succeeds, later calls to that endpoint and model skip streaming for the life of the process). A call
+may hand back `VISION_THROTTLE_ALLOWANCE` throttles; past that the wait goes to Temporal as a
+retryable provider error with its Retry-After. Anything that may have been accepted stays counted:
+other 5xx, timeouts and network errors after sending, accepted streams that break.
 
 The counts live in a shared ledger (migration 0101, `worker/src/db/vision-attempt-store.ts`):
 admission takes the run's then the org's advisory lock, so every worker of a run and every run of an
 org admit against the same rows. The org comes from the run row (its workspace's org when the run has
-none); a run with neither is refused (`unscoped-run`), never run unbounded.
+none; the worker loads the run with that same org, so usage rows and the credit debit use it too); a
+run with neither is refused (`unscoped-run`), never run unbounded. A store-backed run whose store
+has no ledger refuses every request (`no-attempt-ledger`, logged as an error) instead of counting per
+process.
 
 | Setting | Default (range) | Refuses when |
 | --- | --- | --- |
@@ -256,34 +272,36 @@ none); a run with neither is refused (`unscoped-run`), never run unbounded.
 | `VISION_REGION_ATTEMPTS_PER_PAGE` | 12 (0-64) | the run already sent this many routed region requests for the page; that page only |
 | `VISION_BREAKER_MIN_FAILURES` | 20 (1-10000) | at least this many of the run's requests failed or were rejected... |
 | `VISION_BREAKER_FAILURE_RATE` | 0.25 (0.01-1) | ...and they are at least this share of the run's requests (sticky for the run) |
-| `VISION_ORG_UNCHARGED_ATTEMPT_LIMIT` | sized per configured model (1-100000) | the org has this many uncharged requests in the last 24 hours |
+| `VISION_ORG_UNCHARGED_LIMIT_CENTS` | 4000 (1-1000000) | the org's uncharged requests in the last 24 hours, by worst-case weight, plus this one would pass it |
 
-**Org bound.** A request counts as uncharged from the moment it is admitted and is un-counted only
-when it is confirmed to have created a new customer Rich page charge: the usage ledger charged the
-page and the run had not charged it before (`vision_run_charged_pages`). Rejections, failures,
-retries, critique and second reads stay counted. The count is keyed by org only, with no foreign key
-to runs or workspaces, so deleting either mid-call cannot reset it; it holds across runs,
-reprocessing and extraction, and another org is never affected. A worker that dies mid-call leaves
-its requests counted.
+**Org bound.** A request counts as uncharged from the moment it is admitted. It leaves the count
+only in the checkpoint transaction that persists the customer Rich page charge its read created: the
+charge (`rich:<run>:<document>:<page>`, deterministic per run and page) carries the request's ticket,
+and the checkpoint deletes the ticket's `vision_org_attempts` row only if its insert of that charge
+happened (`on conflict do nothing returning id`). A page charged earlier, by another activity or
+another path, removes nothing more. Until that checkpoint the request stays counted (and in flight,
+so it never makes a refusal sticky): a cancel, a workspace or run deletion, a lost page-task lease
+or a crash between the read and its checkpoint leaves it counted. Rejections, failures, retries,
+critique and second reads stay counted. The count is keyed by org only, with no foreign key to runs
+or workspaces, so deleting either cannot reset it; it holds across runs, reprocessing and
+extraction, and another org is never affected.
 
-Default limit: `floor(4000 cents / worst-case request price)`, clamped to 100-20000, where the
-worst-case request is the configured vision model (`DOCSLURP_VISION_MODEL_URI`, else the built-in
-default) at catalog list price with a 16 MP image (about 23,000 input tokens) and the model's full
-output cap. The most an org can cost us per day in uncharged requests is limit x that price, about
-$40. For the default `deepseek/deepseek-v4.1-flash-1017` (pinned-route price $0.30/M input and
-$1.20/M output, 8,192 output tokens) one worst-case request is 23,058 x $0.30/M + 8,192 x $1.20/M =
-1.675 cents, so the limit is 2,388 and the exposure 2,388 x 1.675 cents = $40.00. A workspace that picks a pricier model raises that in proportion (the
-priciest hosted catalog model, `gpt-4.1-mini`, at 3.544 cents: $84.63); set
-`VISION_ORG_UNCHARGED_ATTEMPT_LIMIT` explicitly if that matters. Unpriced (local or private)
-configured models default to 2,000.
+Weights: each request weighs the worst case its own route can cost at catalog list price, a 16 MP
+image (about 23,000 input tokens) plus the prompt and the model's full output cap (enforced as
+`max_tokens`). A model without a list price (uncataloged or private) weighs the costliest catalog
+model; the in-process local runtime weighs 2 cents. So the most an org can cost us per day in
+uncharged requests is the $40 bound, whichever models its workspaces route to: 2,388 requests on the
+default `deepseek/deepseek-v4.1-flash-1017` (23,058 x $0.30/M + 8,192 x $1.20/M = 1.675 cents),
+1,128 on `gpt-4.1-mini` (3.544 cents), and any mix of the two in one org shares the same bound.
 
 **Refusals.** A refused request is never sent; requests sent before it in the same call record their
 billed usage once. A refusal is sticky for the activity only when a count limit is reached: the
-breaker, the org bound when finished uncharged requests alone fill it, and `unscoped-run`. Requests
+breaker, the org bound when finished uncharged requests alone leave no room, `unscoped-run` and
+`no-attempt-ledger`. Requests
 still in flight never make a refusal sticky (they may yet be charged). Pages it refused keep their
 own text and get the page fact `guarded` (ingest report reason `vision-stopped`); the vision manifest
 records `visionGuard` with the reason (`page-attempt-limit`, `rejection-breaker`,
-`org-attempt-limit` or `unscoped-run`). Document-map OCR leaves a refused page without text (and stops
+`org-attempt-limit`, `unscoped-run` or `no-attempt-ledger`). Document-map OCR leaves a refused page without text (and stops
 on a sticky refusal), self-critique is skipped, and deferred materialization releases the page
 (`vision-stopped:<reason>`) to be claimed again later. A malformed setting keeps the default with
 one warning and an out-of-range one is clamped; the guard cannot be turned off.

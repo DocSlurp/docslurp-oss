@@ -61,10 +61,14 @@ export class PipelineUsageEventLedger {
   /** Run being billed; set by WorkflowState. Rich page charges need it for their idempotent ids. */
   runId: string | null = null;
 
-  /** Record an AI/embedding call: price it, log it, buffer it. */
-  record(input: WorkerAiUsageInput): UsageEvent | null {
+  /**
+   * Record an AI/embedding call: price it, log it, buffer it. `visionAttemptTicket` is the vision
+   * guard request that read the page: a Rich charge this record creates carries it, so the checkpoint
+   * that persists the charge removes that request from the org's uncharged count.
+   */
+  record(input: WorkerAiUsageInput, options: { visionAttemptTicket?: string | null } = {}): UsageEvent | null {
     const event = buildWorkerAiUsageEvent(input);
-    this.chargeRichPageRead(event);
+    this.chargeRichPageRead(event, false, options.visionAttemptTicket ?? null);
     if (!hasWorkerAiUsage(event)) {
       return null;
     }
@@ -121,7 +125,11 @@ export class PipelineUsageEventLedger {
    * A vision/OCR read of a page: buffer one billable Rich page charge for it
    * (once per page per run; the id makes a retried checkpoint a no-op).
    */
-  private chargeRichPageRead(event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null }, force = false): void {
+  private chargeRichPageRead(
+    event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null },
+    force = false,
+    visionAttemptTicket: string | null = null,
+  ): void {
     if (!this.runId || (!force && !RICH_PAGE_READ_METRICS.has(event.metric))) return;
     const documentId = event.metadata?.documentId;
     const pageNumber = event.metadata?.pageNumber;
@@ -142,6 +150,7 @@ export class PipelineUsageEventLedger {
       inputTokens: 0,
       outputTokens: 0,
       metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens }),
+      ...(visionAttemptTicket ? { visionAttemptTicket } : {}),
     });
   }
 

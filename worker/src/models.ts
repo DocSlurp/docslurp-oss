@@ -74,6 +74,11 @@ export interface UsageEvent {
   inputTokens?: number;
   outputTokens?: number;
   metadata?: JsonMap;
+  /**
+   * Rich page charges only: the vision guard request that read the page. Not persisted; the checkpoint
+   * that inserts this charge removes that request from the org's uncharged count (vision-attempt-store.ts).
+   */
+  visionAttemptTicket?: string;
 }
 
 export interface PerformanceEvent {

@@ -296,6 +296,30 @@ export interface AttemptSummary {
 
 class StreamStartError extends Error {}
 
+/**
+ * The endpoint refused the streaming request itself (400/404/405/415/422/501) before accepting it: a
+ * capability answer, not a billed failure. Its request is handed back to the vision guard.
+ */
+class StreamUnsupportedError extends StreamStartError {}
+
+const STREAM_UNSUPPORTED_STATUSES: ReadonlySet<number> = new Set([400, 404, 405, 415, 422, 501]);
+
+/**
+ * Endpoints (chat completions URL + model) whose streaming request was refused while the same request
+ * without streaming then succeeded: later calls in this process go straight to non-streaming. Learned
+ * only from that pair, so a refusal caused by the request itself never turns streaming off.
+ */
+const streamingUnsupported = new Set<string>();
+
+function streamingKey(args: { url: string; model: string }): string {
+  return `${args.url}\u0000${args.model}`;
+}
+
+/** Test hook: forget which endpoints refused streaming. */
+export function resetStreamingSupportForTest(): void {
+  streamingUnsupported.clear();
+}
+
 function chatText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -444,9 +468,13 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       ...(args.gate ? { gate: args.gate } : {}),
     });
     if (!response.ok) {
-      args.gate?.failed();
       const text = await response.text();
-      if (streaming && [400, 404, 405, 415, 422, 501].includes(response.status)) throw new StreamStartError(`${response.status} ${text.slice(0, 200)}`);
+      if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
+        // Refused before acceptance: no page admission, no breaker failure, no org count.
+        await args.gate?.unbilled("unsupported");
+        throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`);
+      }
+      args.gate?.failed();
       throw new Error(`vision request failed: ${response.status} ${text}`);
     }
     const isSse = streaming && (response.headers.get("content-type") ?? "").includes("text/event-stream");
@@ -497,7 +525,7 @@ function logAttempt(s: AttemptSummary, model: string) {
 
 /** One guarded call: stream (with non-streaming fallback), classify, retry once on another route. */
 export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Promise<GuardedCompletion> {
-  let streaming = args.streaming;
+  let streaming = args.streaming && !streamingUnsupported.has(streamingKey(args));
   const log: Array<ReturnType<typeof summarize>> = [];
   let body = args.body;
   let last: VisionAttempt | null = null;
@@ -529,6 +557,10 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
         console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
         streaming = false;
         attempt = await runAttempt(args, body, false);
+        if (error instanceof StreamUnsupportedError) {
+          streamingUnsupported.add(streamingKey(args));
+          console.warn(`[vision-stream] model=${args.model} streaming unsupported by this endpoint; non-streaming from now on in this process`);
+        }
       }
     } catch (error) {
       // Earlier attempts (and an accepted one that broke mid-response) were billed: keep that for the caller.

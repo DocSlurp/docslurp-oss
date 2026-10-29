@@ -234,8 +234,8 @@ describe("materializePageRange", () => {
 
   it("refuses OCR once the org's uncharged vision attempts reach the limit, releasing the page for later", async () => {
     // Earlier runs of this org already left the limit's worth of uncharged vision requests.
-    vi.stubEnv("VISION_ORG_UNCHARGED_ATTEMPT_LIMIT", "3");
-    await db.exec(`insert into vision_org_attempts (id, org_id, settled) values ('a1', 'o1', true), ('a2', 'o1', true), ('a3', 'o1', true)`);
+    vi.stubEnv("VISION_ORG_UNCHARGED_LIMIT_CENTS", "3");
+    await db.exec(`insert into vision_org_attempts (id, org_id, weight_cents, settled) values ('a1', 'o1', 1, true), ('a2', 'o1', 1, true), ('a3', 'o1', 1, true)`);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const h = harness({ 1: LONG, 2: "" });

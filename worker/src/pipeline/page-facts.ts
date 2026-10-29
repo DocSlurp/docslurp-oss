@@ -24,6 +24,7 @@ export interface VisionPageOutcome {
     | "rejection-breaker"
     | "org-attempt-limit"
     | "unscoped-run"
+    | "no-attempt-ledger"
     | "blank-render"
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
     | "unverified-render";
@@ -39,6 +40,7 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
     case "rejection-breaker":
     case "org-attempt-limit":
     case "unscoped-run":
+    case "no-attempt-ledger":
       return "guarded";
     case "blank-render":
     case "unverified-render":

@@ -15,6 +15,7 @@ import {
 } from "./vision-model-profiles.js";
 import { attachVisionBilledUsage, estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
+import { visionRequestWeightCents } from "../lib/vision-pricing.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -203,6 +204,15 @@ export async function executeVisionRuntime(args: {
   }
 }
 
+/** `gate` with every admission weighted `weightCents`. */
+function weightedGate(gate: VisionRequestGate, weightCents: number): VisionRequestGate {
+  return {
+    admit: () => gate.admit({ weightCents }),
+    failed: () => gate.failed(),
+    unbilled: (kind) => gate.unbilled(kind),
+  };
+}
+
 /**
  * Sends one page to a resolved route. Private routes are authorized (and,
  * under strict-privacy, audited) per request, use the registry URL and auth,
@@ -219,7 +229,8 @@ async function runRouteVisionRequest(
     outputPath: args.outputPath,
     runner: args.runner,
     signal: args.signal,
-    gate: args.gate,
+    // Each request weighs its route's worst case against the org bound (a private route has no list price).
+    gate: args.gate ? weightedGate(args.gate, visionRequestWeightCents(route.provider === PRIVATE_MODEL_PROVIDER ? route.modelUri : route.model, route.runtime)) : null,
     runtime: route.runtime,
     prompt,
   };

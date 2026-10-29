@@ -3,6 +3,7 @@ import {
   readVisionModelUriOverride,
   resolveVisionRoute,
   visionListPriceCents,
+  visionModelCatalog,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -46,4 +47,30 @@ export function configuredVisionModel(env: Record<string, string | undefined> = 
  */
 export function worstCaseVisionRequestCents(model: string): number | null {
   return visionListPriceCents(model, { inputTokens: visionInputTokenBound(null), outputTokens: visionMaxOutputTokens(model) });
+}
+
+/** The most expensive worst-case request across every priced catalog vision model. */
+export function maxCatalogWorstCaseVisionRequestCents(): number {
+  let max = 0;
+  for (const spec of visionModelCatalog) max = Math.max(max, worstCaseVisionRequestCents(spec.id) ?? 0);
+  return max;
+}
+
+/**
+ * Weight of a local (in-process, `local-cli`) request against the org bound: no provider bills it, so it
+ * only bounds our compute, at 2,000 requests per day under the default $40 bound.
+ */
+export const LOCAL_VISION_REQUEST_WEIGHT_CENTS = 2;
+
+/**
+ * What one request on this route can cost us at most, in cents, for the vision guard's org bound: the
+ * route model's worst-case list price (16 MP image, full enforced output cap). A local runtime weighs
+ * `LOCAL_VISION_REQUEST_WEIGHT_CENTS`. A model without a list price (an uncataloged or private
+ * route) weighs the most expensive cataloged worst case, never less than the configured default.
+ */
+export function visionRequestWeightCents(model: string, runtime: string): number {
+  const priced = worstCaseVisionRequestCents(model);
+  if (priced !== null && priced > 0) return priced;
+  if (runtime === "local-cli") return LOCAL_VISION_REQUEST_WEIGHT_CENTS;
+  return Math.max(maxCatalogWorstCaseVisionRequestCents(), worstCaseVisionRequestCents(configuredVisionModel()) ?? 0);
 }

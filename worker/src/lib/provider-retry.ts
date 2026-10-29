@@ -206,11 +206,27 @@ export interface ProviderRetryOptions {
   /** Fleet-wide TPM/RPM limiting for this provider+model; `onLease` receives the successful attempt's lease. */
   rateLimit?: { model: string; tokens: number; limiter?: ProviderRateLimiter; onLease?: (lease: ProviderRateLease) => void };
   /**
-   * Admission for every HTTP request, inline retries included (the vision attempt guard): `admit` runs
-   * before each request is sent and its refusal propagates as is; `failed` marks a request that got a
-   * retryable status or a network error.
+   * Admission for every HTTP request, inline retries included (the vision attempt guard). `admit` runs
+   * inside the concurrency limiter's task, immediately before `fetch`, and its refusal propagates as is;
+   * nothing that ends before the request is sent (limiter waits, timeouts and aborts, a fleet limiter
+   * refusal) is admitted or counted. `failed` marks a sent request that may have been accepted and
+   * billed (5xx other than overload, a network error or timeout after sending). `unbilled` hands back a
+   * request the provider refused before accepting it (429, 503/529 overload): it returns false once the
+   * call's throttle allowance is spent, and the wait then goes to Temporal.
    */
-  gate?: { admit(): Promise<void>; failed(): void };
+  gate?: ProviderRequestGate;
+}
+
+/** See `ProviderRetryOptions.gate`. */
+export interface ProviderRequestGate {
+  admit(): Promise<void>;
+  failed(): void;
+  unbilled(kind: "throttle"): Promise<boolean>;
+}
+
+/** Statuses a provider returns before accepting a request (nothing billed): rate limits and overload. */
+export function isUnbilledThrottleStatus(status: number): boolean {
+  return status === 429 || status === 503 || status === 529;
 }
 
 /**
@@ -231,21 +247,30 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
     let retryAfterMs: number | null = null;
     let detail: string;
     const rateLimiter = options.rateLimit ? options.rateLimit.limiter ?? providerRateLimiter() : null;
-    // Outside the try: a refusal is not a network error to retry.
-    await options.gate?.admit();
+    // Set once the gate admitted this request and it is handed to fetch: anything before is free.
+    let sent = false;
+    let lease: ProviderRateLease | null = null;
+    let allowanceSpent = false;
     try {
-      const lease = rateLimiter
+      lease = rateLimiter
         ? await rateLimiter.acquire({ provider: options.provider, model: options.rateLimit!.model, tokens: options.rateLimit!.tokens, signal: options.signal })
         : null;
       // Each attempt is bounded (WORKER_AI_REQUEST_TIMEOUT_MS); a timeout is a network error and retries here.
-      const response = await limiter.run(options.provider, () => doFetch(url, { ...init, signal: withRequestTimeout(options.signal) }), options.signal);
+      const response = await limiter.run(options.provider, async () => {
+        // Admitted inside the limiter's task, right before sending: queue waits never consume admissions.
+        await options.gate?.admit();
+        sent = true;
+        return await doFetch(url, { ...init, signal: withRequestTimeout(options.signal) });
+      }, options.signal);
       noteWorkProgress(`provider:${options.provider}`);
       if (response.ok || !isRetryableStatus(response.status)) {
         if (lease) options.rateLimit?.onLease?.(lease);
         return response;
       }
-      options.gate?.failed();
       status = response.status;
+      // A rate limit or overload is refused before acceptance: it leaves the guard's counts.
+      if (isUnbilledThrottleStatus(status) && options.gate) allowanceSpent = !(await options.gate.unbilled("throttle"));
+      else options.gate?.failed();
       retryAfterMs = parseRetryAfterMs(response.headers);
       if (status === 429 && rateLimiter) {
         await rateLimiter.reportThrottle({ provider: options.provider, model: options.rateLimit!.model, retryAfterMs });
@@ -257,6 +282,11 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       }
       detail = `${status} ${body.slice(0, 300)}`;
     } catch (error) {
+      if (!sent) {
+        // Never sent (limiter wait or abort, fleet limiter refusal, guard refusal): nothing to count.
+        lease?.settle(0);
+        throw error;
+      }
       options.gate?.failed();
       if (options.signal?.aborted) throw error;
       // The fleet limiter already waited its budget; hand the wait to Temporal.
@@ -264,7 +294,7 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       detail = `network error: ${error instanceof Error ? error.message : String(error)}`;
     }
 
-    const exhausted = attempt >= maxRetries;
+    const exhausted = attempt >= maxRetries || allowanceSpent;
     const tooLong = retryAfterMs !== null && retryAfterMs > maxInlineWaitMs;
     if (exhausted || tooLong) {
       throw new ProviderRetryableError(

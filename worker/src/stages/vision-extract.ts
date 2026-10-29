@@ -1421,7 +1421,7 @@ export class VisionExtractStage implements Stage {
     if (guardStop) {
       console.warn(
         `[vision-guard] org=${orgId ?? "none"} run=${state.run.id} document=${document.id} stopped=${guardStop.reason} ` +
-          `runFailures=${guardStop.runFailures}/${guardStop.runAttempts} orgAttempts=${guardStop.orgAttempts}/${guardStop.orgLimit}`,
+          `runFailures=${guardStop.runFailures}/${guardStop.runAttempts} orgCents=${guardStop.orgCents}/${guardStop.orgLimitCents}`,
       );
       state.pendingPerformance.push({
         documentId: document.id,

@@ -71,6 +71,11 @@ import {
 type WorkspaceRunRow = {
   id: string;
   org_id: string;
+  /**
+   * The run's org, else its workspace's (runRowQuery): the one org admission, usage attribution and the
+   * credit debit all use. Absent from other run queries.
+   */
+  canonical_org_id?: string | null;
   /** Joined from organizations by loadRun; absent from other run queries. */
   org_funded?: boolean | null;
   org_allow_china_providers?: boolean | null;
@@ -374,11 +379,17 @@ type StageStateRows = (StageStateRow & { scope: "run" | "document" })[];
 
 function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   // The org's plan rides along (no extra round trip): it sets the AI credit
-  // factor for bonus plans in the usage ledger.
+  // factor for bonus plans in the usage ledger. A run without an org takes
+  // its workspace's, as the vision attempt guard does (vision-attempt-store.ts),
+  // so usage rows, the credit debit and admission agree on one org.
   return client<WorkspaceRunRow[]>`
-    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded,
-      (select o.allow_china_providers from organizations o where o.id = r.org_id) as org_allow_china_providers
+    select r.*, c.org_id as canonical_org_id,
+      (select o.funded_at is not null from organizations o where o.id = c.org_id) as org_funded,
+      (select o.allow_china_providers from organizations o where o.id = c.org_id) as org_allow_china_providers
     from workspace_runs r
+    cross join lateral (
+      select coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id
+    ) c
     where r.id = ${runId}
     limit 1
   `;
@@ -3832,7 +3843,7 @@ export class Store {
 function mapRun(row: WorkspaceRunRow): WorkspaceRun {
   return {
     id: row.id,
-    orgId: row.org_id ?? null,
+    orgId: row.canonical_org_id ?? row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
     ...(row.org_allow_china_providers === false ? { orgAllowChinaProviders: false } : {}),
     userId: row.user_id,
