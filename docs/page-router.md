@@ -266,6 +266,16 @@ Promote the two features independently and only with evidence; each step is a co
    Make `active` the default for unset workspaces only as a separate, reviewed change.
 4. Rollback for any step is the previous value of the flag; shadow output is telemetry only and safe to leave on.
 
+### Free-feature router (2026-10-29, opt-in, not wired as a default)
+
+`routers/free-features.ts` (`FreeFeatureRouter`, thresholds in `policies/page-router-free-v1.json`) answers the routing
+questions from probe fields alone, at $0 and about 0.1 ms per page on top of the probe. A page without an ok text
+layer (or a full-page image with fewer than 30 words) is a scan and needs pixels. An ok layer is accepted unless the
+ruled-table score is at least 4, math glyphs are at least 0.5% of characters (0.2% when another page of the document
+reaches 0.5%), or vector paths per word reach 2 (formulas drawn as paths). The Beta-cell estimator still picks targets.
+The replay and fit are in the app repository (`scripts/page-router/free_features.py`); `worker/scripts/probe-features-batch.ts`
+collects the probe rows offline.
+
 ### Default free routing (2026-10-22)
 
 New default settings select the feature-based baseline, avoiding paid decision calls just to classify pages. Explicit decision-model settings remain available. Healthy native prose is retained; substantial unknown embedded images request cropped OCR instead of being assumed decorative. Scans request page OCR once, including tiled scans, and proven blank pages skip extraction. Form/annotation and vector-only pages are not blank. Cost, privacy and quality gates still select and constrain executors; production remains shadow until the promotion checks above pass. These changes do not promote the native PDF engine or claim a measured end-to-end speedup.

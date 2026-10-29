@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "free-feature-router@v1",
+  "policyVersion": "page-router-free-v1",
+  "description": "Zero-cost per-page router from in-process probe features only. Pages without a trustworthy text layer need pixels (vision); pages with an ok text layer escalate only when ruled-table or math evidence says the layer loses structure.",
+  "thresholds": {
+    "tableRuleScoreMin": 4,
+    "mathGlyphRatioMin": 0.005,
+    "vectorPathsPerWordMin": 2,
+    "scanMaxWords": 30,
+    "docMathGlyphRatioMin": 0.005,
+    "docMathPageGlyphRatioMin": 0.002
+  },
+  "provenance": {
+    "fit": "preservation-suite-95-v3 development (suite and born-digital-source views), tolerant-markdown@v1 outcomes, 2026-10-29",
+    "select": "preservation-suite-95-v3 calibration",
+    "script": "DocSlurp/app scripts/page-router/free_features.py"
+  }
+}
