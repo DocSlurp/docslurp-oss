@@ -1259,10 +1259,9 @@ export class VisionExtractStage implements Stage {
     const reconciledContractKey = `${runArtifactRoot(state.run, document.userId)}/extraction-reconciled/${document.id}.contract.json`;
     const reconciledMarkdownKey = `${runArtifactRoot(state.run, document.userId)}/markdown-reconciled/${document.id}.md`;
     const reconciliationKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciliation/${document.id}.json`;
-    // Four distinct keys and the summary evidence (rebuilt from the reconciled markdown) are written together;
-    // the ledger points at them only after every write succeeded.
-    const reconciledMarkdownUri = this.storage.uri(reconciledMarkdownKey);
-    await Promise.all([
+    // The four new keys are written together. Every write settles before a failure propagates, so none is left
+    // running; only then is the published summary evidence overwritten and the ledger pointed at the new keys.
+    await settleAll([
       this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument),
       this.storage.putJson(reconciledContractKey, reconciled.extractionContract),
       this.storage.putBytes(
@@ -1277,11 +1276,12 @@ export class VisionExtractStage implements Stage {
         sourceCanonicalUri: canonicalUri,
         sourceContractUri: contractUri,
       }),
-      refreshSummaryEvidence({
-        storage: this.storage, ledger: state.artifactLedger, document,
-        text: reconciled.markdown, sourceUri: reconciledMarkdownUri,
-      }),
     ]);
+    // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
+    await refreshSummaryEvidence({
+      storage: this.storage, ledger: state.artifactLedger, document,
+      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
+    });
 
     state.artifactLedger.recordDocument(
       document.id,
@@ -1421,4 +1421,11 @@ async function mapWithConcurrency<T, R>(
     }),
   );
   return results;
+}
+
+/** Awaits every promise, then rethrows the first rejection (in argument order); unlike `Promise.all`, none is left running. */
+async function settleAll(promises: Array<Promise<unknown>>): Promise<void> {
+  const results = await Promise.allSettled(promises);
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
 }

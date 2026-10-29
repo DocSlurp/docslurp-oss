@@ -116,10 +116,58 @@ describe("summary evidence follows the current markdown", () => {
       .reconcileExtractionArtifacts(ctx.state, ctx.document, { model: "vision-test" },
         [{ pageNumber: 1, text: "# Intake\n\nRecovered handwritten intake form", model: "vision-test" }], ctx.storage.uri("u1/run-1/vision/doc-1.json"));
     warn.mockRestore();
-    // contract, canonical and classification; then canonical, contract, markdown, reconciliation record and evidence.
+    // contract, canonical and classification; then canonical, contract, markdown and reconciliation record (evidence after).
     expect(peakReads).toBe(3);
-    expect(peakWrites).toBe(5);
+    expect(peakWrites).toBe(4);
     expect(ctx.state.artifactLedger.readDocument(ctx.document.id, "markdown")).toContain("markdown-reconciled");
+  });
+
+  it("vision reconciliation leaves evidence and ledger unchanged, with no write pending, when a new-key write fails", async () => {
+    const ctx = setup();
+    const { evidenceKey } = seedExtraction(ctx);
+    const evidenceBefore = ctx.storage.text(evidenceKey);
+    const ledgerBefore = ["markdown", "canonical-document", "extraction-contract", "summary-evidence", "canonical-reconciliation"]
+      .map((kind) => ctx.state.artifactLedger.readDocument(ctx.document.id, kind as "markdown"));
+    let pending = 0;
+    const written: string[] = [];
+    const store = ctx.storage;
+    const failing = Object.assign(Object.create(store), {
+      async putJson(key: string, value: unknown) {
+        pending += 1;
+        try {
+          // The contract write fails at once; its siblings are still running when it does.
+          if (key.includes("extraction-reconciled")) throw new Error("storage down");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          written.push(key);
+          return await store.putJson(key, value);
+        } finally {
+          pending -= 1;
+        }
+      },
+      async putBytes(key: string, data: Uint8Array) {
+        pending += 1;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          written.push(key);
+          return await store.putBytes(key, data);
+        } finally {
+          pending -= 1;
+        }
+      },
+    });
+    const stage = new VisionExtractStage({} as CommandRunner, failing as unknown as ArtifactStore, fromEnv(), {} as PdfRasterCache);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect((stage as unknown as { reconcileExtractionArtifacts: (...args: unknown[]) => Promise<unknown> })
+      .reconcileExtractionArtifacts(ctx.state, ctx.document, { model: "vision-test" },
+        [{ pageNumber: 1, text: "# Intake\n\nRecovered handwritten intake form", model: "vision-test" }], ctx.storage.uri("u1/run-1/vision/doc-1.json")))
+      .rejects.toThrow("storage down");
+    warn.mockRestore();
+    expect(pending).toBe(0);
+    expect(written).toHaveLength(3);
+    expect(written).not.toContain(evidenceKey);
+    expect(ctx.storage.text(evidenceKey)).toBe(evidenceBefore);
+    expect(["markdown", "canonical-document", "extraction-contract", "summary-evidence", "canonical-reconciliation"]
+      .map((kind) => ctx.state.artifactLedger.readDocument(ctx.document.id, kind as "markdown"))).toEqual(ledgerBefore);
   });
 
   it("is a no-op when no evidence was recorded", async () => {
