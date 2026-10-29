@@ -92,6 +92,36 @@ describe("summary evidence follows the current markdown", () => {
     warn.mockRestore();
   });
 
+  it("vision reconciliation issues its reads together and its writes together, and records the ledger after them", async () => {
+    const ctx = setup();
+    seedExtraction(ctx);
+    ctx.state.artifactLedger.recordDocument(ctx.document.id, "classification", ctx.storage.uri("u1/run-1/classification/doc-1.json"));
+    ctx.storage.objects.set("u1/run-1/classification/doc-1.json", Buffer.from(JSON.stringify({ status: "pending" })));
+    // Each storage call takes one tick of latency; count how many are in flight at once per kind.
+    let reads = 0; let writes = 0; let peakReads = 0; let peakWrites = 0;
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+    const store = ctx.storage;
+    const slow = Object.assign(Object.create(store), {
+      async getJson(key: string) { reads += 1; peakReads = Math.max(peakReads, reads); await tick(); reads -= 1; return store.getJson(key); },
+      async putJson(key: string, value: unknown) {
+        writes += 1; peakWrites = Math.max(peakWrites, writes); await tick(); writes -= 1;
+        expect(ctx.state.artifactLedger.readDocument(ctx.document.id, "markdown")).not.toContain("markdown-reconciled");
+        return store.putJson(key, value);
+      },
+      async putBytes(key: string, data: Uint8Array) { writes += 1; peakWrites = Math.max(peakWrites, writes); await tick(); writes -= 1; return store.putBytes(key, data); },
+    });
+    const stage = new VisionExtractStage({} as CommandRunner, slow as unknown as ArtifactStore, fromEnv(), {} as PdfRasterCache);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await (stage as unknown as { reconcileExtractionArtifacts: (...args: unknown[]) => Promise<unknown> })
+      .reconcileExtractionArtifacts(ctx.state, ctx.document, { model: "vision-test" },
+        [{ pageNumber: 1, text: "# Intake\n\nRecovered handwritten intake form", model: "vision-test" }], ctx.storage.uri("u1/run-1/vision/doc-1.json"));
+    warn.mockRestore();
+    // contract, canonical and classification; then canonical, contract, markdown, reconciliation record and evidence.
+    expect(peakReads).toBe(3);
+    expect(peakWrites).toBe(5);
+    expect(ctx.state.artifactLedger.readDocument(ctx.document.id, "markdown")).toContain("markdown-reconciled");
+  });
+
   it("is a no-op when no evidence was recorded", async () => {
     const ctx = setup();
     expect(await refreshSummaryEvidence({ storage: ctx.storage, ledger: ctx.state.artifactLedger, document: ctx.document,

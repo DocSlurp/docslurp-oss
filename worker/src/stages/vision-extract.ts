@@ -1197,11 +1197,14 @@ export class VisionExtractStage implements Stage {
       return { changedPages: [], decisions: [] };
     }
 
-    const contract = extractionContractSchema.parse(await this.storage.getJson(contractKey));
-    const canonicalDocument = canonicalDocumentSchema.parse(
-      await this.storage.getJson(canonicalKey),
-    );
-    const routing = await this.loadAdaptiveRouting(state, document.id);
+    // Independent reads: fetch them together rather than one storage round trip after another.
+    const [contractJson, canonicalJson, routing] = await Promise.all([
+      this.storage.getJson(contractKey),
+      this.storage.getJson(canonicalKey),
+      this.loadAdaptiveRouting(state, document.id),
+    ]);
+    const contract = extractionContractSchema.parse(contractJson);
+    const canonicalDocument = canonicalDocumentSchema.parse(canonicalJson);
     const routingByPage = new Map(
       (routing?.pages ?? []).map((page) => [page.pageNumber, page]),
     );
@@ -1256,20 +1259,29 @@ export class VisionExtractStage implements Stage {
     const reconciledContractKey = `${runArtifactRoot(state.run, document.userId)}/extraction-reconciled/${document.id}.contract.json`;
     const reconciledMarkdownKey = `${runArtifactRoot(state.run, document.userId)}/markdown-reconciled/${document.id}.md`;
     const reconciliationKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciliation/${document.id}.json`;
-    await this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument);
-    await this.storage.putJson(reconciledContractKey, reconciled.extractionContract);
-    await this.storage.putBytes(
-      reconciledMarkdownKey,
-      Buffer.from(reconciled.markdown, "utf8"),
-      "text/markdown; charset=utf-8",
-    );
-    await this.storage.putJson(reconciliationKey, {
-      documentId: document.id,
-      changedPages: reconciled.changedPages,
-      decisions: reconciled.decisions,
-      sourceCanonicalUri: canonicalUri,
-      sourceContractUri: contractUri,
-    });
+    // Four distinct keys and the summary evidence (rebuilt from the reconciled markdown) are written together;
+    // the ledger points at them only after every write succeeded.
+    const reconciledMarkdownUri = this.storage.uri(reconciledMarkdownKey);
+    await Promise.all([
+      this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument),
+      this.storage.putJson(reconciledContractKey, reconciled.extractionContract),
+      this.storage.putBytes(
+        reconciledMarkdownKey,
+        Buffer.from(reconciled.markdown, "utf8"),
+        "text/markdown; charset=utf-8",
+      ),
+      this.storage.putJson(reconciliationKey, {
+        documentId: document.id,
+        changedPages: reconciled.changedPages,
+        decisions: reconciled.decisions,
+        sourceCanonicalUri: canonicalUri,
+        sourceContractUri: contractUri,
+      }),
+      refreshSummaryEvidence({
+        storage: this.storage, ledger: state.artifactLedger, document,
+        text: reconciled.markdown, sourceUri: reconciledMarkdownUri,
+      }),
+    ]);
 
     state.artifactLedger.recordDocument(
       document.id,
@@ -1286,11 +1298,6 @@ export class VisionExtractStage implements Stage {
       "markdown",
       this.storage.uri(reconciledMarkdownKey),
     );
-    // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
-    await refreshSummaryEvidence({
-      storage: this.storage, ledger: state.artifactLedger, document,
-      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
-    });
     state.artifactLedger.recordDocument(
       document.id,
       "canonical-reconciliation",
