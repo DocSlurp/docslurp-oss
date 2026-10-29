@@ -146,6 +146,6 @@ describe("rejected vision output", () => {
   });
 
   it("still retries throttling", () => {
-    expect(shouldFailOpenVisionError(new ProviderRetryableError("429", "openrouter", 429, null))).toBe(false);
+    expect(shouldFailOpenVisionError(new ProviderRetryableError("429", "openrouter", 429, null, 3))).toBe(false);
   });
 });
