@@ -382,15 +382,15 @@ describe("PdfRasterCache", () => {
     let scratch = "";
     let failedAt = 0;
     let treePids: number[] = [];
-    let exit: { at: number; signal: NodeJS.Signals | null; slotsInUse: number; scratchPresent: boolean } | null = null;
+    let exit: { at: number; code: number | null; signal: NodeJS.Signals | null; slotsInUse: number; scratchPresent: boolean } | null = null;
     const commands = new CommandRunner({
       openSession: async () => ({
         providerId: "test-local",
         isolation: { filesystem: false, network: "none", processes: true, location: "local" },
         spawn: (command) => {
           const child = spawnContained(command.binary, command.args, { env: command.env, containment: "pid-namespace" });
-          child.once("exit", (_code, exitSignal) => {
-            exit = { at: Date.now(), signal: exitSignal, slotsInUse: slots.inUse, scratchPresent: existsSync(scratch) };
+          child.once("exit", (exitCode, exitSignal) => {
+            exit = { at: Date.now(), code: exitCode, signal: exitSignal, slotsInUse: slots.inUse, scratchPresent: existsSync(scratch) };
           });
           return child;
         },
@@ -434,7 +434,9 @@ describe("PdfRasterCache", () => {
     const [parserPid, grandchildPid] = treePids;
     // The parser ignored SIGTERM, so it only exited when the grace period ran out and SIGKILL followed.
     expect(exit).not.toBeNull();
-    expect(exit!.signal).toBe("SIGKILL");
+    // The namespace root (unshare) either dies of the signal itself or reports its child's as 128+9,
+    // depending on the host's unshare (CI's reports 137).
+    expect(exit!.signal === "SIGKILL" || exit!.code === 137).toBe(true);
     expect(exit!.at - failedAt).toBeGreaterThanOrEqual(graceMs - 50);
     expect(exit!.at - failedAt).toBeLessThan(graceMs + 2_000);
     // Until then the aborted lane still held its slot and its scratch was still on disk.
