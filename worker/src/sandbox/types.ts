@@ -8,7 +8,12 @@ export interface SandboxIsolation {
   filesystem: boolean;
   network: SandboxNetworkIsolation;
   /**
-   * Every process a command starts dies with it (a PID namespace), so teardown can be verified.
+   * No process a command starts outlives it on the worker host, so teardown can be verified.
+   * Local providers get it from a PID namespace; it covers what the command forks, not processes a
+   * host service (a systemd user manager over the session bus) starts on its behalf outside the
+   * namespace. Teardown fails closed on those: stdio still held past the bound poisons the slot.
+   * Remote providers (modal) qualify because nothing runs on the host; a remote descendant can
+   * outlive its command inside that activity's remote sandbox until the session ends.
    * Untrusted parser work refuses to run without it (see policy.ts and sandbox/teardown.ts).
    */
   processes: boolean;

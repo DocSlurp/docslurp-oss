@@ -25,7 +25,15 @@ import { resolveCommandPaths } from "../sandbox/paths.js";
 import { sandboxScopeStorage } from "../sandbox/session-context.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
 import { SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
-import { containmentOf, spawnContained, superviseChild, type SupervisedChild } from "../sandbox/teardown.js";
+import {
+  CommandTeardownError,
+  containmentOf,
+  isCommandTeardownError,
+  spawnContained,
+  superviseChild,
+  teardownTimings,
+  type SupervisedChild,
+} from "../sandbox/teardown.js";
 import { resolveScriptsDir } from "./scripts-dir.js";
 import { createPool, type PythonPool } from "./python-pool.js";
 import {
@@ -294,7 +302,7 @@ export class CommandRunner {
                 `${plan.binary} (${code ?? "unknown"}): ${stderr || stdout}`.trim(),
               ),
             );
-          }, (error: Error) => reject(monitor.finish() ?? error));
+          }, (error: Error) => reject(commandFailure(error, monitor.finish())));
           });
         } finally {
           await launched.release();
@@ -371,7 +379,7 @@ export class CommandRunner {
             `${plan.binary} (${code ?? "unknown"}): ${stderr}`.trim(),
           ),
         );
-      }, (error: Error) => reject(monitor.finish() ?? error));
+      }, (error: Error) => reject(commandFailure(error, monitor.finish())));
     });
 
     child.stderr!.on("data", (chunk) => {
@@ -386,12 +394,19 @@ export class CommandRunner {
       stderr += chunk.toString();
     });
 
-    await Promise.all([
-      pipeline(child.stdout!, destination).catch((error) => {
-        throw monitor.peekBudgetError() ?? error;
-      }),
-      exitPromise,
-    ]);
+    // Never fail fast: a destination failure (a full disk) stops the command, and the call settles
+    // only after its teardown is verified. An unverified teardown wins over every other error.
+    const piped = pipeline(child.stdout!, destination).catch((error: Error) => {
+      const failure = monitor.peekBudgetError() ?? error;
+      supervised.terminate(failure, { immediate: true });
+      throw failure;
+    });
+    const [output, exit] = await Promise.allSettled([piped, exitPromise]);
+    if (exit.status === "rejected" && isCommandTeardownError(exit.reason)) {
+      throw commandFailure(exit.reason, output.status === "rejected" ? (output.reason as Error) : null);
+    }
+    if (output.status === "rejected") throw output.reason;
+    if (exit.status === "rejected") throw exit.reason;
 
     return { stderr };
   }
@@ -1027,7 +1042,7 @@ export class CommandRunner {
         if (budgetError) reject(budgetError);
         else if (reason) reject(reason);
         else resolve({ exitCode: code, stdout, stderr });
-      }, (error: Error) => reject(monitor.finish() ?? error));
+      }, (error: Error) => reject(commandFailure(error, monitor.finish())));
     });
   }
 
@@ -1247,11 +1262,14 @@ export class CommandRunner {
       if (session.spawn) {
         assertProcessTeardown(session);
         const child = session.spawn(command);
-        if (!containmentOf(child)) {
-          child.kill("SIGKILL");
-          throw new SandboxPolicyError(
-            `parser sandbox provider '${session.providerId}' started a command without process containment; refusing to run it`,
+        const containment = containmentOf(child);
+        if (containment !== "pid-namespace" && !(containment && allowsUnisolated(session))) {
+          const refusal = new SandboxPolicyError(
+            `parser sandbox provider '${session.providerId}' started a command ` +
+              `${containment ? `with ${containment} containment instead of a PID namespace` : "without process containment"}; refusing to run it`,
           );
+          await stopRefusedChild(plan, child, containment !== undefined, refusal);
+          throw refusal;
         }
         return { child, supervised: superviseCommand(plan, child, signal), release };
       }
@@ -1667,9 +1685,60 @@ async function inspectProcessTree(
  * (a PID namespace). Without one, a parser's descendant can outlive the command, its slot and its
  * scratch. Refuse loudly, unless this is the explicitly unisolated `none` mode.
  */
+/**
+ * The error a failed command rejects with. An unverified teardown always wins over whatever was
+ * stopping the command (a timeout, a budget, a failed destination), so its slot stays poisoned;
+ * that error rides along as its cause.
+ */
+function commandFailure(error: unknown, stopping: Error | null): Error {
+  if (isCommandTeardownError(error)) {
+    if (stopping && stopping !== error && error.cause === undefined) {
+      Object.defineProperty(error, "cause", { value: stopping, configurable: true, writable: true });
+    }
+    return error;
+  }
+  return stopping ?? (error as Error);
+}
+
+/** Only provider none, with the explicit override, may run parser work without a PID namespace. */
+function allowsUnisolated(session: SandboxSession): boolean {
+  return session.providerId === "none" && process.env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true";
+}
+
+/**
+ * Stop a child the runner refuses to run, and settle only once it is gone: the caller releases
+ * the session (and with it capacity and scratch) right after. An unverified teardown wins.
+ */
+async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, contained: boolean, refusal: Error): Promise<void> {
+  if (!contained) {
+    // Not ours to supervise: kill its group (spawned detached) or itself, and wait for its exit.
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      const { verifyMs } = teardownTimings();
+      let timer: NodeJS.Timeout | undefined;
+      const gone = await Promise.race([exited, new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), verifyMs)))]);
+      clearTimeout(timer);
+      if (!gone) throw new CommandTeardownError(`${path.basename(plan.binary)} (refused, uncontained) did not exit after SIGKILL`, { cause: refusal });
+    }
+    return;
+  }
+  const supervised = superviseCommand(plan, child);
+  supervised.terminate(refusal, { immediate: true });
+  try {
+    await supervised.done;
+  } catch (error) {
+    throw commandFailure(error, refusal);
+  }
+}
+
 function assertProcessTeardown(session: SandboxSession): void {
   if (session.isolation.processes) return;
-  if (session.providerId === "none" && process.env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true") return;
+  if (allowsUnisolated(session)) return;
   console.error(
     `[parser-sandbox] status=refused provider=${session.providerId} reason=no-process-teardown ` +
       "detail=provider cannot guarantee a parser's descendants die with it",

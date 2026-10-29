@@ -15,6 +15,11 @@ import { existsSync, readFileSync } from "node:fs";
  * Process-group containment alone does not give it: a descendant that calls setsid leaves the
  * group. Untrusted parser work refuses to run without a PID namespace (see policy.ts); only
  * trusted commands (vector writers) and the explicitly unisolated `none` mode run that way.
+ *
+ * A namespace holds only what the command forks. A host service the command asks to start a
+ * process (a systemd user manager over the session bus, for example) starts it outside, where
+ * it can hold the command's stdio. Such a command never settles cleanly: its stdio stays open
+ * past the bound and it ends in CommandTeardownError with its slot poisoned.
  */
 
 export type Containment = "pid-namespace" | "process-group";
@@ -27,6 +32,7 @@ export type Containment = "pid-namespace" | "process-group";
 export const PID_NAMESPACE_FLAGS = ["--user", "--map-current-user", "--pid", "--mount-proc", "--fork", "--kill-child"] as const;
 
 const UNSHARE_CANDIDATES = ["/usr/bin/unshare", "/bin/unshare"];
+const TINI_CANDIDATES = ["/usr/bin/tini", "/sbin/tini", "/usr/local/bin/tini"];
 const PROBE_TIMEOUT_MS = 10_000;
 
 interface ContainedState {
@@ -61,14 +67,31 @@ export function probePidNamespace(): { ok: boolean; detail: string } {
 }
 
 /**
+ * A minimal init for a PID namespace whose command is not one itself. The namespace's PID 1 gets
+ * only signals it has a handler for, so a parser running as PID 1 ignores SIGTERM and SIGPIPE
+ * (an abort then waits out the whole grace period) and never reaps orphans. tini when installed;
+ * otherwise a shell that forwards TERM, INT and HUP to the command and exits with its status.
+ */
+const INIT_SCRIPT =
+  'trap \'kill -TERM "$child" 2>/dev/null\' TERM INT HUP; "$@" & child=$!; ' +
+  'while :; do wait "$child"; status=$?; kill -0 "$child" 2>/dev/null || exit "$status"; done';
+
+export function namespaceInit(): string[] {
+  const tini = TINI_CANDIDATES.find((candidate) => existsSync(candidate));
+  return tini ? [tini, "--"] : ["/bin/sh", "-c", INIT_SCRIPT, "docslurp-init"];
+}
+
+/**
  * Spawn `binary args` contained: in a new process group, and in a new PID namespace when
- * `containment` is "pid-namespace". Never pass an AbortSignal to spawn: Node would SIGTERM only the
+ * `containment` is "pid-namespace". With `init`, a minimal init (namespaceInit) runs as the
+ * namespace's PID 1 in front of the command; launchers that are an init themselves (the bubblewrap
+ * launcher's traps) go without. Never pass an AbortSignal to spawn: Node would SIGTERM only the
  * root and report the abort before anything exited. superviseChild handles abort and teardown.
  */
 export function spawnContained(
   binary: string,
   args: string[],
-  options: { env: NodeJS.ProcessEnv; cwd?: string; containment: Containment },
+  options: { env: NodeJS.ProcessEnv; cwd?: string; containment: Containment; init?: boolean },
 ): ChildProcess {
   let file = binary;
   let argv = args;
@@ -76,7 +99,7 @@ export function spawnContained(
     const unshare = unshareBinary();
     if (!unshare) throw new Error("unshare (util-linux) is not installed; cannot start a command in its own PID namespace");
     file = unshare;
-    argv = [...PID_NAMESPACE_FLAGS, "--", binary, ...args];
+    argv = [...PID_NAMESPACE_FLAGS, "--", ...(options.init ? namespaceInit() : []), binary, ...args];
   }
   const child = spawn(file, argv, {
     env: options.env,
@@ -102,8 +125,9 @@ export function afterTeardown(child: ChildProcess, cleanup: () => void): void {
 /** A command whose processes could not be confirmed gone. Its slot must stay out of service. */
 export class CommandTeardownError extends Error {
   readonly poisoned = true;
-  constructor(message: string) {
-    super(message);
+  /** `cause` carries why the command was being stopped (timeout, budget, abort), if it was. */
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "CommandTeardownError";
   }
 }
@@ -135,6 +159,26 @@ export interface SupervisedChild {
   readonly done: Promise<CommandExit>;
   /** Stop the command: SIGTERM, then after the grace period (or at once if `immediate`) SIGKILL. */
   terminate(reason: Error, options?: { immediate?: boolean }): void;
+}
+
+/**
+ * Run a short command contained and supervised (probes): resolves with its exit code and output
+ * once its teardown is verified, or rejects (spawn failure, unverified teardown) after `timeoutMs`
+ * plus the teardown bound.
+ */
+export async function runContained(
+  binary: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; containment: Containment; timeoutMs: number; init?: boolean; label?: string },
+): Promise<{ code: number | null; stdout: string; stderr: string; reason: Error | null }> {
+  const child = spawnContained(binary, args, options);
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
+  child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+  const supervised = superviseChild(child, { label: options.label ?? binary.split("/").pop()!, signal: AbortSignal.timeout(options.timeoutMs) });
+  const { code, reason } = await supervised.done;
+  return { code, stdout, stderr, reason };
 }
 
 export interface TeardownTimings {
@@ -243,9 +287,11 @@ function childrenOf(pid: number, table: Map<number, number> | null): number[] {
  * and killing it takes the whole namespace with it.
  *
  * Verification: the root has exited (for a PID namespace, unshare reaped the init, so the
- * namespace is empty) and the root's process group is empty. Anything left in the group after
- * the root exits is SIGKILLed. If that cannot be confirmed within `verifyMs`, stdio is destroyed,
- * the failure is logged loudly, and `done` rejects with CommandTeardownError.
+ * namespace is empty), the root's process group is empty, and the stdio pipes closed. Anything
+ * left in the group after the root exits is SIGKILLed. A namespace does not contain processes a
+ * host service starts on the command's behalf, so stdio is bounded with and without one. If any
+ * of it cannot be confirmed within `verifyMs`, stdio is destroyed, the failure is logged loudly,
+ * and `done` rejects with CommandTeardownError (its `cause` is the termination reason, if any).
  */
 export function superviseChild(
   child: ChildProcess,
@@ -262,6 +308,9 @@ export function superviseChild(
   let terminating = false;
   let settled = false;
   let stdioClosed = false;
+  // Set only by verifyAfterExit once the root's process group is confirmed empty. Nothing settles
+  // (and no cleanup runs) before it: 'close' alone means the root exited and its stdio closed.
+  let verified = false;
   const timers = new Set<NodeJS.Timeout>();
   const onExitWaiters: Array<() => void> = [];
 
@@ -303,7 +352,7 @@ export function superviseChild(
   };
 
   const settle = () => {
-    if (settled || !exit || !stdioClosed) return;
+    if (settled || !exit || !stdioClosed || !verified) return;
     settled = true;
     cleanup();
     runAfterTeardown();
@@ -330,7 +379,19 @@ export function superviseChild(
   };
 
   const unverified = (detail: string) =>
-    fail(new CommandTeardownError(`${options.label} teardown could not be verified: ${detail}`), true);
+    fail(
+      new CommandTeardownError(`${options.label} teardown could not be verified: ${detail}`, reason ? { cause: reason } : undefined),
+      true,
+    );
+
+  const stdioHolder = namespaced
+    ? "a process outside the namespace (for example one a host service started for the command) holds it"
+    : "a descendant left the process group";
+  /** After the group emptied, stdio that stays open has a writer we cannot see or signal: bound the wait. */
+  const boundStdio = (ms: number) =>
+    later(ms, () => {
+      if (!stdioClosed) unverified(`stdio is still held open after the command's processes exited (${stdioHolder})`);
+    });
 
   /** After the root exits: SIGKILL stragglers in its group until it is empty, within the bound. */
   const verifyAfterExit = async () => {
@@ -342,13 +403,13 @@ export function superviseChild(
       signalGroup(pid, "SIGKILL");
       await sleep(25);
     }
-    // Every process is gone. With a PID namespace no writer of the stdio pipes survives, so they
-    // reach EOF once read. Without one, a setsid'd descendant can still hold them: bound the wait.
-    if (!namespaced && !stdioClosed) {
-      later(timings.verifyMs, () => {
-        if (!stdioClosed) unverified("stdio is still held open after the process group emptied (a descendant left it)");
-      });
-    }
+    if (settled) return;
+    verified = true;
+    // Every process the command started is gone, but the stdio pipes can still have a writer: a
+    // setsid'd descendant without a PID namespace, or, even with one, a process a host service (a
+    // systemd user manager reached over the session bus) started outside it. Bound the wait; once
+    // the command is being stopped, wait only briefly.
+    if (!stdioClosed) boundStdio(terminating ? Math.min(timings.launcherGraceMs, timings.verifyMs) : timings.verifyMs);
     settle();
   };
 
@@ -383,7 +444,12 @@ export function superviseChild(
     reason ??= why;
     if (terminating || settled || pid === undefined) return;
     terminating = true;
-    if (exit) return; // already exited; verification is under way
+    if (exit) {
+      // The root already exited. Verification is under way; if it already emptied the group and
+      // only stdio is still held, stop waiting for it after a short grace instead of the full bound.
+      if (verified && !stdioClosed) boundStdio(Math.min(timings.launcherGraceMs, timings.verifyMs));
+      return;
+    }
     if (!terminateOptions?.immediate) {
       // A namespace init only receives signals it handles; the rest of the group gets TERM anyway.
       signalGroup(pid, "SIGTERM");
