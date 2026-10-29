@@ -9,7 +9,7 @@ import {
 
 import { splitRemainingPages } from "../db/page-base-fee.js";
 import { applyPageImageReferences, fastPageImageCaps, pagesKeptAsImage } from "../lib/page-image-references.js";
-import { artifactExportPath, documentExportEntries, type ExportDocumentRow, type ExportSource } from "../exports/build-document-export.js";
+import { artifactExportPath, CANONICAL_REFERENCE_MAX_BYTES, documentExportEntries, type ExportDocumentRow, type ExportSource } from "../exports/build-document-export.js";
 import { RenderImagesStage } from "../stages/render-images.js";
 import { buildCanonicalChunksFromDocument, buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -328,6 +328,48 @@ describe("quality fast: references follow the stored image format", () => {
     // No canonical document in this run: no reference is known, so no image ships.
     const { "doc:canonical-document": _canonical, ...withoutCanonical } = row.artifacts;
     expect((await exported(withoutCanonical)).some((path) => path.includes("images/"))).toBe(false);
+  });
+
+  it("opens the canonical document only when a page image could ship, and caps its size (L3)", async () => {
+    const opened: string[] = [];
+    const row = {
+      id: "doc", workspace_id: "ws", run_id: "run", filename: "a.pdf", mime_type: "application/pdf", source_key: "raw/doc",
+      status: "completed", extraction_mode: "fast", page_count: 2, version_number: 1, metadata: {}, created_at: "2026-10-29", updated_at: "2026-10-29",
+      tags: [], artifacts: { "doc:markdown": "s3://bucket/run/markdown/doc.md", "doc:canonical-document": "s3://bucket/run/canonical/doc.json" },
+    } satisfies ExportDocumentRow;
+    const huge = CANONICAL_REFERENCE_MAX_BYTES + 1;
+    const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+    let read = 0;
+    const source = (size: number | null): ExportSource => ({
+      bucket: "bucket",
+      pages: async () => [],
+      open: async (key) => {
+        opened.push(key);
+        if (key !== "run/canonical/doc.json") return { stream: (async function* () { yield new TextEncoder().encode("x"); })(), size: 1 };
+        // An oversized canonical document, streamed in 1 MiB chunks; counts how much was read.
+        return { size, stream: (async function* () { for (let sent = 0; sent < huge; sent += chunk.length) { read += chunk.length; yield chunk; } })() };
+      },
+    });
+    const exported = async (artifacts: Record<string, string>, size: number | null) => {
+      const paths: string[] = [];
+      for await (const entry of documentExportEntries({ root: "export", scope: "document", content: "markdown", documents: [{ ...row, artifacts }], truncated: false }, source(size), [])) {
+        paths.push(entry.path);
+      }
+      return paths;
+    };
+    // No page-image artifacts: the canonical document is never opened.
+    await exported(row.artifacts, 10);
+    expect(opened).not.toContain("run/canonical/doc.json");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // Stored size over the cap: refused before reading; size unknown: reading stops at the cap.
+    for (const size of [huge, null]) {
+      read = 0;
+      const paths = await exported({ ...row.artifacts, "doc:page-1": "s3://bucket/run/images/doc/page-1.png" }, size);
+      expect(paths.some((path) => path.includes("images/"))).toBe(false);
+      expect(read).toBeLessThanOrEqual(CANONICAL_REFERENCE_MAX_BYTES + chunk.length);
+    }
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
   });
 });
 

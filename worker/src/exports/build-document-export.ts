@@ -118,16 +118,46 @@ async function readText(stream: AsyncIterable<Uint8Array>): Promise<string> {
   return text + decoder.decode();
 }
 
+/** Canonical documents read for page-image references are capped: a larger one ships no page images. */
+export const CANONICAL_REFERENCE_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Reads a stream as text, or null (and stops reading) once it exceeds `maxBytes`. */
+async function readTextCapped(stream: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string | null> {
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  for await (const chunk of stream) {
+    bytes += chunk.byteLength;
+    if (bytes > maxBytes) {
+      (stream as { destroy?: () => void }).destroy?.();
+      return null;
+    }
+    text += decoder.decode(chunk, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 /**
  * Pages whose Fast page-image reference is in a document's canonical document (blocks stamped with the page-image
- * adapter, never matched by text). None when the document has no canonical artifact or it cannot be read.
+ * adapter, never matched by text). None when the document has no canonical artifact, it cannot be read, or it is
+ * larger than CANONICAL_REFERENCE_MAX_BYTES (checked on the stored size and again while reading).
  */
 async function referencedPageImages(source: ExportSource, canonicalKey: string | null): Promise<Set<number>> {
   const pages = new Set<number>();
   if (!canonicalKey) return pages;
   try {
     const opened = await source.open(canonicalKey);
-    const parsed = JSON.parse(await readText(opened.stream)) as { blocks?: unknown };
+    if (opened.size !== null && opened.size > CANONICAL_REFERENCE_MAX_BYTES) {
+      (opened.stream as { destroy?: () => void }).destroy?.();
+      console.warn(`[document-export] canonical document too large for page-image references key=${canonicalKey} bytes=${opened.size}`);
+      return pages;
+    }
+    const text = await readTextCapped(opened.stream, CANONICAL_REFERENCE_MAX_BYTES);
+    if (text === null) {
+      console.warn(`[document-export] canonical document too large for page-image references key=${canonicalKey}`);
+      return pages;
+    }
+    const parsed = JSON.parse(text) as { blocks?: unknown };
     for (const block of Array.isArray(parsed.blocks) ? parsed.blocks : []) {
       if (!block || typeof block !== "object" || !isPageImageReferenceBlock(block as { metadata?: Record<string, unknown> })) continue;
       const page = (block as { pageNumber?: unknown }).pageNumber;
@@ -226,8 +256,10 @@ export async function* documentExportEntries(
     if (args.content !== "all" && completed) {
       // Fast references these page images from the Markdown; ship them so the links resolve. The pages come from
       // the reference blocks in this run's canonical document, the same structure the Markdown was written from.
-      const kept = await referencedPageImages(source, artifactKey("canonical-document"));
-      for (const entry of artifacts) {
+      // Read only when there is a page image to ship: most documents (no kept page images) never open it.
+      const pageImages = artifacts.filter((entry) => PAGE_IMAGE_SLOT.test(entry.name));
+      const kept = pageImages.length > 0 ? await referencedPageImages(source, artifactKey("canonical-document")) : new Set<number>();
+      for (const entry of pageImages) {
         const page = PAGE_IMAGE_SLOT.exec(entry.name);
         if (!page || !kept.has(Number(page[1]))) continue;
         const target = artifactExportPath(entry.name, entry.key)!;

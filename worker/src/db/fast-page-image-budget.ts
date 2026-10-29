@@ -15,6 +15,10 @@ export class FastPageImageBudgetRefused extends Error {
  * page-range shards, a retried stage and a restarted worker get the same grant back (capped at `wanted`) without
  * spending the budget again.
  *
+ * A grant is spent when it is reserved, before anything renders: a render that then fails (bad page, timeout,
+ * storage error) still uses its share of the budget, and a retry gets the same stored grant back rather than a new
+ * one. Failed renders therefore never let a run render more than `perRun` pages in total.
+ *
  * The document must be one of the run's own documents (`documents.run_id`, in the run's workspace and organization),
  * checked in the reservation transaction before the budget is touched; any other pair throws
  * FastPageImageBudgetRefused and reserves nothing. Migration 0101's grant trigger enforces the same rule.
