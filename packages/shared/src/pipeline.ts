@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
+import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
@@ -434,11 +435,10 @@ export const pipelineFeaturesSchema = z
       .default({ route: "auto", coarseFallback: false }),
     inferenceLane: inferenceLaneSchema.default("standard"),
     textGeneration: textGenerationConfigSchema.default(defaultTextGenerationConfig),
-    // Named parser playbook selection controls which extraction/vision strategies to prefer.
-    // Exposed as a coarse, opinionated knob rather than a dozen low-level flags.
-    parserPlaybook: z
-      .enum(["fast", "balanced", "layout-aware", "agentic", "review-grade"])
-      .default("balanced"),
+    // Processing quality (fast / auto / good): the one public extraction knob. The worker derives its internal
+    // parser playbook and vision page selection from it. Retired `parserPlaybook` and `vision.forceAllPages`
+    // inputs are mapped onto it by migrateLegacyQualitySettings.
+    quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
     documentExtraction: documentExtractionConfigSchema.default(
       defaultDocumentExtractionConfig,
     ),
@@ -632,7 +632,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   visualPages: { route: "auto", coarseFallback: false },
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
-  parserPlaybook: "balanced",
+  quality: DEFAULT_QUALITY_MODE,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
   vision: defaultVisionConfig,
@@ -899,7 +899,7 @@ export type PipelineFeatureOverrides = Omit<
 export function normalizePipelineFeatures(
   source?: PipelineFeatureOverrides | PipelineFeatures | null,
 ): PipelineFeatures {
-  source = migrateStoredModelSettings(source);
+  source = migrateLegacyQualitySettings(migrateStoredModelSettings(source));
   // Privacy-only configuration must never opt into a hosted embedding call.
   // Explicit model/profile selections still pass through the privacy validator.
   const fallbackEmbedding = source?.privacyMode && source.privacyMode !== "standard"
@@ -1018,6 +1018,7 @@ export function mergePipelineFeatures(
   overrides?: PipelineFeatureOverrides | null,
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
+  overrides = migrateLegacyQualitySettings(overrides);
   if (!overrides || Object.keys(overrides).length === 0) return normalizedBase;
   return normalizePipelineFeatures(
     mergeOverrideRecord(
@@ -1035,7 +1036,7 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
  * filling in defaults, so they can be merged onto the workspace pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .record(z.string(), z.unknown())
+  .preprocess(migrateLegacyQualitySettings, z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {
@@ -1464,7 +1465,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   visualPages: [],
   inferenceLane: [],
   textGeneration: [],
-  parserPlaybook: ["extract-markdown"],
+  quality: ["extract-markdown", "vision-extract"],
   documentExtraction: ["extract-markdown"],
   visionFallback: ["vision-extract"],
   vision: ["vision-extract"],

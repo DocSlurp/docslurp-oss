@@ -483,7 +483,7 @@ describe("workspace templates", () => {
     const result = applyWorkspaceTemplateLocks(
       {
         ...defaultPipelineFeatures,
-        parserPlaybook: "fast",
+        quality: "fast",
         preserveCode: false,
         preserveImages: false,
         chunkOverlap: false,
@@ -498,7 +498,7 @@ describe("workspace templates", () => {
       template
     );
 
-    expect(result.parserPlaybook).toBe("layout-aware");
+    expect(result.quality).toBe("auto");
     expect(result.preserveCode).toBe(true);
     expect(result.preserveImages).toBe(true);
     expect(result.chunkOverlap).toBe(true);
