@@ -1,5 +1,8 @@
-import { lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+import { afterTeardown } from "./teardown.js";
 
 /**
  * Per-command sandbox scratch (`<root>/run-XXXXXX`) is removed by whoever created it once the
@@ -9,7 +12,52 @@ import path from "node:path";
  *
  * Each instance has a sibling `run-XXXXXX.owner` holding the host pid whose exit means the sandbox
  * is gone. It lives outside the instance, where the parser cannot write.
+ *
+ * The sweep is a heuristic, not a proof that nothing runs: an instance whose owner file is missing
+ * or unreadable is removed by age alone (3 hours, longer than any command's wall-clock budget), and
+ * a recycled owner pid keeps an instance until that unrelated process exits. Symlinked entries are
+ * never followed. Removal after verified teardown (afterTeardown) is the primary path.
  */
+
+export type OwnerWriter = (file: string, pid: number) => void;
+
+const writeOwnerFile: OwnerWriter = (file, pid) => writeFileSync(file, `${pid}\n`);
+
+/**
+ * Start a command whose scratch is `dir`, and give that scratch an owner before anything runs:
+ * the worker's pid first (live for as long as anyone can supervise the command), then the
+ * command's root pid. A failure before spawn removes the scratch and nothing runs. A failure
+ * after it never abandons the child: the command keeps running supervised, the placeholder owner
+ * stays (logged loudly), and `cleanup` runs only once its teardown is verified.
+ */
+export function spawnOwned(
+  dir: string,
+  start: () => ChildProcess,
+  cleanup: () => void,
+  writeOwner: OwnerWriter = writeOwnerFile,
+): ChildProcess {
+  const ownerFile = `${dir}.owner`;
+  let child: ChildProcess;
+  try {
+    writeOwner(ownerFile, process.pid);
+    child = start();
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+  afterTeardown(child, cleanup);
+  if (child.pid !== undefined) {
+    try {
+      writeOwner(ownerFile, child.pid);
+    } catch (error) {
+      console.error(
+        `[parser-sandbox] status=owner-write-failed dir=${dir} pid=${child.pid} owner=${process.pid} ` +
+          `error=${JSON.stringify((error as Error).message)}`,
+      );
+    }
+  }
+  return child;
+}
 
 export interface SweepOptions {
   now?: number;

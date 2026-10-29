@@ -23,6 +23,8 @@ const provider: ParserSandboxProvider<Record<string, never>> = {
         spawnContained(command.binary, command.args, {
           env: command.env,
           containment: current.processes ? "pid-namespace" : "process-group",
+          // The parser is not PID 1 of its namespace: a minimal init forwards signals to it.
+          init: true,
         }),
       close: async () => {},
     };

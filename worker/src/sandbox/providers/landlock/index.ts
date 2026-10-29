@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { release } from "node:os";
 import path from "node:path";
 
 import { readSandboxConfig } from "../../config-schema.js";
-import { startSandboxScratchSweeper } from "../../scratch-sweep.js";
-import { afterTeardown, probePidNamespace, spawnContained } from "../../teardown.js";
+import { spawnOwned, startSandboxScratchSweeper } from "../../scratch-sweep.js";
+import { probePidNamespace, spawnContained } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
   SandboxCommand,
@@ -66,7 +66,13 @@ export function networkForKernel(kernelRelease: string): SandboxNetworkIsolation
   return major > 6 || (major === 6 && minor >= 8) ? "tcp-only" : "none";
 }
 
-/** Landlock confines files and TCP but not processes; each command also runs in its own PID namespace. */
+/**
+ * Landlock confines files and TCP but not processes; each command also runs in its own PID namespace.
+ * landrun v0.1.17 offers no way to restrict UNIX-socket connects, so a parser can ask a host service
+ * listening on one (a session bus, a systemd user manager) to start processes outside its namespace.
+ * Such a command ends in an unverified teardown and a poisoned slot (sandbox/teardown.ts), never in a
+ * reused one; run workers where no such service listens, as the worker images do.
+ */
 function isolationFor(kernelRelease: string): SandboxIsolation {
   return { filesystem: true, network: networkForKernel(kernelRelease), processes: probePidNamespace().ok, location: "local" };
 }
@@ -187,26 +193,25 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
           rmSync(scratch.dir, { recursive: true, force: true });
           rmSync(`${scratch.dir}.owner`, { force: true });
         };
-        try {
-          const sandboxed = {
-            ...command,
-            env: { ...command.env, ...scratch.env },
-            writablePaths: [...command.writablePaths, scratch.dir],
-          };
-          // landrun execs the parser, which becomes init of its own PID namespace.
-          const child = spawnContained(config.binary, landrunArgs(sandboxed), {
-            env: sandboxed.env,
-            cwd: scratch.cwd,
-            containment: "pid-namespace",
-          });
-          if (child.pid !== undefined) writeFileSync(`${scratch.dir}.owner`, `${child.pid}\n`);
-          // Only once every process of the command is gone; a poisoned command keeps it for the sweep.
-          afterTeardown(child, cleanup);
-          return child;
-        } catch (error) {
-          cleanup();
-          throw error;
-        }
+        const sandboxed = {
+          ...command,
+          env: { ...command.env, ...scratch.env },
+          writablePaths: [...command.writablePaths, scratch.dir],
+        };
+        // A minimal init is the namespace's PID 1, so the parser landrun execs gets default
+        // SIGTERM and SIGPIPE handling. Scratch is removed only once every process of the command
+        // is gone; a poisoned command keeps it for the sweep.
+        return spawnOwned(
+          scratch.dir,
+          () =>
+            spawnContained(config.binary, landrunArgs(sandboxed), {
+              env: sandboxed.env,
+              cwd: scratch.cwd,
+              containment: "pid-namespace",
+              init: true,
+            }),
+          cleanup,
+        );
       },
       close: async () => {},
     };

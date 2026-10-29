@@ -1,12 +1,11 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { resolveScriptsDir } from "../../../tools/scripts-dir.js";
 import { readSandboxConfig } from "../../config-schema.js";
-import { startSandboxScratchSweeper } from "../../scratch-sweep.js";
-import { afterTeardown, probePidNamespace, spawnContained } from "../../teardown.js";
+import { spawnOwned, startSandboxScratchSweeper } from "../../scratch-sweep.js";
+import { probePidNamespace, runContained, spawnContained } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
   SandboxCommand,
@@ -73,17 +72,21 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
     // bwrap's own PID namespace holds the parser; the outer one (see openSession) holds the launcher.
     const pidNamespace = probePidNamespace();
     if (!pidNamespace.ok) return { ok: false, isolation: { ...ISOLATION, processes: false }, detail: pidNamespace.detail };
-    const result = spawnSync(launcherPath(), ["/usr/bin/true"], {
-      env: {
-        PATH: process.env.PATH ?? "",
-        ...launcherEnv(config, { readablePaths: [], writablePaths: [] }),
-      },
-      encoding: "utf8",
-      timeout: PROBE_TIMEOUT_MS,
-    });
-    if (result.status === 0) return { ok: true, isolation: ISOLATION, detail: "bubblewrap available" };
-    const detail =
-      result.stderr?.trim() || result.error?.message || `launcher exited with status ${result.status}`;
+    // Probe exactly as commands run: the launcher as init of its own PID namespace, so a host that
+    // cannot nest bwrap's namespace inside it stops the worker here instead of failing every command.
+    let detail: string;
+    try {
+      const result = await runContained(launcherPath(), ["/usr/bin/true"], {
+        env: { PATH: process.env.PATH ?? "", ...launcherEnv(config, { readablePaths: [], writablePaths: [] }) },
+        containment: "pid-namespace",
+        timeoutMs: PROBE_TIMEOUT_MS,
+        label: "bubblewrap-probe",
+      });
+      if (result.code === 0 && !result.reason) return { ok: true, isolation: ISOLATION, detail: "bubblewrap available" };
+      detail = result.reason?.message || result.stderr.trim() || `launcher exited with status ${result.code}`;
+    } catch (error) {
+      detail = (error as Error).message;
+    }
     return { ok: false, isolation: ISOLATION, detail };
   },
   async openSession(config) {
@@ -102,18 +105,15 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
           rmSync(instance, { recursive: true, force: true });
           rmSync(`${instance}.owner`, { force: true });
         };
-        try {
-          const child = spawnContained(launcherPath(), [command.binary, ...command.args], {
-            env: { ...command.env, ...launcherEnv(config, command), DOCSLURP_PARSER_SANDBOX_INSTANCE: instance },
-            containment: "pid-namespace",
-          });
-          if (child.pid !== undefined) writeFileSync(`${instance}.owner`, `${child.pid}\n`);
-          afterTeardown(child, cleanup);
-          return child;
-        } catch (error) {
-          cleanup();
-          throw error;
-        }
+        return spawnOwned(
+          instance,
+          () =>
+            spawnContained(launcherPath(), [command.binary, ...command.args], {
+              env: { ...command.env, ...launcherEnv(config, command), DOCSLURP_PARSER_SANDBOX_INSTANCE: instance },
+              containment: "pid-namespace",
+            }),
+          cleanup,
+        );
       },
       close: async () => {},
     };

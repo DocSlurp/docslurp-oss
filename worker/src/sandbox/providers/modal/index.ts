@@ -29,6 +29,12 @@ export interface ModalConfig {
   sessionTimeoutSeconds: number;
 }
 
+/**
+ * `processes` here means nothing a command starts runs on the worker host, not that remote
+ * descendants die with the command: one that starts its own session can keep running inside this
+ * activity's Modal sandbox (and writing its remote directories) until the session closes or
+ * `sessionTimeoutSeconds` ends it. See docs/self-host/sandbox-providers.md, "Process teardown".
+ */
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
 
 const configSchema: SandboxConfigSchema = {
