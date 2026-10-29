@@ -240,6 +240,16 @@ describe("mcpRoutes", () => {
     expect(call.body.files.every((file: { singlePart?: boolean }) => file.singlePart === undefined)).toBe(true);
   });
 
+  it("passes the processing quality through as pipeline.quality and rejects unknown modes", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    const headers = { Authorization: "Bearer key", "Content-Type": "application/json" };
+    const response = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ urls: ["https://example.com/scan.pdf"], quality: "fast" }) });
+    expect(response.status).toBe(201);
+    expect(uploadRequest.mock.lastCall![0].body).toEqual({ urls: ["https://example.com/scan.pdf"], pipeline: { quality: "fast" } });
+    const bad = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ urls: ["https://example.com/scan.pdf"], quality: "deep" }) });
+    expect(bad.status).toBe(400);
+  });
+
   it("preserves the widget's single-PUT opt-in without forcing it on other uploads", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const response = await app.request("/mcp/tools/upload", {

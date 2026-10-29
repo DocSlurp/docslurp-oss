@@ -208,6 +208,7 @@ const mcpAdapterRoutes = new Hono()
         }
         const form = new FormData();
         if (input.workspace) form.set("workspace", input.workspace);
+        if (input.quality) form.set("pipeline", JSON.stringify({ quality: input.quality }));
         for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
         return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
@@ -216,6 +217,7 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ workspace: input.workspace,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
+          ...(input.quality ? { pipeline: { quality: input.quality } } : {}),
           ...extractFields,
         }), signal: c.req.raw.signal,
       });
