@@ -234,10 +234,9 @@ export interface ProviderRequestGate {
 /**
  * Statuses a provider returns before accepting a request: rate limits and overload.
  *
- * Assumption (not contractual): OpenAI, Anthropic and OpenRouter document 429 as rejected before any
- * inference and do not bill it; 503 and 529 are their overload answers, also returned before a model
- * runs. No provider we use documents billing either. The vision guard hands these back (they leave
- * its counts), bounded by `VISION_THROTTLE_ALLOWANCE` per call, and each hand-back logs
+ * Assumption, not verified against any provider's billing terms: 429 (rate limit) and 503/529
+ * (overload) are answered before a model runs, so nothing is billed. The vision guard hands these
+ * back (they leave its counts), bounded by `VISION_THROTTLE_ALLOWANCE` per call; each hand-back logs
  * `[vision-throttle-handback]` with the org, so a provider that starts billing them shows up as
  * provider spend with no matching admitted requests.
  */

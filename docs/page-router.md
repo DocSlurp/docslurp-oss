@@ -258,8 +258,8 @@ such 404/405/415/501 refusals within 10 minutes, each followed by a successful n
 later calls to that endpoint and model skip streaming for 10 minutes in that process; 400 and 422,
 which usually describe the request, never turn streaming off. Every hand-back logs
 `[vision-throttle-handback]` with org, run and kind. Treating 429, 503 and 529 as unbilled is an
-assumption (providers document 429 as rejected before inference; none documents billing overload
-answers), bounded per call by the allowance below. A call
+assumption not verified against provider billing terms (they are answered before a model runs),
+bounded per call by the allowance below. A call
 may hand back `VISION_THROTTLE_ALLOWANCE` throttles; past that the wait goes to Temporal as a
 retryable provider error with its Retry-After. Anything that may have been accepted stays counted:
 other 5xx, timeouts and network errors after sending, accepted streams that break.
