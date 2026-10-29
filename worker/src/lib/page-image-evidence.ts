@@ -42,7 +42,13 @@ export interface PageImageEvidence {
 
 export interface PageImageEvidenceArtifact {
   documentId: string;
-  source: "pdfimages";
+  source: "pdfimages" | "image-file";
+  /**
+   * Source file bytes over page count. Without any extracted text, a page whose share of the
+   * file is large (minus its images) holds drawn content (vector glyphs, outlined text), not
+   * nothing. Optional: absent in older artifacts.
+   */
+  sourceBytesPerPage?: number | null;
   sparsePageWords: number;
   pages: PageImageEvidence[];
 }
@@ -121,13 +127,33 @@ export function buildPageImageEvidence(args: {
  * Sparse pages (page number → native word count) from page-aligned texts. Returns an
  * empty map when no page is sparse.
  */
-export function findSparsePages(pageTexts: string[]): Map<number, number> {
+export function findSparsePages(pageTexts: string[], textLayerPages?: string[] | null): Map<number, number> {
   const sparse = new Map<number, number>();
   pageTexts.forEach((text, index) => {
-    const words = pageEvidenceWordCount(text);
+    const words = nativePageWords(text, textLayerPages?.[index]);
     if (words < SPARSE_PAGE_WORDS) sparse.set(index + 1, words);
   });
   return sparse;
+}
+
+/**
+ * Native words on a page. Extracted text can come from OCR of a raster (Tesseract inside the
+ * extractor), which is word-shaped yet says nothing about the text layer: a scan with OCR text
+ * is still a raster page. When the PDF's own text layer is known (page facts' pdftotext run), the
+ * smaller of the two counts is the native one.
+ */
+export function nativePageWords(extractedText: string, textLayerText?: string | null): number {
+  const extracted = pageEvidenceWordCount(extractedText);
+  if (typeof textLayerText !== "string") return extracted;
+  return Math.min(extracted, pageEvidenceWordCount(textLayerText));
+}
+
+/**
+ * Evidence for an uploaded image file: one page with no text layer whose content is a single
+ * full-page raster. Any text extracted for it came from OCR.
+ */
+export function imageFilePageEvidence(): PageImageEvidence[] {
+  return [{ pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, embeddedImageBytes: null }];
 }
 
 /**
@@ -174,8 +200,13 @@ export async function collectPageImageEvidence(args: {
    * report's page facts). Reused when it covers every sparse page and succeeded.
    */
   sharedImagesList?: { lastPage: number; stdout: Promise<string | null> };
+  /**
+   * The PDF's own text layer per page (form-feed split pdftotext output from page facts), when
+   * known. Pages past its range keep the extracted text's word count.
+   */
+  textLayerPages?: string[] | null;
 }): Promise<PageImageEvidence[] | null> {
-  const sparsePages = findSparsePages(args.pageTexts);
+  const sparsePages = findSparsePages(args.pageTexts, args.textLayerPages);
   if (sparsePages.size === 0) return null;
   const pageNumbers = [...sparsePages.keys()];
   const first = Math.min(...pageNumbers);

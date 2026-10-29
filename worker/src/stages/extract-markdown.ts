@@ -3,7 +3,7 @@ import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -57,7 +57,9 @@ import { evaluateParserPolicy } from "../lib/parser-policy.js";
 import {
   SPARSE_PAGE_WORDS,
   collectPageImageEvidence,
+  imageFilePageEvidence,
   pageAlignedTexts,
+  type PageImageEvidence,
   type PageImageEvidenceArtifact,
 } from "../lib/page-image-evidence.js";
 import {
@@ -82,7 +84,7 @@ import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore } from "../tools/storage.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
-import { pageFactsEnabled, probePdfPageFacts, recordPageFacts } from "../pipeline/page-facts.js";
+import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 
@@ -742,7 +744,9 @@ export class ExtractMarkdownStage implements Stage {
                   const pageImageEvidenceUri =
                     isPdf && state.run.pipeline.visionFallback
                       ? await this.recordPageImageEvidence(document, tempFile, winningText, state, signal)
-                      : null;
+                      : format === "image" && state.run.pipeline.visionFallback
+                        ? await this.storePageImageEvidence(document, state, imageFilePageEvidence(), "image-file")
+                        : null;
                   registerHash(state, contentHash, artifactUri);
 
                   for (const parserArtifact of parserArtifacts) {
@@ -1010,6 +1014,7 @@ export class ExtractMarkdownStage implements Stage {
         } finally {
           await pageFacts;
           this.imageListings.delete(this.imageListingKey(state, document));
+          this.textLayerListings.delete(this.imageListingKey(state, document));
         }
       },
     );
@@ -1046,12 +1051,52 @@ export class ExtractMarkdownStage implements Stage {
 
   /** Pending `pdfimages -list` runs from page facts, per run and document, shared with page triage. */
   private readonly imageListings = new Map<string, { lastPage: number; stdout: Promise<string | null> }>();
+  /** Pending `pdftotext` runs from page facts (the native text layer), shared with page triage. */
+  private readonly textLayerListings = new Map<string, { lastPage: number; stdout: Promise<string | null> }>();
 
   private imageListingKey(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
   ): string {
     return `${state.run.id}:${document.id}`;
+  }
+
+  /**
+   * The PDF's own text layer per page from page facts' pdftotext run, or null when page facts
+   * did not run or failed. OCR text from the extractor is word-shaped, so page triage needs the
+   * text layer to see that an OCR'd scan is still a raster page.
+   */
+  private async textLayerPages(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+  ): Promise<string[] | null> {
+    const listing = this.textLayerListings.get(this.imageListingKey(state, document));
+    if (!listing) return null;
+    const stdout = await listing.stdout.catch(() => null);
+    return stdout === null ? null : splitFormFeedPages(stdout, listing.lastPage);
+  }
+
+  private async storePageImageEvidence(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    pages: PageImageEvidence[],
+    source: PageImageEvidenceArtifact["source"],
+    sourceBytesPerPage: number | null = null,
+  ): Promise<string> {
+    const artifact: PageImageEvidenceArtifact = {
+      documentId: document.id,
+      source,
+      sparsePageWords: SPARSE_PAGE_WORDS,
+      sourceBytesPerPage,
+      pages,
+    };
+    const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
+    await this.storage.putJson(key, artifact);
+    console.log(
+      `[extract-debug] document=${document.id} pageImageEvidence source=${source} sparsePages=${pages.length} ` +
+        `withImages=${pages.filter((page) => page.imageCount > 0).length}`,
+    );
+    return this.storage.uri(key);
   }
 
   /**
@@ -1075,21 +1120,12 @@ export class ExtractMarkdownStage implements Stage {
         pageTexts,
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
+        textLayerPages: await this.textLayerPages(state, document),
       });
       if (!pages) return null;
-      const artifact: PageImageEvidenceArtifact = {
-        documentId: document.id,
-        source: "pdfimages",
-        sparsePageWords: SPARSE_PAGE_WORDS,
-        pages,
-      };
-      const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
-      await this.storage.putJson(key, artifact);
-      console.log(
-        `[extract-debug] document=${document.id} pageImageEvidence sparsePages=${pages.length} ` +
-          `withImages=${pages.filter((page) => page.imageCount > 0).length}`,
-      );
-      return this.storage.uri(key);
+      const sourceBytes = await stat(sourcePath).then((info) => info.size).catch(() => null);
+      return await this.storePageImageEvidence(document, state, pages, "pdfimages",
+        sourceBytes === null ? null : Math.round(sourceBytes / Math.max(1, document.pageCount)));
     } catch (error) {
       if (signal?.aborted) throw error;
       console.warn(
@@ -1128,6 +1164,7 @@ export class ExtractMarkdownStage implements Stage {
         signal,
         // Page triage (recordPageImageEvidence) reuses this pdfimages run instead of a second one.
         onImagesList: (listing) => this.imageListings.set(this.imageListingKey(state, document), listing),
+        onPageText: (listing) => this.textLayerListings.set(this.imageListingKey(state, document), listing),
       });
       await recordPageFacts(state.store, rows);
     } catch (error) {

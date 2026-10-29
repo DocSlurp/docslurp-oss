@@ -70,6 +70,7 @@ export class ClassifyRouteStage implements Stage {
                   : null,
             structuredComplexity: structured?.pages,
             pageImageEvidence: imageEvidence?.pages,
+            sourceBytesPerPage: imageEvidence?.sourceBytesPerPage ?? null,
           });
 
           await this.storage.putJson(key, surface);
@@ -212,19 +213,21 @@ export class ClassifyRouteStage implements Stage {
   private async loadPageImageEvidence(
     state: import("../pipeline/pipeline.js").WorkflowState,
     documentId: string,
-  ): Promise<{ pages: Map<number, PageImageEvidence>; artifactUri: string } | null> {
+  ): Promise<{ pages: Map<number, PageImageEvidence>; artifactUri: string; sourceBytesPerPage: number | null } | null> {
     const artifactUri = state.artifactLedger.readDocument(documentId, "page-image-evidence");
     if (!artifactUri) return null;
     try {
       const key = keyFromStorageUri(artifactUri, this.storage.bucket);
       if (!key) return null;
-      const payload = (await this.storage.getJson(key)) as { pages?: unknown[] } | null;
+      const payload = (await this.storage.getJson(key)) as { pages?: unknown[]; sourceBytesPerPage?: unknown } | null;
       const pages = new Map<number, PageImageEvidence>();
       for (const entry of payload?.pages ?? []) {
         const page = parsePageImageEvidence(entry);
         if (page) pages.set(page.pageNumber, page);
       }
-      return pages.size > 0 ? { pages, artifactUri } : null;
+      const bytes = payload?.sourceBytesPerPage;
+      const sourceBytesPerPage = typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+      return pages.size > 0 ? { pages, artifactUri, sourceBytesPerPage } : null;
     } catch {
       return null;
     }
@@ -284,6 +287,8 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   structuredComplexity?: Map<number, StructuredPageComplexityEvidence>;
   /** Raster evidence for sparse-text PDF pages (lib/page-image-evidence.ts). */
   pageImageEvidence?: Map<number, PageImageEvidence>;
+  /** Source file bytes over page count, from the raster evidence artifact. */
+  sourceBytesPerPage?: number | null;
 }): AdaptiveRoutingDecisionSurface {
   const hasPageEvidence =
     (args.structuredComplexity?.size ?? 0) > 0 || (args.pageImageEvidence?.size ?? 0) > 0;
@@ -297,14 +302,25 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   }
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename);
   const hasPageAlignment = pageAlignedTexts(args.text, args.pageCount) !== null;
+  // No extractor produced any text for the whole document, and its file is far larger than
+  // blank pages need: the content is drawn (vector paths, outlined glyphs), so a page without
+  // text or images is not blank and vision is its only reader.
+  const documentWithoutText = !args.text.trim();
+  const drawnContent = (evidence: PageImageEvidence | undefined) =>
+    documentWithoutText && args.sourceBytesPerPage != null &&
+    args.sourceBytesPerPage - (evidence?.embeddedImageBytes ?? 0) >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
   const pages = buildAdaptivePageRoutes(args.text, Math.max(1, args.pageCount)).map((page) => {
     const complexity = args.structuredComplexity?.get(page.pageNumber);
     const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
     if (!complexity && !imageEvidence) return page;
-    const ocrDecision = complexity
+    const evidenceDecision = complexity
       ? authorizeStructuredOcr(complexity, pageTextAt(args.text, args.pageCount, page.pageNumber), imageEvidence,
           hasPageAlignment)
       : authorizeRasterPageOcr(imageEvidence!);
+    const ocrDecision: AdaptiveOcrDecision =
+      evidenceDecision.signals.includes(BLANK_PAGE_SIGNAL) && drawnContent(imageEvidence)
+        ? { authorized: true, confidence: 0.7, signals: [DOCUMENT_WITHOUT_TEXT_SIGNAL] }
+        : evidenceDecision;
     if (!ocrDecision.authorized) {
       // Blank pages: confident there is nothing to read, so they are neither rendered nor sent to vision.
       if (ocrDecision.signals.includes(BLANK_PAGE_SIGNAL)) {
@@ -327,7 +343,9 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
     }
     return {
       ...page,
-      route: "handwriting-or-degraded" as const,
+      // OCR text keeps visible structure cues (numeric rows, field labels, equations): keep
+      // that route so the ingest report counts the table; any other raster page is degraded.
+      route: STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
       extractorHint: "vision-rescue" as const,
       confidence: Math.max(page.confidence, ocrDecision.confidence),
       signals: [...page.signals, ...ocrDecision.signals],
@@ -365,7 +383,18 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
 }
 
 const BLANK_PAGE_SIGNAL = "ocr-not-authorized:blank-page";
-const NO_NATIVE_TEXT_SIGNALS = new Set(["ocr-authorized:no-native-text", "ocr-authorized:raster-page-without-text"]);
+const DOCUMENT_WITHOUT_TEXT_SIGNAL = "ocr-authorized:document-without-text";
+const NO_NATIVE_TEXT_SIGNALS = new Set([
+  "ocr-authorized:no-native-text",
+  "ocr-authorized:raster-page-without-text",
+  DOCUMENT_WITHOUT_TEXT_SIGNAL,
+]);
+/**
+ * Bytes per page above which a PDF with no extractable text holds drawn content. Blank pages
+ * need well under 1 KB; a page of text drawn as paths needs tens to hundreds of KB.
+ */
+export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = 16 * 1024;
+const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);
 
 /**
  * True when routing authorized OCR because the page has no native text: vision is the
@@ -375,6 +404,32 @@ const NO_NATIVE_TEXT_SIGNALS = new Set(["ocr-authorized:no-native-text", "ocr-au
 export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDecision">): boolean {
   return page.ocrDecision?.authorized === true &&
     page.ocrDecision.signals.some((signal) => NO_NATIVE_TEXT_SIGNALS.has(signal));
+}
+
+/**
+ * Pages the legacy vision selector sends to vision, pages lacking native text first: vision is
+ * their only source of searchable text, so they keep their place when a page budget truncates
+ * the selection.
+ *
+ * - OCR authorized by raster or structured evidence (scans, OCR'd rasters, no text layer).
+ * - Blank pages never.
+ * - Otherwise the text route decides, also when raster evidence did not authorize OCR (a page
+ *   with a minor image is still a formula or figure page): vision-rescue routes, formula pages
+ *   (a text layer flattens notation that vision transcribes as LaTeX), and sparse form or table
+ *   pages.
+ */
+export function selectLegacyVisionPages(pages: AdaptivePageRoutingEntry[]): number[] {
+  return prioritizePagesWithoutNativeText(pages)
+    .filter((page) => {
+      if (page.ocrDecision?.authorized) return true;
+      if (page.ocrDecision?.signals.includes(BLANK_PAGE_SIGNAL)) return false;
+      return (
+        page.extractorHint === "vision-rescue" ||
+        page.route === "formula-heavy" ||
+        ((page.route === "form" || page.route === "table-heavy") && page.textDensityScore < 0.45)
+      );
+    })
+    .map((page) => page.pageNumber);
 }
 
 /** Page numbers ordered with pages lacking native text first, page order otherwise (stable). */
@@ -584,13 +639,24 @@ export function classifyTextAndFilename(text: string, filename: string): {
     return cond;
   }
 
+  // Whole-word terms, and at least two distinct ones from the body: substrings ("vat" in
+  // "observation", "term" in "determine") and a single stray word labelled scanned brochures
+  // and field notes as invoices or contracts.
   const isInvoice =
     hit(/invoice/.test(name), "name:invoice") ||
-    hit(/invoice\s*#|billed to|remit to|subtotal|vat/i.test(body), "body:invoice-terms");
+    hit(/\binvoice\s*(?:#|no\b|number\b)/i.test(body) ||
+      distinctTerms(body, /\b(?:invoice|billed to|bill to|remit to|subtotal|vat|amount due|balance due|due date)\b/gi) >= 2,
+    "body:invoice-terms");
 
-  const isBank = hit(/statement|routing\s+number|account\s+number|transactions/i.test(body), "body:bank-terms");
+  const isBank = hit(
+    distinctTerms(body, /\b(?:statement period|account statement|routing\s+number|account\s+number|transactions|opening balance|closing balance)\b/gi) >= 2,
+    "body:bank-terms",
+  );
 
-  const isContract = hit(/agreement|party|term|witnesseth|hereby|governing law|signature/i.test(body), "body:contract-terms");
+  const isContract = hit(
+    distinctTerms(body, /\b(?:agreement|parties|party|witnesseth|hereby|governing law|signature|indemnif\w*|termination)\b/gi) >= 2,
+    "body:contract-terms",
+  );
 
   const isReport = hit(/table of contents|executive summary|introduction|conclusion|references/i.test(body), "body:report-structure");
 
@@ -619,6 +685,10 @@ export function classifyTextAndFilename(text: string, filename: string): {
   return { label, confidence, signals };
 }
 
+function distinctTerms(text: string, pattern: RegExp): number {
+  return new Set([...text.matchAll(pattern)].map((match) => match[0].toLowerCase().replace(/\s+/g, " "))).size;
+}
+
 export function buildAdaptivePageRoutes(text: string, pageCount: number): AdaptivePageRoutingEntry[] {
   const pageTexts = splitTextIntoPages(text, Math.max(1, pageCount));
   const resolvedPages = pageTexts.length > 0 ? pageTexts : Array.from({ length: Math.max(1, pageCount) }, () => "");
@@ -634,10 +704,17 @@ export function classifyAdaptivePage(pageNumber: number, text: string): Adaptive
   const digitCount = (normalized.match(/\d/g) ?? []).length;
   const colonLineCount = lines.filter((line) => line.includes(":")).length;
   const markdownTableLineCount = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line)).length;
+  // OCR flattens a table into rows of space-separated cells; several rows with two or more
+  // numeric cells are the table that survives.
+  const numericRowLines = lines.filter((line) => {
+    const cells = line.trim().split(/\s+/);
+    return cells.length >= 3 && cells.filter((cell) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(cell)).length >= 2;
+  }).length;
   const tableMarkers = [
     /\|.+\|/.test(normalized),
     /\t/.test(text),
-    /table\s+\d+|subtotal|total|amount|qty|balance|debit|credit/i.test(normalized)
+    /table\s+\d+|subtotal|total|amount|qty|balance|debit|credit/i.test(normalized),
+    numericRowLines >= 3,
   ].filter(Boolean).length;
   const formFieldLineCount = lines.filter((line) =>
     /^(?:#{1,6}\s*)?(?:name|address|date|signature|phone|email|case\s+id|submitted\s+by|preferred\s+contact|reviewer\s+notes)\b/i.test(line.trim()),

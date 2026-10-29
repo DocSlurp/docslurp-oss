@@ -125,6 +125,11 @@ export async function probePdfPageFacts(args: {
    * soon as it starts, so other per-page evidence (page triage) can reuse the same run.
    */
   onImagesList?: (listing: { lastPage: number; stdout: Promise<string | null> }) => void;
+  /**
+   * Called with the pending `pdftotext` output (pages 1..lastPage, null on failure), so page
+   * triage can tell a page's native text layer apart from text OCR produced for it.
+   */
+  onPageText?: (listing: { lastPage: number; stdout: Promise<string | null> }) => void;
 }): Promise<PageFactUpsert[]> {
   const pageCount = Math.min(Math.max(0, args.pageCount), pageFactsProbePages());
   if (pageCount === 0) return [];
@@ -140,10 +145,9 @@ export async function probePdfPageFacts(args: {
   };
   const imagesListing = args.runner.listImages(args.sourcePath, pageCount).then(capture);
   args.onImagesList?.({ lastPage: pageCount, stdout: imagesListing });
-  const [pageText, imagesList] = await Promise.all([
-    args.runner.pageText(args.sourcePath, pageCount).then(capture),
-    imagesListing,
-  ]);
+  const pageTextListing = args.runner.pageText(args.sourcePath, pageCount).then(capture);
+  args.onPageText?.({ lastPage: pageCount, stdout: pageTextListing });
+  const [pageText, imagesList] = await Promise.all([pageTextListing, imagesListing]);
   return buildPdfPageFacts({ documentId: args.documentId, runId: args.runId, pageCount, pageText, imagesList });
 }
 

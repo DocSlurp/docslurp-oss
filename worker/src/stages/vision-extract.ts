@@ -41,7 +41,7 @@ import {
   type CanonicalReconciliationDecision,
 } from "../lib/canonical-reconciliation.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
-import { prioritizePagesWithoutNativeText } from "./classify-route.js";
+import { selectLegacyVisionPages } from "./classify-route.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
 import { PLAN_QUALITY_METHOD } from "../routing/quality.js";
@@ -1155,20 +1155,7 @@ export class VisionExtractStage implements Stage {
   }
 
   private selectRoutingPages(pages: AdaptivePageRoutingEntry[]): number[] {
-    // Pages with no native text come first: vision is their only source of searchable
-    // text, so they keep their place when maxPagesPerDocument truncates the selection.
-    return prioritizePagesWithoutNativeText(pages)
-      .filter((page) => {
-        if (page.ocrDecision !== undefined) {
-          return page.ocrDecision.authorized;
-        }
-        return (
-          page.extractorHint === "vision-rescue" ||
-          ((page.route === "form" || page.route === "table-heavy") &&
-            page.textDensityScore < 0.45)
-        );
-      })
-      .map((page) => page.pageNumber);
+    return selectLegacyVisionPages(pages);
   }
 
   private async reconcileExtractionArtifacts(
@@ -1379,6 +1366,9 @@ export function shouldFailOpenVisionError(error: unknown): boolean {
   // Throttling (429/5xx after retries) is transient: fail the page task so
   // Temporal retries it, rather than silently dropping the page's content.
   if (findProviderRetryableError(error)) return false;
+  // Output rejected after the alternate-route retry (degenerate, refusal, truncated): the page
+  // keeps its native or OCR text instead of failing the whole document.
+  if (findVisionOutputRejected(error)) return true;
   const message = toError(error).message.toLowerCase();
 
   return [
