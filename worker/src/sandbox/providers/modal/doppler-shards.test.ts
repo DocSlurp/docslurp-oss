@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import { SHARD_PROFILES } from "../../../temporal/page-shard-profiles.js";
-import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerShards, resetDopplerShardStateForTest, type DopplerShardSettings } from "./doppler-shards.js";
+import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerShards, resetDopplerShardStateForTest, shardVmsInUseForTest, type DopplerShardSettings } from "./doppler-shards.js";
 import { MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
 import { planPageShards } from "../../../temporal/page-shards.js";
 
@@ -175,6 +175,30 @@ describe("executeDopplerShards", () => {
     expect(error).toBeInstanceOf(SandboxRunError);
     expect(vm.calls.every((c) => c.range)).toBe(true);
     expect(error.usage.costCents).toBeGreaterThanOrEqual(4);
+  });
+
+  it("never runs more shard VMs than the process ceiling across concurrent forced splits", async () => {
+    const vm = fakeVm(async (j) => pagesText(j.range!.first, j.range!.last));
+    const jobs = await Promise.all([0, 1, 2, 3, 4].map(async (i) => {
+      const output = join(dir, `out-${i}.md`);
+      return executeDopplerShards({ ...job, output }, 25_000, undefined, { ...on, globalParallel: 1 }, { execute: vm.execute }).then(() => output);
+    }));
+    expect(vm.stats.maxActive).toBe(1);
+    for (const output of jobs) expect(await readFile(output, "utf8")).toBe(pagesText(1, 25_000));
+    expect(shardVmsInUseForTest()).toBe(0);
+  });
+
+  it("refuses an infeasible forced split without starting any VM", async () => {
+    const vm = fakeVm();
+    await expect(executeDopplerShards(job, 25_000, undefined, { ...on, maxShards: 1 }, { execute: vm.execute })).rejects.toThrow(/cannot split/);
+    expect(vm.calls).toHaveLength(0);
+  });
+
+  it("releases a waiting forced split's slot request on abort", async () => {
+    const controller = new AbortController();
+    const vm = fakeVm(async (j) => { controller.abort(); return pagesText(j.range!.first, j.range!.last); });
+    await expect(executeDopplerShards(job, 25_000, controller.signal, { ...on, globalParallel: 1 }, { execute: vm.execute })).rejects.toThrow(/aborted/);
+    expect(shardVmsInUseForTest()).toBe(0);
   });
 
   it("logs one searchable line per sharding decision", async () => {

@@ -302,7 +302,7 @@ describe("shard jobs and publication receipts", () => {
     h.exec.mockImplementation(async () => ({ stdout: stream("whole document output"), stderr: stream(diagnostics(21)), wait: async () => 0 }));
     const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false }, outputLimit: 4 }, undefined, async () => h.sdk).catch((e) => e);
     expect(error.message).toBe(SHARDS_UNSUPPORTED_MESSAGE);
-    expect(error.usage?.costCents).toBeGreaterThan(0);
+    expect(error.usage?.metric).toBe("sandbox_compute"); // a fake VM can finish in 0 ms, so its cost may be 0
   });
 
   it("keeps the old-guest classification when termination is unconfirmed", async () => {
@@ -319,7 +319,7 @@ describe("shard jobs and publication receipts", () => {
     await mkdir(j.output); // rename onto a directory fails after a successful run
     const error = await executeDopplerVm(j, undefined, async () => h.sdk).catch((e) => e);
     expect(error.message).toBe("Document VM output publication failed");
-    expect(error.usage?.costCents).toBeGreaterThan(0);
+    expect(error.usage?.metric).toBe("sandbox_compute");
   });
 
   it("does not let a failing control-client close replace the result", async () => {

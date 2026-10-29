@@ -91,10 +91,37 @@ export function planDopplerShards(pageCount: number, fileBytes: number, settings
  * long PDFs cannot exhaust the provider's sandbox quota for other tenants; a saturated budget runs whole.
  */
 let shardVmsInUse = 0;
+const slotWaiters: Array<() => void> = [];
+
+/**
+ * Hard ceiling: every shard VM holds one process slot while it runs, so concurrent documents (including forced
+ * splits, which queue instead of running whole) never exceed DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL shard VMs.
+ */
+async function acquireVmSlot(limit: number, signal: AbortSignal): Promise<() => void> {
+  while (shardVmsInUse >= Math.max(1, limit)) {
+    if (signal.aborted) throw new SandboxRunError("Document VM aborted");
+    await new Promise<void>((resume) => {
+      const onAbort = () => { const i = slotWaiters.indexOf(wake); if (i >= 0) slotWaiters.splice(i, 1); resume(); };
+      const wake = () => { signal.removeEventListener("abort", onAbort); resume(); };
+      slotWaiters.push(wake);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+  if (signal.aborted) throw new SandboxRunError("Document VM aborted");
+  shardVmsInUse++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    shardVmsInUse--;
+    slotWaiters.shift()?.();
+  };
+}
 /** Set when an image refuses shards; sharding stays off until it expires (a fresh image needs a redeploy anyway). */
 let shardsUnsupportedUntil = 0;
 const UNSUPPORTED_BACKOFF_MS = 30 * 60_000;
-export function resetDopplerShardStateForTest(): void { shardVmsInUse = 0; shardsUnsupportedUntil = 0; }
+export function resetDopplerShardStateForTest(): void { shardVmsInUse = 0; shardsUnsupportedUntil = 0; slotWaiters.length = 0; }
+export function shardVmsInUseForTest(): number { return shardVmsInUse; }
 
 /** A plan is dispatched only if it is feasible, within the cap, contiguous and on the guest's chunk grid. */
 export function dispatchablePlan(plan: PageShardPlan, pageCount: number, maxShards: number): boolean {
@@ -171,9 +198,14 @@ export async function executeDopplerShards(
   const vmParallel = Math.max(1, Math.min(settings.vmParallel, free));
   const plan = planDopplerShards(pageCount, info.size, { ...settings, vmParallel }, profile);
   // An infeasible, oversized or malformed plan runs as one whole-document VM (which refuses a document over the per-VM limit).
-  if (!dispatchablePlan(plan, pageCount, settings.maxShards)) return whole(plan.shards.length <= 1 ? "plan-unsharded" : `plan-rejected:${plan.reason}`);
-  const reserved = Math.min(plan.parallel, plan.shards.length);
-  shardVmsInUse += reserved;
+  if (!dispatchablePlan(plan, pageCount, settings.maxShards)) {
+    // One VM cannot convert a document over the per-VM limit: refuse here rather than upload it to a VM that will.
+    if (mustSplit) {
+      logPlan({ shards: 0, pages: pageCount, reason: `split-infeasible:${plan.reason}` });
+      throw new SandboxRunError("Document VM cannot split this document within its limits");
+    }
+    return whole(plan.shards.length <= 1 ? "plan-unsharded" : `plan-rejected:${plan.reason}`);
+  }
   const dispatched = Date.now();
 
   const controller = new AbortController();
@@ -195,11 +227,16 @@ export async function executeDopplerShards(
       while (next < plan.shards.length && !failure && !controller.signal.aborted) {
         const index = next++;
         const shard = plan.shards[index]!;
-        const started = Date.now();
+        let started = Date.now();
         try {
           // Shards share the host's memory: each gets a share of the output cap proportional to its pages (x2 for skew).
           const outputLimit = Math.min(MAX_OUTPUT_BYTES, Math.ceil(MAX_OUTPUT_BYTES * 2 * (shard.last - shard.first + 1) / pageCount));
-          const result = await execute({ ...job, output: outputs[index]!, outputLimit, range: { ...shard, final: shard.last === pageCount } }, controller.signal);
+          const release = await acquireVmSlot(settings.globalParallel, controller.signal);
+          started = Date.now(); // calibration measures the VM, not the queue
+          let result: SandboxResult;
+          try {
+            result = await execute({ ...job, output: outputs[index]!, outputLimit, range: { ...shard, final: shard.last === pageCount } }, controller.signal);
+          } finally { release(); }
           usages[index] = result.usage;
           deps.recordTiming?.({ stage: "extract-markdown", executor: "doppler-vm", pages: shard.last - shard.first + 1,
             ms: Date.now() - started, shardIndex: index, shardCount: plan.shards.length });
@@ -271,7 +308,6 @@ export async function executeDopplerShards(
       ...(usage ? { usage } : {}),
     };
   } finally {
-    shardVmsInUse -= reserved;
     signal?.removeEventListener("abort", onAbort);
     // Cleanup never replaces the result or the usage-bearing error.
     await Promise.allSettled([...outputs, staged].map((file) => rm(file, { force: true })));
