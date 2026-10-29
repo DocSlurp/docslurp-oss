@@ -5,7 +5,6 @@ import {
   pageCredits,
   pageImageReferenceMarkdown,
   type CanonicalDocument,
-  type WorkspaceRun,
 } from "@docslurp/shared";
 
 import { splitRemainingPages } from "../db/page-base-fee.js";
@@ -17,7 +16,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { CommandRunner } from "../tools/runner.js";
-import type { Document } from "../models.js";
+import type { Document, WorkspaceRun } from "../models.js";
 
 const document = { id: "doc", userId: "user", filename: "scan.pdf", mimeType: "application/pdf", pageCount: 2, sourceKey: "source.pdf" } as Document;
 
