@@ -260,7 +260,7 @@ describe("Workspace Intake", () => {
     const run = fakes.runs[0].pipeline;
     expect(run.summarize).toBe(template.pipeline.summarize);
     expect(run.piiPolicy.enabled).toBe(true);
-    expect(run.quality).toBe("good");
+    expect(run.quality).toBe("auto"); // the template locks auto; the upload asked for fast
     expect(run.chunkOverlap).toBe(true); // not locked, so the override applies
   });
 

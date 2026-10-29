@@ -232,7 +232,7 @@ function classifyPage(doc: IngestReportDocumentRow, row: IngestReportPageRow): P
     reason = "processing";
   } else {
     searchable = false;
-    if (row.visionStatus === "kept-as-image") reason = "kept-as-image";
+    if (fastLeftUnread(row.visionStatus)) reason = "kept-as-image";
     else if (row.visionStatus === "over-cap") reason = "vision-page-limit";
     else if (row.visionStatus === "cost-cap") reason = "vision-cost-cap";
     else if (row.visionStatus === "failed") reason = "vision-failed";
@@ -691,13 +691,21 @@ export type IngestRecommendationId = keyof typeof INGEST_RECOMMENDATION_CATALOG;
  * evidence, the expected effect and an estimated cost; "patch" is merged onto
  * the stored pipeline when applied.
  */
+/**
+ * Fast left the page unread on purpose: kept as its page image, or (past the render cap, or blank) not read at all.
+ * Both read as "kept as a page image" to users: previews render any page on demand.
+ */
+function fastLeftUnread(status: string | null | undefined): boolean {
+  return status === "kept-as-image" || status === "not-read";
+}
+
 export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Observed): IngestReportRecommendation[] {
   const recs: Array<IngestReportRecommendation & { id: IngestRecommendationId }> = [];
   const vision = visionCentsPerPage(pipeline, observed);
   // Pages fast kept as images on purpose get their own recommendation below.
-  const keptAsImage = observed.pageViews.filter((page) => page.visionStatus === "kept-as-image" && page.searchable !== true);
+  const keptAsImage = observed.pageViews.filter((page) => fastLeftUnread(page.visionStatus) && page.searchable !== true);
   const missedScans = observed.scannedPages.filter((page) =>
-    page.visionStatus !== "extracted" && page.visionStatus !== "kept-as-image" && page.searchable !== true);
+    page.visionStatus !== "extracted" && !fastLeftUnread(page.visionStatus) && page.searchable !== true);
   const overCap = observed.pageViews.filter((page) => page.visionStatus === "over-cap" && page.searchable !== true);
   const affected = [...new Map([...missedScans, ...overCap].map((page) => [`${page.documentId}:${page.pageNumber}`, page])).values()];
   const affectedDocIds = [...new Set(affected.map((page) => page.documentId))];

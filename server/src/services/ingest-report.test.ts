@@ -427,7 +427,8 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
     expect(parse({ vision: { forceAllPages: true, maxPagesPerDocument: 32 } }).success).toBe(false);
     expect(parse({ vision: {} }).success).toBe(false);
     expect(parse({ vision: { modelUri: "llm://anything" } }).success).toBe(false);
-    expect(parse({ parserPlaybook: "review-grade" }).data?.changes.pipeline).toEqual({ quality: "good" });
+    // review-grade never read every page: it maps to auto, not good.
+    expect(parse({ parserPlaybook: "review-grade" }).data?.changes.pipeline).toEqual({ quality: "auto" });
   });
 });
 

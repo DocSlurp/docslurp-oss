@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ParserPlaybookKey } from "./embedding.js";
+import type { DocumentExtractionConfig } from "./extraction.js";
 
 /**
  * Processing quality: the one public extraction knob. `fast` reads the text layer only and keeps pages without one
@@ -12,6 +13,9 @@ import type { ParserPlaybookKey } from "./embedding.js";
 export const qualityModeSchema = z.enum(["fast", "auto", "good"]);
 export type QualityMode = z.infer<typeof qualityModeSchema>;
 export const DEFAULT_QUALITY_MODE: QualityMode = "auto";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
 
 const QUALITY_PLAYBOOK: Record<QualityMode, ParserPlaybookKey> = {
   fast: "fast",
@@ -34,15 +38,77 @@ export function qualityAllowsPageReading(quality: QualityMode | null | undefined
   return quality !== "fast";
 }
 
-export const QUALITY_RANK: Record<QualityMode, number> = { fast: 0, auto: 1, good: 2 };
+/**
+ * Extractors that only read a file's own text layer or structure: no OCR, no model. Fast may run only these.
+ * `kreuzberg` qualifies only with OCR disabled (fastDocumentExtraction sets it); `liteparse` runs without OCR.
+ */
+export const TEXT_LAYER_EXTRACTORS: ReadonlySet<string> = new Set([
+  "kreuzberg", "native-pdf", "poppler-text", "pandoc", "json", "doppler", "liteparse",
+]);
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  !!value && typeof value === "object" && !Array.isArray(value);
+/** Kreuzberg options that turn OCR on; Fast removes them and sets `disableOcr`. */
+const KREUZBERG_OCR_KEYS = ["ocr", "forceOcr", "forceOcrPages", "disableOcr"] as const;
+
+/**
+ * The document extraction policy Fast runs with, fail closed: `order` keeps only text-layer extractors (a format
+ * left with none falls back to the defaults, which are all text-layer), extractor options keep only text-layer
+ * extractors' entries, Kreuzberg gets an explicit `disableOcr: true` with every OCR option removed, artifact-graph
+ * enrichment (which can OCR) is off, an explicit voting secondary outside the text-layer set falls back to
+ * next-in-order, and `forceOcr` is false. `removed` lists what was dropped, for a loud log line.
+ * Other quality modes return the config unchanged.
+ */
+export function documentExtractionForQuality(
+  config: DocumentExtractionConfig,
+  quality: QualityMode | null | undefined,
+): { config: DocumentExtractionConfig; removed: string[] } {
+  if (qualityAllowsPageReading(quality)) return { config, removed: [] };
+  const removed: string[] = [];
+  const order: DocumentExtractionConfig["order"] = {};
+  for (const [format, ids] of Object.entries(config.order ?? {})) {
+    const kept = ids.filter((id) => TEXT_LAYER_EXTRACTORS.has(id));
+    for (const id of ids) if (!TEXT_LAYER_EXTRACTORS.has(id)) removed.push(`order.${format}:${id}`);
+    if (kept.length > 0) order[format] = kept;
+  }
+  const options: Record<string, unknown> = {};
+  for (const [id, value] of Object.entries(config.options ?? {})) {
+    if (!TEXT_LAYER_EXTRACTORS.has(id)) { removed.push(`options.${id}`); continue; }
+    options[id] = value;
+  }
+  const kreuzberg = isRecord(options.kreuzberg) ? { ...options.kreuzberg } : {};
+  for (const key of KREUZBERG_OCR_KEYS) {
+    if (key in kreuzberg && !(key === "disableOcr" && kreuzberg[key] === true)) removed.push(`options.kreuzberg.${key}`);
+    delete kreuzberg[key];
+  }
+  // Nested `kreuzberg` options are not ours to model: drop any other key that names OCR.
+  for (const key of Object.keys(kreuzberg)) {
+    if (/ocr/i.test(key)) { removed.push(`options.kreuzberg.${key}`); delete kreuzberg[key]; }
+  }
+  options.kreuzberg = { ...kreuzberg, disableOcr: true };
+  if ((config.enrich ?? []).length > 0) removed.push("enrich");
+  const secondary = config.voting?.secondary ?? "next-in-order";
+  const votingSecondary = secondary === "next-in-order" || TEXT_LAYER_EXTRACTORS.has(secondary) ? secondary : "next-in-order";
+  if (votingSecondary !== secondary) removed.push(`voting.secondary:${secondary}`);
+  if (config.forceOcr) removed.push("forceOcr");
+  return {
+    config: {
+      ...config,
+      order,
+      options,
+      enrich: [],
+      voting: { ...config.voting, secondary: votingSecondary },
+      forceOcr: false,
+    },
+    removed,
+  };
+}
+
+export const QUALITY_RANK: Record<QualityMode, number> = { fast: 0, auto: 1, good: 2 };
 
 /**
  * Quality implied by the retired `parserPlaybook` and `vision.forceAllPages` keys, or null when neither says
- * anything. `forceAllPages: true` or `review-grade` mean good, `fast` means fast, any other playbook means auto.
- * `forceAllPages: false` alone implies nothing (it was the default).
+ * anything. Only `forceAllPages: true` (vision on every page) means good; `fast` means fast; every other playbook,
+ * including `review-grade` and `agentic`, means auto. Those playbooks never read every page, so mapping them to
+ * good would multiply a workspace's spend. `forceAllPages: false` alone implies nothing (it was the default).
  */
 export function legacyQualityMode(source: unknown): QualityMode | null {
   if (!isRecord(source)) return null;
@@ -50,9 +116,7 @@ export function legacyQualityMode(source: unknown): QualityMode | null {
   if (isRecord(vision) && vision.forceAllPages === true) return "good";
   const playbook = source.parserPlaybook;
   if (typeof playbook !== "string") return null;
-  if (playbook === "fast") return "fast";
-  if (playbook === "review-grade") return "good";
-  return "auto";
+  return playbook === "fast" ? "fast" : "auto";
 }
 
 /**
@@ -76,9 +140,22 @@ export function migrateLegacyQualitySettings<T>(source: T): T {
   return next as T;
 }
 
+/** Image formats a stored page image can have; PDFs render PNG, image files keep their own format. */
+const PAGE_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "bmp", "avif", "heic"]);
+
+/**
+ * File extension of a stored page image from its key or URI (`png`, `jpg`, `webp`, ...), or `png` when the key has
+ * none. The document export names `images/` entries the same way, so a reference built from it resolves.
+ */
+export function pageImageExtension(keyOrUri: string | null | undefined): string {
+  const match = /\.([a-z0-9]{1,8})$/i.exec((keyOrUri ?? "").split("?")[0] ?? "");
+  const extension = match?.[1]?.toLowerCase();
+  return extension && PAGE_IMAGE_EXTENSIONS.has(extension) ? extension : "png";
+}
+
 /** Export-relative path of a page image (`images/page-0001.png`, the document export layout). */
-export function pageImageExportPath(pageNumber: number): string {
-  return `images/page-${String(pageNumber).padStart(4, "0")}.png`;
+export function pageImageExportPath(pageNumber: number, extension = "png"): string {
+  return `images/page-${String(pageNumber).padStart(4, "0")}.${extension}`;
 }
 
 /** Alt text for a page Fast kept as an image: names the page and says its text was not extracted. */
@@ -88,21 +165,48 @@ export function pageImageReferenceAlt(pageNumber: number): string {
 
 /**
  * Markdown for a page without a usable text layer in Fast mode: a reference to its stored page image instead of
- * OCR text. Fast never reads such a page, so the page has no text and produces no chunks.
+ * OCR text. Fast never reads such a page, so the page has no text and produces no chunks. `extension` is the stored
+ * image's format (pageImageExtension), so the link matches the exported file.
  */
-export function pageImageReferenceMarkdown(pageNumber: number): string {
-  return `![${pageImageReferenceAlt(pageNumber)}](${pageImageExportPath(pageNumber)})`;
+export function pageImageReferenceMarkdown(pageNumber: number, extension = "png"): string {
+  return `![${pageImageReferenceAlt(pageNumber)}](${pageImageExportPath(pageNumber, extension)})`;
 }
 
-const PAGE_IMAGE_REFERENCE_LINE = /!\[Page \d+: scanned page image, no text layer\]\(images\/page-\d{4,}\.png\)/g;
+/** Canonical block `metadata.extractor` (the reconciliation source adapter) of a Fast page-image reference. */
+export const PAGE_IMAGE_REFERENCE_ADAPTER = "page-image";
 
-/** True when a page's Markdown is only a Fast page-image reference (no extracted text). */
-export function isPageImageReferenceMarkdown(markdown: string): boolean {
-  const trimmed = markdown.trim();
-  return trimmed.length > 0 && trimmed.replace(PAGE_IMAGE_REFERENCE_LINE, "").trim().length === 0;
+/**
+ * True when a canonical block is a Fast page-image reference. Recognized structurally, by the adapter the worker
+ * stamped when it wrote the reference, never by its text: a document whose text layer contains the exact reference
+ * string stays searchable.
+ */
+export function isPageImageReferenceBlock(block: { metadata?: Record<string, unknown> | null } | null | undefined): boolean {
+  return block?.metadata?.extractor === PAGE_IMAGE_REFERENCE_ADAPTER;
 }
 
-/** Text with Fast page-image references removed, for chunking and search: they carry no document text. */
-export function stripPageImageReferences(text: string): string {
-  return text.replace(PAGE_IMAGE_REFERENCE_LINE, "");
+/**
+ * Pages whose content is only a Fast page-image reference: every block on the page is a reference block. Blocks
+ * without a page number count as page 1.
+ */
+export function pageImageReferencePages(
+  blocks: ReadonlyArray<{ pageNumber?: number | null; text: string; metadata?: Record<string, unknown> | null }>,
+): Set<number> {
+  const reference = new Set<number>();
+  const content = new Set<number>();
+  for (const block of blocks) {
+    const page = block.pageNumber ?? 1;
+    if (isPageImageReferenceBlock(block)) reference.add(page);
+    else if (block.text.trim()) content.add(page);
+  }
+  for (const page of content) reference.delete(page);
+  return reference;
+}
+
+/**
+ * Page-separated (`\f`) text with the pages in `referencePages` emptied, for chunking and search: a Fast reference
+ * page carries no document text. Pages are 1-based.
+ */
+export function blankPages(text: string, referencePages: ReadonlySet<number>): string {
+  if (referencePages.size === 0) return text;
+  return text.split("\f").map((page, index) => (referencePages.has(index + 1) ? "" : page)).join("\f");
 }

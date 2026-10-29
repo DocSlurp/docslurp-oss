@@ -1,7 +1,11 @@
 import { z } from "zod";
-import { migrateLegacyQualitySettings, qualityModeSchema, updateWorkspaceSearchChatSettingsSchema, updateWorkspaceSearchRetrievalDefaultsSchema } from "@docslurp/shared";
+import { migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateWorkspaceSearchChatSettingsSchema, updateWorkspaceSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 
-/** A retired `vision: { forceAllPages }` patch (older ingest-report recommendations) arrives as `quality`. */
+/**
+ * A retired `vision: { forceAllPages }` patch (older ingest-report recommendations) arrives as `quality`:
+ * `true` is good. `false` alone carries no quality here, because what it means depends on the workspace;
+ * resolveLegacyQualityPatch maps it once the workspace's quality is known.
+ */
 function migrateLegacyPatch(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const vision = (value as { vision?: unknown }).vision;
@@ -10,6 +14,28 @@ function migrateLegacyPatch(value: unknown): unknown {
   if (!hadLegacyVision) return migrated;
   const { vision: rest, ...others } = migrated;
   return rest && typeof rest === "object" && Object.keys(rest).length === 0 ? others : migrated;
+}
+
+/** True when a raw pipeline patch turns the retired `vision.forceAllPages` off without naming a quality. */
+export function legacyForceAllPagesOff(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const patch = raw as { quality?: unknown; parserPlaybook?: unknown; vision?: unknown };
+  if (patch.quality !== undefined || patch.parserPlaybook !== undefined) return false;
+  const vision = patch.vision;
+  return !!vision && typeof vision === "object" && (vision as { forceAllPages?: unknown }).forceAllPages === false;
+}
+
+/**
+ * Applies a retired `vision: { forceAllPages: false }` to a parsed patch: on a Good workspace (vision on every page,
+ * what forceAllPages: true used to mean) it means Auto; on any other workspace it changes nothing.
+ */
+export function resolveLegacyQualityPatch<T extends { quality?: QualityMode }>(
+  patch: T,
+  raw: unknown,
+  currentQuality: QualityMode,
+): T {
+  if (!legacyForceAllPagesOff(raw) || patch.quality !== undefined || currentQuality !== "good") return patch;
+  return { ...patch, quality: "auto" };
 }
 
 const workspaceSettingsPipelinePatchObjectSchema = z.object({

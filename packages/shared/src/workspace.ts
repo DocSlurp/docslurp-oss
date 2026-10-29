@@ -998,7 +998,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["party", "agreement", "clause", "obligation", "date", "amount", "jurisdiction"] },
-      quality: "good",
+      quality: "auto",
       preserveTables: true,
       preserveCode: true,
       pageIndex: true,
@@ -1037,7 +1037,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["patient", "clinician", "condition", "medication", "procedure", "facility", "date"] },
-      quality: "good",
+      quality: "auto",
       visionFallback: true,
       // strict-privacy forbids hosted models: local Florence OCR for vision,
       // and summaries/propositions (hosted text models only) stay off.
@@ -1062,7 +1062,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       "quality",
       "visionFallback",
       "vision.benchmarkProfile",
-          "preserveTables",
+      "preserveTables",
       "pageIndex",
       "summarize",
       "propositionIndex",

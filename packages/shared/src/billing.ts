@@ -702,7 +702,7 @@ export const QUALITY_MODES: Record<QualityMode, QualityModeInfo> = {
     id: "good",
     label: "Good",
     description: "A vision model reads every page for the most faithful tables, figures and layout.",
-    priceNote: `Every page bills Rich. A page whose output exceeds ${PRICE_CARD.richIncludedOutputTokens.toLocaleString("en-US")} tokens counts as extra Rich pages.`,
+    priceNote: `Every page a vision model reads bills Rich, and a page whose output exceeds ${PRICE_CARD.richIncludedOutputTokens.toLocaleString("en-US")} tokens counts as extra Rich pages. A run cost cap can stop vision early; pages it did not read bill as in Auto.`,
     creditsPer1kPages: { min: PRICE_CARD.richPer1kPages, max: PRICE_CARD.richPer1kPages },
   },
 };

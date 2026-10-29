@@ -237,6 +237,26 @@ it("proposes the quality change the ingest report recommends, with new-upload im
   await expect(service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } })).rejects.toBeDefined();
 });
 
+it("maps a retired vision.forceAllPages: false patch to auto on a Good workspace and to nothing elsewhere", async () => {
+  const legacyOff = { pipeline: { vision: { forceAllPages: false } } };
+  // Fast workspace (the fixture): turning the retired flag off means nothing, so nothing changes.
+  const fast = await fixture();
+  await expect(service.proposeWorkspaceSettings({ ...fast, changes: legacyOff })).rejects.toMatchObject({ status: 400, category: "settings_proposal_unchanged" });
+
+  const good = await fixture();
+  await sql`update workspaces set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = ${good.id}`;
+  const proposal = await service.proposeWorkspaceSettings({ ...good, changes: legacyOff });
+  expect(proposal.changes).toContainEqual({ key: "pipeline.quality", label: "Processing quality", before: "good", after: "auto" });
+  await service.applySettingsProposal({ ...good, token: proposal.token, reprocessExisting: false });
+  expect((await saved(good.id)).quality).toBe("auto");
+
+  // An explicit quality wins over the retired flag.
+  const explicit = await fixture();
+  await sql`update workspaces set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = ${explicit.id}`;
+  const fastProposal = await service.proposeWorkspaceSettings({ ...explicit, changes: { pipeline: { quality: "fast", vision: { forceAllPages: false } } } });
+  expect(fastProposal.changes).toContainEqual({ key: "pipeline.quality", label: "Processing quality", before: "good", after: "fast" });
+});
+
 it("words the impact of answer and retrieval changes differently from pipeline changes", async () => {
   const f = await fixture();
   const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { chat: { answerStyle: 'detailed' }, retrieval: { resultCount: 6 } } });

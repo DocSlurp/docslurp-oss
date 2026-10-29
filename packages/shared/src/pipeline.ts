@@ -985,6 +985,9 @@ export function normalizePipelineFeatures(
       ...defaultWorkspaceWebhookSettings,
       ...(source?.webhooks ?? {}),
     },
+    // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
+    // would otherwise bill as Good while skipping vision. A run cost cap (maxCostCents) can still stop vision early.
+    ...(source?.quality === "good" ? { visionFallback: true } : {}),
   });
 }
 
