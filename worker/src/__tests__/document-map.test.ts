@@ -177,6 +177,20 @@ describe("DocumentMapStage", () => {
     expect(usage.snapshot().some((e) => e.metric === "document-map-siphon" && e.inputTokens === 500)).toBe(true);
   });
 
+  it.each([
+    ["fast", 0],
+    ["good", 1],
+    ["auto", 1],
+  ] as const)("map mode under %s quality OCRs a scanned document's siphon windows %d time(s)", async (quality, ocrCalls) => {
+    const texts = Array.from({ length: 100 }, () => "");
+    const ocr = vi.fn(async ({ first, last }: { first: number; last: number }) => ({ pageTexts: Array.from({ length: last - first + 1 }, (_, i) => `OCR page ${first + i}`), costCents: 0 }));
+    const { stage, state, decide } = await setup({ pages: texts }, texts, { pipeline: { quality }, ops: { ocrPages: ocr as never } });
+    decide.mockImplementation(async () => ({ decision: { action: "stop", reason: "done" }, extracted: { nodes: [], terms: [] } }));
+    await stage.mapDocument(state, document(100));
+    // Fast reads the siphon window from the text layer instead of a vision model.
+    expect(ocr).toHaveBeenCalledTimes(ocrCalls);
+  });
+
   it("writes plain page text for pages the map does not cover", async () => {
     const texts = bodyPages(30, () => null);
     const mid = await setup({ pages: texts, outline: [{ title: "Middle", page: 10 }, { title: "Next", page: 12 }] }, texts);

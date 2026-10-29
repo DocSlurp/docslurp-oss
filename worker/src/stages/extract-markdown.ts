@@ -18,6 +18,7 @@ import {
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   qualityAllowsPageReading,
+  documentExtractionForQuality,
   deriveDocumentTitle,
   htmlDocumentTitle,
   type ExtractionContract,
@@ -186,10 +187,17 @@ export class ExtractMarkdownStage implements Stage {
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
           parserPlaybookForQuality(state.run.pipeline.quality);
-        const extractionConfig = {
-          ...defaultDocumentExtractionConfig,
-          ...(state.run.pipeline.documentExtraction ?? {}),
-        };
+        // Fast runs only text-layer extractors with OCR off, whatever the request or workspace asked for.
+        const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
+          { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
+          state.run.pipeline.quality,
+        );
+        if (fastRemoved.length > 0) {
+          console.warn(
+            `[extract-markdown] quality fast removed page-reading extraction settings run=${state.run.id} ` +
+              `document=${document.id} removed=${fastRemoved.join(",")}`,
+          );
+        }
         assertSupportedDocumentTarget(extractionConfig.target);
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
@@ -280,7 +288,10 @@ export class ExtractMarkdownStage implements Stage {
                 }
 
                 // Fast never OCRs: an image file keeps its page image (render-images) and has no extracted text.
-                const keepImageUnread = format === "image" && !qualityAllowsPageReading(state.run.pipeline.quality);
+                // The same image test billing and render-images use (MIME image/*), so an image MIME the format map
+                // does not know is kept unread too instead of reaching an OCR-capable extractor.
+                const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
+                  !qualityAllowsPageReading(state.run.pipeline.quality);
                 let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,

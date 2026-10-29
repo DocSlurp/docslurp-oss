@@ -999,11 +999,11 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 
 | Quality | What it does | Price per 1,000 pages |
 | --- | --- | --- |
-| `fast` | Reads the text layer only, never OCR or a vision model. A page without a usable text layer keeps its stored page image, and its Markdown is `![Page N: scanned page image, no text layer](images/page-NNNN.png)` (the export's page-image path). Such a page has no text, adds no chunks and is not searchable; the ingest report lists it as `kept-as-image`. | $0.05 (every page bills Fast) |
+| `fast` | Reads the text layer only, never OCR or a vision model. Request or workspace extraction settings that could read a page (OCR options, `forceOcr`, model or OCR extractors in `documentExtraction.order`, artifact-graph `enrich`) are removed for the run and logged; Kreuzberg runs with OCR disabled. A page without a usable text layer keeps its stored page image, and its Markdown is `![Page N: scanned page image, no text layer](images/page-NNNN.png)` (the export's page-image path; the extension follows the stored image, so a JPEG upload links `images/page-0001.jpg`). Markdown-only exports include these page images. Renders are capped at `WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT` (default 1,000) per document and `WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN` (default 10,000) per run; pages past a cap stay unread with no reference (previews still render them on demand). On-demand indexing (search-triggered, index-all, map mode) follows the same rule: text layer only. Such a page has no text, adds no chunks and is not searchable; the ingest report lists it as `kept-as-image`. | $0.05 (every page bills Fast) |
 | `auto` (default) | Reads each page the cheapest faithful way: the text layer for born-digital pages, a vision model for scans and complex layouts. | $0.05 to $2.50, depending on the mix |
-| `good` | A vision model reads every page, for the most faithful tables, figures and layout. | $2.50 (every page bills Rich, plus the extra-output-token rule) |
+| `good` | A vision model reads every page, for the most faithful tables, figures and layout. Good turns `visionFallback` on. A run cost cap (`maxCostCents`) can still stop vision early; pages it did not read bill as in Auto. | $2.50 (every page a vision model reads bills Rich, plus the extra-output-token rule) |
 
-`QUALITY_MODES` in `@docslurp/shared` holds these labels, descriptions and prices (from `PRICE_CARD`), and `estimateIngest` takes the same three ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `review-grade` or `forceAllPages: true` to good, any other playbook to auto). Run previews (`POST /v1/runs/preview`) return one option per quality.
+`QUALITY_MODES` in `@docslurp/shared` holds these labels, descriptions and prices (from `PRICE_CARD`), and `estimateIngest` takes the same three ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `forceAllPages: true` to good, and every other playbook, `review-grade` and `agentic` included, to auto: those playbooks never read every page). Run previews (`POST /v1/runs/preview`) return one option per quality.
 
 ### Credits and budgets
 
@@ -1089,7 +1089,7 @@ Finance/                      one folder per document (a document export is just
     structured.json           schema fields, when the workspace has a schema
     metadata.json             filename, type, status, page count, version, tags
     original/Q3 plan.pdf      "all" only: the uploaded file
-    images/page-0001.png      "all" only: rendered page images
+    images/page-0001.png      "all": rendered page images; Markdown-only: pages Fast kept as images
     outputs/html.html         "all" only: readable pipeline outputs (HTML, canonical document, …)
   README.md                   the layout, a document table, and any file that could not be included
 ```

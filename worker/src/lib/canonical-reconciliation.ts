@@ -1,6 +1,6 @@
 import {
   canonicalDocumentSchema,
-  isPageImageReferenceMarkdown,
+  isPageImageReferenceBlock,
   type CanonicalBlock,
   type CanonicalDocument,
   type ExtractionContract,
@@ -170,9 +170,10 @@ export function canonicalDocumentToRawText(document: CanonicalDocument): string 
     .map((blocks) =>
       blocks
         .sort((left, right) => left.order - right.order)
-        .map((block) => block.text.trim())
         // A Fast page-image reference is Markdown only: the page has no extracted text.
-        .filter((text) => text && !isPageImageReferenceMarkdown(text))
+        .filter((block) => !isPageImageReferenceBlock(block))
+        .map((block) => block.text.trim())
+        .filter(Boolean)
         .join("\n\n"),
     )
     .join("\f");

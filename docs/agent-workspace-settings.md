@@ -66,7 +66,9 @@ vision, $2.50; there is no per-file page limit). Quality is what the
 [ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page
 triage skipped or that Fast kept as images, so its `patch` can be proposed as
 `{"changes":{"pipeline":{"visionFallback":true,"quality":"good"}}}`. A retired
-`vision.forceAllPages` patch is accepted and proposed as `quality: "good"`.
+`vision.forceAllPages: true` patch is accepted and proposed as `quality: "good"`;
+`vision.forceAllPages: false` is proposed as `quality: "auto"` on a Good workspace
+and changes nothing on any other.
 Raising quality is `reindex-recommended`: it adds per-page cost and applies to
 new uploads, existing files keep their text until you reprocess them (optional,
 with the usual cost estimate and a separate consent), and reprocessing is never

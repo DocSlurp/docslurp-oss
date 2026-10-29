@@ -7,6 +7,8 @@ import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
   pageCredits,
+  qualityAllowsPageReading,
+  qualityReadsEveryPage,
   richPagesForOutputTokens,
   type MaterializePagesInput,
   type PipelineFeatures,
@@ -38,6 +40,8 @@ import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
 
+/** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
+export const KEPT_AS_IMAGE_REASON = "kept-as-image";
 /** Pages with fewer non-space characters than this have no usable text layer. */
 export const MIN_TEXT_LAYER_CHARS = 40;
 /** Chunks per embedding call. */
@@ -128,6 +132,8 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       return Array.from({ length: count }, (_, i) => pages[i] ?? "");
     },
     async ocrPage(document, page, ctx) {
+      // Fail closed: Fast never sends a page to a vision model.
+      if (!qualityAllowsPageReading(ctx.pipeline.quality)) throw new Error(`quality fast does not read page ${page}`);
       const [artifact] = await raster().renderSelectedPages({
         document, runId: ctx.runId, pageNumbers: [page], dpi: OCR_DPI, signal: ctx.signal,
       });
@@ -274,13 +280,22 @@ export async function materializePageRange(
       console.warn(`[materialize] text layer failed for ${documentId} p${range.first}-${range.last}: ${reason}`);
     }
   }
+  // Quality decides which pages a model reads, as in the eager pipeline: Fast reads none (pages without a text layer
+  // stay unread, kept as page images that render on demand), Good reads every page, Auto only pages without text.
+  const readsPages = qualityAllowsPageReading(pipeline.quality);
+  const readsEveryPage = qualityReadsEveryPage(pipeline.quality);
   const ocrPages: number[] = [];
+  const keptUnread: number[] = [];
   for (const page of pages) {
     const text = texts.get(page) ?? "";
+    const hasTextLayer = text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS;
     // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee).
-    if (text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS) prepared.set(page, { page, text, ocrCostCents: pageCredits("fast", 1) });
-    else ocrPages.push(page);
+    if (readsEveryPage) ocrPages.push(page);
+    else if (hasTextLayer) prepared.set(page, { page, text, ocrCostCents: pageCredits("fast", 1) });
+    else if (readsPages) ocrPages.push(page);
+    else keptUnread.push(page);
   }
+  for (const page of keptUnread) failed.set(page, KEPT_AS_IMAGE_REASON);
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
   await mapLimit(ocrPages, OCR_CONCURRENCY, async (page) => {
     if (spentCents >= budgetCents) {

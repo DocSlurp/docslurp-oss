@@ -33,11 +33,14 @@ function createDocument(filename: string, mimeType: string): Document {
 /** The stage's real control flow, with storage in memory and each extractor replaced by `extract`. */
 async function harness(args: {
   format: "image" | "pdf";
+  /** Overrides the document MIME type (default image/png or application/pdf by format). */
+  mimeType?: string;
   pipeline?: Record<string, unknown>;
   extract?: (label: string) => Promise<{ text: string }>;
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-image-ocr-test-"));
   const attempted: string[] = [];
+  const configs: Record<string, string | undefined> = {};
   const objects = new Map<string, Buffer>();
   const manifests = new Map<string, any>();
   const storage = {
@@ -48,7 +51,14 @@ async function harness(args: {
   };
   const runner = {
     dopplerMarkdown: async () => ({ binary: "doppler-vm", args: [], available: true }),
-    kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
+    kreuzbergMarkdown: async (_source: string, _output: string, configJson?: string) => {
+      configs.kreuzberg = configJson;
+      return { binary: "node", args: [], available: true };
+    },
+    dolphinMarkdown: async (_source: string, _output: string, configJson?: string) => {
+      configs.dolphin = configJson;
+      return { binary: "python", args: [], available: true };
+    },
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
   } as unknown as CommandRunner;
   const stage = new ExtractMarkdownStage(runner, storage as any, {} as any);
@@ -69,13 +79,15 @@ async function harness(args: {
     await writeFile(tempTextPath, text);
     return { label: extractor.label, plan: (extractor as any).plan, textKey, textUri: `s3://test/${textKey}`, tempTextPath };
   };
-  const document = args.format === "image"
-    ? createDocument("scanned-memo.png", "image/png")
-    : createDocument("scan.pdf", "application/pdf");
+  const document = args.mimeType
+    ? createDocument(args.format === "pdf" ? "scan.pdf" : "scan.png", args.mimeType)
+    : args.format === "image"
+      ? createDocument("scanned-memo.png", "image/png")
+      : createDocument("scan.pdf", "application/pdf");
   const state = WorkflowState.create(createRun(args.pipeline), [document]);
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
   return {
-    stage, state, attempted, objects, manifests,
+    stage, state, attempted, configs, objects, manifests,
     checkpoint: () => state.documentStage("doc-1", "extract-markdown"),
     cleanup: () => rm(scratch, { recursive: true, force: true }),
   };
@@ -181,5 +193,57 @@ describe("image documents whose OCR cannot run", () => {
       expect(h.attempted).toEqual(["kreuzberg"]);
       expect(h.checkpoint()?.status).toBe("completed");
     } finally { await h.cleanup(); }
+  });
+});
+
+describe("quality fast extraction is text-layer only", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("drops request OCR options and model extractors, and passes Kreuzberg disableOcr", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({
+      format: "pdf",
+      pipeline: {
+        quality: "fast",
+        documentExtraction: {
+          ...defaultPipelineFeatures.documentExtraction,
+          order: { pdf: ["dolphin", "graph-local", "kreuzberg"] },
+          options: { kreuzberg: { forceOcr: true, ocr: { backend: "paddleocr" } }, dolphin: { mode: "layout" } },
+        },
+      },
+      extract: async () => ({ text: "Born-digital text." }),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.attempted).toEqual(["kreuzberg"]);
+      expect(h.configs.dolphin).toBeUndefined();
+      expect(JSON.parse(h.configs.kreuzberg!)).toEqual({ disableOcr: true });
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  // An image/* MIME the format map does not know falls back to the filename: "scan.pdf" uploaded as image/gif
+  // detects as pdf. Billing and render-images treat it as an image, so extraction must keep it unread too.
+  it("keeps an image/* MIME the format map does not know unread instead of OCRing it", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ format: "pdf", mimeType: "image/gif", pipeline: { quality: "fast" }, extract: async () => ({ text: "OCR TEXT" }) });
+    try {
+      await h.stage.run(h.state);
+      expect(h.attempted).toEqual([]);
+      expect(h.checkpoint()?.status).toBe("completed");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("still OCRs that MIME under auto", async () => {
+    const h = await harness({ format: "pdf", mimeType: "image/gif", extract: async () => ({ text: "OCR TEXT" }) });
+    try {
+      await h.stage.run(h.state);
+      expect(h.attempted.length).toBeGreaterThan(0);
+    } finally {
+      await h.cleanup();
+    }
   });
 });

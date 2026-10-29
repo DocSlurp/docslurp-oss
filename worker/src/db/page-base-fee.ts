@@ -21,7 +21,9 @@ import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements } 
  * every other page of its completed documents is charged here: Rich for image
  * files and for pages the page facts show as scans (no text layer, an embedded
  * image), Fast otherwise. Quality `fast` never reads a page (pages without a
- * text layer are kept as page images), so every page of a fast run bills Fast.
+ * text layer are kept as page images); its pages bill Fast only on evidence
+ * they were not read (splitRemainingPages), so a page that was read anyway
+ * still bills Rich.
  * Audio and video bill by the minute (media stage).
  *
  * Stages that only rebuild indexes from existing content. A partial run that
@@ -45,15 +47,29 @@ export function pageBaseFeeMultiplier(plan: Pick<CompiledPipelinePlan, "stageOrd
 }
 
 /**
- * Splits a completed document's pages not already charged by a Rich read into Fast and Rich pages. Image files
- * and scanned pages bill Rich only when the run's quality reads pages; fast keeps them as images, billed Fast.
+ * Splits a completed document's pages not already charged by a Rich read into Fast and Rich pages, by what the run
+ * observed rather than the mode it declared.
+ *
+ * Auto and Good (`pagesRead`): image files and scanned pages (no text layer, an embedded image) bill Rich.
+ *
+ * Fast never reads a page, and bills one Fast only with evidence it was not read: a page with a native text layer,
+ * or one Fast recorded as kept as an image or left unread (page facts `kept-as-image` / `not-read`, written by
+ * render-images). Everything else that could have been read bills Rich, fail closed: a scanned page that ended up
+ * with text and no such status (something OCR'd it), and an image file not recorded as kept (`fastUnread` = 0).
  */
 export function splitRemainingPages(
-  row: { image: boolean; pages: number; richRead: number; scanned: number },
+  row: { image: boolean; pages: number; richRead: number; scanned: number; scannedRead?: number; fastUnread?: number },
   pagesRead: boolean,
 ): { fast: number; rich: number } {
   const remaining = Math.max(0, row.pages - row.richRead);
-  const rich = !pagesRead ? 0 : row.image ? remaining : Math.min(remaining, Math.max(0, row.scanned - row.richRead));
+  let rich: number;
+  if (pagesRead) {
+    rich = row.image ? remaining : Math.min(remaining, Math.max(0, row.scanned - row.richRead));
+  } else if (row.image) {
+    rich = (row.fastUnread ?? 0) > 0 ? 0 : remaining;
+  } else {
+    rich = Math.min(remaining, Math.max(0, (row.scannedRead ?? row.scanned) - row.richRead));
+  }
   return { fast: remaining - rich, rich };
 }
 
@@ -76,7 +92,7 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       // A full-index run re-indexes documents whose pages may already have paid through query
       // materialization (stamped on the source version's ledger). Those pages are not charged twice.
       // Rich reads are read through usage_attribution (the one spend reader the worker may use).
-      client<{ document_id: string; image: boolean; pages: number; rich_read: number; scanned: number }[]>`
+      client<{ document_id: string; image: boolean; pages: number; rich_read: number; scanned: number; scanned_read: number; fast_unread: number }[]>`
       with docs as (
         select d.id, coalesce(d.mime_type, '') like 'image/%' as image,
           greatest(0, d.page_count - case when ${state.run.kind === "full-index"} then (
@@ -92,7 +108,13 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
           where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
             and au.metadata ->> 'documentId' = docs.id), 0)::int as rich_read,
         coalesce((select count(*) from document_page_facts f
-          where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0), 0)::int as scanned
+          where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0), 0)::int as scanned,
+        -- Fast: scanned pages without evidence they stayed unread (see splitRemainingPages).
+        coalesce((select count(*) from document_page_facts f
+          where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0
+            and coalesce(f.vision_status, '') not in ('kept-as-image', 'not-read')), 0)::int as scanned_read,
+        coalesce((select count(*) from document_page_facts f
+          where f.document_id = docs.id and f.vision_status in ('kept-as-image', 'not-read')), 0)::int as fast_unread
       from docs
     `,
     ], async (client, [lockedRows, rows]) => {
@@ -101,9 +123,13 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       let richPages = 0;
       const documents: Record<string, { fast: number; rich: number }> = {};
       for (const row of rows) {
-        // Image files are read as images; scanned PDF pages without a vision read still bill Rich (not in fast).
+        // Image files are read as images; scanned PDF pages without a vision read still bill Rich. Fast bills by
+        // what it observed: only pages shown unread or with a text layer bill Fast.
         const { fast, rich } = splitRemainingPages(
-          { image: row.image, pages: Number(row.pages), richRead: Number(row.rich_read), scanned: Number(row.scanned) },
+          {
+            image: row.image, pages: Number(row.pages), richRead: Number(row.rich_read), scanned: Number(row.scanned),
+            scannedRead: Number(row.scanned_read), fastUnread: Number(row.fast_unread),
+          },
           pagesRead,
         );
         fastPages += fast;

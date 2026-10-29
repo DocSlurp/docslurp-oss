@@ -6,6 +6,7 @@ import {
   calculateAiUsageCostCents,
   DEFAULT_SERVER_MATERIALIZATION_POLICY,
   narrowMaterializationPolicy,
+  qualityAllowsPageReading,
   resolvePipelineTextModel,
   type MaterializationPolicy,
 } from "@docslurp/shared";
@@ -386,7 +387,8 @@ export class DocumentMapStage implements Stage {
     return await runSiphonLoop({
       pageCount, maxSiphonPages, seed: args.draft, initialObservations: args.initialObservations, shouldStop: () => isCostCapExceeded(state), signal: args.signal,
       readWindow: async (first, last) => {
-        if (args.bornDigital) {
+        // Fast never reads a page with a model: the siphon sees only the text layer, and scanned pages stay unread.
+        if (args.bornDigital || !qualityAllowsPageReading(state.run.pipeline.quality)) {
           const pageTexts = await ops.extractText(args.source, first, last, args.signal);
           pageTexts.forEach((t, i) => args.text.set(first + i, t));
           return { pageTexts };
@@ -417,6 +419,8 @@ export class DocumentMapStage implements Stage {
   private async ocrPages(args: { document: Document; first: number; last: number; state: WorkflowState; signal?: AbortSignal }): Promise<{ pageTexts: string[]; costCents: number }> {
     const { document, state } = args;
     const pageNumbers = Array.from({ length: args.last - args.first + 1 }, (_, i) => args.first + i);
+    // Fail closed: Fast never sends a page to a vision model, whoever asks.
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
     const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, signal: args.signal });
     const byPage = new Map(artifacts.map((a) => [a.pageNumber, a]));
     let costCents = 0;

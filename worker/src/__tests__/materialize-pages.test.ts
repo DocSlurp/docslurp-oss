@@ -283,3 +283,32 @@ describe("materializePageRange", () => {
     await db.exec(`delete from document_maps`);
   });
 });
+
+describe("materializePageRange respects processing quality", () => {
+  const fast = { ...defaultPipelineFeatures, quality: "fast" as const };
+  const good = { ...defaultPipelineFeatures, quality: "good" as const };
+  const reasons = ["query", "full-index"] as const;
+
+  it.each(reasons)("fast (%s) indexes only the text layer and keeps textless pages unread", async (reason) => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await materializePageRange(h.deps, { ...input(h, [1, 2], fast), reason });
+    expect(h.ocrCalls).toEqual([]);
+    expect(result.indexed).toEqual([1]);
+    expect(result.failed).toEqual([{ page: 2, reason: "kept-as-image" }]);
+    const ledger = (h.usage as unknown as { pending: Array<{ metric: string }> }).pending;
+    expect(ledger.filter((e) => e.metric === "page-analysis")).toEqual([]);
+    // No Rich read: only the text-layer page's Fast credit (plus embedding provider cost, 0 credits here).
+    expect(result.costCredits).toBeLessThan(0.25);
+    const state = await db.query<{ state: string; failure_reason: string | null }>(
+      `select state, failure_reason from document_page_states where document_id = 'd1' and page_number = 2`);
+    expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "kept-as-image" });
+  });
+
+  it.each(reasons)("good (%s) reads every page with vision, text layer or not", async (reason) => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await materializePageRange(h.deps, { ...input(h, [1, 2], good), reason });
+    expect(h.ocrCalls.sort()).toEqual([1, 2]);
+    expect(result.indexed).toEqual([1, 2]);
+    expect(result.costCredits).toBeCloseTo(0.5, 6);
+  });
+});

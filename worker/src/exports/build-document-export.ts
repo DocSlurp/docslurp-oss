@@ -83,6 +83,11 @@ const PRETTY_JSON_MAX_BYTES = 8 * 1024 * 1024;
 export interface ExportSource {
   /** Pages in order for one document. */
   pages(documentId: string): Promise<Array<{ page_number: number; text: string }>>;
+  /**
+   * Pages Fast kept as page images (page facts `kept-as-image`). Their Markdown links `images/page-NNNN.<ext>`,
+   * so a Markdown-only export still carries those images. Optional: a source without it exports none.
+   */
+  keptAsImagePages?(documentId: string): Promise<number[]>;
   /** An object by key, streamed. */
   open(key: string): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }>;
   bucket: string;
@@ -201,6 +206,17 @@ export async function* documentExportEntries(
       };
     }
 
+    if (args.content !== "all" && completed && source.keptAsImagePages) {
+      // Fast references these page images from the Markdown; ship them so the links resolve.
+      const kept = new Set(await source.keptAsImagePages(row.id));
+      for (const entry of artifacts) {
+        const page = PAGE_IMAGE_SLOT.exec(entry.name);
+        if (!page || !kept.has(Number(page[1]))) continue;
+        const target = artifactExportPath(entry.name, entry.key)!;
+        yield { path: `${folder}/${target.path}`, compress: target.compress, modifiedAt, body: streamed(entry.key) };
+      }
+    }
+
     if (args.content === "all") {
       const originalPath = `${folder}/original/${safeExportName(row.filename, "original", { keepExtension: true })}`;
       if (withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
@@ -274,6 +290,9 @@ function exportReadme(
     "- `structured.json`: fields extracted against the workspace schema, when it has one",
     "- `metadata.json`: filename, type, status, page count, version and tags",
   ];
+  if (args.content !== "all") {
+    lines.push("- `images/`: page images for pages kept as images in Fast mode, which the Markdown links to");
+  }
   if (args.content === "all") {
     lines.push(
       "- `original/`: the uploaded file",
@@ -411,10 +430,8 @@ export async function buildDocumentExport(
     const [pageCount] = await sql<Array<{ pages: number }>>`
       select count(*)::int as pages from document_pages where document_id = any(${sql.array(documents.map((document) => document.id))})
     `;
-    // "all" also adds one images/ entry per rendered page.
-    const imageEntries = row.content === "all"
-      ? documents.reduce((sum, document) => sum + Object.keys(document.artifacts ?? {}).filter((slot) => /:page-\d+$/.test(slot)).length, 0)
-      : 0;
+    // Markdown-only exports add the page images Fast kept (at most one per page), counted as page images here.
+    const imageEntries = documents.reduce((sum, document) => sum + Object.keys(document.artifacts ?? {}).filter((slot) => /:page-\d+$/.test(slot)).length, 0);
     const omitPageFiles = documents.length * 12 + imageEntries + (pageCount?.pages ?? 0) > ZIP_MAX_ENTRIES;
     const root = row.filename.replace(/\.zip$/i, "");
     const skipped: Array<{ path: string; reason: string }> = [];
@@ -427,6 +444,9 @@ export async function buildDocumentExport(
       pages: async (documentId) => await sql<Array<{ page_number: number; text: string }>>`
         select page_number, text from document_pages where document_id = ${documentId} order by page_number
       `,
+      keptAsImagePages: async (documentId) => (await sql<Array<{ page_number: number }>>`
+        select page_number from document_page_facts where document_id = ${documentId} and vision_status = 'kept-as-image'
+      `).map((page) => page.page_number),
     };
     const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
     const chunks = async function* (): AsyncGenerator<Uint8Array> {
