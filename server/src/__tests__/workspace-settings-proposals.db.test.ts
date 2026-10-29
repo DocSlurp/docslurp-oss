@@ -25,7 +25,7 @@ async function fixture() {
   await sql`insert into "user" (id,name,email) values (${owner},'Owner',${owner+'@example.test'}),(${userId},'Editor',${userId+'@example.test'})`;
   await sql`insert into organizations (id,name,slug,created_by_user_id) values (${id},'Test',${id},${owner})`;
   await sql`insert into org_memberships(org_id,user_id,role) values (${id},${owner},'owner'),(${id},${userId},'member')`;
-  const pipeline = mergePipelineFeatures(defaultPipelineFeatures, { mediaVideo: { enabled: false }, preserveCode: false, parserPlaybook: "fast" });
+  const pipeline = mergePipelineFeatures(defaultPipelineFeatures, { mediaVideo: { enabled: false }, preserveCode: false, quality: "fast" });
   await sql`insert into workspaces(id,org_id,user_id,name,pipeline) values (${id},${id},${owner},'Test',${sql.json(JSON.parse(JSON.stringify(pipeline)))})`;
   await sql`insert into workspace_members(workspace_id,user_id,role) values (${id},${userId},'editor')`;
   await sql`insert into chat_sessions(id,workspace_id,user_id) values (${sessionId},${id},${userId})`;
@@ -42,7 +42,7 @@ it("only proposes until the trusted Apply call, then preserves unrelated nested 
   expect(proposal.changes).toContainEqual({ key: 'pipeline.mediaVideo.enabled', label: 'Video frame analysis', before: false, after: true });
   expect(proposal.reprocessAvailable).toBe(false);
   expect(await service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
-  expect(await saved(f.id)).toMatchObject({ mediaVideo: { enabled: true }, preserveCode: false, parserPlaybook: 'fast' });
+  expect(await saved(f.id)).toMatchObject({ mediaVideo: { enabled: true }, preserveCode: false, quality: 'fast' });
   expect(await sql`select count(*)::int n from audit_log where workspace_id=${f.id} and action='workspace.updated'`).toEqual([{ n: 1 }]);
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 409, category: 'settings_proposal_stale' });
 });
@@ -216,23 +216,23 @@ async function seedIndexedDocument(f: Awaited<ReturnType<typeof fixture>>) {
     values (${f.id},${f.id},'lancedb','test','path','model',1024)`;
 }
 
-it("proposes the vision page-selection change the ingest report recommends, with new-upload impact and an optional reprocess", async () => {
+it("proposes the quality change the ingest report recommends, with new-upload impact and an optional reprocess", async () => {
   const f = await fixture();
   await seedIndexedDocument(f);
   const before = await saved(f.id);
-  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { visionFallback: true, vision: { forceAllPages: true } } } });
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { visionFallback: true, quality: "good" } } });
   expect(proposal.changes).toEqual(expect.arrayContaining([
-    { key: 'pipeline.vision.forceAllPages', label: 'Read every page with vision', before: false, after: true },
+    { key: 'pipeline.quality', label: 'Processing quality', before: 'fast', after: 'good' },
   ]));
   expect(proposal.impact.kind).toBe('reindex-recommended');
-  expect(proposal.impact.reasons.find(r => r.field === 'vision')?.effect).toMatch(/New uploads.*reprocess/);
+  expect(proposal.impact.reasons.find(r => r.field === 'quality')?.effect).toMatch(/New uploads.*reprocess/);
   expect(proposal.reprocessAvailable).toBe(true);
   expect(proposal.reprocessRequired).toBe(false);
   expect(proposal.estimate).not.toBeNull();
   expect(proposal.estimate?.pages).toBeGreaterThan(0);
   // Optional reprocessing: saving without consent changes settings only, and keeps every other vision setting.
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
-  expect(await saved(f.id)).toMatchObject({ vision: { ...before.vision, forceAllPages: true }, preserveCode: false, parserPlaybook: 'fast' });
+  expect(await saved(f.id)).toMatchObject({ vision: before.vision, preserveCode: false, quality: 'good' });
   // The per-file vision page limit was removed; proposing it is rejected rather than silently ignored.
   await expect(service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } })).rejects.toBeDefined();
 });

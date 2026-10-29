@@ -56,7 +56,7 @@ const {
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
-const { defaultPipelineFeatures } = await import("@docslurp/shared");
+const { defaultPipelineFeatures, pageCredits } = await import("@docslurp/shared");
 const { createRunCreation } = await import("../services/run-creation.js");
 
 // Spend admission is exercised through Run creation with no files: it fails or
@@ -219,14 +219,14 @@ describe("run preview", () => {
       },
       historyRows: [
         {
-          parser_playbook: "balanced",
+          quality: "auto",
           completed_runs: 4,
           sampled_documents: 12,
           avg_plausibility_score: 0.68,
           avg_seconds_per_page: 2.8
         },
         {
-          parser_playbook: "layout-aware",
+          quality: "good",
           completed_runs: 3,
           sampled_documents: 9,
           avg_plausibility_score: 0.85,
@@ -237,27 +237,30 @@ describe("run preview", () => {
 
     expect(preview.documentCount).toBe(2);
     expect(preview.estimatedPages).toBeGreaterThan(1);
-    expect(preview.recommended.parserPlaybook).toBe("layout-aware");
+    expect(preview.recommended.quality).toBe("auto");
+    expect(preview.options.map((option) => option.quality)).toEqual(["fast", "auto", "good"]);
     expect(preview.options.some((option) => option.recommended)).toBe(true);
     expect(preview.topSignals).toContain("table-heavy inputs favor layout-aware extraction");
   });
 
-  it("prices the DOCSLURP_VISION_MODEL_URI override like the worker does", () => {
+  it("prices PRICE_CARD units per quality, whichever vision model runs", () => {
     const request = {
       workspaceId: "ws-1",
       pipeline: defaultPipelineFeatures,
       files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000 }],
       urls: [],
     };
-    const cost = () => buildRunProcessingPreview({ request, historyRows: [] }).recommended;
-    const baseline = cost();
+    const preview = () => buildRunProcessingPreview({ request, historyRows: [] });
+    const byQuality = Object.fromEntries(preview().options.map((option) => [option.quality, option.estimatedCost]));
+    const pages = preview().estimatedPages;
+    // fast is flat Fast, good flat Rich, auto spans the two (credits are cents).
+    expect(byQuality.fast).toEqual({ minCents: pageCredits("fast", pages), maxCents: pageCredits("fast", pages) });
+    expect(byQuality.good).toEqual({ minCents: pageCredits("rich", pages), maxCents: pageCredits("rich", pages) });
+    expect(byQuality.auto!.minCents).toBe(pageCredits("fast", pages));
+    expect(byQuality.auto!.maxCents).toBeLessThanOrEqual(pageCredits("rich", pages));
     vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/z-ai/glm-5.3-flash");
     try {
-      const overridden = cost();
-      expect(overridden.estimatedCost.maxCents).toBeLessThan(baseline.estimatedCost.maxCents);
-      // An invalid value is ignored and the default pricing stays.
-      vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/vendor/uncataloged");
-      expect(cost().estimatedCost.maxCents).toBe(baseline.estimatedCost.maxCents);
+      expect(preview().options.map((option) => option.estimatedCost)).toEqual(Object.values(byQuality));
     } finally {
       vi.unstubAllEnvs();
     }

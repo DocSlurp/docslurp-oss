@@ -49,7 +49,7 @@ function fingerprint(plan: WorkspaceChangePlan): string {
 }
 const PIPELINE_LABELS: Record<string, string> = {
   "mediaVideo.enabled": "Video frame analysis",
-  "vision.forceAllPages": "Read every page with vision",
+  quality: "Processing quality",
 };
 function changedValues(before: PipelineFeatures, after: PipelineFeatures, patch: z.infer<typeof workspaceSettingsPipelinePatchSchema>) {
   return Object.entries(patch).flatMap(([key, value]) => {
@@ -58,7 +58,7 @@ function changedValues(before: PipelineFeatures, after: PipelineFeatures, patch:
       key: `pipeline.${key}.${child}`, label: PIPELINE_LABELS[`${key}.${child}`] ?? `${key}.${child}`,
       before: (old as Record<string, unknown> | undefined)?.[child] ?? null, after: (next as Record<string, unknown>)[child],
     }));
-    return [{ key: `pipeline.${key}`, label: key.replace(/([A-Z])/g, " $1"), before: old ?? null, after: next }];
+    return [{ key: `pipeline.${key}`, label: PIPELINE_LABELS[key] ?? key.replace(/([A-Z])/g, " $1"), before: old ?? null, after: next }];
   }).filter(change => JSON.stringify(change.before) !== JSON.stringify(change.after));
 }
 /** Answer and retrieval changes need different wording from pipeline changes: none of them touches stored documents. */
