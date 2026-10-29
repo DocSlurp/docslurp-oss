@@ -38,6 +38,7 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-runtime.js";
 import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
+import { recordMaterializedPageFee } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
@@ -289,7 +290,7 @@ export async function materializePageRange(
   for (const page of pages) {
     const text = texts.get(page) ?? "";
     const hasTextLayer = text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS;
-    // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee).
+    // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee as they turn indexed).
     if (readsEveryPage) ocrPages.push(page);
     else if (hasTextLayer) prepared.set(page, { page, text, ocrCostCents: pageCredits("fast", 1) });
     else if (readsPages) ocrPages.push(page);
@@ -496,14 +497,24 @@ export async function materializePageRange(
   const fastIndexed = result.indexed.filter((page) => !ocrPages.includes(page)).length;
   result.costCredits = Math.round((spentCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
 
-  const writes: Promise<void>[] = [];
-  for (const [credits, group] of indexedByCost) {
-    writes.push(markPages(deps.sql, documentId, group, "indexed", {
-      costCredits: credits, embeddingModel: profile.model,
-      // Full-index pages are charged by the run's completion fee (recordPageBaseFee), not stamped here.
-      feeRun: input.reason === "full-index" ? undefined : input.runId,
-    }));
+  const markIndexed = async (client: Sql): Promise<void> => {
+    for (const [credits, group] of indexedByCost) {
+      await markPages(client, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model });
+    }
+  };
+  if (input.reason === "full-index") {
+    // Full-index pages are charged by the run's completion fee (recordPageBaseFee), not stamped here.
+    await markIndexed(deps.sql);
+  } else if (result.indexed.length > 0) {
+    // The pages turn indexed in the transaction that persists their Rich charges (taken from the usage ledger),
+    // their Fast charges and their `fee_billed_run` stamp: a crash leaves them claimed and unbilled, never
+    // indexed without the billing decision (a retry would otherwise find its own stamp and no Rich charge).
+    await recordMaterializedPageFee(deps.sql as Sql<Record<string, unknown>>, input.runId, documentId, result.indexed, {
+      ledger: deps.usage,
+      transition: (client) => markIndexed(client as unknown as Sql),
+    });
   }
+  const writes: Promise<void>[] = [];
   if (blocked.length > 0) writes.push(markPages(deps.sql, documentId, blocked, "blocked-pii", { failureReason: "pii-policy" }));
   const hardFailed = result.failed.filter((f) => !released.includes(f.page));
   const byReason = new Map<string, number[]>();

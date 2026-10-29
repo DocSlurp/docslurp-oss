@@ -88,13 +88,10 @@ export async function markPages(
   documentId: string,
   pages: number[],
   state: PageLedgerState,
-  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string; feeRun?: string } = {},
+  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string } = {},
 ): Promise<void> {
   if (pages.length === 0) return;
   const releases = state === "indexed" || state === "failed" || state === "blocked-pii" || state === "unseen";
-  // `feeRun`: the run that indexed the pages reserves their billing decision as they turn indexed, so no other
-  // run can charge them before this one records its Rich or Fast charge (page-base-fee.ts recordMaterializedPageFee).
-  const feeRun = state === "indexed" ? (extra.feeRun ?? null) : null;
   await sql`
     update document_page_states
     set state = ${state},
@@ -103,7 +100,6 @@ export async function markPages(
         embedding_model = case when ${state} = 'indexed' then coalesce(${extra.embeddingModel ?? null}, embedding_model) else embedding_model end,
         claimed_by_run = case when ${releases} then null else claimed_by_run end,
         claim_expires_at = case when ${releases} then null else claim_expires_at end,
-        fee_billed_run = coalesce(fee_billed_run, ${feeRun}::text),
         updated_at = now()
     where document_id = ${documentId} and page_number = any(${pages}::int[])
   `;

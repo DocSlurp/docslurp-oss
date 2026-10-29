@@ -85,12 +85,17 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       client<{ spent_cents: number | string }[]>`select spent_cents from workspace_runs where id = ${state.run.id} for no key update`,
       // A full-index run re-indexes documents whose pages may already have paid through query
       // materialization (stamped on the source version's ledger). Those pages are not charged twice.
+      // A stamped page this run read again is already left out through rich_read, so it is not subtracted
+      // twice (which would leave another page unbilled).
       // Rich reads are read through usage_attribution (the one spend reader the worker may use).
       client<{ document_id: string; image: boolean; pages: number; rich_read: number; scanned: number }[]>`
       with docs as (
         select d.id, coalesce(d.mime_type, '') like 'image/%' as image,
           greatest(0, d.page_count - case when ${state.run.kind === "full-index"} then (
             select count(*) from document_page_states s where s.document_id = d.previous_version_id and s.fee_billed_run is not null
+              and not exists (select 1 from usage_attribution au
+                where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+                  and au.metadata ->> 'documentId' = d.id and au.metadata ->> 'pageNumber' = s.page_number::text)
           ) else 0 end)::int as pages
         from documents d
         where d.run_id = ${state.run.id} and d.deduped_from_document_id is null and d.status <> 'failed'
@@ -162,15 +167,28 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
  * transaction, together with the stamp, and every page this run already has a
  * Rich read recorded for (usage_attribution; a retry finds the read an earlier
  * attempt persisted) is stamped without a Fast charge. A later query or full
- * index sees the stamp and charges the page nothing. `richPages` names more
- * pages to treat as read. Returns the newly billed credits.
+ * index sees the stamp and charges the page nothing.
+ *
+ * `transition` runs inside the same transaction, after the page rows are
+ * locked: the materializer turns the pages `indexed` there, so a page is never
+ * indexed without its Rich or Fast charge and stamp (a crash in between rolls
+ * the transition back and the page is materialized and charged again by the
+ * retry, once, by id).
+ *
+ * A page stamped by another run that recorded no Fast or Rich charge for it
+ * (its fee write failed for good, or it was cancelled) is taken over: it is
+ * re-stamped to this run and charged here, so no page stays unbilled.
+ * Returns the newly billed credits.
  */
 export async function recordMaterializedPageFee(
   sql: Sql<Record<string, unknown>>,
   runId: string,
   documentId: string,
   pages: number[],
-  options: { richPages?: ReadonlySet<number>; ledger?: Pick<PipelineUsageEventLedger, "takeRichPageCharges"> } = {},
+  options: {
+    ledger?: Pick<PipelineUsageEventLedger, "takeRichPageCharges">;
+    transition?: (client: Sql<Record<string, unknown>>) => Promise<unknown>;
+  } = {},
 ): Promise<number> {
   const requested = [...new Set(pages)].filter((page) => Number.isInteger(page) && page >= 1).sort((a, b) => a - b);
   const rateCents = pageCredits("fast", 1);
@@ -195,6 +213,7 @@ export async function recordMaterializedPageFee(
       where document_id = ${documentId} and page_number = any(${requested}::int[])
       order by page_number for update
     `;
+    if (options.transition) await options.transition(client);
     const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
       select id, org_id, user_id, workspace_id, stats from workspace_runs where id = ${runId}
     `;
@@ -208,13 +227,13 @@ export async function recordMaterializedPageFee(
         and au.metadata ->> 'documentId' = ${documentId}
         and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
     `;
-    const rich = new Set([...(options.richPages ?? []), ...readRows.map((r) => Number(r.page))]);
+    const rich = new Set(readRows.map((r) => Number(r.page)));
     const owned = await client<{ page_number: number }[]>`
-      update document_page_states
-      set fee_billed_run = ${runId}, fee_billed_at = coalesce(fee_billed_at, now())
-      where document_id = ${documentId} and page_number = any(${requested}::int[])
-        and (fee_billed_run is null or fee_billed_run = ${runId})
-      returning page_number
+      update document_page_states s
+      set fee_billed_run = ${runId}, fee_billed_at = case when s.fee_billed_run = ${runId} then coalesce(s.fee_billed_at, now()) else now() end
+      where s.document_id = ${documentId} and s.page_number = any(${requested}::int[])
+        and (s.fee_billed_run is null or s.fee_billed_run = ${runId} or ${unchargedStampSql(client)})
+      returning s.page_number
     `;
     const fastPages = owned.map(r => r.page_number).filter((page) => !rich.has(page)).sort((x, y) => x - y);
     const fastInserted = await persistRunUsageEvents({ client, state, usageEvents: fastPages.map(page => ({
@@ -229,4 +248,19 @@ export async function recordMaterializedPageFee(
   });
   richBatch?.commit();
   return billed;
+}
+
+/**
+ * SQL condition on a `document_page_states s` row: its stamping run recorded neither a Fast nor a Rich charge
+ * for the page. Stamps and charges commit together (recordMaterializedPageFee), so such a stamp is stale (a
+ * failed fee write, a cancelled run, a stamp from before that rule) and recovery may take the page over.
+ */
+export function unchargedStampSql(client: Sql<Record<string, unknown>>) {
+  return client`(s.fee_billed_run is not null and not exists (
+    select 1 from usage_attribution au
+    where au.run_id = s.fee_billed_run
+      and au.metric in (${BILLABLE_UNIT_METRICS.fastPage}, ${BILLABLE_UNIT_METRICS.richPage})
+      and au.metadata ->> 'documentId' = s.document_id
+      and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = s.page_number::text
+  ))`;
 }
