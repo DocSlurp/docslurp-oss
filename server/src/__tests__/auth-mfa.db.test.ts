@@ -253,6 +253,29 @@ describe("sign-in challenge", () => {
     expect(await browser.session()).toBeNull();
   });
 
+  it("fails closed when a challenge's record of its first factor is missing", async () => {
+    const { user, secret } = await enrolledUser();
+    const browser = new Browser();
+    expect((await signInPassword(browser, user.email)).body.twoFactorRedirect).toBe(true);
+    // As if expiry cleanup had removed it while the completion was in flight.
+    await pool.query(`delete from verification where identifier like '2fa-credential-%'`);
+    const refused = await browser.json<{ code?: string }>("/two-factor/verify-totp", { code: totp(secret) });
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("SIGN_IN_AGAIN");
+    expect(await browser.session()).toBeNull();
+  });
+
+  it("revokes the session and trusted devices a completion mints while the password changes underneath", async () => {
+    const { user, secret } = await enrolledUser();
+    const attacker = new Browser();
+    expect((await signInPassword(attacker, user.email)).body.twoFactorRedirect).toBe(true);
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    await attacker.json("/two-factor/verify-totp", { code: totp(secret), trustDevice: true });
+    expect(await attacker.session()).toBeNull();
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
+  });
+
   it("cancels a pending challenge when the password is reset", async () => {
     const { user, secret } = await enrolledUser();
     const attacker = new Browser();

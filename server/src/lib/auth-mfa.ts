@@ -11,7 +11,7 @@ import { serialize, type CookieOptions } from "hono/utils/cookie";
 import type { Pool } from "pg";
 
 import { assertReviewedBetterAuth } from "./auth-compat.js";
-import { challengeCredentialIdentifier, newSessionCredentialFingerprint } from "./auth-credential-binding.js";
+import { CHALLENGE_CREDENTIAL_GRACE_MS, challengeCredentialIdentifier, newSessionCredentialFingerprint, NO_PASSWORD } from "./auth-credential-binding.js";
 import { hasSensitiveAccess } from "./auth-sensitive-access.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
@@ -365,8 +365,8 @@ async function beginChallenge(ctx: HookContext, userId: string, maxAge: number):
   await ctx.context.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
   await ctx.context.internalAdapter.createVerificationValue({ value: "0", identifier: `2fa-attempts-${identifier}`, expiresAt });
   // A challenge started by a password keeps that password's fingerprint for the session it ends in.
-  const fingerprint = await newSessionCredentialFingerprint();
-  if (fingerprint) await ctx.context.internalAdapter.createVerificationValue({ value: fingerprint, identifier: challengeCredentialIdentifier(identifier), expiresAt });
+  await ctx.context.internalAdapter.createVerificationValue({ value: await newSessionCredentialFingerprint() ?? NO_PASSWORD,
+    identifier: challengeCredentialIdentifier(identifier), expiresAt: new Date(expiresAt.getTime() + CHALLENGE_CREDENTIAL_GRACE_MS) });
   await ctx.setSignedCookie(cookie.name, identifier, ctx.context.secret, cookie.attributes);
 }
 
@@ -687,6 +687,9 @@ export async function beginTwoFactorChallengeCookie(authContext: ChallengeAuthCo
   const expiresAt = new Date(Date.now() + maxAge * 1000);
   await authContext.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
   await authContext.internalAdapter.createVerificationValue({ value: "0", identifier: `2fa-attempts-${identifier}`, expiresAt });
+  // Company sign-in is not a password: its challenge's session isn't bound to one.
+  await authContext.internalAdapter.createVerificationValue({ value: NO_PASSWORD, identifier: challengeCredentialIdentifier(identifier),
+    expiresAt: new Date(expiresAt.getTime() + CHALLENGE_CREDENTIAL_GRACE_MS) });
   // Only the server's validated IdP callback supplies this org. Never read it
   // from the MFA request. Keep it separate from the stock plugin's user record.
   if (ssoOrgId) await authContext.internalAdapter.createVerificationValue({

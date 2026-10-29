@@ -50,6 +50,11 @@ export function challengeCredentialIdentifier(challenge: string): string {
   return `2fa-credential-${challenge}`;
 }
 
+/** Recorded for a challenge whose first factor wasn't a password (SSO, magic link, OAuth). */
+export const NO_PASSWORD = "none";
+/** Outlives its challenge, so expiry cleanup can't remove it while a completion is in flight. */
+export const CHALLENGE_CREDENTIAL_GRACE_MS = 60 * 60 * 1000;
+
 const SECOND_FACTOR_PATHS = new Set(["/two-factor/verify-totp", "/two-factor/verify-backup-code"]);
 
 type FingerprintContext = {
@@ -69,7 +74,30 @@ export async function sessionCredentialFingerprint(pool: Pick<Pool, "query">, ct
   const challenge = await ctx.getSignedCookie(ctx.context.createAuthCookie("two_factor").name, ctx.context.secret);
   if (!challenge) return null;
   const { rows } = await pool.query<{ value: string }>(`select value from verification where identifier = $1`, [challengeCredentialIdentifier(challenge)]);
-  return rows[0]?.value ?? null;
+  // Every challenge records its first factor; a missing record never means "no password".
+  if (!rows[0]) throw new APIError("FORBIDDEN", { code: "SIGN_IN_AGAIN", message: "Sign in again to continue." });
+  return rows[0].value === NO_PASSWORD ? null : rows[0].value;
+}
+
+/**
+ * After a request issues a session, re-reads the password it rests on. If the
+ * password changed while the request ran, the session and every trusted
+ * device of the user (one may have been minted by this request) are deleted.
+ * Either a concurrent reset's own cleanup sees what this request wrote, or
+ * this check sees the reset's new password.
+ */
+async function revokeIfPasswordMoved(pool: Pick<Pool, "query">, token: string): Promise<void> {
+  const { rows } = await pool.query<{ user_id: string; stale: boolean }>(
+    `select s."userId" as user_id,
+            s."credentialFingerprint" is distinct from (
+              select encode(sha256(convert_to(a.password, 'UTF8')), 'hex') from account a
+               where a."userId" = s."userId" and a."providerId" = 'credential' and a.password is not null limit 1) as stale
+       from session s where s.token = $1 and s."credentialFingerprint" is not null`, [token]);
+  const row = rows[0];
+  if (!row?.stale) return;
+  await pool.query(`delete from session where token = $1`, [token]);
+  await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [row.user_id]);
+  console.warn(`[auth] the password changed while a sign-in completed; revoked its session and trusted devices user=${row.user_id}`);
 }
 
 const normalizeEmail = (value: unknown) => typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -117,6 +145,12 @@ export function credentialBindingPlugin(options: { pool: Pick<Pool, "query"> }):
         }),
       }],
       after: [{
+        matcher: (ctx) => ctx.path === "/sign-in/email" || SECOND_FACTOR_PATHS.has(ctx.path ?? ""),
+        handler: createAuthMiddleware(async (ctx) => {
+          const issued = ctx.context.newSession;
+          if (issued?.session.token) await revokeIfPasswordMoved(pool, issued.session.token);
+        }),
+      }, {
         // Sign-up succeeded, or the password was right but the address is unverified.
         matcher: (ctx) => ctx.path === "/sign-up/email" || ctx.path === "/sign-in/email",
         handler: createAuthMiddleware(async (ctx) => {
