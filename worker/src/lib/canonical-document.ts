@@ -1,4 +1,5 @@
 import {
+  isPageImageReferenceMarkdown,
   normalizePageNumbers,
   splitTextIntoPages,
   type CanonicalBlock,
@@ -269,7 +270,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
 export function canonicalDocumentToText(document: CanonicalDocument): string {
   return document.blocks
     .map((block) => block.text.trim())
-    .filter(Boolean)
+    .filter((text) => text && !isPageImageReferenceMarkdown(text))
     .join("\n\n");
 }
 
@@ -279,7 +280,8 @@ export function buildCanonicalChunksFromDocument(
   options?: { chunkOverlap?: boolean; maxChars?: number; sourceKind?: "image" | null; evidenceBoundaries?: boolean }
 ): CanonicalChunk[] {
   const maxChars = options?.maxChars ?? MAX_CHARS;
-  const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0);
+  // A Fast page-image reference (a page kept as an image, never read) carries no text: it is not a chunk.
+  const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0 && !isPageImageReferenceMarkdown(block.text));
 
   if (meaningfulBlocks.length === 0) {
     return [{

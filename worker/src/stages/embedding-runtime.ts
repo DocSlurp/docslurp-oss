@@ -8,7 +8,7 @@ import path from "node:path";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
-import { embedPerplexity } from "@docslurp/shared";
+import { embedPerplexity, stripPageImageReferences } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
@@ -152,13 +152,17 @@ export async function extractTextForEmbedding(
   const canonicalDocument = canonicalArtifactUri
     ? await readCanonicalDocumentArtifact(storage, canonicalArtifactUri)
     : undefined;
-  const artifactText = markdownArtifactUri
+  // Fast page-image references carry no document text; keep them out of chunk context and embeddings.
+  const markdownText = markdownArtifactUri
     ? await readExtractedMarkdown(storage, markdownArtifactUri)
     : null;
+  const artifactText = markdownText ? stripPageImageReferences(markdownText) : null;
   const canonicalText = canonicalDocument
     ? canonicalDocumentToText(canonicalDocument)
     : null;
-  if (artifactText) {
+  if (artifactText !== null && (artifactText.trim() || artifactText !== markdownText)) {
+    // A Markdown artifact made only of Fast page-image references is a valid, empty-text document: no
+    // re-extraction (that would read the pages Fast chose not to read).
     return {
       text: artifactText,
       extractor: "extract-markdown-artifact",

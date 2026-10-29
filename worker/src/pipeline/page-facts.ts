@@ -9,7 +9,8 @@
 import type { CommandRunner } from "../tools/runner.js";
 
 // "over-cap" is no longer produced (the per-document vision page cap was removed on 2026-10-29); older rows keep it.
-export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap";
+// "kept-as-image": quality fast kept a page without a text layer as its page image (no OCR, no vision).
+export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap" | "kept-as-image";
 
 export interface PageFactUpsert {
   documentId: string;

@@ -5,6 +5,7 @@ import {
   compilePipelinePlan,
   deferredProfilesEnabled,
   pageCredits,
+  qualityAllowsPageReading,
   unitChargeMetadata,
   type CompiledPipelinePlan,
   type PipelineRunStage,
@@ -19,7 +20,9 @@ import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements } 
  * Rich as they are read (pipeline/usage-ledger.ts). When the run completes,
  * every other page of its completed documents is charged here: Rich for image
  * files and for pages the page facts show as scans (no text layer, an embedded
- * image), Fast otherwise. Audio and video bill by the minute (media stage).
+ * image), Fast otherwise. Quality `fast` never reads a page (pages without a
+ * text layer are kept as page images), so every page of a fast run bills Fast.
+ * Audio and video bill by the minute (media stage).
  *
  * Stages that only rebuild indexes from existing content. A partial run that
  * executes nothing else is a reindex: its embeddings are mostly reused, so it
@@ -41,6 +44,19 @@ export function pageBaseFeeMultiplier(plan: Pick<CompiledPipelinePlan, "stageOrd
   return Math.round((plan.stageOrder.length / enabled) * 100) / 100;
 }
 
+/**
+ * Splits a completed document's pages not already charged by a Rich read into Fast and Rich pages. Image files
+ * and scanned pages bill Rich only when the run's quality reads pages; fast keeps them as images, billed Fast.
+ */
+export function splitRemainingPages(
+  row: { image: boolean; pages: number; richRead: number; scanned: number },
+  pagesRead: boolean,
+): { fast: number; rich: number } {
+  const remaining = Math.max(0, row.pages - row.richRead);
+  const rich = !pagesRead ? 0 : row.image ? remaining : Math.min(remaining, Math.max(0, row.scanned - row.richRead));
+  return { fast: remaining - rich, rich };
+}
+
 export type RunPageCharges = { fastPages: number; richPages: number; multiplier: number; credits: number };
 
 /**
@@ -51,6 +67,7 @@ export type RunPageCharges = { fastPages: number; richPages: number; multiplier:
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
   let charges: RunPageCharges = { fastPages: 0, richPages: 0, multiplier, credits: 0 };
+  const pagesRead = qualityAllowsPageReading(state.run.pipeline.quality);
   const charged = await retryTransaction(`page-charges run=${state.run.id}`, async () => {
     let total = 0;
     await pipelineTransaction(sql, (client) => [
@@ -84,10 +101,11 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       let richPages = 0;
       const documents: Record<string, { fast: number; rich: number }> = {};
       for (const row of rows) {
-        const remaining = Math.max(0, Number(row.pages) - Number(row.rich_read));
-        // Image files are read as images; scanned PDF pages without a vision read still bill Rich.
-        const rich = row.image ? remaining : Math.min(remaining, Math.max(0, Number(row.scanned) - Number(row.rich_read)));
-        const fast = remaining - rich;
+        // Image files are read as images; scanned PDF pages without a vision read still bill Rich (not in fast).
+        const { fast, rich } = splitRemainingPages(
+          { image: row.image, pages: Number(row.pages), richRead: Number(row.rich_read), scanned: Number(row.scanned) },
+          pagesRead,
+        );
         fastPages += fast;
         richPages += rich;
         if (fast > 0 || rich > 0) documents[row.document_id] = { fast, rich };

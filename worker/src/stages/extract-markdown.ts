@@ -16,6 +16,8 @@ import {
   resolveVisionRoute,
   splitTextIntoPages,
   parserPlaybookCatalog,
+  parserPlaybookForQuality,
+  qualityAllowsPageReading,
   deriveDocumentTitle,
   htmlDocumentTitle,
   type ExtractionContract,
@@ -183,12 +185,7 @@ export class ExtractMarkdownStage implements Stage {
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
-          (
-            state.run.pipeline as unknown as {
-              parserPlaybook?: keyof typeof parserPlaybookCatalog;
-            }
-          ).parserPlaybook ??
-          "balanced";
+          parserPlaybookForQuality(state.run.pipeline.quality);
         const extractionConfig = {
           ...defaultDocumentExtractionConfig,
           ...(state.run.pipeline.documentExtraction ?? {}),
@@ -282,7 +279,9 @@ export class ExtractMarkdownStage implements Stage {
                   };
                 }
 
-                let plannedExtractors = await this.planExtractors({
+                // Fast never OCRs: an image file keeps its page image (render-images) and has no extracted text.
+                const keepImageUnread = format === "image" && !qualityAllowsPageReading(state.run.pipeline.quality);
+                let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -293,7 +292,14 @@ export class ExtractMarkdownStage implements Stage {
                 });
                 // Why an image continues without extracted text (reported in the manifest and stats).
                 let textlessFallback: string | null = null;
-                if (!plannedExtractors) {
+                if (keepImageUnread) {
+                  textlessFallback = "quality fast keeps images unread";
+                  plannedExtractors = {
+                    primary: this.textlessImageExtractor(state, document, textlessFallback),
+                    secondary: null,
+                    tableAware: false,
+                  };
+                } else if (!plannedExtractors) {
                   if (lastUsableResult) return lastUsableResult;
                   const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
                   if (format !== "image") throw new Error(cause);
@@ -1170,10 +1176,12 @@ export class ExtractMarkdownStage implements Stage {
     cause: string,
   ): PreparedExtractor {
     const pipeline = state.run.pipeline;
+    // Fast keeps the image as its page image on purpose; nothing has to read it.
+    const keptAsImage = !qualityAllowsPageReading(pipeline.quality);
     const visionAllowed =
       pipeline.visionFallback &&
       isProviderCallAllowed(pipeline.privacyMode, visionCall(resolveVisionRoute(pipeline.vision)));
-    if (!visionAllowed) {
+    if (!visionAllowed && !keptAsImage) {
       console.error(
         `[extract-error] stage=${this.name} document=${document.id} image-unreadable ` +
           `visionFallback=${pipeline.visionFallback} privacyMode=${pipeline.privacyMode} cause=${cause}`,
@@ -1459,6 +1467,10 @@ export class ExtractMarkdownStage implements Stage {
       process.env.DOCSLURP_CRITIQUE_MAX_COST_CENTS ?? "0",
     );
     if (!critiqueEnabled() || !Number.isFinite(maxCostCents) || maxCostCents <= 0) {
+      return null;
+    }
+    // Self-critique re-reads page rasters with a vision model; fast never reads a page.
+    if (!qualityAllowsPageReading(args.state.run.pipeline.quality)) {
       return null;
     }
     const maxCostPerPageCents = Number.parseFloat(

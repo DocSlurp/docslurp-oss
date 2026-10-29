@@ -1,6 +1,9 @@
 import {
   adaptiveRoutingDecisionSurfaceSchema,
+  canonicalDocumentSchema,
+  qualityAllowsPageReading,
   type AdaptiveRoutingDecisionSurface,
+  type CanonicalDocument,
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, skipCompletedPages, completeDocumentPages } from "../pipeline/checkpoints.js";
@@ -14,6 +17,8 @@ import { pagesNeedingPixels } from "../routing/runtime.js";
 import { prioritizePagesWithoutNativeText } from "./classify-route.js";
 import { visionAllowedForDocument } from "../lib/vision-page-budget.js";
 import { pageInRanges, type DocumentPageRanges } from "../pipeline/page-ranges.js";
+import { applyPageImageReferences, pagesKeptAsImage } from "../lib/page-image-references.js";
+import { recordPageFacts } from "../pipeline/page-facts.js";
 
 export class RenderImagesStage implements Stage {
   readonly name = "render-images";
@@ -42,7 +47,7 @@ export class RenderImagesStage implements Stage {
             ? await state.store.getCompletedPages(state.run.id, document.id, this.name)
             : new Set<number>();
           const remaining = skipCompletedPages(completedPages, allPages);
-          const { pageNumbers, request, routed } = await this.selectPages(state, document);
+          const { pageNumbers, request, routed, keptAsImage } = await this.selectPages(state, document);
           const pages = await this.rasters.renderSelectedPages({
             document,
             runId: state.run.id,
@@ -51,6 +56,20 @@ export class RenderImagesStage implements Stage {
           });
           for (const page of pages) {
             state.artifactLedger.recordDocument(document.id, `page-${page.pageNumber}`, page.artifactUri);
+          }
+          // Fast: pages without a text layer are kept as their stored page image, never read. Only pages whose
+          // image rendered get a reference, so every reference resolves.
+          const rendered = new Set(pages.map((page) => page.pageNumber));
+          const keptPages = keptAsImage.filter((pageNumber) => rendered.has(pageNumber));
+          // A retried stage finds the references already in place (no change) and still reports the pages.
+          await applyPageImageReferences({
+            state, document, storage: this.storage, pages: keptPages, manifestUri: this.storage.uri(key),
+          });
+          const referencedPages = keptPages;
+          if (referencedPages.length > 0) {
+            await recordPageFacts(state.store, referencedPages.map((pageNumber) => ({
+              documentId: document.id, runId: state.run.id, pageNumber, visionStatus: "kept-as-image" as const,
+            })));
           }
 
           await this.storage.putJson(key, {
@@ -68,6 +87,7 @@ export class RenderImagesStage implements Stage {
               pages,
             },
             resumedFrom: completedPages.size > 0 ? completedPages.size : undefined,
+            ...(keptAsImage.length > 0 ? { keptAsImagePages: referencedPages } : {}),
           });
 
           await completeDocumentPages(state, document, this.name, remaining, pageCount, false);
@@ -83,6 +103,7 @@ export class RenderImagesStage implements Stage {
               rasterEngine: pages.find((page) => page.engine)?.engine ?? null,
               skippedPages: completedPages.size,
               processedPages: remaining.length,
+              ...(keptAsImage.length > 0 ? { keptAsImagePages: referencedPages.length } : {}),
             },
           };
         },
@@ -94,15 +115,27 @@ export class RenderImagesStage implements Stage {
   /** Pages this document renders, chosen the same way for whole documents and page-range shards. */
   private async selectPages(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document) {
     const request = await this.loadRasterRequest(state, document.id);
+    const mimeType = document.mimeType ?? "";
+    const isPdf = mimeType === "application/pdf";
+    const isImage = mimeType.startsWith("image/");
+    // Fast never reads a page: render exactly the pages without a text layer, which keep their page image.
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
+      const keptAsImage = isPdf || isImage
+        ? pagesKeptAsImage({
+            canonicalDocument: await this.loadCanonicalDocument(state, document.id),
+            pageCount: Math.max(1, document.pageCount),
+            isImage,
+            routing: request,
+          })
+        : [];
+      return { pageNumbers: keptAsImage, request, routed: null, keptAsImage };
+    }
     // Native text-only runs leave previews on demand. Classification can
     // suggest images, but must not override the workspace feature choices.
     const wantsRasters = state.run.pipeline.preserveImages || state.run.pipeline.visionFallback;
     // Only PDFs and images have a raster form. HTML, text and other
     // split documents keep on-demand previews instead of failing here
     // ("Native image documents only support page 1").
-    const mimeType = document.mimeType ?? "";
-    const isPdf = mimeType === "application/pdf";
-    const isImage = mimeType.startsWith("image/");
     // Active page router: render exactly the pages whose plan needs pixels (accept-text
     // pages need none). Off/shadow, or no plan for this document: the classification path.
     const routed = wantsRasters && isPdf ? await loadActiveRoutePlan(state, this.storage, document.id, this.cfg) : null;
@@ -120,7 +153,7 @@ export class RenderImagesStage implements Stage {
           )
         : [];
     const pageNumbers = isImage ? selected.filter((pageNumber) => pageNumber === 1) : selected;
-    return { pageNumbers, request, routed };
+    return { pageNumbers, request, routed, keptAsImage: [] as number[] };
   }
 
   /**
@@ -142,6 +175,21 @@ export class RenderImagesStage implements Stage {
       if (mine.length === 0) return;
       await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers: mine, signal });
     });
+  }
+
+  private async loadCanonicalDocument(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    documentId: string,
+  ): Promise<CanonicalDocument | null> {
+    const uri = state.artifactLedger.readDocument(documentId, "canonical-document");
+    const key = uri ? keyFromStorageUri(uri, this.storage.bucket) : null;
+    if (!key) return null;
+    try {
+      const parsed = canonicalDocumentSchema.safeParse(await this.storage.getJson<unknown>(key));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
   }
 
   private async loadRasterRequest(
