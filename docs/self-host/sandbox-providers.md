@@ -7,9 +7,22 @@ The worker runs file parsers (poppler, pandoc, LibreOffice and similar) on untru
 | Provider | `DOCSLURP_PARSER_SANDBOX` | Filesystem | Network | Process isolation | Where it runs |
 | --- | --- | --- | --- | --- | --- |
 | Bubblewrap | `bubblewrap` | Isolated | Fully blocked (`full`) | Yes | Local |
-| Landlock | `landlock` | Isolated | TCP blocked (`tcp-only`) | No | Local |
+| Landlock | `landlock` | Isolated | TCP blocked (`tcp-only`) | Yes, when the host allows user namespaces; otherwise the probe fails | Local |
 | Modal | `modal` | Isolated | Fully blocked (`full`) | Yes | Remote |
-| None | `none` | Not isolated | Not isolated (`none`) | No | Local |
+| None | `none` | Not isolated | Not isolated (`none`) | Yes, when the host allows user namespaces; otherwise only with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` | Local |
+
+### Process teardown
+
+"Process isolation" (`processes=true`) means every process a parser command starts dies with it, so the worker can release the command's slot and remove its scratch knowing nothing still runs. Local providers get it by running each command as init of its own PID namespace (`unshare --user --map-current-user --pid --mount-proc --fork --kill-child`, from util-linux), in its own process group:
+
+- On abort, timeout, an RSS or output budget, or a normal exit, the worker sends SIGTERM to the process group, then after `WORKER_COMMAND_ABORT_GRACE_MS` (default 2 s) SIGKILLs everything below the launcher, gives the launcher `WORKER_COMMAND_LAUNCHER_GRACE_MS` (default 1 s) to run its cleanup, and then SIGKILLs it. Killing the namespace's init makes the kernel kill everything left in the namespace, including processes that called `setsid`, re-parented, or closed their stdio.
+- A command settles only once that teardown is verified: unshare has reaped the namespace's init (so the namespace is empty) and the process group is empty. If that cannot be confirmed within `WORKER_COMMAND_TEARDOWN_VERIFY_MS` (default 5 s), the worker destroys the command's stdio, logs `[worker-command] status=teardown-unverified metric=command_teardown_unverified` with the run and document ids, fails the command, and keeps its raster slot out of service (`[worker-capacity] status=slot-poisoned`). Alert on either line.
+- Untrusted parser work refuses to run on a provider without process teardown, both at worker start (the policy below) and per command (`[parser-sandbox] status=refused ... reason=no-process-teardown`). The only exception is `none` with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`, which runs commands in a process group only: a descendant that calls `setsid` can outlive the command there.
+- A sweep (at session start, then every 10 minutes) removes per-command directories under `DOCSLURP_PARSER_SANDBOX_ROOT` whose owning command has exited, for example after a worker crash.
+
+The PID namespace needs unprivileged user namespaces, the same requirement as bubblewrap. Landlock therefore no longer runs where user namespaces are blocked (for example Docker's default seccomp profile); there its probe fails with `cannot create a PID namespace`, and the worker refuses to start rather than run parsers whose descendants could outlive them.
+
+Modal runs commands remotely. An aborted or timed-out command's remote process group is SIGKILLed, and the command settles after that kill and a bounded wait (10 s). A remote descendant that started its own session could keep running inside that activity's Modal sandbox until the session closes or `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` (default 900) ends it. It never runs on the worker host and cannot reach the worker's scratch, so releasing the local slot is safe. Its cost is remote CPU for the rest of the session, and it can still write into that session's remote working directories.
 
 The network levels mean:
 
@@ -44,8 +57,9 @@ Each Temporal activity opens its own sandbox session, and the session closes whe
 
 With `NODE_ENV=production` (which Compose sets), the provider must report:
 
-- filesystem isolation, and
-- network isolation of `tcp-only` or `full`.
+- filesystem isolation,
+- network isolation of `tcp-only` or `full`, and
+- process teardown (`processes=true`, see [Process teardown](#process-teardown)). This one is required in every environment.
 
 Landlock reports `tcp-only`, so it passes. On a kernel without Landlock ABI v9 it never gets that far: the probe fails (see [Landlock](#landlock)). Provider `none` is refused unless you set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`. With that override, every start logs:
 
@@ -53,7 +67,7 @@ Landlock reports `tcp-only`, so it passes. On a kernel without Landlock ABI v9 i
 [parser-sandbox] status=unisolated
 ```
 
-Outside production the policy is not enforced, but the probe still has to pass.
+Outside production only the process-teardown requirement is enforced, and the probe still has to pass.
 
 ## Configuration
 
@@ -82,7 +96,7 @@ A required variable that is missing, or a number or boolean that does not parse,
 
 Set `DOCSLURP_PARSER_SANDBOX=landlock`. The worker images ship `landrun` at `/usr/local/bin/landrun`. Elsewhere, install the pinned release from `worker/sandbox-tools.json` and point `DOCSLURP_LANDRUN_BINARY` at it.
 
-Landlock restricts the parser to read-only access to system runtime paths and the input files, and write access to its scratch and declared output directories. Like the bubblewrap launcher, each command gets a private directory under `DOCSLURP_PARSER_SANDBOX_ROOT` with `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories pointed into it; it is removed when the command exits. The worker resolves `DOCSLURP_LANDRUN_BINARY` against its `PATH` once at start, so the probe and every command run the same landrun. A path containing a comma cannot be granted (landrun splits grant lists on commas), so such a command fails instead of running with the wrong grants. It denies TCP connect and bind. landrun v0.1.17 refuses to run unless the kernel supports Landlock ABI v9. On an older ABI the probe fails with `missing kernel Landlock support. Got Landlock ABI vN, wanted {Landlock V9; ...}`, and the worker refuses to start with landlock rather than running with weaker isolation. The probe tells you whether your kernel qualifies; the test host on kernel 7.2.5 works and Fargate's kernel 6.1 (ABI v2) does not. If you see this, the kernel is too old for landrun v0.1.17: use `bubblewrap` on a host that allows user namespaces, or `modal`. It does not create namespaces, so it works in containers where bubblewrap cannot. It has no PID or IPC isolation, and the `processes` flag is `false`.
+Landlock restricts the parser to read-only access to system runtime paths and the input files, and write access to its scratch and declared output directories. Like the bubblewrap launcher, each command gets a private directory under `DOCSLURP_PARSER_SANDBOX_ROOT` with `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories pointed into it; it is removed when the command exits. The worker resolves `DOCSLURP_LANDRUN_BINARY` against its `PATH` once at start, so the probe and every command run the same landrun. A path containing a comma cannot be granted (landrun splits grant lists on commas), so such a command fails instead of running with the wrong grants. It denies TCP connect and bind. landrun v0.1.17 refuses to run unless the kernel supports Landlock ABI v9. On an older ABI the probe fails with `missing kernel Landlock support. Got Landlock ABI vN, wanted {Landlock V9; ...}`, and the worker refuses to start with landlock rather than running with weaker isolation. The probe tells you whether your kernel qualifies; the test host on kernel 7.2.5 works and Fargate's kernel 6.1 (ABI v2) does not. If you see this, the kernel is too old for landrun v0.1.17: use `bubblewrap` on a host that allows user namespaces, or `modal`. Landlock itself creates no namespaces. Each command still runs in its own PID namespace (see [Process teardown](#process-teardown)), so landlock needs unprivileged user namespaces just as bubblewrap does, and the probe fails without them. It has no IPC isolation.
 
 ## Modal
 
@@ -124,7 +138,7 @@ Results of local Docker checks on 2026-10-20. Image: Debian trixie-slim with bub
 | Default seccomp | Fails: `bwrap: No permissions to create a new namespace` | Works: filesystem rules enforced, TCP connect denied |
 | `seccomp`, `apparmor` and `systempaths` all `unconfined` | Works | Works |
 
-Takeaway: landlock works in containers without `unconfined` security options. Bubblewrap worked only when `seccomp`, `apparmor` and `systempaths` were all `unconfined` in this test. Each option was not tested alone. `compose.selfhost.yml` keeps bubblewrap as the default and uses `systempaths=unconfined` plus a custom seccomp profile (see [Security](security.md#parser-sandbox)).
+Takeaway: landrun itself worked in containers without `unconfined` security options, but this test predates per-command PID namespaces (see [Process teardown](#process-teardown)). Landlock now needs user namespaces too, so expect the same container options as bubblewrap; run the probe. Bubblewrap worked only when `seccomp`, `apparmor` and `systempaths` were all `unconfined` in this test. Each option was not tested alone. `compose.selfhost.yml` keeps bubblewrap as the default and uses `systempaths=unconfined` plus a custom seccomp profile (see [Security](security.md#parser-sandbox)).
 
 <details>
 <summary>Raw probe output, default seccomp</summary>

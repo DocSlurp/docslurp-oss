@@ -1,9 +1,12 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { resolveScriptsDir } from "../../../tools/scripts-dir.js";
 import { readSandboxConfig } from "../../config-schema.js";
+import { startSandboxScratchSweeper } from "../../scratch-sweep.js";
+import { afterTeardown, probePidNamespace, spawnContained } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
   SandboxCommand,
@@ -67,6 +70,9 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
     };
   },
   async probe(config) {
+    // bwrap's own PID namespace holds the parser; the outer one (see openSession) holds the launcher.
+    const pidNamespace = probePidNamespace();
+    if (!pidNamespace.ok) return { ok: false, isolation: { ...ISOLATION, processes: false }, detail: pidNamespace.detail };
     const result = spawnSync(launcherPath(), ["/usr/bin/true"], {
       env: {
         PATH: process.env.PATH ?? "",
@@ -81,15 +87,34 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
     return { ok: false, isolation: ISOLATION, detail };
   },
   async openSession(config) {
+    startSandboxScratchSweeper(config.scratchRoot);
     return {
       providerId: "bubblewrap",
       isolation: ISOLATION,
-      spawn: (command, signal) =>
-        spawn(launcherPath(), [command.binary, ...command.args], {
-          env: { ...command.env, ...launcherEnv(config, command) },
-          stdio: ["ignore", "pipe", "pipe"],
-          signal,
-        }),
+      // The launcher runs as init of its own PID namespace, so killing it (after its descendants,
+      // giving its EXIT trap a chance to remove the instance directory) leaves nothing behind.
+      spawn: (command) => {
+        // The worker owns the instance directory: it is removed once teardown is verified, and a
+        // poisoned command's is left to the sweep (its owner file names the command's root pid).
+        mkdirSync(config.scratchRoot, { recursive: true, mode: 0o700 });
+        const instance = mkdtempSync(path.join(config.scratchRoot, "run-"));
+        const cleanup = () => {
+          rmSync(instance, { recursive: true, force: true });
+          rmSync(`${instance}.owner`, { force: true });
+        };
+        try {
+          const child = spawnContained(launcherPath(), [command.binary, ...command.args], {
+            env: { ...command.env, ...launcherEnv(config, command), DOCSLURP_PARSER_SANDBOX_INSTANCE: instance },
+            containment: "pid-namespace",
+          });
+          if (child.pid !== undefined) writeFileSync(`${instance}.owner`, `${child.pid}\n`);
+          afterTeardown(child, cleanup);
+          return child;
+        } catch (error) {
+          cleanup();
+          throw error;
+        }
+      },
       close: async () => {},
     };
   },

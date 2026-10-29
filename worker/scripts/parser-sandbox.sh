@@ -16,10 +16,23 @@ HOST_TMP_ROOT="${HOST_TMP_ROOT%/}"
 [[ -n "${HOST_TMP_ROOT}" ]] || HOST_TMP_ROOT=/tmp
 WRITABLE_PATHS_RAW="${DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS:-}"
 mkdir -p "${SANDBOX_ROOT}"
-SANDBOX_INSTANCE="$(mktemp -d "${SANDBOX_ROOT%/}/run-XXXXXX")"
+# The worker creates the instance (and its owner file) so it can remove both once the command's
+# teardown is verified, even if this launcher was SIGKILLed before its EXIT trap ran.
+if [[ -n "${DOCSLURP_PARSER_SANDBOX_INSTANCE:-}" ]]; then
+  SANDBOX_INSTANCE="${DOCSLURP_PARSER_SANDBOX_INSTANCE}"
+  instance_name="${SANDBOX_INSTANCE#"${SANDBOX_ROOT%/}"/}"
+  if [[ "${instance_name}" == "${SANDBOX_INSTANCE}" || ! "${instance_name}" =~ ^run-[A-Za-z0-9]+$ \
+        || -L "${SANDBOX_INSTANCE}" || ! -d "${SANDBOX_INSTANCE}" || ! -O "${SANDBOX_INSTANCE}" ]]; then
+    echo "[parser-sandbox] refusing instance directory outside the sandbox root" >&2
+    exit 70
+  fi
+else
+  SANDBOX_INSTANCE="$(mktemp -d "${SANDBOX_ROOT%/}/run-XXXXXX")"
+fi
 
 cleanup() {
   rm -rf "${SANDBOX_INSTANCE}"
+  rm -f "${SANDBOX_INSTANCE}.owner"
 }
 
 trap cleanup EXIT
@@ -123,8 +136,13 @@ forward_term() {
 trap forward_term INT TERM
 status=0
 # wait returns early (status > 128) when a trapped signal arrives; keep waiting until bwrap is gone.
+# Stop on 127 (bwrap was already reaped; keep the status we had) and on any status <= 128, which is
+# bwrap's own exit status: kill -0 alone could spin if its pid were reused.
 while :; do
-  wait "${bwrap_pid}" && status=0 || status=$?
+  wait "${bwrap_pid}" && waited=0 || waited=$?
+  if (( waited == 127 )); then break; fi
+  status=${waited}
+  if (( waited <= 128 )); then break; fi
   kill -0 "${bwrap_pid}" 2>/dev/null || break
 done
 exit "${status}"
