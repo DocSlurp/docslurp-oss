@@ -373,7 +373,7 @@ describe("teardown circuit breaker", () => {
     trip();
     expect(unverifiedTeardownCount()).toBe(3);
     expect(opened).toHaveBeenCalledTimes(1);
-    expect(opened).toHaveBeenCalledWith({ open: true, count: 2, limit: 2 });
+    expect(opened).toHaveBeenCalledWith({ open: true, count: 2, limit: 2 }, expect.any(CommandTeardownError));
     expect(() => assertTeardownBreakerClosed()).toThrow(WorkerQuarantinedError);
   });
 

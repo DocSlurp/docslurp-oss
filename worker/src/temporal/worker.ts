@@ -25,7 +25,8 @@ import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
 import { CommandRunner } from "../tools/runner.js";
 import { createSandboxActivityInterceptor } from "../sandbox/activity-interceptor.js";
-import { onTeardownBreakerOpen } from "../sandbox/teardown-breaker.js";
+import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
+import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
@@ -67,6 +68,9 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+
+/** Set once the teardown breaker opened: the process exits by this timer at the latest. */
+let quarantineExitTimer: NodeJS.Timeout | null = null;
 
 async function main(): Promise<void> {
   installWorkerProcessGuards({ report: (error, attributes) => reportException(error, attributes) });
@@ -121,6 +125,8 @@ async function main(): Promise<void> {
   });
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);
+  // Denylist sources whose command teardown failed, fleet-wide; refuse them before any command.
+  configureSourceQuarantine(postgresSourceQuarantine(store.stageSql));
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession, shardCalibration: createShardCalibration(store) });
   const storage = new ArtifactStore(cfg);
@@ -181,6 +187,9 @@ async function main(): Promise<void> {
         interceptors: { activity: [createSandboxActivityInterceptor(openSession)] },
         // Drain in-flight activities on SIGTERM / max runtime; Fly kill_timeout must exceed this.
         shutdownGraceTime: cfg.workerShutdownGraceMs,
+        // Then give cancelled activities' commands time to be torn down, and stop waiting: a
+        // quarantined worker must exit (sandbox/teardown-breaker.ts).
+        shutdownForceTime: workerShutdownForceMs(cfg.workerShutdownGraceMs),
       } satisfies Partial<WorkerOptions>;
       const workflowOptions = {
         workflowsPath: workflowsUrl.pathname,
@@ -315,12 +324,18 @@ async function main(): Promise<void> {
   // outlived its command, stop taking work, report unhealthy, drain, and exit non-zero so the
   // platform restarts the machine (a fresh VM has no strays).
   let quarantine: string | null = null;
-  onTeardownBreakerOpen((state) => {
+  onTeardownBreakerOpen((state, error) => {
     quarantine = `${state.count} command teardown(s) could not be verified (limit ${state.limit}); restart the machine`;
+    const forceExitMs = quarantineForceExitMs(cfg.workerShutdownGraceMs);
+    const who = Object.entries(error?.attribution ?? {})
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" ");
     console.error(
       `[worker-quarantine] status=open metric=worker_quarantined count=${state.count} limit=${state.limit} ` +
-        `action=drain-and-exit graceMs=${cfg.workerShutdownGraceMs}`,
+        `${who ? `${who} ` : ""}action=drain-and-exit graceMs=${cfg.workerShutdownGraceMs} forceExitMs=${forceExitMs}`,
     );
+    quarantineExitTimer = scheduleQuarantineForceExit(forceExitMs);
     markWorkerShuttingDown("teardown-unverified");
     controller.abort(new Error("teardown-unverified"));
   });
@@ -622,4 +637,6 @@ main().catch(async (error) => {
   // flushErrorReporting does not drain; export them before the process exits.
   await shutdownObservability().catch(() => undefined);
   process.exitCode = 1;
+  // A quarantined worker's force-exit timer keeps the process alive; leave now that we have flushed.
+  if (quarantineExitTimer) process.exit(1);
 });

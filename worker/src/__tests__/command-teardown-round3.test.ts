@@ -16,6 +16,7 @@ import {
   spawnContained,
   superviseChild,
   type Containment,
+  resetUnverifiedTeardownsForTests,
 } from "../sandbox/teardown.js";
 import { SandboxPolicyError, type SandboxSession } from "../sandbox/types.js";
 import { CommandRunner } from "../tools/runner.js";
@@ -65,6 +66,8 @@ afterEach(() => {
     } catch {}
   }
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  // An unverified teardown opens the worker-wide breaker, which refuses every later command.
+  resetUnverifiedTeardownsForTests();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });

@@ -5,6 +5,7 @@ import path from "node:path";
 import { resolveScriptsDir } from "../../../tools/scripts-dir.js";
 import { readSandboxConfig } from "../../config-schema.js";
 import { spawnOwned, startSandboxScratchSweeper } from "../../scratch-sweep.js";
+import { ensureDenyUnixSocketsFilterFile } from "../../seccomp.js";
 import { probePidNamespace, runContained, spawnContained } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
@@ -100,6 +101,8 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
         // The worker owns the instance directory: it is removed once teardown is verified, and a
         // poisoned command's is left to the sweep (its owner file names the command's root pid).
         mkdirSync(config.scratchRoot, { recursive: true, mode: 0o700 });
+        // Throws on an unsupported architecture: such a command never runs without its filter.
+        const seccomp = command.denyUnixSockets ? ensureDenyUnixSocketsFilterFile(config.scratchRoot) : null;
         const instance = mkdtempSync(path.join(config.scratchRoot, "run-"));
         const cleanup = () => {
           rmSync(instance, { recursive: true, force: true });
@@ -109,7 +112,12 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
           instance,
           () =>
             spawnContained(launcherPath(), [command.binary, ...command.args], {
-              env: { ...command.env, ...launcherEnv(config, command), DOCSLURP_PARSER_SANDBOX_INSTANCE: instance },
+              env: {
+                ...command.env,
+                ...launcherEnv(config, command),
+                DOCSLURP_PARSER_SANDBOX_INSTANCE: instance,
+                ...(seccomp ? { DOCSLURP_PARSER_SANDBOX_SECCOMP: seccomp } : {}),
+              },
               containment: "pid-namespace",
             }),
           cleanup,

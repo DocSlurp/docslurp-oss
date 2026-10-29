@@ -28,7 +28,7 @@ import { findHungWorkError } from "../lib/hung-work.js";
 import { findProviderRetryableError } from "../lib/provider-retry.js";
 import { isTransientNetworkError } from "../lib/transient-errors.js";
 import { isWorkerShuttingDown } from "../lib/worker-lifecycle.js";
-import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
+import { findCommandTeardownError, findWorkerQuarantinedError } from "../sandbox/teardown-breaker.js";
 
 export type ActivityErrorClass = "interruption" | "cancelled" | "throttled" | "hung" | "teardown" | "ordinary";
 
@@ -57,6 +57,8 @@ export function classifyActivityError(
 ): ActivityErrorClass {
   const reason: unknown = context.signal?.aborted ? context.signal.reason : undefined;
   if (findCommandTeardownError(error)) return "teardown";
+  // A quarantined worker refusing a command: the work runs on another worker.
+  if (findWorkerQuarantinedError(error)) return "interruption";
   const shuttingDown = (context.shuttingDown ?? isWorkerShuttingDown)();
   if (shuttingDown || isShutdownMessage(messageOf(reason)) || isShutdownMessage(messageOf(error))) return "interruption";
   if (reason instanceof CancelledFailure || error instanceof CancelledFailure) return "cancelled";

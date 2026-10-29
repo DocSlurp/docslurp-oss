@@ -148,6 +148,8 @@ export function landrunArgs(
   ];
 }
 
+let warnedNoSocketFilter = false;
+
 export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
   id: "landlock",
   name: "Landlock (landrun)",
@@ -188,6 +190,14 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
       providerId: "landlock",
       isolation,
       spawn: (command) => {
+        if (command.denyUnixSockets && !warnedNoSocketFilter) {
+          // Landlock here restricts the filesystem and TCP, not UNIX sockets (sandbox/seccomp.ts).
+          warnedNoSocketFilter = true;
+          console.warn(
+            "[parser-sandbox] status=degraded provider=landlock reason=no-unix-socket-filter " +
+              "detail=commands that ask for the UNIX-socket seccomp filter run without it; use bubblewrap in production",
+          );
+        }
         const scratch = createCommandScratch(config.scratchRoot);
         const cleanup = () => {
           rmSync(scratch.dir, { recursive: true, force: true });

@@ -75,6 +75,7 @@ import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { nativePdfEngineState } from "../native-pdf/loader.js";
 import { logNativePdfFallback } from "../native-pdf/types.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
@@ -327,6 +328,11 @@ export class ExtractMarkdownStage implements Stage {
                   graphContext: { sourceHash: contentHash, pageCount, documentId: document.id },
                   signal,
                 });
+                // A candidate whose command could not be torn down ends the stage: never let the
+                // other candidate (possibly the in-process engine) take over as a fallback.
+                for (const result of [resultA, resultB]) {
+                  if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                }
 
                 for (const [planned, result] of [
                   [plannedExtractors.primary, resultA],
@@ -954,6 +960,7 @@ export class ExtractMarkdownStage implements Stage {
                   ]);
                 }
               } catch (error) {
+                rethrowIfTeardown(error);
                 const message = error instanceof Error ? error.message : String(error);
                 console.error(
                   `[extract-error] stage=${this.name} document=${document.id} ` +
@@ -1091,6 +1098,7 @@ export class ExtractMarkdownStage implements Stage {
       );
       return this.storage.uri(key);
     } catch (error) {
+      rethrowIfTeardown(error);
       if (signal?.aborted) throw error;
       console.warn(
         `[extract-markdown] page image evidence unavailable document=${document.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1131,6 +1139,7 @@ export class ExtractMarkdownStage implements Stage {
       });
       await recordPageFacts(state.store, rows);
     } catch (error) {
+      rethrowIfTeardown(error);
       console.warn(`[page-facts] skipped document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -1743,6 +1752,7 @@ export class ExtractMarkdownStage implements Stage {
         ? enrichCanonicalDocumentWithPptx(args.document, payload)
         : enrichCanonicalDocumentWithXlsx(args.document, payload);
     } catch (error) {
+      rethrowIfTeardown(error);
       console.warn(`[extract-markdown] skipped office structure sidecar kind=${kind} document=${args.documentId} reason=${toError(error).message}`);
       return args.document;
     }
@@ -1837,6 +1847,7 @@ export class ExtractMarkdownStage implements Stage {
           payload,
         });
       } catch (error) {
+        rethrowIfTeardown(error);
         console.warn(
           `[extract-markdown] skipped optional parser artifact parser=${job.parser} document=${document.id} reason=${toError(error).message}`,
         );
@@ -1870,6 +1881,7 @@ export class ExtractMarkdownStage implements Stage {
           });
         }
       } catch (error) {
+        rethrowIfTeardown(error);
         console.warn(
           `[extract-markdown] skipped pdf region extraction document=${document.id} reason=${toError(error).message}`,
         );

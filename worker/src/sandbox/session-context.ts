@@ -8,12 +8,27 @@ import type { SandboxSession } from "./types.js";
  */
 export class SandboxSessionScope {
   private opening: Promise<SandboxSession> | null = null;
+  private latched: Error | null = null;
 
   constructor(private readonly open: () => Promise<SandboxSession>) {}
 
   get(): Promise<SandboxSession> {
     this.opening ??= this.open();
     return this.opening;
+  }
+
+  /**
+   * The first command teardown in this scope that could not be verified (a CommandTeardownError).
+   * Once set, the activity ends as a non-retryable teardown failure whatever else happens: a stage
+   * that swallowed the error (a parser fallback), a watchdog that replaced it, a cancellation or a
+   * shutdown cannot turn it into a retry on another worker.
+   */
+  get teardownError(): Error | null {
+    return this.latched;
+  }
+
+  latchTeardown(error: Error): void {
+    this.latched ??= error;
   }
 
   async close(): Promise<void> {
@@ -30,6 +45,11 @@ export class SandboxSessionScope {
 }
 
 export const sandboxScopeStorage = new AsyncLocalStorage<SandboxSessionScope>();
+
+/** The current activity's latched teardown failure, if any (see SandboxSessionScope.teardownError). */
+export function latchedTeardownError(): Error | null {
+  return sandboxScopeStorage.getStore()?.teardownError ?? null;
+}
 
 export function runWithSandboxScope<T>(scope: SandboxSessionScope, fn: () => Promise<T>): Promise<T> {
   return sandboxScopeStorage.run(scope, fn);

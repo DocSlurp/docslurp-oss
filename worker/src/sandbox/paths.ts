@@ -22,10 +22,21 @@ export function resolveCommandPaths(args: {
     inputPaths: resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }),
     writablePaths: resolveSandboxWritablePaths({
       configuredPaths: args.configuredWritablePaths,
-      commandArgs: args.plan.args,
+      // Inputs of a readOnlyInputs plan stay read-only (bound as readable files above).
+      commandArgs: args.plan.readOnlyInputs
+        ? args.plan.args.filter((arg) => !(path.isAbsolute(arg) && isExistingFile(arg)))
+        : args.plan.args,
       runtimeProjectDir,
     }),
   };
+}
+
+function isExistingFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**

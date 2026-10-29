@@ -337,7 +337,8 @@ export class PdfRasterCache {
     last: number,
     signal: AbortSignal,
   ): Promise<Map<number, { widthPt: number; heightPt: number }>> {
-    const sizePlan = await this.runner.pdfPageSizes(sourcePath, first, last);
+    // Reads the shared cached source; writes nothing (readOnlyInputs keeps its directory read-only).
+    const sizePlan = { ...(await this.runner.pdfPageSizes(sourcePath, first, last)), readOnlyInputs: true };
     if (!sizePlan.available) throw new Error("pdfinfo unavailable for bounded rasterization");
     const { stdout } = await this.rasterSlots.run(signal, () => this.runner.run(sizePlan, signal));
     return parsePdfPageSizes(stdout, first, last);
@@ -434,8 +435,12 @@ export class PdfRasterCache {
           const size = sizes.get(selectedPage);
           if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
           const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
-          const prefix = path.join(scratch, `page-${selectedPage}-${selectedPage}`);
-          const plan = await this.runner.renderPdfPageRange(
+          // Each command writes only to its own directory and reads the source read-only: concurrent
+          // lanes share no writable path (so no socket or file to meet on), and one lane cannot touch
+          // another's output.
+          const laneDir = await mkdtemp(path.join(scratch, "docslurp-page-"));
+          const prefix = path.join(laneDir, `page-${selectedPage}-${selectedPage}`);
+          const rendered = await this.runner.renderPdfPageRange(
             source.path,
             prefix,
             selectedPage,
@@ -443,17 +448,18 @@ export class PdfRasterCache {
             renderDpi,
             boundedRasterEdge(size.widthPt, size.heightPt, renderDpi),
           );
-          if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
+          if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
+          const plan = { ...rendered, readOnlyInputs: true };
           await this.rasterSlots.run(signal, () => this.runner.run(plan, signal));
 
           const stem = `${path.basename(prefix)}-`;
-          const filename = (await readdir(scratch)).find((candidate) => {
+          const filename = (await readdir(laneDir)).find((candidate) => {
             if (!candidate.startsWith(stem)) return false;
             const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
             return suffix !== null && Number(suffix[1]) === selectedPage;
           });
           if (!filename) throw new Error(`pdftoppm did not produce page ${selectedPage}`);
-          const bytes = await readFile(path.join(scratch, filename));
+          const bytes = await readFile(path.join(laneDir, filename));
           signal.throwIfAborted();
           await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
           generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });

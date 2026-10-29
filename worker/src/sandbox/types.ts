@@ -48,6 +48,11 @@ export interface SandboxCommand {
   /** Directories the command may write. Remote providers create them and copy them back. */
   writablePaths: string[];
   limits: SandboxLimits;
+  /**
+   * Make creating a UNIX socket fail inside the sandbox (seccomp). bubblewrap enforces it; a provider
+   * that cannot logs that it ran the command without it (see sandbox/seccomp.ts).
+   */
+  denyUnixSockets?: boolean;
 }
 
 export interface SandboxResult {

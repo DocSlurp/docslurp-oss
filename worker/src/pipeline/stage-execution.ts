@@ -37,6 +37,8 @@ import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
+import { latchedTeardownError } from "../sandbox/session-context.js";
+import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
 import {
   buildRunCompletedEvent,
   buildRunProgressEvent,
@@ -617,8 +619,12 @@ export function createStageExecution(deps: {
         ...(completion?.preloaded ? { preloaded: completion.preloaded } : {}),
       };
     } catch (caught) {
-      // A stall abort surfaces as whatever the stage threw on abort; report the hang itself.
-      const error: unknown = stallController.signal.aborted && !runtime.signal.aborted ? stallController.signal.reason : caught;
+      // A stall abort surfaces as whatever the stage threw on abort; report the hang itself. A
+      // command teardown failure (thrown, or latched on this activity and swallowed by the stage)
+      // wins over both: it must end the activity as a non-retryable teardown, never a retry.
+      const teardown = findCommandTeardownError(caught) ?? latchedTeardownError();
+      const error: unknown = teardown
+        ?? (stallController.signal.aborted && !runtime.signal.aborted ? stallController.signal.reason : caught);
       initializeWorkerErrorReporting();
       reportException(error, { runId, stage: stageName });
       const message = error instanceof Error ? error.message : String(error);

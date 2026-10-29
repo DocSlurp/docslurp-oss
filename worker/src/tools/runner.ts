@@ -23,7 +23,9 @@ import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
 import { resolveCommandPaths } from "../sandbox/paths.js";
-import { sandboxScopeStorage } from "../sandbox/session-context.js";
+import { latchedTeardownError, sandboxScopeStorage } from "../sandbox/session-context.js";
+import { admitCommandSource } from "../sandbox/source-quarantine.js";
+import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
 import { SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
 import {
@@ -71,6 +73,17 @@ export interface CommandPlan {
   pythonPath?: string[];
   /** Extra environment from vendor bundles (worker/vendor-bundles.json `env`). */
   bundleEnv?: Record<string, string>;
+  /**
+   * The command never needs a UNIX socket: providers that can (bubblewrap) make creating one fail,
+   * so it cannot meet a concurrent command on a socket and pass file descriptors. Set for poppler
+   * and qpdf tools.
+   */
+  denyUnixSockets?: boolean;
+  /**
+   * Existing file arguments are inputs only: their directories are not made writable. The command
+   * writes only to the directories of its output arguments.
+   */
+  readOnlyInputs?: boolean;
 }
 
 export interface CommandResult {
@@ -334,7 +347,7 @@ export class CommandRunner {
             await pipeline(Readable.from([result.stdout]), destination);
             return { stderr: result.stderr };
           }
-          return await this.streamToWritable(plan, launched.child, launched.supervised, destination);
+          return await this.streamToWritable(plan, launched.child, launched.supervised, destination, signal);
         } finally {
           await launched.release();
         }
@@ -347,8 +360,13 @@ export class CommandRunner {
     child: ChildProcess,
     supervised: SupervisedChild,
     destination: Writable,
+    signal?: AbortSignal,
   ): Promise<{ stderr: string }> {
     const monitor = this.startCommandMonitor(plan, child, supervised);
+    // The command's wall-clock deadline also bounds its output: the monitor stops counting when the
+    // command exits, but the destination (an upload) must still finish by then, or within
+    // WORKER_COMMAND_OUTPUT_FINISH_MS of the exit if that is later.
+    const outputDeadlineAt = Date.now() + (plan.timeoutMs ?? resolveCommandTimeoutMs(plan.pages ?? currentPerfContext()?.pageCount));
     let stderr = "";
     let stderrBytes = 0;
     let outputLimitError: Error | null = null;
@@ -407,6 +425,10 @@ export class CommandRunner {
     const source = child.stdout!;
     let outputSettled = false;
     let outputCancelled = false;
+    let cancelReason: unknown = null;
+    let onOutputCancelled: (() => void) | null = null;
+    // Why we stopped waiting on a destination after a successful exit (deadline, caller abort).
+    let outputStopError: Error | null = null;
     const discardRest = () => {
       source.unpipe(destination);
       source.resume();
@@ -414,10 +436,12 @@ export class CommandRunner {
     const cancelOutput = (why: unknown) => {
       if (outputSettled || outputCancelled) return;
       outputCancelled = true;
+      cancelReason = why;
       discardRest();
       const error = new Error("command output cancelled", { cause: why });
       error.name = "AbortError";
       destination.destroy(error);
+      onOutputCancelled?.();
     };
     const piped = new Promise<void>((resolve, reject) => {
       finished(destination, (error) => {
@@ -448,13 +472,49 @@ export class CommandRunner {
     );
     supervised.terminated.removeEventListener("abort", onTerminated);
     if (exit.status === "rejected") cancelOutput(exit.reason);
-    const output = await piped.then(
-      () => ({ status: "fulfilled" as const }),
-      (reason: unknown) => ({ status: "rejected" as const, reason }),
+    type Settled = { status: "fulfilled" } | { status: "rejected"; reason: unknown };
+    const outputDone = piped.then(
+      (): Settled => ({ status: "fulfilled" }),
+      (reason: unknown): Settled => ({ status: "rejected", reason }),
     );
+    // Bounded: a successful command's destination gets until the output deadline (and no longer
+    // than the caller's signal); a cancelled destination gets OUTPUT_CANCEL_GRACE_MS to finish
+    // destroying, so neither a stalled write nor a stalled _final or _destroy holds this call.
+    const output = await new Promise<Settled>((resolve) => {
+      const timers: NodeJS.Timeout[] = [];
+      const onAbort = () => {
+        outputStopError ??= abortReasonOf(signal!);
+        cancelOutput(outputStopError);
+      };
+      const done = (value: Settled) => {
+        for (const timer of timers) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        onOutputCancelled = null;
+        resolve(value);
+      };
+      const armCancelGrace = () =>
+        timers.push(setTimeout(() => done({ status: "rejected", reason: cancelReason }), OUTPUT_CANCEL_GRACE_MS));
+      if (outputCancelled) armCancelGrace();
+      else onOutputCancelled = armCancelGrace;
+      if (exit.status === "fulfilled" && !outputSettled && !outputCancelled) {
+        const waitMs = Math.max(outputDeadlineAt - Date.now(), outputFinishFloorMs());
+        timers.push(setTimeout(() => {
+          outputStopError ??= Object.assign(
+            new Error(`${path.basename(plan.binary)} output did not finish within ${waitMs} ms after the command exited`),
+            { name: "CommandOutputTimeoutError" },
+          );
+          cancelOutput(outputStopError);
+        }, waitMs));
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+      }
+      void outputDone.then(done);
+    });
     if (exit.status === "rejected" && isCommandTeardownError(exit.reason)) {
       throw commandFailure(exit.reason, output.status === "rejected" && !outputCancelled ? (output.reason as Error) : null);
     }
+    // A successful command whose destination did not finish in time, or whose caller gave up on it.
+    if (outputStopError) throw outputStopError;
     // The output failing first (a full disk) is the cause; its cancellation by a stopped or failed command is not.
     if (output.status === "rejected" && !(outputCancelled && exit.status === "rejected")) throw output.reason;
     if (exit.status === "rejected") throw exit.reason;
@@ -1205,7 +1265,8 @@ export class CommandRunner {
     invocation: DocumentToolInvocation,
   ): Promise<CommandPlan> {
     const planned = planDocumentToolInvocation(invocation);
-    return await this.plan(planned.binary, ...planned.args);
+    const plan = await this.plan(planned.binary, ...planned.args);
+    return SOCKETLESS_DOCUMENT_TOOLS.has(path.basename(planned.binary)) ? { ...plan, denyUnixSockets: true } : plan;
   }
 
   private async isAvailable(binary: string): Promise<boolean> {
@@ -1278,6 +1339,7 @@ export class CommandRunner {
   }
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    await admitCommand();
     if (plan.dopplerVm) {
       // DOCSLURP_DOPPLER_SHARDS=on fans long PDFs out across parallel VMs (needs a doppler-vm@3 image).
       const settings = dopplerShardSettings();
@@ -1774,7 +1836,7 @@ async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, containe
     }
     // superviseChild never resolves an unprovable command; fail closed if that ever changes.
     const error = new CommandTeardownError(`${label} (refused) teardown could not be verified`, { cause: refusal });
-    recordUnverifiedTeardown(error, `label=${label} containment=${containmentOf(child)}`);
+    recordUnverifiedTeardown(error, `label=${label} containment=${containmentOf(child)}`, { attribution: commandAttribution() });
     throw error;
   }
   // Not ours to supervise: kill its group (if it was spawned detached) and itself, and wait (bounded) for its exit.
@@ -1796,7 +1858,7 @@ async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, containe
   child.stdout?.destroy();
   child.stderr?.destroy();
   const error = new CommandTeardownError(`${label} (refused, uncontained) teardown could not be verified: ${detail}`, { cause: refusal });
-  recordUnverifiedTeardown(error, `label=${label} pid=${child.pid} containment=none`);
+  recordUnverifiedTeardown(error, `label=${label} pid=${child.pid} containment=none`, { attribution: commandAttribution() });
   throw error;
 }
 
@@ -1813,15 +1875,54 @@ function assertProcessTeardown(session: SandboxSession): void {
   );
 }
 
+/** Document tools that never use a UNIX socket (see CommandPlan.denyUnixSockets). */
+const SOCKETLESS_DOCUMENT_TOOLS = new Set(["pdfinfo", "pdfseparate", "pdftoppm", "pdftocairo", "pdftotext", "pdftohtml", "pdfimages", "pdfunite", "qpdf"]);
+
+/** How long a cancelled command output may take to finish destroying before the call gives up on it. */
+const OUTPUT_CANCEL_GRACE_MS = 1_000;
+
+/** After a successful exit, the least time a command's destination gets to finish (a final upload part). */
+function outputFinishFloorMs(): number {
+  return readPositiveNumber(process.env.WORKER_COMMAND_OUTPUT_FINISH_MS) ?? 60_000;
+}
+
+function abortReasonOf(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  return Object.assign(new Error("The operation was aborted", { cause: signal.reason }), { name: "AbortError" });
+}
+
 /** Supervise a launched child with its run and document ids attached to every teardown log line. */
 function superviseCommand(plan: CommandPlan, child: ChildProcess, signal?: AbortSignal, unprovable?: string): SupervisedChild {
-  const context = currentPerfContext();
   return superviseChild(child, {
     label: path.basename(plan.binary),
     signal,
     ...(unprovable ? { unprovable } : {}),
-    context: { run_id: context?.runId, document_id: context?.documentId, stage: context?.stageName },
+    context: commandAttribution(),
   });
+}
+
+/** Who a command runs for, on every teardown log line and quarantine record. */
+function commandAttribution(): Record<string, string | undefined> {
+  const context = currentPerfContext();
+  return {
+    org_id: context?.orgId ?? undefined,
+    workspace_id: context?.workspaceId,
+    run_id: context?.runId,
+    document_id: context?.documentId,
+    stage: context?.stageName,
+  };
+}
+
+/**
+ * Before any parser command: an activity whose command teardown already failed gets that failure
+ * (it ends as a non-retryable teardown), any other activity on a quarantined worker a retryable
+ * WorkerQuarantinedError, and a document whose source is quarantined a QuarantinedSourceError.
+ */
+async function admitCommand(): Promise<void> {
+  const latched = latchedTeardownError();
+  if (latched) throw latched;
+  assertTeardownBreakerClosed();
+  await admitCommandSource();
 }
 
 export { resolveScriptsDir };
@@ -1919,6 +2020,7 @@ export function buildSandboxCommand(args: {
     inputPaths: paths.inputPaths,
     writablePaths: paths.writablePaths,
     limits: args.limits,
+    ...(args.plan.denyUnixSockets ? { denyUnixSockets: true } : {}),
   };
 }
 

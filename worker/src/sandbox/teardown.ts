@@ -2,6 +2,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import type { Readable } from "node:stream";
 
+import { sandboxScopeStorage, type SandboxSessionScope } from "./session-context.js";
+
 /**
  * Process containment and verified teardown for local parser commands.
  *
@@ -129,6 +131,8 @@ export function afterTeardown(child: ChildProcess, cleanup: () => void): void {
 /** A command whose processes could not be confirmed gone. Its slot must stay out of service. */
 export class CommandTeardownError extends Error {
   readonly poisoned = true;
+  /** Who the command ran for (run, document, stage, ...), set when it is recorded. */
+  attribution: Record<string, string | number | undefined> = {};
   /** `cause` carries why the command was being stopped (timeout, budget, abort), if it was. */
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -141,7 +145,7 @@ export function isCommandTeardownError(error: unknown): error is CommandTeardown
 }
 
 let unverifiedTeardowns = 0;
-const unverifiedListeners = new Set<(count: number) => void>();
+const unverifiedListeners = new Set<(count: number, error: CommandTeardownError) => void>();
 
 /** Commands this process could not confirm were torn down (each one poisoned its slot). */
 export function unverifiedTeardownCount(): number {
@@ -149,25 +153,39 @@ export function unverifiedTeardownCount(): number {
 }
 
 /** Called (synchronously) after every unverified teardown with the new count; returns an unsubscribe. */
-export function onUnverifiedTeardown(listener: (count: number) => void): () => void {
+export function onUnverifiedTeardown(listener: (count: number, error: CommandTeardownError) => void): () => void {
   unverifiedListeners.add(listener);
   return () => unverifiedListeners.delete(listener);
 }
 
 /**
  * Count a command whose processes may outlive it, log it loudly (alertable) and notify listeners
- * (the worker's teardown circuit breaker). Every CommandTeardownError goes through here once.
+ * (the worker's teardown circuit breaker, the source quarantine). Every CommandTeardownError goes
+ * through here once. It is also latched on the activity's sandbox scope (the one current when the
+ * command was supervised), so the activity ends as a non-retryable teardown failure even if a
+ * stage swallows or replaces the error.
  */
-export function recordUnverifiedTeardown(error: CommandTeardownError, description: string): void {
+export function recordUnverifiedTeardown(
+  error: CommandTeardownError,
+  description: string,
+  options: { scope?: SandboxSessionScope | null; attribution?: Record<string, string | number | undefined> } = {},
+): void {
   unverifiedTeardowns += 1;
+  error.attribution = { ...error.attribution, ...options.attribution };
+  const scope = options.scope === undefined ? sandboxScopeStorage.getStore() : options.scope;
+  scope?.latchTeardown(error);
   // Alertable: a command's processes may still be running and its slot is out of service.
+  const attributed = Object.entries(error.attribution)
+    .filter(([key, value]) => value !== undefined && !description.includes(`${key}=`))
+    .map(([key, value]) => ` ${key}=${value}`)
+    .join("");
   console.error(
     `[worker-command] status=teardown-unverified metric=command_teardown_unverified ` +
-      `count=${unverifiedTeardowns} ${description} detail=${JSON.stringify(error.message)}`,
+      `count=${unverifiedTeardowns} ${description}${attributed} detail=${JSON.stringify(error.message)}`,
   );
   for (const listener of unverifiedListeners) {
     try {
-      listener(unverifiedTeardowns);
+      listener(unverifiedTeardowns, error);
     } catch (listenerError) {
       console.error(`[worker-command] status=teardown-listener-failed error=${(listenerError as Error).message}`);
     }
@@ -371,6 +389,8 @@ export function superviseChild(
   const timings = options.timings ?? teardownTimings();
   const pid = child.pid;
   const namespaced = state.containment === "pid-namespace";
+  // The activity this command belongs to: callbacks below may run outside its async context.
+  const scope = sandboxScopeStorage.getStore() ?? null;
 
   let reason: Error | null = null;
   let exit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
@@ -440,7 +460,7 @@ export function superviseChild(
     child.stdout?.destroy();
     child.stderr?.destroy();
     if (unverified) {
-      recordUnverifiedTeardown(error as CommandTeardownError, describe());
+      recordUnverifiedTeardown(error as CommandTeardownError, describe(), { scope, attribution: options.context ?? {} });
     } else {
       runAfterTeardown();
     }
