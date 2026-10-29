@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createMemoryAuthBudgetStore,
+  EMAIL_RECIPIENT_BUDGETS,
   EMAIL_SENDING_PATHS,
-  emailRecipientLimitPlugin,
+  emailRecipientLimiter,
   emailRecipientLimitsEnabled,
   hashedBudgetKey,
   recipientBudgetKey,
@@ -19,6 +20,19 @@ describe("authentication budgets", () => {
     now += 15_000;
     expect(await store.consume("k", budget)).toEqual({ allowed: false, retryAfterSeconds: 45 });
     now += 45_000;
+    expect((await store.consume("k", budget)).allowed).toBe(true);
+  });
+
+  it("gives back one unit only inside the current window", async () => {
+    let now = 0;
+    const store = createMemoryAuthBudgetStore(() => now);
+    const budget = { windowSeconds: 60, max: 1 };
+    await store.consume("k", budget);
+    await store.release("k");
+    expect((await store.consume("k", budget)).allowed).toBe(true);
+    expect((await store.consume("k", budget)).allowed).toBe(false);
+    now += 61_000;
+    await store.release("k");
     expect((await store.consume("k", budget)).allowed).toBe(true);
   });
 
@@ -45,11 +59,28 @@ describe("per-recipient email limits", () => {
   it("covers every email-sending endpoint but never password sign-in", () => {
     expect([...EMAIL_SENDING_PATHS]).toEqual(expect.arrayContaining(["/email-otp/request-password-reset", "/email-otp/send-verification-otp", "/sign-in/magic-link"]));
     expect(EMAIL_SENDING_PATHS.has("/sign-in/email")).toBe(false);
-    const plugin = emailRecipientLimitPlugin({ store: createMemoryAuthBudgetStore(), enabled: true });
-    const matcher = plugin.hooks!.before![0]!.matcher;
-    expect(matcher({ path: "/email-otp/request-password-reset" } as never)).toBe(true);
-    expect(matcher({ path: "/sign-in/email" } as never)).toBe(false);
-    const disabled = emailRecipientLimitPlugin({ store: createMemoryAuthBudgetStore(), enabled: false });
-    expect(disabled.hooks!.before![0]!.matcher({ path: "/email-otp/request-password-reset" } as never)).toBe(false);
+    const hooked = (enabled: boolean, path: string) => emailRecipientLimiter({ store: createMemoryAuthBudgetStore(), enabled }).plugin.hooks!.before!
+      .some((hook) => hook.matcher({ path } as never));
+    for (const path of ["/email-otp/request-password-reset", "/email-otp/reset-password", "/sign-in/email-otp"]) {
+      expect(hooked(true, path), path).toBe(true);
+      expect(hooked(false, path), path).toBe(false);
+    }
+    expect(hooked(true, "/sign-in/email")).toBe(false);
+  });
+
+  it("keeps a targeted lockout short", () => {
+    expect(Math.max(...EMAIL_RECIPIENT_BUDGETS.map((budget) => budget.windowSeconds))).toBeLessThanOrEqual(15 * 60);
+  });
+
+  it("refunds the address when delivery fails, and only then", async () => {
+    const store = createMemoryAuthBudgetStore();
+    const release = vi.spyOn(store, "release");
+    const { guardDelivery } = emailRecipientLimiter({ store, enabled: true });
+    const ctx = { context: { secret: "secret" } };
+    await guardDelivery(async () => undefined)({ email: "a@example.test" }, ctx);
+    expect(release).not.toHaveBeenCalled();
+    const failure = new Error("provider down");
+    await expect(guardDelivery(async () => { throw failure; })({ email: "A@Example.test " }, ctx)).rejects.toBe(failure);
+    expect(release).toHaveBeenCalledWith(recipientBudgetKey("secret", "a@example.test", EMAIL_RECIPIENT_BUDGETS[0]!.windowSeconds));
   });
 });

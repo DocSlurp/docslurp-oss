@@ -26,7 +26,7 @@ Reviewed release: `1.7.14` (`REVIEWED_BETTER_AUTH_VERSION` in `server/src/lib/au
 | Two-factor challenge for every first factor | `server/src/lib/auth-mfa.ts` | The `twoFactor` plugin has exactly one after-hook, for credential sign-in, and no before-hooks. DocSlurp removes it and challenges every session-issuing endpoint instead. | Hook-shape check and version guard; `auth-mfa.db.test.ts` |
 | Passkey user verification | `server/src/lib/auth-mfa.ts` | `afterVerification` runs after the signature check and reports the authenticated UV flag. | Version guard; `auth-mfa.db.test.ts` |
 | Scanner-safe magic links | `server/src/lib/auth-magic-link.ts` | Marking `magicLinkVerify` `SERVER_ONLY` removes it from the HTTP router, while `auth.api` still runs every hook (MFA, SSO). | Endpoint-shape check and version guard; `auth-magic-link.db.test.ts` |
-| Breached-password outage policy | `server/src/lib/auth-breached-password.ts` | Plugin `init` contexts apply in plugin order, so the policy wraps the hash that `haveIBeenPwned` installed. `tryGetCurrentAuthEndpointContext().path` names the endpoint. Email OTP reset only spends its code after hashing succeeds. | Version guard; `auth-breached-password.test.ts`, `auth-recovery.db.test.ts` |
+| Breached-password hash hook | `server/src/lib/auth-breached-password.ts` | Hooks `ctx.password.hash` from `init`, as the native `haveIBeenPwned` plugin does. `tryGetCurrentAuthEndpointContext().path` names the endpoint. Email OTP reset only spends its code after hashing succeeds. | Version guard (`getBetterAuthVersion()`); `auth-breached-password.test.ts`, `auth-recovery.db.test.ts` |
 
 ## Seams covered by tests only
 
@@ -38,6 +38,6 @@ Reviewed release: `1.7.14` (`REVIEWED_BETTER_AUTH_VERSION` in `server/src/lib/au
 | Session revocation | `packages/shared/src/auth-security.ts` | `cookieCache` stays off, so every request checks the session row. |
 | Native limiter storage | migration `0038`, `packages/shared/src/auth-security.ts` | The `"rateLimit"` table's shape. DocSlurp's own budgets use `auth_rate_limits` (0098) and never write native rows. |
 | Trusted client IP | `server/src/lib/client-ip.ts` | `advanced.ipAddress.ipAddressHeaders` is the only IP source the native limiter reads. |
-| Recovery and limits | `server/src/lib/auth-email.ts`, `server/src/lib/auth-rate-limits.ts` | `revokeSessionsOnPasswordReset` applies to Email OTP reset. Before-hooks see the parsed `ctx.body.email`. `disabledPaths` answers 404 before hooks run. |
+| Recovery and limits | `server/src/lib/auth-email.ts`, `server/src/lib/auth-rate-limits.ts`, `server/src/lib/auth-recovery.ts` | `revokeSessionsOnPasswordReset` applies to Email OTP reset, and that reset only sets `emailVerified` (no `revokeUnprovenAccountAccess`). Before-hooks see the parsed `ctx.body.email`. `defineRequestState` is shared by nested endpoint calls within one request. Email senders receive the endpoint context. `runInBackgroundOrAwait` swallows send errors. `disabledPaths` answers 404 in the HTTP router only. |
 
 The test-only seams are covered by `auth-mfa.db.test.ts`, `auth-session-refresh.db.test.ts`, `sso-enforcement.db.test.ts`, `auth-sensitive-access.db.test.ts`, `auth-rate-limit.db.test.ts` and `auth-recovery.db.test.ts`.

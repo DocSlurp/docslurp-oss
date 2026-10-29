@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { magicLink } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { assertReviewedBetterAuth } from "./auth-compat.js";
-import { consumeAuthBudget, hashedBudgetKey } from "./auth-rate-limits.js";
+import { consumeAuthBudget, hashedBudgetKey, logAuthBudgetDenied } from "./auth-rate-limits.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
 export const MAGIC_LINK_SECONDS = 300;
@@ -24,10 +24,10 @@ export function magicLinkLandingUrl(url: string): string {
   return landing.toString();
 }
 
-export function docslurpMagicLinkPlugin(send: (args: { email: string; url: string }) => Promise<void>) {
+export function docslurpMagicLinkPlugin(send: (args: { email: string; url: string }, ctx?: { context?: { secret?: string } }) => Promise<void>) {
   const plugin = magicLink({ expiresIn: MAGIC_LINK_SECONDS, storeToken: "hashed", disableSignUp: true,
     rateLimit: { window: 60, max: 3 },
-    sendMagicLink: async ({ email, url }) => send({ email, url: magicLinkLandingUrl(url) }),
+    sendMagicLink: async ({ email, url }, ctx) => send({ email, url: magicLinkLandingUrl(url) }, ctx),
   });
   // The reviewed Better Auth router omits SERVER_ONLY endpoints while
   // auth.api still dispatches all hooks. Fail startup if that endpoint changes.
@@ -54,7 +54,10 @@ export function docslurpMagicLinkPlugin(send: (args: { email: string; url: strin
 
 /** Independent of optional API limits; atomic shared-database budget, including unknown addresses. */
 export async function consumeMagicLinkConfirmation(pool: Pick<Pool, "query">, address: string | null): Promise<boolean> {
-  return (await consumeAuthBudget(pool, hashedBudgetKey("magic-confirm", address ?? "unknown"), { windowSeconds: 60, max: 10 })).allowed;
+  const budget = { windowSeconds: 60, max: 10 };
+  const result = await consumeAuthBudget(pool, hashedBudgetKey("magic-confirm", address ?? "unknown"), budget);
+  if (!result.allowed) logAuthBudgetDenied("magic-link-confirm", budget, result);
+  return result.allowed;
 }
 
 type NativeVerify = (input: { query: { token: string; callbackURL: string; newUserCallbackURL: string; errorCallbackURL: string }; headers: Headers; asResponse: true }) => Promise<Response>;

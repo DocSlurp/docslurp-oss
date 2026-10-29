@@ -34,7 +34,7 @@ import { validationHook } from "../lib/validation.js";
 import { safeRedirectPath } from "../lib/safe-redirect.js";
 import { issueSsoSession } from "../lib/sso-enforcement.js";
 import { createSsoUnlinkedPass, SSO_UNLINKED_PASS_COOKIE, SSO_UNLINKED_PASS_TTL_SECONDS } from "../lib/sso-unlinked-pass.js";
-import { databaseAuthBudgetStore, hashedBudgetKey, type AuthBudgetStore } from "../lib/auth-rate-limits.js";
+import { databaseAuthBudgetStore, hashedBudgetKey, logAuthBudgetDenied, type AuthBudgetStore } from "../lib/auth-rate-limits.js";
 
 const ssoConfigSchema = z.object({
   providerType: z.enum(["saml", "oidc"]).nullable().optional(),
@@ -509,11 +509,10 @@ async function ssoRateLimit(c: any, next: () => Promise<void>) {
     return;
   }
 
-  const result = await ssoRateLimitStore.consume(ssoRateLimitKey(c), {
-    windowSeconds: Math.max(1, Math.ceil(ssoRateLimitWindowMs / 1000)),
-    max: ssoRateLimitMax,
-  });
+  const budget = { windowSeconds: Math.max(1, Math.ceil(ssoRateLimitWindowMs / 1000)), max: ssoRateLimitMax };
+  const result = await ssoRateLimitStore.consume(ssoRateLimitKey(c), budget);
   if (!result.allowed) {
+    logAuthBudgetDenied("sso", budget, result);
     c.header("Retry-After", String(result.retryAfterSeconds));
     return apiStatusError(c, 429, "Too many SSO requests");
   }

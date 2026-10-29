@@ -11,7 +11,8 @@ import { applyAccountKindRules } from "../services/account-kind.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
-import { databaseAuthBudgetStore, emailRecipientLimitPlugin, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
+import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
+import { passwordResetOwnershipPlugin } from "./auth-recovery.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
@@ -176,7 +177,8 @@ export function getDevSeedAccountCredential(id: DevSeedAccountKey): DevSeedAccou
 }
 
 const securityOptions = createBetterAuthSecurityOptions(process.env);
-const emailOptions = createAuthEmailOptions(process.env);
+const recipientLimiter = emailRecipientLimiter({ store: databaseAuthBudgetStore(pool), enabled: emailRecipientLimitsEnabled(process.env) });
+const emailOptions = createAuthEmailOptions(process.env, recipientLimiter.guardDelivery);
 /** Invalid values fail startup; see auth-breached-password.ts for the outage policy. */
 export const breachedPasswordPolicy = resolveBreachedPasswordPolicy(process.env);
 /**
@@ -201,7 +203,7 @@ export const auth = betterAuth({
   // The recipient limit follows SSO enforcement: an enforced address is
   // refused before it spends any email budget.
   plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }),
-    emailRecipientLimitPlugin({ store: databaseAuthBudgetStore(pool), enabled: emailRecipientLimitsEnabled(process.env) }),
+    recipientLimiter.plugin, passwordResetOwnershipPlugin({ pool }),
     ...breachedPasswordPlugins(breachedPasswordPolicy),
     ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
     sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus })],

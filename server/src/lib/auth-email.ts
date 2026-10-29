@@ -4,7 +4,12 @@ import { emailOTP } from "better-auth/plugins";
 import { docslurpMagicLinkPlugin } from "./auth-magic-link.js";
 import { APIError } from "better-auth/api";
 
-export function createAuthEmailOptions(env: NodeJS.ProcessEnv) {
+type DeliveryContext = { context?: { secret?: string } };
+type Delivery<T> = (data: T, ctx?: DeliveryContext) => Promise<void>;
+/** Wraps a sender with policy (the per-recipient budget refund); identity by default. */
+export type DeliveryGuard = <T extends { email: string }>(send: (data: T) => Promise<void>) => Delivery<T>;
+
+export function createAuthEmailOptions(env: NodeJS.ProcessEnv, guardDelivery: DeliveryGuard = (send) => (data) => send(data)) {
   const enabled = isEmailAuthConfigured(env);
   return {
     emailAndPassword: {
@@ -25,13 +30,13 @@ export function createAuthEmailOptions(env: NodeJS.ProcessEnv) {
     emailVerification: { sendOnSignUp: enabled, sendOnSignIn: enabled, autoSignInAfterVerification: true },
     plugins: enabled ? [emailOTP({
       overrideDefaultEmailVerification: true,
-      sendVerificationOTP: sendAuthEmailCode,
+      sendVerificationOTP: guardDelivery(sendAuthEmailCode),
       otpLength: 6,
       expiresIn: 600,
       allowedAttempts: 5,
       storeOTP: "hashed",
       disableSignUp: true,
-    }), docslurpMagicLinkPlugin(sendAuthMagicLink)] : [],
+    }), docslurpMagicLinkPlugin(guardDelivery(sendAuthMagicLink))] : [],
   };
 }
 

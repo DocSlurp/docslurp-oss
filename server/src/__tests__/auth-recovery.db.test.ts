@@ -26,6 +26,8 @@ let hashPassword: typeof import("better-auth/crypto")["hashPassword"];
 const sentEmails: Array<{ to: string; subject: string; code: string | null }> = [];
 let hibpMode: "live" | "error" | "hang" = "live";
 const hibpRequests: string[] = [];
+let hibpAborts = 0;
+let resendDown = false;
 
 function sha1(value: string): string {
   return createHash("sha1").update(value).digest("hex").toUpperCase();
@@ -50,13 +52,16 @@ beforeAll(async () => {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const target = String(input instanceof Request ? input.url : input);
     if (target.startsWith("https://api.resend.com/")) {
+      if (resendDown) return new Response("provider outage", { status: 503 });
       const body = JSON.parse(String(init?.body)) as { to: string[]; subject: string; text: string };
       sentEmails.push({ to: body.to[0]!, subject: body.subject, code: /\n\n(\w+)\n\n/.exec(body.text)?.[1] ?? null });
       return Response.json({ id: "email" });
     }
     if (target.startsWith("https://api.pwnedpasswords.com/range/")) {
       hibpRequests.push(target);
-      if (hibpMode === "hang") return new Promise<Response>(() => undefined);
+      if (hibpMode === "hang") {
+        return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => { hibpAborts += 1; reject(init.signal!.reason); }));
+      }
       if (hibpMode === "error") return new Response("unavailable", { status: 503 });
       const prefix = target.slice(-5);
       const lines = [...BREACHED].map(sha1).filter((hash) => hash.startsWith(prefix)).map((hash) => `${hash.slice(5)}:4242`);
@@ -84,6 +89,8 @@ beforeEach(async () => {
   sentEmails.length = 0;
   hibpRequests.length = 0;
   hibpMode = "live";
+  hibpAborts = 0;
+  resendDown = false;
   await pool.query(`delete from auth_rate_limits`);
 });
 afterEach(() => { vi.useRealTimers(); });
@@ -235,6 +242,44 @@ describe("password recovery with native Email OTP", () => {
     expect(sentEmails).toHaveLength(0);
   });
 
+  it("proves mailbox ownership for a pre-registered unverified account and drops every earlier link", async () => {
+    const squatted = await createUser({ password: "the squatters password", emailVerified: false });
+    await pool.query(`insert into account(id, "accountId", "providerId", "userId") values ($1, 'attacker-provider-id', 'google', $2)`, [`google-${squatted.id}`, squatted.id]);
+    const owner = new Browser();
+    await requestReset(owner, squatted.email);
+    expect((await owner.json("/email-otp/reset-password", { email: squatted.email, otp: lastCodeFor(squatted.email), password: NEW_PASSWORD })).status).toBe(200);
+    expect((await pool.query<{ verified: boolean }>(`select "emailVerified" as verified from "user" where id = $1`, [squatted.id])).rows[0]!.verified).toBe(true);
+    expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: "the squatters password" })).status).toBe(401);
+    expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: NEW_PASSWORD })).status).toBe(200);
+    const providers = (await pool.query<{ provider: string }>(`select "providerId" as provider from account where "userId" = $1`, [squatted.id])).rows.map((row) => row.provider);
+    expect(providers).toEqual(["credential"]);
+  });
+
+  it("keeps a verified account's other sign-in methods through a reset", async () => {
+    const user = await createUser();
+    await pool.query(`insert into account(id, "accountId", "providerId", "userId") values ($1, $2, 'google', $3)`, [`google-${user.id}`, `google-${user.id}`, user.id]);
+    const browser = new Browser();
+    await requestReset(browser, user.email);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: lastCodeFor(user.email), password: NEW_PASSWORD })).status).toBe(200);
+    const providers = (await pool.query<{ provider: string }>(`select "providerId" as provider from account where "userId" = $1 order by 1`, [user.id])).rows.map((row) => row.provider);
+    expect(providers).toEqual(["credential", "google"]);
+  });
+
+  it("bounds code guesses per address even when they race", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    await requestReset(browser, user.email);
+    const code = lastCodeFor(user.email);
+    const wrong = code === "000000" ? "111111" : "000000";
+    const statuses = await Promise.all(Array.from({ length: 30 }, () =>
+      new Browser().json<{ code?: string }>("/email-otp/reset-password", { email: user.email, otp: wrong, password: NEW_PASSWORD }).then((result) => result.status)));
+    expect(statuses.filter((status) => status !== 429).length).toBeLessThanOrEqual(10);
+    const limited = await browser.json<{ code?: string }>("/email-otp/reset-password", { email: user.email, otp: code, password: NEW_PASSWORD });
+    expect(limited.status).toBe(429);
+    expect(limited.body.code).toBe("CODE_ATTEMPTS_LIMITED");
+    expect((await new Browser().json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
+  });
+
   it("serves exactly one recovery path", async () => {
     const browser = new Browser();
     for (const path of ["/forget-password/email-otp", "/request-password-reset", "/reset-password"]) {
@@ -293,6 +338,8 @@ describe("breached-password rejection", () => {
     expect(refused.status).toBe(503);
     expect(refused.body.code).toBe("PASSWORD_CHECK_UNAVAILABLE");
     expect(refused.response.headers.get("retry-after")).toBe("60");
+    // A hung lookup is cancelled, not abandoned.
+    expect(hibpAborts).toBe(mode === "hang" ? 1 : 0);
     // Nothing changed: the old password still works and the code survives the outage.
     expect((await new Browser().json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
     hibpMode = "live";
@@ -321,6 +368,26 @@ describe("per-recipient email limits", () => {
     const keys = (await pool.query<{ key: string }>(`select key from auth_rate_limits`)).rows.map((row) => row.key);
     expect(keys.length).toBeGreaterThan(0);
     expect(keys.some((key) => key.includes("@") || key.includes(known.split("@")[0]!))).toBe(false);
+  });
+
+  it("counts verification mail re-sent by password sign-in without failing the sign-in", async () => {
+    const user = await createUser({ emailVerified: false });
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 7; attempt += 1) statuses.push((await new Browser().json("/sign-in/email", { email: user.email, password: PASSWORD })).status);
+    expect(statuses).toEqual(Array(7).fill(403));
+    expect(sentEmails.filter((sent) => sent.to === user.email)).toHaveLength(5);
+  });
+
+  it("gives the budget back when delivery fails, so an email outage locks nobody out", async () => {
+    const user = await createUser();
+    resendDown = true;
+    // Better Auth logs a failed Email OTP send and still answers 200 (it never
+    // reveals delivery). Without the refund, the sixth request would be a 429.
+    for (let attempt = 0; attempt < 6; attempt += 1) expect((await requestReset(new Browser(), user.email)).status).toBe(200);
+    expect(sentEmails).toHaveLength(0);
+    resendDown = false;
+    expect((await requestReset(new Browser(), user.email)).status).toBe(200);
+    expect(lastCodeFor(user.email)).toMatch(/^\d{6}$/);
   });
 });
 
