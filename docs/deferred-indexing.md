@@ -137,7 +137,7 @@ Temperature is computed over the candidate pages C:
 Embedding page images is the expensive pass (billed per page), so it runs only when you explicitly ask for it:
 
 - `indexingMode: "visual"`, chosen by hand. Switching to it shows an estimate that includes the embedding cost; you confirm by saving.
-- `pipeline.visualPages.coarseFallback: true` (default `false`), an advanced toggle under the page-map option. With it on, `map` mode also embeds the uncovered pages of scanned documents whose map covers little. With it off, `map` mode makes no embedder calls, even for scanned documents.
+- `pipeline.visualPages.coarseFallback: true` (default `false`), an advanced toggle under the page-map option. With it on, `map` mode also embeds the uncovered pages of scanned documents whose map covers little. With it off, `map` mode makes no embedder calls, even for scanned documents. Under `quality: "fast"` the toggle has no effect: Fast reads no page, so the coarse layer embeds nothing and charges nothing (the page embedder refuses with `stoppedBy: "quality-fast"`), and the uncovered scanned pages stay unsearchable page images. Use Auto or Good to have them embedded.
 
 `full` mode never runs the page-embed stage. Templates never set either option, and neither affects version hashes.
 

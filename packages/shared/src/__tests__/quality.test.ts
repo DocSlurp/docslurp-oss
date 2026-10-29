@@ -17,6 +17,7 @@ import {
   mergePipelineFeatures,
   migrateLegacyQualitySettings,
   normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   parseExtractorOptions,
   pageImageReferenceMarkdown,
   parseStoredPipelineFeatures,
@@ -233,10 +234,11 @@ describe("Kreuzberg options allow-list", () => {
   });
 
   it("constrains OCR languages to Tesseract codes (L2)", () => {
-    for (const language of ["eng", "deu", "chi_sim", "eng+deu", "eng+chi_tra+jpn"]) {
+    for (const language of ["eng", "deu", "chi_sim", "chi_sim_vert", "chi_tra_vert", "jpn_vert", "eng+deu", "eng+chi_tra+jpn", "eng+chi_sim_vert"]) {
       expect(documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } }, ocr: { language } }).ocr.language).toBe(language);
     }
-    for (const language of ["../../etc/passwd", "eng;rm -rf /", "en", "ENG", "eng+", "+eng", "eng deu", "--psm 0", "e".repeat(9), "eng\nX"]) {
+    for (const language of ["../../etc/passwd", "eng;rm -rf /", "en", "ENG", "eng+", "+eng", "eng deu", "--psm 0", "e".repeat(9), "eng\nX",
+      "chi_sim_vert_x", "eng_", "_eng", "eng__sim", "eng/../x", "eng|id", "$(id)", "`id`", "eng&deu", "eng_sim1", "chi_sim_toolongx"]) {
       expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } } }), language).toThrow();
       expect(() => documentExtractionConfigSchema.parse({ ocr: { language } }), language).toThrow();
     }
@@ -271,6 +273,84 @@ describe("extractor options (M4: one strict schema per extractor id)", () => {
     for (const id of ["pandoc", "native-pdf", "liteparse", "poppler-text", "doppler", "graph-local", "json", "unknown", "__proto__", "constructor", "toString"]) {
       expect(() => documentExtractionConfigSchema.parse({ options: { [id]: {} } }), id).toThrow();
       expect(() => parseExtractorOptions(id, {}), id).toThrow(/takes no options/);
+    }
+  });
+});
+
+describe("stored pipelines with settings the strict schemas reject (round 4 M2)", () => {
+  const stored = {
+    quality: "fast",
+    documentExtraction: {
+      order: { pdf: ["liteparse", "kreuzberg"] },
+      options: {
+        liteparse: { ocr: true },
+        kreuzberg: { useCache: false, forceOcr: false, ocr: { backend: "tesseract", language: "en", vlmConfig: { model: "x" } } },
+        dolphin: { mode: "page", repoPath: "/tmp/attacker", modelPath: "/tmp/model" },
+        ["__proto__"]: { polluted: true },
+      },
+      ocr: { language: "en", autoRotate: false },
+    },
+  };
+
+  it("loads with every rejected path dropped and logged, keeping quality and the valid settings", () => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+    try {
+      const parsed = normalizeStoredPipelineFeatures(JSON.parse(JSON.stringify(stored)) as never, "workspace ws_1");
+      expect(parsed.quality).toBe("fast");
+      expect(parsed.documentExtraction.order.pdf).toEqual(["liteparse", "kreuzberg"]);
+      expect(parsed.documentExtraction.options).toEqual({
+        kreuzberg: { forceOcr: false, ocr: { backend: "tesseract" } },
+        dolphin: { mode: "page" },
+      });
+      expect(JSON.stringify(parsed)).not.toContain("/tmp/attacker");
+      expect(JSON.stringify(parsed)).not.toContain("/tmp/model");
+      expect(parsed.documentExtraction.ocr).toEqual({ language: "eng", autoRotate: false });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("workspace ws_1");
+      for (const path of [
+        "documentExtraction.ocr.language", "documentExtraction.options.liteparse", "documentExtraction.options.__proto__",
+        "documentExtraction.options.kreuzberg.useCache", "documentExtraction.options.kreuzberg.ocr.vlmConfig",
+        "documentExtraction.options.kreuzberg.ocr.language", "documentExtraction.options.dolphin.repoPath",
+        "documentExtraction.options.dolphin.modelPath",
+      ]) expect(errors[0]).toContain(path);
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+      // parseStoredPipelineFeatures (run history) reads the same row the same way.
+      expect(parseStoredPipelineFeatures(JSON.parse(JSON.stringify(stored)), "run r1").documentExtraction.options).toEqual(parsed.documentExtraction.options);
+    } finally {
+      console.error = original;
+    }
+  });
+
+  it("drops an extractor whose options cannot be repaired, and options that are not an object", () => {
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      expect(normalizeStoredPipelineFeatures({ documentExtraction: { options: { dolphin: "repoPath=/tmp/x", kreuzberg: { ocr: "x" } } } } as never, "run r2")
+        .documentExtraction.options).toEqual({ kreuzberg: {} });
+      expect(normalizeStoredPipelineFeatures({ documentExtraction: { options: ["dolphin"] } } as never, "run r3").documentExtraction.options).toEqual({});
+    } finally {
+      console.error = quiet;
+    }
+  });
+
+  it("stays strict for requests and for every other invalid setting, quality included", () => {
+    expect(() => normalizePipelineFeatures(stored as never)).toThrow();
+    expect(pipelineFeatureOverridesSchema.safeParse({ documentExtraction: { options: { dolphin: { repoPath: "/tmp/attacker" } } } }).success).toBe(false);
+    expect(() => normalizeStoredPipelineFeatures({ quality: "ultra" } as never, "workspace ws_2")).toThrow();
+  });
+
+  it("does not log or copy a clean stored pipeline", () => {
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      const clean = { quality: "auto", documentExtraction: { options: { dolphin: { mode: "page" } } } };
+      expect(normalizeStoredPipelineFeatures(clean as never, "workspace ws_3").documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
+      expect(errors).toEqual([]);
+    } finally {
+      console.error = original;
     }
   });
 });

@@ -345,6 +345,7 @@ export class DocumentMapStage implements Stage {
 
     // (7) coarse visual layer: scanned pages the map does not cover get page-image vectors (cost-capped).
     // Page-image embedding costs per page, so it runs only on explicit opt-in (`visualPages.coarseFallback`).
+    // Under Fast, embedPageImages refuses (stoppedBy "quality-fast"): nothing is rendered, embedded or charged.
     if (!bornDigital && coverage < COVERAGE_THRESHOLD && state.run.pipeline.visualPages?.coarseFallback === true) {
       const embedder = this.deps.pageEmbedder !== undefined
         ? this.deps.pageEmbedder

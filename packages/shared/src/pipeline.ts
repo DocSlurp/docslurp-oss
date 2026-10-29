@@ -4,6 +4,7 @@ import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema }
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
+  sanitizeStoredDocumentExtraction,
 } from "./extraction.js";
 import {
   defaultEmbeddingConfig,
@@ -991,6 +992,28 @@ export function normalizePipelineFeatures(
   });
 }
 
+/**
+ * `normalizePipelineFeatures` for a stored pipeline (a workspace or run row). Stored extractor settings that the
+ * strict schemas now reject (an unknown extractor id or key, a Dolphin path, an invalid OCR language) are dropped
+ * with a loud log naming `source` and the dropped paths (sanitizeStoredDocumentExtraction), instead of failing the
+ * read. Requests stay strict, and nothing else is relaxed: an invalid `quality` or any other setting still throws.
+ */
+export function normalizeStoredPipelineFeatures(
+  stored: PipelineFeatureOverrides | PipelineFeatures | null | undefined,
+  source: string,
+): PipelineFeatures {
+  return normalizePipelineFeatures(sanitizeStoredPipeline(stored, source));
+}
+
+/** Drops invalid stored extractor settings (see normalizeStoredPipelineFeatures), logging what it dropped. */
+export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
+  if (!isPlainRecord(stored) || !isPlainRecord(stored.documentExtraction)) return stored;
+  const { value, dropped } = sanitizeStoredDocumentExtraction(stored.documentExtraction);
+  if (dropped.length === 0) return stored;
+  console.error(`[pipeline] stored pipeline of ${source} has extractor settings the schema rejects; dropped ${dropped.join(", ")}`);
+  return { ...stored, documentExtraction: value } as T;
+}
+
 /** Keys whose override value replaces the base value instead of merging into it. */
 const replacedPipelineKeys = new Set(["outputSchema", "vectorBackends"]);
 
@@ -1432,8 +1455,8 @@ export function compilePipelinePlan(
  * required. Each validation pass drops exactly the fields the schema reports
  * so defaults fill them; a list of historical runs never fails on one row.
  */
-export function parseStoredPipelineFeatures(stored: unknown): PipelineFeatures {
-  let source = structuredClone((stored ?? null) as Record<string, unknown> | null);
+export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a stored pipeline"): PipelineFeatures {
+  let source = structuredClone(sanitizeStoredPipeline((stored ?? null) as Record<string, unknown> | null, sourceName));
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       return normalizePipelineFeatures(source as PipelineFeatureOverrides | null);

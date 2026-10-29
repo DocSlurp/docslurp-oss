@@ -153,6 +153,28 @@ describe("page charges", () => {
   });
 });
 
+describe("worker run load (round 4 M2)", () => {
+  it("loads a run whose stored pipeline has extractor settings the strict schemas reject, with every rejected path gone", async () => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+    try {
+      await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+        values ('stale-x', 'o1', 'u1', 'w', 'upload', 'processing', 'extract',
+          '{"quality":"fast","documentExtraction":{"options":{"dolphin":{"mode":"page","repoPath":"/tmp/attacker"},"liteparse":{}},"ocr":{"language":"en"}}}', 1)`);
+      const run = await store.loadRun("stale-x");
+      expect(run.pipeline.quality).toBe("fast");
+      expect(run.pipeline.documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
+      expect(run.pipeline.documentExtraction.ocr.language).toBe("eng");
+      expect(JSON.stringify(run.pipeline)).not.toContain("/tmp/attacker");
+      expect(errors.join("\n")).toMatch(/run stale-x.*documentExtraction\.options\.dolphin\.repoPath/);
+    } finally {
+      console.error = original;
+      await db.exec(`delete from workspace_runs where id = 'stale-x'`);
+    }
+  });
+});
+
 describe("flag coercion", () => {
   it("runs map/visual pipelines as full when the flag is off", () => {
     const run = { pipeline: { ...defaultPipelineFeatures, indexingMode: "map" as const } };

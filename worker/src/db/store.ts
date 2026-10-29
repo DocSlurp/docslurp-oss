@@ -13,9 +13,8 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
-import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
@@ -3843,7 +3842,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
-    pipeline: applyDefaultVisionOverride(mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures)),
+    pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`)),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},
@@ -3927,9 +3926,7 @@ export function buildStorageIntegrityReport(args: {
       continue;
     }
 
-    const pipeline = mergePipelineFeatures(
-      run.pipeline ?? defaultPipelineFeatures,
-    );
+    const pipeline = normalizeStoredPipelineFeatures(run.pipeline ?? defaultPipelineFeatures, `run ${run.runId}`);
     if ((pipeline.embed || pipeline.indexVectors) && run.chunkCount === 0) {
       findings.push({
         kind: "missing-index-rows",
