@@ -114,3 +114,19 @@ describe("calibrateShardProfile", () => {
     expect(next.baseMiB).toBe(vm.baseMiB);
   });
 });
+
+describe("calibrated priors", () => {
+  it("fans long PDFs out across Doppler VMs and leaves short ones whole", async () => {
+    const { SHARD_PROFILES, shardCapacity } = await import("../temporal/page-shard-profiles.js");
+    const profile = SHARD_PROFILES["extract-markdown:doppler-vm"];
+    const capacity = shardCapacity("doppler-vm", { idleSlots: 0, orgSlots: 0, vmParallel: 16 });
+    const short = planPageShards(21, profile, capacity, { maxCostOverhead: 1, maxShards: 32 });
+    expect(short.shards).toHaveLength(1);
+    const long = planPageShards(477, profile, capacity, { maxCostOverhead: 1, maxShards: 32 });
+    expect(long.shardPages % 32).toBe(0);
+    expect(long.predictedWallMs).toBeLessThan(long.unshardedWallMs / 2);
+    // The production 477-page VM call took ~7.6-10.3 s; the prior predicts the same order of magnitude unsharded.
+    expect(long.unshardedWallMs).toBeGreaterThan(6_000);
+    expect(long.unshardedWallMs).toBeLessThan(10_000);
+  });
+});

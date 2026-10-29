@@ -46,6 +46,10 @@ export interface PageShardOptions {
   maxCostOverhead: number;
   /** Fewer shards win when their predicted wall time is within this fraction of the fastest plan. */
   wallTolerance?: number;
+  /** Splitting must save at least this much wall time (default 2 s)... */
+  minSavingMs?: number;
+  /** ...and at least this fraction of the unsharded wall time (default 0.25). */
+  minSavingFraction?: number;
   maxShards: number;
 }
 
@@ -162,8 +166,13 @@ export function planPageShards(
     plans.push({ k, shards: ceilDiv(n, k), wall: wallFor(profile, n, k, 1, 1, 0), cost: costFor(profile, n, k), parallel: 1, scaleUp: false });
   }
 
-  const fastest = Math.min(...plans.map((o) => o.wall));
-  const chosen = plans
+  // A split that saves too little is not worth its extra executors and failure surface.
+  const minSaving = Math.max(options.minSavingMs ?? 2_000, (options.minSavingFraction ?? 0.25) * unshardedWallMs);
+  const forcedSplit = n > hardMax;
+  const worthwhile = plans.filter((o) => o.k >= n || forcedSplit || unshardedWallMs - o.wall >= minSaving);
+  const pool = worthwhile.length > 0 ? worthwhile : plans;
+  const fastest = Math.min(...pool.map((o) => o.wall));
+  const chosen = pool
     .filter((o) => o.wall <= fastest * (1 + tolerance))
     .sort((a, b) => a.shards - b.shards || a.cost - b.cost || b.k - a.k)[0]!;
 
