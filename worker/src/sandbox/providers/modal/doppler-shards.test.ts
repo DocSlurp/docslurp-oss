@@ -8,7 +8,7 @@ import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerSh
 import { MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
 import { planPageShards } from "../../../temporal/page-shards.js";
 
-const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32, globalParallel: 64 };
+const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32, globalParallel: 64, rangesSupported: true };
 const usage = (seconds: number) => ({
   provider: "modal", model: "doppler-document-vm", metric: "sandbox_compute", amount: seconds, unit: "cent", costCents: seconds,
   metadata: { wallSeconds: seconds, costFloorCents: seconds / 2 },
@@ -145,11 +145,47 @@ describe("executeDopplerShards", () => {
     expect(vm.calls.slice(before).map((c) => c.range)).toEqual([undefined]);
   });
 
-  it("runs whole when the process VM budget is saturated or the document exceeds the guest's page limit", async () => {
-    const vm = fakeVm(async (j) => pagesText(1, j.range ? 0 : 1));
+  it("runs an optional split whole when the process VM budget is saturated", async () => {
+    const vm = fakeVm(async () => pagesText(1, 477));
     await executeDopplerShards(job, 477, undefined, { ...on, globalParallel: 1 }, { execute: vm.execute });
-    await executeDopplerShards(job, 10_001, undefined, on, { execute: vm.execute });
+    expect(vm.calls.map((c) => c.range)).toEqual([undefined]);
+  });
+
+  it("always splits a document longer than one VM may convert, in waves when the budget is full", async () => {
+    const vm = fakeVm(async (j) => pagesText(j.range!.first, j.range!.last));
+    const pages = 25_000;
+    await executeDopplerShards(job, pages, undefined, { ...on, enabled: false, globalParallel: 1 }, { execute: vm.execute });
+    const ranges = vm.calls.map((c) => c.range!);
+    expect(ranges.every((r) => r && r.last - r.first + 1 <= 10_000 && (r.first - 1) % 32 === 0)).toBe(true);
+    expect(ranges.at(-1)).toMatchObject({ last: pages, final: true });
+    expect(vm.stats.maxActive).toBe(1);
+    expect(await readFile(job.output, "utf8")).toBe(pagesText(1, pages));
+  });
+
+  it("runs a long document whole (and so refused by the guest) only when the image cannot take ranges or it is over the document limit", async () => {
+    const vm = fakeVm(async () => new SandboxRunError("Document VM parser failed (1)", usage(1)));
+    await executeDopplerShards(job, 25_000, undefined, { ...on, rangesSupported: false }, { execute: vm.execute }).catch(() => {});
+    await executeDopplerShards(job, 100_001, undefined, on, { execute: vm.execute }).catch(() => {});
     expect(vm.calls.map((c) => c.range)).toEqual([undefined, undefined]);
+  });
+
+  it("does not fall back to one VM when a forced split fails", async () => {
+    const vm = fakeVm(async (j) => j.range?.first === 1 ? new SandboxRunError("Document VM parser failed (1)", usage(4)) : pagesText(j.range!.first, j.range!.last));
+    const error = await executeDopplerShards(job, 25_000, undefined, on, { execute: vm.execute }).catch((e) => e);
+    expect(error).toBeInstanceOf(SandboxRunError);
+    expect(vm.calls.every((c) => c.range)).toBe(true);
+    expect(error.usage.costCents).toBeGreaterThanOrEqual(4);
+  });
+
+  it("logs one searchable line per sharding decision", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await executeDopplerShards(job, 477, undefined, on, { execute: fakeVm().execute });
+      await executeDopplerShards(job, 20, undefined, on, { execute: fakeVm(async () => pagesText(1, 20)).execute });
+      const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[document-vm]"));
+      expect(lines[0]).toMatch(/shards=\d+ pages=477 shardPages=\d+ parallel=\d+ vms=\d+ wallMs=\d+ .*outcome=merged/);
+      expect(lines[1]).toMatch(/shards=1 pages=20 reason=plan-unsharded/);
+    } finally { info.mockRestore(); }
   });
 
   it("requires the image protocol to be declared before sharding", () => {

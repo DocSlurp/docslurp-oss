@@ -28,6 +28,15 @@ class ChunkMergeTest(unittest.TestCase):
         for pages in (0, -1, 10001, True, 1.5):
             with self.assertRaises(ValueError): guest.page_ranges(pages)
 
+    def test_long_documents_convert_only_in_bounded_shards(self):
+        pages = 25000
+        with self.assertRaises(ValueError): guest.page_ranges(pages)                      # whole document: refused
+        with self.assertRaises(ValueError): guest.page_ranges(pages, 1, 10016)            # one VM over the limit
+        self.assertEqual(guest.page_ranges(pages, 9985, 19968)[-1], (19937, 19968))       # 9,984-page shard: allowed
+        self.assertEqual(guest.page_ranges(pages, 19969, 25000)[-1], (24993, 25000))
+        with self.assertRaises(ValueError): guest.page_ranges(guest.MAX_DOCUMENT_PAGES + 1, 1, 32)
+        self.assertEqual(self_request(pages, {"first": 19969, "last": 25000, "final": True}), (19969, 25000))
+
     def test_order_and_blank_slots_across_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d); output = p / "merged"; size = 0
@@ -45,6 +54,11 @@ class ChunkMergeTest(unittest.TestCase):
             with (p / "out").open("wb") as f:
                 with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 2, True, 0)
                 with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 1, False, guest.MAX_OUTPUT - 2)
+
+def self_request(pages, body):
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "shard.json"; path.write_text(json.dumps(body))
+        return guest.shard_request(pages, path)
 
 class ShardRequestTest(unittest.TestCase):
     def request(self, pages, body):

@@ -20,15 +20,20 @@ MAX_SHARD_REQUEST = 256
 MAX_INPUT = 500 * 1024 * 1024
 MAX_RAW = 256 * 1024 * 1024
 MAX_OUTPUT = 64 * 1024 * 1024
+# One VM converts at most MAX_PAGES pages. A longer document is converted only as host-planned
+# shards, each of at most MAX_PAGES pages, up to MAX_DOCUMENT_PAGES in total.
 MAX_PAGES = 10000
+MAX_DOCUMENT_PAGES = 100000
 CHUNK_PAGES = 32
 JOB_SECONDS = 150
 
 
 def page_ranges(pages, first=1, last=None):
-    if type(pages) is not int or not 1 <= pages <= MAX_PAGES:
+    if type(pages) is not int or not 1 <= pages <= MAX_DOCUMENT_PAGES:
         raise ValueError('invalid PDF page count')
     last = pages if last is None else last
+    if type(first) is not int or type(last) is not int or not 1 <= first <= last <= pages or last - first + 1 > MAX_PAGES:
+        raise ValueError('PDF range exceeds the per-VM page limit')
     return [(start, min(start + CHUNK_PAGES - 1, last)) for start in range(first, last + 1, CHUNK_PAGES)]
 
 
@@ -115,7 +120,8 @@ def main():
         raise ValueError('PDF info exceeds limit')
     match = re.search(rb'^Pages:\s+(\d+)\s*$', info_text, re.MULTILINE)
     pages = int(match[1]) if match else 0
-    page_ranges(pages)  # validates the count before any request is read
+    if type(pages) is not int or not 1 <= pages <= MAX_DOCUMENT_PAGES:
+        raise ValueError('invalid PDF page count')  # validated before any request is read
     shard_first, shard_last = shard_request(pages)
     ranges = page_ranges(pages, shard_first, shard_last)
     settings = Path('/opt/doppler/defaults.json').read_text()

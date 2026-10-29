@@ -4,10 +4,20 @@ import { planPageShards, type PageShardPlan, type ShardCostProfile } from "../..
 import { SHARD_PROFILES, shardCapacity } from "../../../temporal/page-shard-profiles.js";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import type { UsageEvent } from "../../../models.js";
+import { currentPerfContext } from "../../../lib/perf-context.js";
 import { executeDopplerVm, GUEST_CHUNK_PAGES, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, type DopplerVmJob } from "./doppler-vm.js";
 
-/** The guest's own page limit: larger documents are refused by every shard, so never shard them. */
-export const GUEST_MAX_PAGES = 10_000;
+/** Most pages one guest VM converts; a longer document must be split into shards no larger than this. */
+export const GUEST_MAX_VM_PAGES = 10_000;
+/** Most pages in a document the guest accepts at all (only as shards of at most GUEST_MAX_VM_PAGES). */
+export const GUEST_MAX_DOCUMENT_PAGES = 100_000;
+
+/** One searchable line per sharding decision: `[document-vm] shards=...`. */
+function logPlan(fields: Record<string, string | number | boolean | undefined>): void {
+  const documentId = currentPerfContext()?.documentId;
+  const parts = Object.entries({ document: documentId, ...fields }).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}`);
+  console.info(`[document-vm] ${parts.join(" ")}`);
+}
 
 /**
  * Parallel Doppler shards: one fresh offline VM per page range, merged in page order.
@@ -29,6 +39,8 @@ export interface DopplerShardSettings {
   maxShards: number;
   /** Most shard VMs this worker process holds across all documents. */
   globalParallel: number;
+  /** The image's guest accepts page ranges (protocol 3): required to split documents over GUEST_MAX_VM_PAGES. */
+  rangesSupported: boolean;
 }
 
 export function dopplerShardSettings(env: NodeJS.ProcessEnv = process.env): DopplerShardSettings {
@@ -40,6 +52,7 @@ export function dopplerShardSettings(env: NodeJS.ProcessEnv = process.env): Dopp
   return {
     // Sharding needs a range-aware guest; the image's protocol is declared with its digest, never assumed.
     enabled: /^(1|true|on)$/i.test(env.DOCSLURP_DOPPLER_SHARDS?.trim() ?? "") && env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() === "3",
+    rangesSupported: env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() === "3",
     globalParallel: int("DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL", 16, 1, 256),
     vmParallel: int("DOCSLURP_DOPPLER_VM_MAX_PARALLEL", 8, 1, 64),
     maxCostOverhead: Number.isFinite(overhead) && overhead >= 0 ? Math.min(overhead, 10) : 0.5,
@@ -65,8 +78,9 @@ export interface DopplerShardDeps {
 
 /** Plan shards for one document; a single shard means "run the whole document in one VM". */
 export function planDopplerShards(pageCount: number, fileBytes: number, settings: DopplerShardSettings, profile: ShardCostProfile): PageShardPlan {
-  // Every shard VM and a possible whole-document fallback each receive the full file.
-  const byTransfer = Math.max(1, Math.floor(settings.maxTransferBytes / Math.max(1, fileBytes)) - 1);
+  // Every shard VM receives the full file, and so does the whole-document fallback (which a forced split never runs).
+  const fallbackUploads = pageCount > GUEST_MAX_VM_PAGES ? 0 : 1;
+  const byTransfer = Math.max(1, Math.floor(settings.maxTransferBytes / Math.max(1, fileBytes)) - fallbackUploads);
   return planPageShards(pageCount, { ...profile, pageAlign: GUEST_CHUNK_PAGES },
     shardCapacity("doppler-vm", { idleSlots: 0, orgSlots: 0, vmParallel: settings.vmParallel }),
     { maxCostOverhead: settings.maxCostOverhead, maxShards: Math.min(settings.maxShards, byTransfer) });
@@ -135,7 +149,15 @@ export async function executeDopplerShards(
   deps: DopplerShardDeps = {},
 ): Promise<SandboxResult> {
   const execute = deps.execute ?? executeDopplerVm;
-  if (!settings.enabled || job.range || !Number.isSafeInteger(pageCount) || pageCount < 1) return execute(job, signal);
+  if (job.range || !Number.isSafeInteger(pageCount) || pageCount < 1) return execute(job, signal);
+  // A document longer than one VM may convert must be split; that is not optional sharding.
+  const mustSplit = pageCount > GUEST_MAX_VM_PAGES;
+  const whole = (reason: string) => {
+    if (settings.enabled || mustSplit) logPlan({ shards: 1, pages: pageCount, reason });
+    return execute(job, signal);
+  };
+  if (mustSplit ? !settings.rangesSupported : !settings.enabled) return whole(mustSplit ? "ranges-unsupported" : "disabled");
+  if (pageCount > GUEST_MAX_DOCUMENT_PAGES) return whole("over-document-limit");
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
   // Size only: the host does not open or parse the document.
   const info = await lstat(job.input);
@@ -143,12 +165,16 @@ export async function executeDopplerShards(
   const profile = await (deps.profile?.() ?? Promise.resolve(SHARD_PROFILES["extract-markdown:doppler-vm"] as ShardCostProfile));
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
   const free = settings.globalParallel - shardVmsInUse;
-  if (pageCount > GUEST_MAX_PAGES || free < 2 || Date.now() < shardsUnsupportedUntil) return execute(job, signal);
-  const plan = planDopplerShards(pageCount, info.size, { ...settings, vmParallel: Math.min(settings.vmParallel, free) }, profile);
-  // An infeasible, oversized or malformed plan runs as today: one whole-document VM.
-  if (!dispatchablePlan(plan, pageCount, settings.maxShards)) return execute(job, signal);
+  if (Date.now() < shardsUnsupportedUntil) return whole("image-refused-ranges");
+  // Optional sharding needs two free VMs; a forced split proceeds on at least one, running its shards in waves.
+  if (!mustSplit && free < 2) return whole("vm-budget-full");
+  const vmParallel = Math.max(1, Math.min(settings.vmParallel, free));
+  const plan = planDopplerShards(pageCount, info.size, { ...settings, vmParallel }, profile);
+  // An infeasible, oversized or malformed plan runs as one whole-document VM (which refuses a document over the per-VM limit).
+  if (!dispatchablePlan(plan, pageCount, settings.maxShards)) return whole(plan.shards.length <= 1 ? "plan-unsharded" : `plan-rejected:${plan.reason}`);
   const reserved = Math.min(plan.parallel, plan.shards.length);
   shardVmsInUse += reserved;
+  const dispatched = Date.now();
 
   const controller = new AbortController();
   const onAbort = () => controller.abort();
@@ -190,8 +216,15 @@ export async function executeDopplerShards(
     }));
     if (signal?.aborted || (controller.signal.aborted && !failure)) fail("Document VM aborted");
     if (failure) {
+      const vms = usages.filter(Boolean).length;
+      // One VM cannot convert a document over the per-VM limit, so there is nothing to fall back to.
+      if (mustSplit) {
+        logPlan({ shards: plan.shards.length, pages: pageCount, shardPages: plan.shardPages, vms, outcome: "failed", fallback: false });
+        return fail(failure instanceof SandboxRunError ? failure.message : "Document VM shard failed");
+      }
       // A guest that refuses a range (for example, it counts different pages than the host's index) would refuse
       // every retry too. Fall back once to one whole-document VM: the same boundary, at the cost of a second run.
+      logPlan({ shards: plan.shards.length, pages: pageCount, shardPages: plan.shardPages, vms, outcome: "failed", fallback: true });
       console.warn(`[document-vm] shard failed; retrying as one whole-document VM shards=${plan.shards.length}`);
       let whole: SandboxResult;
       try {
@@ -226,6 +259,9 @@ export async function executeDopplerShards(
       fail("Document VM shard merge failed"); // filesystem errors stay out of the message; the cost stays in
     }
     const usage = mergeVmUsage(usages, plan.shards.length);
+    logPlan({ shards: plan.shards.length, pages: pageCount, shardPages: plan.shardPages, parallel: plan.parallel,
+      vms: usages.filter(Boolean).length, wallMs: Date.now() - dispatched, predictedWallMs: plan.predictedWallMs,
+      unshardedWallMs: plan.unshardedWallMs, outputBytes: total, forced: mustSplit, outcome: "merged" });
     return {
       stdout: JSON.stringify({ protocol: "doppler-vm@3", engine: "doppler", outputBytes: total,
         conversion: { pages: pageCount, first: 1, last: pageCount, documentPages: pageCount, shards: plan.shards.length,
