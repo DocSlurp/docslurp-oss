@@ -680,6 +680,13 @@
       "when": 1793300000000,
       "tag": "0096_drop_legacy_budget_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1793300000001,
+      "tag": "0097_sensitive_account_access",
+      "breakpoints": true
     }
   ]
 }

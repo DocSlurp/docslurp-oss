@@ -43,6 +43,7 @@
     "@opentelemetry/exporter-logs-otlp-http": "^0.223.0",
     "@opentelemetry/sdk-logs": "^0.223.0",
     "@posthog/ai": "^8.17.0",
+    "@simplewebauthn/server": "13.3.3",
     "@temporalio/client": "^1.24.0",
     "@temporalio/common": "^1.24.0",
     "ai": "7.0.154",

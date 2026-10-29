@@ -1,5 +1,7 @@
 ## Error recovery audit (2026-10-28)
 
+- [#224](https://github.com/DocSlurp/docslurp-oss/issues/224) Sensitive account verification (2026-10-29): Enforce fixed, session-bound sensitive-access grants for account credentials, factors, API-key mutations, destructive account/org actions, org MFA policy and SSO links. Require fresh proof, invalidate weaker grants when policy changes, and preserve narrowly scoped initial MFA enrollment and existing machine bulk-revoke permissions.
+
 Council-reviewed error contracts: allowlisted validation constraints, full Retry-After within SDK deadlines, and safe code-based SDK/CLI messages. No schema, retry eligibility, tenant-scope or deployment change.
 
 - [x] [#219](https://github.com/DocSlurp/docslurp-oss/issues/219) Error recovery: Retain safe validation constraints

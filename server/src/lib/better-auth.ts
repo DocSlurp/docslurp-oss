@@ -9,11 +9,13 @@ import { ensureUserAndOrganization } from "../services/account-provisioning.js";
 import { cookieHeaderFromAuthContext, recordSignupAttribution } from "../services/signup-attribution.js";
 import { applyAccountKindRules } from "../services/account-kind.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
-import { createAuthEmailOptions } from "./auth-email.js";
+import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
 import { createMfaPlugins, resolveMfaConfig, sessionAssuranceFields, sessionAssuranceFor } from "./auth-mfa.js";
+import { sensitiveEmailPlugin } from "./auth-sensitive-email.js";
+import { sensitiveAccessPlugin, grantSensitiveAccess, recordSensitiveFirstFactorProof, getSensitiveAccessStatus } from "./auth-sensitive-access.js";
 import { ssoEnforcementPlugin } from "./sso-enforcement.js";
 
 /**
@@ -184,7 +186,8 @@ export const auth = betterAuth({
   baseURL: resolveBetterAuthBaseUrl(process.env),
   ...emailOptions,
   // SSO issuance policy and MFA assurance both apply to every new session.
-  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }), ...createMfaPlugins({ pool, config: mfaConfig })],
+  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }), ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
+    sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus })],
   session: { ...securityOptions.session, additionalFields: sessionAssuranceFields },
   databaseHooks: {
     session: {

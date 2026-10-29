@@ -46,6 +46,8 @@ const KEY = "dslp_priv_route_auth_test";
 const ROUTE_AUTHENTICATED = [
   "GET /v1/models",
   "POST /v1/chat/completions",
+  // Session-bound proof start checks its own cookie session, including policy-blocked sessions.
+  "POST /v1/auth/sensitive-sso/start",
   "GET /v1/auth/oidc/:orgId/init",
   "GET /v1/auth/oidc/:orgId/callback",
   "GET /v1/auth/saml/:orgSlug/init",
@@ -128,6 +130,16 @@ describe("API key route declarations (real middleware stack)", () => {
     const documentedKeys = documented.map((operation) => `${operation.method} ${toHonoPath(operation.path)}`)
       .filter((key) => !ROUTE_AUTHENTICATED.includes(key)).sort();
     expect(declared).toEqual(documentedKeys);
+  });
+
+  it("rejects API keys on the self-authenticating sensitive SSO start route", async () => {
+    const before = mocks.validateApiKey.mock.calls.length;
+    const response = await app.request("/v1/auth/sensitive-sso/start", {
+      method: "POST", headers: { Authorization: `Bearer ${KEY}`, Origin: "http://localhost", "content-type": "application/json" }, body: "{}",
+    });
+    // Trusted origin passes; an API key must never substitute for the original browser session.
+    expect(response.status).toBe(401);
+    expect(mocks.validateApiKey.mock.calls.length).toBe(before);
   });
 
   it("keeps the self-authenticating route list explicit", () => {

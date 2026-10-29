@@ -643,6 +643,16 @@ export const session = pgTable(
     mfaVerified: boolean().default(false).notNull(),
     /** Last proof of identity; copied across re-issues and used for the re-auth window. */
     authenticatedAt: timestamp({ withTimezone: true, mode: "string" }),
+    /** Explicit proof for this session only; never copied across rotations. */
+    sensitiveVerifiedAt: timestamp({ withTimezone: true, mode: "string" }),
+    sensitiveMfaVerified: boolean().default(false).notNull(),
+    sensitiveSsoVerified: boolean().default(false).notNull(),
+    sensitiveFirstFactorSsoVerified: boolean().default(false).notNull(),
+    sensitiveFirstFactorAt: timestamp({ withTimezone: true, mode: "string" }),
+    sensitiveEmailOTPHash: text(),
+    sensitiveEmailOTPExpiresAt: timestamp({ withTimezone: true, mode: "string" }),
+    sensitiveEmailOTPSentAt: timestamp({ withTimezone: true, mode: "string" }),
+    sensitiveEmailOTPAttempts: integer().default(0).notNull(),
   },
   (table) => [
     index("session_user_id_idx").using(
@@ -2624,6 +2634,8 @@ export const ssoAuthRequests = pgTable(
     nonce: text(),
     redirectPath: text("redirect_path"),
     linkUserId: text("link_user_id").references(() => user.id, { onDelete: "cascade" }),
+    sensitiveUserId: text("sensitive_user_id").references(() => user.id, { onDelete: "cascade" }),
+    sensitiveSessionId: text("sensitive_session_id").references(() => session.id, { onDelete: "cascade" }),
     expiresAt: timestamp("expires_at", {
       withTimezone: true,
       mode: "string",
@@ -2655,6 +2667,7 @@ export const ssoAuthRequests = pgTable(
       name: "sso_auth_requests_org_id_fkey",
     }).onDelete("cascade"),
     unique("sso_auth_requests_state_key").on(table.state),
+    check("sso_sensitive_binding_check", sql`(${table.sensitiveUserId} is null and ${table.sensitiveSessionId} is null) or (${table.sensitiveUserId} is not null and ${table.sensitiveSessionId} is not null and ${table.linkUserId} is null)`),
     check(
       "sso_auth_requests_provider_check",
       sql`provider = ANY (ARRAY['oidc'::text, 'saml'::text])`,

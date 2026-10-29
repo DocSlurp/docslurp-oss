@@ -10,7 +10,11 @@ import { parseStringPromise } from "xml2js";
 import { z } from "zod";
 
 import { sql } from "../db.js";
-import { auth } from "../lib/auth.js";
+import { auth, appDbPool } from "../lib/auth.js";
+import { grantSensitiveAccess, recordSensitiveFirstFactorProof, getSensitiveAccessStatus } from "../lib/auth-sensitive-access.js";
+import { isFreshSensitiveSsoAuthentication, sensitiveSamlRequestCache, verifiedSamlSensitiveAuthTime, isSensitiveSsoStartOrigin, sensitiveSsoOptions } from "../lib/auth-sensitive-sso.js";
+import { requireSensitiveSession } from "../lib/require-sensitive-session.js";
+import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
 import { beginTwoFactorChallengeCookie, MFA_CHALLENGE_MAX_AGE_SECONDS, MFA_CHALLENGE_PATH } from "../lib/auth-mfa.js";
 import { openSecret, sealSecret } from "../lib/encryption.js";
 import { requestIp } from "../lib/request-context.js";
@@ -71,6 +75,9 @@ interface SsoRequestRow {
   nonce: string | null;
   redirect_path: string | null;
   link_user_id: string | null;
+  sensitive_user_id?: string | null;
+  sensitive_session_id?: string | null;
+  created_at?: string;
   expires_at: string;
   consumed_at: string | null;
 }
@@ -338,7 +345,8 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
     }>;
   };
 
-  const descriptor = parsed.EntityDescriptor?.[0];
+  // xml2js keeps the document root as an object even with explicitArray enabled.
+  const descriptor = (Array.isArray(parsed.EntityDescriptor) ? parsed.EntityDescriptor[0] : parsed.EntityDescriptor) as NonNullable<typeof parsed.EntityDescriptor>[number] | undefined;
   const idp = descriptor?.IDPSSODescriptor?.[0];
   const services = idp?.SingleSignOnService ?? [];
   const redirectService = services.find((service) =>
@@ -373,6 +381,8 @@ async function storeSsoRequest(args: {
   nonce?: string | null;
   redirectPath?: string | null;
   linkUserId?: string | null;
+  sensitiveUserId?: string;
+  sensitiveSessionId?: string;
 }): Promise<void> {
   await sql`
     insert into sso_auth_requests (
@@ -383,6 +393,8 @@ async function storeSsoRequest(args: {
       nonce,
       redirect_path,
       link_user_id,
+      sensitive_user_id,
+      sensitive_session_id,
       expires_at
     )
     values (
@@ -393,6 +405,8 @@ async function storeSsoRequest(args: {
       ${args.nonce ?? null},
       ${args.redirectPath ?? null},
       ${args.linkUserId ?? null},
+      ${args.sensitiveUserId ?? null},
+      ${args.sensitiveSessionId ?? null},
       now() + interval '10 minutes'
     )
   `;
@@ -569,7 +583,7 @@ async function consumeSsoRequest(state: string, provider: "oidc" | "saml"): Prom
       and provider = ${provider}
       and consumed_at is null
       and expires_at > now()
-    returning state, org_id, provider, code_verifier, nonce, redirect_path, link_user_id, expires_at::text, consumed_at::text
+    returning state, org_id, provider, code_verifier, nonce, redirect_path, link_user_id, sensitive_user_id, sensitive_session_id, created_at::text, expires_at::text, consumed_at::text
   `;
   return rows[0] ?? null;
 }
@@ -712,6 +726,19 @@ async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: S
     where org_id = ${identity.orgId} and user_id = ${link.user_id}
   `;
   return { kind: "signed-in", userId: link.user_id };
+}
+
+async function finishSensitiveSsoCallback(c: any, identity: SsoAssertedIdentity, requestRow: SsoRequestRow, authenticatedAtMs: number): Promise<Response> {
+  const userId = requestRow.sensitive_user_id;
+  const sessionId = requestRow.sensitive_session_id;
+  if (!userId || !sessionId || !requestRow.created_at || requestRow.link_user_id || !isFreshSensitiveSsoAuthentication(authenticatedAtMs, requestRow.created_at)) return apiStatusError(c, 403, "Fresh company verification was not confirmed");
+  // No email matching, account linking, user switching or session replacement in this flow.
+  const [link] = await sql<{ user_id: string }[]>`select user_id from sso_identity_links where org_id = ${identity.orgId} and provider = ${identity.provider} and issuer = ${identity.issuer} and subject = ${identity.subject} limit 1`;
+  if (!link || link.user_id !== userId || !await isOrgMember(identity.orgId, userId)) return apiStatusError(c, 403, "Company verification did not match this account");
+  const status = await getSensitiveAccessStatus(appDbPool, userId, sessionId);
+  const updated = status.requiresMfa ? await recordSensitiveFirstFactorProof(appDbPool, userId, sessionId, { ssoVerified: true }) : await grantSensitiveAccess(appDbPool, userId, sessionId, { ssoVerified: true });
+  if (!updated) return apiStatusError(c, 403, "The original session is no longer available");
+  return redirectToApp(c, "/auth/sensitive-sso-complete");
 }
 
 async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestRow: SsoRequestRow): Promise<Response> {
@@ -951,7 +978,7 @@ function samlCallbackUrl(c: any, org: OrgRow): string {
   return `${inferApiOrigin(c.req.raw)}/v1/auth/saml/${encodeURIComponent(org.slug ?? org.id)}/callback`;
 }
 
-function createSamlClient(c: any, org: OrgRow, samlMetadata: SamlMetadata, uniqueId?: string): SAML {
+function createSamlClient(c: any, org: OrgRow, samlMetadata: SamlMetadata, uniqueId?: string, sensitiveRequest?: SsoRequestRow, forceAuthn = false): SAML {
   return new SAML({
     entryPoint: samlMetadata.entryPoint,
     idpCert: samlMetadata.certificates,
@@ -959,7 +986,8 @@ function createSamlClient(c: any, org: OrgRow, samlMetadata: SamlMetadata, uniqu
     callbackUrl: samlCallbackUrl(c, org),
     identifierFormat: null,
     validateInResponseTo: ValidateInResponseTo.always,
-    cacheProvider: createSamlRequestCacheProvider(org.id),
+    cacheProvider: sensitiveRequest ? sensitiveSamlRequestCache(sensitiveRequest.state, sensitiveRequest.created_at ?? "", sensitiveRequest.expires_at) : createSamlRequestCacheProvider(org.id),
+    ...(sensitiveRequest || forceAuthn ? { forceAuthn: true } : {}),
     ...(uniqueId ? { generateUniqueId: () => uniqueId } : {}),
     disableRequestedAuthnContext: true,
     acceptedClockSkewMs: 5_000,
@@ -981,6 +1009,8 @@ function isSamlReady(config: SsoConfig): boolean {
 async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
   redirectPath: string | null;
   linkUserId?: string | null;
+  sensitiveUserId?: string;
+  sensitiveSessionId?: string;
 }): Promise<{ url: string; state: string }> {
   const state = createStateToken();
   if (config.providerType === "oidc") {
@@ -994,7 +1024,9 @@ async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
       codeVerifier,
       nonce,
       redirectPath: options.redirectPath,
-      linkUserId: options.linkUserId ?? null
+      linkUserId: options.linkUserId ?? null,
+      sensitiveUserId: options.sensitiveUserId,
+      sensitiveSessionId: options.sensitiveSessionId,
     });
 
     const authorizeUrl = new URL(metadata.authorization_endpoint);
@@ -1006,19 +1038,23 @@ async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
     authorizeUrl.searchParams.set("nonce", nonce);
     authorizeUrl.searchParams.set("code_challenge", createPkceChallenge(codeVerifier));
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
-    if (options.linkUserId) authorizeUrl.searchParams.set("prompt", "login");
+    if (options.linkUserId || options.sensitiveUserId) authorizeUrl.searchParams.set("prompt", "login");
+    if (options.sensitiveUserId) authorizeUrl.searchParams.set("max_age", "0");
     return { url: authorizeUrl.toString(), state };
   }
 
   const samlMetadata = await fetchSamlMetadata(config.metadataUrl!);
+  if (options.sensitiveUserId && !samlMetadata.issuer) throw new Error("SSO verification requires an explicit IdP issuer");
   await storeSsoRequest({
     state,
     orgId: org.id,
     provider: "saml",
     redirectPath: options.redirectPath,
-    linkUserId: options.linkUserId ?? null
+    linkUserId: options.linkUserId ?? null,
+    sensitiveUserId: options.sensitiveUserId,
+    sensitiveSessionId: options.sensitiveSessionId,
   });
-  const url = await createSamlClient(c, org, samlMetadata, state).getAuthorizeUrlAsync(state, undefined, {});
+  const url = await createSamlClient(c, org, samlMetadata, state, undefined, Boolean(options.sensitiveUserId)).getAuthorizeUrlAsync(state, undefined, {});
   return { url, state };
 }
 
@@ -1226,7 +1262,7 @@ export const ssoRoutes = new Hono()
       link: link ? { email: link.email, linkedAt: link.created_at, lastUsedAt: link.last_used_at } : null
     });
   })
-  .post("/:orgId/sso/link", async (c) => {
+  .post("/:orgId/sso/link", requireSensitiveSession, async (c) => {
     const user = c.get("sessionUser");
     const orgId = c.req.param("orgId");
     // JSON only, so a cross-site page can't start a link flow without a CORS preflight.
@@ -1254,7 +1290,7 @@ export const ssoRoutes = new Hono()
     setSsoStateCookie(c, state);
     return c.json({ authorizeUrl });
   })
-  .delete("/:orgId/sso/link", async (c) => {
+  .delete("/:orgId/sso/link", requireSensitiveSession, async (c) => {
     const user = c.get("sessionUser");
     const orgId = c.req.param("orgId");
     await sql`delete from sso_identity_links where org_id = ${orgId} and user_id = ${user.id}`;
@@ -1263,6 +1299,22 @@ export const ssoRoutes = new Hono()
 
 export const samlCallbackRoutes = new Hono()
   .use("*", ssoRateLimit)
+  .post("/sensitive-sso/start", async c => {
+    if (!isSensitiveSsoStartOrigin(c.req.header("origin"), c.req.url, appUrl()) || !c.req.header("content-type")?.startsWith("application/json")) return apiStatusError(c, 403, "Company verification must start from this app");
+    // This endpoint starts proof only; policy-blocked sessions still cannot perform sensitive mutations.
+    const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, { allowMfaPolicyBlocked: true });
+    if (!actor) return apiStatusError(c, 401, "Sign in to verify your identity");
+    const options = await sensitiveSsoOptions(appDbPool, actor.userId, actor.user.email);
+    const selected = options[0];
+    if (!selected) return apiStatusError(c, 403, "No linked company identity is available for verification");
+    const org = await loadOrgById(selected.orgId);
+    if (!org) return apiStatusError(c, 403, "Company verification is unavailable");
+    const config = resolveStoredSsoConfig(org.sso_config);
+    if ((!isOidcReady(config) && !isSamlReady(config)) || await requireVerifiedSsoDomain(org, config, actor.user.email)) return apiStatusError(c, 403, "Company verification is unavailable");
+    const { url, state } = await beginSsoFlow(c, org, config, { redirectPath: "/auth/sensitive-sso-complete", sensitiveUserId: actor.userId, sensitiveSessionId: actor.sessionId });
+    setSsoStateCookie(c, state);
+    return c.json({ authorizeUrl: url });
+  })
   .get("/oidc/:orgId/init", async (c) => {
     const orgId = c.req.param("orgId");
     const org = await loadOrgById(orgId);
@@ -1361,6 +1413,10 @@ export const samlCallbackRoutes = new Hono()
       return apiStatusError(c, 403, domainError);
     }
 
+    if (requestRow.sensitive_user_id) {
+      const authTime = typeof payload.auth_time === "number" && Number.isInteger(payload.auth_time) ? payload.auth_time * 1000 : NaN;
+      return finishSensitiveSsoCallback(c, { orgId: org.id, provider: "oidc", issuer: metadata.issuer, subject: payload.sub, email }, requestRow, authTime);
+    }
     return await finishSsoCallback(c, {
       orgId: org.id,
       provider: "oidc",
@@ -1414,7 +1470,7 @@ export const samlCallbackRoutes = new Hono()
     }
 
     const samlMetadata = await fetchSamlMetadata(config.metadataUrl!);
-    const validated = await createSamlClient(c, org, samlMetadata).validatePostResponseAsync({ SAMLResponse: samlResponse });
+    const validated = await createSamlClient(c, org, samlMetadata, undefined, requestRow.sensitive_user_id ? requestRow : undefined).validatePostResponseAsync({ SAMLResponse: samlResponse });
     const profile = validated.profile as Record<string, unknown> | null;
     if (!profile) {
       return apiStatusError(c, 400, "SAML response did not contain an authenticated profile");
@@ -1434,6 +1490,10 @@ export const samlCallbackRoutes = new Hono()
       return apiStatusError(c, 403, domainError);
     }
 
+    if (requestRow.sensitive_user_id) {
+      const instant = verifiedSamlSensitiveAuthTime(profile, samlMetadata.issuer ?? "", requestRow.state);
+      return finishSensitiveSsoCallback(c, { orgId: org.id, provider: "saml", issuer: samlMetadata.issuer ?? "", subject, email }, requestRow, instant ?? NaN);
+    }
     const issuer = (typeof profile.issuer === "string" && profile.issuer)
       || samlMetadata.issuer
       || config.metadataUrl!;
