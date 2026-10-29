@@ -149,16 +149,15 @@ async function pageStage(args: {
     }))),
   };
   const storage = {
-    downloadToTempFile: async () => {
+    downloadToTempFile: async (key: string) => {
       const dir = await mkdtemp(path.join(scratch, "page-"));
-      const file = path.join(dir, "page.png");
+      const file = path.join(dir, `page-${key.split("/")[1]}.png`);
       await writeFile(file, "png");
       return file;
     },
   };
   visionRuntime.execute.mockImplementation(async ({ imagePath }: { imagePath: string }) => {
-    void imagePath;
-    const pageNumber = Number(visionRuntime.execute.mock.calls.length);
+    const pageNumber = Number(/page-(\d+)\.png$/.exec(imagePath)?.[1]);
     const answer = args.answer(pageNumber);
     if (answer instanceof Error) throw answer;
     return {
@@ -256,24 +255,21 @@ describe("vision page loop under the guard", () => {
   it("records mixed outcomes: read, rejected with text, rejected without text", async () => {
     const harness = await pageStage({
       pages: 3,
-      answer: (call) => (call === 1 ? { text: "page one read by vision" } : rejection()),
+      answer: (page) => (page === 1 ? { text: "page one read by vision" } : rejection()),
     });
     scratch = harness.scratch;
     const state = runState();
     const skips = new Map<number, VisionPageSkip>();
     const outputs = await harness.run(state, { inkCheckPages: new Set(), fallbackTextPages: new Set([2]) }, skips);
-    expect(outputs.map((page) => page.pageNumber)).toHaveLength(1);
+    expect(outputs.map((page) => page.pageNumber)).toEqual([1]);
     const facts = buildVisionPageFacts({
       documentId: "doc", runId: "run-1", pageCount: 3, selected: [1, 2, 3], processed: outputs, cap: 3, outcomes: skips,
     });
     const statuses = facts.map((fact) => fact.visionStatus);
     expect(statuses.filter((status) => status === "extracted")).toHaveLength(1);
     // A rejected page with usable text keeps it (`rejected`); without any it is an explicit failure.
-    const rejectedPage = [...skips.values()].find((skip) => skip.fallbackText)!;
-    const lostPage = [...skips.values()].find((skip) => !skip.fallbackText)!;
-    expect(facts[rejectedPage.pageNumber - 1]!.visionStatus).toBe("rejected");
-    expect(facts[lostPage.pageNumber - 1]!.visionStatus).toBe("failed");
-    expect(facts[rejectedPage.pageNumber - 1]!.visionTextBytes).toBeNull();
+    expect(statuses).toEqual(["extracted", "rejected", "failed"]);
+    expect(facts[1]!.visionTextBytes).toBeNull();
   });
 
   it("a page task stores the skip, not model text", async () => {
