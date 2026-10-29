@@ -236,6 +236,28 @@ describe("ingest report: observed content", () => {
     expect(report.searchability.byReason.find((entry) => entry.reason === "document-failed")?.pages).toBe(2);
   });
 
+  it("rules: rejected vision pages keep their text; guard-stopped pages are explained, not re-proposed", () => {
+    const report = build({
+      documents: [doc("hostile", { pageCount: 4 })],
+      pages: pages("hostile", [
+        { text: 1800, images: 1, vision: "rejected", chunks: 1 },
+        { text: 0, images: 1, vision: "guarded" },
+        { text: 0, images: 1, vision: "guarded" },
+        { text: 0, images: 1, vision: "failed" },
+      ]),
+    });
+    const byId = Object.fromEntries(report.recommendations.map((rec) => [rec.id, rec]));
+    expect(byId["vision-rejected-pages"]).toMatchObject({ severity: "info", affectedPages: 1, patch: null });
+    expect(byId["vision-stopped"]).toMatchObject({ severity: "medium", affectedPages: 2, patch: null, reprocessDocumentIds: [] });
+    // A rejected page without usable text is a vision failure.
+    expect(byId["retry-vision-failures"]?.affectedPages).toBe(1);
+    // Neither is a missing setting: only the failed page counts toward the vision-coverage rule.
+    expect(byId["turn-on-vision"]).toBeUndefined();
+    expect(byId["vision-all-pages"]?.affectedPages ?? 0).toBeLessThanOrEqual(1);
+    expect(report.extraction).toMatchObject({ visionRejectedPages: 1, visionStoppedPages: 2, visionFailedPages: 1 });
+    expect(report.searchability.byReason.find((entry) => entry.reason === "vision-stopped")?.pages).toBe(2);
+  });
+
   it("viewers see recommendations but cannot act", () => {
     const report = build({ pipeline: pipeline({ visionFallback: false }), documents: [doc("scan", { pageCount: 1 })], pages: pages("scan", [{ text: 0, images: 1 }]), canEdit: false });
     expect(report.permissions.canEdit).toBe(false);
@@ -384,6 +406,10 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
       stages: [stage("tables", "classify-route", { tablePages: 2 })],
     }),
     build({ documents: [doc("done", { pageCount: 1 })], pages: pages("done", [{ text: 0, images: 1, vision: "extracted", chunks: 1 }]), stages: [stage("done", "vision-extract", { selectedPages: 1, pages: 1, costCents: 1 })] }),
+    build({
+      documents: [doc("hostile", { pageCount: 3 })],
+      pages: pages("hostile", [{ text: 1800, images: 1, vision: "rejected", chunks: 1 }, { text: 0, images: 1, vision: "guarded" }, { text: 0, images: 1, vision: "failed" }]),
+    }),
   ];
 
   it("accounts for every recommendation id the report can emit", () => {

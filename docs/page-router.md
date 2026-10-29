@@ -166,7 +166,10 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
-| `VISION_ROUTING_V2` | `off` | off, on, workspace ids | Legacy vision routing v2 (below) for every run or a comma-separated canary list of workspace ids. Worker only. A malformed value reads as off with one warning. |
+| `VISION_ROUTING_V2` | `off` | off, on, workspace ids | Legacy vision routing v2 (below) for every run or a comma-separated canary list of workspace ids. Worker only, read once per run at run start. A malformed value reads as off with one warning. |
+| `VISION_RUN_PROVIDER_BUDGET_CENTS` | `2500` | cents > 0 | Vision provider spend per run, rejected attempts included (vision run guard, below). |
+| `VISION_REJECTION_BREAKER_MIN_PAGES` | `10` | integer >= 1 | Rejected pages before the rejection breaker can stop vision for the run. |
+| `VISION_REJECTION_BREAKER_RATE` | `0.2` | 0 < rate <= 1 | Rejected share of attempted pages that trips the breaker. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -187,30 +190,70 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 ### Legacy vision routing v2
 
 `VISION_ROUTING_V2` gates the fixes to the legacy (non-router) vision path so production can
-enable them for one workspace before everyone. The worker resolves it once per run from the
-run's workspace (`worker/src/lib/vision-routing-v2.ts`) and passes `{ routingV2 }` into the pure
-routing functions; none of them read the environment. With the flag off, routing matches the
-pre-v2 behaviour exactly.
+enable them for one workspace before everyone. The worker reads it once, when the run starts
+(`startRun`), and persists the resolved version as the run artifact `run:vision-routing-version`
+(`v1` or `v2`). Extract-markdown, classify-route, vision fan-out and page tasks read that artifact,
+so workers with different environments, retries and rehydrated runs route a run the same way
+(`worker/src/lib/vision-routing-v2.ts`). The pure routing functions take `{ routingV2 }`; none
+of them read the environment. Every comma-separated entry must be a valid workspace id: `ws-a,,`,
+`,ws-a` and `ws-a,` are malformed and read as off with one warning.
 
 Gated (v2 only):
 
 - Page triage counts native words from page facts' shared `pdftotext` run, so an OCR'd scan stays
-  sparse (`extract-markdown` passes `textLayerPages`); uploaded images get full-page raster
-  evidence (`imageFilePageEvidence`).
-- Document labels use whole-word terms and need two distinct body terms (`distinctTerms`).
-- Page routes: the numeric-row table cue, garbled-text detection, Unicode-math formula signals,
-  and keeping structured routes (table, form, formula, figure) for OCR'd pages.
+  sparse (`extract-markdown` passes `textLayerPages`; when `pdftotext` failed or its pages do not
+  line up, triage keeps the v1 count); uploaded images get full-page raster evidence
+  (`imageFilePageEvidence`).
+- Document labels use whole-word terms and need two distinct body terms, read from the first
+  256 KB of text (`hasDistinctTerms` stops at the answer, so memory does not grow with the upload).
+- Page routes: the numeric-row table cue, garbled-text detection, Unicode-math formula signals
+  (each scanning the first 64 KB of a page), and keeping structured routes (table, form, formula,
+  figure) for OCR'd pages.
 - A page without text layer or images whose OCR text has words counts as drawn content.
 - `selectLegacyVisionPages` also admits formula pages and lets the text route decide when raster
   evidence does not authorize OCR; v1 lets any page-evidence decision decide alone.
 
-Always on: a page whose vision output is rejected keeps its native or OCR text
-(`shouldFailOpenVisionError`), and a PDF with no extractable text but heavy pages
-(`sourceBytesPerPage`) is drawn content sent to vision instead of read as blank.
+With the flag off, routing is v1 except for these always-on changes, so it does **not** reproduce
+`origin/main` exactly:
 
-`classify-route` and `vision-extract` record `routingVersion` (`v1` or `v2`) in their stage stats
-and the `vision-text-density-score` / `vision-fail-open` performance metadata, so canary runs can
-be told apart in telemetry.
+- A page whose vision output is rejected (degenerate, refusal, truncated) no longer fails the
+  document (`shouldFailOpenVisionError`). It keeps its native or OCR text when that text is usable
+  (page fact `rejected`); otherwise the page is recorded as `failed`. Its model text is never kept.
+- A PDF with no extractable text whose bytes outside embedded images are large
+  (`drawnBytesPerPage`: file bytes minus every embedded image's bytes, over pages, from page facts'
+  whole-document `pdfimages` listing) nominates its pages as drawn content. Bytes are spoofable, so
+  vision-extract calls a model for such a page only if its own render is not blank
+  (`renderLooksBlank`); padding, metadata, attachments or a large font buy no vision calls.
+- The vision run guard below, and bounded counting in page classification (same counts, no match
+  arrays).
+
+#### Vision run guard
+
+Customers pay only for pages vision reads, and the run cost cap counts only those charges, but a
+rejected attempt still costs the provider call. Every vision call (legacy pages and page-router
+regions) is admitted by a per-run guard (`worker/src/lib/vision-spend-guard.ts`) that counts the
+provider cost of every attempt, billable or not, plus a reservation for each call in flight (two
+attempts of a full output at list price) in this process and in other page tasks. Committed spend
+comes from `usage_attribution` and live `page_work_tasks` leases (`Store.visionRunSpend`). The guard
+stops vision for the rest of the run when:
+
+| Setting | Default | Stops vision when |
+| --- | --- | --- |
+| `VISION_RUN_PROVIDER_BUDGET_CENTS` | 2500 (lowered to the run's `maxCostCents` when set) | committed provider spend plus in-flight reservations would pass it |
+| `VISION_REJECTION_BREAKER_MIN_PAGES` | 10 | at least this many pages were rejected... |
+| `VISION_REJECTION_BREAKER_RATE` | 0.2 | ...and they are at least this share of attempted pages |
+
+A malformed value keeps the default with one warning; the guard cannot be turned off. Pages it
+stopped get the page fact `guarded` (ingest report reason `vision-stopped`) and the vision manifest
+records `visionGuard` with the reason.
+
+Telemetry: `classify-route` and `vision-extract` record `routingVersion` (`v1` or `v2`) in their
+stage stats, the vision manifest and the `vision-text-density-score`, `vision-fail-open` and
+`vision-attempt-failure` performance metadata. Per document, vision-extract logs
+`[vision-rejections] org=<id> run=<id> document=<id> rejected=<n> attempted=<n> rate=<r>` and records
+the `vision-rejection-rate` metric (alert per org on a sustained rate), plus `vision-page-outcome`
+per page without output and `vision-guard-stop` (`[vision-guard]` log line) when the guard stops a
+run. The manifest's `failedPages` lists each such page with its reason and whether it kept text.
 
 ## Economics
 
