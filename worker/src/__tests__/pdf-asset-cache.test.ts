@@ -17,7 +17,7 @@ import {
   parsePdfPageSizes,
   runLanes,
 } from "../pipeline/pdf-asset-cache.js";
-import { spawnContained } from "../sandbox/teardown.js";
+import { probePidNamespace, spawnContained } from "../sandbox/teardown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
 
@@ -353,7 +353,8 @@ describe("PdfRasterCache", () => {
     expect(defaultPdftoppmProcessConcurrency({ PDF_PDFTOPPM_PROCESS_CONCURRENCY: "1000" })).toBe(32);
   });
 
-  it("holds the slot and scratch until an aborted sibling's real process tree exits, escalating to SIGKILL", async () => {
+  // Needs unprivileged user namespaces for the parser's PID namespace (CI runners may not allow them).
+  it.skipIf(!probePidNamespace().ok)("holds the slot and scratch until an aborted sibling's real process tree exits, escalating to SIGKILL", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -434,8 +435,7 @@ describe("PdfRasterCache", () => {
     const [parserPid, grandchildPid] = treePids;
     // The parser ignored SIGTERM, so it only exited when the grace period ran out and SIGKILL followed.
     expect(exit).not.toBeNull();
-    // The namespace root (unshare) either dies of the signal itself or reports its child's as 128+9,
-    // depending on the host's unshare (CI's reports 137).
+    // The namespace root (unshare) dies of the signal itself or reports its child's as 128+9.
     expect(`${exit!.code}/${exit!.signal}`).toMatch(/^(137\/null|null\/SIGKILL)$/);
     expect(exit!.at - failedAt).toBeGreaterThanOrEqual(graceMs - 50);
     expect(exit!.at - failedAt).toBeLessThan(graceMs + 2_000);
