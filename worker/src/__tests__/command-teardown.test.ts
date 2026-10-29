@@ -313,28 +313,37 @@ describe("stale sandbox scratch sweep", () => {
   it("removes instances whose owner exited or that have no owner for too long, and keeps the rest", () => {
     const root = scratch("docslurp-sweep-");
     const now = Date.now();
-    const make = (name: string, ageMs: number, owner?: number) => {
+    // Age is the owner file's mtime (the worker writes it), or the instance's ctime without one.
+    // The parser can backdate its own instance (here to 1970); that must not age it.
+    const make = (name: string, ownerAgeMs?: number, owner?: number) => {
       const dir = path.join(root, name);
       mkdirSync(path.join(dir, "tmp"), { recursive: true });
       writeFileSync(path.join(dir, "tmp", "parser-output"), "x");
-      if (owner !== undefined) writeFileSync(`${dir}.owner`, `${owner}\n`);
-      const at = new Date(now - ageMs);
-      utimesSync(dir, at, at);
+      if (owner !== undefined) {
+        writeFileSync(`${dir}.owner`, `${owner}\n`);
+        const at = new Date(now - ownerAgeMs!);
+        utimesSync(`${dir}.owner`, at, at);
+      }
+      utimesSync(dir, new Date(0), new Date(0));
       return dir;
     };
     const live = 4242;
     const dead = 4343;
+    const isAlive = (pid: number) => pid === live;
     const ownerGone = make("run-ownergone", 120_000, dead);
     const ownerLive = make("run-ownerlive", 10 * 60 * 60_000, live);
     const fresh = make("run-fresh", 5_000, dead);
-    const unownedOld = make("run-unownedold", 4 * 60 * 60_000);
-    const unownedNew = make("run-unownednew", 60_000);
-    const unrelated = make("keep-me", 10 * 60 * 60_000);
+    const unowned = make("run-unowned");
+    const unrelated = make("keep-me");
 
-    const removed = sweepStaleSandboxScratch(root, { now, isAlive: (pid) => pid === live });
-    expect(removed.sort()).toEqual([ownerGone, unownedOld].sort());
-    for (const dir of [ownerGone, unownedOld]) expect(existsSync(dir)).toBe(false);
+    expect(sweepStaleSandboxScratch(root, { now, isAlive })).toEqual([ownerGone]);
+    expect(existsSync(ownerGone)).toBe(false);
     expect(existsSync(`${ownerGone}.owner`)).toBe(false);
-    for (const dir of [ownerLive, fresh, unownedNew, unrelated]) expect(existsSync(dir)).toBe(true);
+    for (const dir of [ownerLive, fresh, unowned, unrelated]) expect(existsSync(dir)).toBe(true);
+
+    // Three hours on, the unowned instance (by ctime) and the one whose owner exited are due.
+    const later = sweepStaleSandboxScratch(root, { now: now + 3 * 60 * 60_000 + 1_000, isAlive });
+    expect(later.sort()).toEqual([fresh, unowned].sort());
+    for (const dir of [ownerLive, unrelated]) expect(existsSync(dir)).toBe(true);
   });
 });

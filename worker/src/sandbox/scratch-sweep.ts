@@ -1,5 +1,5 @@
 import type { ChildProcess } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { afterTeardown } from "./teardown.js";
@@ -14,14 +14,32 @@ import { afterTeardown } from "./teardown.js";
  * is gone. It lives outside the instance, where the parser cannot write.
  *
  * The sweep is a heuristic, not a proof that nothing runs: an instance whose owner file is missing
- * or unreadable is removed by age alone (3 hours, longer than any command's wall-clock budget), and
- * a recycled owner pid keeps an instance until that unrelated process exits. Symlinked entries are
- * never followed. Removal after verified teardown (afterTeardown) is the primary path.
+ * is removed by age alone (3 hours, longer than any command's wall-clock budget), and a recycled
+ * owner pid keeps an instance until that unrelated process exits. An owner file that exists but
+ * cannot be read or parsed keeps its instance (logged): only a missing one counts as no owner. The
+ * owner file is replaced atomically (temp file + rename), so a reader never sees it half-written.
+ *
+ * Age never comes from the instance's mtime, which the parser controls (utimes): it is the owner
+ * file's mtime (the worker writes it, the parser cannot), or, without an owner file, the instance's
+ * ctime, which nothing unprivileged can move back. Symlinked entries are never followed. Removal
+ * after verified teardown (afterTeardown) is the primary path.
  */
 
 export type OwnerWriter = (file: string, pid: number) => void;
 
-const writeOwnerFile: OwnerWriter = (file, pid) => writeFileSync(file, `${pid}\n`);
+let ownerWrites = 0;
+
+const writeOwnerFile: OwnerWriter = (file, pid) => {
+  ownerWrites += 1;
+  const temp = `${file}.tmp-${process.pid}-${ownerWrites}`;
+  try {
+    writeFileSync(temp, `${pid}\n`, { mode: 0o600 });
+    renameSync(temp, file);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+};
 
 /**
  * Start a command whose scratch is `dir`, and give that scratch an owner before anything runs:
@@ -81,12 +99,18 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function readOwner(file: string): number | null {
+type Owner = { pid: number; ageMs: number } | "missing" | "unreadable";
+
+function readOwner(file: string, now: number): Owner {
   try {
-    const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
-    return Number.isInteger(pid) && pid > 1 ? pid : null;
-  } catch {
-    return null;
+    const stat = lstatSync(file);
+    if (!stat.isFile()) return "unreadable";
+    const text = readFileSync(file, "utf8").trim();
+    if (!/^\d+$/.test(text)) return "unreadable";
+    const pid = Number.parseInt(text, 10);
+    return pid > 1 ? { pid, ageMs: now - stat.mtimeMs } : "unreadable";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
   }
 }
 
@@ -106,17 +130,21 @@ export function sweepStaleSandboxScratch(root: string, options: SweepOptions = {
   for (const name of entries) {
     if (!/^run-[A-Za-z0-9]+$/.test(name)) continue;
     const dir = path.join(root, name);
-    let ageMs: number;
+    let ctimeAgeMs: number;
     try {
       const stat = lstatSync(dir);
       if (!stat.isDirectory()) continue;
-      ageMs = now - stat.mtimeMs;
+      ctimeAgeMs = now - stat.ctimeMs;
     } catch {
       continue;
     }
     const ownerFile = `${dir}.owner`;
-    const owner = readOwner(ownerFile);
-    const stale = owner === null ? ageMs >= unownedAfterMs : ageMs >= ownerGoneAfterMs && !isAlive(owner);
+    const owner = readOwner(ownerFile, now);
+    if (owner === "unreadable") {
+      console.warn(`[parser-sandbox] status=sweep-skipped dir=${dir} reason=owner-unreadable`);
+      continue;
+    }
+    const stale = owner === "missing" ? ctimeAgeMs >= unownedAfterMs : owner.ageMs >= ownerGoneAfterMs && !isAlive(owner.pid);
     if (!stale) continue;
     try {
       rmSync(dir, { recursive: true, force: true });
