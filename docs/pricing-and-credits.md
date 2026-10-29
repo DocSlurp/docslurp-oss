@@ -30,7 +30,7 @@ the latest load test. `pnpm pricing:watch` there tracks model prices and where e
 
 | Quality | Billing | Per 1,000 pages |
 | --- | --- | --- |
-| `fast` | Text layer only. Pages without one keep their page image and are never OCR'd or read by a model. Billing follows what the run observed (`splitRemainingPages` in `worker/src/db/page-base-fee.ts`): a page bills Fast with a native text layer or when Fast recorded it as kept as an image or left unread (page facts `kept-as-image` / `not-read`); any other scanned page or image file bills Rich, fail closed. | $0.05 |
+| `fast` | Text layer only. Pages without one keep their page image and are never OCR'd or read by a model. Billing comes from the usage ledger (`splitRemainingPages` in `worker/src/db/page-base-fee.ts`), never from the best-effort page facts: a page bills Rich only when a Rich read of it was recorded for the run (charged as it was read), and every other page, scans and image files included, bills Fast. A workspace cannot combine Fast with visual indexing mode, which embeds page images and bills them Rich. | $0.05 |
 | `auto` (default) | Text pages bill Fast; pages a model reads, and unread scans and image files, bill Rich. | $0.05 to $2.50 |
 | `good` | Vision reads every page (Good turns `visionFallback` on), so every page it reads bills Rich, plus `richPagesForOutputTokens` for long output. A run cost cap can stop vision early; pages it did not read bill as in Auto. On-demand materialization reads every page with vision too. | $2.50 |
 
