@@ -276,6 +276,20 @@ describe("sign-in challenge", () => {
     expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
   });
 
+  it("still revokes trust when a reset already deleted the new session, and runs after the MFA gate", async () => {
+    const { user } = await enrolledUser();
+    const { credentialFingerprint, revokeIfPasswordMoved } = await import("../lib/auth-credential-binding.js");
+    const oldHash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`trust-device-${user.id}-late`, user.id]);
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    expect(await revokeIfPasswordMoved(pool, user.id, "session-already-deleted", credentialFingerprint(oldHash))).toBe(true);
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
+    expect(await revokeIfPasswordMoved(pool, user.id, "any", credentialFingerprint(replaced))).toBe(false);
+    const order = ((await auth.$context).options.plugins ?? []).map((plugin) => plugin.id);
+    expect(order.indexOf("docslurp-credential-recheck")).toBeGreaterThan(order.indexOf("docslurp-mfa"));
+  });
+
   it("cancels a pending challenge when the password is reset", async () => {
     const { user, secret } = await enrolledUser();
     const attacker = new Browser();

@@ -13,7 +13,7 @@ import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
 import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
 import { uniformCodeRefusal } from "./auth-recovery.js";
-import { credentialBindingPlugin, sessionCredentialFingerprint } from "./auth-credential-binding.js";
+import { credentialBindingPlugin, credentialRecheckPlugin, sessionCredentialFingerprint } from "./auth-credential-binding.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
@@ -208,7 +208,9 @@ export const auth = betterAuth({
     recipientLimiter.plugin, credentialBindingPlugin({ pool }),
     ...breachedPasswordPlugins(breachedPasswordPolicy),
     ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
-    sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus })],
+    sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus }),
+    // Last: its after-hook must see what the MFA gate's after-hooks wrote.
+    credentialRecheckPlugin({ pool })],
   session: { ...securityOptions.session, additionalFields: sessionAssuranceFields },
   databaseHooks: {
     session: {

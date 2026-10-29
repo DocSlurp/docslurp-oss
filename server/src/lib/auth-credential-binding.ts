@@ -81,23 +81,42 @@ export async function sessionCredentialFingerprint(pool: Pick<Pool, "query">, ct
 
 /**
  * After a request issues a session, re-reads the password it rests on. If the
- * password changed while the request ran, the session and every trusted
- * device of the user (one may have been minted by this request) are deleted.
- * Either a concurrent reset's own cleanup sees what this request wrote, or
- * this check sees the reset's new password.
+ * password changed while the request ran, the session (if a reset hasn't
+ * already deleted it) and every trusted device of the user (one may have been
+ * minted or rotated by this request) are deleted. Either a concurrent reset's
+ * cleanup sees what this request wrote, or this check sees the new password.
  */
-async function revokeIfPasswordMoved(pool: Pick<Pool, "query">, token: string): Promise<void> {
-  const { rows } = await pool.query<{ user_id: string; stale: boolean }>(
-    `select s."userId" as user_id,
-            s."credentialFingerprint" is distinct from (
-              select encode(sha256(convert_to(a.password, 'UTF8')), 'hex') from account a
-               where a."userId" = s."userId" and a."providerId" = 'credential' and a.password is not null limit 1) as stale
-       from session s where s.token = $1 and s."credentialFingerprint" is not null`, [token]);
-  const row = rows[0];
-  if (!row?.stale) return;
+export async function revokeIfPasswordMoved(pool: Pick<Pool, "query">, userId: string, token: string, provedFingerprint: string): Promise<boolean> {
+  const { rows } = await pool.query<{ current: string | null }>(
+    `select encode(sha256(convert_to(password, 'UTF8')), 'hex') as current from account
+      where "userId" = $1 and "providerId" = 'credential' and password is not null limit 1`, [userId]);
+  if (rows[0]?.current === provedFingerprint) return false;
   await pool.query(`delete from session where token = $1`, [token]);
-  await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [row.user_id]);
-  console.warn(`[auth] the password changed while a sign-in completed; revoked its session and trusted devices user=${row.user_id}`);
+  await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [userId]);
+  console.warn(`[auth] the password changed while a sign-in completed; revoked its session and trusted devices user=${userId}`);
+  return true;
+}
+
+/**
+ * The final check of a sign-in, registered after the MFA gate so it also sees
+ * a trusted device that gate rotated.
+ */
+export function credentialRecheckPlugin(options: { pool: Pick<Pool, "query"> }): BetterAuthPlugin {
+  const { pool } = options;
+  return {
+    id: "docslurp-credential-recheck",
+    hooks: {
+      after: [{
+        matcher: (ctx) => ctx.path === "/sign-in/email" || SECOND_FACTOR_PATHS.has(ctx.path ?? ""),
+        handler: createAuthMiddleware(async (ctx) => {
+          const issued = ctx.context.newSession;
+          if (!issued?.session.token) return;
+          const proved = await sessionCredentialFingerprint(pool, ctx).catch(() => null);
+          if (proved) await revokeIfPasswordMoved(pool, issued.user.id, issued.session.token, proved);
+        }),
+      }],
+    },
+  } as BetterAuthPlugin;
 }
 
 const normalizeEmail = (value: unknown) => typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -145,12 +164,6 @@ export function credentialBindingPlugin(options: { pool: Pick<Pool, "query"> }):
         }),
       }],
       after: [{
-        matcher: (ctx) => ctx.path === "/sign-in/email" || SECOND_FACTOR_PATHS.has(ctx.path ?? ""),
-        handler: createAuthMiddleware(async (ctx) => {
-          const issued = ctx.context.newSession;
-          if (issued?.session.token) await revokeIfPasswordMoved(pool, issued.session.token);
-        }),
-      }, {
         // Sign-up succeeded, or the password was right but the address is unverified.
         matcher: (ctx) => ctx.path === "/sign-up/email" || ctx.path === "/sign-in/email",
         handler: createAuthMiddleware(async (ctx) => {
