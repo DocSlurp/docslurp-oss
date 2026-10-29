@@ -29,6 +29,8 @@ import { embedPageImages, withinCostCap, type PageEmbedDeps } from "./page-embed
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { guardedVisionCall } from "../lib/guarded-vision-call.js";
+import { visionGuardFor } from "../lib/vision-spend-guard.js";
 
 export const MAP_BLOCK_PAGES = 15;
 export const COVERAGE_THRESHOLD = 0.85;
@@ -417,6 +419,8 @@ export class DocumentMapStage implements Stage {
   private async ocrPages(args: { document: Document; first: number; last: number; state: WorkflowState; signal?: AbortSignal }): Promise<{ pageTexts: string[]; costCents: number }> {
     const { document, state } = args;
     const pageNumbers = Array.from({ length: args.last - args.first + 1 }, (_, i) => args.first + i);
+    // Vision already stopped for the run: render nothing, call nothing.
+    if (visionGuardFor(state).stop) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
     const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, signal: args.signal });
     const byPage = new Map(artifacts.map((a) => [a.pageNumber, a]));
     let costCents = 0;
@@ -426,12 +430,31 @@ export class DocumentMapStage implements Stage {
       if (!artifact) { pageTexts.push(""); continue; }
       const imagePath = await this.storage.downloadToTempFile(artifact.artifactKey, `map-${pageNumber}-*.png`);
       try {
-        const result = await executeVisionRuntime({
-          imagePath, mimeType: artifact.mimeType, outputPath: `${imagePath}.vision.json`, vision: state.run.pipeline.vision,
-          cfg: this.config, runner: this.runner, privacyMode: state.run.pipeline.privacyMode,
-          signal: args.signal,
+        const vision = state.run.pipeline.vision;
+        const price = (result: { costCents?: number; inputTokens: number; outputTokens: number }) =>
+          result.costCents ?? calculateAiUsageCostCents({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens });
+        // The run's vision guard (provider budget, rejection breaker, org unbilled limit) bounds
+        // map OCR too; a rejected or failed call records its spend there and still throws.
+        const guarded = await guardedVisionCall({
+          host: state, vision, cfg: this.config, imagePath,
+          page: { documentId: document.id, pageNumber },
+          record: (input) => state.usageLedger.record(input),
+          metadata: { mapOcr: true },
+          call: () => executeVisionRuntime({
+            imagePath, mimeType: artifact.mimeType, outputPath: `${imagePath}.vision.json`, vision,
+            cfg: this.config, runner: this.runner, privacyMode: state.run.pipeline.privacyMode,
+            signal: args.signal,
+          }),
+          price,
         });
-        const cents = result.costCents ?? calculateAiUsageCostCents({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens });
+        if (!guarded.admitted) {
+          // Vision stopped for the run: no more OCR calls; the remaining pages stay without text.
+          console.warn(`[document-map] document=${document.id} page=${pageNumber} ocr stopped: ${guarded.stop.reason}`);
+          while (pageTexts.length < pageNumbers.length) pageTexts.push("");
+          break;
+        }
+        const result = guarded.result;
+        const cents = price(result);
         costCents += cents;
         state.usageLedger.record({
           provider: result.provider ?? "vision-runtime", model: result.model, metric: "document-map-ocr", amount: 1, unit: "page",

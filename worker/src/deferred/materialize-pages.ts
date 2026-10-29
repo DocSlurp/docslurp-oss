@@ -33,8 +33,8 @@ import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type Vector
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-runtime.js";
-import { findVisionOutputRejected } from "../tools/vision-stream.js";
+import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { guardedVisionCall, guardedVisionFailureCost, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
 
@@ -282,49 +282,58 @@ export async function materializePageRange(
     else ocrPages.push(page);
   }
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
+  // Every OCR call passes the run's vision guard: the run's provider budget and rejection breaker
+  // and the org's rolling unbilled limit, beside this materialization's own credit budget.
+  const guardHost = { run, ...(deps.store?.visionSpend ? { visionSpend: deps.store.visionSpend } : {}) };
   await mapLimit(ocrPages, OCR_CONCURRENCY, async (page) => {
     if (spentCents >= budgetCents) {
       released.push(page);
       failed.set(page, "credit-limit");
       return;
     }
+    let guarded: GuardedVisionOutcome<OcrPageResult>;
     try {
-      const ocr = await ops.ocrPage(document, page, { runId: input.runId, pipeline });
-      const event = deps.usage.record({
-        provider: ocr.provider ?? "vision-runtime",
-        model: ocr.model,
-        metric: "page-analysis",
-        amount: 1,
-        unit: "page",
-        costCents: ocr.costCents,
-        inputTokens: ocr.inputTokens,
-        outputTokens: ocr.outputTokens,
-        metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+      guarded = await guardedVisionCall({
+        host: guardHost,
+        vision: pipeline.vision,
+        cfg: deps.config,
+        page: { documentId, pageNumber: page },
+        record: (usage) => deps.usage.record(usage),
+        metadata: { materializedBy: input.reason, sessionId: input.sessionId },
+        call: () => ops.ocrPage(document, page, { runId: input.runId, pipeline }),
+        price: (ocr) => ocr.costCents,
       });
-      // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
-      void event;
-      const cost = pageCredits("rich", richPagesForOutputTokens(ocr.outputTokens));
-      spentCents += cost;
-      if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
-      else prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
     } catch (error) {
-      // A page rejected on every attempt was still billed: record the summed spend and count it against the budget.
-      const rejected = findVisionOutputRejected(error);
-      if (rejected) {
-        const usage = rejectedVisionUsageInput(rejected, rejected.costCents ?? calculateAiUsageCostCents({
-          inputTokens: rejected.inputTokens,
-          outputTokens: rejected.outputTokens,
-          costPer1kInputTokens: deps.config.costPer1kInputTokens,
-          costPer1kOutputTokens: deps.config.costPer1kOutputTokens,
-        }), "vision-runtime");
-        const event = deps.usage.record({
-          ...usage,
-          metadata: { ...usage.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
-        });
-        spentCents += event?.costCents ?? usage.costCents;
-      }
+      // A page rejected on every attempt (or failed after billing) was recorded with its spend by
+      // the guarded call: count it against the budget.
+      spentCents += guardedVisionFailureCost(error) ?? 0;
       failed.set(page, error instanceof Error ? error.message : String(error));
+      return;
     }
+    if (!guarded.admitted) {
+      // Vision stopped for the run or the org: the page stays claimable for later.
+      released.push(page);
+      failed.set(page, `vision-stopped:${guarded.stop.reason}`);
+      return;
+    }
+    const ocr = guarded.result;
+    const event = deps.usage.record({
+      provider: ocr.provider ?? "vision-runtime",
+      model: ocr.model,
+      metric: "page-analysis",
+      amount: 1,
+      unit: "page",
+      costCents: ocr.costCents,
+      inputTokens: ocr.inputTokens,
+      outputTokens: ocr.outputTokens,
+      metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+    });
+    // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
+    void event;
+    const cost = pageCredits("rich", richPagesForOutputTokens(ocr.outputTokens));
+    spentCents += cost;
+    if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
+    else prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
   });
 
   // 2. PII check with the workspace policy.

@@ -1,49 +1,43 @@
-import type { UsageEvent } from "../models.js";
+import { randomUUID } from "node:crypto";
 
 /**
- * Per-run guard on vision provider spend. Customers are charged only for pages vision reads
- * (Rich page credits), and the run cost cap counts only those charges, but a rejected attempt
- * (degenerate, refusal, truncated: `billable: false`) still costs us the provider call. A
- * hostile upload can make every page reject, so without this guard the provider spend of a
- * run has no bound once the per-document vision page cap is gone.
+ * Guard on vision provider spend. Customers are charged only for pages vision reads (Rich page
+ * credits), and the run cost cap counts only those charges, but a rejected or failed attempt
+ * (`billable: false`) still costs us the provider call. A hostile upload can make every page
+ * reject, so without this guard the provider spend of a run has no bound once the per-document
+ * vision page cap is gone, and many small runs from one org would each start from zero.
  *
- * Before each vision call the stage asks `admit`. The guard counts the provider cost of every
- * vision attempt in the run (billable or not) plus a reservation for each call in flight, and:
+ * Every vision provider call (legacy pages, routed regions and their fallbacks, document-map
+ * OCR, self-critique, deferred page materialization) asks `admit` first with a reservation priced
+ * at that call's own model and a bounded input and output size (`visionCallReserveCents`). The
+ * backend admits atomically per run and per org (Postgres: advisory locks, so every worker of the
+ * run sees the same ledger) and refuses when:
  *
- * - **Provider budget**: refuses when the projected spend would pass the run's budget
- *   (`VISION_RUN_PROVIDER_BUDGET_CENTS`, default 2,500 cents, lowered to the run cost cap when the
- *   run has one).
- * - **Rejection breaker**: refuses once at least `VISION_REJECTION_BREAKER_MIN_PAGES` pages
- *   (default 10) were rejected and they are at least `VISION_REJECTION_BREAKER_RATE` (default 0.2)
- *   of the pages attempted.
+ * - **Provider budget**: the run's settled vision spend plus every live reservation of the run
+ *   plus this one passes `VISION_RUN_PROVIDER_BUDGET_CENTS` (default 2,500 cents, lowered to the
+ *   run cost cap when the run has one).
+ * - **Rejection breaker**: at least `VISION_REJECTION_BREAKER_MIN_PAGES` pages (default 10) were
+ *   rejected and they are at least `VISION_REJECTION_BREAKER_RATE` (default 0.2) of the pages
+ *   attempted in the run.
+ * - **Org unbilled limit**: the org's unbilled vision provider spend (rejected and failed
+ *   attempts) over the last `VISION_ORG_UNBILLED_WINDOW_HOURS` (default 24), plus every live
+ *   reservation of the org plus this one, passes `VISION_ORG_UNBILLED_LIMIT_CENTS` (default
+ *   5,000 cents). This bound holds across runs, reprocessing and extraction.
  *
- * Spend committed by other activities (page tasks, shards, earlier attempts) comes from the
- * store (`usage_attribution` plus live page-task leases); spend not yet checkpointed comes from
- * this process's usage ledger. A refusal is sticky for the guard's lifetime.
+ * Each admitted call settles once, whatever happens to it: its actual provider cost, whether the
+ * customer is billed for it, and the page it read (rejected or not). A reservation that is never
+ * settled (a crashed worker) counts in full once it expires. A refusal is sticky for the guard.
  */
-export interface VisionRunSpend {
-  /** Provider cost of every vision attempt committed for the run, billable or not. */
-  providerCostCents: number;
-  /** Distinct pages with at least one committed vision attempt. */
-  attemptedPages: number;
-  /** Distinct pages whose committed attempt was rejected. */
-  rejectedPages: number;
-  /** Vision page tasks of the run running in other activities (live leases). */
-  inFlightPages: number;
-}
-
-export type VisionRunSpendSource = (
-  runId: string,
-  exclude?: { documentId: string; pageNumber: number },
-) => Promise<VisionRunSpend>;
-
 export interface VisionGuardConfig {
   budgetCents: number;
   breakerMinRejectedPages: number;
   breakerRejectedRate: number;
+  /** Rolling limit on the org's unbilled vision provider spend. */
+  orgUnbilledLimitCents: number;
+  orgWindowHours: number;
 }
 
-export type VisionGuardStopReason = "provider-budget" | "rejection-breaker";
+export type VisionGuardStopReason = "provider-budget" | "rejection-breaker" | "org-unbilled-limit";
 
 export interface VisionGuardStop {
   reason: VisionGuardStopReason;
@@ -52,20 +46,58 @@ export interface VisionGuardStop {
   budgetCents: number;
   attemptedPages: number;
   rejectedPages: number;
+  orgUnbilledCents: number;
+  orgLimitCents: number;
+}
+
+/** What one admitted call cost once it finished (success, rejection or failure). */
+export interface VisionSettlement {
+  /** Provider cost of the call, billable or not. */
+  costCents: number;
+  /** The customer is charged for the call (a page read); false for rejected and failed attempts. */
+  billable: boolean;
+  /** The page the call read, for the rejection breaker. */
+  page?: { documentId: string; pageNumber: number; rejected: boolean };
+}
+
+/** The run's and org's ledger as the backend read it, under its locks. */
+export interface VisionSpendSnapshot {
+  runCostCents: number;
+  runReservedCents: number;
+  attemptedPages: number;
+  rejectedPages: number;
+  orgUnbilledCents: number;
+  orgReservedCents: number;
+}
+
+export interface VisionAdmitRequest {
+  runId: string;
+  orgId: string | null;
+  reserveCents: number;
+  config: VisionGuardConfig;
+}
+
+export type VisionBackendAdmission =
+  | { admitted: true; reservationId: string }
+  | { admitted: false; stop: VisionGuardStop };
+
+/** Shared vision spend ledger: Postgres in workers (db/vision-spend-store.ts), memory otherwise. */
+export interface VisionSpendBackend {
+  admit(request: VisionAdmitRequest): Promise<VisionBackendAdmission>;
+  settle(reservationId: string, settlement: VisionSettlement): Promise<void>;
 }
 
 export type VisionAdmission =
-  | { admitted: true; release: () => void }
+  | { admitted: true; settle: (settlement: VisionSettlement) => Promise<void> }
   | { admitted: false; stop: VisionGuardStop };
 
 export const DEFAULT_VISION_RUN_PROVIDER_BUDGET_CENTS = 2_500;
 export const DEFAULT_VISION_REJECTION_BREAKER_MIN_PAGES = 10;
 export const DEFAULT_VISION_REJECTION_BREAKER_RATE = 0.2;
-/** Vision usage metrics: a page read and a failed or rejected attempt. */
-export const VISION_USAGE_METRICS = ["page-analysis", "page-analysis-attempt"] as const;
-/** How long a store snapshot is reused before the guard reads it again. */
-const REMOTE_REFRESH_MS = 5_000;
-const REMOTE_REFRESH_ADMISSIONS = 20;
+export const DEFAULT_VISION_ORG_UNBILLED_LIMIT_CENTS = 5_000;
+export const DEFAULT_VISION_ORG_WINDOW_HOURS = 24;
+/** A reservation not settled within this long (a crashed worker) counts in full. */
+export const VISION_RESERVATION_TTL_MS = 15 * 60_000;
 
 const warned = new Set<string>();
 
@@ -99,146 +131,185 @@ export function resolveVisionGuardConfig(
       DEFAULT_VISION_REJECTION_BREAKER_MIN_PAGES, (v) => v >= 1)),
     breakerRejectedRate: envNumber(env, "VISION_REJECTION_BREAKER_RATE", DEFAULT_VISION_REJECTION_BREAKER_RATE,
       (v) => v > 0 && v <= 1),
+    orgUnbilledLimitCents: envNumber(env, "VISION_ORG_UNBILLED_LIMIT_CENTS", DEFAULT_VISION_ORG_UNBILLED_LIMIT_CENTS,
+      (v) => v > 0),
+    orgWindowHours: Math.trunc(envNumber(env, "VISION_ORG_UNBILLED_WINDOW_HOURS", DEFAULT_VISION_ORG_WINDOW_HOURS,
+      (v) => v >= 1 && v <= 168)),
   };
 }
 
-function isVisionUsage(event: UsageEvent): boolean {
-  return (VISION_USAGE_METRICS as readonly string[]).includes(event.metric);
-}
-
-function pageKey(event: UsageEvent): string | null {
-  const documentId = event.metadata?.documentId;
-  const pageNumber = event.metadata?.pageNumber;
-  return typeof documentId === "string" && typeof pageNumber === "number" ? `${documentId}:${pageNumber}` : null;
-}
-
-export function isRejectedVisionAttempt(event: UsageEvent): boolean {
-  return event.metric === "page-analysis-attempt" && event.metadata?.outcome === "rejected";
-}
-
-/** Provider cost of a vision usage event, as `usage-event-store` persists it (`providerCostCents`). */
-function providerCost(event: UsageEvent): number {
-  const stored = event.metadata?.providerCostCents;
-  const cost = typeof stored === "number" ? stored : Number(event.costCents);
-  return Number.isFinite(cost) && cost > 0 ? cost : 0;
-}
-
-interface LocalTally {
-  costCents: number;
-  attempted: Set<string>;
-  rejected: Set<string>;
-}
-
-function tally(events: readonly UsageEvent[]): LocalTally {
-  const result: LocalTally = { costCents: 0, attempted: new Set(), rejected: new Set() };
-  for (const event of events) {
-    if (!isVisionUsage(event)) continue;
-    result.costCents += providerCost(event);
-    const key = pageKey(event);
-    if (!key) continue;
-    result.attempted.add(key);
-    if (isRejectedVisionAttempt(event)) result.rejected.add(key);
+/** The admission rule both backends apply to the snapshot they read under their locks. */
+export function decideVisionAdmission(
+  snapshot: VisionSpendSnapshot,
+  reserveCents: number,
+  config: VisionGuardConfig,
+  orgScoped: boolean,
+): VisionGuardStop | null {
+  const reservedCents = snapshot.runReservedCents + reserveCents;
+  let reason: VisionGuardStopReason | null = null;
+  if (snapshot.rejectedPages >= config.breakerMinRejectedPages &&
+    snapshot.rejectedPages / Math.max(1, snapshot.attemptedPages) >= config.breakerRejectedRate) {
+    reason = "rejection-breaker";
+  } else if (snapshot.runCostCents + reservedCents > config.budgetCents) {
+    reason = "provider-budget";
+  } else if (orgScoped && snapshot.orgUnbilledCents + snapshot.orgReservedCents + reserveCents > config.orgUnbilledLimitCents) {
+    reason = "org-unbilled-limit";
   }
-  return result;
+  if (!reason) return null;
+  return {
+    reason,
+    providerCostCents: round(snapshot.runCostCents),
+    reservedCents: round(reservedCents),
+    budgetCents: config.budgetCents,
+    attemptedPages: snapshot.attemptedPages,
+    rejectedPages: snapshot.rejectedPages,
+    orgUnbilledCents: round(snapshot.orgUnbilledCents),
+    orgLimitCents: config.orgUnbilledLimitCents,
+  };
+}
+
+export function sanitizeCents(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Process-local ledger for runs without a store (tests, local CLI runs). Same rule as the
+ * Postgres backend; it only sees this process.
+ */
+export class MemoryVisionSpendBackend implements VisionSpendBackend {
+  private readonly runs = new Map<string, { costCents: number; pages: Map<string, boolean> }>();
+  private readonly orgs = new Map<string, Array<{ at: number; cents: number }>>();
+  private readonly reservations = new Map<string, { runId: string; orgId: string | null; cents: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  async admit(request: VisionAdmitRequest): Promise<VisionBackendAdmission> {
+    const reserve = sanitizeCents(request.reserveCents);
+    const run = this.runs.get(request.runId) ?? { costCents: 0, pages: new Map() };
+    const live = [...this.reservations.values()];
+    const since = this.now() - request.config.orgWindowHours * 3_600_000;
+    const snapshot: VisionSpendSnapshot = {
+      runCostCents: run.costCents,
+      runReservedCents: live.filter((r) => r.runId === request.runId).reduce((sum, r) => sum + r.cents, 0),
+      attemptedPages: run.pages.size,
+      rejectedPages: [...run.pages.values()].filter(Boolean).length,
+      orgUnbilledCents: request.orgId
+        ? (this.orgs.get(request.orgId) ?? []).filter((e) => e.at > since).reduce((sum, e) => sum + e.cents, 0)
+        : 0,
+      orgReservedCents: request.orgId
+        ? live.filter((r) => r.orgId === request.orgId).reduce((sum, r) => sum + r.cents, 0)
+        : 0,
+    };
+    const stop = decideVisionAdmission(snapshot, reserve, request.config, request.orgId !== null);
+    if (stop) return { admitted: false, stop };
+    const reservationId = randomUUID();
+    this.reservations.set(reservationId, { runId: request.runId, orgId: request.orgId, cents: reserve });
+    return { admitted: true, reservationId };
+  }
+
+  async settle(reservationId: string, settlement: VisionSettlement): Promise<void> {
+    const reservation = this.reservations.get(reservationId);
+    if (!reservation) return;
+    this.reservations.delete(reservationId);
+    const cost = sanitizeCents(settlement.costCents);
+    const run = this.runs.get(reservation.runId) ?? { costCents: 0, pages: new Map() };
+    run.costCents += cost;
+    if (settlement.page) {
+      const key = `${settlement.page.documentId}:${settlement.page.pageNumber}`;
+      run.pages.set(key, run.pages.get(key) === true || settlement.page.rejected);
+    }
+    this.runs.set(reservation.runId, run);
+    if (!settlement.billable && cost > 0 && reservation.orgId) {
+      const entries = this.orgs.get(reservation.orgId) ?? [];
+      entries.push({ at: this.now(), cents: cost });
+      this.orgs.set(reservation.orgId, entries);
+    }
+  }
+}
+
+/** Shared by every store-less state in this process, so page tasks of one run see each other. */
+const processBackend = new MemoryVisionSpendBackend();
+
+export interface VisionGuardHost {
+  run: { id: string; orgId?: string | null; pipeline: { maxCostCents?: number | null } };
+  /** Set by loadRunState from the store; absent in tests and store-less runs. */
+  visionSpend?: VisionSpendBackend;
 }
 
 export class VisionRunGuard {
   private stopped: VisionGuardStop | null = null;
-  private inFlightCents = 0;
-  /** Store snapshot plus the ledger's pending vision usage when it was read. */
-  private base: { spend: VisionRunSpend; pending: LocalTally; at: number; admissions: number } | null = null;
-  /** Vision usage this guard has seen recorded since `base` was read. */
-  private recordedEvents: UsageEvent[] = [];
 
   constructor(
-    private readonly runId: string,
+    private readonly run: { id: string; orgId: string | null },
     private readonly config: VisionGuardConfig,
-    private readonly pendingUsage: () => readonly UsageEvent[],
-    private readonly source?: VisionRunSpendSource,
-    private readonly exclude?: { documentId: string; pageNumber: number },
-    private readonly now: () => number = Date.now,
+    private readonly backend: VisionSpendBackend,
   ) {}
 
   get stop(): VisionGuardStop | null {
     return this.stopped;
   }
 
-  /** Tell the guard about a vision usage event this process recorded (success, failure or rejection). */
-  observe(event: UsageEvent | null | undefined): void {
-    if (event && isVisionUsage(event)) this.recordedEvents.push(event);
-  }
-
-  /** Admit one vision call reserving `reserveCents`, or refuse with why. */
+  /**
+   * Admit one vision call reserving `reserveCents`, or refuse with why. An admitted call must
+   * settle exactly once (later calls are ignored); settling never throws.
+   */
   async admit(reserveCents: number): Promise<VisionAdmission> {
     if (this.stopped) return { admitted: false, stop: this.stopped };
-    const reserve = Number.isFinite(reserveCents) && reserveCents > 0 ? reserveCents : 0;
-    const spend = await this.currentSpend();
-    const reservedCents = (spend.inFlightPages + 1) * reserve + this.inFlightCents;
-    const { breakerMinRejectedPages, breakerRejectedRate, budgetCents } = this.config;
-    let reason: VisionGuardStopReason | null = null;
-    if (spend.rejectedPages >= breakerMinRejectedPages &&
-      spend.rejectedPages / Math.max(1, spend.attemptedPages) >= breakerRejectedRate) {
-      reason = "rejection-breaker";
-    } else if (spend.providerCostCents + reservedCents > budgetCents) {
-      reason = "provider-budget";
+    const admission = await this.backend.admit({
+      runId: this.run.id, orgId: this.run.orgId, reserveCents: sanitizeCents(reserveCents), config: this.config,
+    });
+    if (!admission.admitted) {
+      this.stopped = admission.stop;
+      console.warn(
+        `[vision-guard] org=${this.run.orgId ?? "none"} run=${this.run.id} stopped=${admission.stop.reason} ` +
+          `providerCents=${admission.stop.providerCostCents} reservedCents=${admission.stop.reservedCents} ` +
+          `budgetCents=${admission.stop.budgetCents} orgUnbilledCents=${admission.stop.orgUnbilledCents} ` +
+          `orgLimitCents=${admission.stop.orgLimitCents} rejected=${admission.stop.rejectedPages} attempted=${admission.stop.attemptedPages}`,
+      );
+      return admission;
     }
-    if (reason) {
-      this.stopped = {
-        reason,
-        providerCostCents: round(spend.providerCostCents),
-        reservedCents: round(reservedCents),
-        budgetCents,
-        attemptedPages: spend.attemptedPages,
-        rejectedPages: spend.rejectedPages,
-      };
-      return { admitted: false, stop: this.stopped };
-    }
-    this.inFlightCents += reserve;
-    let released = false;
+    let settled = false;
     return {
       admitted: true,
-      release: () => {
-        if (released) return;
-        released = true;
-        this.inFlightCents -= reserve;
+      settle: async (settlement) => {
+        if (settled) return;
+        settled = true;
+        try {
+          await this.backend.settle(admission.reservationId, settlement);
+        } catch (error) {
+          // The reservation stays and counts in full until it expires: stricter, never looser.
+          console.warn(`[vision-guard] run=${this.run.id} settle failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
       },
     };
   }
+}
 
-  /**
-   * Committed spend from the store (refreshed every few seconds or admissions) plus everything
-   * recorded in this process since: the ledger's pending events when the snapshot was read (read
-   * before the store, so an event checkpointed in between counts twice rather than never) and
-   * events observed after it.
-   */
-  private async currentSpend(): Promise<VisionRunSpend> {
-    const now = this.now();
-    // Without a store nothing is committed elsewhere: read the ledger once and keep counting what
-    // this guard observes (a checkpoint could otherwise drop events from both sides).
-    const stale = this.base !== null && this.source !== undefined &&
-      (now - this.base.at >= REMOTE_REFRESH_MS || this.base.admissions >= REMOTE_REFRESH_ADMISSIONS);
-    if (!this.base || stale) {
-      const pending = tally(this.pendingUsage());
-      this.recordedEvents = [];
-      const spend = this.source
-        ? await this.source(this.runId, this.exclude)
-        : { providerCostCents: 0, attemptedPages: 0, rejectedPages: 0, inFlightPages: 0 };
-      this.base = { spend, pending, at: now, admissions: 0 };
-    }
-    this.base.admissions += 1;
-    const since = tally(this.recordedEvents);
-    const { spend, pending } = this.base;
-    // Page counts: committed pages plus local pages (a page counted on both sides is rare and
-    // only makes the guard stricter).
-    const attempted = new Set([...pending.attempted, ...since.attempted]);
-    const rejected = new Set([...pending.rejected, ...since.rejected]);
-    return {
-      providerCostCents: spend.providerCostCents + pending.costCents + since.costCents,
-      attemptedPages: spend.attemptedPages + attempted.size,
-      rejectedPages: spend.rejectedPages + rejected.size,
-      inFlightPages: spend.inFlightPages,
-    };
+const guards = new WeakMap<object, VisionRunGuard>();
+
+/** The vision guard of one activity's state (one per state, so a refusal is sticky for it). */
+export function visionGuardFor(host: VisionGuardHost): VisionRunGuard {
+  let guard = guards.get(host);
+  if (!guard) {
+    guard = new VisionRunGuard({ id: host.run.id, orgId: host.run.orgId ?? null }, resolveVisionGuardConfig(host.run),
+      host.visionSpend ?? processBackend);
+    guards.set(host, guard);
   }
+  return guard;
+}
+
+/** Tokens a page image can take: about one per 700 pixels, at least a typical page's 2,200. */
+const IMAGE_TOKENS_PER_PIXEL = 1 / 700;
+const MIN_IMAGE_TOKENS = 2_200;
+/** Rasters are bounded to 16 MP (lib/raster-bounds.ts): the bound when the size is unknown. */
+const MAX_RASTER_PIXELS = 16_000_000;
+const PROMPT_OVERHEAD_TOKENS = 200;
+
+/** Upper bound on one vision call's input tokens: the prompt plus the image at its size. */
+export function visionInputTokenBound(image: { widthPx: number | null; heightPx: number | null } | null, prompt = ""): number {
+  const pixels = image?.widthPx && image.heightPx ? Math.min(image.widthPx * image.heightPx, MAX_RASTER_PIXELS) : MAX_RASTER_PIXELS;
+  return Math.max(MIN_IMAGE_TOKENS, Math.ceil(pixels * IMAGE_TOKENS_PER_PIXEL)) +
+    Math.ceil(prompt.length / 3) + PROMPT_OVERHEAD_TOKENS;
 }
 
 function round(value: number): number {

@@ -249,6 +249,32 @@ export function findVisionOutputRejected(error: unknown): VisionOutputRejectedEr
   return null;
 }
 
+const acceptedAttemptErrors = new WeakSet<object>();
+
+/** Provider usage a failed (not rejected) vision call was still billed for. */
+export interface VisionBilledUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Provider charge when known; otherwise the caller prices the tokens. */
+  costCents?: number;
+}
+
+const billedUsage = new WeakMap<object, VisionBilledUsage>();
+
+/** Record on `error` the usage a failed vision call was billed for (first annotation wins). */
+export function attachVisionBilledUsage(error: unknown, usage: VisionBilledUsage): void {
+  if (error && typeof error === "object" && !billedUsage.has(error)) billedUsage.set(error, usage);
+}
+
+/** Usage billed for the failed vision call behind `error` (it may be wrapped as a `cause`), or null. */
+export function findVisionBilledUsage(error: unknown): VisionBilledUsage | null {
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (typeof cur === "object" && billedUsage.has(cur)) return billedUsage.get(cur)!;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 export interface AttemptSummary {
   attempt: number;
   provider: string | null;
@@ -409,7 +435,13 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       throw new Error(`vision request failed: ${response.status} ${text}`);
     }
     const isSse = streaming && (response.headers.get("content-type") ?? "").includes("text/event-stream");
-    attempt = isSse ? await consumeStream(response, () => controller.abort(new Error("degenerate vision output"))) : await consumeJson(response);
+    try {
+      attempt = isSse ? await consumeStream(response, () => controller.abort(new Error("degenerate vision output"))) : await consumeJson(response);
+    } catch (error) {
+      // The provider accepted the request: it may bill the input even though no usage came back.
+      if (error && typeof error === "object") acceptedAttemptErrors.add(error);
+      throw error;
+    }
     return attempt;
   } finally {
     args.signal?.removeEventListener("abort", onCaller);
@@ -457,13 +489,31 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
   for (let index = 1; index <= 2; index++) {
     let attempt: VisionAttempt;
     try {
-      attempt = await runAttempt(args, body, streaming);
+      try {
+        attempt = await runAttempt(args, body, streaming);
+      } catch (error) {
+        if (!(error instanceof StreamStartError)) throw error;
+        // Endpoint rejects or fails streaming before the first chunk: one non-streaming retry of the same attempt.
+        console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
+        streaming = false;
+        attempt = await runAttempt(args, body, false);
+      }
     } catch (error) {
-      if (!(error instanceof StreamStartError)) throw error;
-      // Endpoint rejects or fails streaming before the first chunk: one non-streaming retry of the same attempt.
-      console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
-      streaming = false;
-      attempt = await runAttempt(args, body, false);
+      // Earlier attempts (and an accepted one that broke mid-response) were billed: keep that for the caller.
+      const accepted = error !== null && typeof error === "object" && acceptedAttemptErrors.has(error);
+      const totals = log.length > 0 ? totalsOf(log, args) : null;
+      const estimate = accepted ? { inputTokens: args.inputTokenEstimate, outputTokens: 0 } : null;
+      if (totals || estimate) {
+        const inputTokens = (totals?.inputTokens ?? 0) + (estimate?.inputTokens ?? 0);
+        const outputTokens = (totals?.outputTokens ?? 0) + (estimate?.outputTokens ?? 0);
+        const known = totals?.costCents ?? (totals ? undefined : 0);
+        const estimated = estimate ? args.estimateCostCents?.(estimate) : 0;
+        attachVisionBilledUsage(error, {
+          inputTokens, outputTokens,
+          ...(known !== undefined && estimated !== undefined ? { costCents: known + estimated } : {}),
+        });
+      }
+      throw error;
     }
     last = attempt;
     degenerate ??= attempt.degenerate;

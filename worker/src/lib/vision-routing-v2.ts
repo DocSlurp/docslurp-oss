@@ -15,8 +15,8 @@ import type { WorkspaceRun } from "../models.js";
  *
  * The environment is read once per run, when the run starts (`pinRunRoutingVersion` from
  * `startRun`), and the resolved version is persisted as a run artifact. Every later stage, shard
- * and page task of the run reads that artifact, so workers with different environments, retries
- * and rehydrated runs all route the run the same way.
+ * and page task of the run reads that artifact (`resolveRunRoutingV2`, v1 when it is missing), so
+ * workers with different environments, retries and rehydrated runs all route the run the same way.
  */
 export type VisionRoutingV2Setting =
   | { mode: "off" }
@@ -98,14 +98,17 @@ export function pinRunRoutingVersion(
 }
 
 /**
- * Whether the run routes with v2: the version pinned at run start. A run started before the pin
- * existed (or a state built outside `startRun`, as in tests) pins it on first use.
+ * Whether the run routes with v2: the version pinned at run start. Only `startRun` reads the
+ * environment; a run without a pin (started before pins existed, or a state built outside
+ * `startRun`) routes as v1, so no later stage, shard or retry can fill in a different value.
  */
-export function resolveRunRoutingV2(
-  state: RunRoutingState,
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  return pinRunRoutingVersion(state, env) === "v2";
+export function resolveRunRoutingV2(state: RunRoutingState): boolean {
+  const stored = state.artifactLedger.read(VISION_ROUTING_VERSION_SLOT);
+  if (stored === "v2") return true;
+  if (stored !== undefined && stored !== "v1") {
+    console.warn(`[vision-routing] run=${state.run.id} has routing version ${JSON.stringify(stored.slice(0, 40))}; routing as v1`);
+  }
+  return false;
 }
 
 /** Test hook: forget which malformed values already warned. */

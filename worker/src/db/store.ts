@@ -54,7 +54,7 @@ import {
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
-import { VISION_USAGE_METRICS, type VisionRunSpend } from "../lib/vision-spend-guard.js";
+import { PostgresVisionSpendBackend } from "./vision-spend-store.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -2485,35 +2485,12 @@ export class Store {
     }
   }
 
-  /**
-   * Committed vision spend of one run for the vision provider budget and rejection breaker
-   * (lib/vision-spend-guard.ts): provider cost of every vision attempt, billable or not, through
-   * the shared attribution view, and vision page tasks still running under a live lease.
-   * `exclude` is the caller's own page task, which reserves for itself.
-   */
-  async visionRunSpend(runId: string, exclude?: { documentId: string; pageNumber: number }): Promise<VisionRunSpend> {
-    const [spend] = await this.sql<{ provider_cost_cents: number | string | null; attempted_pages: number; rejected_pages: number }[]>`
-      select
-        coalesce(sum(
-          case when jsonb_typeof(au.metadata -> 'providerCostCents') = 'number'
-            then (au.metadata ->> 'providerCostCents')::double precision * au.share::double precision
-            else au.cost_cents::double precision end
-        ), 0) as provider_cost_cents,
-        count(distinct (au.metadata ->> 'documentId') || ':' || (au.metadata ->> 'pageNumber'))::int as attempted_pages,
-        count(distinct (au.metadata ->> 'documentId') || ':' || (au.metadata ->> 'pageNumber'))
-          filter (where au.metric = 'page-analysis-attempt' and au.metadata ->> 'outcome' = 'rejected')::int as rejected_pages
-      from usage_attribution au
-      where au.run_id = ${runId} and au.metric = any(${[...VISION_USAGE_METRICS]}::text[])`;
-    const [tasks] = await this.sql<{ in_flight: number }[]>`
-      select count(*)::int as in_flight from page_work_tasks
-      where run_id = ${runId} and status = 'processing' and lease_expires_at > now()
-        and not (document_id = ${exclude?.documentId ?? ""} and page_number = ${exclude?.pageNumber ?? -1})`;
-    return {
-      providerCostCents: Number(spend?.provider_cost_cents ?? 0) || 0,
-      attemptedPages: Number(spend?.attempted_pages ?? 0),
-      rejectedPages: Number(spend?.rejected_pages ?? 0),
-      inFlightPages: Number(tasks?.in_flight ?? 0),
-    };
+  private visionSpendBackend: PostgresVisionSpendBackend | null = null;
+
+  /** The shared vision spend ledger every vision call of a run admits against (lib/vision-spend-guard.ts). */
+  get visionSpend(): PostgresVisionSpendBackend {
+    this.visionSpendBackend ??= new PostgresVisionSpendBackend(this.sql);
+    return this.visionSpendBackend;
   }
 
   /**

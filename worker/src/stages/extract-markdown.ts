@@ -88,6 +88,8 @@ import { type ArtifactStore } from "../tools/storage.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { guardedVisionCall } from "../lib/guarded-vision-call.js";
+import { visionGuardFor } from "../lib/vision-spend-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 
@@ -1549,6 +1551,10 @@ export class ExtractMarkdownStage implements Stage {
     if (critiquePages.length === 0) {
       return null;
     }
+    // Vision already stopped for the run (provider budget, rejection breaker, org limit): no renders, no calls.
+    if (visionGuardFor(args.state).stop) {
+      return null;
+    }
     // Self-critique is optional; skip it when the vision route is hosted and
     // the workspace privacy mode forbids hosted calls.
     if (!(await allowHostedCall(args.state, visionCall(resolveVisionRoute(args.state.run.pipeline.vision)), [args.document.id]))) {
@@ -1591,22 +1597,42 @@ export class ExtractMarkdownStage implements Stage {
         );
         try {
           const originalText = pageTexts[pageNumber - 1] ?? "";
-          const result = await executeVisionRuntime({
-            imagePath,
-            outputPath: `${imagePath}.json`,
-            privacyMode: args.state.run.pipeline.privacyMode,
-            vision: {
-              ...args.state.run.pipeline.vision,
-              prompt: buildCritiquePrompt(
-                originalText,
-                args.state.run.pipeline.preserveTables,
-                args.state.run.pipeline.preserveCode,
-              ),
-            },
+          const critiqueVision = {
+            ...args.state.run.pipeline.vision,
+            prompt: buildCritiquePrompt(
+              originalText,
+              args.state.run.pipeline.preserveTables,
+              args.state.run.pipeline.preserveCode,
+            ),
+          };
+          const critiqueCost = (result: Awaited<ReturnType<typeof executeVisionRuntime>>) =>
+            result.provider === "private" && result.costCents !== undefined ? result.costCents : calculateCritiqueCost(
+              this.cfg, result.runtime, result.baseUrl, result.inputTokens, result.outputTokens,
+            );
+          // The run's vision guard bounds critique calls like every other vision call; a rejected or
+          // failed call records its spend there.
+          const guarded = await guardedVisionCall({
+            host: args.state,
+            vision: critiqueVision,
             cfg: this.cfg,
-            runner: this.runner,
-            signal: args.signal,
+            imagePath,
+            prompt: critiqueVision.prompt,
+            page: { documentId: args.document.id, pageNumber },
+            record: (input) => args.state.usageLedger.record(input),
+            metadata: { critique: true },
+            call: () => executeVisionRuntime({
+              imagePath,
+              outputPath: `${imagePath}.json`,
+              privacyMode: args.state.run.pipeline.privacyMode,
+              vision: critiqueVision,
+              cfg: this.cfg,
+              runner: this.runner,
+              signal: args.signal,
+            }),
+            price: critiqueCost,
           });
+          if (!guarded.admitted) throw new Error(`vision-stopped: ${guarded.stop.reason}`);
+          const result = guarded.result;
           const normalizedText = normalizeCritiqueText(result.text);
           const originalPlausibilityScore = scoreExtractionPlausibility(
             originalText,
@@ -1630,13 +1656,7 @@ export class ExtractMarkdownStage implements Stage {
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
             latencyMs: result.latencyMs,
-            costCents: result.provider === "private" && result.costCents !== undefined ? result.costCents : calculateCritiqueCost(
-              this.cfg,
-              result.runtime,
-              result.baseUrl,
-              result.inputTokens,
-              result.outputTokens,
-            ),
+            costCents: critiqueCost(result),
             text: normalizedText,
             reason: accepted ? "plausibility-gain" : "requires-review",
           };

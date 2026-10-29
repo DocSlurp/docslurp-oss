@@ -12,6 +12,8 @@
  * Only pages with sparse native text are inspected, so born-digital documents pay nothing.
  */
 
+import { open } from "node:fs/promises";
+
 import type { CommandRunner } from "../tools/runner.js";
 import { embeddedImageBytesByPage } from "./page-yield-evidence.js";
 
@@ -200,6 +202,34 @@ export function renderLooksBlank(raster: { sizeBytes: number; widthPx: number | 
 }
 
 const BLANK_RENDER_TOLERANCE = 1.05;
+
+/**
+ * Ink check for a page nominated only by drawn-content bytes: `ink` goes to vision; `blank` and
+ * `unknown` do not. Fails closed: a render whose type, size or pixel dimensions cannot be
+ * confirmed is never sent, since the nomination itself is only a byte-count hint.
+ */
+export function inkCheckVerdict(raster: { sizeBytes: number; widthPx: number | null; heightPx: number | null; mimeType: string }): "ink" | "blank" | "unknown" {
+  if (raster.mimeType !== "image/png" || !raster.widthPx || !raster.heightPx || !(raster.sizeBytes > 0)) return "unknown";
+  return renderLooksBlank(raster) ? "blank" : "ink";
+}
+
+/**
+ * Size and pixel dimensions of a PNG on disk, read from the file itself (24 header bytes), so a
+ * cached render needs no manifest: the file is the one vision would receive. Nulls when it is not
+ * a PNG.
+ */
+export async function readPngFileFacts(filePath: string): Promise<{ sizeBytes: number; widthPx: number | null; heightPx: number | null }> {
+  const handle = await open(filePath, "r");
+  try {
+    const { size } = await handle.stat();
+    const header = Buffer.alloc(24);
+    const { bytesRead } = await handle.read(header, 0, 24, 0);
+    const png = bytesRead === 24 && header.readUInt32BE(0) === 0x89504e47 && header.toString("ascii", 12, 16) === "IHDR";
+    return { sizeBytes: size, widthPx: png ? header.readUInt32BE(16) : null, heightPx: png ? header.readUInt32BE(20) : null };
+  } finally {
+    await handle.close();
+  }
+}
 
 /**
  * Evidence for an uploaded image file: one page with no text layer whose content is a single

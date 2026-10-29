@@ -17,7 +17,15 @@ export type PageVisionStatus = "extracted" | "failed" | "rejected" | "guarded" |
 
 /** Why a selected page has no vision output (vision-extract `VisionPageSkip`). */
 export interface VisionPageOutcome {
-  outcome: "rejected" | "failed" | "provider-budget" | "rejection-breaker" | "blank-render";
+  outcome:
+    | "rejected"
+    | "failed"
+    | "provider-budget"
+    | "rejection-breaker"
+    | "org-unbilled-limit"
+    | "blank-render"
+    /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
+    | "unverified-render";
   /** The page has usable native or OCR text to keep when vision gives nothing. */
   fallbackText: boolean;
 }
@@ -28,8 +36,10 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
       return outcome.fallbackText ? "rejected" : "failed";
     case "provider-budget":
     case "rejection-breaker":
+    case "org-unbilled-limit":
       return "guarded";
     case "blank-render":
+    case "unverified-render":
       return "not-selected";
     default:
       return "failed";

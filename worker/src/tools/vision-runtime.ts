@@ -13,7 +13,7 @@ import {
   visionReasoningParams,
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
-import { estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
+import { attachVisionBilledUsage, estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -481,13 +481,16 @@ export async function runVisionRequest(args: {
       if (modelSwap) {
         console.warn(`[vision-model-swap] requested=${modelSwap.requested} served=${modelSwap.served} provider=${modelSwap.provider ?? "unknown"} policy=${args.swapPolicy ?? "warn"}`);
         if (args.swapPolicy === "fail") {
-          throw new ProviderRetryableError(
+          const error = new ProviderRetryableError(
             `vision model swap: requested ${modelSwap.requested} but ${modelSwap.provider ?? "provider"} served ${modelSwap.served}`,
             args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
             null,
             null,
             1,
           );
+          // The swapped call was served and billed even though its output is refused.
+          attachVisionBilledUsage(error, { inputTokens: result.inputTokens, outputTokens: result.outputTokens, ...(result.costCents !== undefined ? { costCents: result.costCents } : {}) });
+          throw error;
         }
       }
 
