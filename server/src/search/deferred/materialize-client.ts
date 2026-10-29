@@ -11,7 +11,8 @@ import {
 
 import { sql } from "../../db.js";
 import { startMaterializeWorkflow } from "../../lib/temporal.js";
-import { canSpend } from "../../services/billing/spend-guard.js";
+import { canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
+import { enforceLiveBudgetCaps } from "../../services/run-creation.js";
 import type { MaterializeEvent } from "./deferred-context.js";
 
 export const MATERIALIZE_POLL_MS = 250;
@@ -59,7 +60,17 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     for (const row of rows) result.set(pageKey(row.document_id, row.page_number), { state: row.state, costCredits: Number(row.cost) || 0 });
     return result;
   },
-  canSpend: (orgId, workspaceId) => canSpend(orgId, workspaceId),
+  async canSpend(orgId, workspaceId) {
+    // Materialize runs skip run creation, so check the live monthly caps here like every other run
+    // insert: canSpend reads the cached budget_paused flags, which lag until the next sweep.
+    try {
+      await enforceLiveBudgetCaps(workspaceId, orgId);
+    } catch (error) {
+      if (isSpendBlockedError(error)) return false;
+      throw error;
+    }
+    return canSpend(orgId, workspaceId);
+  },
   async createRun(args) {
     const id = `mat_${randomUUID()}`;
     // The run carries the source document's pipeline (its ingest run, else the workspace's), so the

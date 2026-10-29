@@ -148,6 +148,7 @@ type BudgetAlertRow = {
   monthly_budget_cents: number;
   budget_alert_threshold_percent: number;
   budget_alert_level: number;
+  budget_paused: boolean;
   spend_cents: number;
   cost_alert: boolean | null;
 };
@@ -3429,7 +3430,9 @@ export class Store {
         w.monthly_budget_cents,
         w.budget_alert_threshold_percent,
         w.budget_alert_level,
-        coalesce(spend.cost_cents, 0)::integer as spend_cents,
+        w.budget_paused,
+        -- floor, not the cast's rounding: 99.5 cents must not trip a 100-cent cap (the live check compares exactly).
+        floor(coalesce(spend.cost_cents, 0))::integer as spend_cents,
         np.cost_alert
       from workspaces w
       join "user" u on u.id = w.user_id
@@ -3455,6 +3458,7 @@ export class Store {
         w.monthly_budget_cents,
         w.budget_alert_threshold_percent,
         w.budget_alert_level,
+        w.budget_paused,
         spend.cost_cents,
         np.cost_alert
       `,
@@ -3466,7 +3470,8 @@ export class Store {
         row.monthly_budget_cents,
         row.budget_alert_threshold_percent,
       );
-      if (nextLevel === row.budget_alert_level) {
+      // A budget change resets budget_paused but not the level, so compare both.
+      if (nextLevel === row.budget_alert_level && row.budget_paused === nextLevel >= 100) {
         continue;
       }
 
@@ -3511,7 +3516,8 @@ export class Store {
         o.monthly_budget_cents,
         o.budget_alert_threshold_percent,
         o.budget_alert_level,
-        coalesce(spend.cost_cents, 0)::integer as spend_cents,
+        o.budget_paused,
+        floor(coalesce(spend.cost_cents, 0))::integer as spend_cents,
         np.cost_alert
       from organizations o
       join "user" u on u.id = o.created_by_user_id
@@ -3534,6 +3540,7 @@ export class Store {
         o.monthly_budget_cents,
         o.budget_alert_threshold_percent,
         o.budget_alert_level,
+        o.budget_paused,
         spend.cost_cents,
         np.cost_alert
       `,
@@ -3545,7 +3552,8 @@ export class Store {
         row.monthly_budget_cents,
         row.budget_alert_threshold_percent,
       );
-      if (nextLevel === row.budget_alert_level) {
+      // A budget change resets budget_paused but not the level, so compare both.
+      if (nextLevel === row.budget_alert_level && row.budget_paused === nextLevel >= 100) {
         continue;
       }
 

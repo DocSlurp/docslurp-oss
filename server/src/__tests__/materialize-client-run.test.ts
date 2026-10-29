@@ -11,7 +11,18 @@ vi.mock("../db.js", () => ({
   ),
 }));
 vi.mock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn() }));
-vi.mock("../services/billing/spend-guard.js", () => ({ canSpend: vi.fn(async () => true) }));
+const spend = vi.hoisted(() => ({
+  canSpend: vi.fn(async () => true),
+  enforceLiveBudgetCaps: vi.fn(async () => undefined),
+}));
+class BlockedError extends Error {
+  constructor(readonly code: string) { super(code); }
+}
+vi.mock("../services/billing/spend-guard.js", () => ({
+  canSpend: spend.canSpend,
+  isSpendBlockedError: (error: unknown) => error instanceof BlockedError,
+}));
+vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: spend.enforceLiveBudgetCaps }));
 
 const { defaultMaterializeDeps } = await import("../search/deferred/materialize-client.js");
 
@@ -46,5 +57,27 @@ describe("materialize run rows", () => {
     await defaultMaterializeDeps.failRun("mat_1", "x");
     await defaultMaterializeDeps.closeDedupedRun("mat_1");
     for (const call of mocks.calls) expect(call.text).toContain("status in ('queued', 'processing')");
+  });
+});
+
+describe("materialize spend gate", () => {
+  it("checks the live monthly caps before inserting runs, not only the cached budget_paused flag", async () => {
+    spend.canSpend.mockClear();
+    spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new BlockedError("workspace_budget_paused"));
+    await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).resolves.toBe(false);
+    expect(spend.enforceLiveBudgetCaps).toHaveBeenCalledWith("ws-1", "org-1");
+    expect(spend.canSpend).not.toHaveBeenCalled();
+  });
+
+  it("then applies the credit gate", async () => {
+    spend.canSpend.mockResolvedValueOnce(false);
+    await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).resolves.toBe(false);
+    spend.canSpend.mockResolvedValueOnce(true);
+    await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).resolves.toBe(true);
+  });
+
+  it("fails closed on an unexpected error", async () => {
+    spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new Error("Workspace not found"));
+    await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).rejects.toThrow("Workspace not found");
   });
 });
