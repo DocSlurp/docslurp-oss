@@ -17,6 +17,7 @@ import {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 const sha1 = (value: string) => createHash("sha1").update(value).digest("hex").toUpperCase();
+const pad = (char: string) => `${"0".repeat(34)}${char}:0`;
 
 describe("breached-password policy", () => {
   it("is on in production and off elsewhere unless configured", () => {
@@ -41,18 +42,20 @@ describe("breached-password policy", () => {
     expect(breachedPasswordPlugins({ enabled: false, timeoutMs: 3000, maxInFlight: 32 })).toEqual([]);
   });
 
-  it("parses counts like the native plugin and rejects a corrupt answer", () => {
-    expect(compromiseCount("ABC:3\r\nDEF:0", "def")).toBe(0);
-    expect(compromiseCount("ABC:3\r\nDEF:12", "abc")).toBe(3);
-    expect(compromiseCount("ABC:3", "fff")).toBe(0);
-    expect(() => compromiseCount("ABC:lots", "abc")).toThrow(BreachLookupError);
+  it("reads a range answer strictly", () => {
+    const listed = sha1("x").slice(5);
+    expect(compromiseCount(`${listed}:3\r\n${pad("A")}`, listed.toLowerCase())).toBe(3);
+    expect(compromiseCount(`${pad("A")}\r\n${pad("B")}\r\n`, listed)).toBe(0);
+    for (const body of ["", "\r\n", "<html><body>Service Unavailable</body></html>", `${pad("A")}\r\n${listed}:lots`, `${pad("A")}\r\nABC:3`]) {
+      expect(() => compromiseCount(body, listed), JSON.stringify(body)).toThrow(BreachLookupError);
+    }
   });
 });
 
 describe("range lookup", () => {
   it("sends only a padded five-character prefix and detects a listed password", async () => {
     const digest = sha1("hunter2-secret");
-    const http = vi.fn(async (_url: string, _init?: RequestInit) => new Response(`${digest.slice(5)}:9\r\n0000000000000000000000000000000000A:0`));
+    const http = vi.fn(async (_url: string, _init?: RequestInit) => new Response(`${digest.slice(5)}:9\r\n${pad("A")}`));
     vi.stubGlobal("fetch", http);
     expect(await createBreachLookup({ timeoutMs: 1000, maxInFlight: 4 }).isCompromised("hunter2-secret")).toBe(true);
     const [url, init] = http.mock.calls[0]!;
@@ -87,6 +90,13 @@ describe("range lookup", () => {
     const lookup = createBreachLookup({ timeoutMs: 5000, maxInFlight: 1 });
     void lookup.isCompromised("first").catch(() => undefined);
     await expect(lookup.isCompromised("second")).rejects.toMatchObject({ reason: "saturated" });
+  });
+
+  it("treats an empty or HTML 200 as a failed lookup, not a clean one", async () => {
+    for (const body of ["", "<html>Gateway</html>"]) {
+      vi.stubGlobal("fetch", async () => new Response(body, { status: 200 }));
+      await expect(createBreachLookup({ timeoutMs: 1000, maxInFlight: 4 }).isCompromised("x"), body).rejects.toMatchObject({ reason: "malformed" });
+    }
   });
 
   it("calls a network failure a network failure", async () => {
@@ -128,7 +138,7 @@ describe("password hash hook", () => {
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain("hunter2-secret");
   });
 
-  it("checks before hashing, and never on other endpoints or outside one", async () => {
+  it("checks before hashing, skips verification-only endpoints, and refuses outside any endpoint", async () => {
     const lookup = vi.fn(async () => false);
     const hash = vi.fn(async (password: string) => `hashed:${password}`);
     const run = hook({ inFlight: 0, isCompromised: lookup }, hash);
@@ -136,7 +146,8 @@ describe("password hash hook", () => {
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup.mock.invocationCallOrder[0]!).toBeLessThan(hash.mock.invocationCallOrder[0]!);
     expect(await run("/sign-in/email", "pw")).toBe("hashed:pw");
-    expect(await run(null, "pw")).toBe("hashed:pw");
+    await expect(run(null, "pw")).rejects.toThrow(/outside a Better Auth endpoint/);
     expect(lookup).toHaveBeenCalledTimes(1);
+    expect(hash).toHaveBeenCalledTimes(2);
   });
 });

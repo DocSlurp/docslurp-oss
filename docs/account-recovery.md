@@ -15,11 +15,15 @@ A completed reset:
 - **ends every session** of the account (`revokeSessionsOnPasswordReset: true`) and clears its trusted devices, so whoever held the old password is signed out;
 - **never signs in.** The person signs in with the new password afterwards, and an account with two-factor still gets its second-factor challenge. Recovery doesn't turn off two-factor and doesn't grant sensitive-account access;
 - **sets a first password** for an account that has none (email-code, magic-link or Google/GitHub users), and marks the address verified, because the code proved mailbox ownership;
-- **removes earlier links from an account that was unverified.** If someone registered the address before its owner proved it, the reset deletes every account link (and stored OAuth token) except the password just chosen. That is the rule Better Auth's Email OTP sign-in and magic links already apply (`revokeUnprovenAccountAccess`); its Email OTP reset only marks the address verified. A verified account keeps its other sign-in methods.
+- **removes everything an unverified account gathered before its owner proved the address.** If someone registered the address first, the reset deletes every account link and stored OAuth token except the password just chosen, plus passkeys, two-factor enrolment, trusted devices and sessions. Better Auth's Email OTP sign-in and magic links already apply this rule (`revokeUnprovenAccountAccess`); its Email OTP reset only marks the address verified. A verified account keeps its other sign-in methods.
+
+The native reset commits before any hook can run after it, so the promotion is made durable. A `reset-promotion:<user>` marker row is written before the reset. The cleanup and the marker's removal share one transaction. While a marker stands for a verified user, any new session for that user first completes the cleanup and is then refused with `403 SIGN_IN_AGAIN`. A crash between the reset and the cleanup therefore fails closed until the cleanup has run. A wrong code leaves no marker behind.
 
 A domain that enforces company SSO is refused with `SSO_REQUIRED` before any code is sent. The answer depends only on the domain, like `/api/sso-lookup`.
 
-There is one recovery path. Over HTTP, the link-based reset endpoints (`/request-password-reset`, `/reset-password`) and the deprecated `/forget-password/email-otp` alias are disabled (`disabledPaths`) and answer 404. `disabledPaths` applies to the router only. The server-side `auth.api` methods still exist, and no DocSlurp code calls them.
+There is one recovery path. Over HTTP, the link-based reset endpoints (`/request-password-reset`, `/reset-password`) and the deprecated `/forget-password/email-otp` alias are disabled (`disabledPaths`) and answer 404. So does the generic `/email-otp/check-verification-otp`, which has no caller and would be one more place to guess codes. `disabledPaths` applies to the router only. The server-side `auth.api` methods still exist, and no DocSlurp code calls them.
+
+**Wrong codes look the same for every address.** Better Auth answers "too many attempts" (403) or "expired" only for a code it issued, and it issues codes only to registered addresses. `handleAuthRequest`, DocSlurp's single entry to the Better Auth router, rewrites both answers on every code-checking endpoint to the `400 INVALID_OTP` an unregistered address gets. A hook can't do this, because the dispatcher keeps the original status.
 
 Better Auth never reveals whether a code email was delivered. A failed send is logged as `[Better Auth]: Failed to run background task` and the endpoint still answers `{ success: true }`. The UI therefore says a code is on its way *if* the address has an account.
 
@@ -32,9 +36,13 @@ Every endpoint that stores a new password checks it against the [Have I Been Pwn
 | Outcome | Response |
 | --- | --- |
 | The password is in the corpus | `400 PASSWORD_COMPROMISED`. Nothing is stored and a reset code stays usable until it expires. |
-| The lookup times out (`AUTH_BREACHED_PASSWORD_TIMEOUT_MS`, default 3000), fails, returns an error status or a malformed body, or 32 lookups are already in flight | `503 PASSWORD_CHECK_UNAVAILABLE` with `Retry-After: 60`. The request is aborted, never stored unchecked, and the reset code survives. |
+| The lookup times out (`AUTH_BREACHED_PASSWORD_TIMEOUT_MS`, default 3000), fails, returns an error status or a body that isn't a range list, or 32 lookups are already in flight | `503 PASSWORD_CHECK_UNAVAILABLE` with `Retry-After: 60`. The request is aborted, the password is never stored unchecked, and the reset code survives. |
+
+A `200` is only a clean answer if every line is a 35-character suffix and a count, with at least one line (the API pads every answer to hundreds). An empty body or an HTML page from a proxy is a failed lookup. A cleanly truncated list of valid lines can't be detected from its content; the transport's own length checks are the only guard there.
 
 Each refusal logs `[auth-breach-check] refused a new password reason=<timeout|upstream_status|network|malformed|saturated> [status=<http>] duration_ms=<n> path=<endpoint>`. It is reported to telemetry with the same fields. Neither carries the password, its hash, the address or the request URL.
+
+While the check is on, hashing a password outside any Better Auth endpoint throws instead of silently skipping the check. Every native call to `password.hash` happens inside an endpoint, and `better-auth-compat.test.ts` pins the list of native call sites so a new password-writing path fails the upgrade review. Seed data hashes with `hashPassword` from `better-auth/crypto`.
 
 `AUTH_BREACHED_PASSWORD_CHECK` is `on` by default in production and `off` elsewhere. Tests and local seed workflows stay offline. Self-hosted deployments without internet access must set it to `off`; production logs a warning at startup when it is off. Disabling it doesn't make recovery work offline, because recovery still needs the Resend email configuration. Invalid values fail startup.
 
@@ -63,7 +71,7 @@ node -e 'const {createHmac}=require("node:crypto");const d=createHmac("sha256",p
 # then: delete from auth_rate_limits where key in ('email-recipient:900:…', 'email-code-check:900:…');
 ```
 
-**Storage.** `auth_rate_limits` keys never contain an address, IP or token. Recipient keys are an HMAC of the normalized address under `BETTER_AUTH_SECRET`; other keys are SHA-256 digests. Every limit is one atomic statement shared by all app machines. A database error refuses the request rather than skipping the limit; SSO and magic-link confirmation answer 500 until the database is back. Expired rows are pruned in the background. During a rolling deploy, machines still on the previous release keep the old in-process SSO counters until they are replaced.
+**Storage.** `auth_rate_limits` keys never contain an address, IP or token. Recipient keys are an HMAC of the normalized address under `BETTER_AUTH_SECRET`; other keys are SHA-256 digests. Every limit is one atomic statement shared by all app machines, on the database's clock, so machines with skewed clocks agree on windows. A refund names the window it was counted in and never reaches a later one. A database error refuses the request rather than skipping the limit; SSO and magic-link confirmation answer 500 until the database is back. Expired rows are pruned in the background. During a rolling deploy, machines still on the previous release keep the old in-process SSO counters until they are replaced.
 
 Better Auth's limiter never applies to server-side `auth.api` calls. Every DocSlurp-owned endpoint that accepts input needs a native custom rule or a plugin `rateLimit` entry, and `auth-recovery.db.test.ts` fails when one is missing.
 

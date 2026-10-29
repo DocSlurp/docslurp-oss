@@ -22,6 +22,7 @@ const BREACHED = new Set(["password1234", "breached but long enough"]);
 let pool: Pool;
 let stop: () => Promise<void>;
 let auth: typeof import("../lib/better-auth.js")["auth"];
+let handleAuthRequest: typeof import("../lib/better-auth.js")["handleAuthRequest"];
 let hashPassword: typeof import("better-auth/crypto")["hashPassword"];
 const sentEmails: Array<{ to: string; subject: string; code: string | null }> = [];
 let hibpMode: "live" | "error" | "hang" = "live";
@@ -66,7 +67,7 @@ beforeAll(async () => {
       const prefix = target.slice(-5);
       const lines = [...BREACHED].map(sha1).filter((hash) => hash.startsWith(prefix)).map((hash) => `${hash.slice(5)}:4242`);
       // Padding entries, as the real API returns with Add-Padding.
-      lines.push("0000000000000000000000000000000000A:0", "0000000000000000000000000000000000B:0");
+      lines.push(`${"0".repeat(34)}A:0`, `${"0".repeat(34)}B:0`);
       return new Response(lines.join("\r\n"), { headers: { "content-type": "text/plain" } });
     }
     return realFetch(input, init);
@@ -74,7 +75,7 @@ beforeAll(async () => {
   const { Pool } = await import("pg");
   pool = new Pool({ connectionString: url, max: 4 });
   (globalThis as { __docslurpAuthPool?: Pool }).__docslurpAuthPool = pool;
-  ({ auth } = await import("../lib/better-auth.js"));
+  ({ auth, handleAuthRequest } = await import("../lib/better-auth.js"));
   ({ hashPassword } = await import("better-auth/crypto"));
 }, 120_000);
 
@@ -109,7 +110,8 @@ class Browser {
     }
   }
   async json<T = Record<string, unknown>>(path: string, body?: unknown, method?: string): Promise<{ status: number; body: T; response: Response }> {
-    const response = await auth.handler(new Request(`${ORIGIN}/api/auth${path}`, {
+    // The production entry point: trusted client IP, uniform code refusals, safe errors.
+    const response = await handleAuthRequest(new Request(`${ORIGIN}/api/auth${path}`, {
       method: method ?? (body === undefined ? "GET" : "POST"),
       headers: { origin: ORIGIN, cookie: this.header(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -138,6 +140,26 @@ async function createUser(options: { password?: string | false; emailVerified?: 
     await pool.query(`insert into account(id, "accountId", "providerId", "userId", password) values ($1, $2, 'credential', $2, $3)`, [`acct-${id}`, id, hash]);
   }
   return { id, email };
+}
+
+/** What a squatter could have attached to an address before its owner proved it. */
+async function attachUnprovenAccess(userId: string) {
+  await pool.query(`insert into account(id, "accountId", "providerId", "userId") values ($1, $2, 'google', $3)`, [`google-${userId}`, `attacker-${userId}`, userId]);
+  await pool.query(`insert into passkey(id, "publicKey", "userId", "credentialID", counter, "deviceType", "backedUp") values ($1, 'pk', $2, $1, 0, 'singleDevice', false)`, [`passkey-${userId}`, userId]);
+  await pool.query(`insert into "twoFactor"(id, secret, "backupCodes", "userId") values ($1, 'secret', 'codes', $2)`, [`tf-${userId}`, userId]);
+  await pool.query(`update "user" set "twoFactorEnabled" = true where id = $1`, [userId]);
+  await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`trust-device-${userId}`, userId]);
+}
+
+async function unprovenAccessLeft(userId: string) {
+  const { rows } = await pool.query<Record<string, number | boolean>>(`select
+    (select count(*)::int from account where "userId" = $1 and "providerId" <> 'credential') as links,
+    (select count(*)::int from passkey where "userId" = $1) as passkeys,
+    (select count(*)::int from "twoFactor" where "userId" = $1) as two_factor,
+    (select "twoFactorEnabled" from "user" where id = $1) as two_factor_enabled,
+    (select count(*)::int from verification where value = $1 and (identifier like 'trust-device-%' or identifier like 'reset-promotion:%')) as markers,
+    (select count(*)::int from session where "userId" = $1) as sessions`, [userId]);
+  return rows[0];
 }
 
 async function requestReset(browser: Browser, email: string) {
@@ -244,15 +266,68 @@ describe("password recovery with native Email OTP", () => {
 
   it("proves mailbox ownership for a pre-registered unverified account and drops every earlier link", async () => {
     const squatted = await createUser({ password: "the squatters password", emailVerified: false });
-    await pool.query(`insert into account(id, "accountId", "providerId", "userId") values ($1, 'attacker-provider-id', 'google', $2)`, [`google-${squatted.id}`, squatted.id]);
+    await attachUnprovenAccess(squatted.id);
     const owner = new Browser();
     await requestReset(owner, squatted.email);
     expect((await owner.json("/email-otp/reset-password", { email: squatted.email, otp: lastCodeFor(squatted.email), password: NEW_PASSWORD })).status).toBe(200);
     expect((await pool.query<{ verified: boolean }>(`select "emailVerified" as verified from "user" where id = $1`, [squatted.id])).rows[0]!.verified).toBe(true);
     expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: "the squatters password" })).status).toBe(401);
     expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: NEW_PASSWORD })).status).toBe(200);
-    const providers = (await pool.query<{ provider: string }>(`select "providerId" as provider from account where "userId" = $1`, [squatted.id])).rows.map((row) => row.provider);
-    expect(providers).toEqual(["credential"]);
+    expect(await unprovenAccessLeft(squatted.id)).toEqual({ links: 0, passkeys: 0, two_factor: 0, two_factor_enabled: false, markers: 0, sessions: 1 });
+  });
+
+  it("finishes an interrupted promotion before any new session, failing closed", async () => {
+    // State after a crash between the native reset commit and the cleanup.
+    const user = await createUser();
+    await attachUnprovenAccess(user.id);
+    await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`reset-promotion:${user.id}`, user.id]);
+    const refused = await new Browser().json<{ code?: string }>("/sign-in/email", { email: user.email, password: PASSWORD });
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("SIGN_IN_AGAIN");
+    expect(await unprovenAccessLeft(user.id)).toEqual({ links: 0, passkeys: 0, two_factor: 0, two_factor_enabled: false, markers: 0, sessions: 0 });
+    expect((await new Browser().json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
+  });
+
+  it("leaves no promotion marker behind when the code is wrong", async () => {
+    const user = await createUser({ emailVerified: false });
+    await requestReset(new Browser(), user.email);
+    const code = lastCodeFor(user.email);
+    expect((await new Browser().json("/email-otp/reset-password", { email: user.email, otp: code === "000000" ? "111111" : "000000", password: NEW_PASSWORD })).status).toBe(400);
+    expect((await pool.query(`select 1 from verification where identifier = $1`, [`reset-promotion:${user.id}`])).rowCount).toBe(0);
+  });
+
+  it("clears the reset account's trusted devices, not those of whoever is signed in", async () => {
+    const caller = await createUser();
+    const target = await createUser();
+    for (const user of [caller, target]) {
+      await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`trust-device-${user.id}`, user.id]);
+    }
+    const browser = new Browser();
+    expect((await browser.json("/sign-in/email", { email: caller.email, password: PASSWORD })).status).toBe(200);
+    await requestReset(browser, target.email);
+    expect((await browser.json("/email-otp/reset-password", { email: target.email, otp: lastCodeFor(target.email), password: NEW_PASSWORD })).status).toBe(200);
+    const left = async (userId: string) => (await pool.query(`select 1 from verification where identifier = $1`, [`trust-device-${userId}`])).rowCount;
+    expect(await left(target.id)).toBe(0);
+    expect(await left(caller.id)).toBe(1);
+  });
+
+  it("answers wrong codes for registered and unregistered addresses alike", async () => {
+    const known = await createUser();
+    const unknown = `nobody-${randomBytes(3).toString("hex")}@example.test`;
+    const guesses = async (email: string) => {
+      await requestReset(new Browser(), email);
+      const real = sentEmails.filter((sent) => sent.to === email).at(-1)?.code;
+      const wrong = real === "000000" ? "111111" : "000000";
+      const answers: string[] = [];
+      for (let attempt = 0; attempt < 7; attempt += 1) {
+        const response = await new Browser().json<{ code?: string }>("/email-otp/reset-password", { email, otp: wrong, password: NEW_PASSWORD });
+        answers.push(`${response.status}:${response.body.code}`);
+      }
+      return answers;
+    };
+    const knownAnswers = await guesses(known.email);
+    expect(knownAnswers).toEqual(Array(7).fill("400:INVALID_OTP"));
+    expect(await guesses(unknown)).toEqual(knownAnswers);
   });
 
   it("keeps a verified account's other sign-in methods through a reset", async () => {
@@ -282,7 +357,7 @@ describe("password recovery with native Email OTP", () => {
 
   it("serves exactly one recovery path", async () => {
     const browser = new Browser();
-    for (const path of ["/forget-password/email-otp", "/request-password-reset", "/reset-password"]) {
+    for (const path of ["/forget-password/email-otp", "/request-password-reset", "/reset-password", "/email-otp/check-verification-otp"]) {
       expect((await browser.json(path, { email: "anyone@example.test", newPassword: NEW_PASSWORD, token: "x" })).status, path).toBe(404);
     }
   });
@@ -441,13 +516,28 @@ describe("per-recipient email limits", () => {
 describe("shared authentication budgets", () => {
   it("admits exactly the budget under concurrency and restarts after the window", async () => {
     const { consumeAuthBudget } = await import("../lib/auth-rate-limits.js");
-    const start = Date.now();
+    const start = new Date();
+    const at = (ms: number) => new Date(start.getTime() + ms);
     const results = await Promise.all(Array.from({ length: 20 }, () => consumeAuthBudget(pool, "test:concurrency", { windowSeconds: 60, max: 5 }, start)));
     expect(results.filter((result) => result.allowed)).toHaveLength(5);
     expect(results.find((result) => !result.allowed)!.retryAfterSeconds).toBe(60);
     expect((await pool.query<{ count: number }>(`select count from auth_rate_limits where key = 'test:concurrency'`)).rows[0]!.count).toBe(6);
-    expect((await consumeAuthBudget(pool, "test:concurrency", { windowSeconds: 60, max: 5 }, start + 30_000)).allowed).toBe(false);
-    expect((await consumeAuthBudget(pool, "test:concurrency", { windowSeconds: 60, max: 5 }, start + 60_000)).allowed).toBe(true);
+    expect((await consumeAuthBudget(pool, "test:concurrency", { windowSeconds: 60, max: 5 }, at(30_000))).allowed).toBe(false);
+    expect((await consumeAuthBudget(pool, "test:concurrency", { windowSeconds: 60, max: 5 }, at(60_000))).allowed).toBe(true);
+  });
+
+  it("refunds only the window a step was counted in, on the database clock", async () => {
+    const { consumeAuthBudget, releaseAuthBudget } = await import("../lib/auth-rate-limits.js");
+    const budget = { windowSeconds: 60, max: 1 };
+    const stale = await consumeAuthBudget(pool, "test:refund", budget, new Date(Date.now() - 120_000));
+    // A new window on the database clock (no explicit time).
+    expect((await consumeAuthBudget(pool, "test:refund", budget)).allowed).toBe(true);
+    await releaseAuthBudget(pool, "test:refund", stale.window);
+    expect((await consumeAuthBudget(pool, "test:refund", budget)).allowed).toBe(false);
+    const current = (await pool.query<{ window: string }>(`select (extract(epoch from window_started_at) * 1000000)::bigint::text as window from auth_rate_limits where key = 'test:refund'`)).rows[0]!.window;
+    await releaseAuthBudget(pool, "test:refund", current);
+    await releaseAuthBudget(pool, "test:refund", current);
+    expect((await consumeAuthBudget(pool, "test:refund", budget)).allowed).toBe(true);
   });
 });
 

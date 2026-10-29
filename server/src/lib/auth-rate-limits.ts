@@ -27,12 +27,20 @@ export interface AuthBudgetResult {
   allowed: boolean;
   /** Seconds until the current window ends; meaningful when `allowed` is false. */
   retryAfterSeconds: number;
+  /** Identifies the window this step was counted in, so a refund can't reach a later one. */
+  window: string;
 }
 
 export interface AuthBudgetStore {
   consume(key: string, budget: AuthBudget): Promise<AuthBudgetResult>;
-  /** Gives back one unit in the current window, e.g. when the counted email never left. */
-  release(key: string): Promise<void>;
+  /** Gives back one unit, only if `window` is still the key's current window. */
+  release(key: string, window: string): Promise<void>;
+}
+
+/** A counted step that may later be refunded. */
+export interface AuthBudgetReservation {
+  key: string;
+  window: string;
 }
 
 const PRUNE_EVERY = 200;
@@ -40,12 +48,15 @@ let consumedSincePrune = 0;
 
 /**
  * One fixed-window step. A count stops at `max + 1`, so a flood can't push a
- * counter arbitrarily high, and the window restarts once it has elapsed.
+ * counter arbitrarily high, and the window restarts once it has elapsed. The
+ * window clock is the database's, so app machines with skewed clocks agree;
+ * `now` exists for tests.
  */
-export async function consumeAuthBudget(pool: Queryable, key: string, budget: AuthBudget, now = Date.now()): Promise<AuthBudgetResult> {
-  const { rows } = await pool.query<{ count: number; retry_after: number }>(
-    `insert into auth_rate_limits (key, count, window_started_at, expires_at)
-       values ($1, 1, to_timestamp($2::double precision / 1000), to_timestamp(($2::double precision + $3) / 1000))
+export async function consumeAuthBudget(pool: Queryable, key: string, budget: AuthBudget, now?: Date): Promise<AuthBudgetResult> {
+  const { rows } = await pool.query<{ count: number; retry_after: number; window_id: string }>(
+    `with clock as (select coalesce($2::timestamptz, clock_timestamp()) as at)
+     insert into auth_rate_limits (key, count, window_started_at, expires_at)
+       select $1, 1, at, at + make_interval(secs => $3) from clock
      on conflict (key) do update set
        count = case when auth_rate_limits.expires_at <= excluded.window_started_at then 1
                     else least(auth_rate_limits.count + 1, $4 + 1) end,
@@ -53,30 +64,33 @@ export async function consumeAuthBudget(pool: Queryable, key: string, budget: Au
                                 then excluded.window_started_at else auth_rate_limits.window_started_at end,
        expires_at = case when auth_rate_limits.expires_at <= excluded.window_started_at
                          then excluded.expires_at else auth_rate_limits.expires_at end
-     returning count, greatest(1, ceil(extract(epoch from expires_at) - $2::double precision / 1000))::int as retry_after`,
-    [key, now, budget.windowSeconds * 1000, budget.max],
+     returning count,
+       greatest(1, ceil(extract(epoch from expires_at - (select at from clock))))::int as retry_after,
+       (extract(epoch from window_started_at) * 1000000)::bigint::text as window_id`,
+    [key, now ?? null, budget.windowSeconds, budget.max],
   );
   const row = rows[0];
   if (!row) throw new Error("auth rate limit returned no row");
   consumedSincePrune += 1;
   if (consumedSincePrune >= PRUNE_EVERY) {
     consumedSincePrune = 0;
-    void pool.query(`delete from auth_rate_limits where expires_at < to_timestamp($1::double precision / 1000)`, [now])
+    void pool.query(`delete from auth_rate_limits where expires_at < clock_timestamp()`)
       .catch(error => console.warn("[auth-rate-limit] prune failed", error instanceof Error ? error.message : error));
   }
-  return { allowed: row.count <= budget.max, retryAfterSeconds: row.retry_after };
+  return { allowed: row.count <= budget.max, retryAfterSeconds: row.retry_after, window: row.window_id };
 }
 
-export async function releaseAuthBudget(pool: Queryable, key: string, now = Date.now()): Promise<void> {
+export async function releaseAuthBudget(pool: Queryable, key: string, window: string): Promise<void> {
   await pool.query(
     `update auth_rate_limits set count = greatest(count - 1, 0)
-     where key = $1 and expires_at > to_timestamp($2::double precision / 1000)`,
-    [key, now],
+     where key = $1 and (extract(epoch from window_started_at) * 1000000)::bigint = $2::bigint
+       and expires_at > clock_timestamp()`,
+    [key, window],
   );
 }
 
 export function databaseAuthBudgetStore(pool: Queryable): AuthBudgetStore {
-  return { consume: (key, budget) => consumeAuthBudget(pool, key, budget), release: (key) => releaseAuthBudget(pool, key) };
+  return { consume: (key, budget) => consumeAuthBudget(pool, key, budget), release: (key, window) => releaseAuthBudget(pool, key, window) };
 }
 
 /** Low-cardinality refusal telemetry: purpose and window only, never the key or who it stands for. */
@@ -86,20 +100,20 @@ export function logAuthBudgetDenied(purpose: string, budget: AuthBudget, result:
 
 /** Same semantics, one process. For tests and single-process tools only; never shared across machines. */
 export function createMemoryAuthBudgetStore(now: () => number = Date.now): AuthBudgetStore {
-  const windows = new Map<string, { count: number; expiresAt: number }>();
+  const windows = new Map<string, { count: number; startedAt: number; expiresAt: number }>();
   return {
     async consume(key, budget) {
       const at = now();
       const current = windows.get(key);
       const entry = current && current.expiresAt > at
-        ? { count: Math.min(current.count + 1, budget.max + 1), expiresAt: current.expiresAt }
-        : { count: 1, expiresAt: at + budget.windowSeconds * 1000 };
+        ? { ...current, count: Math.min(current.count + 1, budget.max + 1) }
+        : { count: 1, startedAt: at, expiresAt: at + budget.windowSeconds * 1000 };
       windows.set(key, entry);
-      return { allowed: entry.count <= budget.max, retryAfterSeconds: Math.max(1, Math.ceil((entry.expiresAt - at) / 1000)) };
+      return { allowed: entry.count <= budget.max, retryAfterSeconds: Math.max(1, Math.ceil((entry.expiresAt - at) / 1000)), window: String(entry.startedAt) };
     },
-    async release(key) {
+    async release(key, window) {
       const current = windows.get(key);
-      if (current && current.expiresAt > now()) current.count = Math.max(0, current.count - 1);
+      if (current && current.expiresAt > now() && String(current.startedAt) === window) current.count = Math.max(0, current.count - 1);
     },
   };
 }
@@ -182,10 +196,10 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
   // Set by the hook once this request's mail is counted, and by delivery once it
   // is sent. Request state, not the endpoint path: native code can send from a
   // nested endpoint call.
-  const counted = defineRequestState(() => ({ value: false, email: "", sent: false }));
-  const release = async (secret: string, email: string) => {
-    for (const budget of EMAIL_RECIPIENT_BUDGETS) {
-      await store.release(recipientBudgetKey(secret, email, budget.windowSeconds))
+  const counted = defineRequestState(() => ({ value: false, sent: false, reservations: [] as AuthBudgetReservation[] }));
+  const release = async (reservations: readonly AuthBudgetReservation[]) => {
+    for (const { key, window } of reservations) {
+      await store.release(key, window)
         .catch(releaseError => console.warn("[auth-rate-limit] release failed", releaseError instanceof Error ? releaseError.message : releaseError));
     }
   };
@@ -213,8 +227,10 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
           const email = typeof ctx.body?.email === "string" ? ctx.body.email : "";
           // No address: the endpoint's own validation answers.
           if (!email.trim()) return;
+          const reservations: AuthBudgetReservation[] = [];
           for (const budget of EMAIL_RECIPIENT_BUDGETS) {
-            const result = await store.consume(recipientBudgetKey(ctx.context.secret, email, budget.windowSeconds), budget);
+            const key = recipientBudgetKey(ctx.context.secret, email, budget.windowSeconds);
+            const result = await store.consume(key, budget);
             if (!result.allowed) {
               logAuthBudgetDenied("email-recipient", budget, result);
               throw new APIError("TOO_MANY_REQUESTS", {
@@ -222,8 +238,9 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
                 message: "Too many emails were requested for this address. Try again later.",
               }, { "Retry-After": String(result.retryAfterSeconds) });
             }
+            reservations.push({ key, window: result.window });
           }
-          Object.assign(await counted.get(), { value: true, email });
+          Object.assign(await counted.get(), { value: true, reservations });
         }),
       }],
       after: [{
@@ -235,7 +252,7 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
           const state = await counted.get();
           const returned = ctx.context.returned;
           if (!state.value || state.sent || !isAPIError(returned) || returned.statusCode === 429) return;
-          await release(ctx.context.secret, state.email);
+          await release(state.reservations.splice(0));
         }),
       }],
     },
@@ -244,21 +261,26 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
     plugin,
     guardDelivery: (send) => async (data, ctx) => {
       const secret = ctx?.context?.secret;
-      const alreadyCounted = await hasRequestState() && (await counted.get()).value;
-      if (enabled && secret && !alreadyCounted) {
+      const state = await hasRequestState() ? await counted.get() : null;
+      let reservations: AuthBudgetReservation[] = state?.value ? state.reservations : [];
+      if (enabled && secret && !state?.value) {
+        reservations = [];
         for (const budget of EMAIL_RECIPIENT_BUDGETS) {
-          const result = await store.consume(recipientBudgetKey(secret, data.email, budget.windowSeconds), budget);
+          const key = recipientBudgetKey(secret, data.email, budget.windowSeconds);
+          const result = await store.consume(key, budget);
           if (!result.allowed) {
             logAuthBudgetDenied("email-recipient-indirect", budget, result);
+            await release(reservations);
             return;
           }
+          reservations.push({ key, window: result.window });
         }
       }
       try {
         await send(data);
-        if (await hasRequestState()) (await counted.get()).sent = true;
+        if (state) state.sent = true;
       } catch (error) {
-        if (enabled && secret) await release(secret, data.email);
+        if (enabled) await release(reservations.splice(0));
         throw error;
       }
     },

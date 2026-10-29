@@ -78,17 +78,30 @@ export class BreachLookupError extends Error {
 
 const isAbort = (error: unknown) => error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 
-/** Same rule as the native parser: a matching suffix line with a non-negative integer count. */
+const RANGE_LINE = /^([0-9A-F]{35}):(\d{1,12})$/i;
+
+/**
+ * Reads a range answer strictly: every line must be a 35-character suffix
+ * and a count, and there must be at least one (the API pads every answer to
+ * hundreds of lines). An empty body, an HTML error page or any malformed line
+ * is a failed lookup, never a clean one. A cleanly truncated list of valid
+ * lines can't be told apart from content alone; the transport's own length
+ * checks are the only guard there.
+ */
 export function compromiseCount(body: string, hashSuffix: string): number {
-  const prefix = `${hashSuffix.toUpperCase()}:`;
-  for (const line of body.split(/\r?\n/)) {
-    if (line.slice(0, prefix.length).toUpperCase() !== prefix) continue;
-    const text = line.slice(prefix.length).trim();
-    const count = Number(text);
-    if (!Number.isSafeInteger(count) || count < 0 || String(count) !== text) throw new BreachLookupError("malformed");
-    return count;
+  const suffix = hashSuffix.toUpperCase();
+  let lines = 0;
+  let count = 0;
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const match = RANGE_LINE.exec(line);
+    if (!match) throw new BreachLookupError("malformed");
+    lines += 1;
+    if (match[1]!.toUpperCase() === suffix) count = Number(match[2]);
   }
-  return 0;
+  if (lines === 0) throw new BreachLookupError("malformed");
+  return count;
 }
 
 export interface BreachLookup {
@@ -146,7 +159,10 @@ export function breachedPasswordPlugins(policy: BreachedPasswordPolicy, lookup: 
             ...ctx.password,
             async hash(password: string): Promise<string> {
               const path = tryGetCurrentAuthEndpointContext()?.path;
-              if (!path || !BREACHED_PASSWORD_PATHS.includes(path)) return hash(password);
+              // Every native caller hashes inside an endpoint (better-auth-compat.test.ts
+              // keeps that list); outside one, nothing says whether this is a new password.
+              if (!path) throw new Error("[auth-breach-check] password hashed outside a Better Auth endpoint while the breach check is on; use hashPassword from better-auth/crypto for seed data");
+              if (!BREACHED_PASSWORD_PATHS.includes(path)) return hash(password);
               const started = Date.now();
               let compromised: boolean;
               try {

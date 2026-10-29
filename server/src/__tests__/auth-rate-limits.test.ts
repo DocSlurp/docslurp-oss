@@ -18,22 +18,24 @@ describe("authentication budgets", () => {
     expect((await store.consume("k", budget)).allowed).toBe(true);
     expect((await store.consume("k", budget)).allowed).toBe(true);
     now += 15_000;
-    expect(await store.consume("k", budget)).toEqual({ allowed: false, retryAfterSeconds: 45 });
+    expect(await store.consume("k", budget)).toMatchObject({ allowed: false, retryAfterSeconds: 45 });
     now += 45_000;
     expect((await store.consume("k", budget)).allowed).toBe(true);
   });
 
-  it("gives back one unit only inside the current window", async () => {
+  it("gives back one unit only to the window it was counted in", async () => {
     let now = 0;
     const store = createMemoryAuthBudgetStore(() => now);
     const budget = { windowSeconds: 60, max: 1 };
-    await store.consume("k", budget);
-    await store.release("k");
+    const first = await store.consume("k", budget);
+    await store.release("k", first.window);
     expect((await store.consume("k", budget)).allowed).toBe(true);
     expect((await store.consume("k", budget)).allowed).toBe(false);
     now += 61_000;
-    await store.release("k");
     expect((await store.consume("k", budget)).allowed).toBe(true);
+    // A late refund from the old window can't open the new one.
+    await store.release("k", first.window);
+    expect((await store.consume("k", budget)).allowed).toBe(false);
   });
 
   it("keys never contain the address, IP or token they stand for", () => {
@@ -81,6 +83,6 @@ describe("per-recipient email limits", () => {
     expect(release).not.toHaveBeenCalled();
     const failure = new Error("provider down");
     await expect(guardDelivery(async () => { throw failure; })({ email: "A@Example.test " }, ctx)).rejects.toBe(failure);
-    expect(release).toHaveBeenCalledWith(recipientBudgetKey("secret", "a@example.test", EMAIL_RECIPIENT_BUDGETS[0]!.windowSeconds));
+    expect(release).toHaveBeenCalledWith(recipientBudgetKey("secret", "a@example.test", EMAIL_RECIPIENT_BUDGETS[0]!.windowSeconds), expect.any(String));
   });
 });

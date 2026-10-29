@@ -581,10 +581,13 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
    * every trusted device of the user, not just this browser's.
    */
   const forgetTrustedDevices = createAuthMiddleware(async (ctx) => {
-    let userId = ctx.context.session?.user?.id ?? null;
-    if (!userId && ctx.path === "/email-otp/reset-password" && typeof ctx.body?.email === "string") {
-      userId = (await pool.query<{ id: string }>(`select id from "user" where lower(email) = lower($1)`, [ctx.body.email])).rows[0]?.id ?? null;
-    }
+    // A reset changes the account its body names, whoever is signed in on this
+    // browser: never fall back to the caller's own session there.
+    const userId = ctx.path === "/email-otp/reset-password"
+      ? (typeof ctx.body?.email === "string"
+        ? (await pool.query<{ id: string }>(`select id from "user" where lower(email) = lower($1)`, [ctx.body.email.trim()])).rows[0]?.id ?? null
+        : null)
+      : ctx.context.session?.user?.id ?? null;
     if (!userId || isAPIError(ctx.context.returned)) return;
     await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [userId]);
   });
