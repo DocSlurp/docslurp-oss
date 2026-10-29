@@ -91,6 +91,9 @@ beforeAll(async () => {
     allowedDomains: [], scopes: ALL_SCOPES, rateLimitRpm: 600, rateLimitPpd: 100_000, rateLimits: [],
   });
   const { createApiApp } = await import("../server.js");
+  // The SSO limiter counts in the database, which this stack replaces with a refusing stub.
+  const { setSsoRateLimitStoreForTests } = await import("../routes/sso.js");
+  setSsoRateLimitStoreForTests((await import("../lib/auth-rate-limits.js")).createMemoryAuthBudgetStore());
   const { buildOpenApiDocument } = await import("../lib/openapi.js");
   const { listRouteAuthModes } = await import("../lib/route-auth.js");
   app = createApiApp();

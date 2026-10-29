@@ -237,6 +237,72 @@ describe("TOTP enrolment", () => {
 });
 
 describe("sign-in challenge", () => {
+  it("binds the session a challenge ends in to the password that started it", async () => {
+    const { user, secret } = await enrolledUser();
+    const browser = new Browser();
+    expect((await signInPassword(browser, user.email)).body.twoFactorRedirect).toBe(true);
+    expect((await browser.json("/two-factor/verify-totp", { code: totp(secret) })).status).toBe(200);
+    const hash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    const { credentialFingerprint } = await import("../lib/auth-credential-binding.js");
+    const session = await browser.session();
+    expect((await pool.query<{ fingerprint: string }>(`select "credentialFingerprint" as fingerprint from session where id = $1`, [session!.session.id])).rows[0]!.fingerprint)
+      .toBe(credentialFingerprint(hash));
+    // The password changes (by any path): the session the challenge produced ends at its next use.
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    expect(await browser.session()).toBeNull();
+  });
+
+  it("fails closed when a challenge's record of its first factor is missing", async () => {
+    const { user, secret } = await enrolledUser();
+    const browser = new Browser();
+    expect((await signInPassword(browser, user.email)).body.twoFactorRedirect).toBe(true);
+    // As if expiry cleanup had removed it while the completion was in flight.
+    await pool.query(`delete from verification where identifier like '2fa-credential-%'`);
+    const refused = await browser.json<{ code?: string }>("/two-factor/verify-totp", { code: totp(secret) });
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("SIGN_IN_AGAIN");
+    expect(await browser.session()).toBeNull();
+  });
+
+  it("revokes the session and trusted devices a completion mints while the password changes underneath", async () => {
+    const { user, secret } = await enrolledUser();
+    const attacker = new Browser();
+    expect((await signInPassword(attacker, user.email)).body.twoFactorRedirect).toBe(true);
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    await attacker.json("/two-factor/verify-totp", { code: totp(secret), trustDevice: true });
+    expect(await attacker.session()).toBeNull();
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
+  });
+
+  it("still revokes trust when a reset already deleted the new session, and runs after the MFA gate", async () => {
+    const { user } = await enrolledUser();
+    const { credentialFingerprint, revokeIfPasswordMoved } = await import("../lib/auth-credential-binding.js");
+    const oldHash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`trust-device-${user.id}-late`, user.id]);
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    expect(await revokeIfPasswordMoved(pool, user.id, "session-already-deleted", credentialFingerprint(oldHash))).toBe(true);
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
+    expect(await revokeIfPasswordMoved(pool, user.id, "any", credentialFingerprint(replaced))).toBe(false);
+    const order = ((await auth.$context).options.plugins ?? []).map((plugin) => plugin.id);
+    expect(order.indexOf("docslurp-credential-recheck")).toBeGreaterThan(order.indexOf("docslurp-mfa"));
+  });
+
+  it("cancels a pending challenge when the password is reset", async () => {
+    const { user, secret } = await enrolledUser();
+    const attacker = new Browser();
+    expect((await signInPassword(attacker, user.email)).body.twoFactorRedirect).toBe(true);
+    const owner = new Browser();
+    expect((await owner.json("/email-otp/request-password-reset", { email: user.email })).status).toBe(200);
+    const code = sentEmails.filter((sent) => sent.to === user.email).at(-1)!.code;
+    expect((await owner.json("/email-otp/reset-password", { email: user.email, otp: code, password: "a brand new password" })).status).toBe(200);
+    expect((await attacker.json("/two-factor/verify-totp", { code: totp(secret) })).status).not.toBe(200);
+    expect(await attacker.session()).toBeNull();
+    expect((await pool.query(`select 1 from session where "userId" = $1`, [user.id])).rowCount).toBe(0);
+  });
+
   it("issues no session after the password; the second factor issues an MFA-verified one", async () => {
     const { user, secret } = await enrolledUser();
     const before = await sessionsFor(user.id);
@@ -279,20 +345,16 @@ describe("sign-in challenge", () => {
     expect(await browser.session()).toBeNull();
   });
 
-  it("turns redirect sign-ins (email links, OAuth callbacks) into a redirect to the challenge", async () => {
+  it("serves no link-based email verification: it would sign in without a challenge-free path but also skip the verification binding", async () => {
+    // Redirect sign-ins that stop at the challenge are covered by magic links (auth-magic-link.db.test.ts).
     const { user } = await enrolledUser();
     await pool.query(`update "user" set "emailVerified" = false where id = $1`, [user.id]);
     const { createEmailVerificationToken } = await import("better-auth/api");
     const token = await createEmailVerificationToken(SECRET, user.email);
     const browser = new Browser();
     const response = await browser.request(`/verify-email?token=${token}&callbackURL=${encodeURIComponent("/app/workspaces")}`);
-    expect(response.status).toBe(302);
-    const location = new URL(response.headers.get("location")!);
-    expect(location.pathname).toBe("/app/sign-in");
-    expect(location.searchParams.get("mfa")).toBe("required");
-    expect(location.searchParams.get("redirectTo")).toBe("/app/workspaces");
+    expect(response.status).toBe(404);
     expect(await browser.session()).toBeNull();
-    expect(browser.cookies.has("better-auth.two_factor")).toBe(true);
   });
 
   it("revokes a session that skipped the challenge, whatever minted it", async () => {

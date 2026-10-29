@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { magicLink } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
+import { assertReviewedBetterAuth } from "./auth-compat.js";
+import { consumeAuthBudget, hashedBudgetKey, logAuthBudgetDenied } from "./auth-rate-limits.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
 export const MAGIC_LINK_SECONDS = 300;
@@ -23,15 +24,16 @@ export function magicLinkLandingUrl(url: string): string {
   return landing.toString();
 }
 
-export function docslurpMagicLinkPlugin(send: (args: { email: string; url: string }) => Promise<void>) {
+export function docslurpMagicLinkPlugin(send: (args: { email: string; url: string }, ctx?: { context?: { secret?: string } }) => Promise<void>) {
   const plugin = magicLink({ expiresIn: MAGIC_LINK_SECONDS, storeToken: "hashed", disableSignUp: true,
     rateLimit: { window: 60, max: 3 },
-    sendMagicLink: async ({ email, url }) => send({ email, url: magicLinkLandingUrl(url) }),
+    sendMagicLink: async ({ email, url }, ctx) => send({ email, url: magicLinkLandingUrl(url) }, ctx),
   });
-  // Pinned Better Auth 1.7.14's router omits SERVER_ONLY endpoints while
+  // The reviewed Better Auth router omits SERVER_ONLY endpoints while
   // auth.api still dispatches all hooks. Fail startup if that endpoint changes.
+  assertReviewedBetterAuth("magic-link verification", plugin.version);
   const verify = plugin.endpoints.magicLinkVerify;
-  if (plugin.version !== "1.7.14" || verify.path !== "/magic-link/verify" || verify.options.method !== "GET" || !verify.options.metadata) {
+  if (verify.path !== "/magic-link/verify" || verify.options.method !== "GET" || !verify.options.metadata) {
     throw new Error("Review Better Auth magic-link verification before upgrading");
   }
   Object.assign(verify.options.metadata, { SERVER_ONLY: true });
@@ -52,14 +54,10 @@ export function docslurpMagicLinkPlugin(send: (args: { email: string; url: strin
 
 /** Independent of optional API limits; atomic shared-database budget, including unknown addresses. */
 export async function consumeMagicLinkConfirmation(pool: Pick<Pool, "query">, address: string | null): Promise<boolean> {
-  const key = `magic-confirm:${createHash("sha256").update(address ?? "unknown").digest("hex")}`;
-  const now = Date.now();
-  const { rows } = await pool.query<{ count: number }>(`insert into "rateLimit" (id,key,count,"lastRequest") values($1,$1,1,$2)
-    on conflict(key) do update set
-      count = case when "rateLimit"."lastRequest" <= $2 - 60000 then 1 else least("rateLimit".count + 1, 11) end,
-      "lastRequest" = case when "rateLimit"."lastRequest" <= $2 - 60000 then $2 else "rateLimit"."lastRequest" end
-    returning count`, [key, now]);
-  return rows.length === 1 && rows[0]!.count <= 10;
+  const budget = { windowSeconds: 60, max: 10 };
+  const result = await consumeAuthBudget(pool, hashedBudgetKey("magic-confirm", address ?? "unknown"), budget);
+  if (!result.allowed) logAuthBudgetDenied("magic-link-confirm", budget, result);
+  return result.allowed;
 }
 
 type NativeVerify = (input: { query: { token: string; callbackURL: string; newUserCallbackURL: string; errorCallbackURL: string }; headers: Headers; asResponse: true }) => Promise<Response>;

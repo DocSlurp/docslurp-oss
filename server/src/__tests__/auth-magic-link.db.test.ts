@@ -62,7 +62,7 @@ afterAll(async () => {
   vi.unstubAllGlobals();
 });
 
-beforeEach(async () => { sentEmails.length = 0; await pool.query(`delete from "rateLimit" where key like 'magic-confirm:%'`); });
+beforeEach(async () => { sentEmails.length = 0; await pool.query(`delete from auth_rate_limits where key like 'magic-confirm:%'`); });
 afterEach(() => { vi.useRealTimers(); });
 
 

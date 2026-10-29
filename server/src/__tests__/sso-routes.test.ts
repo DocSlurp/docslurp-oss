@@ -200,8 +200,9 @@ vi.mock("../lib/auth.js", () => ({
   }
 }));
 
-const { inferApiOrigin, resetSsoRateLimitBucketsForTests, samlCallbackRoutes, ssoRoutes } =
+const { inferApiOrigin, setSsoRateLimitStoreForTests, samlCallbackRoutes, ssoRoutes } =
   await import("../routes/sso.js");
+const { createMemoryAuthBudgetStore } = await import("../lib/auth-rate-limits.js");
 const { setTxtResolverForTests, validateClaimableDomain } = await import("../services/sso-domains.js");
 
 const issuer = "https://idp.acme.com";
@@ -297,7 +298,7 @@ beforeEach(() => {
   safeExternalFetchMock.mockClear();
   vi.stubGlobal("fetch", vi.fn());
   setTxtResolverForTests(null);
-  resetSsoRateLimitBucketsForTests();
+  setSsoRateLimitStoreForTests(createMemoryAuthBudgetStore());
   delete process.env.PUBLIC_API_URL;
   delete process.env.API_URL;
   delete process.env.APP_URL;
@@ -460,10 +461,19 @@ describe("ssoRoutes security hardening", () => {
     expect(await test()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
   });
 
+  it("refuses SSO requests when the shared limiter can't count", async () => {
+    setSsoRateLimitStoreForTests({ consume: async () => { throw new Error("database unavailable"); }, release: async () => undefined });
+    const app = new Hono().route("/v1/auth", samlCallbackRoutes);
+    const response = await app.request("/v1/auth/oidc/missing/init", { headers: { "User-Agent": "limiter-down" } });
+    expect(response.status).toBe(500);
+    expect(response.headers.get("location")).toBeNull();
+  });
+
   it("rate limits repeated SSO auth endpoint requests", async () => {
     process.env.SSO_RATE_LIMIT_MAX = "2";
     vi.resetModules();
     const fresh = await import("../routes/sso.js");
+    fresh.setSsoRateLimitStoreForTests((await import("../lib/auth-rate-limits.js")).createMemoryAuthBudgetStore());
     const app = new Hono().route("/v1/auth", fresh.samlCallbackRoutes);
     process.env.SSO_RATE_LIMIT_MAX = "1000";
 

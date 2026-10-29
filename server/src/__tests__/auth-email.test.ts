@@ -26,4 +26,11 @@ describe("authentication email delivery", () => {
     expect(html).toContain(">123456</div>");
     expect(html).toContain("10 minutes");
   });
+  it("labels a password reset code and reassures someone who didn't ask", () => {
+    const { subject, text, html } = renderAuthCodeEmail("654321", "forget-password");
+    expect(subject).toBe("654321 is your DocSlurp password reset code");
+    expect(text).toContain("\n\n654321\n\n");
+    expect(text).toContain("your password hasn't changed");
+    expect(html).toContain("Your password reset code:");
+  });
 });
