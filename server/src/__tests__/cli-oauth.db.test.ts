@@ -111,6 +111,11 @@ beforeEach(async () => {
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("MCP_PUBLIC_URL", origin);
   await q("delete from mcp_oauth_device_attempts");
+  // Browser authentication is a test double, but action grants remain real,
+  // session-bound database state and must never leak into another case.
+  await q(`update session set "sensitiveVerifiedAt" = null, "sensitiveFirstFactorAt" = null,
+    "sensitiveMfaVerified" = false, "sensitiveSsoVerified" = false, "sensitiveFirstFactorSsoVerified" = false
+    where (id = 'sess-owner' and "userId" = 'owner') or (id = 'sess-other' and "userId" = 'other')`);
 });
 
 const pkce = () => {
@@ -319,6 +324,15 @@ describe("scope mapping on the REST API", () => {
       method: "PATCH", headers: { cookie: cookie(user), origin, "content-type": "application/json" },
       body: JSON.stringify({ scopes: ["search"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } }),
     });
+    const unverified = await patch("owner");
+    expect(unverified.status).toBe(403);
+    expect(await unverified.json()).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+    expect((await patch("other")).status).toBe(403);
+    // This suite doubles browser login, so explicitly establish each exact
+    // session's action proof before exercising ownership and live token policy.
+    const { grantSensitiveAccess } = await import("../lib/auth-sensitive-access.js");
+    expect(await grantSensitiveAccess(pool.current!, "other", "sess-other")).toBe(true);
+    expect(await grantSensitiveAccess(pool.current!, "owner", "sess-owner")).toBe(true);
     expect((await patch("other")).status).toBe(404);
     expect((await patch("owner")).status).toBe(200);
     const refreshed = await token({ grant_type: "refresh_token", refresh_token: issued.refresh_token });
