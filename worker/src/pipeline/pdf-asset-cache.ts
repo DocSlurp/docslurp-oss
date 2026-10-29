@@ -12,7 +12,7 @@ import { documentArtifactRoot } from "../lib/artifact-root.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
-import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
+import { defaultRenderConcurrency, renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
 
@@ -35,6 +35,16 @@ export interface RasterCacheOptions {
   loadEngine?: () => Promise<NativePdfEngine | null>;
   /** Max parallel native renders (one document handle per lane). */
   concurrency?: number;
+  /** Max parallel pdftoppm commands per selected-page render (default `defaultPdftoppmConcurrency`). */
+  pdftoppmConcurrency?: number;
+}
+
+/**
+ * pdftoppm lanes per render: `PDF_RASTER_CONCURRENCY` when set (as for native renders), else at most 2,
+ * since each lane is a separate sandboxed process holding a full-page bitmap.
+ */
+export function defaultPdftoppmConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  return env.PDF_RASTER_CONCURRENCY?.trim() ? defaultRenderConcurrency(env) : Math.min(2, defaultRenderConcurrency(env));
 }
 
 let rasterEngineUnavailableReported = false;
@@ -223,6 +233,20 @@ export class PdfRasterCache {
     return (await this.sources.get(document)).path;
   }
 
+  /** Page sizes (CropBox, points) for `pageNumbers` from one pdfinfo call over their span. */
+  private async pdfPageSizes(
+    sourcePath: string,
+    pageNumbers: number[],
+    signal?: AbortSignal,
+  ): Promise<Map<number, { widthPt: number; heightPt: number }>> {
+    const first = Math.min(...pageNumbers);
+    const last = Math.max(...pageNumbers);
+    const sizePlan = await this.runner.pdfPageSizes(sourcePath, first, last);
+    if (!sizePlan.available) throw new Error("pdfinfo unavailable for bounded rasterization");
+    const { stdout } = await this.runner.run(sizePlan, signal);
+    return parsePdfPageSizes(stdout, first, last);
+  }
+
   async renderSelectedPages(args: {
     document: Document;
     runId: string;
@@ -298,40 +322,51 @@ export class PdfRasterCache {
         : [];
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
-        for (const selectedPage of pdftoppmPages) {
-          const range = { first: selectedPage, last: selectedPage };
-          const sizePlan = await this.runner.pdfPageSizes(source.path, selectedPage, selectedPage);
-          if (!sizePlan.available) throw new Error("pdfinfo unavailable for bounded rasterization");
-          const sizeResult = await this.runner.run(sizePlan, args.signal);
-          const size = sizeResult.stdout.match(/(?:Page\s+\d+\s+size|Page size):\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
-          if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
-          const renderDpi = boundedRasterDpi(Number(size[1]), Number(size[2]), dpi);
-          const prefix = path.join(scratch, `page-${range.first}-${range.last}`);
-          const plan = await this.runner.renderPdfPageRange(
-            source.path,
-            prefix,
-            range.first,
-            range.last,
-            renderDpi,
-            boundedRasterEdge(Number(size[1]), Number(size[2]), renderDpi),
-          );
-          if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
-          await this.runner.run(plan, args.signal);
+        // One pdfinfo call sizes every page to render; each page then renders in its own pdftoppm call,
+        // a few at a time, so a multi-page selection no longer waits on 2N sequential sandboxed commands.
+        const sizes = pdftoppmPages.length > 0
+          ? await this.pdfPageSizes(source.path, pdftoppmPages, args.signal)
+          : new Map<number, { widthPt: number; heightPt: number }>();
+        const lanes = Math.max(1, Math.min(this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency(), pdftoppmPages.length));
+        let cursor = 0;
+        let failure: { error: unknown } | null = null;
+        // The first failure stops every lane; all lanes drain before the scratch directory is removed.
+        await Promise.all(Array.from({ length: lanes }, async () => {
+          while (cursor < pdftoppmPages.length && !failure) {
+            try {
+              args.signal?.throwIfAborted();
+              const selectedPage = pdftoppmPages[cursor++]!;
+              const size = sizes.get(selectedPage);
+              if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+              const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
+              const prefix = path.join(scratch, `page-${selectedPage}-${selectedPage}`);
+              const plan = await this.runner.renderPdfPageRange(
+                source.path,
+                prefix,
+                selectedPage,
+                selectedPage,
+                renderDpi,
+                boundedRasterEdge(size.widthPt, size.heightPt, renderDpi),
+              );
+              if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
+              await this.runner.run(plan, args.signal);
 
-          const filenames = await readdir(scratch);
-          for (let pageNumber = range.first; pageNumber <= range.last; pageNumber += 1) {
-            const filename = filenames.find((candidate) => {
               const stem = `${path.basename(prefix)}-`;
-              if (!candidate.startsWith(stem)) return false;
-              const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
-              return suffix !== null && Number(suffix[1]) === pageNumber;
-            });
-            if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
-            const bytes = await readFile(path.join(scratch, filename));
-            await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
-            generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+              const filename = (await readdir(scratch)).find((candidate) => {
+                if (!candidate.startsWith(stem)) return false;
+                const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
+                return suffix !== null && Number(suffix[1]) === selectedPage;
+              });
+              if (!filename) throw new Error(`pdftoppm did not produce page ${selectedPage}`);
+              const bytes = await readFile(path.join(scratch, filename));
+              await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
+              generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+            } catch (error) {
+              failure ??= { error };
+            }
           }
-        }
+        }));
+        if (failure) throw (failure as { error: unknown }).error;
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }
@@ -389,6 +424,23 @@ async function hashFile(filePath: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(filePath)) hash.update(chunk);
   return hash.digest("hex");
+}
+
+/**
+ * Per-page sizes from `pdfinfo -f first -l last` ("Page    N size: W x H pts"). A one-page call may print the
+ * unnumbered "Page size:" form instead; it applies to `first` only when first === last.
+ */
+export function parsePdfPageSizes(stdout: string, first: number, last: number): Map<number, { widthPt: number; heightPt: number }> {
+  const sizes = new Map<number, { widthPt: number; heightPt: number }>();
+  for (const match of stdout.matchAll(/Page\s+(\d+)\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/g)) {
+    const pageNumber = Number(match[1]);
+    if (pageNumber >= first && pageNumber <= last) sizes.set(pageNumber, { widthPt: Number(match[2]), heightPt: Number(match[3]) });
+  }
+  if (first === last && !sizes.has(first)) {
+    const single = stdout.match(/Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
+    if (single) sizes.set(first, { widthPt: Number(single[1]), heightPt: Number(single[2]) });
+  }
+  return sizes;
 }
 
 function readPngDimensions(bytes: Buffer): { widthPx: number | null; heightPx: number | null } {
