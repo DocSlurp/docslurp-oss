@@ -47,7 +47,7 @@ import {
   resolveVisionGuardConfig,
   type VisionGuardStop,
 } from "../lib/vision-spend-guard.js";
-import { resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
+import { VISION_ROUTING_VERSION_SLOT, resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
 import { PLAN_QUALITY_METHOD } from "../routing/quality.js";
@@ -1231,7 +1231,8 @@ export class VisionExtractStage implements Stage {
           runtime: route.runtime,
         },
       });
-      this.guardFor(state).observe(recorded);
+      // The guard exists once callVisionOnImage admitted the call.
+      this.guards.get(state)?.observe(recorded);
     } else state.usageLedger.enqueue(
       buildFailedVisionAttemptUsage({
         documentId: document.id,
@@ -1258,7 +1259,7 @@ export class VisionExtractStage implements Stage {
         reason,
         usagePersisted: true,
         rejected: rejected !== null,
-        routingVersion: routingVersion(resolveRunRoutingV2(state)),
+        routingVersion: state.artifactLedger?.read(VISION_ROUTING_VERSION_SLOT) ?? null,
       },
     });
   }
