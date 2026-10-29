@@ -51,7 +51,7 @@ export interface ShardTiming {
 }
 
 export interface DopplerShardDeps {
-  execute?: typeof executeDopplerVm;
+  execute?: (job: DopplerVmJob, signal?: AbortSignal) => Promise<SandboxResult>;
   profile?: () => Promise<ShardCostProfile>;
   recordTiming?: (timing: ShardTiming) => void;
 }

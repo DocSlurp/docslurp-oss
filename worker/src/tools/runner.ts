@@ -1,5 +1,6 @@
 import { VM_TIMEOUT_MS, type DopplerVmJob } from "../sandbox/providers/modal/doppler-vm.js";
-import { dopplerShardSettings, executeDopplerShards } from "../sandbox/providers/modal/doppler-shards.js";
+import { dopplerShardSettings, executeDopplerShards, type DopplerShardDeps } from "../sandbox/providers/modal/doppler-shards.js";
+import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
   ensureVendorBundle,
@@ -72,6 +73,8 @@ export interface CommandRunnerOptions {
    * (registered by the worker with setDefaultParserSandbox, else initialized from the env).
    */
   openSession?: (activityId: string) => Promise<SandboxSession>;
+  /** Measured shard profiles (DB-backed); without it Doppler shards plan from the priors. */
+  shardCalibration?: Pick<ShardCalibration, "profile">;
 }
 
 /** A started command: a local child process to monitor, or a remote run that completes on its own. */
@@ -132,11 +135,13 @@ export class CommandRunner {
   private readonly commandRssBudgetKb: number | null;
   private readonly containerMemoryLimitMb: number | null;
   private readonly openSession?: (activityId: string) => Promise<SandboxSession>;
+  private readonly shardCalibration?: Pick<ShardCalibration, "profile">;
   private readonly warmedCommands = new Set<string>();
   private embedPool?: PythonPool;
 
   constructor(options: CommandRunnerOptions = {}) {
     this.openSession = options.openSession;
+    this.shardCalibration = options.shardCalibration;
     this.scriptsDir = resolveScriptsDir();
     this.venvBin = resolveVenvBin(process.env.PYTHON_VENV);
     const preferred = path.join(this.venvBin, "python3");
@@ -1190,6 +1195,14 @@ export class CommandRunner {
    * Start a command through the activity's sandbox session. Vector-writer commands hold
    * backend credentials and run outside the sandbox. Callers must `release()` when done.
    */
+  private dopplerShardDeps(): DopplerShardDeps {
+    const calibration = this.shardCalibration;
+    return {
+      ...(calibration ? { profile: () => calibration.profile("extract-markdown:doppler-vm") } : {}),
+      recordTiming: (timing) => recordShardTimingInContext(timing),
+    };
+  }
+
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
     if (plan.dopplerVm) {
       // DOCSLURP_DOPPLER_SHARDS=on fans long PDFs out across parallel VMs (needs a doppler-vm@3 image).
