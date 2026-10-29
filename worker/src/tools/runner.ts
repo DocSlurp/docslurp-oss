@@ -268,10 +268,19 @@ export class CommandRunner {
             }
             stderr += chunk.toString();
           });
+          let abortError: Error | null = null;
           child.on("error", (error) => {
+            if (holdAbortedChild(child, error)) {
+              abortError = error;
+              return;
+            }
             reject(monitor.finish() ?? error);
           });
           child.on("close", (code) => {
+            if (abortError) {
+              reject(monitor.finish(code) ?? abortError);
+              return;
+            }
             if (outputLimitError) {
               reject(outputLimitError);
               return;
@@ -343,10 +352,19 @@ export class CommandRunner {
       DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
 
     const exitPromise = new Promise<void>((resolve, reject) => {
+      let abortError: Error | null = null;
       child.on("error", (error) => {
+        if (holdAbortedChild(child, error)) {
+          abortError = error;
+          return;
+        }
         reject(monitor.finish() ?? error);
       });
       child.on("close", (code) => {
+        if (abortError) {
+          reject(monitor.finish(code) ?? abortError);
+          return;
+        }
         if (outputLimitError) {
           reject(outputLimitError);
           return;
@@ -1012,12 +1030,18 @@ export class CommandRunner {
       child.stderr?.on("data", (chunk) => {
         stderr += chunk.toString();
       });
+      let abortError: Error | null = null;
       child.on("error", (error) => {
+        if (holdAbortedChild(child, error)) {
+          abortError = error;
+          return;
+        }
         reject(monitor.finish() ?? error);
       });
       child.on("close", (code) => {
         const budgetError = monitor.finish(code);
         if (budgetError) reject(budgetError);
+        else if (abortError) reject(abortError);
         else resolve({ exitCode: code, stdout, stderr });
       });
     });
@@ -1643,12 +1667,54 @@ async function inspectProcessTree(
   });
 }
 
-async function killProcessTree(pids: number[]): Promise<void> {
+async function killProcessTree(pids: number[], signal: NodeJS.Signals = "SIGKILL"): Promise<void> {
   for (const pid of [...pids].reverse()) {
     try {
-      process.kill(pid, "SIGKILL");
+      process.kill(pid, signal);
     } catch {}
   }
+}
+
+/** How long an aborted command's process tree gets to exit after SIGTERM before it is SIGKILLed. */
+export const DEFAULT_COMMAND_ABORT_GRACE_MS = 2_000;
+
+function commandAbortGraceMs(): number {
+  return readPositiveNumber(process.env.WORKER_COMMAND_ABORT_GRACE_MS) ?? DEFAULT_COMMAND_ABORT_GRACE_MS;
+}
+
+/**
+ * Node signals a child and emits an AbortError the moment its spawn signal aborts, before the child has
+ * exited. Callers release semaphore slots and remove scratch once a command settles, so a running
+ * parser must not outlive its command: for an abort of a spawned child, SIGTERM its whole process tree,
+ * SIGKILL whatever is left after a short grace period, and return true so the caller settles on 'close'
+ * (after every process holding its stdio is gone) instead of on this error.
+ */
+function holdAbortedChild(child: ChildProcess, error: Error): boolean {
+  if (error.name !== "AbortError" || child.pid === undefined) return false;
+  const pid = child.pid;
+  // Snapshot the tree while the root still links it: a descendant reparented after the root dies is
+  // still killed with the first snapshot's pids.
+  const seen = new Set<number>([pid]);
+  const snapshot = async () => {
+    for (const descendant of (await inspectProcessTree(pid).catch(() => null))?.pids ?? []) seen.add(descendant);
+    return [...seen];
+  };
+  let closed = false;
+  void snapshot().then((pids) => {
+    if (!closed) void killProcessTree(pids, "SIGTERM");
+  });
+  const escalate = setTimeout(() => {
+    void snapshot().then((pids) => {
+      if (closed) return;
+      console.error(`[worker-command] status=abort-kill pid=${pid} grace_ms=${commandAbortGraceMs()} pids=${pids.length}`);
+      void killProcessTree(pids, "SIGKILL");
+    });
+  }, commandAbortGraceMs());
+  child.once("close", () => {
+    closed = true;
+    clearTimeout(escalate);
+  });
+  return true;
 }
 
 export { resolveScriptsDir };

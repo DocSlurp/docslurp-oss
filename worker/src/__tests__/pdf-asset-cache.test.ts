@@ -1,4 +1,6 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,7 +16,9 @@ import {
   defaultPdftoppmProcessConcurrency,
   normalizePageNumbers,
   parsePdfPageSizes,
+  runLanes,
 } from "../pipeline/pdf-asset-cache.js";
+import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
 
 /** pdfinfo -f/-l output: the "Pages:" line, then one numbered size line per page. */
@@ -321,6 +325,17 @@ describe("PdfRasterCache", () => {
       "File size:      1234 bytes",
     ].join("\n");
     expect(parsePdfPageSizes(injected, 3, 3)).toEqual(new Map([[3, { widthPt: 612, heightPt: 792 }]]));
+    // Only the last "Pages:" line starts the size block: a title that injects its own "Pages:" line and a fake
+    // size after it must lose to the real size pdfinfo prints after its own, later "Pages:" line.
+    const injectedPagesLine = [
+      "Title:          x",
+      "Pages:          1",
+      "Page    3 size: 99999 x 99999 pts",
+      "Producer:       y",
+      "Pages:          12",
+      "Page    3 size: 595.28 x 841.89 pts (A4)",
+    ].join("\n");
+    expect(parsePdfPageSizes(injectedPagesLine, 3, 3)).toEqual(new Map([[3, { widthPt: 595.28, heightPt: 841.89 }]]));
     // A title-only size line with no real one after "Pages:" sizes nothing (the render then refuses).
     expect(parsePdfPageSizes("Title: a\nPage    3 size: 99999 x 99999 pts\nPages:  3\nEncrypted: no", 3, 3).size).toBe(0);
   });
@@ -337,7 +352,7 @@ describe("PdfRasterCache", () => {
     expect(defaultPdftoppmProcessConcurrency({ PDF_PDFTOPPM_PROCESS_CONCURRENCY: "1000" })).toBe(32);
   });
 
-  it("aborts in-flight sibling commands on the first failure and uploads nothing after it", async () => {
+  it("holds the slot and scratch until an aborted sibling's real process tree exits, escalating to SIGKILL", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -349,30 +364,155 @@ describe("PdfRasterCache", () => {
     };
     const uploads: string[] = [];
     const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
-    let siblingAborted = false;
+    const pidRoot = await mkdtemp(path.join(tmpdir(), "raster-abort-test-"));
+    tempRoots.push(pidRoot);
+    const pidFile = path.join(pidRoot, "pids");
+    // A parser wrapper and its child that both ignore SIGTERM, like a launcher whose parser keeps running.
+    const grandchild = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+    const parser = `
+      const { spawn } = require("node:child_process");
+      const { writeFileSync } = require("node:fs");
+      process.on("SIGTERM", () => {});
+      const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });
+      child.on("spawn", () => writeFileSync(process.argv[1], process.pid + " " + child.pid));
+      setInterval(() => {}, 1000);
+    `;
+    const slots = new Semaphore(4);
+    let scratch = "";
+    let failedAt = 0;
+    let exit: { at: number; signal: NodeJS.Signals | null; slotsInUse: number; scratchPresent: boolean } | null = null;
+    const commands = new CommandRunner({
+      openSession: async () => ({
+        providerId: "test-local",
+        isolation: "none" as never,
+        spawn: (command, signal) => {
+          const child = spawn(command.binary, command.args, { env: command.env, stdio: ["ignore", "pipe", "pipe"], signal });
+          child.once("exit", (_code, exitSignal) => {
+            exit = { at: Date.now(), signal: exitSignal, slotsInUse: slots.inUse, scratchPresent: existsSync(scratch) };
+          });
+          return child;
+        },
+        close: async () => {},
+      }),
+    });
     const runner = {
       async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
       async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
       async run(plan: { binary?: string; args: string[] }, signal?: AbortSignal) {
         if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
-        const page = Number(plan.args[1]);
-        if (page === 1) {
-          await new Promise((resolve) => setTimeout(resolve, 5));
+        if (Number(plan.args[1]) === 2) {
+          scratch = path.dirname(plan.args[0]!);
+          return await commands.run({ binary: process.execPath, args: ["-e", parser, pidFile], available: true }, signal);
+        }
+        // Fail only once the sibling's whole tree is running.
+        while (!existsSync(pidFile) || (await readFile(pidFile, "utf8")).split(" ").length < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        failedAt = Date.now();
+        throw new Error("pdftoppm crashed");
+      },
+    };
+    const graceMs = 300;
+    const previousGrace = process.env.WORKER_COMMAND_ABORT_GRACE_MS;
+    process.env.WORKER_COMMAND_ABORT_GRACE_MS = String(graceMs);
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    try {
+      const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 2, rasterSlots: slots });
+      await expect(cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 10 }, runId: "run-1", pageNumbers: [1, 2] }))
+        .rejects.toThrow("pdftoppm crashed");
+    } finally {
+      if (previousGrace === undefined) delete process.env.WORKER_COMMAND_ABORT_GRACE_MS;
+      else process.env.WORKER_COMMAND_ABORT_GRACE_MS = previousGrace;
+      await sourceCache.clear();
+    }
+    const [parserPid, grandchildPid] = (await readFile(pidFile, "utf8")).split(" ").map(Number);
+    // The parser ignored SIGTERM, so it only exited when the grace period ran out and SIGKILL followed.
+    expect(exit).not.toBeNull();
+    expect(exit!.signal).toBe("SIGKILL");
+    expect(exit!.at - failedAt).toBeGreaterThanOrEqual(graceMs - 50);
+    expect(exit!.at - failedAt).toBeLessThan(graceMs + 2_000);
+    // Until then the aborted lane still held its slot and its scratch was still on disk.
+    expect(exit!.slotsInUse).toBeGreaterThanOrEqual(1);
+    expect(exit!.scratchPresent).toBe(true);
+    // Nothing of the tree survives the render: both processes are gone, the slot is free and scratch removed.
+    for (const pid of [parserPid!, grandchildPid!]) expect(() => process.kill(pid, 0)).toThrow();
+    expect(slots.inUse).toBe(0);
+    expect(existsSync(scratch)).toBe(false);
+    expect(uploads).toEqual([]);
+  }, 15_000);
+
+  it("uploads nothing from a lane whose command finished after a sibling failed", async () => {
+    const sourceStorage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "pdf bytes");
+        return filePath;
+      },
+    };
+    const uploads: string[] = [];
+    const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
+    let releaseSibling!: () => void;
+    const siblingMayFail = new Promise<void>((resolve) => { releaseSibling = resolve; });
+    let finishedAfterAbort = false;
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
+      async run(plan: { binary?: string; args: string[] }, signal?: AbortSignal) {
+        if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
+        if (Number(plan.args[1]) === 2) {
+          await siblingMayFail;
           throw new Error("pdftoppm crashed");
         }
-        // The sibling only finishes when its signal aborts, like a killed child process; it has already written output.
-        await writeFile(`${plan.args[0]}-${page}.png`, "x");
+        // This command completes successfully with its page written, but only after the sibling failed.
+        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+        releaseSibling();
         await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
-        siblingAborted = true;
-        throw signal!.reason;
+        finishedAfterAbort = true;
+        return { stdout: "", stderr: "" };
       },
     };
     const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 2, rasterSlots: new Semaphore(4) });
-    await expect(cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 10 }, runId: "run-1", pageNumbers: [1, 2, 3] }))
+    await expect(cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 10 }, runId: "run-1", pageNumbers: [1, 2] }))
       .rejects.toThrow("pdftoppm crashed");
-    expect(siblingAborted).toBe(true);
+    expect(finishedAfterAbort).toBe(true);
     expect(uploads).toEqual([]);
+    await sourceCache.clear();
+  });
+
+  it("runs every item on one lane when the lane count is not a positive finite number", async () => {
+    for (const lanes of [Number.NaN, 0, -2, Number.POSITIVE_INFINITY]) {
+      const seen: number[] = [];
+      await runLanes([1, 2, 3], lanes, undefined, async (item) => { seen.push(item); });
+      expect(seen).toEqual([1, 2, 3]);
+    }
+    const sourceStorage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "pdf bytes");
+        return filePath;
+      },
+    };
+    const uploads: string[] = [];
+    const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
+      async run(plan: { binary?: string; args: string[] }) {
+        if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
+        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: Number.NaN, rasterSlots: new Semaphore(4) });
+    const rendered = await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 10 }, runId: "run-1", pageNumbers: [1, 2, 5] });
+    expect(rendered.map((page) => page.pageNumber)).toEqual([1, 2, 5]);
+    expect(uploads).toHaveLength(3);
     await sourceCache.clear();
   });
 

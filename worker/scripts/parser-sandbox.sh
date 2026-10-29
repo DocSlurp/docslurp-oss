@@ -22,7 +22,10 @@ cleanup() {
   rm -rf "${SANDBOX_INSTANCE}"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# Until bwrap starts there is nothing to stop: a signal ends the launcher and EXIT cleans up.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 export HOME="${SANDBOX_INSTANCE}/home"
 export TMPDIR="${SANDBOX_INSTANCE}/tmp"
@@ -107,4 +110,21 @@ for raw_path in "${writable_paths[@]}"; do
   bwrap_args+=(--bind "${writable_path}" "${writable_path}")
 done
 
-bwrap "${bwrap_args[@]}" -- "$@"
+# bwrap runs in the background so a TERM or INT to this launcher reaches it at once: bash defers
+# traps while a foreground child runs, which left the parser running after the worker signalled us.
+# bwrap exits on TERM; --die-with-parent and the PID namespace then take the whole parser tree with
+# it. Async jobs ignore SIGINT in a non-interactive shell, so both signals forward as TERM. The EXIT
+# trap still removes the instance directory, after bwrap has exited.
+bwrap "${bwrap_args[@]}" -- "$@" &
+bwrap_pid=$!
+forward_term() {
+  kill -TERM "${bwrap_pid}" 2>/dev/null || true
+}
+trap forward_term INT TERM
+status=0
+# wait returns early (status > 128) when a trapped signal arrives; keep waiting until bwrap is gone.
+while :; do
+  wait "${bwrap_pid}" && status=0 || status=$?
+  kill -0 "${bwrap_pid}" 2>/dev/null || break
+done
+exit "${status}"

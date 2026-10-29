@@ -434,6 +434,8 @@ export class PdfRasterCache {
           await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
           generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
         });
+        const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
+        if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }
@@ -504,6 +506,8 @@ export async function runLanes<T>(
   task: (item: T, signal: AbortSignal) => Promise<void>,
 ): Promise<void> {
   if (items.length === 0) return;
+  // A misconfigured lane count (NaN, 0, Infinity) must still run every item, never zero lanes.
+  const laneCount = Number.isFinite(lanes) && lanes >= 1 ? Math.floor(lanes) : 1;
   const controller = new AbortController();
   const forward = () => controller.abort(signal!.reason);
   if (signal?.aborted) forward();
@@ -511,7 +515,7 @@ export async function runLanes<T>(
   let cursor = 0;
   let failure: { error: unknown } | null = null;
   try {
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(lanes, items.length)) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(laneCount, items.length) }, async () => {
       while (cursor < items.length && !failure) {
         try {
           controller.signal.throwIfAborted();
