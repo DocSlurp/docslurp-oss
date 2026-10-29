@@ -370,6 +370,53 @@ describe("per-recipient email limits", () => {
     expect(keys.some((key) => key.includes("@") || key.includes(known.split("@")[0]!))).toBe(false);
   });
 
+  it("shares one budget across sign-up, magic links and verification resends", async () => {
+    const email = `paths-${randomBytes(3).toString("hex")}@example.test`;
+    const statuses = [
+      (await new Browser().json("/sign-up/email", { name: "New", email, password: NEW_PASSWORD })).status,
+      (await new Browser().json("/sign-in/magic-link", { email })).status,
+      (await new Browser().json("/send-verification-email", { email })).status,
+      (await new Browser().json("/email-otp/send-verification-otp", { email, type: "email-verification" })).status,
+      (await new Browser().json("/sign-in/magic-link", { email })).status,
+    ];
+    expect(statuses.every((status) => status !== 429), JSON.stringify(statuses)).toBe(true);
+    const limited = await new Browser().json<{ code?: string }>("/sign-in/magic-link", { email });
+    expect(limited.status).toBe(429);
+    expect(limited.body.code).toBe("EMAIL_RATE_LIMITED");
+  });
+
+  it("never limits password sign-in per address, nor lets it spend the email budget", async () => {
+    const user = await createUser();
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await new Browser().json<{ code?: string }>("/sign-in/email", { email: user.email, password: "wrong password here" });
+      expect(response.status).toBe(401);
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) expect((await requestReset(new Browser(), user.email)).status).toBe(200);
+  });
+
+  it("gives refused sign-ups their unit back", async () => {
+    const email = `refused-${randomBytes(3).toString("hex")}@example.test`;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      expect((await new Browser().json("/sign-up/email", { name: "New", email, password: "breached but long enough" })).status).toBe(400);
+    }
+    expect((await new Browser().json("/sign-up/email", { name: "New", email, password: NEW_PASSWORD })).status).toBe(200);
+  });
+
+  it("fails closed, sending nothing, when the budget table is unavailable", async () => {
+    const user = await createUser();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await pool.query(`alter table auth_rate_limits rename to auth_rate_limits_unavailable`);
+    try {
+      expect((await requestReset(new Browser(), user.email)).status).toBeGreaterThanOrEqual(500);
+      expect((await new Browser().json("/email-otp/reset-password", { email: user.email, otp: "123456", password: NEW_PASSWORD })).status).toBeGreaterThanOrEqual(500);
+    } finally {
+      await pool.query(`alter table auth_rate_limits_unavailable rename to auth_rate_limits`);
+      vi.mocked(console.error).mockRestore();
+    }
+    expect(sentEmails).toHaveLength(0);
+    expect((await new Browser().json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
+  });
+
   it("counts verification mail re-sent by password sign-in without failing the sign-in", async () => {
     const user = await createUser({ emailVerified: false });
     const statuses: number[] = [];

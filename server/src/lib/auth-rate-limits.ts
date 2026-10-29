@@ -2,7 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 
 import { defineRequestState, hasRequestState } from "@better-auth/core/context";
 import type { BetterAuthPlugin } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import type { Pool } from "pg";
 
 /**
@@ -179,9 +179,16 @@ export interface EmailRecipientLimiter {
 
 export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled: boolean }): EmailRecipientLimiter {
   const { store, enabled } = options;
-  // Set by the hook once this request's mail is counted. Request state, not the
-  // endpoint path: native code can send from a nested endpoint call.
-  const counted = defineRequestState(() => ({ value: false }));
+  // Set by the hook once this request's mail is counted, and by delivery once it
+  // is sent. Request state, not the endpoint path: native code can send from a
+  // nested endpoint call.
+  const counted = defineRequestState(() => ({ value: false, email: "", sent: false }));
+  const release = async (secret: string, email: string) => {
+    for (const budget of EMAIL_RECIPIENT_BUDGETS) {
+      await store.release(recipientBudgetKey(secret, email, budget.windowSeconds))
+        .catch(releaseError => console.warn("[auth-rate-limit] release failed", releaseError instanceof Error ? releaseError.message : releaseError));
+    }
+  };
   const plugin = {
     id: "docslurp-email-recipient-limits",
     hooks: {
@@ -216,7 +223,19 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
               }, { "Retry-After": String(result.retryAfterSeconds) });
             }
           }
-          (await counted.get()).value = true;
+          Object.assign(await counted.get(), { value: true, email });
+        }),
+      }],
+      after: [{
+        matcher: (ctx: { path?: string }) => enabled && EMAIL_SENDING_PATHS.has(ctx.path ?? ""),
+        // A refused request that sent nothing (a breached password at sign-up,
+        // an existing account, invalid input) gives its unit back. A successful
+        // answer never does: an unknown address must cost the same as a known one.
+        handler: createAuthMiddleware(async (ctx) => {
+          const state = await counted.get();
+          const returned = ctx.context.returned;
+          if (!state.value || state.sent || !isAPIError(returned) || returned.statusCode === 429) return;
+          await release(ctx.context.secret, state.email);
         }),
       }],
     },
@@ -237,13 +256,9 @@ export function emailRecipientLimiter(options: { store: AuthBudgetStore; enabled
       }
       try {
         await send(data);
+        if (await hasRequestState()) (await counted.get()).sent = true;
       } catch (error) {
-        if (enabled && secret) {
-          for (const budget of EMAIL_RECIPIENT_BUDGETS) {
-            await store.release(recipientBudgetKey(secret, data.email, budget.windowSeconds))
-              .catch(releaseError => console.warn("[auth-rate-limit] release failed", releaseError instanceof Error ? releaseError.message : releaseError));
-          }
-        }
+        if (enabled && secret) await release(secret, data.email);
         throw error;
       }
     },
