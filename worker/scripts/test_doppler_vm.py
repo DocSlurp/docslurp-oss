@@ -37,6 +37,16 @@ class ChunkMergeTest(unittest.TestCase):
         with self.assertRaises(ValueError): guest.page_ranges(guest.MAX_DOCUMENT_PAGES + 1, 1, 32)
         self.assertEqual(self_request(pages, {"first": 19969, "last": 25000, "final": True}), (19969, 25000))
 
+    def test_document_limit_boundaries_and_settings_scale(self):
+        self.assertEqual(guest.page_ranges(100000, 1, 10000)[-1], (9985, 10000))
+        with self.assertRaises(ValueError): guest.page_ranges(100000, 1, 10001)
+        with self.assertRaises(ValueError): guest.page_ranges(100001, 1, 32)
+        self.assertEqual(self_request(100000, {"first": 99969, "last": 100000, "final": True}), (99969, 100000))
+        for pages in (25000, 100000):
+            for count in (32, 1):
+                share = json.loads(guest.chunk_settings('{}', pages, count))['furniture_min_share']
+                self.assertTrue(share == share and share < float('inf'))  # finite; furniture never repeats past 1.0
+
     def test_order_and_blank_slots_across_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d); output = p / "merged"; size = 0

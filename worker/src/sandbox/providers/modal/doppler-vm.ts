@@ -18,7 +18,11 @@ export type DopplerVmJob = {
   range?: { first: number; last: number; final: boolean };
   /** Per-shard output cap, at most MAX_OUTPUT_BYTES: parallel shards share one host's memory. */
   outputLimit?: number;
+  /** The host's page count: a shard whose guest counts differently fails at once, not at the final shard. */
+  expectedDocumentPages?: number;
 };
+
+export const PAGE_COUNT_MISMATCH_MESSAGE = "Document VM page count disagrees with the host";
 
 /** Thrown when a ranged job reaches a guest that predates shards; callers stop sharding on it. */
 export const SHARDS_UNSUPPORTED_MESSAGE = "Document VM image does not support page-range shards";
@@ -271,6 +275,9 @@ export async function executeDopplerVm(
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
       const diagnostics = JSON.parse(stderr.toString("utf8"));
       if (job.range && diagnostics.protocol === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      if (job.expectedDocumentPages !== undefined && diagnostics.conversion?.documentPages !== job.expectedDocumentPages) {
+        throw new DopplerVmFailure(PAGE_COUNT_MISMATCH_MESSAGE);
+      }
       if (!validEnvelope(diagnostics, output, job.range)) throw new DopplerVmFailure("Document VM invalid result envelope");
       if (cancelled) throw new DopplerVmFailure("Document VM cancelled before output commit");
       stagedOutput = `${job.output}.${randomUUID()}.partial`;

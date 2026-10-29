@@ -1200,6 +1200,7 @@ export class CommandRunner {
     return {
       ...(calibration ? { profile: () => calibration.profile("extract-markdown:doppler-vm") } : {}),
       recordTiming: (timing) => recordShardTimingInContext(timing),
+      onProgress: () => noteWorkProgress("command:doppler-shard"),
     };
   }
 
@@ -1208,7 +1209,8 @@ export class CommandRunner {
       // DOCSLURP_DOPPLER_SHARDS=on fans long PDFs out across parallel VMs (needs a doppler-vm@3 image).
       const settings = dopplerShardSettings();
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
-      const waves = settings.enabled ? Math.ceil(settings.maxShards / settings.vmParallel) + 1 : 1;
+      // Long documents split even with optional sharding off; shards also note progress as they finish.
+      const waves = settings.rangesSupported ? Math.ceil(settings.maxShards / settings.vmParallel) + 1 : 1;
       return {
         remote: executeDopplerShards(plan.dopplerVm, pages, signal, settings, this.dopplerShardDeps()),
         timeoutMs: VM_TIMEOUT_MS * waves,

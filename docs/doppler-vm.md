@@ -40,7 +40,19 @@ ranges, with or without `DOCSLURP_DOPPLER_SHARDS`: it queues for VM slots and ru
 back to one VM, and is refused on the host (no VM) when no split fits the shard, transfer or time limits. Documents
 over 100,000 pages are refused. Every shard VM holds one process slot while it runs, so
 `DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL` is a hard ceiling per worker process (not across the fleet or per org).
-Each decision logs one `[document-vm] document=… shards=… pages=…` line. The host plans from the pipeline's page count and the
+The slot ceiling counts shard VMs only; whole-document runs and fallbacks take no slot.
+
+Practical ceiling: every shard VM receives the full file, so a forced split needs `file size × shards ≤
+DOCSLURP_DOPPLER_SHARD_TRANSFER_MB`. Forced shards are capped at 60 s of predicted work (about 4,600 pages), so
+100,000 pages needs about 22 shards and fits the default 512 MiB only for files under about 23 MiB; the merged
+Markdown must also fit 64 MiB (about 670 B/page at 100,000 pages). The final shard runs first and every shard checks
+the host's page count, so a mismatch fails before most VMs are paid for. Splitting the file once inside a VM so each
+shard receives only its own pages would remove the transfer ceiling (not implemented).
+
+Each decision logs one line, `[document-vm] document=<id> outcome=<merged|whole|failed|refused> shards=<n> pages=<n>
+reason=<slug> wallMs=<n>`, followed by plan fields (`shardPages`, `parallel`, `vms`, `predictedWallMs`,
+`unshardedWallMs`, `outputBytes`) or refusal fields (`needShards`, `maxShards`, `fileMiB`, `transferCapMiB`). Values
+contain no spaces. The host plans from the pipeline's page count and the
 file size only. Each guest re-counts pages and refuses a range that is off the 32-page chunk grid, outside the
 document or (for the final shard) short of the last page. Shards are merged in page order under the same output cap,
 and the result is byte-identical to one whole-document VM.
