@@ -130,7 +130,7 @@ describe("page charges", () => {
       const call = (strings: TemplateStringsArray, ...values: unknown[]) => (tx as unknown as (s: TemplateStringsArray, ...v: unknown[]) => unknown)(strings, ...values);
       const proxy: Sql = new Proxy(tx as unknown as Sql, {
         apply: (_target, _this, args: [TemplateStringsArray, ...unknown[]]) => {
-          if (!competitor && args[0].join("?").includes("select id, org_id, user_id")) {
+          if (!competitor && args[0].join("?").includes("select r.id, coalesce(r.org_id")) {
             competitor = recordMaterializedPageFee({ begin: (fn: (t: unknown) => unknown) => fn(proxy) } as unknown as Sql, "m2", "d1", [7, 8]);
             return competitor.then(() => call(...args));
           }
