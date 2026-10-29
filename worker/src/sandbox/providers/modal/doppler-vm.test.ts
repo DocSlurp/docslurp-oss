@@ -296,11 +296,21 @@ it("does not fall back to registry when imported image resolution fails", async 
   expect(h.fromRegistry).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
 });
 
+/** A mocked VM finishes within a millisecond; report a second of runtime so its cost is measurable. */
+function elapsedClock() {
+  const realNow = Date.now.bind(Date);
+  const start = realNow();
+  let reads = 0;
+  return vi.spyOn(Date, "now").mockImplementation(() => (reads++ === 0 ? start : realNow() + 1_000));
+}
+
 describe("shard jobs and publication receipts", () => {
   it("recognises an old guest that ignored the range even when its output overran the shard cap", async () => {
     const j = await job(); const h = harness();
     h.exec.mockImplementation(async () => ({ stdout: stream("whole document output"), stderr: stream(diagnostics(21)), wait: async () => 0 }));
+    const clock = elapsedClock();
     const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false }, outputLimit: 4 }, undefined, async () => h.sdk).catch((e) => e);
+    clock.mockRestore();
     expect(error.message).toBe(SHARDS_UNSUPPORTED_MESSAGE);
     expect(error.usage?.costCents).toBeGreaterThan(0);
   });
@@ -317,7 +327,9 @@ describe("shard jobs and publication receipts", () => {
     const j = await job(); const h = harness();
     const { mkdir } = await import("node:fs/promises");
     await mkdir(j.output); // rename onto a directory fails after a successful run
+    const clock = elapsedClock();
     const error = await executeDopplerVm(j, undefined, async () => h.sdk).catch((e) => e);
+    clock.mockRestore();
     expect(error.message).toBe("Document VM output publication failed");
     expect(error.usage?.costCents).toBeGreaterThan(0);
   });
