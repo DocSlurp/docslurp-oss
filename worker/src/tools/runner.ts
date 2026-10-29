@@ -434,6 +434,8 @@ export class CommandRunner {
       if (!outputCancelled) supervised.terminate(failure, { immediate: true });
       throw failure;
     });
+    // Observed now and awaited after the exit: it can settle first, and must not count as unhandled.
+    piped.catch(() => {});
     const onTerminated = () => cancelOutput(supervised.terminated.reason);
     if (supervised.terminated.aborted) onTerminated();
     else supervised.terminated.addEventListener("abort", onTerminated, { once: true });

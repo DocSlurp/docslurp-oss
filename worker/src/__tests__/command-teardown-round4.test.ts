@@ -297,7 +297,13 @@ describe.skipIf(!linux)("stdio bound counts only while our side waits on the wri
   it("a silent external holder still trips the bound while we are reading", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const duration = uniqueSleep();
-    const child = spawnContained("/bin/sh", ["-c", `setsid sleep ${duration} & exit 0`], { env: process.env, containment: "process-group" });
+    const marker = path.join(scratch("docslurp-holder-"), "escaped");
+    // The root exits only once the holder has left its group, so verification cannot kill it first.
+    const child = spawnContained(
+      "/bin/sh",
+      ["-c", `setsid sh -c 'echo > ${marker}; exec sleep ${duration}' & while [ ! -s ${marker} ]; do sleep 0.01; done; exit 0`],
+      { env: process.env, containment: "process-group" },
+    );
     child.stdout!.on("data", () => {});
     child.stderr!.on("data", () => {});
     const supervised = superviseChild(child, { label: "held", timings: { graceMs: 100, launcherGraceMs: 100, verifyMs: 300 } });
@@ -312,9 +318,14 @@ describe.skipIf(!linux)("stdio bound counts only while our side waits on the wri
     vi.spyOn(console, "error").mockImplementation(() => {});
     const duration = uniqueSleep();
     // Every chunk restarts the bound; only the absolute cap ends it.
+    const marker = path.join(scratch("docslurp-trickle-"), "escaped");
     const child = spawnContained(
       "/bin/sh",
-      ["-c", `setsid sh -c 'while :; do echo x; sleep 0.05; done' & setsid sleep ${duration} & exit 0`],
+      [
+        "-c",
+        `setsid sh -c 'while :; do echo x; sleep 0.05; done' & ` +
+          `setsid sh -c 'echo > ${marker}; exec sleep ${duration}' & while [ ! -s ${marker} ]; do sleep 0.01; done; exit 0`,
+      ],
       { env: process.env, containment: "process-group" },
     );
     let chunks = 0;
