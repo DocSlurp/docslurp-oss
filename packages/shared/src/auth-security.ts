@@ -157,6 +157,7 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
         "/sensitive-access/password": { window: 60, max: 5 },
         "/sensitive-access/passkey/options": { window: 60, max: 10 },
         "/sensitive-access/passkey/verify": { window: 60, max: 10 },
+        "/sign-in/magic-link": { window: 60, max: 3 },
         "/sign-in/email": {
           window: 10,
           max: 3

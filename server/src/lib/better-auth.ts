@@ -78,6 +78,7 @@ if (betterAuthSecret === "dev-secret-change-me" && process.env.NODE_ENV === "pro
 
 export const appDbPool = pool;
 export const configuredEmailAuth = isEmailAuthConfigured(process.env);
+export const configuredMagicLinkAuth = configuredEmailAuth;
 
 const oauthTokenEncryptionKey = process.env.OAUTH_TOKEN_ENCRYPTION_KEY?.trim();
 if (!oauthTokenEncryptionKey && process.env.NODE_ENV === "production") {

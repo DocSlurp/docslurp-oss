@@ -1,6 +1,7 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { isEmailAuthConfigured } from "@docslurp/shared/auth-security";
 import { emailOTP } from "better-auth/plugins";
+import { docslurpMagicLinkPlugin } from "./auth-magic-link.js";
 import { APIError } from "better-auth/api";
 
 export function createAuthEmailOptions(env: NodeJS.ProcessEnv) {
@@ -23,7 +24,7 @@ export function createAuthEmailOptions(env: NodeJS.ProcessEnv) {
       allowedAttempts: 5,
       storeOTP: "hashed",
       disableSignUp: true,
-    })] : [],
+    }), docslurpMagicLinkPlugin(sendAuthMagicLink)] : [],
   };
 }
 
@@ -61,4 +62,20 @@ export function renderAuthCodeEmail(otp: string): { subject: string; text: strin
 </table></td></tr></table>
 </body></html>`;
   return { subject, text, html };
+}
+
+
+/** Native link tokens remain private: delivery errors never include the link. */
+export async function sendAuthMagicLink({ email, url }: { email: string; url: string }): Promise<void> {
+  if (!isEmailAuthConfigured(process.env)) throw new Error("Email authentication is disabled");
+  const escaped = url.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const response = await instrumentFetch("resend", "email")("https://api.resend.com/emails", {
+    method: "POST", signal: AbortSignal.timeout(10_000),
+    headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY!.trim()}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: process.env.EMAIL_FROM!.trim(), to: [email], subject: "Your DocSlurp sign-in link",
+      text: `Open this link, then choose Continue to sign in:\n\n${url}\n\nThis link expires in 5 minutes and works once. If you did not request it, ignore this email.`,
+      html: `<p>Open this link, then choose Continue to sign in:</p><p><a href="${escaped}">Continue to DocSlurp</a></p><p>This link expires in 5 minutes and works once. If you did not request it, ignore this email.</p>`,
+    }),
+  });
+  if (!response.ok) throw new Error("Unable to send sign-in link");
 }
