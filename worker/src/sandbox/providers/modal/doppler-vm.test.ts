@@ -3,7 +3,7 @@ import { mkdtemp, open, writeFile, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boundedStream, executeDopplerVm, MAX_PDF_BYTES, VM_TIMEOUT_MS, VM_CLEANUP_TIMEOUT_MS, dopplerVmUsage } from "./doppler-vm.js";
+import { boundedStream, executeDopplerVm, SHARDS_UNSUPPORTED_MESSAGE, MAX_PDF_BYTES, VM_TIMEOUT_MS, VM_CLEANUP_TIMEOUT_MS, dopplerVmUsage } from "./doppler-vm.js";
 import type { ModalSdk } from "./index.js";
 
 function stream(bytes: string) {
@@ -295,3 +295,38 @@ it("does not fall back to registry when imported image resolution fails", async 
   await expect(executeDopplerVm(j, undefined, async () => h.sdk)).rejects.toThrow(/^Document VM execution failed$/);
   expect(h.fromRegistry).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
 });
+
+describe("shard jobs and publication receipts", () => {
+  it("recognises an old guest that ignored the range even when its output overran the shard cap", async () => {
+    const j = await job(); const h = harness();
+    h.exec.mockImplementation(async () => ({ stdout: stream("whole document output"), stderr: stream(diagnostics(21)), wait: async () => 0 }));
+    const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false }, outputLimit: 4 }, undefined, async () => h.sdk).catch((e) => e);
+    expect(error.message).toBe(SHARDS_UNSUPPORTED_MESSAGE);
+    expect(error.usage?.costCents).toBeGreaterThan(0);
+  });
+
+  it("keeps the old-guest classification when termination is unconfirmed", async () => {
+    const j = await job(); const h = harness();
+    h.terminate.mockImplementation(async () => { throw new Error("provider down"); });
+    const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false } }, undefined, async () => h.sdk).catch((e) => e);
+    expect(error.message).toBe(SHARDS_UNSUPPORTED_MESSAGE);
+    expect(error.usage?.metadata?.allocationUnconfirmed).toBe(true);
+  });
+
+  it("returns the VM's cost when publishing its output fails", async () => {
+    const j = await job(); const h = harness();
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(j.output); // rename onto a directory fails after a successful run
+    const error = await executeDopplerVm(j, undefined, async () => h.sdk).catch((e) => e);
+    expect(error.message).toBe("Document VM output publication failed");
+    expect(error.usage?.costCents).toBeGreaterThan(0);
+  });
+
+  it("does not let a failing control-client close replace the result", async () => {
+    const j = await job(); const h = harness();
+    h.close.mockImplementation(() => { throw new Error("close failed"); });
+    await expect(executeDopplerVm(j, undefined, async () => h.sdk)).resolves.toMatchObject({ exitCode: 0 });
+    expect(await readFile(j.output, "utf8")).toBe("result");
+  });
+});
+

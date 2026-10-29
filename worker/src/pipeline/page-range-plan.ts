@@ -36,7 +36,7 @@ export function planRunPageRanges(args: {
       maxCostOverhead: args.maxCostOverhead ?? 1,
       maxShards: remaining,
     });
-    if (plan.shards.length < 2) continue;
+    if (!plan.feasible || plan.shards.length < 2) continue;
     for (const range of plan.shards) shards.push([{ documentId: document.id, first: range.first, last: range.last }]);
     remaining -= plan.shards.length;
   }

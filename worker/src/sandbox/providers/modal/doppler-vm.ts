@@ -83,6 +83,10 @@ export function validEnvelope(
   return range.final ? documentPages === range.last : (documentPages as number) > range.last;
 }
 
+function guestProtocol(stderr: Buffer): unknown {
+  try { return (JSON.parse(stderr.toString("utf8")) as { protocol?: unknown }).protocol; } catch { return undefined; }
+}
+
 /** Read incrementally: readText/readBytes allocate the complete hostile stream. */
 export async function boundedStream(stream: ReadableStream<Uint8Array>, limit: number): Promise<Buffer> {
   const reader = stream.getReader();
@@ -151,6 +155,7 @@ export async function executeDopplerVm(
   let inputDirectory: string | undefined;
   let succeeded = false;
   let allocationUsage: UsageEvent | undefined;
+  let primaryMessage: string | undefined;
   function terminate(target: NonNullable<typeof vm>): Promise<void> {
     // The control client is closed promptly when creation hangs. If creation later
     // returns an ID, use a fresh control client solely to terminate that VM.
@@ -253,7 +258,14 @@ export async function executeDopplerVm(
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
       const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py"];
       const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 155_000, mode: "binary" }));
-      const [output, stderr, code] = await control(() => Promise.all([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
+      const [out, err, exit] = await control(() => Promise.allSettled([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
+      // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
+      // recognised even when its whole-document output overran this shard's cap.
+      if (job.range && err.status === "fulfilled" && guestProtocol(err.value) === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      if (out.status === "rejected") throw out.reason;
+      if (err.status === "rejected") throw err.reason;
+      if (exit.status === "rejected") throw exit.reason;
+      const [output, stderr, code] = [out.value, err.value, exit.value];
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
@@ -273,6 +285,7 @@ export async function executeDopplerVm(
   } catch (error) {
     // Raw SDK errors can contain control credentials. Keep them out of logs.
     const message = error instanceof DopplerVmFailure ? error.message : "Document VM execution failed";
+    primaryMessage = message;
     const exposure = vm ? usage() : creationRequested ? dopplerVmUsage(image, VM_TIMEOUT_MS / 1000) : undefined;
     if (exposure && !vm) exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
       estimateReason: "Creation acknowledgement missing; conservatively reserve full configured VM lifetime" };
@@ -286,7 +299,9 @@ export async function executeDopplerVm(
         const exposure = dopplerVmUsage(image, Math.max(VM_TIMEOUT_MS / 1000, (Date.now() - started) / 1000));
         exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
           estimateReason: "VM termination unconfirmed; reserve full configured lifetime" };
-        throw new SandboxRunError("Document VM termination failed or exceeded cleanup deadline", exposure);
+        // Keep an old-image refusal recognisable: callers stop sharding on it.
+        throw new SandboxRunError(primaryMessage === SHARDS_UNSUPPORTED_MESSAGE ? SHARDS_UNSUPPORTED_MESSAGE
+          : "Document VM termination failed or exceeded cleanup deadline", exposure);
       }
       if (vm && allocationUsage) Object.assign(allocationUsage, usage());
       if (succeeded && stagedOutput) {
@@ -294,14 +309,17 @@ export async function executeDopplerVm(
           throw new SandboxRunError("Document VM cancelled before output commit", usage());
         }
         // No await between final cancellation check and atomic publication.
-        renameSync(stagedOutput, job.output);
+        try { renameSync(stagedOutput, job.output); }
+        catch { throw new SandboxRunError("Document VM output publication failed", usage()); }
       }
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      clientClosed = true; client?.close();
-      if (stagedOutput) await rm(stagedOutput, { force: true });
-      if (inputDirectory) await rm(inputDirectory, { recursive: true, force: true });
+      clientClosed = true;
+      // Cleanup never replaces the result or a usage-bearing error.
+      try { client?.close(); } catch { /* control client already unusable */ }
+      if (stagedOutput) await rm(stagedOutput, { force: true }).catch(() => {});
+      if (inputDirectory) await rm(inputDirectory, { recursive: true, force: true }).catch(() => {});
     }
   }
 }
