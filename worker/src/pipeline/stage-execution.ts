@@ -117,7 +117,7 @@ export interface StageRuntime {
   onStageFailure?(failure: { classification: StageFailureClass; ordinaryFailures: number | undefined }): void;
 }
 
-export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "ordinary";
+export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "teardown" | "ordinary";
 
 export type LoadRunOptions = {
   /** Fixed, or derived from the loaded run (e.g. its pipeline's stage count). */

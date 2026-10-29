@@ -47,6 +47,7 @@ import { workerShutdownState } from "../lib/worker-lifecycle.js";
 import {
   classifyActivityError,
   hungWorkFailure,
+  teardownFailure,
   interruptionFailure,
   type ActivityErrorClass,
 } from "./failure-classification.js";
@@ -129,6 +130,8 @@ export function toStageActivityFailure(
       return error;
     case "hung":
       return hungWorkFailure(error);
+    case "teardown":
+      return teardownFailure(error);
     case "throttled":
       return toActivityFailure(error);
     case "ordinary":
@@ -268,6 +271,7 @@ export function createActivities(deps: ActivityDependencies) {
         const classification = classifyActivityError(error, { signal: Context.current().cancellationSignal });
         if (classification === "interruption") throw interruptionFailure(error);
         if (classification === "hung") throw hungWorkFailure(error);
+        if (classification === "teardown") throw teardownFailure(error);
         throw toActivityFailure(error);
       }
     },
@@ -433,6 +437,7 @@ export function createActivities(deps: ActivityDependencies) {
         const classification = classify(error);
         if (classification === "interruption") throw interruptionFailure(error);
         if (classification === "hung") throw hungWorkFailure(error);
+        if (classification === "teardown") throw teardownFailure(error);
         throw toActivityFailure(error);
       }
     },

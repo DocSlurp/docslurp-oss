@@ -23,6 +23,9 @@
  *                  is not a network blip; process state is untrusted.
  * - startup:       a precondition that must hold before polling (parser sandbox,
  *                  private model endpoints) failed.
+ * - teardown-unverified: the teardown circuit breaker quarantined the worker
+ *                  (sandbox/teardown-breaker.ts); a parser's processes may still
+ *                  run, so only a machine restart clears it.
  * Everything else is transient and retried forever. Fatal exits are logged as
  * `[worker-fatal] reason=<reason> ...` so the cause is greppable.
  */
@@ -31,7 +34,7 @@ import { causeChain, isTransientNetworkError } from "../lib/transient-errors.js"
 
 export { isTransientNetworkError };
 
-export type FatalWorkerReason = "config" | "auth" | "schema-behind" | "native-crash" | "startup";
+export type FatalWorkerReason = "config" | "auth" | "schema-behind" | "native-crash" | "startup" | "teardown-unverified";
 
 export class FatalWorkerError extends Error {
   readonly reason: FatalWorkerReason;

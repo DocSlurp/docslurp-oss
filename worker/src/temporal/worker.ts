@@ -25,6 +25,7 @@ import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
 import { CommandRunner } from "../tools/runner.js";
 import { createSandboxActivityInterceptor } from "../sandbox/activity-interceptor.js";
+import { onTeardownBreakerOpen } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
@@ -310,12 +311,25 @@ async function main(): Promise<void> {
     () => (activeSession?.activityWorkers ?? []).reduce((sum, worker) => sum + worker.getStatus().numInFlightActivities, 0));
   setInterval(() => utilization.sample(), 1_000).unref();
   setInterval(() => console.log(`[worker-utilization] ${JSON.stringify(utilization.snapshot())}`), 60_000).unref();
+  // Teardown circuit breaker (sandbox/teardown-breaker.ts): once a parser's processes may have
+  // outlived its command, stop taking work, report unhealthy, drain, and exit non-zero so the
+  // platform restarts the machine (a fresh VM has no strays).
+  let quarantine: string | null = null;
+  onTeardownBreakerOpen((state) => {
+    quarantine = `${state.count} command teardown(s) could not be verified (limit ${state.limit}); restart the machine`;
+    console.error(
+      `[worker-quarantine] status=open metric=worker_quarantined count=${state.count} limit=${state.limit} ` +
+        `action=drain-and-exit graceMs=${cfg.workerShutdownGraceMs}`,
+    );
+    markWorkerShuttingDown("teardown-unverified");
+    controller.abort(new Error("teardown-unverified"));
+  });
   // Liveness for the Fly machine check and the post-deploy assertion; /metrics for Fly's scraper.
   const healthPort = resolveWorkerHealthPort();
   const healthServer = healthPort
     ? startWorkerHealthServer({
         port: healthPort,
-        health: () => evaluateWorkerHealth(currentWorkers().map((worker) => worker.getStatus())),
+        health: () => evaluateWorkerHealth(currentWorkers().map((worker) => worker.getStatus()), quarantine),
         metrics: async () => `${await scaler.metrics()}${utilization.metricLines().join("\n")}\n`,
       })
     : null;
@@ -556,6 +570,7 @@ async function main(): Promise<void> {
       onSession: (session) => { activeSession = session; },
       onRestart: ({ error, reason, attempt }) => reportException(error, { operation: "worker-restart", reason, attempt }),
     });
+    if (quarantine) throw new FatalWorkerError("teardown-unverified", `worker quarantined: ${quarantine}`);
   } finally {
     if (maxRuntimeTimer) {
       clearTimeout(maxRuntimeTimer);
