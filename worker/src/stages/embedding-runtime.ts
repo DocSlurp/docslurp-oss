@@ -140,9 +140,13 @@ export async function extractTextForEmbedding(
   document: Document,
   runner: CommandRunner,
   storage: ArtifactStore,
-  markdownArtifactUri?: string,
-  signal?: AbortSignal,
-  canonicalArtifactUri?: string,
+  markdownArtifactUri: string | undefined,
+  signal: AbortSignal | undefined,
+  /**
+   * Required (pass undefined only when there is none): Fast page-image references are recognized from the canonical
+   * blocks, so a caller without it would index the raw reference Markdown as page text.
+   */
+  canonicalArtifactUri: string | undefined,
 ): Promise<{
   text: string;
   extractor: string;

@@ -50,7 +50,8 @@ export class PageIndexStage implements Stage {
             this.runner,
             this.storage,
             state.artifactLedger.readDocument(document.id, "markdown"),
-            signal
+            signal,
+            state.artifactLedger.readDocument(document.id, "canonical-document"),
           );
           const pageTexts = splitByPages(extracted.text, document.pageCount);
 
