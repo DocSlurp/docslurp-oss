@@ -11,6 +11,7 @@ import {
   type PipelineRunStage,
 } from "@docslurp/shared";
 import type { WorkflowState } from "../pipeline/pipeline.js";
+import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { pipelineTransaction } from "./transaction-pipeline.js";
 import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements } from "./usage-event-store.js";
@@ -151,23 +152,31 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
 }
 
 /**
- * Bills pages materialized on demand (deferred indexing) as Fast pages. One
- * usage event per (run, document, page) with a deterministic id, so a retried
- * activity or a second query that re-claims a page never charges it twice.
- * Pages in `richPages` were read by OCR and already charged Rich by the usage
- * ledger, so they get no Fast charge. Returns the newly billed credits.
+ * Bills pages materialized on demand (deferred indexing). One usage event per
+ * (run, document, page) with a deterministic id, so a retried activity or a
+ * second query that re-claims a page never charges it twice.
+ *
+ * The `fee_billed_run` stamp is each page's billing decision, Fast or Rich.
+ * Pages a model read were charged Rich by the usage ledger: the ledger's
+ * pending Rich charges for the document (`ledger`) are persisted in this
+ * transaction, together with the stamp, and every page this run already has a
+ * Rich read recorded for (usage_attribution; a retry finds the read an earlier
+ * attempt persisted) is stamped without a Fast charge. A later query or full
+ * index sees the stamp and charges the page nothing. `richPages` names more
+ * pages to treat as read. Returns the newly billed credits.
  */
 export async function recordMaterializedPageFee(
   sql: Sql<Record<string, unknown>>,
   runId: string,
   documentId: string,
   pages: number[],
-  richPages: ReadonlySet<number> = new Set(),
+  options: { richPages?: ReadonlySet<number>; ledger?: Pick<PipelineUsageEventLedger, "takeRichPageCharges"> } = {},
 ): Promise<number> {
-  const requested = [...new Set(pages)].filter((page) => !richPages.has(page)).sort((a, b) => a - b);
+  const requested = [...new Set(pages)].filter((page) => Number.isInteger(page) && page >= 1).sort((a, b) => a - b);
   const rateCents = pageCredits("fast", 1);
   if (requested.length === 0) return 0;
-  return sql.begin(async tx => {
+  const richBatch = options.ledger?.takeRichPageCharges(documentId);
+  const billed = await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
     await client`select id from workspace_runs where id = ${runId} for update`;
     // The ledger row is where a page's fee is stamped; create any that are missing (normally ensurePageRows did). A document deleted
@@ -186,6 +195,20 @@ export async function recordMaterializedPageFee(
       where document_id = ${documentId} and page_number = any(${requested}::int[])
       order by page_number for update
     `;
+    const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
+      select id, org_id, user_id, workspace_id, stats from workspace_runs where id = ${runId}
+    `;
+    if (!row) throw new Error(`run not found: ${runId}`);
+    const state = { run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} } } as unknown as WorkflowState;
+    // The Rich charges for reads this attempt made land with the stamps they back (ids are deterministic per run and page).
+    const richInserted = await persistRunUsageEvents({ client, state, usageEvents: richBatch?.events ?? [] });
+    const readRows = await client<{ page: number }[]>`
+      select distinct (au.metadata ->> 'pageNumber')::int as page from usage_attribution au
+      where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+        and au.metadata ->> 'documentId' = ${documentId}
+        and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
+    `;
+    const rich = new Set([...(options.richPages ?? []), ...readRows.map((r) => Number(r.page))]);
     const owned = await client<{ page_number: number }[]>`
       update document_page_states
       set fee_billed_run = ${runId}, fee_billed_at = coalesce(fee_billed_at, now())
@@ -193,20 +216,17 @@ export async function recordMaterializedPageFee(
         and (fee_billed_run is null or fee_billed_run = ${runId})
       returning page_number
     `;
-    const unique = owned.map(r => r.page_number).sort((x, y) => x - y);
-    if (unique.length === 0) return 0;
-    const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
-      select id, org_id, user_id, workspace_id, stats from workspace_runs where id = ${runId}
-    `;
-    if (!row) throw new Error(`run not found: ${runId}`);
-    const state = { run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} } } as unknown as WorkflowState;
-    const inserted = await persistRunUsageEvents({ client, state, usageEvents: unique.map(page => ({
+    const fastPages = owned.map(r => r.page_number).filter((page) => !rich.has(page)).sort((x, y) => x - y);
+    const fastInserted = await persistRunUsageEvents({ client, state, usageEvents: fastPages.map(page => ({
       id: `${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
       amount: 1, unit: "page", costCents: rateCents,
       metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, page, materialized: true }),
     })) });
+    const inserted = richInserted + fastInserted;
     // The usage_events trigger adds `inserted` to the run's spent_cents (0056_run_spent_cents).
     if (inserted > 0) await debitRunUsageCredits({ client, state, costCents: inserted });
     return inserted;
   });
+  richBatch?.commit();
+  return billed;
 }

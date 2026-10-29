@@ -1,15 +1,16 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
 import { Store } from "../db/store.js";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
-import { claimPages, ensurePageRows } from "../deferred/page-ledger.js";
+import { claimPages, ensurePageRows, markPages } from "../deferred/page-ledger.js";
 import type { PageMaterializerOps } from "../deferred/materialize-pages.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { coerceIndexingModeForFlag } from "../pipeline/stage-execution.js";
 import { markPagesIngested, markPagesIngestedIfDeferred } from "../stages/page-index.js";
 import { mergeMaterializeResults, splitMaterializeRanges } from "../temporal/materialize-ranges.js";
@@ -113,7 +114,7 @@ describe("page charges", () => {
   it("charges each materialized page once per run as Fast, skipping pages OCR already charged Rich", async () => {
     expect(await recordMaterializedPageFee(sql, "m1", "d1", [3, 4, 5])).toBeCloseTo(fast(3), 9);
     expect(await recordMaterializedPageFee(sql, "m1", "d1", [4, 5, 6])).toBeCloseTo(fast(1), 9);
-    expect(await recordMaterializedPageFee(sql, "m1", "d1", [10, 11], new Set([10, 11]))).toBe(0);
+    expect(await recordMaterializedPageFee(sql, "m1", "d1", [10, 11], { richPages: new Set([10, 11]) })).toBe(0);
     const rows = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' order by id`);
     expect(rows.rows.map((r) => r.id)).toEqual(["m1:d1:3", "m1:d1:4", "m1:d1:5", "m1:d1:6"]);
     const [run] = (await db.query<{ spent_cents: string }>(`select spent_cents from workspace_runs where id = 'm1'`)).rows;
@@ -409,6 +410,99 @@ describe("runMaterializeRange activity", () => {
     expect(total.rows.map((r) => Number(r.amount)).reduce((a, b) => a + b, 0)).toBe(12);
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+  });
+
+  describe("pages a model read (M1: one charge per page, Rich or Fast)", () => {
+    // Page 3 has no text layer, so Auto sends it to OCR; the rest have one.
+    const ocrOps: Partial<PageMaterializerOps> = {
+      ...ops,
+      async extractText(_d, range) { return Array.from({ length: range.last - range.first + 1 }, (_, i) => (range.first + i === 3 ? "" : LONG)); },
+      async ocrPage(_d, page) { return { text: `${LONG} scanned page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 }; },
+    };
+    const ocrDeps = (extra: object = {}) => {
+      const base = deps(extra) as { materializer: Record<string, unknown> };
+      return { ...base, materializer: { ...base.materializer, ops: ocrOps } } as never;
+    };
+    const charges = async () => (await db.query<{ run_id: string; metric: string; page: number; amount: number }>(`
+      select run_id, metric, coalesce(metadata->>'page', metadata->>'pageNumber')::int as page, amount::float8 as amount
+      from usage_events where metric in ('ingest-page-fast', 'ingest-page-rich')
+        and run_id in ('m1', 'm2', 'fi') and coalesce(metadata->>'documentId', '') = 'd1'
+      order by page, run_id, metric`)).rows;
+    const reset = async () => {
+      await db.exec(`update workspace_runs set status = 'processing', stage = 'materialize', kind = 'materialize' where id in ('m1', 'm2')`);
+      await ensurePageRows(sql, "d1", 12);
+    };
+
+    it("stamps an OCR-read page with its Rich charge, so a later query charges it nothing", async () => {
+      await reset();
+      await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));
+      const stamps = await db.query<{ page_number: number; fee_billed_run: string | null }>(
+        `select page_number, fee_billed_run from document_page_states where document_id = 'd1' and page_number in (3, 4) order by 1`);
+      expect(stamps.rows).toEqual([{ page_number: 3, fee_billed_run: "m1" }, { page_number: 4, fee_billed_run: "m1" }]);
+      await runMaterializeRange(ocrDeps(), input("m2", [3, 4, 5]));
+      expect(await charges()).toEqual([
+        { run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 },
+        { run_id: "m1", metric: "ingest-page-fast", page: 4, amount: 1 },
+        { run_id: "m2", metric: "ingest-page-fast", page: 5, amount: 1 },
+      ]);
+    });
+
+    it("a retried attempt charges nothing twice, with or without the earlier attempt's stamp", async () => {
+      await reset();
+      await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));
+      await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));
+      // An attempt that persisted its Rich read but crashed before stamping: the retry finds the read and skips Fast.
+      await db.exec(`update document_page_states set fee_billed_run = null, fee_billed_at = null where document_id = 'd1' and page_number = 3`);
+      await runMaterializeRange(ocrDeps(), input("m1", [3]));
+      expect(await charges()).toEqual([
+        { run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 },
+        { run_id: "m1", metric: "ingest-page-fast", page: 4, amount: 1 },
+      ]);
+    });
+
+    it("a concurrent query cannot charge a page Fast while the run that read it is still writing its charge", async () => {
+      await reset();
+      // m1 has marked page 3 indexed (which reserves its billing decision) but not yet written its charges.
+      await claimPages(sql, { documentId: "d1", pages: [3], runId: "m1", ttlSeconds: 300, reason: "query" });
+      await markPages(sql, "d1", [3], "indexed", { feeRun: "m1" });
+      await runMaterializeRange(ocrDeps(), input("m2", [3]));
+      const ledger = new PipelineUsageEventLedger();
+      ledger.runId = "m1";
+      ledger.chargeRichPage({ documentId: "d1", pageNumber: 3, readBy: "page-analysis" });
+      expect(await recordMaterializedPageFee(sql, "m1", "d1", [3], { ledger })).toBeCloseTo(pageCredits("rich", 1), 9);
+      expect(ledger.pendingCount).toBe(0);
+      expect(await charges()).toEqual([{ run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 }]);
+    });
+
+    it("two queries racing for the same scanned page charge it once", async () => {
+      await reset();
+      await Promise.all([runMaterializeRange(ocrDeps({ sleep: async () => {} }), input("m1", [3])), runMaterializeRange(ocrDeps({ sleep: async () => {} }), input("m2", [3]))]);
+      const rows = await charges();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ metric: "ingest-page-rich", page: 3, amount: 1 });
+    });
+
+    it("a later full index charges neither the Rich-read page nor the Fast pages again", async () => {
+      process.env.DOCSLURP_DEFERRED_PROFILES = "1";
+      await reset();
+      await db.exec(`
+        delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+          values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+          values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
+      try {
+        await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));
+        await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
+        const fast = await db.query<{ amount: string }>(`select amount from usage_events where metric = 'ingest-page-fast' and run_id in ('m1', 'fi')`);
+        expect(fast.rows.map((r) => Number(r.amount)).reduce((a, b) => a + b, 0)).toBe(11);
+        const rich = await db.query<{ amount: string }>(`select amount from usage_events where metric = 'ingest-page-rich' and run_id in ('m1', 'fi')`);
+        expect(rich.rows.map((r) => Number(r.amount))).toEqual([1]);
+      } finally {
+        delete process.env.DOCSLURP_DEFERRED_PROFILES;
+        await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+      }
+    });
   });
 
   it("reports pages still held after the wait budget as failed", async () => {

@@ -128,7 +128,8 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
       result.failed.push(...own.failed);
       result.costCredits += own.costCredits;
       // Full-index runs pay page charges through the normal run path.
-      if (reason !== "full-index") await recordMaterializedPageFee(sql, input.runId, input.documentId, own.indexed, state.usageLedger.richPagesOf(input.documentId));
+      // Rich reads are persisted with the stamps (no later Fast charge for a page a model read).
+      if (reason !== "full-index") await recordMaterializedPageFee(sql, input.runId, input.documentId, own.indexed, { ledger: state.usageLedger });
     } finally {
       if (beat) clearInterval(beat);
       // Persists buffered AI usage even when materialization threw.
@@ -136,14 +137,19 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
     }
   };
 
-  /** Pages another run indexed (or a crashed attempt left unbilled): charge any that no run has billed yet. */
+  /**
+   * Pages another run indexed (or a crashed attempt of this run left unbilled): charge any that no other run
+   * owns. A page is stamped for the run that indexed it when it turns indexed (materialize-pages.ts), so a peer
+   * still writing its charges, Rich or Fast, keeps it; a retry of this run finishes its own (ids are idempotent,
+   * and a page with a recorded Rich read gets no Fast charge).
+   */
   const billUnbilled = async (pages: number[]): Promise<void> => {
     if (pages.length === 0) return;
     const rows = await sql<{ page_number: number }[]>`
       select s.page_number from document_page_states s
       where s.document_id = ${input.documentId} and s.page_number = any(${pages}::int[])
         and s.state = 'indexed' and s.materialized_by in ('query', 'backfill')
-        and s.fee_billed_run is null
+        and (s.fee_billed_run is null or s.fee_billed_run = ${input.runId})
     `;
     await recordMaterializedPageFee(sql, input.runId, input.documentId, rows.map((r) => r.page_number));
   };

@@ -498,7 +498,11 @@ export async function materializePageRange(
 
   const writes: Promise<void>[] = [];
   for (const [credits, group] of indexedByCost) {
-    writes.push(markPages(deps.sql, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model }));
+    writes.push(markPages(deps.sql, documentId, group, "indexed", {
+      costCredits: credits, embeddingModel: profile.model,
+      // Full-index pages are charged by the run's completion fee (recordPageBaseFee), not stamped here.
+      feeRun: input.reason === "full-index" ? undefined : input.runId,
+    }));
   }
   if (blocked.length > 0) writes.push(markPages(deps.sql, documentId, blocked, "blocked-pii", { failureReason: "pii-policy" }));
   const hardFailed = result.failed.filter((f) => !released.includes(f.page));
