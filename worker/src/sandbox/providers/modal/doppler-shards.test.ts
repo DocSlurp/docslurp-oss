@@ -179,7 +179,7 @@ describe("executeDopplerShards", () => {
       const error = await executeDopplerShards(job, 100_000, undefined, on, { execute: vm.execute }).catch((e) => e);
       expect(error).toBeInstanceOf(SandboxRunError); // 30 MiB x the 22+ shards needed exceeds the 512 MiB transfer cap
       expect(vm.calls).toHaveLength(0);
-      expect(String(info.mock.calls.at(-1)![0])).toMatch(/outcome=refused shards=0 pages=100000 reason=split-infeasible wallMs=0 needShards=\d+ maxShards=32 fileMiB=30 transferCapMiB=512/);
+      expect(String(info.mock.calls.at(-1)![0])).toMatch(/outcome=refused shards=0 pages=100000 reason=split-infeasible wallMs=0 needShards=22 maxShards=17 configuredMaxShards=32 transferShards=17 legalShardPages=4608 fileMiB=30 transferCapMiB=512/);
       await executeDopplerShards(job, 100_000, undefined, { ...on, maxTransferBytes: 1024 * 1024 * 1024 }, { execute: vm.execute });
       expect(vm.calls.length).toBeGreaterThan(10);
       expect(vm.calls.every((c) => c.range!.last - c.range!.first + 1 <= 4_640)).toBe(true); // forced shards stay inside 60 s
@@ -191,6 +191,15 @@ describe("executeDopplerShards", () => {
     const error = await executeDopplerShards(job, 25_000, undefined, on, { execute: vm.execute }).catch((e) => e);
     expect(error.message).toMatch(/disagrees/);
     expect(vm.calls.every((c) => c.expectedDocumentPages === 25_000)).toBe(true);
+  });
+
+  it("counts concurrent shard completions correctly and stops before the remaining waves", async () => {
+    const big = "x".repeat(25 * 1024 * 1024);
+    const vm = fakeVm(async (j) => big + pagesText(j.range!.first, j.range!.last));
+    const error = await executeDopplerShards(job, 25_000, undefined, { ...on, vmParallel: 3 }, { execute: vm.execute }).catch((e) => e);
+    expect(error.message).toBe("Document VM merged output exceeds limit");
+    expect(vm.calls.length).toBeLessThanOrEqual(5); // 6 shards planned; the third 25 MiB completion trips the cap
+    expect(error.usage.costCents).toBe(2 * vm.calls.length);
   });
 
   it("stops paying for shards once the merged output cannot fit", async () => {

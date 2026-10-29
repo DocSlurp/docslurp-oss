@@ -146,6 +146,17 @@ const UNSUPPORTED_BACKOFF_MS = 30 * 60_000;
 export function resetDopplerShardStateForTest(): void { shardVmsInUse = 0; shardsUnsupportedUntil = 0; slotWaiters.length = 0; }
 export function shardVmsInUseForTest(): number { return shardVmsInUse; }
 
+/** The legal split for a forced document: what it needs versus what the transfer and shard caps allow. */
+export function forcedSplitLimits(pageCount: number, fileBytes: number, settings: DopplerShardSettings, profile: ShardCostProfile) {
+  const maxMs = Math.min(profile.maxShardMs, FORCED_SHARD_MAX_MS);
+  const byTime = profile.perPageMs > 0 ? Math.floor((maxMs - profile.fixedMs) / profile.perPageMs) : GUEST_MAX_VM_PAGES;
+  const legalShardPages = Math.max(GUEST_CHUNK_PAGES,
+    Math.floor(Math.min(profile.maxShardPages, GUEST_MAX_VM_PAGES, byTime) / GUEST_CHUNK_PAGES) * GUEST_CHUNK_PAGES);
+  const transferShards = Math.max(1, Math.floor(settings.maxTransferBytes / Math.max(1, fileBytes)));
+  return { legalShardPages, needShards: Math.ceil(pageCount / legalShardPages), transferShards,
+    effectiveMaxShards: Math.min(settings.maxShards, transferShards) };
+}
+
 /** A plan is dispatched only if it is feasible, within the cap, contiguous and on the guest's chunk grid. */
 export function dispatchablePlan(plan: PageShardPlan, pageCount: number, maxShards: number): boolean {
   if (!plan.feasible || plan.shards.length < 2 || plan.shards.length > maxShards) return false;
@@ -231,10 +242,11 @@ export async function executeDopplerShards(
   if (!dispatchablePlan(plan, pageCount, settings.maxShards)) {
     // One VM cannot convert a document over the per-VM limit: refuse here rather than upload it to a VM that will.
     if (mustSplit) {
-      const maxShardPages = Math.max(1, plan.shardPages);
+      const limits = forcedSplitLimits(pageCount, info.size, settings, profile);
       logPlan({ outcome: "refused", shards: 0, pages: pageCount, reason: "split-infeasible", wallMs: 0,
-        needShards: Math.ceil(pageCount / maxShardPages), maxShards: settings.maxShards, fileMiB: Math.round(info.size / 1048576),
-        transferCapMiB: Math.round(settings.maxTransferBytes / 1048576) });
+        needShards: limits.needShards, maxShards: limits.effectiveMaxShards, configuredMaxShards: settings.maxShards,
+        transferShards: limits.transferShards, legalShardPages: limits.legalShardPages,
+        fileMiB: Math.round(info.size / 1048576), transferCapMiB: Math.round(settings.maxTransferBytes / 1048576) });
       throw new SandboxRunError("Document VM cannot split this document within its limits");
     }
     return whole(plan.shards.length <= 1 ? "plan-unsharded" : "plan-rejected");
@@ -278,7 +290,9 @@ export async function executeDopplerShards(
           usages[index] = result.usage;
           deps.onProgress?.();
           // Stop paying for shards as soon as the merged output can no longer fit.
-          completedBytes += (await lstat(outputs[index]!)).size + 1;
+          // Await first, then add: concurrent completions must not overwrite each other's increments.
+          const shardBytes = (await lstat(outputs[index]!)).size;
+          completedBytes += shardBytes + 1;
           if (completedBytes > MAX_OUTPUT_BYTES + 1) throw new SandboxRunError(OUTPUT_LIMIT_MESSAGE, result.usage);
           deps.recordTiming?.({ stage: "extract-markdown", executor: "doppler-vm", pages: shard.last - shard.first + 1,
             ms: Date.now() - started, shardIndex: index, shardCount: plan.shards.length });
