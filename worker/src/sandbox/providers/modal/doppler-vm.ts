@@ -25,10 +25,24 @@ export type DopplerVmJob = {
 export const PAGE_COUNT_MISMATCH_MESSAGE = "Document VM page count disagrees with the host";
 
 /** The image's guest protocol as declared by the deploy beside its digest (0 when unset or invalid). */
+let warnedProtocol: string | undefined;
 export function declaredGuestProtocol(env: NodeJS.ProcessEnv = process.env): number {
   const value = env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() ?? "";
-  return /^[2-4]$/.test(value) ? Number(value) : 0;
+  if (/^[2-4]$/.test(value)) return Number(value);
+  // A typo must be loud: an unrecognised value disables shards and the hardening requirement.
+  if (value && warnedProtocol !== value) {
+    warnedProtocol = value;
+    console.warn(`[document-vm] ignoring invalid DOCSLURP_DOPPLER_VM_PROTOCOL=${JSON.stringify(value.slice(0, 16))}; expected 2, 3 or 4`);
+  }
+  return 0;
 }
+
+/** The image does not match its declared hardened protocol: every run would fail the same way, so callers stop. */
+export const HARDENING_MISMATCH_MESSAGE = "Document VM image does not report the declared confinement";
+/** The guest could not confine itself (exit 3) and refused to parse. */
+export const CONFINEMENT_UNAVAILABLE_MESSAGE = "Document VM guest confinement unavailable";
+/** Minimum seccomp denials a protocol 4 report must claim (the policy denies 85 calls on x86-64). */
+export const MIN_SECCOMP_DENIED = 80;
 
 /** The guest hardening policy this host accepts; the guest refuses rather than apply a partial policy. */
 export const HARDENING_POLICY = "doppler-guest-hardening@2";
@@ -37,7 +51,7 @@ export const HARDENING_POLICY = "doppler-guest-hardening@2";
 export function validHardening(hardening: unknown): boolean {
   const h = hardening as { policy?: unknown; noNewPrivs?: unknown; landlockAbi?: unknown; seccompDenied?: unknown } | null;
   return h?.policy === HARDENING_POLICY && h.noNewPrivs === true && Number.isSafeInteger(h.landlockAbi) && (h.landlockAbi as number) >= 4 &&
-    Number.isSafeInteger(h.seccompDenied) && (h.seccompDenied as number) > 0;
+    Number.isSafeInteger(h.seccompDenied) && (h.seccompDenied as number) >= MIN_SECCOMP_DENIED;
 }
 
 /** Thrown when a ranged job reaches a guest that predates shards; callers stop sharding on it. */
@@ -105,6 +119,13 @@ export function validEnvelope(
   if (conversion.first !== first || conversion.last !== last || pages !== (last as number) - first + 1) return false;
   if (!range) return true;
   return range.final ? documentPages === range.last : (documentPages as number) > range.last;
+}
+
+function hardenedEnvelope(stderr: Buffer): boolean {
+  try {
+    const parsed = JSON.parse(stderr.toString("utf8")) as { protocol?: unknown; hardening?: unknown };
+    return parsed.protocol === "doppler-vm@4" && validHardening(parsed.hardening);
+  } catch { return false; }
 }
 
 function guestProtocol(stderr: Buffer): unknown {
@@ -286,10 +307,14 @@ export async function executeDopplerVm(
       // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
       // recognised even when its whole-document output overran this shard's cap.
       if (job.range && err.status === "fulfilled" && guestProtocol(err.value) === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      if (declaredGuestProtocol() >= 4 && err.status === "fulfilled" && exit.status === "fulfilled" && exit.value === 0 && !hardenedEnvelope(err.value)) {
+        throw new DopplerVmFailure(HARDENING_MISMATCH_MESSAGE);
+      }
       if (out.status === "rejected") throw out.reason;
       if (err.status === "rejected") throw err.reason;
       if (exit.status === "rejected") throw exit.reason;
       const [output, stderr, code] = [out.value, err.value, exit.value];
+      if (code === 3) throw new DopplerVmFailure(CONFINEMENT_UNAVAILABLE_MESSAGE);
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.

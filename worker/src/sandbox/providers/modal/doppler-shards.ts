@@ -5,7 +5,7 @@ import { SHARD_PROFILES, shardCapacity } from "../../../temporal/page-shard-prof
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import type { UsageEvent } from "../../../models.js";
 import { currentPerfContext } from "../../../lib/perf-context.js";
-import { declaredGuestProtocol, executeDopplerVm, GUEST_CHUNK_PAGES, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, PAGE_COUNT_MISMATCH_MESSAGE, SHARDS_UNSUPPORTED_MESSAGE, type DopplerVmJob } from "./doppler-vm.js";
+import { CONFINEMENT_UNAVAILABLE_MESSAGE, declaredGuestProtocol, executeDopplerVm, GUEST_CHUNK_PAGES, HARDENING_MISMATCH_MESSAGE, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, PAGE_COUNT_MISMATCH_MESSAGE, SHARDS_UNSUPPORTED_MESSAGE, type DopplerVmJob } from "./doppler-vm.js";
 
 /** Most pages one guest VM converts; a longer document must be split into shards no larger than this. */
 export const GUEST_MAX_VM_PAGES = 10_000;
@@ -20,6 +20,8 @@ function hardeningOf(stdout: string): unknown {
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   if (message === SHARDS_UNSUPPORTED_MESSAGE) return "image-refused-ranges";
+  if (message === HARDENING_MISMATCH_MESSAGE) return "image-hardening-mismatch";
+  if (message === CONFINEMENT_UNAVAILABLE_MESSAGE) return "confinement-unavailable";
   if (message === PAGE_COUNT_MISMATCH_MESSAGE) return "page-count-mismatch";
   if (message === OUTPUT_LIMIT_MESSAGE || message.includes("byte limit")) return "output-limit";
   if (message.includes("aborted")) return "aborted";
@@ -316,8 +318,10 @@ export async function executeDopplerShards(
     if (signal?.aborted || (controller.signal.aborted && !failure)) fail("Document VM aborted");
     if (failure) {
       const vms = usages.filter(Boolean).length;
-      // One VM cannot convert a document over the per-VM limit, so there is nothing to fall back to.
-      if (mustSplit) {
+      // Nothing to fall back to: one VM cannot convert a document over the per-VM limit, and an image that cannot
+      // confine itself (or does not report its declared confinement) fails a whole-document VM the same way.
+      const reason = failureReason(failure);
+      if (mustSplit || reason === "image-hardening-mismatch" || reason === "confinement-unavailable") {
         logPlan({ outcome: "failed", shards: plan.shards.length, pages: pageCount, reason: failureReason(failure), wallMs: Date.now() - dispatched,
           shardPages: plan.shardPages, vms, fallback: false });
         return fail(failure instanceof SandboxRunError ? failure.message : "Document VM shard failed");

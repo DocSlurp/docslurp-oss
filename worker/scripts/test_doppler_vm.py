@@ -118,6 +118,18 @@ class ShardRequestTest(unittest.TestCase):
             link = Path(d) / "shard.json"; link.symlink_to(target)
             with self.assertRaises(ValueError): guest.shard_request(67, link)
 
+def _layers_available():
+    try:
+        import ctypes
+        if ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1) < 4:
+            return False
+        ctypes.CDLL('libseccomp.so.2')
+        return True
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(_layers_available(), "needs Landlock ABI >= 4 and libseccomp (CI asserts both on Linux)")
 class HardeningTest(unittest.TestCase):
     """Applies the real Landlock and seccomp layers in a child process (needs Landlock ABI >= 4 and libseccomp)."""
 
@@ -202,5 +214,36 @@ print(json.dumps(results))"""
                     f"try:\n    g.harden({job!r}); print('applied')\nexcept ValueError as e:\n    print('refused', e)")
             out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
         self.assertTrue(out.stdout.startswith('refused'), out.stdout + out.stderr)
+
+    def test_root_capabilities_are_dropped(self):
+        import shutil, subprocess, sys
+        if not shutil.which('unshare'):
+            self.skipTest('unshare unavailable')
+        with tempfile.TemporaryDirectory() as job:
+            code = (f"import importlib.util, json\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"before = g._status('CapEff')\nreport = g.harden({job!r})\n"
+                    f"print(json.dumps({{'before': before, 'report': report}}))")
+            out = subprocess.run(['unshare', '--map-root-user', sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        if out.returncode != 0 and 'unshare' in out.stderr:
+            self.skipTest('user namespaces unavailable: ' + out.stderr[:80])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        result = json.loads(out.stdout)
+        self.assertNotEqual(int(result['before'], 16), 0)        # root in the namespace held capabilities
+        self.assertEqual(result['report']['capabilities'], 0)
+        self.assertTrue(result['report']['boundingCleared'])
+
+    def test_confinement_failure_exits_with_its_own_code(self):
+        import subprocess, sys
+        code = (f"import importlib.util\n"
+                f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                f"g.resource.setrlimit = lambda *a: None\n"
+                f"def broken(job='/job'): raise ValueError('landlock unavailable')\n"
+                f"g.harden = broken\ng.entry()")
+        out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 3, out.stderr)
+        self.assertIn('confinement unavailable', out.stderr)
 
 if __name__ == "__main__": unittest.main()

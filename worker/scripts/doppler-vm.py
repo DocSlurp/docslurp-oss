@@ -85,7 +85,7 @@ def _landlock(libc, job):
             fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
             try:
                 # struct landlock_path_beneath_attr is packed: u64 allowed_access, s32 parent_fd.
-                rule = ctypes.create_string_buffer(struct.pack('<Qi', access & handled, fd), 12)
+                rule = ctypes.create_string_buffer(struct.pack('=Qi', access & handled, fd), 12)
                 if libc.syscall(_SYS_ADD_RULE, ctypes.c_int(ruleset), ctypes.c_int(1), rule, ctypes.c_uint32(0)) != 0:
                     raise ValueError('landlock rule refused')
             finally:
@@ -140,15 +140,49 @@ def _seccomp():
     return denied
 
 
+class HardeningError(Exception):
+    pass
+
+
+def _status(field):
+    with open('/proc/self/status') as status:
+        for line in status:
+            if line.startswith(field + ':'):
+                return line.split(':', 1)[1].strip()
+    raise HardeningError('process status unavailable')
+
+
+def _drop_capabilities(libc):
+    # The guest may run as root: drop every capability (ambient, bounding, then effective/permitted/inheritable).
+    if int(_status('CapEff'), 16) or int(_status('CapPrm'), 16) or int(_status('CapBnd'), 16):
+        libc.prctl(47, 4, 0, 0, 0)  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL (no-op when unsupported)
+        for cap in range(64):
+            if libc.prctl(24, cap, 0, 0, 0) != 0 and ctypes.get_errno() not in (22, 1):  # PR_CAPBSET_DROP; EINVAL ends, EPERM checked below
+                raise HardeningError('capability drop refused')
+        header = ctypes.create_string_buffer(struct.pack('=Ii', 0x20080522, 0), 8)  # _LINUX_CAPABILITY_VERSION_3
+        data = ctypes.create_string_buffer(24)  # two zeroed {effective, permitted, inheritable}
+        libc.syscall.restype = ctypes.c_long
+        if libc.syscall(126, header, data) != 0:  # capset (x86-64)
+            raise HardeningError('capset refused')
+    if int(_status('CapEff'), 16) or int(_status('CapPrm'), 16):
+        raise HardeningError('capabilities remain')
+    return int(_status('CapBnd'), 16) == 0
+
+
 def harden(job='/job'):
     libc = ctypes.CDLL(None, use_errno=True)
+    # Landlock and seccomp bind the calling thread; the guest is single-threaded before any parse.
+    if _status('Threads') != '1':
+        raise HardeningError('guest is not single-threaded')
+    bounding_cleared = _drop_capabilities(libc)
     if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
         raise ValueError('no_new_privs refused')
     if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE 0: no ptrace-mode access to the guest from its children
         raise ValueError('dumpable refused')
     abi = _landlock(libc, job)
     denied = _seccomp()
-    return {'policy': HARDENING_POLICY, 'noNewPrivs': True, 'landlockAbi': abi, 'seccompDenied': denied}
+    return {'policy': HARDENING_POLICY, 'noNewPrivs': True, 'capabilities': 0, 'boundingCleared': bounding_cleared,
+            'landlockAbi': abi, 'seccompDenied': denied}
 
 
 def page_ranges(pages, first=1, last=None):
@@ -223,7 +257,10 @@ def main():
     resource.setrlimit(resource.RLIMIT_CPU, (JOB_SECONDS, JOB_SECONDS))
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RAW,) * 2)
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-    hardening = harden()
+    try:
+        hardening = harden()
+    except Exception as error:
+        raise HardeningError('confinement unavailable') from error
     info = os.lstat('/job/input')
     if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_INPUT:
         raise ValueError('invalid PDF input')
@@ -294,8 +331,16 @@ def main():
         os.close(fd)
 
 
-if __name__ == '__main__':
+def entry():
     try:
         main()
+    except HardeningError:
+        # Distinct exit code: the host reports confinement failure, not a parse failure, and never retries weaker.
+        print('Doppler guest confinement unavailable', file=sys.stderr)
+        raise SystemExit(3)
     except Exception:
         raise SystemExit('Doppler guest refused or failed extraction')
+
+
+if __name__ == '__main__':
+    entry()

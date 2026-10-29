@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import { SHARD_PROFILES } from "../../../temporal/page-shard-profiles.js";
 import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerShards, resetDopplerShardStateForTest, shardVmsInUseForTest, type DopplerShardSettings } from "./doppler-shards.js";
-import { MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
+import { declaredGuestProtocol, MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
 import { planPageShards } from "../../../temporal/page-shards.js";
 
 const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32, globalParallel: 64, rangesSupported: true };
@@ -229,6 +229,15 @@ describe("executeDopplerShards", () => {
     expect(shardVmsInUseForTest()).toBe(0);
   });
 
+  it("does not run a doomed fallback VM when the image cannot confine itself or misreports confinement", async () => {
+    for (const message of ["Document VM image does not report the declared confinement", "Document VM guest confinement unavailable"]) {
+      const vm = fakeVm(async (j) => j.range?.final ? new SandboxRunError(message, usage(1)) : pagesText(j.range?.first ?? 1, j.range?.last ?? 477));
+      const error = await executeDopplerShards(job, 477, undefined, on, { execute: vm.execute }).catch((e) => e);
+      expect(error.message).toBe(message);
+      expect(vm.calls.every((c) => c.range)).toBe(true);
+    }
+  });
+
   it("refuses an infeasible forced split without starting any VM", async () => {
     const vm = fakeVm();
     await expect(executeDopplerShards(job, 25_000, undefined, { ...on, maxShards: 1 }, { execute: vm.execute })).rejects.toThrow(/cannot split/);
@@ -304,7 +313,7 @@ describe("doppler-vm@3 envelope", () => {
   });
 
   it("requires proof of in-VM hardening when the image is declared protocol 4", () => {
-    const hardened = { policy: "doppler-guest-hardening@2", noNewPrivs: true, landlockAbi: 10, seccompDenied: 92 };
+    const hardened = { policy: "doppler-guest-hardening@2", noNewPrivs: true, landlockAbi: 10, seccompDenied: 85 };
     const env4 = (diag: Record<string, unknown>, declared: number) =>
       validEnvelope({ engine: "doppler", outputBytes: 5, conversion: { pages: 3, first: 1, last: 3, documentPages: 3 }, ...diag }, Buffer.from("a\fb\fc"), undefined, declared);
     expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 4)).toBe(true);
@@ -314,6 +323,10 @@ describe("doppler-vm@3 envelope", () => {
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, seccompDenied: 0 } }, 4)).toBe(false);
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, noNewPrivs: "true" } }, 4)).toBe(false);
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, policy: "doppler-guest-hardening@1" } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, seccompDenied: 79 } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, landlockAbi: 4.5 } }, 4)).toBe(false);
+    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "04" })).toBe(0);
+    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "5" })).toBe(0);
     expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 3)).toBe(true);            // rolling forward
     expect(env4({ protocol: "doppler-vm@4" }, 3)).toBe(false);                                 // a @4 guest always reports
     expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on", DOCSLURP_DOPPLER_VM_PROTOCOL: "4" }).enabled).toBe(true);
