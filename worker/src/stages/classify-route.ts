@@ -18,7 +18,7 @@ import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { SPARSE_PAGE_WORDS, pageAlignedTexts, type PageImageEvidence } from "../lib/page-image-evidence.js";
+import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
@@ -306,9 +306,12 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   // blank pages need: the content is drawn (vector paths, outlined glyphs), so a page without
   // text or images is not blank and vision is its only reader.
   const documentWithoutText = !args.text.trim();
-  const drawnContent = (evidence: PageImageEvidence | undefined) =>
-    documentWithoutText && args.sourceBytesPerPage != null &&
-    args.sourceBytesPerPage - (evidence?.embeddedImageBytes ?? 0) >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
+  // Likewise a page with no text layer and no image whose extracted text (OCR of its render)
+  // still has words: the words are drawn, so the page is not blank.
+  const drawnContent = (evidence: PageImageEvidence | undefined, pageText: string) =>
+    pageEvidenceWordCount(pageText) >= DRAWN_TEXT_MIN_WORDS ||
+    (documentWithoutText && args.sourceBytesPerPage != null &&
+      args.sourceBytesPerPage - (evidence?.embeddedImageBytes ?? 0) >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE);
   const pages = buildAdaptivePageRoutes(args.text, Math.max(1, args.pageCount)).map((page) => {
     const complexity = args.structuredComplexity?.get(page.pageNumber);
     const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
@@ -318,7 +321,8 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
           hasPageAlignment)
       : authorizeRasterPageOcr(imageEvidence!);
     const ocrDecision: AdaptiveOcrDecision =
-      evidenceDecision.signals.includes(BLANK_PAGE_SIGNAL) && drawnContent(imageEvidence)
+      evidenceDecision.signals.includes(BLANK_PAGE_SIGNAL) &&
+      drawnContent(imageEvidence, pageTextAt(args.text, args.pageCount, page.pageNumber))
         ? { authorized: true, confidence: 0.7, signals: [DOCUMENT_WITHOUT_TEXT_SIGNAL] }
         : evidenceDecision;
     if (!ocrDecision.authorized) {
@@ -383,7 +387,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
 }
 
 const BLANK_PAGE_SIGNAL = "ocr-not-authorized:blank-page";
-const DOCUMENT_WITHOUT_TEXT_SIGNAL = "ocr-authorized:document-without-text";
+const DOCUMENT_WITHOUT_TEXT_SIGNAL = "ocr-authorized:drawn-content";
 const NO_NATIVE_TEXT_SIGNALS = new Set([
   "ocr-authorized:no-native-text",
   "ocr-authorized:raster-page-without-text",
@@ -394,6 +398,8 @@ const NO_NATIVE_TEXT_SIGNALS = new Set([
  * need well under 1 KB; a page of text drawn as paths needs tens to hundreds of KB.
  */
 export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = 16 * 1024;
+/** Extracted words on a page with neither a text layer nor images that make it drawn text, not blank. */
+export const DRAWN_TEXT_MIN_WORDS = 10;
 const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);
 
 /**
@@ -729,6 +735,10 @@ export function classifyAdaptivePage(pageNumber: number, text: string): Adaptive
     /%/.test(normalized),
     lines.some((line) => /\bq[1-4]\b|\bjan\b|\bfeb\b|\bmar\b/i.test(line))
   ].filter(Boolean).length;
+  // Text from fonts without a Unicode map comes out as long runs of shifted glyph codes
+  // ("6FDOLQJDWWHQWLRQ...") rather than words: the text layer exists but is unreadable.
+  const garbledCharacters = (normalized.match(/[A-Za-z0-9]{20,}/g) ?? []).reduce((sum, run) => sum + run.length, 0);
+  const garbledText = charCount >= 200 && garbledCharacters / Math.max(1, charCount) >= 0.2;
   const degradationMarkers = [
     charCount < 80,
     /�/.test(normalized),
@@ -747,7 +757,12 @@ export function classifyAdaptivePage(pageNumber: number, text: string): Adaptive
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";
   let confidence = Math.max(0.45, textDensityScore);
 
-  if (degradationMarkers >= 2) {
+  if (garbledText) {
+    route = "handwriting-or-degraded";
+    extractorHint = "vision-rescue";
+    confidence = 0.86;
+    signals.push("garbled-text");
+  } else if (degradationMarkers >= 2) {
     route = "handwriting-or-degraded";
     extractorHint = "vision-rescue";
     confidence = 0.82;
@@ -831,6 +846,12 @@ function detectFormulaHeavyContent(text: string, lines: string[]): SpecializedSi
   const symbolDensity = (text.match(/[=+\-*/^_<>]/g) ?? []).length;
   const functionAssignmentLines = lines.filter((line) => /\b[a-z]\w*\([^)]*\)\s*=/.test(line) || /\b(?:f|g|h|y)\s*=\s*[^.]{4,}/i.test(line)).length;
 
+  // Text layers of typeset math carry it as Unicode: mathematical alphanumerics (𝑑, 𝐱) and
+  // operators (∑, ≤, √). Their linear order loses fractions, scripts and roots.
+  const mathAlphanumerics = (text.match(/[\u{1D400}-\u{1D7FF}]/gu) ?? []).length;
+  const mathOperators = (text.match(/[\u2200-\u22FF\u27C0-\u27EF\u2980-\u2AFF]/gu) ?? []).length;
+  if (mathAlphanumerics >= 3) signals.push("math:unicode-alphanumerics");
+  if (mathAlphanumerics + mathOperators >= 6) signals.push("math:unicode-symbols");
   if (latexCommands > 0) signals.push("math:latex");
   if (equationLines > 0) signals.push("math:equation-lines");
   if (mathFunctionTerms >= 2) signals.push("math:function-terms");
@@ -839,6 +860,7 @@ function detectFormulaHeavyContent(text: string, lines: string[]): SpecializedSi
 
   const hasStrongMathContext =
     latexCommands > 0 ||
+    mathAlphanumerics >= 3 ||
     mathFunctionTerms >= 2 ||
     functionAssignmentLines > 0 ||
     equationLines >= 2;

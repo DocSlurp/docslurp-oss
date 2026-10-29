@@ -123,6 +123,30 @@ describe("legacy vision page selector", () => {
   it("leaves dense prose pages on native text", () => {
     expect(selectLegacyVisionPages([classifyAdaptivePage(1, OCR_PROSE)])).toEqual([]);
   });
+
+  it("admits text layers carrying Unicode math", () => {
+    const page = classifyAdaptivePage(1, `${OCR_PROSE}\nWith key dimension 𝑑𝑘 = 64 the score is 𝑞 · 𝑘 / √𝑑𝑘 and Σ weights ≤ 1.`);
+    expect(page.route).toBe("formula-heavy");
+    expect(selectLegacyVisionPages([page])).toEqual([1]);
+  });
+
+  it("sends garbled text layers (fonts without a Unicode map) to vision", () => {
+    const garbled = Array.from({ length: 8 }, (_, index) => `## ${index}KHPDWUL[SURGXFWFRPSDUHVHDFKTXHU\\ZLWK QRUPDOL]DWLRQ7KHUHVXOWLQJZHLJKWV`).join("\n");
+    const page = classifyAdaptivePage(1, garbled);
+    expect(page.signals).toContain("garbled-text");
+    expect(selectLegacyVisionPages([page])).toEqual([1]);
+    // Long identifiers inside ordinary prose do not trip it.
+    expect(classifyAdaptivePage(1, `${OCR_PROSE} see ABCDEFGHIJKLMNOPQRSTUV123`).signals).not.toContain("garbled-text");
+  });
+});
+
+describe("pages whose text is drawn", () => {
+  it("sends a page with OCR words but no text layer and no images to vision", () => {
+    const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };
+    const routed = surface({ text: OCR_PROSE, evidence: [empty] });
+    expect(selected(routed)).toEqual([1]);
+    expect(routed.status === "ready" && routed.pages[0]!.ocrDecision?.signals).toContain("ocr-authorized:drawn-content");
+  });
 });
 
 describe("document labels", () => {
