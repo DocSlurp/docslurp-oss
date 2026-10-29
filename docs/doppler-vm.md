@@ -22,3 +22,32 @@ This isolates **the Doppler extraction command**, not the entire existing ingest
 VM allocation is a separate scoped usage-ledger event. The recorded cost uses the one-core ceiling conservatively; metadata also records the half-core reservation floor. Its USD estimate uses published Modal sandbox CPU/memory rates observed 2026-10-27, not a bill; image import, storage, egress and regional premiums are excluded. Pending creation or unconfirmed termination records conservative maximum-lifetime exposure and uncertainty metadata. Provider estimates are nonbillable to users until the existing pricing policy assigns charges.
 
 The private app owns binary provenance, hashes, image construction and manual deployment. Merge this reviewed core dependency first, then update the app's pin to that merged main SHA. A successful local container smoke check is packaging evidence, **not** evidence of VM isolation. Private deployments can preimport the digest-pinned image during CI and set `DOCSLURP_DOPPLER_MODAL_IMAGE_ID` to its immutable Modal ID. The worker then resolves that ID without registry credentials; a failed lookup never falls back to registry/local parsing. The digest remains mandatory provenance. Validate the exact production adapter against the imported image before enabling the default. Keep security-sensitive PRs draft until two independent council reviews are reconciled and a human owner approves merge.
+
+## Parallel page-range shards
+
+`DOCSLURP_DOPPLER_SHARDS=on` splits a long PDF across several VMs (`worker/src/sandbox/providers/modal/doppler-shards.ts`).
+It also requires `DOCSLURP_DOPPLER_VM_PROTOCOL=3`, set together with the digest of an image built from guest protocol
+`doppler-vm@3`. If an older image is configured anyway, its guest ignores the range and converts the whole document
+in every shard VM; the host refuses those results, turns sharding off for 30 minutes on that worker and runs one
+whole-document VM. Worst case for that document: about (shards + 1) × the VM cost of one run.
+
+Rollout order: deploy workers with this host code first, then switch `DOCSLURP_DOPPLER_VM_IMAGE` to the @3 image and
+set the protocol variable. An older worker refuses every @3 result. Documents above 10,000 pages, and plans the
+process VM budget cannot hold, run as one whole-document VM. The host plans from the pipeline's page count and the
+file size only. Each guest re-counts pages and refuses a range that is off the 32-page chunk grid, outside the
+document or (for the final shard) short of the last page. Shards are merged in page order under the same output cap,
+and the result is byte-identical to one whole-document VM.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOCSLURP_DOPPLER_SHARDS` | off | Enable shards. |
+| `DOCSLURP_DOPPLER_VM_MAX_PARALLEL` | 8 | VMs one document may hold at once. |
+| `DOCSLURP_DOPPLER_VM_PROTOCOL` | unset | Must be `3` (the image's guest protocol) for shards. |
+| `DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL` | 16 | Shard VMs one worker process holds across documents. |
+| `DOCSLURP_DOPPLER_SHARD_COST_OVERHEAD` | 0.5 | Most extra VM cost over one VM (0.5 = at most 1.5×). |
+| `DOCSLURP_DOPPLER_SHARD_TRANSFER_MB` | 512 | Cap on file bytes × (shards + 1 fallback): every VM receives the full PDF. |
+| `DOCSLURP_DOPPLER_MAX_SHARDS` | 32 | Hard shard cap. |
+
+Each extra VM adds about 1.9 s of billed boot. At 0.5 core / 1 GiB (Modal list prices, 2026-10-28) a 477-page PDF
+is about 2.29M pages per $1 in one VM, 1.17M in 5 VMs and 524k in 15 VMs. Shard timings are recorded as
+`shard_timing_ms` and refit the planner's profile.

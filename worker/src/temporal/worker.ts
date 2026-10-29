@@ -21,6 +21,7 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 
 import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
+import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
 import { CommandRunner } from "../tools/runner.js";
 import { createSandboxActivityInterceptor } from "../sandbox/activity-interceptor.js";
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
-  const runner = new CommandRunner({ openSession });
+  const runner = new CommandRunner({ openSession, shardCalibration: createShardCalibration(store) });
   const storage = new ArtifactStore(cfg);
   const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql });
 

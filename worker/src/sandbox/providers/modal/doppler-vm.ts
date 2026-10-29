@@ -12,13 +12,31 @@ import type { UsageEvent } from "../../../models.js";
 // Only failures constructed here may carry diagnostic text across the SDK boundary.
 class DopplerVmFailure extends Error {}
 
-export type DopplerVmJob = { operation: "doppler-markdown"; input: string; output: string; };
+/** `range` asks the guest for one parallel shard; it must start on the guest's 32-page chunk grid. */
+export type DopplerVmJob = {
+  operation: "doppler-markdown"; input: string; output: string;
+  range?: { first: number; last: number; final: boolean };
+  /** Per-shard output cap, at most MAX_OUTPUT_BYTES: parallel shards share one host's memory. */
+  outputLimit?: number;
+};
+
+/** Thrown when a ranged job reaches a guest that predates shards; callers stop sharding on it. */
+export const SHARDS_UNSUPPORTED_MESSAGE = "Document VM image does not support page-range shards";
 export const MAX_PDF_BYTES = DOPPLER_MAX_PDF_BYTES;
 export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const INPUT_BUFFER_BYTES = 8 * 1024 * 1024;
 export const MAX_LOG_BYTES = 16 * 1024;
 export const VM_TIMEOUT_MS = 180_000;
 export const VM_CLEANUP_TIMEOUT_MS = 5_000;
+export const GUEST_CHUNK_PAGES = 32;
+
+/** Host-side shape check; the guest re-validates against its own page count. */
+export function validShardRange(range: DopplerVmJob["range"]): boolean {
+  if (!range) return true;
+  const { first, last, final } = range;
+  return Number.isSafeInteger(first) && Number.isSafeInteger(last) && typeof final === "boolean" &&
+    first >= 1 && last >= first && (first - 1) % GUEST_CHUNK_PAGES === 0 && (final || last % GUEST_CHUNK_PAGES === 0);
+}
 
 /** Sandbox list prices verified 2026-10-27 at https://modal.com/pricing.
  * This is an allocation estimate, not a provider invoice. CPU is physical cores.
@@ -35,6 +53,38 @@ export function dopplerVmUsage(image: string, seconds: number): UsageEvent {
       wallSeconds: duration, rateObservedAt: "2026-10-27", rateSource: "https://modal.com/pricing",
       excludes: ["image import", "storage", "egress", "regional multipliers"],
     } };
+}
+
+/**
+ * The guest's diagnostic envelope must match its output. A shard must come from a range-aware guest
+ * (`doppler-vm@3`) that echoes the requested range: an older image ignores the request and converts the
+ * whole document, which would duplicate pages after the merge. Whole-document jobs accept either protocol
+ * so a worker can roll out ahead of its image.
+ */
+export function validEnvelope(
+  diagnostics: { protocol?: unknown; engine?: unknown; outputBytes?: unknown; conversion?: Record<string, unknown> },
+  output: Buffer,
+  range: DopplerVmJob["range"],
+): boolean {
+  const conversion = diagnostics.conversion ?? {};
+  const pages = conversion.pages;
+  if (diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length || !Number.isSafeInteger(pages) || (pages as number) < 1) return false;
+  // Every page owns one slot; slots are separated by form feeds.
+  let separators = 0;
+  for (const byte of output) if (byte === 0x0c) separators++;
+  if (diagnostics.protocol === "doppler-vm@2") return !range;
+  if (diagnostics.protocol !== "doppler-vm@3") return false;
+  const documentPages = conversion.documentPages;
+  if (separators !== (pages as number) - 1 || !Number.isSafeInteger(documentPages)) return false;
+  const first = range?.first ?? 1;
+  const last = range?.last ?? documentPages;
+  if (conversion.first !== first || conversion.last !== last || pages !== (last as number) - first + 1) return false;
+  if (!range) return true;
+  return range.final ? documentPages === range.last : (documentPages as number) > range.last;
+}
+
+function guestProtocol(stderr: Buffer): unknown {
+  try { return (JSON.parse(stderr.toString("utf8")) as { protocol?: unknown }).protocol; } catch { return undefined; }
 }
 
 /** Read incrementally: readText/readBytes allocate the complete hostile stream. */
@@ -64,6 +114,9 @@ export async function executeDopplerVm(
   loadSdk: () => Promise<ModalSdk> = () => import("modal"),
 ) {
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
+  if (!validShardRange(job.range)) throw new SandboxRunError("Document VM invalid shard range");
+  const outputLimit = Math.min(MAX_OUTPUT_BYTES, job.outputLimit ?? MAX_OUTPUT_BYTES);
+  if (!(outputLimit > 0)) throw new SandboxRunError("Document VM invalid output limit");
   const image = resolveModalImage(process.env.DOCSLURP_DOPPLER_VM_IMAGE ?? "", undefined);
   if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(image)) throw new SandboxRunError("Document VM requires a verified digest-pinned DOCSLURP_DOPPLER_VM_IMAGE with offline parser assets");
   // Every asynchronous control operation shares this absolute deadline, including SDK
@@ -102,6 +155,7 @@ export async function executeDopplerVm(
   let inputDirectory: string | undefined;
   let succeeded = false;
   let allocationUsage: UsageEvent | undefined;
+  let primaryMessage: string | undefined;
   function terminate(target: NonNullable<typeof vm>): Promise<void> {
     // The control client is closed promptly when creation hangs. If creation later
     // returns an ID, use a fresh control client solely to terminate that VM.
@@ -197,18 +251,27 @@ export async function executeDopplerVm(
       await control(() => stagedInput.path
         ? vm!.filesystem.copyFromLocal(stagedInput.path, "/job/input")
         : vm!.filesystem.writeBytes(stagedInput.bytes!, "/job/input"));
+      if (job.range) {
+        const { first, last, final } = job.range;
+        await control(() => vm!.filesystem.writeBytes(Buffer.from(JSON.stringify({ first, last, final })), "/job/shard.json"));
+      }
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
       const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py"];
       const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 155_000, mode: "binary" }));
-      const [output, stderr, code] = await control(() => Promise.all([boundedStream(child.stdout, MAX_OUTPUT_BYTES), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
+      const [out, err, exit] = await control(() => Promise.allSettled([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
+      // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
+      // recognised even when its whole-document output overran this shard's cap.
+      if (job.range && err.status === "fulfilled" && guestProtocol(err.value) === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      if (out.status === "rejected") throw out.reason;
+      if (err.status === "rejected") throw err.reason;
+      if (exit.status === "rejected") throw exit.reason;
+      const [output, stderr, code] = [out.value, err.value, exit.value];
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
       const diagnostics = JSON.parse(stderr.toString("utf8"));
-      if (diagnostics.protocol !== "doppler-vm@2" || diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length ||
-          !Number.isSafeInteger(diagnostics.conversion?.pages) || diagnostics.conversion.pages < 1) {
-        throw new DopplerVmFailure("Document VM invalid result envelope");
-      }
+      if (job.range && diagnostics.protocol === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      if (!validEnvelope(diagnostics, output, job.range)) throw new DopplerVmFailure("Document VM invalid result envelope");
       if (cancelled) throw new DopplerVmFailure("Document VM cancelled before output commit");
       stagedOutput = `${job.output}.${randomUUID()}.partial`;
       // Bounded local write is awaited so cancellation cannot race its cleanup.
@@ -222,6 +285,7 @@ export async function executeDopplerVm(
   } catch (error) {
     // Raw SDK errors can contain control credentials. Keep them out of logs.
     const message = error instanceof DopplerVmFailure ? error.message : "Document VM execution failed";
+    primaryMessage = message;
     const exposure = vm ? usage() : creationRequested ? dopplerVmUsage(image, VM_TIMEOUT_MS / 1000) : undefined;
     if (exposure && !vm) exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
       estimateReason: "Creation acknowledgement missing; conservatively reserve full configured VM lifetime" };
@@ -235,7 +299,9 @@ export async function executeDopplerVm(
         const exposure = dopplerVmUsage(image, Math.max(VM_TIMEOUT_MS / 1000, (Date.now() - started) / 1000));
         exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
           estimateReason: "VM termination unconfirmed; reserve full configured lifetime" };
-        throw new SandboxRunError("Document VM termination failed or exceeded cleanup deadline", exposure);
+        // Keep an old-image refusal recognisable: callers stop sharding on it.
+        throw new SandboxRunError(primaryMessage === SHARDS_UNSUPPORTED_MESSAGE ? SHARDS_UNSUPPORTED_MESSAGE
+          : "Document VM termination failed or exceeded cleanup deadline", exposure);
       }
       if (vm && allocationUsage) Object.assign(allocationUsage, usage());
       if (succeeded && stagedOutput) {
@@ -243,14 +309,17 @@ export async function executeDopplerVm(
           throw new SandboxRunError("Document VM cancelled before output commit", usage());
         }
         // No await between final cancellation check and atomic publication.
-        renameSync(stagedOutput, job.output);
+        try { renameSync(stagedOutput, job.output); }
+        catch { throw new SandboxRunError("Document VM output publication failed", usage()); }
       }
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      clientClosed = true; client?.close();
-      if (stagedOutput) await rm(stagedOutput, { force: true });
-      if (inputDirectory) await rm(inputDirectory, { recursive: true, force: true });
+      clientClosed = true;
+      // Cleanup never replaces the result or a usage-bearing error.
+      try { client?.close(); } catch { /* control client already unusable */ }
+      if (stagedOutput) await rm(stagedOutput, { force: true }).catch(() => {});
+      if (inputDirectory) await rm(inputDirectory, { recursive: true, force: true }).catch(() => {});
     }
   }
 }

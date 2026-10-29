@@ -97,6 +97,9 @@ const activities: Activities = {
     return usage;
   },
   async setRunShardDemand() {},
+  async planPageRangeShards() {
+    return { shards: [[{ documentId: "doc-a", first: 1, last: 64 }], [{ documentId: "doc-a", first: 65, last: 128 }], [{ documentId: "doc-a", first: 129, last: 160 }]] };
+  },
   async completePipelineRun() {},
   async failPipelineRun() {},
   async prepareVisionPageTasks(input: StageInput) {
@@ -247,6 +250,22 @@ const scenarios: Scenario[] = [
       return { pageTotal: 3, groupStagesRun: (stageNames: string[]) => (first("group") ? 2 : stageNames.length) };
     },
     children: 1,
+    expect: "completed",
+  },
+  {
+    name: "page-range-shards-render-images",
+    description:
+      "WORKER_PAGE_RANGE_SHARDS input: render-images plans three page-range shards of one long PDF before its document " +
+      "shards and stage pass; embed is listed but not range-shardable, so it keeps document shards only.",
+    input: {
+      runId: "fixture-page-range", pipeline,
+      stageOrder: ["split-pages", "extract-markdown", "classify-route", "render-images", "embed", "index"],
+      slotGate: true, pageChildBatchSize: 500,
+      documentSharding: { minDocsPerShard: 1, maxShards: 2, minPagesPerShard: 1 }, groupLightStages: true,
+      pageRangeSharding: { stages: ["render-images", "embed"], maxShards: 8 },
+    },
+    behaviour: () => ({ pageTotal: 0 }),
+    children: 0,
     expect: "completed",
   },
   {

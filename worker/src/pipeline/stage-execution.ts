@@ -31,6 +31,9 @@ import {
 } from "./local-compute-cost.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { WorkflowState, type Stage } from "./pipeline.js";
+import { pageRangeExecutorIsolated, pagesInRanges, resolveShardPageRanges } from "./page-ranges.js";
+import { recordShardTiming } from "./shard-calibration.js";
+import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
@@ -45,6 +48,7 @@ import {
  * and report the outcome. Orchestrator-agnostic: Temporal activities are thin
  * adapters that inject heartbeat, cancellation, and attempt number.
  */
+
 
 /** The narrow slice of the worker Store that stage execution needs. */
 export type StageExecutionStore = Pick<
@@ -94,6 +98,10 @@ export interface StageRuntime {
    * to the unsharded stage activity that follows the shards.
    */
   documentIds?: readonly string[];
+  /** Page-range shard (with documentIds): only these pages, through the stage's runPageRanges. */
+  pageRanges?: readonly PageRangeSlice[];
+  shardIndex?: number;
+  shardCount?: number;
   /**
    * Read the run's pause/cancel request in the stage-completion checkpoint and report it as
    * StageOutput.controlRequested, so a stage group does not spend a round trip asking between stages.
@@ -302,8 +310,13 @@ export function createStageExecution(deps: {
       preloaded: runtime.preloaded,
     });
     const shard = runtime.documentIds !== undefined;
+    if (runtime.pageRanges && !runtime.documentIds) throw new Error("page-range shard requires its document ids");
     if (runtime.documentIds) state.beginShard(runtime.documentIds);
     const { documents } = state;
+    // Validated against the shard's own documents before any work; an invalid shard does nothing.
+    const pageRanges = runtime.pageRanges ? resolveShardPageRanges(runtime.pageRanges, documents) : null;
+    if (pageRanges && !stage.runPageRanges) throw new Error(`stage ${stageName} does not support page-range shards`);
+    if (pageRanges && !pageRangeExecutorIsolated(stageName)) throw new Error(`stage ${stageName} refuses page-range shards: executor is not VM-isolated`);
 
     if (stageName === "vision-extract") state.distributedVisionPages = await store.pageTasks.completed(runId);
 
@@ -464,9 +477,19 @@ export function createStageExecution(deps: {
         metadata: { runId, workspaceId: state.run.workspaceId, orgId: state.run.orgId,
           temporalAttempt: runtime.attempt, stage: stageName },
       }, () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId },
-        () => runWithProgressTracker(tracker, () => stage.run(state, stageSignal))));
+        () => runWithProgressTracker(tracker, () => pageRanges
+          ? stage.runPageRanges!(state, pageRanges, stageSignal)
+          : stage.run(state, stageSignal))));
 
       const durationMs = Date.now() - startedAt;
+      if (pageRanges) {
+        for (const [documentId, ranges] of pageRanges) {
+          recordShardTiming(state, { stage: stageName, executor: "fly-shared-slot", documentId,
+            pages: pagesInRanges(ranges), ms: durationMs / pageRanges.size,
+            ...(runtime.shardIndex === undefined ? {} : { shardIndex: runtime.shardIndex }),
+            ...(runtime.shardCount === undefined ? {} : { shardCount: runtime.shardCount }) });
+        }
+      }
       const newArtifactKeys = Object.keys(state.artifactLedger.changedSince(artifacts));
 
       // Record CPU/RAM delta
@@ -490,7 +513,8 @@ export function createStageExecution(deps: {
       const localObservation = buildAllocatedResourceObservation({
         profile: deploymentProfile,
         wallTimeMs: durationMs,
-        pages: documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
+        // A range shard does only its ranges; counting whole documents would inflate pages per minute and per $1.
+        pages: pageRanges ? [...pageRanges.values()].reduce((total, ranges) => total + pagesInRanges(ranges), 0) : documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
         cold: false,
       });
       state.usageLedger.enqueue(buildLocalComputeUsageEvent({

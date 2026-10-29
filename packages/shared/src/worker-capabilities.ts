@@ -36,6 +36,8 @@ export const WORKER_CAPABILITIES = [
   "workflow.index-before-enrich",
   /** Groups arbitrary adjacent stages into one activity (stage-groups.ts), not only LIGHT_STAGES. */
   "workflow.group-adjacent-stages",
+  /** Plans and runs page-range shards of long documents (pageRangeSharding in workflow input). */
+  "workflow.page-range-shards",
   /** Consumes and renews org credit leases (schema 0052 + 0053 present and leases on in this worker). */
   "billing.credit-leases",
   /** Stamps documents.lexical_searchable_at at embed (schema 0051). */
@@ -66,6 +68,11 @@ export const GATED_FEATURES: readonly GatedFeature[] = [
     flag: "WORKER_GROUP_ADJACENT_STAGES",
     capability: "workflow.group-adjacent-stages",
     description: "groupableStages recorded in workflow input",
+  },
+  {
+    flag: "WORKER_PAGE_RANGE_SHARDS",
+    capability: "workflow.page-range-shards",
+    description: "pageRangeSharding recorded in workflow input: long documents split into page-range shards",
   },
   {
     flag: "WORKER_CREDIT_LEASES",

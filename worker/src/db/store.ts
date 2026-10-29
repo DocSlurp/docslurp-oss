@@ -661,6 +661,33 @@ export class Store {
     };
   }
 
+  /**
+   * Newest shard timings for one planner profile (`${stage}:${executor}`), for shard calibration.
+   * Fleet-wide performance aggregate: selects only numeric measurements (wall ms, pages, peak RSS), never
+   * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
+   * Served by performance_log_shard_timing_idx (0098).
+   */
+  async loadShardObservations(profileKey: string, limit = 200): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>> {
+    const rows = await this.sql<Array<{ ms: string | number; pages: string | number | null; max_rss_mib: string | number | null }>>`
+      select perf.value as ms,
+        (perf.metadata->>'pages')::numeric as pages,
+        (perf.metadata->>'maxRssMiB')::numeric as max_rss_mib
+      from performance_log perf
+      where perf.metric = 'shard_timing_ms'
+        and perf.metadata->>'profileKey' = ${profileKey}
+        and perf.created_at >= now() - interval '14 days'
+      order by perf.created_at desc
+      limit ${Math.max(1, Math.min(1_000, Math.floor(limit)))}
+    `;
+    return rows.flatMap((row) => {
+      const pages = Number(row.pages);
+      const ms = Number(row.ms);
+      if (!(pages > 0) || !Number.isFinite(ms)) return [];
+      const rss = row.max_rss_mib === null ? undefined : Number(row.max_rss_mib);
+      return [rss !== undefined && Number.isFinite(rss) ? { pages, ms, maxRssMiB: rss } : { pages, ms }];
+    });
+  }
+
   async renewHeartbeat(runId: string): Promise<void> {
     await this.sql`
       update workspace_runs

@@ -56,11 +56,19 @@ export interface CheckpointStore {
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.
    */
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
+  /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
+  loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }
 
 export interface Stage {
   readonly name: string;
   run(state: WorkflowState, signal?: AbortSignal): Promise<void>;
+  /**
+   * Page-range shard: do the per-page work for only these pages, leaving document checkpoints,
+   * manifests and ledger entries to the unsharded pass that follows (which must find the work
+   * done and skip it). Stages without it reject page-range shards.
+   */
+  runPageRanges?(state: WorkflowState, ranges: ReadonlyMap<string, ReadonlyArray<{ first: number; last: number }>>, signal?: AbortSignal): Promise<void>;
 }
 
 export interface VectorIndex {
