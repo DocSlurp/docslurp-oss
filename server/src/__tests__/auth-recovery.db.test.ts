@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 import type { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -249,7 +249,7 @@ describe("password recovery with native Email OTP", () => {
     // Unverified: the squatter can't get a session, so nothing else can be attached.
     const squatter = new Browser();
     expect((await squatter.json("/sign-in/email", { email: squatted.email, password: "the squatters password" })).status).toBe(403);
-    expect(squatter.cookies.size).toBe(0);
+    expect([...squatter.cookies.keys()].some((name) => name.includes("session_token"))).toBe(false);
     expect((await pool.query(`select 1 from session where "userId" = $1`, [squatted.id])).rowCount).toBe(0);
     const owner = new Browser();
     await requestReset(owner, squatted.email);
@@ -259,6 +259,91 @@ describe("password recovery with native Email OTP", () => {
     expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: NEW_PASSWORD })).status).toBe(200);
     const providers = (await pool.query<{ provider: string }>(`select "providerId" as provider from account where "userId" = $1`, [squatted.id])).rows.map((row) => row.provider);
     expect(providers).toEqual(["credential"]);
+  });
+
+  it("won't let the owner verify an address someone else signed up with; they take it over by reset instead", async () => {
+    const email = `squatted-${randomBytes(3).toString("hex")}@example.test`;
+    const attacker = new Browser();
+    expect((await attacker.json("/sign-up/email", { name: "Squatter", email, password: "the squatters password" })).status).toBe(200);
+    const code = lastCodeFor(email);
+    // The owner follows a crafted link that opens on "enter the code we emailed you".
+    const owner = new Browser();
+    const refused = await owner.json<{ code?: string }>("/email-otp/verify-email", { email, otp: code });
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("VERIFY_WITH_PASSWORD");
+    expect((await pool.query<{ verified: boolean }>(`select "emailVerified" as verified from "user" where email = $1`, [email])).rows[0]!.verified).toBe(false);
+    expect((await attacker.json("/sign-in/email", { email, password: "the squatters password" })).status).toBe(403);
+    await requestReset(owner, email);
+    expect((await owner.json("/email-otp/reset-password", { email, otp: lastCodeFor(email), password: NEW_PASSWORD })).status).toBe(200);
+    expect((await new Browser().json("/sign-in/email", { email, password: "the squatters password" })).status).toBe(401);
+    expect((await new Browser().json("/sign-in/email", { email, password: NEW_PASSWORD })).status).toBe(200);
+  });
+
+  it("verifies in the browser that signed up, or after a correct-password sign-in anywhere", async () => {
+    const email = `owner-${randomBytes(3).toString("hex")}@example.test`;
+    const signup = new Browser();
+    expect((await signup.json("/sign-up/email", { name: "Owner", email, password: NEW_PASSWORD })).status).toBe(200);
+    const elsewhere = new Browser();
+    expect((await elsewhere.json<{ code?: string }>("/sign-in/email", { email, password: NEW_PASSWORD })).body.code).toBe("EMAIL_NOT_VERIFIED");
+    expect((await elsewhere.json("/email-otp/verify-email", { email, otp: lastCodeFor(email) })).status).toBe(200);
+    expect(await elsewhere.session()).not.toBeNull();
+
+    const second = `owner-${randomBytes(3).toString("hex")}@example.test`;
+    const sameBrowser = new Browser();
+    await sameBrowser.json("/sign-up/email", { name: "Owner", email: second, password: NEW_PASSWORD });
+    // A binding for one address doesn't verify another.
+    expect((await sameBrowser.json("/email-otp/verify-email", { email: email.replace("owner-", "other-"), otp: "000000" })).status).toBe(403);
+    expect((await sameBrowser.json("/email-otp/verify-email", { email: second, otp: lastCodeFor(second) })).status).toBe(200);
+  });
+
+  it("refuses verification without a binding the same way for every address", async () => {
+    const known = (await createUser({ emailVerified: false })).email;
+    const unknown = `nobody-${randomBytes(3).toString("hex")}@example.test`;
+    const answers = await Promise.all([known, unknown].map(async (email) => {
+      const response = await new Browser().json<{ code?: string }>("/email-otp/verify-email", { email, otp: "123456" });
+      return `${response.status}:${response.body.code}`;
+    }));
+    expect(answers).toEqual(["403:VERIFY_WITH_PASSWORD", "403:VERIFY_WITH_PASSWORD"]);
+  });
+
+  it("ends a password-issued session at its next use once the password changes, however late it was issued", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    expect((await browser.json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
+    const { rows } = await pool.query<{ fingerprint: string | null; token: string }>(`select "credentialFingerprint" as fingerprint, token from session where "userId" = $1`, [user.id]);
+    const oldHash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    const { credentialFingerprint } = await import("../lib/auth-credential-binding.js");
+    expect(rows[0]!.fingerprint).toBe(credentialFingerprint(oldHash));
+
+    await requestReset(new Browser(), user.email);
+    expect((await new Browser().json("/email-otp/reset-password", { email: user.email, otp: lastCodeFor(user.email), password: NEW_PASSWORD })).status).toBe(200);
+    // A sign-in that proved the old password and inserted its session after the reset committed.
+    const late = await (await auth.$context).internalAdapter.createSession(user.id);
+    await pool.query(`update session set "credentialFingerprint" = $2 where token = $1`, [late.token, credentialFingerprint(oldHash)]);
+    const straggler = new Browser();
+    straggler.cookies.set("better-auth.session_token", encodeURIComponent(`${late.token}.${createHmac("sha256", SECRET).update(late.token).digest("base64")}`));
+    expect(await straggler.session()).toBeNull();
+    expect((await pool.query(`select 1 from session where token = $1`, [late.token])).rowCount).toBe(0);
+    // A session from the new password is unaffected.
+    const fresh = new Browser();
+    expect((await fresh.json("/sign-in/email", { email: user.email, password: NEW_PASSWORD })).status).toBe(200);
+    expect(await fresh.session()).not.toBeNull();
+  });
+
+  it("carries the sessions a password change keeps over to the new password", async () => {
+    // Signing out other devices (revokeOtherSessions) creates a session inside Better Auth's
+    // transaction, which the single-backend test database can't serve alongside the pool.
+    const user = await createUser();
+    const [current, other] = [new Browser(), new Browser()];
+    for (const browser of [current, other]) expect((await browser.json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
+    expect((await current.json("/sensitive-access/password", { password: PASSWORD })).status).toBe(200);
+    expect((await current.json("/change-password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD, revokeOtherSessions: false })).status).toBe(200);
+    expect(await current.session()).not.toBeNull();
+    expect(await other.session()).not.toBeNull();
+    const newHash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    const { credentialFingerprint } = await import("../lib/auth-credential-binding.js");
+    const fingerprints = (await pool.query<{ fingerprint: string }>(`select "credentialFingerprint" as fingerprint from session where "userId" = $1`, [user.id])).rows.map((row) => row.fingerprint);
+    expect(fingerprints).toEqual([credentialFingerprint(newHash), credentialFingerprint(newHash)]);
   });
 
   it("keeps the configuration that lets an unverified account hold nothing but its password", async () => {

@@ -272,6 +272,8 @@ interface SessionRow {
   created_at: Date;
   two_factor_enabled: boolean;
   passkeys: number;
+  /** Issued by a password that has since changed (auth-credential-binding.ts). */
+  stale_credential: boolean;
 }
 
 /** Cookie pairs named `name` (or a chunk of it, `name.0`) in a raw Cookie header. */
@@ -321,7 +323,11 @@ async function loadSessionRow(pool: Pick<Pool, "query">, token: string): Promise
     `select s.id as session_id, s.token, s."userId" as user_id, u.email, s."mfaVerified" as mfa_verified,
             s."authenticatedAt" as authenticated_at, s."createdAt" as created_at,
             u."twoFactorEnabled" as two_factor_enabled,
-            (select count(*)::int from passkey p where p."userId" = s."userId") as passkeys
+            (select count(*)::int from passkey p where p."userId" = s."userId") as passkeys,
+            coalesce(s."credentialFingerprint" is distinct from (
+              select encode(sha256(convert_to(a.password, 'UTF8')), 'hex') from account a
+               where a."userId" = s."userId" and a."providerId" = 'credential' and a.password is not null limit 1
+            ), false) and s."credentialFingerprint" is not null as stale_credential
        from session s join "user" u on u.id = s."userId"
       where s.token = $1 and s."expiresAt" > now()`,
     [token],
@@ -491,6 +497,10 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
     const { ambiguous, row } = await requestSession(ctx, pool);
     if (ambiguous) {
       console.warn(`[auth-mfa] ignored a request carrying several session cookies path=${ctx.path}`);
+    } else if (row?.stale_credential) {
+      // Its password changed after (or while) it signed in: a reset or change must end it.
+      await pool.query(`delete from session where token = $1`, [row.token]);
+      console.warn(`[auth-mfa] revoked a session issued by a password that has since changed user=${row.user_id} session=${row.session_id}`);
     } else {
       if (!row || row.mfa_verified) return;
       if (!row.two_factor_enabled) {
@@ -649,6 +659,7 @@ export function createMfaPlugins(options: MfaPluginOptions): BetterAuthPlugin[] 
 export const sessionAssuranceFields = {
   mfaVerified: { type: "boolean", required: false, defaultValue: false, input: false },
   authenticatedAt: { type: "date", required: false, input: false },
+  credentialFingerprint: { type: "string", required: false, input: false },
 } as const;
 
 // ---------------------------------------------------------------------------

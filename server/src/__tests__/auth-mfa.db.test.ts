@@ -279,20 +279,16 @@ describe("sign-in challenge", () => {
     expect(await browser.session()).toBeNull();
   });
 
-  it("turns redirect sign-ins (email links, OAuth callbacks) into a redirect to the challenge", async () => {
+  it("serves no link-based email verification: it would sign in without a challenge-free path but also skip the verification binding", async () => {
+    // Redirect sign-ins that stop at the challenge are covered by magic links (auth-magic-link.db.test.ts).
     const { user } = await enrolledUser();
     await pool.query(`update "user" set "emailVerified" = false where id = $1`, [user.id]);
     const { createEmailVerificationToken } = await import("better-auth/api");
     const token = await createEmailVerificationToken(SECRET, user.email);
     const browser = new Browser();
     const response = await browser.request(`/verify-email?token=${token}&callbackURL=${encodeURIComponent("/app/workspaces")}`);
-    expect(response.status).toBe(302);
-    const location = new URL(response.headers.get("location")!);
-    expect(location.pathname).toBe("/app/sign-in");
-    expect(location.searchParams.get("mfa")).toBe("required");
-    expect(location.searchParams.get("redirectTo")).toBe("/app/workspaces");
+    expect(response.status).toBe(404);
     expect(await browser.session()).toBeNull();
-    expect(browser.cookies.has("better-auth.two_factor")).toBe(true);
   });
 
   it("revokes a session that skipped the challenge, whatever minted it", async () => {

@@ -13,6 +13,7 @@ import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
 import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
 import { uniformCodeRefusal } from "./auth-recovery.js";
+import { credentialBindingPlugin, newSessionCredentialFingerprint } from "./auth-credential-binding.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
@@ -187,7 +188,7 @@ export const breachedPasswordPolicy = resolveBreachedPasswordPolicy(process.env)
  * second spelling of the same flow for every policy to track. The generic code
  * checker has no caller and would be one more place to guess codes.
  */
-export const DISABLED_AUTH_PATHS = ["/forget-password/email-otp", "/request-password-reset", "/reset-password", "/email-otp/check-verification-otp"];
+export const DISABLED_AUTH_PATHS = ["/forget-password/email-otp", "/request-password-reset", "/reset-password", "/email-otp/check-verification-otp", "/verify-email"];
 /** Passkey relying party and 2FA settings; invalid passkey origins fail startup. */
 export const mfaConfig = resolveMfaConfig(process.env, securityOptions.baseURL);
 export const auth = betterAuth({
@@ -204,7 +205,7 @@ export const auth = betterAuth({
   // The recipient limit follows SSO enforcement: an enforced address is
   // refused before it spends any email budget.
   plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }),
-    recipientLimiter.plugin,
+    recipientLimiter.plugin, credentialBindingPlugin({ pool }),
     ...breachedPasswordPlugins(breachedPasswordPolicy),
     ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
     sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus })],
@@ -223,7 +224,7 @@ export const auth = betterAuth({
             .catch(error => console.warn("[account-kind] not applied", error instanceof Error ? error.message : error));
           // Whether this session passed a second factor, decided by the endpoint
           // that created it (see sessionAssuranceFor), never by request input.
-          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId) } };
+          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId), credentialFingerprint: await newSessionCredentialFingerprint() } };
         }
       }
     },

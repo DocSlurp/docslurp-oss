@@ -701,6 +701,13 @@
       "when": 1793300000003,
       "tag": "0099_auth_rate_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1793300000004,
+      "tag": "0100_session_credential_fingerprint",
+      "breakpoints": true
     }
   ]
 }
