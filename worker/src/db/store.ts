@@ -7,6 +7,7 @@ import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
+import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
@@ -2482,6 +2483,11 @@ export class Store {
         where org_id = ${orgId} and artifact_uri = ${artifactUri} and embed_key = any(${batch}::text[])
       `;
     }
+  }
+
+  /** Reserves a document's share of the run's Fast page-image render budget, shared by every worker (fast-page-image-budget.ts). */
+  async reserveFastPageImageRenders(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number> {
+    return await reserveFastPageImageRenders(this.sql, args);
   }
 
   /**

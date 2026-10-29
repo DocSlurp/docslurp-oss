@@ -21,7 +21,6 @@ import {
   applyPageImageReferences,
   fastPageImageCaps,
   pagesKeptAsImage,
-  reserveFastPageImageRenders,
 } from "../lib/page-image-references.js";
 import { recordPageFacts } from "../pipeline/page-facts.js";
 
@@ -72,8 +71,8 @@ export class RenderImagesStage implements Stage {
             pages: keptPages.map((pageNumber) => ({ pageNumber, artifactUri: renderedUris.get(pageNumber)! })),
           });
           const referencedPages = keptPages;
-          // Billing reads these facts (page-base-fee.ts): a textless page bills Fast only when Fast recorded it as
-          // kept as an image or left unread. Textless pages Fast did not render (cap, blank, render failure) are unread.
+          // Ingest report facts (best effort; billing never reads them). Textless pages Fast did not render (cap, blank,
+          // render failure) are recorded unread.
           const keptSet = new Set(referencedPages);
           const unread = [...new Set([...unreadPages, ...keptAsImage.filter((pageNumber) => !keptSet.has(pageNumber))])];
           if (referencedPages.length > 0 || unread.length > 0) {
@@ -145,13 +144,19 @@ export class RenderImagesStage implements Stage {
         routing: request,
         maxPages: caps.perDocument,
       });
-      const granted = reserveFastPageImageRenders(state.run.id, document.id, selection.kept.length, caps.perRun);
+      // The per-run cap is a Postgres reservation shared by every worker (db/fast-page-image-budget.ts). Without a
+      // store to reserve from, nothing renders (fail closed).
+      const reserve = state.store?.reserveFastPageImageRenders?.bind(state.store);
+      const granted = selection.kept.length === 0 || !reserve
+        ? 0
+        : await reserve({ runId: state.run.id, documentId: document.id, wanted: selection.kept.length, perRun: caps.perRun });
       const keptAsImage = selection.kept.slice(0, granted);
       const unreadPages = [...selection.unread, ...selection.kept.slice(granted)].sort((a, b) => a - b);
       if (selection.reason || granted < selection.kept.length) {
+        const reason = granted < selection.kept.length ? (reserve ? "run-cap" : "run-budget-unavailable") : selection.reason;
         console.warn(
           `[render-images] fast page images limited document=${document.id} run=${state.run.id} ` +
-            `reason=${granted < selection.kept.length ? "run-cap" : selection.reason} kept=${keptAsImage.length} unread=${unreadPages.length} ` +
+            `reason=${reason} kept=${keptAsImage.length} unread=${unreadPages.length} ` +
             `capPerDocument=${caps.perDocument} capPerRun=${caps.perRun}`,
         );
       }

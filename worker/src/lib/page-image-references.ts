@@ -44,7 +44,7 @@ export function fastPageImageCaps(env: NodeJS.ProcessEnv = process.env): { perDo
  * (nothing to show) are left unread, as are textless pages past `maxPages` (in page order, so every page-range shard
  * of a document agrees). Fails closed, rendering nothing: no canonical document (missing or unparseable) means the
  * pages' text is unknown, and in a multi-page document a text block without a page number means page attribution is
- * unknown. An image file is its single page.
+ * unknown. An image file keeps its first frame; further frames (multi-frame TIFF or GIF) are left unread.
  */
 export function pagesKeptAsImage(args: {
   canonicalDocument: CanonicalDocument | null;
@@ -58,7 +58,9 @@ export function pagesKeptAsImage(args: {
     .filter((block) => block.text.trim().length > 0 && !isPageImageReferenceBlock(block));
   if (args.isImage) {
     if (textBlocks.length > 0) return { kept: [], unread: [], reason: null };
-    return maxPages >= 1 ? { kept: [1], unread: [], reason: null } : { kept: [], unread: [1], reason: "cap" };
+    // Only the first frame of a multi-frame image (TIFF, GIF) renders; the other frames are recorded unread.
+    const frames = Array.from({ length: Math.max(0, Math.trunc(args.pageCount) - 1) }, (_, index) => index + 2);
+    return maxPages >= 1 ? { kept: [1], unread: frames, reason: null } : { kept: [], unread: [1, ...frames], reason: "cap" };
   }
   if (!args.canonicalDocument) return { kept: [], unread: [], reason: "canonical-document-missing" };
   const pageCount = Math.max(1, Math.trunc(args.pageCount));
@@ -81,29 +83,6 @@ export function pagesKeptAsImage(args: {
     else unread.push(pageNumber);
   }
   return { kept, unread, reason: unread.length > 0 && kept.length >= maxPages ? "cap" : null };
-}
-
-/**
- * Per-run budget of Fast page-image renders, shared by the documents one worker process renders for a run. A
- * document's grant is remembered, so page-range shards, the stage that follows them and a retried stage reuse it
- * instead of spending the budget again. A distributed run can exceed the budget by at most one per-document cap
- * per concurrent worker.
- */
-const runRenderBudgets = new Map<string, { used: number; touched: number; grants: Map<string, number> }>();
-
-/** Reserves up to `wanted` renders of a run's budget for one document and returns how many were granted. */
-export function reserveFastPageImageRenders(runId: string, documentId: string, wanted: number, perRun: number): number {
-  const now = Date.now();
-  for (const [id, entry] of runRenderBudgets) if (now - entry.touched > 6 * 60 * 60_000) runRenderBudgets.delete(id);
-  const entry = runRenderBudgets.get(runId) ?? { used: 0, touched: now, grants: new Map<string, number>() };
-  entry.touched = now;
-  runRenderBudgets.set(runId, entry);
-  const previous = entry.grants.get(documentId);
-  if (previous !== undefined) return Math.min(previous, wanted);
-  const granted = Math.max(0, Math.min(wanted, perRun - entry.used));
-  entry.used += granted;
-  entry.grants.set(documentId, granted);
-  return granted;
 }
 
 /**

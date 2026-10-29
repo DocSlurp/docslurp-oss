@@ -8,7 +8,7 @@ import {
 } from "@docslurp/shared";
 
 import { splitRemainingPages } from "../db/page-base-fee.js";
-import { applyPageImageReferences, pagesKeptAsImage, reserveFastPageImageRenders } from "../lib/page-image-references.js";
+import { applyPageImageReferences, fastPageImageCaps, pagesKeptAsImage } from "../lib/page-image-references.js";
 import { artifactExportPath, documentExportEntries, type ExportDocumentRow, type ExportSource } from "../exports/build-document-export.js";
 import { RenderImagesStage } from "../stages/render-images.js";
 import { buildCanonicalChunksFromDocument, buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
@@ -125,13 +125,13 @@ describe("quality fast: pages without a text layer", () => {
     expect(chunks[0]!.pageNumbers).toEqual([]);
   });
 
-  it("bills a scanned page Fast only when Fast recorded it unread", () => {
+  it("bills Fast pages from the ledger: only pages with a recorded Rich read are Rich (already charged)", () => {
     const scannedPdf = { image: false, pages: 2, richRead: 0, scanned: 1 };
-    expect(splitRemainingPages({ ...scannedPdf, scannedRead: 0, fastUnread: 1 }, false)).toEqual({ fast: 2, rich: 0 });
-    // The scan has no kept-as-image / not-read record: something read it, so it bills Rich.
-    expect(splitRemainingPages({ ...scannedPdf, scannedRead: 1, fastUnread: 0 }, false)).toEqual({ fast: 1, rich: 1 });
-    expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0, fastUnread: 1 }, false)).toEqual({ fast: 1, rich: 0 });
-    expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0, fastUnread: 0 }, false)).toEqual({ fast: 0, rich: 1 });
+    expect(splitRemainingPages(scannedPdf, false)).toEqual({ fast: 2, rich: 0 });
+    // One page was read and charged Rich by the ledger; the other bills Fast.
+    expect(splitRemainingPages({ ...scannedPdf, richRead: 1 }, false)).toEqual({ fast: 1, rich: 0 });
+    expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0 }, false)).toEqual({ fast: 1, rich: 0 });
+    expect(splitRemainingPages({ image: true, pages: 1, richRead: 1, scanned: 0 }, false)).toEqual({ fast: 0, rich: 0 });
     expect(pageCredits("fast", 2)).toBeCloseTo(0.01);
     // auto and good still bill an unread scan Rich.
     expect(splitRemainingPages(scannedPdf, true)).toEqual({ fast: 1, rich: 1 });
@@ -164,6 +164,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     });
     const { storage, objects } = memoryStorage(withCanonical ? { "canonical/blank.json": canonical, "contract/blank.json": contract } : {});
     const facts: Array<{ pageNumber: number; visionStatus?: string }> = [];
+    const grants = new Map<string, number>();
     const state = WorkflowState.create({
       id: runId, orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
       pipeline: normalizePipelineFeatures({ quality: "fast" }),
@@ -172,6 +173,13 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     const known: Record<string, unknown> = {
       getCompletedPages: async () => new Set<number>(),
       upsertPageFacts: async (rows: typeof facts) => void facts.push(...rows),
+      // In-memory stand-in for the Postgres budget (db/fast-page-image-budget.ts, tested against PGlite).
+      reserveFastPageImageRenders: async (args: { documentId: string; wanted: number; perRun: number }) => {
+        const used = [...grants.values()].reduce((sum, granted) => sum + granted, 0);
+        const granted = grants.get(args.documentId) ?? Math.max(0, Math.min(args.wanted, args.perRun - used));
+        grants.set(args.documentId, granted);
+        return Math.min(granted, args.wanted);
+      },
     };
     (state as unknown as { store: unknown }).store = new Proxy(known, {
       get: (target, key: string) => target[key] ?? (async () => undefined),
@@ -180,7 +188,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
       state.artifactLedger.recordDocument("blank", "canonical-document", "s3://bucket/canonical/blank.json");
       state.artifactLedger.recordDocument("blank", "extraction-contract", "s3://bucket/contract/blank.json");
     }
-    return { state, storage, objects, facts };
+    return { state, storage, objects, facts, grants };
   }
 
   it("caps a many-page blank PDF at the per-document limit and records the rest unread", async () => {
@@ -204,13 +212,38 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     vi.stubEnv("WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN", "7");
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
-      const { state, storage } = blankState(true, "run-run-cap");
+      const { state, storage, grants } = blankState(true, "run-run-cap");
       const { stage: render, rendered } = stage(storage);
       await render.run(state);
       expect(rendered.flat()).toHaveLength(7);
-      // The document's grant is remembered: a retry spends no more of the run budget.
-      expect(reserveFastPageImageRenders("run-run-cap", "blank", 50, 7)).toBe(7);
-      expect(reserveFastPageImageRenders("run-run-cap", "other", 50, 7)).toBe(0);
+      expect(grants.get("blank")).toBe(7);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("renders nothing without a store to reserve the run budget from (fail closed)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { state, storage, facts } = blankState(true, "run-no-budget");
+    const proxied = (state as unknown as { store: Record<string, unknown> }).store;
+    (state as unknown as { store: unknown }).store = new Proxy({}, {
+      get: (_target, key: string) => (key === "reserveFastPageImageRenders" ? undefined : proxied[key]),
+    });
+    const { stage: render, rendered } = stage(storage);
+    await render.run(state);
+    expect(rendered.flat()).toEqual([]);
+    expect(facts.filter((row) => row.visionStatus === "not-read")).toHaveLength(manyPages);
+  });
+
+  it("keeps the first frame of a multi-frame image and records the other frames unread", () => {
+    expect(pagesKeptAsImage({ canonicalDocument: null, pageCount: 3, isImage: true })).toEqual({ kept: [1], unread: [2, 3], reason: null });
+    expect(pagesKeptAsImage({ canonicalDocument: null, pageCount: 2, isImage: true, maxPages: 0 })).toEqual({ kept: [], unread: [1, 2], reason: "cap" });
+  });
+
+  it("reads the render caps from the environment", () => {
+    vi.stubEnv("WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN", "3");
+    try {
+      expect(fastPageImageCaps()).toEqual({ perDocument: 1_000, perRun: 3 });
     } finally {
       vi.unstubAllEnvs();
     }
@@ -259,29 +292,42 @@ describe("quality fast: references follow the stored image format", () => {
     expect(artifactExportPath("page-1", artifactUri)?.path).toBe(link);
   });
 
-  it("ships the referenced page images in a Markdown-only export", async () => {
+  it("ships the referenced page images in a Markdown-only export, from the canonical references (no page facts)", async () => {
+    const built = buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: `Text page.\f${pageImageReferenceMarkdown(2)}\f`, pageCount: 3, extractor: "native-pdf" });
+    const canonical = {
+      ...built,
+      blocks: built.blocks.map((block) => (block.pageNumber === 2 ? { ...block, metadata: { ...block.metadata, extractor: "page-image" } } : block)),
+    };
     const row = {
       id: "doc", workspace_id: "ws", run_id: "run", filename: "scan.pdf", mime_type: "application/pdf", source_key: "raw/doc",
       status: "completed", extraction_mode: "fast", page_count: 3, version_number: 1, metadata: {}, created_at: "2026-10-29", updated_at: "2026-10-29",
       tags: [], artifacts: {
         "doc:markdown": "s3://bucket/run/markdown/doc.md",
+        "doc:canonical-document": "s3://bucket/run/canonical/doc.json",
         "doc:page-2": "s3://bucket/run/images/doc/page-2.png",
         "doc:page-3": "s3://bucket/run/images/doc/page-3.png",
       },
     } satisfies ExportDocumentRow;
+    const bytes = (text: string) => ({ stream: (async function* () { yield new TextEncoder().encode(text); })(), size: text.length });
     const source: ExportSource = {
       bucket: "bucket",
       pages: async () => [],
-      open: async () => ({ stream: (async function* () { yield new Uint8Array([1]); })(), size: 1 }),
-      keptAsImagePages: async () => [2],
+      open: async (key) => (key === "run/canonical/doc.json" ? bytes(JSON.stringify(canonical)) : bytes("x")),
     };
-    const paths: string[] = [];
-    for await (const entry of documentExportEntries({ root: "export", scope: "document", content: "markdown", documents: [row], truncated: false }, source, [])) {
-      paths.push(entry.path);
-    }
-    // Only the kept page's image: page 3 rendered for another reason stays an "all" export asset.
+    const exported = async (artifacts: Record<string, string>) => {
+      const paths: string[] = [];
+      for await (const entry of documentExportEntries({ root: "export", scope: "document", content: "markdown", documents: [{ ...row, artifacts }], truncated: false }, source, [])) {
+        paths.push(entry.path);
+      }
+      return paths;
+    };
+    const paths = await exported(row.artifacts);
+    // Only the referenced page's image: page 3 rendered for another reason stays an "all" export asset.
     expect(paths).toContain("export/images/page-0002.png");
     expect(paths).not.toContain("export/images/page-0003.png");
+    // No canonical document in this run: no reference is known, so no image ships.
+    const { "doc:canonical-document": _canonical, ...withoutCanonical } = row.artifacts;
+    expect((await exported(withoutCanonical)).some((path) => path.includes("images/"))).toBe(false);
   });
 });
 

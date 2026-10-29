@@ -6,6 +6,7 @@ import {
   DOCUMENT_EXPORT_MAX_DOCUMENTS,
   DOCUMENT_EXPORT_TTL_DAYS,
   documentExportFolderNames,
+  isPageImageReferenceBlock,
   safeExportName,
   type DocumentExportContent,
 } from "@docslurp/shared";
@@ -83,11 +84,6 @@ const PRETTY_JSON_MAX_BYTES = 8 * 1024 * 1024;
 export interface ExportSource {
   /** Pages in order for one document. */
   pages(documentId: string): Promise<Array<{ page_number: number; text: string }>>;
-  /**
-   * Pages Fast kept as page images (page facts `kept-as-image`). Their Markdown links `images/page-NNNN.<ext>`,
-   * so a Markdown-only export still carries those images. Optional: a source without it exports none.
-   */
-  keptAsImagePages?(documentId: string): Promise<number[]>;
   /** An object by key, streamed. */
   open(key: string): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }>;
   bucket: string;
@@ -120,6 +116,27 @@ async function readText(stream: AsyncIterable<Uint8Array>): Promise<string> {
   let text = "";
   for await (const chunk of stream) text += decoder.decode(chunk, { stream: true });
   return text + decoder.decode();
+}
+
+/**
+ * Pages whose Fast page-image reference is in a document's canonical document (blocks stamped with the page-image
+ * adapter, never matched by text). None when the document has no canonical artifact or it cannot be read.
+ */
+async function referencedPageImages(source: ExportSource, canonicalKey: string | null): Promise<Set<number>> {
+  const pages = new Set<number>();
+  if (!canonicalKey) return pages;
+  try {
+    const opened = await source.open(canonicalKey);
+    const parsed = JSON.parse(await readText(opened.stream)) as { blocks?: unknown };
+    for (const block of Array.isArray(parsed.blocks) ? parsed.blocks : []) {
+      if (!block || typeof block !== "object" || !isPageImageReferenceBlock(block as { metadata?: Record<string, unknown> })) continue;
+      const page = (block as { pageNumber?: unknown }).pageNumber;
+      pages.add(typeof page === "number" && Number.isInteger(page) && page > 0 ? page : 1);
+    }
+  } catch (error) {
+    console.warn(`[document-export] page-image references unreadable key=${canonicalKey}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return pages;
 }
 
 export async function* documentExportEntries(
@@ -206,9 +223,10 @@ export async function* documentExportEntries(
       };
     }
 
-    if (args.content !== "all" && completed && source.keptAsImagePages) {
-      // Fast references these page images from the Markdown; ship them so the links resolve.
-      const kept = new Set(await source.keptAsImagePages(row.id));
+    if (args.content !== "all" && completed) {
+      // Fast references these page images from the Markdown; ship them so the links resolve. The pages come from
+      // the reference blocks in this run's canonical document, the same structure the Markdown was written from.
+      const kept = await referencedPageImages(source, artifactKey("canonical-document"));
       for (const entry of artifacts) {
         const page = PAGE_IMAGE_SLOT.exec(entry.name);
         if (!page || !kept.has(Number(page[1]))) continue;
@@ -335,15 +353,18 @@ const documentColumns = (sql: Sql) => sql`
 export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow[]): Promise<void> {
   const runIds = [...new Set(documents.map((row) => row.run_id).filter((id): id is string => Boolean(id)))];
   if (runIds.length === 0) return;
-  const slots = await sql<Array<{ document_id: string; slot: string; uri: string }>>`
-    select split_part(artifact.key, ':', 1) as document_id, artifact.key as slot, artifact.value as uri
+  const slots = await sql<Array<{ run_id: string; document_id: string; slot: string; uri: string }>>`
+    select r.id as run_id, split_part(artifact.key, ':', 1) as document_id, artifact.key as slot, artifact.value as uri
     from workspace_runs r
     cross join lateral jsonb_each_text(coalesce(r.artifacts, '{}'::jsonb)) as artifact
     where r.id = any(${sql.array(runIds)})
       and split_part(artifact.key, ':', 1) = any(${sql.array(documents.map((row) => row.id))})
   `;
+  // Only the document's own (current) run: another run in the export never contributes its artifacts.
+  const runOf = new Map(documents.map((row) => [row.id, row.run_id]));
   const byDocument = new Map<string, Record<string, string>>();
-  for (const { document_id, slot, uri } of slots) {
+  for (const { run_id, document_id, slot, uri } of slots) {
+    if (runOf.get(document_id) !== run_id) continue;
     const map = byDocument.get(document_id) ?? {};
     map[slot] = uri;
     byDocument.set(document_id, map);
@@ -444,9 +465,6 @@ export async function buildDocumentExport(
       pages: async (documentId) => await sql<Array<{ page_number: number; text: string }>>`
         select page_number, text from document_pages where document_id = ${documentId} order by page_number
       `,
-      keptAsImagePages: async (documentId) => (await sql<Array<{ page_number: number }>>`
-        select page_number from document_page_facts where document_id = ${documentId} and vision_status = 'kept-as-image'
-      `).map((page) => page.page_number),
     };
     const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
     const chunks = async function* (): AsyncGenerator<Uint8Array> {
