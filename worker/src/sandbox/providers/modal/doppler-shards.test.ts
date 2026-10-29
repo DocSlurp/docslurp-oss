@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import { SHARD_PROFILES } from "../../../temporal/page-shard-profiles.js";
-import { executeDopplerShards, mergeVmUsage, planDopplerShards, type DopplerShardSettings } from "./doppler-shards.js";
-import { MAX_PDF_BYTES, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
+import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerShards, resetDopplerShardStateForTest, type DopplerShardSettings } from "./doppler-shards.js";
+import { MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
+import { planPageShards } from "../../../temporal/page-shards.js";
 
-const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32 };
+const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32, globalParallel: 64 };
 const usage = (seconds: number) => ({
   provider: "modal", model: "doppler-document-vm", metric: "sandbox_compute", amount: seconds, unit: "cent", costCents: seconds,
   metadata: { wallSeconds: seconds, costFloorCents: seconds / 2 },
@@ -18,6 +19,7 @@ const pagesText = (first: number, last: number) => Array.from({ length: last - f
 let dir: string;
 let job: DopplerVmJob;
 beforeEach(async () => {
+  resetDopplerShardStateForTest();
   dir = await mkdtemp(join(tmpdir(), "doppler-shards-"));
   job = { operation: "doppler-markdown", input: join(dir, "in.pdf"), output: join(dir, "out.md") };
   await writeFile(job.input, Buffer.alloc(1024));
@@ -108,6 +110,63 @@ describe("executeDopplerShards", () => {
     await truncate(job.input, MAX_PDF_BYTES + 1);
     await expect(executeDopplerShards(job, 477, undefined, on, { execute: vm.execute })).rejects.toThrow(/invalid or oversized/);
     expect(vm.calls).toHaveLength(0);
+  });
+
+  it("launches nothing when the request is already aborted", async () => {
+    const vm = fakeVm();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(executeDopplerShards(job, 477, controller.signal, on, { execute: vm.execute })).rejects.toThrow(/aborted/);
+    const late = new AbortController();
+    await expect(executeDopplerShards(job, 477, late.signal, on, { execute: vm.execute, profile: async () => { late.abort(); return SHARD_PROFILES["extract-markdown:doppler-vm"]; } }))
+      .rejects.toThrow(/aborted/);
+    expect(vm.calls).toHaveLength(0);
+  });
+
+  it("keeps every VM's cost when the merge fails on the filesystem", async () => {
+    const vm = fakeVm(async (j) => j.range && j.range.final ? new Error("unreachable") : pagesText(j.range?.first ?? 1, j.range?.last ?? 477));
+    // The final shard "succeeds" without writing output: the merge read fails with ENOENT.
+    const execute = vi.fn(async (vmJob: DopplerVmJob, signal?: AbortSignal): Promise<SandboxResult> => {
+      if (vmJob.range?.final) return { stdout: "", stderr: "", exitCode: 0, usage: usage(2) };
+      return vm.execute(vmJob, signal);
+    });
+    const error = await executeDopplerShards(job, 477, undefined, on, { execute }).catch((e) => e);
+    expect(error).toBeInstanceOf(SandboxRunError);
+    expect(error.message).toBe("Document VM shard merge failed");
+    expect(error.usage.costCents).toBe(2 * execute.mock.calls.length);
+    expect(await readdir(dir)).toEqual(["in.pdf"]);
+  });
+
+  it("stops sharding after an image refuses ranges", async () => {
+    const vm = fakeVm(async (j) => j.range ? new SandboxRunError(SHARDS_UNSUPPORTED_MESSAGE, usage(8)) : pagesText(1, 477));
+    await executeDopplerShards(job, 477, undefined, on, { execute: vm.execute });
+    const before = vm.calls.length;
+    await executeDopplerShards(job, 477, undefined, on, { execute: vm.execute });
+    expect(vm.calls.slice(before).map((c) => c.range)).toEqual([undefined]);
+  });
+
+  it("runs whole when the process VM budget is saturated or the document exceeds the guest's page limit", async () => {
+    const vm = fakeVm(async (j) => pagesText(1, j.range ? 0 : 1));
+    await executeDopplerShards(job, 477, undefined, { ...on, globalParallel: 1 }, { execute: vm.execute });
+    await executeDopplerShards(job, 10_001, undefined, on, { execute: vm.execute });
+    expect(vm.calls.map((c) => c.range)).toEqual([undefined, undefined]);
+  });
+
+  it("requires the image protocol to be declared before sharding", () => {
+    expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on" }).enabled).toBe(false);
+    expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on", DOCSLURP_DOPPLER_VM_PROTOCOL: "2" }).enabled).toBe(false);
+    expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on", DOCSLURP_DOPPLER_VM_PROTOCOL: "3" }).enabled).toBe(true);
+  });
+
+  it("never plans past the shard cap, and keeps shards on the chunk grid", () => {
+    const profile = SHARD_PROFILES["extract-markdown:doppler-vm"];
+    for (const maxShards of [1, 2, 3]) {
+      const plan = planPageShards(10_000, { ...profile, pageAlign: 32 }, { readySlots: 8, maxSlots: 8, scaleUpMs: 0 }, { maxCostOverhead: 1, maxShards });
+      expect(plan.shards.length).toBeLessThanOrEqual(maxShards);
+      expect(plan.shards.every((s) => (s.first - 1) % 32 === 0)).toBe(true);
+    }
+    // A 400 MB file under a 512 MB budget cannot afford a second upload plus the fallback.
+    expect(planDopplerShards(10_000, 400 * 1024 * 1024, on, profile).shards).toHaveLength(1);
   });
 
   it("caps shards by the bytes every VM must receive", () => {

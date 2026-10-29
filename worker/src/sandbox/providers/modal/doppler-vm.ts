@@ -16,7 +16,12 @@ class DopplerVmFailure extends Error {}
 export type DopplerVmJob = {
   operation: "doppler-markdown"; input: string; output: string;
   range?: { first: number; last: number; final: boolean };
+  /** Per-shard output cap, at most MAX_OUTPUT_BYTES: parallel shards share one host's memory. */
+  outputLimit?: number;
 };
+
+/** Thrown when a ranged job reaches a guest that predates shards; callers stop sharding on it. */
+export const SHARDS_UNSUPPORTED_MESSAGE = "Document VM image does not support page-range shards";
 export const MAX_PDF_BYTES = DOPPLER_MAX_PDF_BYTES;
 export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const INPUT_BUFFER_BYTES = 8 * 1024 * 1024;
@@ -106,6 +111,8 @@ export async function executeDopplerVm(
 ) {
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
   if (!validShardRange(job.range)) throw new SandboxRunError("Document VM invalid shard range");
+  const outputLimit = Math.min(MAX_OUTPUT_BYTES, job.outputLimit ?? MAX_OUTPUT_BYTES);
+  if (!(outputLimit > 0)) throw new SandboxRunError("Document VM invalid output limit");
   const image = resolveModalImage(process.env.DOCSLURP_DOPPLER_VM_IMAGE ?? "", undefined);
   if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(image)) throw new SandboxRunError("Document VM requires a verified digest-pinned DOCSLURP_DOPPLER_VM_IMAGE with offline parser assets");
   // Every asynchronous control operation shares this absolute deadline, including SDK
@@ -246,11 +253,12 @@ export async function executeDopplerVm(
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
       const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py"];
       const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 155_000, mode: "binary" }));
-      const [output, stderr, code] = await control(() => Promise.all([boundedStream(child.stdout, MAX_OUTPUT_BYTES), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
+      const [output, stderr, code] = await control(() => Promise.all([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
       const diagnostics = JSON.parse(stderr.toString("utf8"));
+      if (job.range && diagnostics.protocol === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
       if (!validEnvelope(diagnostics, output, job.range)) throw new DopplerVmFailure("Document VM invalid result envelope");
       if (cancelled) throw new DopplerVmFailure("Document VM cancelled before output commit");
       stagedOutput = `${job.output}.${randomUUID()}.partial`;

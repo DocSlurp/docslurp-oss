@@ -31,6 +31,7 @@ import { planRunPageRanges } from "../pipeline/page-range-plan.js";
 import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { SHARD_PROFILES, type ShardProfileKey } from "./page-shard-profiles.js";
 import { PAGE_RANGE_SHARDABLE_STAGES } from "./shared.js";
+import { pageRangeExecutorIsolated } from "../pipeline/page-ranges.js";
 import {
   createStageExecution,
   loadRunState,
@@ -393,6 +394,7 @@ export function createActivities(deps: ActivityDependencies) {
      */
     async planPageRangeShards(input: PageRangeShardPlanInput): Promise<PageRangeShardPlan> {
       if (!PAGE_RANGE_SHARDABLE_STAGES.includes(input.stageName)) return { shards: [] };
+      if (!pageRangeExecutorIsolated(input.stageName)) return { shards: [] };
       const key = `${input.stageName}:fly-shared-slot` as ShardProfileKey;
       const prior = SHARD_PROFILES[key];
       if (!prior) return { shards: [] };

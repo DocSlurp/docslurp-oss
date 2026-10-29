@@ -79,6 +79,10 @@ export interface PageRangeSlice {
 }
 
 /** Stages that can run page-range shards (a `runPageRanges` implementation). */
+/**
+ * Stages with a range path. Workflows filter recorded stages through this list, so adding a stage here
+ * changes replay of in-flight runs that recorded it: gate any addition with patched().
+ */
 export const PAGE_RANGE_SHARDABLE_STAGES: readonly string[] = ["render-images"];
 
 /** Recorded in workflow input so replay never depends on later env changes. */

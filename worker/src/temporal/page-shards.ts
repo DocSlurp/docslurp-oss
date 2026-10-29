@@ -69,6 +69,8 @@ export interface PageShardPlan {
   unshardedWallMs: number;
   predictedCostUsd: number;
   unshardedCostUsd: number;
+  /** False when no plan within `maxShards` fits the executor's memory or time limits; callers decide (never exceed the cap). */
+  feasible: boolean;
   reason: string;
 }
 
@@ -160,10 +162,13 @@ export function planPageShards(
     if (k !== n && !forced && overhead > options.maxCostOverhead) continue;
     plans.push({ k, shards, wall: Math.min(wallReady, wallScaled), cost, parallel: scaleUp ? scaled : readyOnly, scaleUp });
   }
+  const cap = Math.max(1, Math.floor(options.maxShards));
   if (plans.length === 0) {
-    // Nothing affordable: the smallest split that still fits the executor.
-    const k = Math.min(hardMax, n);
-    plans.push({ k, shards: ceilDiv(n, k), wall: wallFor(profile, n, k, 1, 1, 0), cost: costFor(profile, n, k), parallel: 1, scaleUp: false });
+    // Nothing affordable within the limits: the fewest aligned shards the cap allows. Never exceed the cap.
+    const k = Math.min(n, Math.ceil(ceilDiv(n, cap) / align) * align);
+    const shards = ceilDiv(n, k);
+    const slots = Math.min(shards, ready);
+    plans.push({ k, shards, wall: wallFor(profile, n, k, slots, slots, 0), cost: costFor(profile, n, k), parallel: slots, scaleUp: false });
   }
 
   // A split that saves too little is not worth its extra executors and failure surface.
@@ -176,12 +181,15 @@ export function planPageShards(
     .filter((o) => o.wall <= fastest * (1 + tolerance))
     .sort((a, b) => a.shards - b.shards || a.cost - b.cost || b.k - a.k)[0]!;
 
-  const reason = chosen.k >= n
+  const reason = !(Math.min(chosen.k, n) <= hardMax) ? `infeasible: ${n} pages need more than ${cap} shards of at most ${hardMax} pages`
+    : chosen.k >= n
     ? "unsharded: splitting does not pay for its fixed overhead"
     : n > hardMax && chosen.shards === ceilDiv(n, hardMax)
       ? `split for executor limits (max ${hardMax} pages per shard)`
       : `${chosen.shards} shards of ${chosen.k} pages on ${chosen.parallel} executors${chosen.scaleUp ? " (after scale-up)" : ""}`;
+  const feasible = Math.min(chosen.k, n) <= hardMax && chosen.shards <= cap;
   return {
+    feasible,
     shardPages: Math.min(chosen.k, n),
     shards: pageRanges(n, Math.min(chosen.k, n)),
     parallel: chosen.parallel,
@@ -229,17 +237,23 @@ export function calibrateShardProfile(
   observations: readonly ShardObservation[],
   priorWeight = 8,
 ): ShardCostProfile {
-  const valid = observations.filter((o) => o.pages > 0 && Number.isFinite(o.ms) && o.ms >= 0);
-  const distinct = new Set(valid.map((o) => o.pages)).size;
-  if (valid.length < 3 || distinct < 2) return prior;
+  const valid = observations.filter((o) => o.pages > 0 && Number.isFinite(o.pages) && Number.isFinite(o.ms) && o.ms >= 0);
+  const sizes = new Set(valid.map((o) => o.pages));
+  // One document's shards are near-identical sizes: a slope across them is noise. Require real spread.
+  const smallest = Math.min(...sizes);
+  const largest = Math.max(...sizes);
+  if (valid.length < 3 || sizes.size < 3 || largest < 2 * smallest) return prior;
   const fit = theilSen(valid.map((o) => ({ x: o.pages, y: o.ms })));
   if (!fit || fit.slope <= 0) return prior;
-  const w = valid.length / (valid.length + priorWeight);
+  // Rows from one document are correlated: weight by distinct sizes, not rows.
+  const w = sizes.size / (sizes.size + priorWeight);
   const blend = (a: number, b: number) => a * (1 - w) + b * w;
+  // Observations are fleet-wide: clamp to a band around the prior so no tenant's documents can swing every plan.
+  const band = (value: number, around: number) => around > 0 ? Math.min(3 * around, Math.max(0.5 * around, value)) : Math.max(0, value);
   const next: ShardCostProfile = {
     ...prior,
-    fixedMs: Math.max(0, blend(prior.fixedMs, Math.max(0, fit.intercept))),
-    perPageMs: blend(prior.perPageMs, fit.slope),
+    fixedMs: band(blend(prior.fixedMs, Math.max(0, fit.intercept)), prior.fixedMs),
+    perPageMs: band(blend(prior.perPageMs, fit.slope), prior.perPageMs),
   };
   const mem = valid.filter((o) => typeof o.maxRssMiB === "number").map((o) => ({ x: o.pages, y: o.maxRssMiB! }));
   const memFit = new Set(mem.map((m) => m.x)).size >= 2 ? theilSen(mem) : null;

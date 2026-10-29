@@ -35,7 +35,8 @@ export const SHARD_PROFILES = {
   },
   "render-images:fly-shared-slot": {
     stage: "render-images", executor: "fly-shared-slot",
-    fixedMs: 3_000, perPageMs: 6.5, baseMiB: 300, perPageMiB: 2, memoryLimitMiB: 1_600,
+    // Memory per page is unmeasured: 0 so a guess cannot force splits (calibration raises it once RSS is recorded).
+    fixedMs: 3_000, perPageMs: 6.5, baseMiB: 300, perPageMiB: 0, memoryLimitMiB: 1_600,
     maxShardMs: 240_000, minShardPages: 64, maxShardPages: 2_000, pageAlign: 8,
     usdPerSecond: FLY_SLOT_USD_PER_SECOND,
   },

@@ -33,15 +33,12 @@ describe("resolveWorkflowScalingInput", () => {
     expect(resolveWorkflowScalingInput({ TEMPORAL_ACTIVITY_TASK_QUEUE: "acts" }, { loadtest: true }).activityTaskQueue).toBeUndefined();
   });
 
-  it("records page-range shards only when enabled and the whole fleet supports them", () => {
+  it("records no page-range shards while no stage parses behind a VM boundary", () => {
     expect(resolveWorkflowScalingInput({}).pageRangeSharding).toBeUndefined();
-    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 8 }).pageRangeSharding)
-      .toEqual({ stages: ["render-images"], maxShards: 8 });
-    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 64 }, new Set()).pageRangeSharding)
-      .toBeUndefined();
+    // render-images rasterizes in the worker: even with the flag on and a capable fleet, nothing is recorded.
     expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 64 },
-      new Set(["workflow.page-range-shards" as const])).pageRangeSharding).toEqual({ stages: ["render-images"], maxShards: 32 });
-    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 1 }).pageRangeSharding)
+      new Set(["workflow.page-range-shards" as const])).pageRangeSharding).toBeUndefined();
+    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 8 }).pageRangeSharding)
       .toBeUndefined();
   });
 

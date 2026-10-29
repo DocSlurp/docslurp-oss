@@ -76,8 +76,8 @@ which is the known isolation gap; sharding them must not widen it and needs a co
 temporal-workflow-changes.md)
 
 1. Doppler extraction: guest accepts `{first, last, documentPages}` and keeps its 32-page
-   internal chunking; host runs the planned shards as parallel VMs, merges in page order, fails
-   the document on any shard failure and records usage per VM. Output stays byte-identical.
+   internal chunking; host runs the planned shards as parallel VMs, merges in page order and, on any shard
+   failure, runs one whole-document VM once (all VM costs recorded). Output stays byte-identical.
 2. Page-range shard activity: extend `runPipelineStageShard` from document IDs to
    `(documentId, pageRange)` for render-images and embed.
 3. Feed observed shard timings back through `calibrateShardProfile` (per stage, executor class).
@@ -104,3 +104,10 @@ temporal-workflow-changes.md)
   step that runs once before the shards; until then `embed` stays whole-document, with
   document shards only.
 
+
+## Isolation gate for worker-slot range shards
+
+Range shards put one document into several worker processes. A stage takes them only when its executor parses
+behind a VM boundary (`worker/src/pipeline/page-ranges.ts`, `PAGE_RANGE_VM_ISOLATED_STAGES` in
+`server/src/lib/temporal.ts`). render-images still rasterizes in the worker, so `WORKER_PAGE_RANGE_SHARDS` records
+nothing today; the plumbing waits for a VM raster executor.

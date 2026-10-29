@@ -26,8 +26,14 @@ The private app owns binary provenance, hashes, image construction and manual de
 ## Parallel page-range shards
 
 `DOCSLURP_DOPPLER_SHARDS=on` splits a long PDF across several VMs (`worker/src/sandbox/providers/modal/doppler-shards.ts`).
-It needs an image built from guest protocol `doppler-vm@3`; an older guest ignores the range, fails the envelope
-check and the document falls back to one whole-document VM. The host plans from the pipeline's page count and the
+It also requires `DOCSLURP_DOPPLER_VM_PROTOCOL=3`, set together with the digest of an image built from guest protocol
+`doppler-vm@3`. If an older image is configured anyway, its guest ignores the range and converts the whole document
+in every shard VM; the host refuses those results, turns sharding off for 30 minutes on that worker and runs one
+whole-document VM. Worst case for that document: about (shards + 1) × the VM cost of one run.
+
+Rollout order: deploy workers with this host code first, then switch `DOCSLURP_DOPPLER_VM_IMAGE` to the @3 image and
+set the protocol variable. An older worker refuses every @3 result. Documents above 10,000 pages, and plans the
+process VM budget cannot hold, run as one whole-document VM. The host plans from the pipeline's page count and the
 file size only. Each guest re-counts pages and refuses a range that is off the 32-page chunk grid, outside the
 document or (for the final shard) short of the last page. Shards are merged in page order under the same output cap,
 and the result is byte-identical to one whole-document VM.
@@ -36,8 +42,10 @@ and the result is byte-identical to one whole-document VM.
 | --- | --- | --- |
 | `DOCSLURP_DOPPLER_SHARDS` | off | Enable shards. |
 | `DOCSLURP_DOPPLER_VM_MAX_PARALLEL` | 8 | VMs one document may hold at once. |
-| `DOCSLURP_DOPPLER_SHARD_COST_OVERHEAD` | 1 | Most extra VM cost over one VM (1 = at most 2×). |
-| `DOCSLURP_DOPPLER_SHARD_TRANSFER_MB` | 512 | Cap on shards × file bytes (every VM receives the full PDF). |
+| `DOCSLURP_DOPPLER_VM_PROTOCOL` | unset | Must be `3` (the image's guest protocol) for shards. |
+| `DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL` | 16 | Shard VMs one worker process holds across documents. |
+| `DOCSLURP_DOPPLER_SHARD_COST_OVERHEAD` | 0.5 | Most extra VM cost over one VM (0.5 = at most 1.5×). |
+| `DOCSLURP_DOPPLER_SHARD_TRANSFER_MB` | 512 | Cap on file bytes × (shards + 1 fallback): every VM receives the full PDF. |
 | `DOCSLURP_DOPPLER_MAX_SHARDS` | 32 | Hard shard cap. |
 
 Each extra VM adds about 1.9 s of billed boot. At 0.5 core / 1 GiB (Modal list prices, 2026-10-28) a 477-page PDF

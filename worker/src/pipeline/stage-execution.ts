@@ -31,7 +31,7 @@ import {
 } from "./local-compute-cost.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { WorkflowState, type Stage } from "./pipeline.js";
-import { pagesInRanges, resolveShardPageRanges } from "./page-ranges.js";
+import { pageRangeExecutorIsolated, pagesInRanges, resolveShardPageRanges } from "./page-ranges.js";
 import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
@@ -316,6 +316,7 @@ export function createStageExecution(deps: {
     // Validated against the shard's own documents before any work; an invalid shard does nothing.
     const pageRanges = runtime.pageRanges ? resolveShardPageRanges(runtime.pageRanges, documents) : null;
     if (pageRanges && !stage.runPageRanges) throw new Error(`stage ${stageName} does not support page-range shards`);
+    if (pageRanges && !pageRangeExecutorIsolated(stageName)) throw new Error(`stage ${stageName} refuses page-range shards: executor is not VM-isolated`);
 
     if (stageName === "vision-extract") state.distributedVisionPages = await store.pageTasks.completed(runId);
 
@@ -512,7 +513,8 @@ export function createStageExecution(deps: {
       const localObservation = buildAllocatedResourceObservation({
         profile: deploymentProfile,
         wallTimeMs: durationMs,
-        pages: documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
+        // A range shard does only its ranges; counting whole documents would inflate pages per minute and per $1.
+        pages: pageRanges ? [...pageRanges.values()].reduce((total, ranges) => total + pagesInRanges(ranges), 0) : documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
         cold: false,
       });
       state.usageLedger.enqueue(buildLocalComputeUsageEvent({

@@ -1,5 +1,30 @@
 import type { PageRangeSlice } from "../temporal/shared.js";
 
+/**
+ * Page-range shards spread one document across several worker processes. A stage may take them only if
+ * it parses customer bytes behind a VM boundary: in-worker parsing (the native engine in-process, or a
+ * command under bubblewrap on the worker) would put one hostile file into more credential-bearing
+ * processes and widen the known isolation gap. No stage qualifies yet: render-images rasterizes in the
+ * worker. Add a stage here only with a VM-isolated executor and its negative tests.
+ */
+const VM_ISOLATED_PAGE_RANGE_STAGES = new Set<string>();
+
+/** Test hook: exercise the range path of a stage as if its executor were VM-isolated. */
+export function setVmIsolatedPageRangeStagesForTest(stages: readonly string[]): void {
+  VM_ISOLATED_PAGE_RANGE_STAGES.clear();
+  for (const stage of stages) VM_ISOLATED_PAGE_RANGE_STAGES.add(stage);
+}
+
+let warned = false;
+export function pageRangeExecutorIsolated(stageName: string): boolean {
+  if (VM_ISOLATED_PAGE_RANGE_STAGES.has(stageName)) return true;
+  if (!warned) {
+    warned = true;
+    console.warn(`[page-range-shards] refused for ${stageName}: its executor parses in the worker, not behind a VM boundary`);
+  }
+  return false;
+}
+
 export type DocumentPageRanges = ReadonlyMap<string, ReadonlyArray<{ first: number; last: number }>>;
 
 /**

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -128,7 +129,24 @@ describe("Stage Execution", () => {
     expect(output.artifacts).toEqual({});
   });
 
+  afterEach(() => setVmIsolatedPageRangeStagesForTest([]));
+
+  it("refuses page-range shards for a stage whose executor is not VM-isolated", async () => {
+    const store = new FakeStore();
+    store.documents = [{ ...makeDocument(), pageCount: 100 }];
+    let ranged = 0;
+    const execution = createStageExecution({
+      store, config,
+      stages: [{ name: "render-images", run: async () => {}, runPageRanges: async () => { ranged++; } }],
+    });
+    const { runtime: rt } = runtime();
+    await expect(execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 33, last: 64 }], shardIndex: 1, shardCount: 3 }))
+      .rejects.toThrow(/not VM-isolated/);
+    expect(ranged).toBe(0);
+  });
+
   it("runs a page-range shard through runPageRanges and leaves the stage and documents to the stage pass", async () => {
+    setVmIsolatedPageRangeStagesForTest(["render-images"]);
     const store = new FakeStore();
     store.documents = [{ ...makeDocument(), pageCount: 100 }];
     const seen: Array<[string, unknown]> = [];

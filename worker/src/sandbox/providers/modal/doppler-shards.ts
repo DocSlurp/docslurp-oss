@@ -4,7 +4,10 @@ import { planPageShards, type PageShardPlan, type ShardCostProfile } from "../..
 import { SHARD_PROFILES, shardCapacity } from "../../../temporal/page-shard-profiles.js";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import type { UsageEvent } from "../../../models.js";
-import { executeDopplerVm, GUEST_CHUNK_PAGES, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, type DopplerVmJob } from "./doppler-vm.js";
+import { executeDopplerVm, GUEST_CHUNK_PAGES, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, type DopplerVmJob } from "./doppler-vm.js";
+
+/** The guest's own page limit: larger documents are refused by every shard, so never shard them. */
+export const GUEST_MAX_PAGES = 10_000;
 
 /**
  * Parallel Doppler shards: one fresh offline VM per page range, merged in page order.
@@ -24,6 +27,8 @@ export interface DopplerShardSettings {
   /** Every shard VM receives the full PDF: cap shards x file bytes. */
   maxTransferBytes: number;
   maxShards: number;
+  /** Most shard VMs this worker process holds across all documents. */
+  globalParallel: number;
 }
 
 export function dopplerShardSettings(env: NodeJS.ProcessEnv = process.env): DopplerShardSettings {
@@ -33,9 +38,11 @@ export function dopplerShardSettings(env: NodeJS.ProcessEnv = process.env): Dopp
   };
   const overhead = Number.parseFloat(env.DOCSLURP_DOPPLER_SHARD_COST_OVERHEAD ?? "");
   return {
-    enabled: /^(1|true|on)$/i.test(env.DOCSLURP_DOPPLER_SHARDS?.trim() ?? ""),
+    // Sharding needs a range-aware guest; the image's protocol is declared with its digest, never assumed.
+    enabled: /^(1|true|on)$/i.test(env.DOCSLURP_DOPPLER_SHARDS?.trim() ?? "") && env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() === "3",
+    globalParallel: int("DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL", 16, 1, 256),
     vmParallel: int("DOCSLURP_DOPPLER_VM_MAX_PARALLEL", 8, 1, 64),
-    maxCostOverhead: Number.isFinite(overhead) && overhead >= 0 ? Math.min(overhead, 10) : 1,
+    maxCostOverhead: Number.isFinite(overhead) && overhead >= 0 ? Math.min(overhead, 10) : 0.5,
     maxTransferBytes: int("DOCSLURP_DOPPLER_SHARD_TRANSFER_MB", 512, 1, 8192) * 1024 * 1024,
     maxShards: int("DOCSLURP_DOPPLER_MAX_SHARDS", 32, 1, 128),
   };
@@ -58,10 +65,33 @@ export interface DopplerShardDeps {
 
 /** Plan shards for one document; a single shard means "run the whole document in one VM". */
 export function planDopplerShards(pageCount: number, fileBytes: number, settings: DopplerShardSettings, profile: ShardCostProfile): PageShardPlan {
-  const byTransfer = Math.max(1, Math.floor(settings.maxTransferBytes / Math.max(1, fileBytes)));
+  // Every shard VM and a possible whole-document fallback each receive the full file.
+  const byTransfer = Math.max(1, Math.floor(settings.maxTransferBytes / Math.max(1, fileBytes)) - 1);
   return planPageShards(pageCount, { ...profile, pageAlign: GUEST_CHUNK_PAGES },
     shardCapacity("doppler-vm", { idleSlots: 0, orgSlots: 0, vmParallel: settings.vmParallel }),
     { maxCostOverhead: settings.maxCostOverhead, maxShards: Math.min(settings.maxShards, byTransfer) });
+}
+
+/**
+ * Process-wide VM accounting. Shard VMs of every document on this worker share one budget, so a batch of
+ * long PDFs cannot exhaust the provider's sandbox quota for other tenants; a saturated budget runs whole.
+ */
+let shardVmsInUse = 0;
+/** Set when an image refuses shards; sharding stays off until it expires (a fresh image needs a redeploy anyway). */
+let shardsUnsupportedUntil = 0;
+const UNSUPPORTED_BACKOFF_MS = 30 * 60_000;
+export function resetDopplerShardStateForTest(): void { shardVmsInUse = 0; shardsUnsupportedUntil = 0; }
+
+/** A plan is dispatched only if it is feasible, within the cap, contiguous and on the guest's chunk grid. */
+export function dispatchablePlan(plan: PageShardPlan, pageCount: number, maxShards: number): boolean {
+  if (!plan.feasible || plan.shards.length < 2 || plan.shards.length > maxShards) return false;
+  let expected = 1;
+  for (const shard of plan.shards) {
+    if (shard.first !== expected || shard.last < shard.first || (shard.first - 1) % GUEST_CHUNK_PAGES !== 0) return false;
+    if (shard.last !== pageCount && shard.last % GUEST_CHUNK_PAGES !== 0) return false;
+    expected = shard.last + 1;
+  }
+  return expected === pageCount + 1;
 }
 
 /** Sum per-VM usage into one conservative event: any unconfirmed allocation keeps its full reservation. */
@@ -106,22 +136,34 @@ export async function executeDopplerShards(
 ): Promise<SandboxResult> {
   const execute = deps.execute ?? executeDopplerVm;
   if (!settings.enabled || job.range || !Number.isSafeInteger(pageCount) || pageCount < 1) return execute(job, signal);
+  if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
   // Size only: the host does not open or parse the document.
   const info = await lstat(job.input);
   if (!info.isFile() || info.size > MAX_PDF_BYTES) throw new SandboxRunError("Document VM invalid or oversized input");
   const profile = await (deps.profile?.() ?? Promise.resolve(SHARD_PROFILES["extract-markdown:doppler-vm"] as ShardCostProfile));
-  const plan = planDopplerShards(pageCount, info.size, settings, profile);
-  if (plan.shards.length <= 1) return execute(job, signal);
+  if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
+  const free = settings.globalParallel - shardVmsInUse;
+  if (pageCount > GUEST_MAX_PAGES || free < 2 || Date.now() < shardsUnsupportedUntil) return execute(job, signal);
+  const plan = planDopplerShards(pageCount, info.size, { ...settings, vmParallel: Math.min(settings.vmParallel, free) }, profile);
+  // An infeasible, oversized or malformed plan runs as today: one whole-document VM.
+  if (!dispatchablePlan(plan, pageCount, settings.maxShards)) return execute(job, signal);
+  const reserved = Math.min(plan.parallel, plan.shards.length);
+  shardVmsInUse += reserved;
 
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) controller.abort(); // delivered between the check above and the listener
   const token = randomUUID();
   const outputs = plan.shards.map((_, index) => `${job.output}.shard-${index}.${token}`);
   const usages: Array<UsageEvent | undefined> = new Array(plan.shards.length);
   const staged = `${job.output}.${token}.partial`;
   let failure: unknown;
   let next = 0;
+  // Every exit below carries the cost of the VMs that already ran.
+  const fail = (message: string, extra: Array<UsageEvent | undefined> = []): never => {
+    throw new SandboxRunError(message, mergeVmUsage([...usages, ...extra], plan.shards.length));
+  };
   try {
     await Promise.all(Array.from({ length: Math.min(plan.parallel, plan.shards.length) }, async () => {
       while (next < plan.shards.length && !failure && !controller.signal.aborted) {
@@ -129,49 +171,61 @@ export async function executeDopplerShards(
         const shard = plan.shards[index]!;
         const started = Date.now();
         try {
-          const result = await execute({ ...job, output: outputs[index]!, range: { ...shard, final: shard.last === pageCount } }, controller.signal);
+          // Shards share the host's memory: each gets a share of the output cap proportional to its pages (x2 for skew).
+          const outputLimit = Math.min(MAX_OUTPUT_BYTES, Math.ceil(MAX_OUTPUT_BYTES * 2 * (shard.last - shard.first + 1) / pageCount));
+          const result = await execute({ ...job, output: outputs[index]!, outputLimit, range: { ...shard, final: shard.last === pageCount } }, controller.signal);
           usages[index] = result.usage;
           deps.recordTiming?.({ stage: "extract-markdown", executor: "doppler-vm", pages: shard.last - shard.first + 1,
             ms: Date.now() - started, shardIndex: index, shardCount: plan.shards.length });
         } catch (error) {
           if (error instanceof SandboxRunError) usages[index] = error.usage;
+          if (error instanceof Error && error.message === SHARDS_UNSUPPORTED_MESSAGE && Date.now() >= shardsUnsupportedUntil) {
+            shardsUnsupportedUntil = Date.now() + UNSUPPORTED_BACKOFF_MS;
+            console.warn("[document-vm] image does not support page-range shards; sharding off for 30 min. Check DOCSLURP_DOPPLER_VM_PROTOCOL against the image");
+          }
           failure ??= error;
           controller.abort(); // stop scheduling and cancel in-flight shards
         }
       }
     }));
-    const usage = mergeVmUsage(usages, plan.shards.length);
-    if (signal?.aborted) throw new SandboxRunError("Document VM aborted", usage);
+    if (signal?.aborted || (controller.signal.aborted && !failure)) fail("Document VM aborted");
     if (failure) {
       // A guest that refuses a range (for example, it counts different pages than the host's index) would refuse
       // every retry too. Fall back once to one whole-document VM: the same boundary, at the cost of a second run.
       console.warn(`[document-vm] shard failed; retrying as one whole-document VM shards=${plan.shards.length}`);
+      let whole: SandboxResult;
       try {
-        const whole = await execute(job, signal);
-        const combined = mergeVmUsage([usage, whole.usage], plan.shards.length);
-        return { ...whole, ...(combined ? { usage: combined } : {}) };
+        whole = await execute(job, signal);
       } catch (error) {
-        throw new SandboxRunError(error instanceof SandboxRunError ? error.message : "Document VM execution failed",
-          mergeVmUsage([usage, error instanceof SandboxRunError ? error.usage : undefined], plan.shards.length));
+        return fail(error instanceof SandboxRunError ? error.message : "Document VM execution failed",
+          [error instanceof SandboxRunError ? error.usage : undefined]);
       }
+      const combined = mergeVmUsage([...usages, whole.usage], plan.shards.length);
+      return { ...whole, ...(combined ? { usage: combined } : {}) };
     }
     // Merge in page order with the same bounds a single VM enforces.
-    const handle = await open(staged, "wx", 0o600);
     let total = 0;
     try {
-      for (const [index, shard] of plan.shards.entries()) {
-        const bytes = await readFile(outputs[index]!);
-        if (countSlots(bytes) !== shard.last - shard.first + 1) throw new SandboxRunError("Document VM shard page slots do not match range", usage);
-        total += bytes.length + (index > 0 ? 1 : 0);
-        if (total > MAX_OUTPUT_BYTES) throw new SandboxRunError("Document VM merged output exceeds limit", usage);
-        if (index > 0) await handle.write(Buffer.from([0x0c]));
-        await handle.write(bytes);
+      const handle = await open(staged, "wx", 0o600);
+      try {
+        for (const [index, shard] of plan.shards.entries()) {
+          const bytes = await readFile(outputs[index]!);
+          if (countSlots(bytes) !== shard.last - shard.first + 1) fail("Document VM shard page slots do not match range");
+          total += bytes.length + (index > 0 ? 1 : 0);
+          if (total > MAX_OUTPUT_BYTES) fail("Document VM merged output exceeds limit");
+          if (index > 0) await handle.write(Buffer.from([0x0c]));
+          await handle.write(bytes);
+        }
+      } finally {
+        await handle.close();
       }
-    } finally {
-      await handle.close();
+      if (signal?.aborted) fail("Document VM cancelled before output commit");
+      await rename(staged, job.output);
+    } catch (error) {
+      if (error instanceof SandboxRunError) throw error;
+      fail("Document VM shard merge failed"); // filesystem errors stay out of the message; the cost stays in
     }
-    if (signal?.aborted) throw new SandboxRunError("Document VM cancelled before output commit", usage);
-    await rename(staged, job.output);
+    const usage = mergeVmUsage(usages, plan.shards.length);
     return {
       stdout: JSON.stringify({ protocol: "doppler-vm@3", engine: "doppler", outputBytes: total,
         conversion: { pages: pageCount, first: 1, last: pageCount, documentPages: pageCount, shards: plan.shards.length,
@@ -181,7 +235,9 @@ export async function executeDopplerShards(
       ...(usage ? { usage } : {}),
     };
   } finally {
+    shardVmsInUse -= reserved;
     signal?.removeEventListener("abort", onAbort);
-    await Promise.all([...outputs, staged].map((file) => rm(file, { force: true })));
+    // Cleanup never replaces the result or the usage-bearing error.
+    await Promise.allSettled([...outputs, staged].map((file) => rm(file, { force: true })));
   }
 }

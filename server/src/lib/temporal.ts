@@ -278,6 +278,9 @@ export function resolveWorkflowScalingInput(
  * by the org's worker slots. Recorded only when every worker advertises
  * workflow.page-range-shards (undefined or null capabilities = ungated, for tests and local dev).
  */
+/** Stages whose executors parse customer bytes in a VM; see worker/src/pipeline/page-ranges.ts. */
+export const PAGE_RANGE_VM_ISOLATED_STAGES: readonly string[] = [];
+
 export function resolvePageRangeSharding(
   env: NodeJS.ProcessEnv,
   maxShards: number,
@@ -285,7 +288,12 @@ export function resolvePageRangeSharding(
 ): { pageRangeSharding?: { stages: string[]; maxShards: number } } {
   if (!envFlag(env.WORKER_PAGE_RANGE_SHARDS, false) || maxShards < 2) return {};
   if (capabilities && !capabilities.has("workflow.page-range-shards")) return {};
-  return { pageRangeSharding: { stages: ["render-images"], maxShards } };
+  // Range shards put one document into several worker processes, so a stage qualifies only once its executor
+  // parses behind a VM boundary. render-images still rasterizes in the worker: record nothing until it moves,
+  // so runs keep their stage grouping and skip the planning activity.
+  const stages = PAGE_RANGE_VM_ISOLATED_STAGES;
+  if (stages.length === 0) return {};
+  return { pageRangeSharding: { stages: [...stages], maxShards } };
 }
 
 /**
