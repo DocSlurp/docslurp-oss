@@ -74,6 +74,8 @@ export const WORKER_TABLES = Object.freeze({
   remote_capacity_leases: { privileges: DML, evidence: "worker/src/media/capacity, journal.ts" },
   remote_capacity_watchdog: { privileges: DML, evidence: "worker/src/media/capacity/store.ts" },
   remote_media_jobs: { privileges: DML, evidence: "worker/src/media/journal.ts, reconcile.ts" },
+  run_fast_page_image_budgets: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/fast-page-image-budget.ts per-run Fast render budget" },
+  run_fast_page_image_grants: { privileges: ["select", "insert"], evidence: "worker/src/db/fast-page-image-budget.ts per-document Fast render grants" },
   search_index_staleness: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts DERIVED_TABLES" },
   storage_cleanup_queue: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts drainStorageCleanupQueue; workspace_runs trigger" },
   upload_session_files: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts retained source keys" },

@@ -136,11 +136,11 @@ describe("mode switching", () => {
     await seedWorkspace("t-fast-visual", "gold", "map", { quality: "fast" });
     await expect(ws.updateWorkspace("t-fast-visual", "u1", {}, { indexingMode: "visual" })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
     await seedWorkspace("t-visual-fast", "gold", "visual");
-    await expect(ws.updateWorkspace("t-visual-fast", "u1", { pipeline: { quality: "fast" } })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
+    await expect(ws.updateWorkspace("t-visual-fast", "u1", { pipeline: { quality: "fast" } as never })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
     await expect(ws.createWorkspace({ userId: "u1", orgId: "gold", name: "FV", pipeline: { ...defaultPipelineFeatures, quality: "fast", indexingMode: "visual" } }))
       .rejects.toMatchObject({ code: "visual_mode_quality" });
     // Auto with visual stays allowed.
-    expect((await ws.updateWorkspace("t-visual-fast", "u1", { pipeline: { quality: "auto" } }))?.indexingMode).toBe("visual");
+    expect((await ws.updateWorkspace("t-visual-fast", "u1", { pipeline: { quality: "auto" } as never }))?.indexingMode).toBe("visual");
   });
 
   it("lets any organization switch to full; credits are checked when the indexing work is admitted", async () => {
