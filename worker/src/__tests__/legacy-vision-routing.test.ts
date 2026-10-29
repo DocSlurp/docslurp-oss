@@ -11,6 +11,10 @@ import { shouldFailOpenVisionError } from "../stages/vision-extract.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { ProviderRetryableError } from "../lib/provider-retry.js";
 
+// These cases run with legacy vision routing v2 on (VISION_ROUTING_V2); the gated changes are
+// v2-only, so off must keep v1 routing (checked at the end).
+const V2 = { routingV2: true } as const;
+
 // Generic OCR-shaped prose: word-shaped, plausible, and carrying no structure.
 const OCR_PROSE = Array.from({ length: 12 }, (_, index) =>
   `Line ${index + 1} of recovered text where the reader moved along the page and noted what was seen there today.`,
@@ -21,6 +25,7 @@ function surface(args: {
   pageCount?: number;
   evidence?: PageImageEvidence[];
   sourceBytesPerPage?: number | null;
+  routingV2?: boolean;
 }) {
   return buildAdaptiveRoutingDecisionSurface({
     documentId: "doc-1",
@@ -30,12 +35,13 @@ function surface(args: {
     evidence: { source: "canonical-document", artifactUri: "s3://bucket/canonical.json" },
     pageImageEvidence: new Map((args.evidence ?? []).map((page) => [page.pageNumber, page])),
     sourceBytesPerPage: args.sourceBytesPerPage ?? null,
+    routingV2: args.routingV2 ?? true,
   });
 }
 
 function selected(result: ReturnType<typeof surface>): number[] {
   if (result.status !== "ready") return [];
-  return selectLegacyVisionPages(result.pages);
+  return selectLegacyVisionPages(result.pages, V2);
 }
 
 describe("OCR provenance in page triage", () => {
@@ -106,37 +112,37 @@ describe("legacy vision page selector", () => {
       "L(x) = \\sum_i \\alpha_i (y_i - f(x_i))^2",
       "where f(x) = w^T x + b and the gradient is",
       "dL/dw = -2 \\sum_i \\alpha_i (y_i - f(x_i)) x_i",
-    ].join("\n"));
+    ].join("\n"), V2);
     expect(formula.route).toBe("formula-heavy");
-    expect(selectLegacyVisionPages([formula])).toEqual([1]);
+    expect(selectLegacyVisionPages([formula], V2)).toEqual([1]);
   });
 
   it("lets the text route decide when raster evidence does not authorize OCR", () => {
-    const chart = classifyAdaptivePage(1, "Figure 3: quarterly revenue chart with legend and axis labels, Q1 Q2 Q3 up 12%");
+    const chart = classifyAdaptivePage(1, "Figure 3: quarterly revenue chart with legend and axis labels, Q1 Q2 Q3 up 12%", V2);
     expect(chart.extractorHint).toBe("vision-rescue");
     const minorImage = { ...chart, ocrDecision: { authorized: false, confidence: 0.8, signals: ["ocr-not-authorized:minor-images=1"] } };
-    expect(selectLegacyVisionPages([minorImage])).toEqual([1]);
+    expect(selectLegacyVisionPages([minorImage], V2)).toEqual([1]);
     const blank = { ...chart, ocrDecision: { authorized: false, confidence: 0.9, signals: ["ocr-not-authorized:blank-page"] } };
-    expect(selectLegacyVisionPages([blank])).toEqual([]);
+    expect(selectLegacyVisionPages([blank], V2)).toEqual([]);
   });
 
   it("leaves dense prose pages on native text", () => {
-    expect(selectLegacyVisionPages([classifyAdaptivePage(1, OCR_PROSE)])).toEqual([]);
+    expect(selectLegacyVisionPages([classifyAdaptivePage(1, OCR_PROSE, V2)], V2)).toEqual([]);
   });
 
   it("admits text layers carrying Unicode math", () => {
-    const page = classifyAdaptivePage(1, `${OCR_PROSE}\nWith key dimension 𝑑𝑘 = 64 the score is 𝑞 · 𝑘 / √𝑑𝑘 and Σ weights ≤ 1.`);
+    const page = classifyAdaptivePage(1, `${OCR_PROSE}\nWith key dimension 𝑑𝑘 = 64 the score is 𝑞 · 𝑘 / √𝑑𝑘 and Σ weights ≤ 1.`, V2);
     expect(page.route).toBe("formula-heavy");
-    expect(selectLegacyVisionPages([page])).toEqual([1]);
+    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
   });
 
   it("sends garbled text layers (fonts without a Unicode map) to vision", () => {
     const garbled = Array.from({ length: 8 }, (_, index) => `## ${index}KHPDWUL[SURGXFWFRPSDUHVHDFKTXHU\\ZLWK QRUPDOL]DWLRQ7KHUHVXOWLQJZHLJKWV`).join("\n");
-    const page = classifyAdaptivePage(1, garbled);
+    const page = classifyAdaptivePage(1, garbled, V2);
     expect(page.signals).toContain("garbled-text");
-    expect(selectLegacyVisionPages([page])).toEqual([1]);
+    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
     // Long identifiers inside ordinary prose do not trip it.
-    expect(classifyAdaptivePage(1, `${OCR_PROSE} see ABCDEFGHIJKLMNOPQRSTUV123`).signals).not.toContain("garbled-text");
+    expect(classifyAdaptivePage(1, `${OCR_PROSE} see ABCDEFGHIJKLMNOPQRSTUV123`, V2).signals).not.toContain("garbled-text");
   });
 });
 
@@ -152,13 +158,13 @@ describe("pages whose text is drawn", () => {
 describe("document labels", () => {
   it("does not read invoice or contract terms out of longer words", () => {
     const notes = "Field observation log. We determine the conservation status of private plots and elevated terraces.";
-    expect(classifyTextAndFilename(notes, "notes.pdf").label).toBe("generic");
+    expect(classifyTextAndFilename(notes, "notes.pdf", V2).label).toBe("generic");
   });
 
   it("still labels real invoices and contracts", () => {
-    expect(classifyTextAndFilename("Invoice # 1042\nBilled to: Example Co\nSubtotal 40.00", "scan.pdf").label).toBe("invoice");
-    expect(classifyTextAndFilename("Bill to Example Co. Amount due 40.00. VAT 8.00", "scan.pdf").label).toBe("invoice");
-    expect(classifyTextAndFilename("This agreement between the parties is subject to governing law.", "a.pdf").label).toBe("contract");
+    expect(classifyTextAndFilename("Invoice # 1042\nBilled to: Example Co\nSubtotal 40.00", "scan.pdf", V2).label).toBe("invoice");
+    expect(classifyTextAndFilename("Bill to Example Co. Amount due 40.00. VAT 8.00", "scan.pdf", V2).label).toBe("invoice");
+    expect(classifyTextAndFilename("This agreement between the parties is subject to governing law.", "a.pdf", V2).label).toBe("contract");
   });
 });
 
@@ -171,5 +177,48 @@ describe("rejected vision output", () => {
 
   it("still retries throttling", () => {
     expect(shouldFailOpenVisionError(new ProviderRetryableError("429", "openrouter", 429, null, 3))).toBe(false);
+  });
+});
+
+describe("routing v2 off (VISION_ROUTING_V2 default)", () => {
+  it("keeps v1 page routes, labels and the v1 vision selector", () => {
+    const garbled = Array.from({ length: 8 }, (_, index) => `## ${index}KHPDWUL[SURGXFWFRPSDUHVHDFKTXHU\\ZLWK QRUPDOL]DWLRQ7KHUHVXOWLQJZHLJKWV`).join("\n");
+    expect(classifyAdaptivePage(1, garbled).signals).not.toContain("garbled-text");
+    const unicodeMath = classifyAdaptivePage(1, `${OCR_PROSE}\nWith key dimension 𝑑𝑘 = 64 the score is 𝑞 · 𝑘 / √𝑑𝑘 and Σ weights ≤ 1.`);
+    expect(unicodeMath.route).not.toBe("formula-heavy");
+    const formula = classifyAdaptivePage(1, [
+      "The loss is defined as follows.",
+      "L(x) = \\sum_i \\alpha_i (y_i - f(x_i))^2",
+      "where f(x) = w^T x + b and the gradient is",
+      "dL/dw = -2 \\sum_i \\alpha_i (y_i - f(x_i)) x_i",
+    ].join("\n"));
+    expect(formula.route).toBe("formula-heavy");
+    // v1 selector: no formula admission, and a page-evidence decision decides alone.
+    expect(selectLegacyVisionPages([formula])).toEqual([]);
+    const chart = classifyAdaptivePage(1, "Figure 3: quarterly revenue chart with legend and axis labels, Q1 Q2 Q3 up 12%");
+    const minorImage = { ...chart, ocrDecision: { authorized: false, confidence: 0.8, signals: ["ocr-not-authorized:minor-images=1"] } };
+    expect(selectLegacyVisionPages([minorImage])).toEqual([]);
+    expect(selectLegacyVisionPages([chart])).toEqual([1]);
+    const notes = "Field observation log. We determine the conservation status of private plots and elevated terraces.";
+    expect(classifyTextAndFilename(notes, "notes.pdf").label).not.toBe("generic");
+  });
+
+  it("does not treat OCR words on a page without text layer or images as drawn content", () => {
+    const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };
+    const routed = surface({ text: OCR_PROSE, evidence: [empty], routingV2: false });
+    expect(routed.status === "ready" && routed.pages[0]!.ocrDecision?.signals).toContain("ocr-not-authorized:blank-page");
+    expect(selected(routed)).toEqual([]);
+  });
+
+  it("keeps the always-on textless-PDF fix: a document without text but heavy pages reaches vision", () => {
+    const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };
+    const routed = surface({ text: "", evidence: [empty], sourceBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 4, routingV2: false });
+    expect(routed.status === "ready" && routed.pages[0]!.ocrDecision?.signals).toContain("ocr-authorized:drawn-content");
+    expect(selectLegacyVisionPages(routed.status === "ready" ? routed.pages : [])).toEqual([1]);
+  });
+
+  it("keeps the always-on rejected-output fail-open", () => {
+    const rejected = new VisionOutputRejectedError("vision output rejected: leader-run", [], 10, 10, 0);
+    expect(shouldFailOpenVisionError(rejected)).toBe(true);
   });
 });

@@ -87,6 +87,7 @@ import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
+import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -744,7 +745,7 @@ export class ExtractMarkdownStage implements Stage {
                   const pageImageEvidenceUri =
                     isPdf && state.run.pipeline.visionFallback
                       ? await this.recordPageImageEvidence(document, tempFile, winningText, state, signal)
-                      : format === "image" && state.run.pipeline.visionFallback
+                      : format === "image" && state.run.pipeline.visionFallback && resolveRunRoutingV2(state.run)
                         ? await this.storePageImageEvidence(document, state, imageFilePageEvidence(), "image-file")
                         : null;
                   registerHash(state, contentHash, artifactUri);
@@ -1120,7 +1121,8 @@ export class ExtractMarkdownStage implements Stage {
         pageTexts,
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
-        textLayerPages: await this.textLayerPages(state, document),
+        // Routing v2 counts native words from the text layer, so an OCR'd scan stays sparse.
+        textLayerPages: resolveRunRoutingV2(state.run) ? await this.textLayerPages(state, document) : null,
       });
       if (!pages) return null;
       const sourceBytes = await stat(sourcePath).then((info) => info.size).catch(() => null);

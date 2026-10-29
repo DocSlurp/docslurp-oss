@@ -166,6 +166,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
+| `VISION_ROUTING_V2` | `off` | off, on, workspace ids | Legacy vision routing v2 (below) for every run or a comma-separated canary list of workspace ids. Worker only. A malformed value reads as off with one warning. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -182,6 +183,34 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | image build args | off | `DOCSLURP_NATIVE_PDF`, `DOCSLURP_NATIVE_PDF_OCR_MODELS`, `DOCSLURP_NATIVE_PDF_CJK_FONTS` | Ship the binding, OCR models (~30 MB) and CJK fonts (~54 MB); see `vendor-artifacts/native-pdf/README.md` and `fly.worker.toml`. |
 
 `.env.example` lists every flag above with its default.
+
+### Legacy vision routing v2
+
+`VISION_ROUTING_V2` gates the fixes to the legacy (non-router) vision path so production can
+enable them for one workspace before everyone. The worker resolves it once per run from the
+run's workspace (`worker/src/lib/vision-routing-v2.ts`) and passes `{ routingV2 }` into the pure
+routing functions; none of them read the environment. With the flag off, routing matches the
+pre-v2 behaviour exactly.
+
+Gated (v2 only):
+
+- Page triage counts native words from page facts' shared `pdftotext` run, so an OCR'd scan stays
+  sparse (`extract-markdown` passes `textLayerPages`); uploaded images get full-page raster
+  evidence (`imageFilePageEvidence`).
+- Document labels use whole-word terms and need two distinct body terms (`distinctTerms`).
+- Page routes: the numeric-row table cue, garbled-text detection, Unicode-math formula signals,
+  and keeping structured routes (table, form, formula, figure) for OCR'd pages.
+- A page without text layer or images whose OCR text has words counts as drawn content.
+- `selectLegacyVisionPages` also admits formula pages and lets the text route decide when raster
+  evidence does not authorize OCR; v1 lets any page-evidence decision decide alone.
+
+Always on: a page whose vision output is rejected keeps its native or OCR text
+(`shouldFailOpenVisionError`), and a PDF with no extractable text but heavy pages
+(`sourceBytesPerPage`) is drawn content sent to vision instead of read as blank.
+
+`classify-route` and `vision-extract` record `routingVersion` (`v1` or `v2`) in their stage stats
+and the `vision-text-density-score` / `vision-fail-open` performance metadata, so canary runs can
+be told apart in telemetry.
 
 ## Economics
 

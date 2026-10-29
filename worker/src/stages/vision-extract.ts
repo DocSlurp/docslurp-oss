@@ -6,7 +6,6 @@ import {
   resolveVisionRoute,
   visionListPriceCents,
   visionModelTokenPricing,
-  type AdaptivePageRoutingEntry,
   type ParserPlaybookKey,
   type VisionConfig,
   type VisionRuntime,
@@ -42,6 +41,7 @@ import {
 } from "../lib/canonical-reconciliation.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
 import { selectLegacyVisionPages } from "./classify-route.js";
+import { resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
 import { PLAN_QUALITY_METHOD } from "../routing/quality.js";
@@ -200,6 +200,7 @@ export class VisionExtractStage implements Stage {
           maxPagesPerDocument: this.visionPageBudget(state, document.id),
         };
         const route = resolveVisionRoute(selection);
+        const routingV2 = resolveRunRoutingV2(state.run);
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -274,6 +275,7 @@ export class VisionExtractStage implements Stage {
                   score: needsVision.score,
                   selectedPages: needsVision.selectedPages,
                   reason: needsVision.reason,
+                  routingVersion: routingVersion(routingV2),
                 },
               };
             }
@@ -330,6 +332,7 @@ export class VisionExtractStage implements Stage {
                   runtime: route.runtime,
                   model: route.model,
                   reason,
+                  routingVersion: routingVersion(routingV2),
                 },
               });
 
@@ -346,6 +349,7 @@ export class VisionExtractStage implements Stage {
                   score: needsVision.score,
                   selectedPages: needsVision.selectedPages,
                   reason,
+                  routingVersion: routingVersion(routingV2),
                 },
               };
             }
@@ -473,6 +477,7 @@ export class VisionExtractStage implements Stage {
                 latencyMs: totalLatencyMs,
                 selectedPages: needsVision.selectedPages,
                 routingPolicy: needsVision.routing?.visionPolicy ?? null,
+                routingVersion: routingVersion(routingV2),
                 reconciledPages: reconciliation.changedPages,
                 reconciliationDecisions: reconciliation.decisions.map((decision) => ({
                   pageNumber: decision.pageNumber,
@@ -505,7 +510,8 @@ export class VisionExtractStage implements Stage {
     } | null;
   }> {
     const routing = await this.loadAdaptiveRouting(state, document.id);
-    let selectedPages = this.selectRoutingPages(routing?.pages ?? []);
+    const routingV2 = resolveRunRoutingV2(state.run);
+    let selectedPages = selectLegacyVisionPages(routing?.pages ?? [], { routingV2 });
     let score = 0;
     let needed = false;
     let reason = "persisted-text-density-sufficient";
@@ -570,6 +576,7 @@ export class VisionExtractStage implements Stage {
         evidenceSource: routing ? "page-triage" : "persisted-extraction",
         routingPolicy: routing?.visionPolicy ?? null,
         documentComplexity: routing?.documentComplexity ?? null,
+        routingVersion: routingVersion(routingV2),
       },
     });
 
@@ -1152,10 +1159,6 @@ export class VisionExtractStage implements Stage {
     } catch {
       return null;
     }
-  }
-
-  private selectRoutingPages(pages: AdaptivePageRoutingEntry[]): number[] {
-    return selectLegacyVisionPages(pages);
   }
 
   private async reconcileExtractionArtifacts(

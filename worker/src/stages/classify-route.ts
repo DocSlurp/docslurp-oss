@@ -20,6 +20,7 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
+import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
 // Emits a classification artifact and (optionally) a suggested parser playbook override per document.
@@ -47,6 +48,7 @@ export class ClassifyRouteStage implements Stage {
             document.id,
           );
           const imageEvidence = await this.loadPageImageEvidence(state, document.id);
+          const routingV2 = resolveRunRoutingV2(state.run);
           const surface = buildAdaptiveRoutingDecisionSurface({
             documentId: document.id,
             filename: document.filename,
@@ -71,6 +73,7 @@ export class ClassifyRouteStage implements Stage {
             structuredComplexity: structured?.pages,
             pageImageEvidence: imageEvidence?.pages,
             sourceBytesPerPage: imageEvidence?.sourceBytesPerPage ?? null,
+            routingV2,
           });
 
           await this.storage.putJson(key, surface);
@@ -80,6 +83,7 @@ export class ClassifyRouteStage implements Stage {
               stats: {
                 skipped: true,
                 reason: "extraction-evidence-unavailable",
+                routingVersion: routingVersion(routingV2),
               },
             };
           }
@@ -93,6 +97,7 @@ export class ClassifyRouteStage implements Stage {
             stats: {
               label: surface.label,
               confidence: surface.confidence,
+              routingVersion: routingVersion(routingV2),
               suggestedPlaybook: surface.suggestedPlaybook,
               documentComplexity: surface.documentComplexity,
               visionPolicy: surface.visionPolicy,
@@ -289,7 +294,10 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   pageImageEvidence?: Map<number, PageImageEvidence>;
   /** Source file bytes over page count, from the raster evidence artifact. */
   sourceBytesPerPage?: number | null;
+  /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
+  routingV2?: boolean;
 }): AdaptiveRoutingDecisionSurface {
+  const routingV2 = args.routingV2 === true;
   const hasPageEvidence =
     (args.structuredComplexity?.size ?? 0) > 0 || (args.pageImageEvidence?.size ?? 0) > 0;
   if ((!args.text.trim() && !hasPageEvidence) || !args.evidence) {
@@ -300,19 +308,19 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
       pages: [],
     });
   }
-  const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename);
+  const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename, { routingV2 });
   const hasPageAlignment = pageAlignedTexts(args.text, args.pageCount) !== null;
   // No extractor produced any text for the whole document, and its file is far larger than
   // blank pages need: the content is drawn (vector paths, outlined glyphs), so a page without
   // text or images is not blank and vision is its only reader.
   const documentWithoutText = !args.text.trim();
-  // Likewise a page with no text layer and no image whose extracted text (OCR of its render)
-  // still has words: the words are drawn, so the page is not blank.
+  // Likewise (v2) a page with no text layer and no image whose extracted text (OCR of its
+  // render) still has words: the words are drawn, so the page is not blank.
   const drawnContent = (evidence: PageImageEvidence | undefined, pageText: string) =>
-    pageEvidenceWordCount(pageText) >= DRAWN_TEXT_MIN_WORDS ||
+    (routingV2 && pageEvidenceWordCount(pageText) >= DRAWN_TEXT_MIN_WORDS) ||
     (documentWithoutText && args.sourceBytesPerPage != null &&
       args.sourceBytesPerPage - (evidence?.embeddedImageBytes ?? 0) >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE);
-  const pages = buildAdaptivePageRoutes(args.text, Math.max(1, args.pageCount)).map((page) => {
+  const pages = buildAdaptivePageRoutes(args.text, Math.max(1, args.pageCount), { routingV2 }).map((page) => {
     const complexity = args.structuredComplexity?.get(page.pageNumber);
     const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
     if (!complexity && !imageEvidence) return page;
@@ -347,9 +355,9 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
     }
     return {
       ...page,
-      // OCR text keeps visible structure cues (numeric rows, field labels, equations): keep
+      // v2: OCR text keeps visible structure cues (numeric rows, field labels, equations): keep
       // that route so the ingest report counts the table; any other raster page is degraded.
-      route: STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
+      route: routingV2 && STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
       extractorHint: "vision-rescue" as const,
       confidence: Math.max(page.confidence, ocrDecision.confidence),
       signals: [...page.signals, ...ocrDecision.signals],
@@ -417,6 +425,9 @@ export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDec
  * their only source of searchable text, so they keep their place when a page budget truncates
  * the selection.
  *
+ * v1 (routing v2 off): a routing decision from page evidence decides alone; otherwise
+ * vision-rescue routes and sparse form or table pages. v2:
+ *
  * - OCR authorized by raster or structured evidence (scans, OCR'd rasters, no text layer).
  * - Blank pages never.
  * - Otherwise the text route decides, also when raster evidence did not authorize OCR (a page
@@ -424,7 +435,24 @@ export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDec
  *   (a text layer flattens notation that vision transcribes as LaTeX), and sparse form or table
  *   pages.
  */
-export function selectLegacyVisionPages(pages: AdaptivePageRoutingEntry[]): number[] {
+export function selectLegacyVisionPages(
+  pages: AdaptivePageRoutingEntry[],
+  options: RoutingVersionOptions = {},
+): number[] {
+  if (options.routingV2 !== true) {
+    return prioritizePagesWithoutNativeText(pages)
+      .filter((page) => {
+        if (page.ocrDecision !== undefined) {
+          return page.ocrDecision.authorized;
+        }
+        return (
+          page.extractorHint === "vision-rescue" ||
+          ((page.route === "form" || page.route === "table-heavy") &&
+            page.textDensityScore < 0.45)
+        );
+      })
+      .map((page) => page.pageNumber);
+  }
   return prioritizePagesWithoutNativeText(pages)
     .filter((page) => {
       if (page.ocrDecision?.authorized) return true;
@@ -631,7 +659,7 @@ function canonicalBlocksToPageText(
     .join("\f");
 }
 
-export function classifyTextAndFilename(text: string, filename: string): {
+export function classifyTextAndFilename(text: string, filename: string, options: RoutingVersionOptions = {}): {
   label: string;
   confidence: number;
   signals: string[];
@@ -645,22 +673,29 @@ export function classifyTextAndFilename(text: string, filename: string): {
     return cond;
   }
 
-  // Whole-word terms, and at least two distinct ones from the body: substrings ("vat" in
+  // v2: whole-word terms, and at least two distinct ones from the body: substrings ("vat" in
   // "observation", "term" in "determine") and a single stray word labelled scanned brochures
   // and field notes as invoices or contracts.
+  const routingV2 = options.routingV2 === true;
   const isInvoice =
     hit(/invoice/.test(name), "name:invoice") ||
-    hit(/\binvoice\s*(?:#|no\b|number\b)/i.test(body) ||
-      distinctTerms(body, /\b(?:invoice|billed to|bill to|remit to|subtotal|vat|amount due|balance due|due date)\b/gi) >= 2,
+    hit(routingV2
+      ? /\binvoice\s*(?:#|no\b|number\b)/i.test(body) ||
+        distinctTerms(body, /\b(?:invoice|billed to|bill to|remit to|subtotal|vat|amount due|balance due|due date)\b/gi) >= 2
+      : /invoice\s*#|billed to|remit to|subtotal|vat/i.test(body),
     "body:invoice-terms");
 
   const isBank = hit(
-    distinctTerms(body, /\b(?:statement period|account statement|routing\s+number|account\s+number|transactions|opening balance|closing balance)\b/gi) >= 2,
+    routingV2
+      ? distinctTerms(body, /\b(?:statement period|account statement|routing\s+number|account\s+number|transactions|opening balance|closing balance)\b/gi) >= 2
+      : /statement|routing\s+number|account\s+number|transactions/i.test(body),
     "body:bank-terms",
   );
 
   const isContract = hit(
-    distinctTerms(body, /\b(?:agreement|parties|party|witnesseth|hereby|governing law|signature|indemnif\w*|termination)\b/gi) >= 2,
+    routingV2
+      ? distinctTerms(body, /\b(?:agreement|parties|party|witnesseth|hereby|governing law|signature|indemnif\w*|termination)\b/gi) >= 2
+      : /agreement|party|term|witnesseth|hereby|governing law|signature/i.test(body),
     "body:contract-terms",
   );
 
@@ -695,13 +730,22 @@ function distinctTerms(text: string, pattern: RegExp): number {
   return new Set([...text.matchAll(pattern)].map((match) => match[0].toLowerCase().replace(/\s+/g, " "))).size;
 }
 
-export function buildAdaptivePageRoutes(text: string, pageCount: number): AdaptivePageRoutingEntry[] {
+export function buildAdaptivePageRoutes(
+  text: string,
+  pageCount: number,
+  options: RoutingVersionOptions = {},
+): AdaptivePageRoutingEntry[] {
   const pageTexts = splitTextIntoPages(text, Math.max(1, pageCount));
   const resolvedPages = pageTexts.length > 0 ? pageTexts : Array.from({ length: Math.max(1, pageCount) }, () => "");
-  return resolvedPages.map((pageText, index) => classifyAdaptivePage(index + 1, pageText));
+  return resolvedPages.map((pageText, index) => classifyAdaptivePage(index + 1, pageText, options));
 }
 
-export function classifyAdaptivePage(pageNumber: number, text: string): AdaptivePageRoutingEntry {
+export function classifyAdaptivePage(
+  pageNumber: number,
+  text: string,
+  options: RoutingVersionOptions = {},
+): AdaptivePageRoutingEntry {
+  const routingV2 = options.routingV2 === true;
   const normalized = text.trim();
   const words = normalized ? normalized.split(/\s+/).filter(Boolean) : [];
   const charCount = normalized.length;
@@ -710,9 +754,9 @@ export function classifyAdaptivePage(pageNumber: number, text: string): Adaptive
   const digitCount = (normalized.match(/\d/g) ?? []).length;
   const colonLineCount = lines.filter((line) => line.includes(":")).length;
   const markdownTableLineCount = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line)).length;
-  // OCR flattens a table into rows of space-separated cells; several rows with two or more
+  // v2: OCR flattens a table into rows of space-separated cells; several rows with two or more
   // numeric cells are the table that survives.
-  const numericRowLines = lines.filter((line) => {
+  const numericRowLines = !routingV2 ? 0 : lines.filter((line) => {
     const cells = line.trim().split(/\s+/);
     return cells.length >= 3 && cells.filter((cell) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(cell)).length >= 2;
   }).length;
@@ -735,10 +779,12 @@ export function classifyAdaptivePage(pageNumber: number, text: string): Adaptive
     /%/.test(normalized),
     lines.some((line) => /\bq[1-4]\b|\bjan\b|\bfeb\b|\bmar\b/i.test(line))
   ].filter(Boolean).length;
-  // Text from fonts without a Unicode map comes out as long runs of shifted glyph codes
+  // v2: text from fonts without a Unicode map comes out as long runs of shifted glyph codes
   // ("6FDOLQJDWWHQWLRQ...") rather than words: the text layer exists but is unreadable.
-  const garbledCharacters = (normalized.match(/[A-Za-z0-9]{20,}/g) ?? []).reduce((sum, run) => sum + run.length, 0);
-  const garbledText = charCount >= 200 && garbledCharacters / Math.max(1, charCount) >= 0.2;
+  const garbledCharacters = !routingV2
+    ? 0
+    : (normalized.match(/[A-Za-z0-9]{20,}/g) ?? []).reduce((sum, run) => sum + run.length, 0);
+  const garbledText = routingV2 && charCount >= 200 && garbledCharacters / Math.max(1, charCount) >= 0.2;
   const degradationMarkers = [
     charCount < 80,
     /�/.test(normalized),
@@ -751,7 +797,7 @@ export function classifyAdaptivePage(pageNumber: number, text: string): Adaptive
   ].filter(Boolean).length;
   const textDensityScore = Math.min(1, (charCount / 900) * 0.6 + (wordCount / 180) * 0.4);
   const signals: string[] = [];
-  const specializedContent = detectSpecializedContent(normalized, lines);
+  const specializedContent = detectSpecializedContent(normalized, lines, routingV2);
 
   let route: AdaptivePageRoute = "straightforward-text";
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";
@@ -818,13 +864,13 @@ type SpecializedSignalCandidate = {
   signals: string[];
 };
 
-function detectSpecializedContent(text: string, lines: string[]): AdaptiveSpecializedContentEntry[] {
+function detectSpecializedContent(text: string, lines: string[], routingV2: boolean): AdaptiveSpecializedContentEntry[] {
   if (!text) {
     return [];
   }
 
   const candidates = [
-    detectFormulaHeavyContent(text, lines),
+    detectFormulaHeavyContent(text, lines, routingV2),
     detectSourceCodeContent(text, lines),
     detectChemicalNotationContent(text, lines)
   ].filter((candidate): candidate is SpecializedSignalCandidate => candidate !== null);
@@ -838,7 +884,7 @@ function detectSpecializedContent(text: string, lines: string[]): AdaptiveSpecia
     }));
 }
 
-function detectFormulaHeavyContent(text: string, lines: string[]): SpecializedSignalCandidate | null {
+function detectFormulaHeavyContent(text: string, lines: string[], routingV2: boolean): SpecializedSignalCandidate | null {
   const signals: string[] = [];
   const latexCommands = (text.match(/\\(?:frac|sum|int|alpha|beta|gamma|theta|lambda|mu|sigma|pi|sqrt|times|cdot|begin\{(?:equation|align)\}|end\{(?:equation|align)\})/g) ?? []).length;
   const equationLines = lines.filter((line) => /[=<>]/.test(line) && /[+\-*/^_]/.test(line)).length;
@@ -846,10 +892,10 @@ function detectFormulaHeavyContent(text: string, lines: string[]): SpecializedSi
   const symbolDensity = (text.match(/[=+\-*/^_<>]/g) ?? []).length;
   const functionAssignmentLines = lines.filter((line) => /\b[a-z]\w*\([^)]*\)\s*=/.test(line) || /\b(?:f|g|h|y)\s*=\s*[^.]{4,}/i.test(line)).length;
 
-  // Text layers of typeset math carry it as Unicode: mathematical alphanumerics (𝑑, 𝐱) and
+  // v2: text layers of typeset math carry it as Unicode: mathematical alphanumerics (𝑑, 𝐱) and
   // operators (∑, ≤, √). Their linear order loses fractions, scripts and roots.
-  const mathAlphanumerics = (text.match(/[\u{1D400}-\u{1D7FF}]/gu) ?? []).length;
-  const mathOperators = (text.match(/[\u2200-\u22FF\u27C0-\u27EF\u2980-\u2AFF]/gu) ?? []).length;
+  const mathAlphanumerics = routingV2 ? (text.match(/[\u{1D400}-\u{1D7FF}]/gu) ?? []).length : 0;
+  const mathOperators = routingV2 ? (text.match(/[\u2200-\u22FF\u27C0-\u27EF\u2980-\u2AFF]/gu) ?? []).length : 0;
   if (mathAlphanumerics >= 3) signals.push("math:unicode-alphanumerics");
   if (mathAlphanumerics + mathOperators >= 6) signals.push("math:unicode-symbols");
   if (latexCommands > 0) signals.push("math:latex");
