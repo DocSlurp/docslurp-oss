@@ -15,9 +15,13 @@ A completed reset:
 - **ends every session** of the account (`revokeSessionsOnPasswordReset: true`) and clears its trusted devices, so whoever held the old password is signed out;
 - **never signs in.** The person signs in with the new password afterwards, and an account with two-factor still gets its second-factor challenge. Recovery doesn't turn off two-factor and doesn't grant sensitive-account access;
 - **sets a first password** for an account that has none (email-code, magic-link or Google/GitHub users), and marks the address verified, because the code proved mailbox ownership;
-- **removes everything an unverified account gathered before its owner proved the address.** If someone registered the address first, the reset deletes every account link and stored OAuth token except the password just chosen, plus passkeys, two-factor enrolment, trusted devices and sessions. Better Auth's Email OTP sign-in and magic links already apply this rule (`revokeUnprovenAccountAccess`); its Email OTP reset only marks the address verified. A verified account keeps its other sign-in methods.
+- **replaces a squatter's password** on an account someone registered before its owner proved the address, and marks the address verified. That password is the only access such an account can hold here:
+  - `requireEmailVerification` withholds every session until the address is verified. Passkeys, two-factor, trusted devices and linked sign-ins all need a session, so none can be added before then.
+  - OAuth implicit linking needs the provider's verified email, and `beforeOAuthAccountCreate` removes the unverified password as it links.
+  - Magic links and Email OTP sign-in run Better Auth's `revokeUnprovenAccountAccess`.
+  - Company SSO never links by email.
 
-The native reset commits before any hook can run after it, so the promotion is made durable. A `reset-promotion:<user>` marker row is written before the reset. The cleanup and the marker's removal share one transaction. While a marker stands for a verified user, any new session for that user first completes the cleanup and is then refused with `403 SIGN_IN_AGAIN`. A crash between the reset and the cleanup therefore fails closed until the cleanup has run. A wrong code leaves no marker behind.
+  So the native reset transaction, which overwrites the password, is a complete ownership promotion. A configuration contract test fails if any of these premises changes. An earlier design added a separate cleanup after the reset; the council found races in it, and with nothing to clean it only added risk, so it was removed.
 
 A domain that enforces company SSO is refused with `SSO_REQUIRED` before any code is sent. The answer depends only on the domain, like `/api/sso-lookup`.
 

@@ -12,7 +12,7 @@ import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
 import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
-import { recoveryPolicyPlugin, uniformCodeRefusal } from "./auth-recovery.js";
+import { uniformCodeRefusal } from "./auth-recovery.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
@@ -204,7 +204,7 @@ export const auth = betterAuth({
   // The recipient limit follows SSO enforcement: an enforced address is
   // refused before it spends any email budget.
   plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }),
-    recipientLimiter.plugin, recoveryPolicyPlugin({ pool }),
+    recipientLimiter.plugin,
     ...breachedPasswordPlugins(breachedPasswordPolicy),
     ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
     sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus })],

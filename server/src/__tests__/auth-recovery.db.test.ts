@@ -142,26 +142,6 @@ async function createUser(options: { password?: string | false; emailVerified?: 
   return { id, email };
 }
 
-/** What a squatter could have attached to an address before its owner proved it. */
-async function attachUnprovenAccess(userId: string) {
-  await pool.query(`insert into account(id, "accountId", "providerId", "userId") values ($1, $2, 'google', $3)`, [`google-${userId}`, `attacker-${userId}`, userId]);
-  await pool.query(`insert into passkey(id, "publicKey", "userId", "credentialID", counter, "deviceType", "backedUp") values ($1, 'pk', $2, $1, 0, 'singleDevice', false)`, [`passkey-${userId}`, userId]);
-  await pool.query(`insert into "twoFactor"(id, secret, "backupCodes", "userId") values ($1, 'secret', 'codes', $2)`, [`tf-${userId}`, userId]);
-  await pool.query(`update "user" set "twoFactorEnabled" = true where id = $1`, [userId]);
-  await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`trust-device-${userId}`, userId]);
-}
-
-async function unprovenAccessLeft(userId: string) {
-  const { rows } = await pool.query<Record<string, number | boolean>>(`select
-    (select count(*)::int from account where "userId" = $1 and "providerId" <> 'credential') as links,
-    (select count(*)::int from passkey where "userId" = $1) as passkeys,
-    (select count(*)::int from "twoFactor" where "userId" = $1) as two_factor,
-    (select "twoFactorEnabled" from "user" where id = $1) as two_factor_enabled,
-    (select count(*)::int from verification where value = $1 and (identifier like 'trust-device-%' or identifier like 'reset-promotion:%')) as markers,
-    (select count(*)::int from session where "userId" = $1) as sessions`, [userId]);
-  return rows[0];
-}
-
 async function requestReset(browser: Browser, email: string) {
   return browser.json<{ success?: boolean; code?: string }>("/email-otp/request-password-reset", { email });
 }
@@ -264,36 +244,33 @@ describe("password recovery with native Email OTP", () => {
     expect(sentEmails).toHaveLength(0);
   });
 
-  it("proves mailbox ownership for a pre-registered unverified account and drops every earlier link", async () => {
+  it("replaces a squatter's password on a pre-registered account, the only access it could hold", async () => {
     const squatted = await createUser({ password: "the squatters password", emailVerified: false });
-    await attachUnprovenAccess(squatted.id);
+    // Unverified: the squatter can't get a session, so nothing else can be attached.
+    const squatter = new Browser();
+    expect((await squatter.json("/sign-in/email", { email: squatted.email, password: "the squatters password" })).status).toBe(403);
+    expect(squatter.cookies.size).toBe(0);
+    expect((await pool.query(`select 1 from session where "userId" = $1`, [squatted.id])).rowCount).toBe(0);
     const owner = new Browser();
     await requestReset(owner, squatted.email);
     expect((await owner.json("/email-otp/reset-password", { email: squatted.email, otp: lastCodeFor(squatted.email), password: NEW_PASSWORD })).status).toBe(200);
     expect((await pool.query<{ verified: boolean }>(`select "emailVerified" as verified from "user" where id = $1`, [squatted.id])).rows[0]!.verified).toBe(true);
     expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: "the squatters password" })).status).toBe(401);
     expect((await new Browser().json("/sign-in/email", { email: squatted.email, password: NEW_PASSWORD })).status).toBe(200);
-    expect(await unprovenAccessLeft(squatted.id)).toEqual({ links: 0, passkeys: 0, two_factor: 0, two_factor_enabled: false, markers: 0, sessions: 1 });
+    const providers = (await pool.query<{ provider: string }>(`select "providerId" as provider from account where "userId" = $1`, [squatted.id])).rows.map((row) => row.provider);
+    expect(providers).toEqual(["credential"]);
   });
 
-  it("finishes an interrupted promotion before any new session, failing closed", async () => {
-    // State after a crash between the native reset commit and the cleanup.
-    const user = await createUser();
-    await attachUnprovenAccess(user.id);
-    await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`reset-promotion:${user.id}`, user.id]);
-    const refused = await new Browser().json<{ code?: string }>("/sign-in/email", { email: user.email, password: PASSWORD });
-    expect(refused.status).toBe(403);
-    expect(refused.body.code).toBe("SIGN_IN_AGAIN");
-    expect(await unprovenAccessLeft(user.id)).toEqual({ links: 0, passkeys: 0, two_factor: 0, two_factor_enabled: false, markers: 0, sessions: 0 });
-    expect((await new Browser().json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
-  });
-
-  it("leaves no promotion marker behind when the code is wrong", async () => {
-    const user = await createUser({ emailVerified: false });
-    await requestReset(new Browser(), user.email);
-    const code = lastCodeFor(user.email);
-    expect((await new Browser().json("/email-otp/reset-password", { email: user.email, otp: code === "000000" ? "111111" : "000000", password: NEW_PASSWORD })).status).toBe(400);
-    expect((await pool.query(`select 1 from verification where identifier = $1`, [`reset-promotion:${user.id}`])).rowCount).toBe(0);
+  it("keeps the configuration that lets an unverified account hold nothing but its password", async () => {
+    // auth-recovery.ts relies on each of these; if one changes, a reset needs ownership cleanup again.
+    const { options } = await auth.$context;
+    const { beforeOAuthAccountCreate } = await import("../lib/oauth-account-linking.js");
+    expect(options.emailAndPassword?.requireEmailVerification).toBe(true);
+    expect(options.account?.accountLinking?.trustedProviders ?? []).toEqual([]);
+    expect(options.databaseHooks?.account?.create?.before).toBe(beforeOAuthAccountCreate);
+    const plugins = (options.plugins ?? []).map((plugin) => plugin.id);
+    expect(plugins).toEqual(expect.arrayContaining(["email-otp", "magic-link"]));
+    expect(plugins.filter((id) => ["admin", "anonymous", "username", "phone-number", "one-tap", "generic-oauth"].includes(id))).toEqual([]);
   });
 
   it("clears the reset account's trusted devices, not those of whoever is signed in", async () => {
