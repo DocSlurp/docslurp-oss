@@ -65,3 +65,5 @@ An invalid passkey configuration fails at startup.
 - DocSlurp: `GET /v1/account/security` returns factors, passkey last use, this session's assurance and re-auth deadline, and policy status. `GET` and `PUT /v1/organizations/:orgId/security-policy` read and change the org policy, and accept sessions only.
 
 Sensitive proof endpoints: `GET /api/auth/sensitive-access`; `POST /api/auth/sensitive-access/password`; `GET /api/auth/sensitive-access/passkey/options`; `POST /api/auth/sensitive-access/passkey/verify`; `POST /api/auth/sensitive-access/email-otp/{send,verify}`; and `POST /v1/auth/sensitive-sso/start`. Proof POSTs require a trusted app origin.
+
+Email sign-in links use the native magic-link plugin while retaining these policies; see [magic-link login](magic-link-login.md).

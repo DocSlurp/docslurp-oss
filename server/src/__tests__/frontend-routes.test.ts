@@ -25,6 +25,7 @@ vi.mock("../lib/admin-emails.js", () => ({ admitConfiguredAdminUser: mocks.admit
 vi.mock("../lib/sso-lookup.js", () => ({ hasConfiguredSsoProvider: mocks.sso }));
 vi.mock("../lib/better-auth.js", () => ({
   configuredEmailAuth: true,
+  configuredMagicLinkAuth: true,
   configuredSocialProviders: { github: true, google: false },
   getDevSeedAccountDescriptors: mocks.devSeed,
 }));
@@ -100,7 +101,7 @@ describe("GET /meta/auth-config", () => {
     mocks.sso.mockResolvedValue(true);
     mocks.devSeed.mockReturnValue([]);
     const res = await appAs(session("u1")).request("/meta/auth-config");
-    expect(await res.json()).toEqual({ emailAuth: true, socialProviders: { github: true, google: false }, ssoConfigured: true, devSeedAccounts: [] });
+    expect(await res.json()).toEqual({ emailAuth: true, magicLinkAuth: true, socialProviders: { github: true, google: false }, ssoConfigured: true, devSeedAccounts: [] });
     mocks.devSeed.mockReturnValue([{ id: "admin", label: "Seed admin", email: "admin@docslurp.local" }]);
     expect((await (await appAs(session("u1")).request("/meta/auth-config")).json()).devSeedAccounts).toHaveLength(1);
   });

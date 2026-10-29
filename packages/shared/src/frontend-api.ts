@@ -11,6 +11,8 @@ export type DevSeedAccountDescriptor = { id: "admin" | "member"; label: string; 
 /** GET /meta/auth-config: what the sign-in surface offers. Public. */
 export type AuthConfigResponse = {
   emailAuth: boolean;
+  /** Native magic-link login is available only with a configured email sender. */
+  magicLinkAuth: boolean;
   socialProviders: { github: boolean; google: boolean };
   ssoConfigured: boolean;
   /** Empty unless the server runs with NODE_ENV=development. */

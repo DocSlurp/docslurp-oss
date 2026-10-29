@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { sensitiveSamlRequestCache, verifiedSamlSensitiveAuthTime } from "../lib/auth-sensitive-sso.js";
 
 // Exercise node-saml's actual XML signature verification with a disposable test IdP key.
@@ -11,7 +12,7 @@ const samlRequire = createRequire(createRequire(import.meta.url).resolve("@node-
 const { SignedXml } = samlRequire("xml-crypto");
 let scratch: string; let key: string; let cert: string;
 beforeAll(() => {
-  scratch = mkdtempSync(join(process.env.TMPDIR ?? "/home/dan/tmp/agents", "sensitive-saml-test."));
+  scratch = mkdtempSync(join(tmpdir(), "sensitive-saml-test."));
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=synthetic-idp.test", "-days", "1", "-keyout", join(scratch, "key.pem"), "-out", join(scratch, "cert.pem")], { stdio: "ignore" });
   key = readFileSync(join(scratch, "key.pem"), "utf8"); cert = readFileSync(join(scratch, "cert.pem"), "utf8");
 });

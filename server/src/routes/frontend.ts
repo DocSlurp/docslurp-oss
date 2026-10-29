@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 
 import { sql } from "../db.js";
-import { configuredEmailAuth, configuredSocialProviders, getDevSeedAccountDescriptors } from "../lib/better-auth.js";
+import { configuredEmailAuth, configuredMagicLinkAuth, configuredSocialProviders, getDevSeedAccountDescriptors } from "../lib/better-auth.js";
 import { hasConfiguredSsoProvider } from "../lib/sso-lookup.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { authenticatedByRoute } from "../lib/route-auth.js";
@@ -48,6 +48,7 @@ metaRoutes.get("/auth-config", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json({
     emailAuth: configuredEmailAuth,
+    magicLinkAuth: configuredMagicLinkAuth,
     socialProviders: configuredSocialProviders,
     ssoConfigured: await hasConfiguredSsoProvider(),
     devSeedAccounts: getDevSeedAccountDescriptors(),
