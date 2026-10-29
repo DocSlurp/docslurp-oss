@@ -1,7 +1,8 @@
 # Page-range sharding for long documents
 
-Status (2026-10-28): planner and priors only (`worker/src/temporal/page-shards.ts`,
-`page-shard-profiles.ts`). No stage uses them yet.
+Status (2026-10-28): planner, priors and calibration (`worker/src/temporal/page-shards.ts`,
+`page-shard-profiles.ts`, `worker/src/pipeline/shard-calibration.ts`); Doppler parallel VMs behind
+`DOCSLURP_DOPPLER_SHARDS` (see doppler-vm.md). All off by default.
 
 Document sharding (`document-shards.ts`) spreads whole documents across worker slots, so a
 500-page PDF still runs every per-document stage on one executor. In production a 477-page
