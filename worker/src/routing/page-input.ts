@@ -16,7 +16,7 @@ import {
 
 import { loadProbeBinding } from "./probe/binding.js";
 import type { Recogniser } from "./probe/ocr-layer.js";
-import { NativeProbeOpenError, looksEncrypted, lockedRow, probeNativePdf } from "./probe/probe.js";
+import { NativeProbeOpenError, PROBE_OVERLAP_MAX_PAGES, looksEncrypted, lockedRow, probeNativePdf } from "./probe/probe.js";
 
 export interface ProbeRow {
   pageNumber: number;
@@ -77,13 +77,28 @@ export type ProbeRunner = (args: {
   signal?: AbortSignal;
 }) => Promise<string>;
 
+/**
+ * Probe render overlap settings. `PROBE_OVERLAP_RENDER=0|false|off` renders each page's 72 DPI image on the feature
+ * handle instead of a second handle (default on). `PROBE_OVERLAP_MAX_PAGES` (default 1000) caps the page count of
+ * documents that get the second handle; non-numeric or negative values keep the default.
+ */
+export function readProbeOverlap(env: NodeJS.ProcessEnv = process.env): { overlapRender: boolean; overlapRenderMaxPages: number } {
+  const flag = env.PROBE_OVERLAP_RENDER?.trim().toLowerCase();
+  const max = Number(env.PROBE_OVERLAP_MAX_PAGES?.trim() || Number.NaN);
+  return {
+    overlapRender: !(flag === "0" || flag === "false" || flag === "off"),
+    overlapRenderMaxPages: Number.isInteger(max) && max >= 0 ? max : PROBE_OVERLAP_MAX_PAGES,
+  };
+}
+
 /** Native runner: probes in-process through the native-pdf binding and emits the same JSON lines. Throws when the binding is absent. */
-export function createNativeProbeRunner(): ProbeRunner {
+export function createNativeProbeRunner(env: NodeJS.ProcessEnv = process.env): ProbeRunner {
   return async ({ pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, recognise, signal }) => {
     const loaded = loadProbeBinding();
     if (!loaded.ok) throw new NativeProbeOpenError("NATIVE_PDF_UNAVAILABLE", `native-pdf probe unavailable: ${loaded.reason}`);
     const lines: string[] = [];
-    for await (const row of probeNativePdf(loaded.binding, { pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, recognise, signal })) lines.push(JSON.stringify(row));
+    const overlap = readProbeOverlap(env);
+    for await (const row of probeNativePdf(loaded.binding, { pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, recognise, signal, ...overlap })) lines.push(JSON.stringify(row));
     return lines.join("\n") + "\n";
   };
 }

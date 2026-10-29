@@ -45,7 +45,12 @@ export interface NativeProbeOptions {
    * sits behind the synchronous feature work; rows are unchanged. One handle per concurrent render, as `renderPagesNative` does.
    */
   overlapRender?: boolean;
+  /** Open the second render handle only for documents of at most this many pages (default `PROBE_OVERLAP_MAX_PAGES`). */
+  overlapRenderMaxPages?: number;
 }
+
+/** Page-count ceiling for the probe's second render handle (`PROBE_OVERLAP_MAX_PAGES`). */
+export const PROBE_OVERLAP_MAX_PAGES = 1000;
 
 /** Without a sandboxed recogniser the OCR layer stays unverified, as when tesseract is not installed. */
 const noRecogniser: Recogniser = async () => null;
@@ -130,12 +135,31 @@ export async function probePage(
   docFeatures: Set<string>,
   producer: string,
   options: Pick<NativeProbeOptions, "thumbDir" | "thumbPx"> & { stem?: string; renderDoc?: ProbeBindingDoc } = {},
-): Promise<{ row: NativeProbeRow; page: ProbeBindingPage; size: { widthPt: number; heightPt: number; rotation: number } }> {
+): Promise<ProbedPage> {
   const t0 = performance.now();
-  // With a second handle the render starts now and runs while the features below are read.
+  // With a second handle the render starts now and runs while the features are read on `doc`.
   const earlyRender = options.renderDoc ? options.renderDoc.page(pageIndex).renderAsync(PROBE_RENDER) : null;
-  // A feature error below fails the page; the render's own outcome is then irrelevant.
-  earlyRender?.catch(() => undefined);
+  try {
+    return await readPage(doc, pageIndex, pageCount, docFeatures, producer, options, earlyRender, t0);
+  } finally {
+    // One task per handle: the render settles before this page fails or returns, so the next page's render and
+    // `close()` never start while it is in flight. A feature error fails the page; the render's outcome is then moot.
+    if (earlyRender) await earlyRender.then(() => undefined, () => undefined);
+  }
+}
+
+type ProbedPage = { row: NativeProbeRow; page: ProbeBindingPage; size: { widthPt: number; heightPt: number; rotation: number } };
+
+async function readPage(
+  doc: ProbeBindingDoc,
+  pageIndex: number,
+  pageCount: number,
+  docFeatures: Set<string>,
+  producer: string,
+  options: Pick<NativeProbeOptions, "thumbDir" | "thumbPx"> & { stem?: string },
+  earlyRender: Promise<Buffer> | null,
+  t0: number,
+): Promise<ProbedPage> {
   const page = doc.page(pageIndex);
   const size = page.size();
   const pw = size.widthPt;
@@ -384,7 +408,8 @@ export async function* probeNativePdf(binding: ProbeBinding, options: NativeProb
     const count = doc.pageCount();
     const docFeatures = documentFeatures(doc, meta.encrypted);
     // The first handle opened, so a second normally does too; without one the probe renders on the first, as before.
-    if (options.overlapRender ?? true) {
+    // Large documents skip the second handle: it holds its own parsed xref and object cache.
+    if ((options.overlapRender ?? true) && count <= (options.overlapRenderMaxPages ?? PROBE_OVERLAP_MAX_PAGES)) {
       try {
         renderDoc = binding.openPath(options.pdfPath, { limits: PROBE_LIMITS });
       } catch {
