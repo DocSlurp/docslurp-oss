@@ -436,7 +436,7 @@ describe("PdfRasterCache", () => {
     expect(exit).not.toBeNull();
     // The namespace root (unshare) either dies of the signal itself or reports its child's as 128+9,
     // depending on the host's unshare (CI's reports 137).
-    expect(exit!.signal === "SIGKILL" || exit!.code === 137).toBe(true);
+    expect(`${exit!.code}/${exit!.signal}`).toMatch(/^(137\/null|null\/SIGKILL)$/);
     expect(exit!.at - failedAt).toBeGreaterThanOrEqual(graceMs - 50);
     expect(exit!.at - failedAt).toBeLessThan(graceMs + 2_000);
     // Until then the aborted lane still held its slot and its scratch was still on disk.
