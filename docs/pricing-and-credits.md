@@ -23,6 +23,21 @@ Rate-card and plan changes are owner decisions. Before you change `CREDIT_RATE_C
 `INFRA_COST_OBSERVATIONS` or worker sizing, run `pnpm pricing:validate` in DocSlurp/app and compare the result with
 the latest load test. `pnpm pricing:watch` there tracks model prices and where each model is hosted.
 
+## Processing quality
+
+`pipeline.quality` (`packages/shared/src/quality.ts`) is the public extraction choice, and `QUALITY_MODES`
+(`billing.ts`) prices it from `PRICE_CARD`:
+
+| Quality | Billing | Per 1,000 pages |
+| --- | --- | --- |
+| `fast` | Text layer only. Pages without one keep their page image, are never OCR'd or read by a model, and bill Fast (`splitRemainingPages` in `worker/src/db/page-base-fee.ts`). | $0.05 |
+| `auto` (default) | Text pages bill Fast; pages a model reads, and unread scans and image files, bill Rich. | $0.05 to $2.50 |
+| `good` | Vision reads every page, so every page bills Rich, plus `richPagesForOutputTokens` for long output. | $2.50 |
+
+`PIPELINE_PROFILES` (the `estimateIngest` page-class model) is keyed by the same ids, so estimator ranges match the
+catalog: `billing.test.ts` checks every mix stays inside its mode's range. A quality picker shows
+`qualityModePriceRange(mode)`. Parser playbooks are internal (`parserPlaybookForQuality`).
+
 ## Flat Extract tiers
 
 Extract pages sell at a flat price per page. A hosted route may serve a flat-tier page only when its token prices
