@@ -15,6 +15,8 @@ import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { pushPerfMetric } from "../lib/perf-context.js";
+import { isCommandTeardownError } from "../sandbox/teardown.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -63,9 +65,14 @@ export function defaultPdftoppmProcessConcurrency(env: NodeJS.ProcessEnv = proce
   return Number.isInteger(configured) && configured >= 1 ? Math.min(configured, PDFTOPPM_PROCESS_CONCURRENCY_MAX) : 8;
 }
 
-/** Counting semaphore; waiters run in FIFO order and leave the queue when their signal aborts. */
+/**
+ * Counting semaphore; waiters run in FIFO order and leave the queue when their signal aborts.
+ * A task that fails with an unverified command teardown keeps its slot: its processes may still be
+ * running, so the capacity stays out of service (bounded, logged and counted) instead of being reused.
+ */
 export class Semaphore {
   private active = 0;
+  private poisonedSlots = 0;
   private readonly waiters: Array<() => void> = [];
 
   constructor(readonly limit: number) {}
@@ -74,12 +81,29 @@ export class Semaphore {
     return this.active;
   }
 
+  /** Slots held forever by commands whose teardown could not be verified. */
+  get poisoned(): number {
+    return this.poisonedSlots;
+  }
+
   async run<T>(signal: AbortSignal | undefined, task: () => Promise<T>): Promise<T> {
     await this.acquire(signal);
+    let poisoned = false;
     try {
       return await task();
+    } catch (error) {
+      poisoned = isCommandTeardownError(error);
+      throw error;
     } finally {
-      this.release();
+      if (poisoned) {
+        this.poisonedSlots += 1;
+        console.error(
+          `[worker-capacity] status=slot-poisoned metric=raster_slot_poisoned poisoned=${this.poisonedSlots} limit=${this.limit}`,
+        );
+        pushPerfMetric({ metric: "raster-slot-poisoned", value: this.poisonedSlots, unit: "count", tags: ["process", "teardown"] });
+      } else {
+        this.release();
+      }
     }
   }
 

@@ -6,6 +6,7 @@ import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it } from "vitest";
+import { superviseChild } from "../sandbox/teardown.js";
 import type { SandboxCommand } from "../sandbox/types.js";
 
 const sandboxInputs = {
@@ -20,11 +21,12 @@ async function runThroughBubblewrap(command: SandboxCommand) {
   const session = await bubblewrap.openSession(bubblewrap.readConfig({}), { activityId: "test" });
   try {
     const child = session.spawn!(command);
+    const supervised = superviseChild(child, { label: "isolation-test" });
     let stderr = "";
     child.stderr?.on("data", (chunk) => (stderr += chunk));
     child.stdout?.resume();
-    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    const status = await new Promise<number | null>((resolve) => child.once("close", resolve));
+    const timer = setTimeout(() => supervised.terminate(new Error("timeout"), { immediate: true }), 10_000);
+    const { code: status } = await supervised.done;
     clearTimeout(timer);
     return { status, stderr };
   } finally {

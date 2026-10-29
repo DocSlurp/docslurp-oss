@@ -24,7 +24,8 @@ import type { Writable } from "node:stream";
 import { resolveCommandPaths } from "../sandbox/paths.js";
 import { sandboxScopeStorage } from "../sandbox/session-context.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
-import { SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
+import { SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
+import { containmentOf, spawnContained, superviseChild, type SupervisedChild } from "../sandbox/teardown.js";
 import { resolveScriptsDir } from "./scripts-dir.js";
 import { createPool, type PythonPool } from "./python-pool.js";
 import {
@@ -79,7 +80,7 @@ export interface CommandRunnerOptions {
 
 /** A started command: a local child process to monitor, or a remote run that completes on its own. */
 export type LaunchedCommand =
-  | { child: ChildProcess; release(): Promise<void> }
+  | { child: ChildProcess; supervised: SupervisedChild; release(): Promise<void> }
   | { remote: Promise<SandboxResult>; timeoutMs: number; release(): Promise<void> };
 
 const DEFAULT_SCRATCH_ROOT = "/tmp/docslurp-parser-sandbox";
@@ -233,9 +234,9 @@ export class CommandRunner {
             if (result.exitCode === 0) return { stdout: result.stdout, stderr: result.stderr };
             throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim());
           }
-          const { child } = launched;
+          const { child, supervised } = launched;
           return await new Promise<CommandResult>((resolve, reject) => {
-          const monitor = this.startCommandMonitor(plan, child);
+          const monitor = this.startCommandMonitor(plan, child, supervised);
 
           let stdout = "";
           let stderr = "";
@@ -252,7 +253,7 @@ export class CommandRunner {
               outputLimitError = new Error(
                 `${plan.binary} stdout exceeded ${maxOutputBytes} bytes`,
               );
-              void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+              supervised.terminate(outputLimitError, { immediate: true });
               return;
             }
             stdout += chunk.toString();
@@ -263,22 +264,15 @@ export class CommandRunner {
               outputLimitError = new Error(
                 `${plan.binary} stderr exceeded ${maxOutputBytes} bytes`,
               );
-              void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+              supervised.terminate(outputLimitError, { immediate: true });
               return;
             }
             stderr += chunk.toString();
           });
-          let abortError: Error | null = null;
-          child.on("error", (error) => {
-            if (holdAbortedChild(child, error)) {
-              abortError = error;
-              return;
-            }
-            reject(monitor.finish() ?? error);
-          });
-          child.on("close", (code) => {
-            if (abortError) {
-              reject(monitor.finish(code) ?? abortError);
+          // Settles only after every process of the command is gone (see sandbox/teardown.ts).
+          supervised.done.then(({ code, reason }) => {
+            if (reason && reason.name === "AbortError") {
+              reject(monitor.finish(code) ?? reason);
               return;
             }
             if (outputLimitError) {
@@ -300,7 +294,7 @@ export class CommandRunner {
                 `${plan.binary} (${code ?? "unknown"}): ${stderr || stdout}`.trim(),
               ),
             );
-          });
+          }, (error: Error) => reject(monitor.finish() ?? error));
           });
         } finally {
           await launched.release();
@@ -330,7 +324,7 @@ export class CommandRunner {
             await pipeline(Readable.from([result.stdout]), destination);
             return { stderr: result.stderr };
           }
-          return await this.streamToWritable(plan, launched.child, destination);
+          return await this.streamToWritable(plan, launched.child, launched.supervised, destination);
         } finally {
           await launched.release();
         }
@@ -341,9 +335,10 @@ export class CommandRunner {
   private async streamToWritable(
     plan: CommandPlan,
     child: ChildProcess,
+    supervised: SupervisedChild,
     destination: Writable,
   ): Promise<{ stderr: string }> {
-    const monitor = this.startCommandMonitor(plan, child);
+    const monitor = this.startCommandMonitor(plan, child, supervised);
     let stderr = "";
     let stderrBytes = 0;
     let outputLimitError: Error | null = null;
@@ -352,17 +347,9 @@ export class CommandRunner {
       DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
 
     const exitPromise = new Promise<void>((resolve, reject) => {
-      let abortError: Error | null = null;
-      child.on("error", (error) => {
-        if (holdAbortedChild(child, error)) {
-          abortError = error;
-          return;
-        }
-        reject(monitor.finish() ?? error);
-      });
-      child.on("close", (code) => {
-        if (abortError) {
-          reject(monitor.finish(code) ?? abortError);
+      supervised.done.then(({ code, reason }) => {
+        if (reason && reason.name === "AbortError") {
+          reject(monitor.finish(code) ?? reason);
           return;
         }
         if (outputLimitError) {
@@ -384,7 +371,7 @@ export class CommandRunner {
             `${plan.binary} (${code ?? "unknown"}): ${stderr}`.trim(),
           ),
         );
-      });
+      }, (error: Error) => reject(monitor.finish() ?? error));
     });
 
     child.stderr!.on("data", (chunk) => {
@@ -393,7 +380,7 @@ export class CommandRunner {
         outputLimitError = new Error(
           `${plan.binary} stderr exceeded ${maxOutputBytes} bytes`,
         );
-        void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+        supervised.terminate(outputLimitError, { immediate: true });
         return;
       }
       stderr += chunk.toString();
@@ -994,7 +981,7 @@ export class CommandRunner {
       outcome =
         "remote" in launched
           ? await this.settleRemote(selected.plan, launched, "malware-scan")
-          : await this.collectChild(selected.plan, launched.child, "malware-scan");
+          : await this.collectChild(selected.plan, launched.child, launched.supervised, "malware-scan");
     } finally {
       await launched.release();
     }
@@ -1019,9 +1006,14 @@ export class CommandRunner {
   }
 
   /** Run a monitored local child to completion; rejects on spawn errors and budget or timeout kills. */
-  private collectChild(plan: CommandPlan, child: ChildProcess, metricPrefix: string): Promise<SandboxResult> {
+  private collectChild(
+    plan: CommandPlan,
+    child: ChildProcess,
+    supervised: SupervisedChild,
+    metricPrefix: string,
+  ): Promise<SandboxResult> {
     return new Promise<SandboxResult>((resolve, reject) => {
-      const monitor = this.startCommandMonitor(plan, child, { metricPrefix });
+      const monitor = this.startCommandMonitor(plan, child, supervised, { metricPrefix });
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (chunk) => {
@@ -1030,20 +1022,12 @@ export class CommandRunner {
       child.stderr?.on("data", (chunk) => {
         stderr += chunk.toString();
       });
-      let abortError: Error | null = null;
-      child.on("error", (error) => {
-        if (holdAbortedChild(child, error)) {
-          abortError = error;
-          return;
-        }
-        reject(monitor.finish() ?? error);
-      });
-      child.on("close", (code) => {
+      supervised.done.then(({ code, reason }) => {
         const budgetError = monitor.finish(code);
         if (budgetError) reject(budgetError);
-        else if (abortError) reject(abortError);
+        else if (reason) reject(reason);
         else resolve({ exitCode: code, stdout, stderr });
-      });
+      }, (error: Error) => reject(monitor.finish() ?? error));
     });
   }
 
@@ -1241,8 +1225,9 @@ export class CommandRunner {
     }
     if (isVectorBackendCommand(plan.args, this.scriptsDir)) {
       const env = buildCommandEnv({ plan, venvBin: this.venvBin, isVectorBackend: true });
-      const child = spawn(plan.binary, plan.args, { env, stdio: ["ignore", "pipe", "pipe"], signal });
-      return { child, release: async () => {} };
+      // Trusted code that holds backend credentials, not a parser: a process group is enough.
+      const child = spawnContained(plan.binary, plan.args, { env, containment: "process-group" });
+      return { child, supervised: superviseCommand(plan, child, signal), release: async () => {} };
     }
     const { scratchRoot, writablePaths } = await this.sandboxPathConfig();
     const pages = plan.pages ?? currentPerfContext()?.pageCount;
@@ -1259,7 +1244,17 @@ export class CommandRunner {
     });
     const { session, release } = await this.acquireSession();
     try {
-      if (session.spawn) return { child: session.spawn(command, signal), release };
+      if (session.spawn) {
+        assertProcessTeardown(session);
+        const child = session.spawn(command);
+        if (!containmentOf(child)) {
+          child.kill("SIGKILL");
+          throw new SandboxPolicyError(
+            `parser sandbox provider '${session.providerId}' started a command without process containment; refusing to run it`,
+          );
+        }
+        return { child, supervised: superviseCommand(plan, child, signal), release };
+      }
       if (session.run) return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {
@@ -1326,6 +1321,7 @@ export class CommandRunner {
   private startCommandMonitor(
     plan: CommandPlan,
     child: ReturnType<typeof spawn>,
+    supervised: SupervisedChild,
     options?: { metricPrefix?: string },
   ) {
     const context = currentPerfContext();
@@ -1354,9 +1350,8 @@ export class CommandRunner {
           console.error(
             `[worker-command] status=timeout binary=${plan.binary} timeout_ms=${timeoutMs} pages=${pages ?? "unknown"} pid=${pid}`,
           );
-          void inspectProcessTree(pid)
-            .then((snapshot) => killProcessTree(snapshot?.pids ?? [pid]))
-            .catch(() => killProcessTree([pid]));
+          // The same verified teardown as an abort: TERM, then KILL, settling once all of it is gone.
+          supervised.terminate(timeoutError);
         }, timeoutMs)
       : undefined;
     wallClockTimer?.unref?.();
@@ -1401,7 +1396,7 @@ export class CommandRunner {
             `rss_mb=${formatMemoryMb(snapshot.rssKb)} limit_mb=${formatMemoryMb(this.commandRssBudgetKb)} ` +
             `pid=${pid} args=${JSON.stringify(plan.args)}`,
         );
-        await killProcessTree(snapshot.pids);
+        supervised.terminate(budgetError, { immediate: true });
       }
     };
 
@@ -1667,54 +1662,32 @@ async function inspectProcessTree(
   });
 }
 
-async function killProcessTree(pids: number[], signal: NodeJS.Signals = "SIGKILL"): Promise<void> {
-  for (const pid of [...pids].reverse()) {
-    try {
-      process.kill(pid, signal);
-    } catch {}
-  }
-}
-
-/** How long an aborted command's process tree gets to exit after SIGTERM before it is SIGKILLed. */
-export const DEFAULT_COMMAND_ABORT_GRACE_MS = 2_000;
-
-function commandAbortGraceMs(): number {
-  return readPositiveNumber(process.env.WORKER_COMMAND_ABORT_GRACE_MS) ?? DEFAULT_COMMAND_ABORT_GRACE_MS;
-}
-
 /**
- * Node signals a child and emits an AbortError the moment its spawn signal aborts, before the child has
- * exited. Callers release semaphore slots and remove scratch once a command settles, so a running
- * parser must not outlive its command: for an abort of a spawned child, SIGTERM its whole process tree,
- * SIGKILL whatever is left after a short grace period, and return true so the caller settles on 'close'
- * (after every process holding its stdio is gone) instead of on this error.
+ * Untrusted parser work needs a provider that guarantees every process a command starts dies with it
+ * (a PID namespace). Without one, a parser's descendant can outlive the command, its slot and its
+ * scratch. Refuse loudly, unless this is the explicitly unisolated `none` mode.
  */
-function holdAbortedChild(child: ChildProcess, error: Error): boolean {
-  if (error.name !== "AbortError" || child.pid === undefined) return false;
-  const pid = child.pid;
-  // Snapshot the tree while the root still links it: a descendant reparented after the root dies is
-  // still killed with the first snapshot's pids.
-  const seen = new Set<number>([pid]);
-  const snapshot = async () => {
-    for (const descendant of (await inspectProcessTree(pid).catch(() => null))?.pids ?? []) seen.add(descendant);
-    return [...seen];
-  };
-  let closed = false;
-  void snapshot().then((pids) => {
-    if (!closed) void killProcessTree(pids, "SIGTERM");
+function assertProcessTeardown(session: SandboxSession): void {
+  if (session.isolation.processes) return;
+  if (session.providerId === "none" && process.env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true") return;
+  console.error(
+    `[parser-sandbox] status=refused provider=${session.providerId} reason=no-process-teardown ` +
+      "detail=provider cannot guarantee a parser's descendants die with it",
+  );
+  throw new SandboxPolicyError(
+    `parser sandbox provider '${session.providerId}' cannot guarantee that a command's processes die with it ` +
+      "(no PID namespace); refusing untrusted parser work",
+  );
+}
+
+/** Supervise a launched child with its run and document ids attached to every teardown log line. */
+function superviseCommand(plan: CommandPlan, child: ChildProcess, signal?: AbortSignal): SupervisedChild {
+  const context = currentPerfContext();
+  return superviseChild(child, {
+    label: path.basename(plan.binary),
+    signal,
+    context: { run_id: context?.runId, document_id: context?.documentId, stage: context?.stageName },
   });
-  const escalate = setTimeout(() => {
-    void snapshot().then((pids) => {
-      if (closed) return;
-      console.error(`[worker-command] status=abort-kill pid=${pid} grace_ms=${commandAbortGraceMs()} pids=${pids.length}`);
-      void killProcessTree(pids, "SIGKILL");
-    });
-  }, commandAbortGraceMs());
-  child.once("close", () => {
-    closed = true;
-    clearTimeout(escalate);
-  });
-  return true;
 }
 
 export { resolveScriptsDir };

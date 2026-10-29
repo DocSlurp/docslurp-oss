@@ -7,6 +7,10 @@ export type SandboxNetworkIsolation = "none" | "tcp-only" | "full";
 export interface SandboxIsolation {
   filesystem: boolean;
   network: SandboxNetworkIsolation;
+  /**
+   * Every process a command starts dies with it (a PID namespace), so teardown can be verified.
+   * Untrusted parser work refuses to run without it (see policy.ts and sandbox/teardown.ts).
+   */
   processes: boolean;
   location: "local" | "remote";
 }
@@ -65,8 +69,11 @@ export class SandboxRunError extends Error {
 export interface SandboxSession {
   readonly providerId: string;
   readonly isolation: SandboxIsolation;
-  /** Local providers return a child process so the existing monitor keeps enforcing limits. */
-  spawn?(command: SandboxCommand, signal?: AbortSignal): ChildProcess;
+  /**
+   * Local providers return a child started by `spawnContained` (sandbox/teardown.ts); the runner
+   * refuses any other. The caller owns abort, limits and teardown through `superviseChild`.
+   */
+  spawn?(command: SandboxCommand): ChildProcess;
   /** Remote providers run to completion and enforce limits provider-side. */
   run?(command: SandboxCommand, signal?: AbortSignal): Promise<SandboxResult>;
   close(): Promise<void>;

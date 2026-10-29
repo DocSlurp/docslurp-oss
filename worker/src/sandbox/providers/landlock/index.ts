@@ -1,9 +1,11 @@
-import { spawn, spawnSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { release } from "node:os";
 import path from "node:path";
 
 import { readSandboxConfig } from "../../config-schema.js";
+import { startSandboxScratchSweeper } from "../../scratch-sweep.js";
+import { afterTeardown, probePidNamespace, spawnContained } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
   SandboxCommand,
@@ -64,8 +66,9 @@ export function networkForKernel(kernelRelease: string): SandboxNetworkIsolation
   return major > 6 || (major === 6 && minor >= 8) ? "tcp-only" : "none";
 }
 
+/** Landlock confines files and TCP but not processes; each command also runs in its own PID namespace. */
 function isolationFor(kernelRelease: string): SandboxIsolation {
-  return { filesystem: true, network: networkForKernel(kernelRelease), processes: false, location: "local" };
+  return { filesystem: true, network: networkForKernel(kernelRelease), processes: probePidNamespace().ok, location: "local" };
 }
 
 /** Grantable paths that exist. landrun splits a grant list on commas, so a comma in a path fails closed. */
@@ -164,6 +167,8 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
       { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8", timeout: PROBE_TIMEOUT_MS },
     );
     if (result.status === 0) {
+      // Without a PID namespace a parser's descendants could outlive it: fail closed.
+      if (!isolation.processes) return { ok: false, isolation, detail: `${probePidNamespace().detail} (kernel ${kernel})` };
       return { ok: true, isolation, detail: `landrun available (kernel ${kernel})` };
     }
     const reason =
@@ -172,26 +177,31 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
   },
   async openSession(config) {
     const isolation = isolationFor(release());
+    startSandboxScratchSweeper(config.scratchRoot);
     return {
       providerId: "landlock",
       isolation,
-      spawn: (command, signal) => {
+      spawn: (command) => {
         const scratch = createCommandScratch(config.scratchRoot);
-        const cleanup = () => rmSync(scratch.dir, { recursive: true, force: true });
+        const cleanup = () => {
+          rmSync(scratch.dir, { recursive: true, force: true });
+          rmSync(`${scratch.dir}.owner`, { force: true });
+        };
         try {
           const sandboxed = {
             ...command,
             env: { ...command.env, ...scratch.env },
             writablePaths: [...command.writablePaths, scratch.dir],
           };
-          const child = spawn(config.binary, landrunArgs(sandboxed), {
+          // landrun execs the parser, which becomes init of its own PID namespace.
+          const child = spawnContained(config.binary, landrunArgs(sandboxed), {
             env: sandboxed.env,
             cwd: scratch.cwd,
-            stdio: ["ignore", "pipe", "pipe"],
-            signal,
+            containment: "pid-namespace",
           });
-          // 'close' follows a normal exit, a kill or abort, and a failed spawn alike.
-          child.once("close", cleanup);
+          if (child.pid !== undefined) writeFileSync(`${scratch.dir}.owner`, `${child.pid}\n`);
+          // Only once every process of the command is gone; a poisoned command keeps it for the sweep.
+          afterTeardown(child, cleanup);
           return child;
         } catch (error) {
           cleanup();

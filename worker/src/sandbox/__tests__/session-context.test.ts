@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PassThrough } from "node:stream";
@@ -8,9 +7,10 @@ import { ProgressTracker, runWithProgressTracker } from "../../lib/work-progress
 import type { UsageEvent } from "../../models.js";
 import { CommandRunner } from "../../tools/runner.js";
 import { runWithSandboxScope, SandboxSessionScope } from "../session-context.js";
+import { spawnContained } from "../teardown.js";
 import { SandboxRunError, type SandboxCommand, type SandboxIsolation, type SandboxResult, type SandboxSession } from "../types.js";
 
-const ISOLATION: SandboxIsolation = { filesystem: false, network: "none", processes: false, location: "local" };
+const ISOLATION: SandboxIsolation = { filesystem: false, network: "none", processes: true, location: "local" };
 
 function recordingSession(id: string, commands: SandboxCommand[]): SandboxSession {
   return {
@@ -18,8 +18,9 @@ function recordingSession(id: string, commands: SandboxCommand[]): SandboxSessio
     isolation: ISOLATION,
     spawn: (command) => {
       commands.push(command);
-      return spawn(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(id)})`], {
-        stdio: ["ignore", "pipe", "pipe"],
+      return spawnContained(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(id)})`], {
+        env: process.env,
+        containment: "process-group",
       });
     },
     close: async () => {},

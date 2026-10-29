@@ -1,8 +1,11 @@
-import { spawn } from "node:child_process";
-
+import { probePidNamespace, spawnContained } from "../../teardown.js";
 import type { ParserSandboxProvider, SandboxIsolation } from "../../types.js";
 
-const ISOLATION: SandboxIsolation = { filesystem: false, network: "none", processes: false, location: "local" };
+/** No filesystem or network isolation. Commands still get a PID namespace where the host allows it,
+ * so their processes die with them; without one, untrusted work needs DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED. */
+function isolation(): SandboxIsolation {
+  return { filesystem: false, network: "none", processes: probePidNamespace().ok, location: "local" };
+}
 
 const provider: ParserSandboxProvider<Record<string, never>> = {
   id: "none",
@@ -10,14 +13,20 @@ const provider: ParserSandboxProvider<Record<string, never>> = {
   description: "Runs parsers directly on the host with no isolation. Development only.",
   configSchema: { type: "object", properties: {} },
   readConfig: () => ({}),
-  probe: async () => ({ ok: true, isolation: ISOLATION, detail: "no isolation" }),
-  openSession: async () => ({
-    providerId: "none",
-    isolation: ISOLATION,
-    spawn: (command, signal) =>
-      spawn(command.binary, command.args, { env: command.env, stdio: ["ignore", "pipe", "pipe"], signal }),
-    close: async () => {},
-  }),
+  probe: async () => ({ ok: true, isolation: isolation(), detail: `no isolation; ${probePidNamespace().detail}` }),
+  openSession: async () => {
+    const current = isolation();
+    return {
+      providerId: "none",
+      isolation: current,
+      spawn: (command) =>
+        spawnContained(command.binary, command.args, {
+          env: command.env,
+          containment: current.processes ? "pid-namespace" : "process-group",
+        }),
+      close: async () => {},
+    };
+  },
 };
 
 export default provider as ParserSandboxProvider;

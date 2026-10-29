@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, type TestContext } from "vitest";
 
+import { superviseChild } from "../teardown.js";
 import type { SandboxCommand, SandboxResult, SandboxSession } from "../types.js";
 
 const BASH = "/usr/bin/bash";
@@ -14,19 +15,18 @@ export async function execInSession(
   signal?: AbortSignal,
 ): Promise<SandboxResult> {
   if (session.spawn) {
-    const child = session.spawn(command, signal);
+    const child = session.spawn(command);
+    // Local sessions leave abort, limits and teardown to the caller (the runner in production).
+    const supervised = superviseChild(child, { label: "contract", signal });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (chunk) => (stdout += chunk));
     child.stderr?.on("data", (chunk) => (stderr += chunk));
-    // Local sessions leave limit enforcement to the caller (the runner's monitor in production).
-    const timer = setTimeout(() => child.kill("SIGKILL"), command.limits.timeoutMs);
+    const timer = setTimeout(() => supervised.terminate(new Error("timeout"), { immediate: true }), command.limits.timeoutMs);
     try {
-      const exitCode = await new Promise<number | null>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", (code) => resolve(code));
-      });
-      return { exitCode, stdout, stderr };
+      const { code, reason } = await supervised.done;
+      if (reason?.name === "AbortError") throw reason;
+      return { exitCode: code, stdout, stderr };
     } finally {
       clearTimeout(timer);
     }
@@ -195,6 +195,36 @@ export function defineSandboxContract(
       expect(next.stdout.trim()).toBe("still-open");
     });
 
+    it("leaves no descendant alive once an aborted command settles, even one that left its group", async (ctx) => {
+      const opened = ready(ctx);
+      if (opened.isolation.location !== "local") ctx.skip("remote processes are stopped provider-side");
+      // The root exits at once on TERM; its setsid'd grandchild ignores TERM and keeps stdout open.
+      const duration = `31.${process.pid}${Date.now() % 100_000}`;
+      const controller = new AbortController();
+      const aborted = execInSession(
+        opened,
+        command(["-c", `trap "exit 0" TERM; setsid /usr/bin/bash -c 'trap "" TERM; exec sleep ${duration}' & sleep 600 & wait $!`]),
+        controller.signal,
+      ).catch((error: unknown) => error);
+      const deadline = Date.now() + 10_000;
+      let sleeper: number | null = null;
+      while ((sleeper = hostPidOfSleep(duration)) === null && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(sleeper).not.toBeNull();
+      controller.abort();
+      try {
+        expect(await aborted).toBeInstanceOf(Error);
+        expect(hostPidOfSleep(duration)).toBeNull();
+      } finally {
+        if (sleeper !== null) {
+          try {
+            process.kill(sleeper, "SIGKILL");
+          } catch {}
+        }
+      }
+    }, 20_000);
+
     it("never brings back an aborted command's partial output, and stops its processes", async (ctx) => {
       const opened = ready(ctx);
       // A local command writes the host directory directly, so a partial file it wrote before
@@ -255,4 +285,15 @@ echo checked`,
       expect(result.stderr).toContain("boom");
     });
   });
+}
+
+/** Host pid of a live `sleep <duration>`, read from the host's /proc (commands may see their own). */
+function hostPidOfSleep(duration: string): number | null {
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      if (readFileSync(`/proc/${entry}/cmdline`, "utf8") === `sleep\0${duration}\0`) return Number(entry);
+    } catch {}
+  }
+  return null;
 }

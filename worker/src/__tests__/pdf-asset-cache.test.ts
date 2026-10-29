@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +17,7 @@ import {
   parsePdfPageSizes,
   runLanes,
 } from "../pipeline/pdf-asset-cache.js";
+import { spawnContained } from "../sandbox/teardown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
 
@@ -373,20 +373,21 @@ describe("PdfRasterCache", () => {
       const { spawn } = require("node:child_process");
       const { writeFileSync } = require("node:fs");
       process.on("SIGTERM", () => {});
-      const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });
+      const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}, process.argv[1]], { stdio: "ignore" });
       child.on("spawn", () => writeFileSync(process.argv[1], process.pid + " " + child.pid));
       setInterval(() => {}, 1000);
     `;
     const slots = new Semaphore(4);
     let scratch = "";
     let failedAt = 0;
+    let treePids: number[] = [];
     let exit: { at: number; signal: NodeJS.Signals | null; slotsInUse: number; scratchPresent: boolean } | null = null;
     const commands = new CommandRunner({
       openSession: async () => ({
         providerId: "test-local",
-        isolation: "none" as never,
-        spawn: (command, signal) => {
-          const child = spawn(command.binary, command.args, { env: command.env, stdio: ["ignore", "pipe", "pipe"], signal });
+        isolation: { filesystem: false, network: "none", processes: true, location: "local" },
+        spawn: (command) => {
+          const child = spawnContained(command.binary, command.args, { env: command.env, containment: "pid-namespace" });
           child.once("exit", (_code, exitSignal) => {
             exit = { at: Date.now(), signal: exitSignal, slotsInUse: slots.inUse, scratchPresent: existsSync(scratch) };
           });
@@ -408,6 +409,9 @@ describe("PdfRasterCache", () => {
         while (!existsSync(pidFile) || (await readFile(pidFile, "utf8")).split(" ").length < 2) {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
+        // The parser runs in its own PID namespace, so the pids it wrote are namespace pids: find the
+        // tree's host pids by the pid-file path both processes carry in argv.
+        treePids = hostPidsWithArg(pidFile);
         failedAt = Date.now();
         throw new Error("pdftoppm crashed");
       },
@@ -425,7 +429,8 @@ describe("PdfRasterCache", () => {
       else process.env.WORKER_COMMAND_ABORT_GRACE_MS = previousGrace;
       await sourceCache.clear();
     }
-    const [parserPid, grandchildPid] = (await readFile(pidFile, "utf8")).split(" ").map(Number);
+    expect(treePids).toHaveLength(2);
+    const [parserPid, grandchildPid] = treePids;
     // The parser ignored SIGTERM, so it only exited when the grace period ran out and SIGKILL followed.
     expect(exit).not.toBeNull();
     expect(exit!.signal).toBe("SIGKILL");
@@ -609,3 +614,16 @@ describe("PdfRasterCache", () => {
     ]);
   });
 });
+
+/** Host pids of live node processes with `arg` among their argv (not the unshare launcher). */
+function hostPidsWithArg(arg: string): number[] {
+  const found: number[] = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const argv = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
+      if (argv[0] === process.execPath && argv.includes(arg)) found.push(Number(entry));
+    } catch {}
+  }
+  return found;
+}
