@@ -992,7 +992,7 @@ export async function updateWorkspace(
     pipeline = await resolveUpdatedPipeline(workspaceId, current, parsed, options);
   }
   // With precomputed inputs the caller already validated the switch (this may run inside its transaction).
-  if (!options.precomputed && deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
+  if (!options.precomputed && deferredProfilesEnabled() && (pipeline.indexingMode !== current.pipeline.indexingMode || (pipeline.indexingMode === "visual" && pipeline.quality === "fast"))) {
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 

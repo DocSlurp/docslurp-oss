@@ -547,7 +547,7 @@ async function applyPlannedChange(args: {
   const { plan, userId } = args;
   const { workspace } = plan;
   // Mode-switch validation reads on other connections, so it runs before any transaction opens.
-  if (deferredProfilesEnabled() && plan.nextPipeline.indexingMode !== workspace.pipeline.indexingMode) {
+  if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== workspace.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && plan.nextPipeline.quality === "fast"))) {
     await validateModeSwitch({ current: workspace, nextPipeline: plan.nextPipeline });
   }
   const lock = (tx: Tx) => tx`select pg_advisory_xact_lock(hashtextextended(${`config-change:${workspace.id}`}, 0))`;

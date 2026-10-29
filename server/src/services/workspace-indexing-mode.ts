@@ -62,7 +62,15 @@ export function hasPrivatePageEmbedder(): boolean {
 }
 
 /** Visual mode sends page images to an embedder: refuse when privacy or PII policy forbids it. */
-export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privacyMode" | "piiPolicy">): void {
+export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privacyMode" | "piiPolicy"> & Partial<Pick<PipelineFeatures, "quality">>): void {
+  // Visual mode embeds every page image, which bills Rich; Fast promises Fast pricing and no page reading.
+  if (pipeline.quality === "fast") {
+    throw new IndexingModeError(
+      "Visual mode embeds page images, which bill Rich; Fast quality reads no page. Choose Auto or Good quality, or another indexing mode.",
+      400,
+      "visual_mode_quality",
+    );
+  }
   const hostedForbidden = pipeline.privacyMode !== "standard" && !hasPrivatePageEmbedder();
   const piiBlocks = Boolean(pipeline.piiPolicy?.enabled && pipeline.piiPolicy.action === "block_indexing");
   if (hostedForbidden || piiBlocks) {
@@ -333,7 +341,7 @@ export async function requestFullIndex(args: FullIndexArgs): Promise<{ runId: st
 export type ModeSwitchResult = { runIds: string[]; pipelines: Map<string, PipelineFeatures> };
 
 /**
- * Validates a requested mode before it is saved: visual needs privacy/PII clearance. Every mode is open to every
+ * Validates a requested mode before it is saved: visual needs privacy/PII clearance and a quality that reads pages. Every mode is open to every
  * organization; credits are checked when the indexing work is admitted, not here.
  * `current` is null when creating a workspace.
  */
@@ -341,7 +349,7 @@ export async function validateModeChoice(args: {
   orgId: string;
   workspaceId: string | null;
   currentMode: IndexingMode | null;
-  nextPipeline: Pick<PipelineFeatures, "indexingMode" | "privacyMode" | "piiPolicy">;
+  nextPipeline: Pick<PipelineFeatures, "indexingMode" | "privacyMode" | "piiPolicy"> & Partial<Pick<PipelineFeatures, "quality">>;
 }): Promise<void> {
   if (args.nextPipeline.indexingMode === "visual") assertVisualModeAllowed(args.nextPipeline);
 }

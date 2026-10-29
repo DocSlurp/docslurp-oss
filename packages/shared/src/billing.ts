@@ -680,7 +680,7 @@ export type QualityModeInfo = {
 
 /**
  * The public processing quality choice. Prices come from PRICE_CARD: Fast never reads a page with OCR or a model
- * (scans are kept as page images), so it is Fast-priced throughout; Auto bills each page by how it was read; Good
+ * (scans are kept as page images), so its pages bill Fast unless the usage ledger records a read; Auto bills each page by how it was read; Good
  * reads every page with a vision model (Rich, plus the extra-output-token rule, richPagesForOutputTokens).
  */
 export const QUALITY_MODES: Record<QualityMode, QualityModeInfo> = {
@@ -688,7 +688,7 @@ export const QUALITY_MODES: Record<QualityMode, QualityModeInfo> = {
     id: "fast",
     label: "Fast",
     description: "Text layer only. Scanned pages are kept as images, not read.",
-    priceNote: "Every page bills Fast. Pages without a text layer are stored as page images and are not searchable.",
+    priceNote: "Pages bill Fast. A page bills Rich only when a model actually reads it, such as visual indexing embedding its page image; a workspace cannot combine Fast with visual mode. Pages without a text layer are stored as page images and are not searchable.",
     creditsPer1kPages: { min: PRICE_CARD.fastPer1kPages, max: PRICE_CARD.fastPer1kPages },
   },
   auto: {
