@@ -17,6 +17,7 @@ import {
   mergePipelineFeatures,
   migrateLegacyQualitySettings,
   normalizePipelineFeatures,
+  parseExtractorOptions,
   pageImageReferenceMarkdown,
   parseStoredPipelineFeatures,
   parserPlaybookForQuality,
@@ -209,22 +210,85 @@ describe("documentExtractionForQuality", () => {
 });
 
 describe("Kreuzberg options allow-list", () => {
-  it("keeps only the allow-listed Kreuzberg keys in Auto and Good", () => {
+  it("keeps the allow-listed Kreuzberg keys in Auto and Good", () => {
     const pipeline = normalizePipelineFeatures({
       quality: "auto",
-      documentExtraction: { options: { kreuzberg: {
-        forceOcr: true,
-        ocr: { backend: "paddleocr", language: "deu", vlmConfig: { model: "x" }, baseUrl: "http://169.254.169.254" },
-        structuredExtraction: { schema: {} },
-        baseUrl: "http://attacker.invalid",
-        cacheNamespace: "other-tenant",
-        useCache: false,
-      } } } as never,
+      documentExtraction: { options: { kreuzberg: { forceOcr: true, ocr: { backend: "paddleocr", language: "deu" } } } } as never,
     });
     expect(pipeline.documentExtraction.options.kreuzberg).toEqual({ forceOcr: true, ocr: { backend: "paddleocr", language: "deu" } });
-    expect(documentExtractionConfigSchema.parse({ options: { kreuzberg: { structuredExtraction: {} } } }).options).toEqual({ kreuzberg: {} });
   });
 
+  it("rejects every key outside the allow-list, nested OCR keys included (fail closed)", () => {
+    for (const kreuzberg of [
+      { structuredExtraction: { schema: {} } },
+      { baseUrl: "http://attacker.invalid" },
+      { cacheNamespace: "other-tenant" },
+      { useCache: false },
+      { ocr: { backend: "paddleocr", vlmConfig: { model: "x" } } },
+      { ocr: { baseUrl: "http://169.254.169.254" } },
+    ]) {
+      expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg } }), JSON.stringify(kreuzberg)).toThrow();
+      expect(() => normalizePipelineFeatures({ quality: "auto", documentExtraction: { options: { kreuzberg } } } as never)).toThrow();
+    }
+  });
+
+  it("constrains OCR languages to Tesseract codes (L2)", () => {
+    for (const language of ["eng", "deu", "chi_sim", "eng+deu", "eng+chi_tra+jpn"]) {
+      expect(documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } }, ocr: { language } }).ocr.language).toBe(language);
+    }
+    for (const language of ["../../etc/passwd", "eng;rm -rf /", "en", "ENG", "eng+", "+eng", "eng deu", "--psm 0", "e".repeat(9), "eng\nX"]) {
+      expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } } }), language).toThrow();
+      expect(() => documentExtractionConfigSchema.parse({ ocr: { language } }), language).toThrow();
+    }
+  });
+});
+
+describe("extractor options (M4: one strict schema per extractor id)", () => {
+  it("accepts only Dolphin's mode and maxBatchSize", () => {
+    expect(documentExtractionConfigSchema.parse({ options: { dolphin: { mode: "layout", maxBatchSize: 4 } } }).options)
+      .toEqual({ dolphin: { mode: "layout", maxBatchSize: 4 } });
+    expect(parseExtractorOptions("dolphin", { mode: "page" })).toEqual({ mode: "page" });
+  });
+
+  it("rejects Dolphin repo, model and Python paths, and any other key", () => {
+    for (const dolphin of [
+      { repoPath: "/tmp/attacker" },
+      { modelPath: "/tmp/attacker-model" },
+      { mode: "page", repoPath: "/workspace/uploads/evil" },
+      { pythonBin: "/bin/sh" },
+      { dolphin: { repoPath: "/tmp/attacker" } },
+      { modelFlavor: "Dolphin-v2" },
+      { mode: "shell" },
+      { maxBatchSize: 1000 },
+    ]) {
+      expect(() => documentExtractionConfigSchema.parse({ options: { dolphin } }), JSON.stringify(dolphin)).toThrow();
+      expect(() => normalizePipelineFeatures({ documentExtraction: { options: { dolphin } } } as never)).toThrow();
+      expect(() => parseExtractorOptions("dolphin", dolphin)).toThrow();
+    }
+  });
+
+  it("rejects options for extractor ids without an option schema", () => {
+    for (const id of ["pandoc", "native-pdf", "liteparse", "poppler-text", "doppler", "graph-local", "json", "unknown", "__proto__", "constructor", "toString"]) {
+      expect(() => documentExtractionConfigSchema.parse({ options: { [id]: {} } }), id).toThrow();
+      expect(() => parseExtractorOptions(id, {}), id).toThrow(/takes no options/);
+    }
+  });
+});
+
+describe("Fast's Kreuzberg config (L1)", () => {
+  it("carries no ocr key, only the disableOcr marker", () => {
+    const hostileOcr = documentExtractionConfigSchema.parse({
+      options: { kreuzberg: { forceOcr: true, forceOcrPages: [1], ocr: { backend: "tesseract", language: "eng" } } },
+    });
+    const { config } = documentExtractionForQuality(hostileOcr, "fast");
+    const kreuzberg = config.options.kreuzberg as Record<string, unknown>;
+    expect(Object.keys(kreuzberg)).toEqual(["disableOcr"]);
+    expect("ocr" in kreuzberg).toBe(false);
+    expect(kreuzberg.disableOcr).toBe(true);
+  });
+});
+
+describe("Kreuzberg OCR backend", () => {
   it("rejects an unknown OCR backend", () => {
     expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: "vlm" } } } })).toThrow();
   });

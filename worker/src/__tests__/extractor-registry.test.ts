@@ -29,6 +29,33 @@ describe("document extractor registry", () => {
     expect(serializeExtractorOptions(options, "native-pdf")).toBeUndefined();
   });
 
+  it("re-parses every extractor's options against its strict schema before handing any to a script (M4)", () => {
+    expect(serializeExtractorOptions({ dolphin: { mode: "layout", maxBatchSize: 4 } }, "dolphin")).toBe('{"mode":"layout","maxBatchSize":4}');
+    // A hand-built or stored config with Dolphin paths never reaches dolphin_extract.py, whichever extractor runs.
+    const injected = { kreuzberg: { outputFormat: "markdown" }, dolphin: { mode: "page", repoPath: "/tmp/attacker", modelPath: "/tmp/m" } };
+    expect(() => serializeExtractorOptions(injected, "dolphin")).toThrow();
+    expect(() => serializeExtractorOptions(injected, "kreuzberg")).toThrow();
+    expect(() => serializeExtractorOptions({ dolphin: { dolphin: { repoPath: "/tmp/attacker" } } }, "dolphin")).toThrow();
+    // Unknown ids and keys fail closed.
+    expect(() => serializeExtractorOptions({ pandoc: { filter: "/tmp/evil.lua" } }, "pandoc")).toThrow(/takes no options/);
+    expect(() => serializeExtractorOptions({ liteparse: { ocr: true } }, "kreuzberg")).toThrow(/takes no options/);
+    expect(() => serializeExtractorOptions({ kreuzberg: { baseUrl: "http://169.254.169.254" } }, "kreuzberg")).toThrow();
+    expect(() => serializeExtractorOptions({ kreuzberg: { ocr: { language: "../../tessdata" } } }, "kreuzberg")).toThrow();
+  });
+
+  it("refuses image inputs to Kreuzberg when OCR is meant to be off (Fast's disableOcr marker; L1)", async () => {
+    const plan = { binary: "node", args: [], available: true };
+    const runner = { kreuzbergMarkdown: async () => plan } as unknown as CommandRunner;
+    const off = '{"disableOcr":true}';
+    for (const [source, format] of [["/tmp/scan.png", "image"], ["/tmp/photo.JPG", undefined], ["/tmp/scan.pdf", "image"], ["/tmp/x.webp", "pdf"]] as const) {
+      const prepared = await documentExtractorRegistry.prepare("kreuzberg", runner, source, off, format ? { format } : undefined);
+      expect(prepared.plan.available, source).toBe(false);
+    }
+    // Text-layer formats with the marker, and images without it, are unaffected.
+    expect((await documentExtractorRegistry.prepare("kreuzberg", runner, "/tmp/a.pdf", off, { format: "pdf" })).plan.available).toBe(true);
+    expect((await documentExtractorRegistry.prepare("kreuzberg", runner, "/tmp/a.docx", off, { format: "office-word" })).plan.available).toBe(true);
+  });
+
   it("registers Poppler text and the local graph as selectable PDF methods", async () => {
     expect(documentExtractorRegistry.resolve("pdf", ["kreuzberg", "poppler-text", "graph-local"]))
       .toEqual(["kreuzberg", "poppler-text", "graph-local"]);

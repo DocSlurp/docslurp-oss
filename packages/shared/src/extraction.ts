@@ -111,20 +111,28 @@ export const extractionJsonOptionsSchema = z
   .nullable()
   .default(null);
 
-export const dolphinAdapterConfigSchema = z.object({
-  mode: dolphinModeSchema.default("page"),
-  modelFlavor: dolphinModelFlavorSchema.default("Dolphin-v2"),
-  maxBatchSize: z.number().int().min(1).max(32).default(8),
-  repoPath: z.string().trim().min(1).nullable().default(null),
-  modelPath: z.string().trim().min(1).nullable().default(null),
-  preferGpu: z.boolean().default(true),
-});
-export type DolphinAdapterConfig = z.infer<typeof dolphinAdapterConfigSchema>;
+/** An OCR language list as Tesseract names it (`eng`, `chi_sim`, `eng+deu`): no paths, flags or other characters. */
+export const ocrLanguageSchema = z.string().trim().regex(/^[a-z_]{3,8}(\+[a-z_]{3,8})*$/, "OCR language must be Tesseract codes such as eng or eng+deu").max(64);
+
+/**
+ * Dolphin options a workspace may set. The repository and model paths, and the Python binary, come only from the
+ * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a workspace would
+ * let it choose which script the worker runs.
+ */
+export const dolphinExtractorOptionsSchema = z.object({
+  mode: dolphinModeSchema.optional(),
+  maxBatchSize: z.number().int().min(1).max(32).optional(),
+}).strict();
+export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSchema>;
 
 /**
  * Kreuzberg options a workspace may set. The worker spreads them into Kreuzberg's extractFile config, so only these
- * keys survive parsing: anything else (structured extraction, a VLM OCR config with its own base URL, cache
- * namespaces) would let a workspace make the parser call out or share caches.
+ * keys are accepted: anything else (structured extraction, a VLM OCR config with its own base URL, cache
+ * namespaces) would let a workspace make the parser call out or share caches. Unknown keys are rejected.
+ *
+ * `disableOcr` is a marker for the worker, not a Kreuzberg switch: @kreuzberg/node 4.10.2 drops it (and
+ * `ocr.enabled`) in normalizeExtractionConfig and OCRs every image regardless, so the extractor registry refuses
+ * image inputs to Kreuzberg when it is set (Fast sets it).
  */
 export const kreuzbergExtractorOptionsSchema = z.object({
   outputFormat: z.literal("markdown").optional(),
@@ -133,15 +141,34 @@ export const kreuzbergExtractorOptionsSchema = z.object({
   disableOcr: z.boolean().optional(),
   ocr: z.object({
     backend: extractionOcrBackendSchema.optional(),
-    language: z.string().trim().min(2).max(32).optional(),
-  }).optional(),
-});
+    language: ocrLanguageSchema.optional(),
+  }).strict().optional(),
+}).strict();
 export type KreuzbergExtractorOptions = z.infer<typeof kreuzbergExtractorOptionsSchema>;
 
-/** Extractor options by extractor id; `kreuzberg` is allow-listed (kreuzbergExtractorOptionsSchema). */
+/**
+ * Option schemas by extractor id. Only these extractors take options; every other id, and every key a schema does
+ * not name, is rejected. The worker re-parses each id before handing options to a script (parseExtractorOptions).
+ */
+export const extractorOptionSchemas = {
+  kreuzberg: kreuzbergExtractorOptionsSchema,
+  dolphin: dolphinExtractorOptionsSchema,
+} as const;
+
+/** Extractor options by extractor id (extractorOptionSchemas); unknown ids and keys are rejected. */
 export const documentExtractorOptionsSchema = z
-  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional() })
-  .catchall(z.unknown());
+  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional() })
+  .strict();
+
+/**
+ * One extractor's options, validated against its own schema. Throws for an id without an option schema and for any
+ * key the schema does not allow, so a stored or hand-built config can never pass unchecked options to a script.
+ */
+export function parseExtractorOptions(id: string, value: unknown): Record<string, unknown> {
+  const schema = (extractorOptionSchemas as Record<string, z.ZodType<Record<string, unknown>>>)[id];
+  if (!schema || !Object.hasOwn(extractorOptionSchemas, id)) throw new Error(`extractor ${id} takes no options`);
+  return schema.parse(value);
+}
 
 /** A workspace policy. The document router can emit the same ordered IDs per document. */
 export const documentExtractionConfigSchema = z.object({
@@ -161,7 +188,7 @@ export const documentExtractionConfigSchema = z.object({
   options: documentExtractorOptionsSchema.default({}),
   forceOcr: z.boolean().default(false),
   ocr: z.object({
-    language: z.string().trim().min(2).max(16).default("eng"),
+    language: ocrLanguageSchema.default("eng"),
     autoRotate: z.boolean().default(true),
   }).default({ language: "eng", autoRotate: true }),
 });
