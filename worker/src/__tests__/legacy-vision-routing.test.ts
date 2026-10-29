@@ -3,10 +3,19 @@ import {
   buildAdaptiveRoutingDecisionSurface,
   classifyAdaptivePage,
   classifyTextAndFilename,
+  CLASSIFY_TEXT_MAX_CHARS,
   DRAWN_CONTENT_MIN_BYTES_PER_PAGE,
+  hasDistinctTerms,
   selectLegacyVisionPages,
 } from "../stages/classify-route.js";
-import { findSparsePages, imageFilePageEvidence, nativePageWords, type PageImageEvidence } from "../lib/page-image-evidence.js";
+import {
+  drawnBytesPerPage,
+  findSparsePages,
+  imageFilePageEvidence,
+  nativePageWords,
+  totalEmbeddedImageBytes,
+  type PageImageEvidence,
+} from "../lib/page-image-evidence.js";
 import { shouldFailOpenVisionError } from "../stages/vision-extract.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { ProviderRetryableError } from "../lib/provider-retry.js";
@@ -24,7 +33,7 @@ function surface(args: {
   text: string;
   pageCount?: number;
   evidence?: PageImageEvidence[];
-  sourceBytesPerPage?: number | null;
+  drawnBytesPerPage?: number | null;
   routingV2?: boolean;
 }) {
   return buildAdaptiveRoutingDecisionSurface({
@@ -34,7 +43,7 @@ function surface(args: {
     pageCount: args.pageCount ?? 1,
     evidence: { source: "canonical-document", artifactUri: "s3://bucket/canonical.json" },
     pageImageEvidence: new Map((args.evidence ?? []).map((page) => [page.pageNumber, page])),
-    sourceBytesPerPage: args.sourceBytesPerPage ?? null,
+    drawnBytesPerPage: args.drawnBytesPerPage ?? null,
     routingV2: args.routingV2 ?? true,
   });
 }
@@ -86,11 +95,11 @@ describe("documents without any extracted text", () => {
   const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };
 
   it("sends drawn-content pages (path-only text) to vision", () => {
-    expect(selected(surface({ text: "", evidence: [empty], sourceBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 20 }))).toEqual([1]);
+    expect(selected(surface({ text: "", evidence: [empty], drawnBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 20 }))).toEqual([1]);
   });
 
   it("keeps small blank documents out of vision", () => {
-    expect(selected(surface({ text: "", evidence: [empty], sourceBytesPerPage: 900 }))).toEqual([]);
+    expect(selected(surface({ text: "", evidence: [empty], drawnBytesPerPage: 900 }))).toEqual([]);
     expect(selected(surface({ text: "", evidence: [empty] }))).toEqual([]);
   });
 
@@ -99,7 +108,7 @@ describe("documents without any extracted text", () => {
       text: `${OCR_PROSE}\f`,
       pageCount: 2,
       evidence: [{ ...empty, pageNumber: 2 }],
-      sourceBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 20,
+      drawnBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 20,
     });
     expect(selected(routed)).toEqual([]);
   });
@@ -212,7 +221,7 @@ describe("routing v2 off (VISION_ROUTING_V2 default)", () => {
 
   it("keeps the always-on textless-PDF fix: a document without text but heavy pages reaches vision", () => {
     const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };
-    const routed = surface({ text: "", evidence: [empty], sourceBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 4, routingV2: false });
+    const routed = surface({ text: "", evidence: [empty], drawnBytesPerPage: DRAWN_CONTENT_MIN_BYTES_PER_PAGE * 4, routingV2: false });
     expect(routed.status === "ready" && routed.pages[0]!.ocrDecision?.signals).toContain("ocr-authorized:drawn-content");
     expect(selectLegacyVisionPages(routed.status === "ready" ? routed.pages : [])).toEqual([1]);
   });
@@ -220,5 +229,58 @@ describe("routing v2 off (VISION_ROUTING_V2 default)", () => {
   it("keeps the always-on rejected-output fail-open", () => {
     const rejected = new VisionOutputRejectedError("vision output rejected: leader-run", [], 10, 10, 0);
     expect(shouldFailOpenVisionError(rejected)).toBe(true);
+  });
+});
+
+describe("drawn bytes per page", () => {
+  const header = "page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio\n" +
+    "--------------------------------------------------------------------------------------------\n";
+  const row = (page: number, object: number, size: string, type = "image") =>
+    `   ${page}     0 ${type}    1700  2200  rgb     3   8  jpeg   no       ${object}  0   200   200  ${size} 1.2%`;
+
+  it("subtracts every embedded image in the file, once per image object", () => {
+    // A logo (object 7) on both pages is stored once; a full-page photo on page 2.
+    const listing = header + [row(1, 7, "10K"), row(2, 7, "10K"), row(2, 9, "2.0M")].join("\n");
+    expect(totalEmbeddedImageBytes(listing)).toBe(10 * 1024 + 2 * 1024 ** 2);
+    // A 2 MB photo on page 2 does not make blank page 1 look drawn.
+    expect(drawnBytesPerPage(2 * 1024 ** 2 + 12 * 1024, totalEmbeddedImageBytes(listing), 2)).toBe(1024);
+  });
+
+  it("is unknown when the file size or any image size is unknown", () => {
+    expect(totalEmbeddedImageBytes(header + row(1, 7, "??"))).toBeNull();
+    expect(drawnBytesPerPage(null, 0, 1)).toBeNull();
+    expect(drawnBytesPerPage(4096, null, 1)).toBeNull();
+    expect(drawnBytesPerPage(4096, 0, 2)).toBe(2048);
+  });
+});
+
+describe("bounded text scans", () => {
+  it("finds distinct terms without materializing every match", () => {
+    expect(hasDistinctTerms("vat vat vat", /\bvat\b/gi, 2)).toBe(false);
+    expect(hasDistinctTerms("VAT then a subtotal", /\b(?:vat|subtotal)\b/gi, 2)).toBe(true);
+    // Not global as passed: still walks every match.
+    expect(hasDistinctTerms("vat and subtotal", /\b(?:vat|subtotal)\b/i, 2)).toBe(true);
+  });
+
+  it("classifies a multi-megabyte upload in bounded time and memory", () => {
+    // 16 MB of one repeated term: the old Set([...matchAll]) built millions of match objects.
+    const huge = "vat ".repeat(4 * 1024 * 1024);
+    const before = process.memoryUsage().heapUsed;
+    const started = performance.now();
+    const label = classifyTextAndFilename(huge, "upload.pdf", V2);
+    const page = classifyAdaptivePage(1, huge, V2);
+    const elapsed = performance.now() - started;
+    const grown = process.memoryUsage().heapUsed - before;
+    expect(label.signals).not.toContain("body:invoice-terms");
+    expect(page.pageNumber).toBe(1);
+    expect(elapsed).toBeLessThan(5_000);
+    // The input string itself is ~16 MB (Latin-1); a lowercase copy of the prefix is all we add.
+    expect(grown).toBeLessThan(200 * 1024 * 1024);
+  });
+
+  it("reads the label from the opening text only in v2", () => {
+    const late = `${"plain words ".repeat(CLASSIFY_TEXT_MAX_CHARS / 12 + 10)} invoice subtotal amount due`;
+    expect(classifyTextAndFilename(late, "upload.pdf", V2).label).toBe("generic");
+    expect(classifyTextAndFilename(late, "upload.pdf").label).toBe("invoice");
   });
 });

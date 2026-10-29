@@ -57,7 +57,9 @@ import { evaluateParserPolicy } from "../lib/parser-policy.js";
 import {
   SPARSE_PAGE_WORDS,
   collectPageImageEvidence,
+  drawnBytesPerPage,
   imageFilePageEvidence,
+  totalEmbeddedImageBytes,
   pageAlignedTexts,
   type PageImageEvidence,
   type PageImageEvidenceArtifact,
@@ -745,7 +747,7 @@ export class ExtractMarkdownStage implements Stage {
                   const pageImageEvidenceUri =
                     isPdf && state.run.pipeline.visionFallback
                       ? await this.recordPageImageEvidence(document, tempFile, winningText, state, signal)
-                      : format === "image" && state.run.pipeline.visionFallback && resolveRunRoutingV2(state.run)
+                      : format === "image" && state.run.pipeline.visionFallback && resolveRunRoutingV2(state)
                         ? await this.storePageImageEvidence(document, state, imageFilePageEvidence(), "image-file")
                         : null;
                   registerHash(state, contentHash, artifactUri);
@@ -1077,18 +1079,37 @@ export class ExtractMarkdownStage implements Stage {
     return stdout === null ? null : splitFormFeedPages(stdout, listing.lastPage);
   }
 
+  /**
+   * (File bytes - every embedded image's bytes) / pages, from page facts' whole-document
+   * `pdfimages -list` run; null when that listing is missing, failed or stops short of the last
+   * page (the drawn-content hint then stays off rather than counting unlisted images as drawing).
+   */
+  private async drawnBytesPerPage(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    sourcePath: string,
+  ): Promise<number | null> {
+    const pageCount = Math.max(1, document.pageCount);
+    const listing = this.imageListings.get(this.imageListingKey(state, document));
+    if (!listing || listing.lastPage < pageCount) return null;
+    const stdout = await listing.stdout.catch(() => null);
+    if (stdout === null) return null;
+    const fileBytes = await stat(sourcePath).then((info) => info.size).catch(() => null);
+    return drawnBytesPerPage(fileBytes, totalEmbeddedImageBytes(stdout), pageCount);
+  }
+
   private async storePageImageEvidence(
     document: import("../models.js").Document,
     state: import("../pipeline/pipeline.js").WorkflowState,
     pages: PageImageEvidence[],
     source: PageImageEvidenceArtifact["source"],
-    sourceBytesPerPage: number | null = null,
+    drawnBytesPerPage: number | null = null,
   ): Promise<string> {
     const artifact: PageImageEvidenceArtifact = {
       documentId: document.id,
       source,
       sparsePageWords: SPARSE_PAGE_WORDS,
-      sourceBytesPerPage,
+      drawnBytesPerPage,
       pages,
     };
     const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
@@ -1122,12 +1143,11 @@ export class ExtractMarkdownStage implements Stage {
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
         // Routing v2 counts native words from the text layer, so an OCR'd scan stays sparse.
-        textLayerPages: resolveRunRoutingV2(state.run) ? await this.textLayerPages(state, document) : null,
+        textLayerPages: resolveRunRoutingV2(state) ? await this.textLayerPages(state, document) : null,
       });
       if (!pages) return null;
-      const sourceBytes = await stat(sourcePath).then((info) => info.size).catch(() => null);
       return await this.storePageImageEvidence(document, state, pages, "pdfimages",
-        sourceBytes === null ? null : Math.round(sourceBytes / Math.max(1, document.pageCount)));
+        await this.drawnBytesPerPage(state, document, sourcePath));
     } catch (error) {
       if (signal?.aborted) throw error;
       console.warn(

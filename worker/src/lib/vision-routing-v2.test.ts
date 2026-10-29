@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceRun } from "../models.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import {
+  VISION_ROUTING_VERSION_SLOT,
   parseVisionRoutingV2,
+  pinRunRoutingVersion,
   resetVisionRoutingV2WarningsForTest,
   resolveRunRoutingV2,
   routingVersion,
   visionRoutingV2Enabled,
 } from "./vision-routing-v2.js";
 
-function run(workspaceId?: string): WorkspaceRun {
-  return { id: "run-1", workspaceId } as WorkspaceRun;
+function run(workspaceId?: string, artifacts: Record<string, string> = {}) {
+  return WorkflowState.create({ id: "run-1", workspaceId, artifacts, stats: {}, pipeline: {} } as unknown as WorkspaceRun, []);
 }
 
 describe("VISION_ROUTING_V2", () => {
@@ -39,19 +42,45 @@ describe("VISION_ROUTING_V2", () => {
 
   it("reads malformed values as off with one warning per value", () => {
     const warn = vi.fn();
-    for (const value of ["true", "1", "yes", "on,ws-a", "ws a", "ws-a;ws-b", ",", "ws-*"]) {
+    const malformed = ["true", "1", "yes", "on,ws-a", "ws a", "ws-a;ws-b", ",", "ws-*", "ws-a,,", ",ws-a", "ws-a,", "ws-a, ,ws-b"];
+    for (const value of malformed) {
       expect(parseVisionRoutingV2(value, warn)).toEqual({ mode: "off" });
     }
-    expect(warn).toHaveBeenCalledTimes(8);
+    expect(warn).toHaveBeenCalledTimes(malformed.length);
     parseVisionRoutingV2("true", warn);
-    expect(warn).toHaveBeenCalledTimes(8);
+    parseVisionRoutingV2("ws-a,", warn);
+    expect(warn).toHaveBeenCalledTimes(malformed.length);
     expect(warn.mock.calls[0]![0]).toContain("VISION_ROUTING_V2");
   });
 
-  it("resolves once per run", () => {
-    const pinned = run("ws-a");
-    expect(resolveRunRoutingV2(pinned, { VISION_ROUTING_V2: "ws-a" })).toBe(true);
-    expect(resolveRunRoutingV2(pinned, { VISION_ROUTING_V2: "off" })).toBe(true);
+  it("pins the version in the run's artifacts at run start", () => {
+    const started = run("ws-a");
+    expect(pinRunRoutingVersion(started, { VISION_ROUTING_V2: "ws-a" })).toBe("v2");
+    expect(started.run.artifacts[VISION_ROUTING_VERSION_SLOT]).toBe("v2");
+    // Later reads in the same process ignore a changed environment.
+    expect(resolveRunRoutingV2(started, { VISION_ROUTING_V2: "off" })).toBe(true);
+    // A retried start keeps the first value.
+    expect(pinRunRoutingVersion(started, { VISION_ROUTING_V2: "off" })).toBe("v2");
+  });
+
+  it("rehydrated runs read the pinned version whatever this worker's environment says", () => {
+    const started = run("ws-a");
+    pinRunRoutingVersion(started, { VISION_ROUTING_V2: "on" });
+    // A fresh run object built from the persisted artifacts (another activity or worker).
+    const rehydrated = run("ws-a", { ...started.run.artifacts });
+    expect(resolveRunRoutingV2(rehydrated, { VISION_ROUTING_V2: "off" })).toBe(true);
+    expect(resolveRunRoutingV2(rehydrated, { VISION_ROUTING_V2: "ws-other" })).toBe(true);
+
+    const offRun = run("ws-a");
+    pinRunRoutingVersion(offRun, { VISION_ROUTING_V2: "off" });
+    const offRehydrated = run("ws-a", { ...offRun.run.artifacts });
+    expect(resolveRunRoutingV2(offRehydrated, { VISION_ROUTING_V2: "on" })).toBe(false);
+  });
+
+  it("an unknown pinned version routes as v1", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(resolveRunRoutingV2(run("ws-a", { [VISION_ROUTING_VERSION_SLOT]: "v3" }), { VISION_ROUTING_V2: "on" })).toBe(false);
+    warn.mockRestore();
   });
 
   it("labels the routing version for stage stats", () => {

@@ -36,6 +36,7 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import {
   buildRunCompletedEvent,
@@ -236,6 +237,10 @@ export function createStageExecution(deps: {
       : store.hydrateState(state));
     const { run, documents } = state;
 
+    // Legacy vision routing version: read from the environment once, here, and persisted with the
+    // run's artifacts by the progress write below, so every stage, shard and page task agrees.
+    const visionRoutingVersion = pinRunRoutingVersion(state);
+
     // Mark run as processing
     state.run.status = "processing";
     state.totalStages = input.totalStages;
@@ -257,7 +262,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion}`,
     );
     if (completedRunStages.length > 0) {
       console.log(

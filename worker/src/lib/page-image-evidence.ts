@@ -44,11 +44,13 @@ export interface PageImageEvidenceArtifact {
   documentId: string;
   source: "pdfimages" | "image-file";
   /**
-   * Source file bytes over page count. Without any extracted text, a page whose share of the
-   * file is large (minus its images) holds drawn content (vector glyphs, outlined text), not
-   * nothing. Optional: absent in older artifacts.
+   * Source file bytes minus the bytes of every embedded image in the file, over page count, or
+   * null when the image listing did not cover every page. Without any extracted text, a large
+   * figure suggests drawn content (vector glyphs, outlined text). It is only a hint: padding,
+   * metadata, attachments and fonts also count, so vision-extract confirms each such page's
+   * render is not blank before calling a model (`renderLooksBlank`).
    */
-  sourceBytesPerPage?: number | null;
+  drawnBytesPerPage?: number | null;
   sparsePageWords: number;
   pages: PageImageEvidence[];
 }
@@ -146,6 +148,40 @@ export function nativePageWords(extractedText: string, textLayerText?: string | 
   const extracted = pageEvidenceWordCount(extractedText);
   if (typeof textLayerText !== "string") return extracted;
   return Math.min(extracted, pageEvidenceWordCount(textLayerText));
+}
+
+/**
+ * Bytes of every distinct embedded image in a `pdfimages -list` listing (an image object drawn
+ * on several pages counts once, as it is stored once), or null when any row's size is unknown or
+ * the listing is implausibly long.
+ */
+export function totalEmbeddedImageBytes(stdout: string): number | null {
+  const seen = new Set<string>();
+  let total = 0;
+  let rows = 0;
+  for (const line of stdout.split("\n")) {
+    const f = line.trim().split(/\s+/);
+    if (!/^\d+$/.test(f[0] ?? "")) continue;
+    if (++rows > 100_000) return null;
+    if (!["image", "mask", "smask", "stencil"].includes(f[2] ?? "")) return null;
+    const size = /^(\d+(?:\.\d+)?)([BKMG]?)$/.exec(f[14] ?? "");
+    const bytes = size ? Math.round(Number(size[1]) * 1024 ** ("BKMG".indexOf(size[2] || "B"))) : NaN;
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return null;
+    const id = /^\d+$/.test(f[10] ?? "") && /^\d+$/.test(f[11] ?? "") ? `${f[10]}:${f[11]}` : `inline:${rows}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    total += bytes;
+  }
+  return Number.isSafeInteger(total) ? total : null;
+}
+
+/**
+ * Drawn bytes per page: (file bytes - all embedded image bytes) / pages, or null when either is
+ * unknown. See `PageImageEvidenceArtifact.drawnBytesPerPage`.
+ */
+export function drawnBytesPerPage(fileBytes: number | null, imageBytes: number | null, pageCount: number): number | null {
+  if (fileBytes === null || imageBytes === null || !Number.isFinite(fileBytes) || fileBytes < 0) return null;
+  return Math.round(Math.max(0, fileBytes - imageBytes) / Math.max(1, pageCount));
 }
 
 /**

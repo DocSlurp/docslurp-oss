@@ -200,7 +200,7 @@ export class VisionExtractStage implements Stage {
           maxPagesPerDocument: this.visionPageBudget(state, document.id),
         };
         const route = resolveVisionRoute(selection);
-        const routingV2 = resolveRunRoutingV2(state.run);
+        const routingV2 = resolveRunRoutingV2(state);
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -510,7 +510,7 @@ export class VisionExtractStage implements Stage {
     } | null;
   }> {
     const routing = await this.loadAdaptiveRouting(state, document.id);
-    const routingV2 = resolveRunRoutingV2(state.run);
+    const routingV2 = resolveRunRoutingV2(state);
     let selectedPages = selectLegacyVisionPages(routing?.pages ?? [], { routingV2 });
     let score = 0;
     let needed = false;
