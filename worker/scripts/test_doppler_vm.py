@@ -46,4 +46,52 @@ class ChunkMergeTest(unittest.TestCase):
                 with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 2, True, 0)
                 with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 1, False, guest.MAX_OUTPUT - 2)
 
+class ShardRequestTest(unittest.TestCase):
+    def request(self, pages, body):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "shard.json"
+            if body is not None:
+                path.write_bytes(body if isinstance(body, bytes) else json.dumps(body).encode())
+            return guest.shard_request(pages, path)
+
+    def test_absent_request_is_the_whole_document(self):
+        self.assertEqual(self.request(67, None), (1, 67))
+
+    def test_aligned_shards_reproduce_the_whole_document_chunks(self):
+        for pages in (33, 64, 65, 477, 998):
+            whole = guest.page_ranges(pages)
+            for size in (32, 64, 96):
+                pieces = []
+                for first in range(1, pages + 1, size):
+                    last = min(pages, first + size - 1)
+                    self.assertEqual(self.request(pages, {"first": first, "last": last, "final": last == pages}), (first, last))
+                    pieces += guest.page_ranges(pages, first, last)
+                self.assertEqual(pieces, whole)
+
+    def test_refuses_malformed_unaligned_or_out_of_range_requests(self):
+        bad = [
+            {"first": 2, "last": 32, "final": False},            # off the chunk grid
+            {"first": 1, "last": 40, "final": False},            # non-final end off the grid
+            {"first": 33, "last": 64, "final": True},            # claims final short of the last page
+            {"first": 33, "last": 67, "final": False},           # ends on the last page without final
+            {"first": 65, "last": 96, "final": False},           # past the document
+            {"first": 0, "last": 32, "final": False},
+            {"first": 1, "last": 32},                            # missing key
+            {"first": 1, "last": 32, "final": False, "x": 1},    # extra key
+            {"first": "1", "last": 32, "final": False},
+            {"first": True, "last": 32, "final": False},
+            {"first": 1, "last": 32, "final": 0},
+            [1, 32],
+            b"x" * (guest.MAX_SHARD_REQUEST + 1),
+            b"not json",
+        ]
+        for body in bad:
+            with self.assertRaises(ValueError, msg=repr(body)): self.request(67, body)
+
+    def test_refuses_symlinked_request(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "real"; target.write_text('{"first":1,"last":32,"final":false}')
+            link = Path(d) / "shard.json"; link.symlink_to(target)
+            with self.assertRaises(ValueError): guest.shard_request(67, link)
+
 if __name__ == "__main__": unittest.main()

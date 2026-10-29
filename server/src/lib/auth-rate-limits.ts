@@ -7,7 +7,7 @@ import type { Pool } from "pg";
 
 /**
  * DocSlurp's own authentication budgets, shared by every app machine through
- * the `auth_rate_limits` table (migration 0098).
+ * the `auth_rate_limits` table (migration 0099).
  *
  * Better Auth's limiter keys only on client IP and path, and server-side
  * `auth.api` calls bypass it. These budgets cover what it can't: per-recipient

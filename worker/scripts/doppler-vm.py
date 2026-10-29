@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fixed offline VM entry point: bounded page-range chunks, ordered Markdown merge.
 
-No URLs, credentials, user flags or host paths. The host supplies a single PDF;
-all page counting, range parsing and merging happen behind the VM boundary.
+No URLs, credentials, user flags or host paths. The host supplies a single PDF
+and, for a parallel shard, an optional page range; all page counting, range
+validation, parsing and merging happen behind the VM boundary.
 """
 import json
 import os
@@ -14,7 +15,8 @@ import sys
 import time
 from pathlib import Path
 
-DOPPLER_GUEST_PROTOCOL = "doppler-vm@2"
+DOPPLER_GUEST_PROTOCOL = "doppler-vm@3"
+MAX_SHARD_REQUEST = 256
 MAX_INPUT = 500 * 1024 * 1024
 MAX_RAW = 256 * 1024 * 1024
 MAX_OUTPUT = 64 * 1024 * 1024
@@ -23,10 +25,38 @@ CHUNK_PAGES = 32
 JOB_SECONDS = 150
 
 
-def page_ranges(pages):
+def page_ranges(pages, first=1, last=None):
     if type(pages) is not int or not 1 <= pages <= MAX_PAGES:
         raise ValueError('invalid PDF page count')
-    return [(first, min(first + CHUNK_PAGES - 1, pages)) for first in range(1, pages + 1, CHUNK_PAGES)]
+    last = pages if last is None else last
+    return [(start, min(start + CHUNK_PAGES - 1, last)) for start in range(first, last + 1, CHUNK_PAGES)]
+
+
+def shard_request(pages, path=Path('/job/shard.json')):
+    """The host's page range for a parallel shard, or the whole document when absent.
+
+    Ranges start on the internal chunk grid, so a shard runs exactly the chunks the
+    whole-document conversion would and the merged output is byte-identical. A final
+    shard must end on the document's last page: a host page count that is too low
+    fails here instead of silently dropping pages.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return 1, pages
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SHARD_REQUEST:
+        raise ValueError('invalid shard request')
+    request = json.loads(path.read_bytes())
+    if type(request) is not dict or set(request) != {'first', 'last', 'final'}:
+        raise ValueError('invalid shard request')
+    first, last, final = request['first'], request['last'], request['final']
+    if type(first) is not int or type(last) is not int or type(final) is not bool:
+        raise ValueError('invalid shard request')
+    if not 1 <= first <= last <= pages or (first - 1) % CHUNK_PAGES:
+        raise ValueError('shard range outside document or chunk grid')
+    if final != (last == pages) or (not final and last % CHUNK_PAGES):
+        raise ValueError('shard end does not match document')
+    return first, last
 
 
 def chunk_settings(settings, document_pages, chunk_pages):
@@ -84,7 +114,10 @@ def main():
     if len(info_text) > 65536:
         raise ValueError('PDF info exceeds limit')
     match = re.search(rb'^Pages:\s+(\d+)\s*$', info_text, re.MULTILINE)
-    ranges = page_ranges(int(match[1]) if match else 0)
+    pages = int(match[1]) if match else 0
+    page_ranges(pages)  # validates the count before any request is read
+    shard_first, shard_last = shard_request(pages)
+    ranges = page_ranges(pages, shard_first, shard_last)
     settings = Path('/opt/doppler/defaults.json').read_text()
     total_bytes = 0
     words = 0
@@ -98,7 +131,7 @@ def main():
             if Path('/job/raw.xhtml').stat().st_size > MAX_RAW:
                 raise ValueError('PDF chunk text layer exceeds limit')
             with open('/job/chunk.md', 'wb') as chunk, open('/job/converter-report.json', 'wb') as report:
-                params = chunk_settings(settings, ranges[-1][1], last - first + 1)
+                params = chunk_settings(settings, pages, last - first + 1)
                 run(['/opt/doppler/bin/doppler-md', '--report', '--params', params, '/job/raw.xhtml'], chunk, report)
             with open('/job/converter-report.json', 'rb') as report:
                 diagnostics = json.loads(report.read(16385))
@@ -112,7 +145,8 @@ def main():
                 Path('/job', name).unlink()
     print(json.dumps({'protocol': DOPPLER_GUEST_PROTOCOL, 'engine': 'doppler',
                       'elapsedMs': round((time.monotonic() - started) * 1000), 'outputBytes': total_bytes,
-                      'conversion': {'pages': ranges[-1][1], 'chunks': len(ranges), 'chunkPages': CHUNK_PAGES,
+                      'conversion': {'pages': shard_last - shard_first + 1, 'first': shard_first, 'last': shard_last,
+                                     'documentPages': pages, 'chunks': len(ranges), 'chunkPages': CHUNK_PAGES,
                                      'words': words, 'degradedPages': degraded_pages}}), file=sys.stderr)
     fd = os.open('/job/output', os.O_RDONLY | os.O_NOFOLLOW)
     try:

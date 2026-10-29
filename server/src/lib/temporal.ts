@@ -240,6 +240,7 @@ export function resolveWorkflowScalingInput(
   documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number };
   groupLightStages?: boolean;
   groupableStages?: string[];
+  pageRangeSharding?: { stages: string[]; maxShards: number };
 } {
   const batch = Number.parseInt(env.WORKER_PAGE_CHILD_BATCH_SIZE ?? "500", 10);
   // Load-test workers serve workflows and activities from their one queue.
@@ -267,7 +268,32 @@ export function resolveWorkflowScalingInput(
     // Adjacent light stages share one activity (worker LIGHT_STAGES); WORKER_GROUP_LIGHT_STAGES=false turns it off.
     ...(envFlag(env.WORKER_GROUP_LIGHT_STAGES, true) ? { groupLightStages: true } : {}),
     ...resolveGroupableStages(env, capabilities),
+    ...resolvePageRangeSharding(env, maxShards, capabilities),
   };
+}
+
+/**
+ * WORKER_PAGE_RANGE_SHARDS (default off): long PDFs are split into page-range shards for
+ * render-images, sized by the worker's calibrated cost model and capped like document shards
+ * by the org's worker slots. Recorded only when every worker advertises
+ * workflow.page-range-shards (undefined or null capabilities = ungated, for tests and local dev).
+ */
+/** Stages whose executors parse customer bytes in a VM; see worker/src/pipeline/page-ranges.ts. */
+export const PAGE_RANGE_VM_ISOLATED_STAGES: readonly string[] = [];
+
+export function resolvePageRangeSharding(
+  env: NodeJS.ProcessEnv,
+  maxShards: number,
+  capabilities?: ReadonlySet<WorkerCapability> | null,
+): { pageRangeSharding?: { stages: string[]; maxShards: number } } {
+  if (!envFlag(env.WORKER_PAGE_RANGE_SHARDS, false) || maxShards < 2) return {};
+  if (capabilities && !capabilities.has("workflow.page-range-shards")) return {};
+  // Range shards put one document into several worker processes, so a stage qualifies only once its executor
+  // parses behind a VM boundary. render-images still rasterizes in the worker: record nothing until it moves,
+  // so runs keep their stage grouping and skip the planning activity.
+  const stages = PAGE_RANGE_VM_ISOLATED_STAGES;
+  if (stages.length === 0) return {};
+  return { pageRangeSharding: { stages: [...stages], maxShards } };
 }
 
 /**

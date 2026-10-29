@@ -692,7 +692,14 @@
       "idx": 98,
       "version": "7",
       "when": 1793300000002,
-      "tag": "0098_auth_rate_limits",
+      "tag": "0098_performance_log_shard_timing_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1793300000003,
+      "tag": "0099_auth_rate_limits",
       "breakpoints": true
     }
   ]

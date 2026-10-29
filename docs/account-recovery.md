@@ -43,7 +43,7 @@ Each refusal logs `[auth-breach-check] refused a new password reason=<timeout|up
 | Limit | Scope | Storage |
 | --- | --- | --- |
 | Better Auth native limits: sign-in 3 per 10 s, email sends 3 per minute, Email OTP checks and resets 3 per minute, and the custom rules in `@docslurp/shared/auth-security` | Per trusted client IP and path | `"rateLimit"` table (0038), production only |
-| Email delivery: 5 per 15 minutes | Per recipient address, across sign-up, verification codes, password reset and magic links | `auth_rate_limits` (0098) |
+| Email delivery: 5 per 15 minutes | Per recipient address, across sign-up, verification codes, password reset and magic links | `auth_rate_limits` (0099) |
 | Emailed-code checks: 10 per 15 minutes | Per address, across Email OTP reset, verification and sign-in | `auth_rate_limits` |
 | Magic-link confirmation: 10 per minute | Per trusted client IP, plus a shared unknown-address bucket | `auth_rate_limits` |
 | Company SSO endpoints: `SSO_RATE_LIMIT_MAX` per `SSO_RATE_LIMIT_WINDOW_MS` (default 30 per minute) | Per trusted client IP, method and path, after the global API limiter | `auth_rate_limits` |

@@ -1,5 +1,5 @@
 import { PRICE_CARD, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { withObservation, recordMediaTelemetry } from "@docslurp/shared/observability";
@@ -73,7 +73,8 @@ export async function scanVideo(runner: CommandRunner, source: string, policy: V
     largestGapSeconds:Math.max(...[0,...selected.map(f=>f.seconds),policy.duration].slice(1).map((t,i)=>t-[0,...selected.map(f=>f.seconds)][i])) };
 }
 export async function prepareVideoFrame(runner: CommandRunner, source: string, seconds: number, signal?: AbortSignal): Promise<VideoFrame> {
-  const output=path.join(path.dirname(source),"selected-frame.jpg");
+  // Unique per call: frame batches may be prepared while another batch is still being described.
+  const output=path.join(path.dirname(source),`selected-frame-${randomUUID()}.jpg`);
   const plan=await runner.plan("ffmpeg","-nostdin","-v","error","-y","-threads","1","-protocol_whitelist","file,pipe","-format_whitelist","mov,matroska,webm,avi",
     "-ss",String(seconds),"-i",source,"-map","0:v:0","-an","-sn","-dn","-frames:v","1","-vf","scale=384:384:force_original_aspect_ratio=decrease","-q:v","5","-threads","1","-fs","200000",output);
   plan.timeoutMs=30000;

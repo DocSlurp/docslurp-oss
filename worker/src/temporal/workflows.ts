@@ -42,6 +42,7 @@ import { resolvePipelineWorkflowStageOrder } from "./pipeline-workflow-plan.js";
 import {
   LIGHT_STAGES,
   SHARDABLE_STAGES,
+  PAGE_RANGE_SHARDABLE_STAGES,
   STAGE_THROTTLED_ATTEMPTS,
   stageWorksOn,
   WORKER_SLOT_UNAVAILABLE,
@@ -267,8 +268,13 @@ export async function documentPipeline(
   };
   // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
   const groupable = scaling && input.groupableStages ? new Set<string>(input.groupableStages) : null;
+  // Recorded in workflow input: runs started without it never plan page-range shards.
+  const pageRangeStages = input.pageRangeSharding && scaling
+    ? new Set(input.pageRangeSharding.stages.filter((stage) => PAGE_RANGE_SHARDABLE_STAGES.includes(stage)))
+    : null;
   const needsPreWork = (stageName: string): boolean =>
-    (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1;
+    (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
+    || (pageRangeStages?.has(stageName) ?? false);
 
   try {
     // Execute each stage sequentially
@@ -392,6 +398,48 @@ export async function documentPipeline(
         // Drain in-flight pages before any whole-run write, including the failure path.
         if (pageFailure) throw pageFailure;
         if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
+      }
+
+      // Page-range shards warm long documents' per-page work across slots; the document
+      // shards and the unsharded pass below then find it done.
+      if (pageRangeStages?.has(stageName) && scaling) {
+        const plan = await scaling.quick.planPageRangeShards({
+          runId: input.runId, stageName, maxShards: input.pageRangeSharding!.maxShards,
+        });
+        if (plan.shards.length > 1) {
+          const shardActivities = shardActivityProxies(input.activityTaskQueue);
+          await scaling.quick.setRunShardDemand({ runId: input.runId, shards: plan.shards.length });
+          await runPageFanOut({
+            bundles: plan.shards.map((pageRanges, shardIndex) => ({ pageRanges, shardIndex })),
+            concurrency: plan.shards.length,
+            run: async ({ pageRanges, shardIndex }) => {
+              try {
+                return await shardActivities.runPipelineStageShard({
+                  stageName, runId: input.runId, totalStages: stageOrder.length, artifacts: {},
+                  documentIds: [...new Set(pageRanges.map((range) => range.documentId))],
+                  pageRanges, shardIndex, shardCount: plan.shards.length,
+                  ...(input.slotGate ? { slotGate: true } : {}),
+                });
+              } catch (error) {
+                if ((input.slotGate && isSlotUnavailable(error)) || cancelled) throw error;
+                // The stage pass below renders whatever this shard left undone.
+                return { inputTokens: 0, outputTokens: 0, costCents: 0 };
+              }
+            },
+            onUsage: (shardUsage) => {
+              usage = addUsage(usage, shardUsage);
+              progress = { ...progress, usage: { ...usage } };
+            },
+            isSlotUnavailable: (error) => input.slotGate === true && isSlotUnavailable(error),
+            waitFor: (predicate) => condition(predicate),
+            sleep: (ms) => sleep(ms),
+            now: () => Date.now(),
+            random: () => Math.random(),
+            isPaused: () => paused,
+            isCancelled: () => cancelled,
+          });
+          if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
+        }
       }
 
       // Recorded in workflow input: runs started without it keep one activity per stage.

@@ -218,3 +218,51 @@ describe("video workspace defaults and explicit disable", () => {
     expect(f.state.documentStage("doc", "extract-markdown")?.status).toBe("failed");
   });
 });
+
+describe("concurrent media windows", () => {
+  const run = async (concurrency: string) => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED", "true"); vi.stubEnv("MEDIA_CHUNK_OVERLAP_SECONDS", "4"); vi.stubEnv("DEEPINFRA_API_KEY", "test");
+    vi.stubEnv("MEDIA_WINDOW_CONCURRENCY", concurrency);
+    vi.mocked(inspectMedia).mockResolvedValue({ duration: 1290, hasAudio: true, hasVideo: false });
+    // Later windows answer first, so completion order differs from window order.
+    vi.mocked(transcribeChunk).mockImplementation((async (args: { offset: number; input: { durationSeconds: number } }) => {
+      await new Promise((resolve) => setTimeout(resolve, Math.max(1, 40 - args.offset / 40)));
+      return { text: `speech at ${args.offset}`, segments: [{ start: 0, end: 2, text: `speech at ${args.offset}` }], costUsd: 0.01, costSource: "estimate" };
+    }) as never);
+    const f = fixture();
+    await extractMedia({ ...f, storage: f.storage as unknown as ArtifactStore });
+    const offsets = vi.mocked(transcribeChunk).mock.calls.map((c) => c[0].offset);
+    const markdown = (f.storage.putBytes.mock.calls[0] as unknown as [string, Buffer])[1].toString();
+    const json = (f.storage.putJson.mock.calls as unknown as [string, unknown][]).map(([key, value]) => [key, JSON.stringify(value)]);
+    vi.mocked(transcribeChunk).mockClear();
+    return { offsets: [...offsets].sort((a, b) => a - b), markdown, json, status: f.state.documentStage("doc", "extract-markdown")?.status };
+  };
+
+  it("publishes identical artifacts with 1 and 4 windows in flight", async () => {
+    const sequential = await run("1");
+    const concurrent = await run("4");
+    expect(sequential.offsets).toEqual([0, 296, 596, 896, 1196]);
+    expect(concurrent).toEqual(sequential);
+    expect(concurrent.status).toBe("completed");
+  });
+
+  it("fails the document after draining in-flight windows when one window fails", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED", "true"); vi.stubEnv("DEEPINFRA_API_KEY", "test"); vi.stubEnv("MEDIA_WINDOW_CONCURRENCY", "4");
+    vi.mocked(inspectMedia).mockResolvedValue({ duration: 1290, hasAudio: true, hasVideo: false });
+    let inFlight = 0;
+    vi.mocked(transcribeChunk).mockImplementation((async (args: { offset: number }) => {
+      inFlight++;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (args.offset === 296) throw new Error("Remote media request failed; inspect its durable receipt before retry");
+        return { text: "x", segments: [], costUsd: 0, costSource: "estimate" };
+      } finally { inFlight--; }
+    }) as never);
+    vi.spyOn(console, "info").mockImplementation(() => {}); vi.spyOn(console, "error").mockImplementation(() => {});
+    const f = fixture();
+    await extractMedia({ ...f, storage: f.storage as unknown as ArtifactStore }).catch(() => {});
+    expect(inFlight).toBe(0);
+    expect(f.state.documentStage("doc", "extract-markdown")?.status).toBe("failed");
+    expect(f.storage.putBytes).not.toHaveBeenCalled();
+  });
+});

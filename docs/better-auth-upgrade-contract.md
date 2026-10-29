@@ -36,7 +36,7 @@ Reviewed release: `1.7.14` (`REVIEWED_BETTER_AUTH_VERSION` in `server/src/lib/au
 | SSO session provenance | `server/src/lib/sso-enforcement.ts` | Native session tokens are `[a-zA-Z0-9]`, so a `_` prefix written by the `session.create.before` hook marks an SSO session. |
 | Sensitive-access proofs | `server/src/lib/auth-sensitive-access.ts` | `internalAdapter.findAccounts`, `findSession`, `createVerificationValue` and `consumeVerificationValue` keep their semantics. |
 | Session revocation | `packages/shared/src/auth-security.ts` | `cookieCache` stays off, so every request checks the session row. |
-| Native limiter storage | migration `0038`, `packages/shared/src/auth-security.ts` | The `"rateLimit"` table's shape. DocSlurp's own budgets use `auth_rate_limits` (0098) and never write native rows. |
+| Native limiter storage | migration `0038`, `packages/shared/src/auth-security.ts` | The `"rateLimit"` table's shape. DocSlurp's own budgets use `auth_rate_limits` (0099) and never write native rows. |
 | Trusted client IP | `server/src/lib/client-ip.ts` | `advanced.ipAddress.ipAddressHeaders` is the only IP source the native limiter reads. |
 | Recovery and limits | `server/src/lib/auth-email.ts`, `server/src/lib/auth-rate-limits.ts`, `server/src/lib/auth-recovery.ts` | `revokeSessionsOnPasswordReset` applies to Email OTP reset, and that reset only sets `emailVerified` (no `revokeUnprovenAccountAccess`). Before-hooks see the parsed `ctx.body.email`. `defineRequestState` is shared by nested endpoint calls within one request. Email senders receive the endpoint context. `runInBackgroundOrAwait` swallows send errors. `disabledPaths` answers 404 in the HTTP router only. |
 
