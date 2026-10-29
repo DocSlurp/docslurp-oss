@@ -1,5 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import type { Readable } from "node:stream";
 
 /**
  * Process containment and verified teardown for local parser commands.
@@ -71,6 +72,9 @@ export function probePidNamespace(): { ok: boolean; detail: string } {
  * only signals it has a handler for, so a parser running as PID 1 ignores SIGTERM and SIGPIPE
  * (an abort then waits out the whole grace period) and never reaps orphans. tini when installed;
  * otherwise a shell that forwards TERM, INT and HUP to the command and exits with its status.
+ * While it waits for the command, the shell also reaps orphans re-parented to it (it waits on any
+ * child). A command killed by a signal is reported as exit 128+signal (137 for SIGKILL), as tini
+ * reports it: PID 1 cannot re-raise a signal on itself, so the signal itself is not preserved.
  */
 const INIT_SCRIPT =
   'trap \'kill -TERM "$child" 2>/dev/null\' TERM INT HUP; "$@" & child=$!; ' +
@@ -137,10 +141,42 @@ export function isCommandTeardownError(error: unknown): error is CommandTeardown
 }
 
 let unverifiedTeardowns = 0;
+const unverifiedListeners = new Set<(count: number) => void>();
 
 /** Commands this process could not confirm were torn down (each one poisoned its slot). */
 export function unverifiedTeardownCount(): number {
   return unverifiedTeardowns;
+}
+
+/** Called (synchronously) after every unverified teardown with the new count; returns an unsubscribe. */
+export function onUnverifiedTeardown(listener: (count: number) => void): () => void {
+  unverifiedListeners.add(listener);
+  return () => unverifiedListeners.delete(listener);
+}
+
+/**
+ * Count a command whose processes may outlive it, log it loudly (alertable) and notify listeners
+ * (the worker's teardown circuit breaker). Every CommandTeardownError goes through here once.
+ */
+export function recordUnverifiedTeardown(error: CommandTeardownError, description: string): void {
+  unverifiedTeardowns += 1;
+  // Alertable: a command's processes may still be running and its slot is out of service.
+  console.error(
+    `[worker-command] status=teardown-unverified metric=command_teardown_unverified ` +
+      `count=${unverifiedTeardowns} ${description} detail=${JSON.stringify(error.message)}`,
+  );
+  for (const listener of unverifiedListeners) {
+    try {
+      listener(unverifiedTeardowns);
+    } catch (listenerError) {
+      console.error(`[worker-command] status=teardown-listener-failed error=${(listenerError as Error).message}`);
+    }
+  }
+}
+
+/** Tests only. */
+export function resetUnverifiedTeardownsForTests(): void {
+  unverifiedTeardowns = 0;
 }
 
 export interface CommandExit {
@@ -159,6 +195,14 @@ export interface SupervisedChild {
   readonly done: Promise<CommandExit>;
   /** Stop the command: SIGTERM, then after the grace period (or at once if `immediate`) SIGKILL. */
   terminate(reason: Error, options?: { immediate?: boolean }): void;
+  /**
+   * Aborts (with the reason) as soon as the command is being stopped, for any reason: abort,
+   * timeout, budget, output limit, failed destination. Consumers of its output cancel on it, so a
+   * stalled destination can never keep a stopped command's stdio, and with it `done`, open.
+   */
+  readonly terminated: AbortSignal;
+  /** Resolves when the root exits, before teardown is verified (`done` still waits for that). */
+  readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
 
 /**
@@ -188,9 +232,17 @@ export interface TeardownTimings {
   launcherGraceMs: number;
   /** After SIGKILL, how long the command gets to be confirmed gone before its slot is poisoned. */
   verifyMs: number;
+  /**
+   * After the command's processes are gone, the total time its stdio may keep our side waiting on
+   * a writer, across all the chunks that restart the idle bound (a trickling holder). Time our own
+   * consumer spends backpressured is not counted: the command's wall-clock timeout bounds that,
+   * and cancels the output. Default 60 s; a gone command's data is already in the pipe.
+   */
+  drainCapMs?: number;
 }
 
-export const DEFAULT_TEARDOWN_TIMINGS: TeardownTimings = { graceMs: 2_000, launcherGraceMs: 1_000, verifyMs: 5_000 };
+export const DEFAULT_TEARDOWN_TIMINGS: TeardownTimings = { graceMs: 2_000, launcherGraceMs: 1_000, verifyMs: 5_000, drainCapMs: 60_000 };
+const STDIO_TICK_MS = 25;
 
 function positive(raw: string | undefined): number | undefined {
   const value = Number(raw);
@@ -202,6 +254,7 @@ export function teardownTimings(env: NodeJS.ProcessEnv = process.env): TeardownT
     graceMs: positive(env.WORKER_COMMAND_ABORT_GRACE_MS) ?? DEFAULT_TEARDOWN_TIMINGS.graceMs,
     launcherGraceMs: positive(env.WORKER_COMMAND_LAUNCHER_GRACE_MS) ?? DEFAULT_TEARDOWN_TIMINGS.launcherGraceMs,
     verifyMs: positive(env.WORKER_COMMAND_TEARDOWN_VERIFY_MS) ?? DEFAULT_TEARDOWN_TIMINGS.verifyMs,
+    drainCapMs: positive(env.WORKER_COMMAND_STDIO_DRAIN_CAP_MS) ?? DEFAULT_TEARDOWN_TIMINGS.drainCapMs,
   };
 }
 
@@ -292,10 +345,26 @@ function childrenOf(pid: number, table: Map<number, number> | null): number[] {
  * host service starts on the command's behalf, so stdio is bounded with and without one. If any
  * of it cannot be confirmed within `verifyMs`, stdio is destroyed, the failure is logged loudly,
  * and `done` rejects with CommandTeardownError (its `cause` is the termination reason, if any).
+ *
+ * The stdio bound cannot tell a writer we cannot see from our own slow consumer, so it counts only
+ * while our side waits on the writer: nothing buffered, not paused by backpressure. Each chunk we
+ * read restarts it. `drainCapMs` caps the total waiting time, so a trickling writer cannot hold it
+ * forever. Only a real EOF counts as closed stdio: a consumer that gives up on the output must
+ * keep draining it (unpipe and resume), never destroy it, or a holder would go unnoticed.
+ *
+ * `unprovable` is for a command whose containment cannot prove its teardown (a child the runner
+ * refused for lacking a PID namespace: a setsid'd descendant leaves the group). It is still
+ * stopped and its group emptied, but it always ends in CommandTeardownError and keeps its scratch.
  */
 export function superviseChild(
   child: ChildProcess,
-  options: { label: string; signal?: AbortSignal; timings?: TeardownTimings; context?: Record<string, string | number | undefined> },
+  options: {
+    label: string;
+    signal?: AbortSignal;
+    timings?: TeardownTimings;
+    context?: Record<string, string | number | undefined>;
+    unprovable?: string;
+  },
 ): SupervisedChild {
   const state = containedChildren.get(child);
   if (!state) throw new Error("superviseChild needs a child started by spawnContained");
@@ -313,7 +382,11 @@ export function superviseChild(
   let verified = false;
   const timers = new Set<NodeJS.Timeout>();
   const onExitWaiters: Array<() => void> = [];
+  const terminatedController = new AbortController();
+  let stdioTicker: NodeJS.Timeout | undefined;
 
+  let resolveExited!: (value: { code: number | null; signal: NodeJS.Signals | null }) => void;
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => (resolveExited = resolve));
   let resolveDone!: (value: CommandExit) => void;
   let rejectDone!: (error: Error) => void;
   const done = new Promise<CommandExit>((resolve, reject) => {
@@ -338,6 +411,7 @@ export function superviseChild(
   const cleanup = () => {
     for (const timer of timers) clearTimeout(timer);
     timers.clear();
+    if (stdioTicker) clearInterval(stdioTicker);
     options.signal?.removeEventListener("abort", onAbort);
   };
 
@@ -366,12 +440,7 @@ export function superviseChild(
     child.stdout?.destroy();
     child.stderr?.destroy();
     if (unverified) {
-      unverifiedTeardowns += 1;
-      // Alertable: a command's processes may still be running and its slot is out of service.
-      console.error(
-        `[worker-command] status=teardown-unverified metric=command_teardown_unverified ` +
-          `count=${unverifiedTeardowns} ${describe()} detail=${JSON.stringify(error.message)}`,
-      );
+      recordUnverifiedTeardown(error as CommandTeardownError, describe());
     } else {
       runAfterTeardown();
     }
@@ -387,11 +456,55 @@ export function superviseChild(
   const stdioHolder = namespaced
     ? "a process outside the namespace (for example one a host service started for the command) holds it"
     : "a descendant left the process group";
-  /** After the group emptied, stdio that stays open has a writer we cannot see or signal: bound the wait. */
-  const boundStdio = (ms: number) =>
-    later(ms, () => {
-      if (!stdioClosed) unverified(`stdio is still held open after the command's processes exited (${stdioHolder})`);
-    });
+  const stdioStreams = () => [child.stdout, child.stderr].filter((stream): stream is Readable => !!stream && !stream.destroyed);
+  const bytesRead = () => stdioStreams().reduce((sum, stream) => sum + ((stream as { bytesRead?: number }).bytesRead ?? 0), 0);
+  /** Our side waits on the writer: nothing buffered and not paused (by backpressure or otherwise). */
+  const waitingOnWriter = () => stdioStreams().every((stream) => stream.readableLength === 0 && stream.readableFlowing !== false);
+  let stdioBudgetMs = Number.POSITIVE_INFINITY;
+
+  /**
+   * After the group emptied, stdio that stays open has a writer we cannot see or signal: bound the
+   * wait. The budget counts only while our side waits on that writer, restarts with every chunk we
+   * read, and is re-checked once after setImmediate before it fires; `drainCapMs` caps it all.
+   */
+  const boundStdio = (ms: number) => {
+    stdioBudgetMs = Math.min(stdioBudgetMs, ms);
+    if (stdioTicker || stdioClosed || settled) return;
+    const capMs = timings.drainCapMs ?? DEFAULT_TEARDOWN_TIMINGS.drainCapMs!;
+    let waitedMs = 0;
+    let idleMs = 0;
+    let last = Date.now();
+    let lastBytes = bytesRead();
+    let checking = false;
+    stdioTicker = setInterval(() => {
+      if (checking || settled) return;
+      const now = Date.now();
+      const elapsed = now - last;
+      last = now;
+      const bytes = bytesRead();
+      const waiting = waitingOnWriter();
+      if (waiting) waitedMs += elapsed;
+      if (bytes !== lastBytes) {
+        lastBytes = bytes;
+        idleMs = 0;
+      } else if (waiting) {
+        idleMs += elapsed;
+      }
+      const capped = waitedMs >= capMs;
+      if (!capped && idleMs < stdioBudgetMs) return;
+      checking = true;
+      setImmediate(() => {
+        checking = false;
+        if (stdioClosed || settled) return;
+        if (!capped && (bytesRead() !== lastBytes || !waitingOnWriter())) return;
+        unverified(
+          capped
+            ? `stdio kept us waiting ${capMs} ms after the command's processes exited (${stdioHolder}, still writing)`
+            : `stdio is still held open after the command's processes exited (${stdioHolder})`,
+        );
+      });
+    }, STDIO_TICK_MS);
+  };
 
   /** After the root exits: SIGKILL stragglers in its group until it is empty, within the bound. */
   const verifyAfterExit = async () => {
@@ -404,6 +517,7 @@ export function superviseChild(
       await sleep(25);
     }
     if (settled) return;
+    if (options.unprovable) return unverified(options.unprovable);
     verified = true;
     // Every process the command started is gone, but the stdio pipes can still have a writer: a
     // setsid'd descendant without a PID namespace, or, even with one, a process a host service (a
@@ -442,7 +556,9 @@ export function superviseChild(
 
   const terminate = (why: Error, terminateOptions?: { immediate?: boolean }) => {
     reason ??= why;
-    if (terminating || settled || pid === undefined) return;
+    if (settled) return;
+    if (!terminatedController.signal.aborted) terminatedController.abort(reason);
+    if (terminating || pid === undefined) return;
     terminating = true;
     if (exit) {
       // The root already exited. Verification is under way; if it already emptied the group and
@@ -463,6 +579,7 @@ export function superviseChild(
 
   child.once("exit", (code, signal) => {
     exit = { code, signal };
+    resolveExited(exit);
     for (const resolve of onExitWaiters.splice(0)) resolve();
     void verifyAfterExit();
   });
@@ -478,5 +595,5 @@ export function superviseChild(
   if (options.signal?.aborted) onAbort();
   else options.signal?.addEventListener("abort", onAbort, { once: true });
 
-  return { done, terminate };
+  return { done, terminate, terminated: terminatedController.signal, exited };
 }

@@ -19,6 +19,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Readable } from "node:stream";
 import { platform } from "node:os";
 import { pipeline } from "node:stream/promises";
+import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
 import { resolveCommandPaths } from "../sandbox/paths.js";
@@ -29,6 +30,7 @@ import {
   CommandTeardownError,
   containmentOf,
   isCommandTeardownError,
+  recordUnverifiedTeardown,
   spawnContained,
   superviseChild,
   teardownTimings,
@@ -396,16 +398,63 @@ export class CommandRunner {
 
     // Never fail fast: a destination failure (a full disk) stops the command, and the call settles
     // only after its teardown is verified. An unverified teardown wins over every other error.
-    const piped = pipeline(child.stdout!, destination).catch((error: Error) => {
+    // The output is cancelled as soon as the command is being stopped (timeout, abort, budget) or
+    // its root exits non-zero, and whenever the command's exit fails, so a destination that never
+    // calls back (a stalled upload) can keep neither the command's stdio nor this call open. A
+    // command that succeeded waits for its destination: a slow final upload part is legitimate.
+    // Cancelling destroys only the destination. The command's stdout is unpiped and drained to its
+    // real EOF: teardown verification counts only an EOF as closed stdio, never our own destroy.
+    const source = child.stdout!;
+    let outputSettled = false;
+    let outputCancelled = false;
+    const discardRest = () => {
+      source.unpipe(destination);
+      source.resume();
+    };
+    const cancelOutput = (why: unknown) => {
+      if (outputSettled || outputCancelled) return;
+      outputCancelled = true;
+      discardRest();
+      const error = new Error("command output cancelled", { cause: why });
+      error.name = "AbortError";
+      destination.destroy(error);
+    };
+    const piped = new Promise<void>((resolve, reject) => {
+      finished(destination, (error) => {
+        outputSettled = true;
+        if (error) reject(error);
+        else resolve();
+      });
+      // pipe() does not forward a source error; without this the destination would wait forever.
+      source.once("error", (error) => cancelOutput(error));
+      source.pipe(destination);
+    }).catch((error: Error) => {
+      discardRest();
       const failure = monitor.peekBudgetError() ?? error;
-      supervised.terminate(failure, { immediate: true });
+      if (!outputCancelled) supervised.terminate(failure, { immediate: true });
       throw failure;
     });
-    const [output, exit] = await Promise.allSettled([piped, exitPromise]);
+    const onTerminated = () => cancelOutput(supervised.terminated.reason);
+    if (supervised.terminated.aborted) onTerminated();
+    else supervised.terminated.addEventListener("abort", onTerminated, { once: true });
+    void supervised.exited.then(({ code, signal }) => {
+      if (code !== 0 || signal) cancelOutput(new Error(`${plan.binary} exited with ${code ?? signal}`));
+    });
+    const exit = await exitPromise.then(
+      () => ({ status: "fulfilled" as const }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
+    );
+    supervised.terminated.removeEventListener("abort", onTerminated);
+    if (exit.status === "rejected") cancelOutput(exit.reason);
+    const output = await piped.then(
+      () => ({ status: "fulfilled" as const }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
+    );
     if (exit.status === "rejected" && isCommandTeardownError(exit.reason)) {
-      throw commandFailure(exit.reason, output.status === "rejected" ? (output.reason as Error) : null);
+      throw commandFailure(exit.reason, output.status === "rejected" && !outputCancelled ? (output.reason as Error) : null);
     }
-    if (output.status === "rejected") throw output.reason;
+    // The output failing first (a full disk) is the cause; its cancellation by a stopped or failed command is not.
+    if (output.status === "rejected" && !(outputCancelled && exit.status === "rejected")) throw output.reason;
     if (exit.status === "rejected") throw exit.reason;
 
     return { stderr };
@@ -1269,7 +1318,6 @@ export class CommandRunner {
               `${containment ? `with ${containment} containment instead of a PID namespace` : "without process containment"}; refusing to run it`,
           );
           await stopRefusedChild(plan, child, containment !== undefined, refusal);
-          throw refusal;
         }
         return { child, supervised: superviseCommand(plan, child, signal), release };
       }
@@ -1706,34 +1754,48 @@ function allowsUnisolated(session: SandboxSession): boolean {
 }
 
 /**
- * Stop a child the runner refuses to run, and settle only once it is gone: the caller releases
- * the session (and with it capacity and scratch) right after. An unverified teardown wins.
+ * Stop a child the runner refuses to run. It always ends in CommandTeardownError (cause: the
+ * refusal): it was refused because its containment cannot prove that its processes are gone (a
+ * setsid'd descendant leaves the process group, and an uncontained child has no group we own), so
+ * root exit or an empty group proves nothing. Its slot is poisoned, its scratch is kept for the
+ * sweep, and the worker's teardown circuit breaker counts it.
  */
-async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, contained: boolean, refusal: Error): Promise<void> {
-  if (!contained) {
-    // Not ours to supervise: kill its group (spawned detached) or itself, and wait for its exit.
-    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-      const { verifyMs } = teardownTimings();
-      let timer: NodeJS.Timeout | undefined;
-      const gone = await Promise.race([exited, new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), verifyMs)))]);
-      clearTimeout(timer);
-      if (!gone) throw new CommandTeardownError(`${path.basename(plan.binary)} (refused, uncontained) did not exit after SIGKILL`, { cause: refusal });
+async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, contained: boolean, refusal: Error): Promise<never> {
+  const label = path.basename(plan.binary);
+  if (contained) {
+    const supervised = superviseCommand(plan, child, undefined, `${label} was refused (${refusal.message}); its teardown cannot be proven`);
+    supervised.terminate(refusal, { immediate: true });
+    try {
+      await supervised.done;
+    } catch (error) {
+      throw commandFailure(error, refusal);
     }
-    return;
+    // superviseChild never resolves an unprovable command; fail closed if that ever changes.
+    const error = new CommandTeardownError(`${label} (refused) teardown could not be verified`, { cause: refusal });
+    recordUnverifiedTeardown(error, `label=${label} containment=${containmentOf(child)}`);
+    throw error;
   }
-  const supervised = superviseCommand(plan, child);
-  supervised.terminate(refusal, { immediate: true });
-  try {
-    await supervised.done;
-  } catch (error) {
-    throw commandFailure(error, refusal);
+  // Not ours to supervise: kill its group (if it was spawned detached) and itself, and wait (bounded) for its exit.
+  let detail = "it was started without process containment, so no descendant of it can be proven gone";
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      /* not a group leader */
+    }
+    child.kill("SIGKILL");
+    const { verifyMs } = teardownTimings();
+    let timer: NodeJS.Timeout | undefined;
+    const gone = await Promise.race([exited, new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), verifyMs)))]);
+    clearTimeout(timer);
+    if (!gone) detail = `it did not exit within ${verifyMs} ms of SIGKILL`;
   }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  const error = new CommandTeardownError(`${label} (refused, uncontained) teardown could not be verified: ${detail}`, { cause: refusal });
+  recordUnverifiedTeardown(error, `label=${label} pid=${child.pid} containment=none`);
+  throw error;
 }
 
 function assertProcessTeardown(session: SandboxSession): void {
@@ -1750,11 +1812,12 @@ function assertProcessTeardown(session: SandboxSession): void {
 }
 
 /** Supervise a launched child with its run and document ids attached to every teardown log line. */
-function superviseCommand(plan: CommandPlan, child: ChildProcess, signal?: AbortSignal): SupervisedChild {
+function superviseCommand(plan: CommandPlan, child: ChildProcess, signal?: AbortSignal, unprovable?: string): SupervisedChild {
   const context = currentPerfContext();
   return superviseChild(child, {
     label: path.basename(plan.binary),
     signal,
+    ...(unprovable ? { unprovable } : {}),
     context: { run_id: context?.runId, document_id: context?.documentId, stage: context?.stageName },
   });
 }

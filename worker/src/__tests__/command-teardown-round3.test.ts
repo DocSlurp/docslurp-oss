@@ -431,10 +431,14 @@ describe("containment the runner accepts", () => {
         },
       }),
     });
+    vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(runner.run({ binary: "/bin/sh", args: [], available: true })).rejects.toThrow(
       /process-group containment instead of a PID namespace/,
     );
-    await expect(runner.run({ binary: "/bin/sh", args: [], available: true })).rejects.toBeInstanceOf(SandboxPolicyError);
+    // Refused for lacking a PID namespace, so its teardown is never proven (round 4): poisoned.
+    const error = await runner.run({ binary: "/bin/sh", args: [], available: true }).catch((caught: Error) => caught);
+    expect(error).toBeInstanceOf(CommandTeardownError);
+    expect((error as Error).cause).toBeInstanceOf(SandboxPolicyError);
     expect(exitedBeforeRelease).toBe(true);
   }, 15_000);
 
@@ -442,7 +446,10 @@ describe("containment the runner accepts", () => {
     const runner = new CommandRunner({
       openSession: async () => ({ ...unisolatedSession(), isolation: { ...unisolatedSession().isolation, processes: true } }),
     });
-    await expect(runner.run({ binary: "/bin/sh", args: ["-c", "true"], available: true })).rejects.toBeInstanceOf(SandboxPolicyError);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = await runner.run({ binary: "/bin/sh", args: ["-c", "true"], available: true }).catch((caught: Error) => caught);
+    expect(error).toBeInstanceOf(CommandTeardownError);
+    expect((error as Error).cause).toBeInstanceOf(SandboxPolicyError);
   });
 });
 
@@ -517,9 +524,8 @@ describe.skipIf(!linux)("stale sandbox scratch sweep edge cases", () => {
     const stale = path.join(root, "run-stale");
     mkdirSync(stale);
     symlinkSync(outside, path.join(stale, "escape"));
-    old(stale, 4 * 60 * 60_000);
-    old(outside, 4 * 60 * 60_000);
-    const removed = sweepStaleSandboxScratch(root);
+    // Unowned instances age by ctime, which cannot be backdated: sweep from four hours ahead.
+    const removed = sweepStaleSandboxScratch(root, { now: Date.now() + 4 * 60 * 60_000 });
     expect(removed).toEqual([stale]);
     expect(existsSync(path.join(root, "run-link"))).toBe(true);
     expect(readFileSync(path.join(outside, "precious"), "utf8")).toBe("x");
@@ -532,7 +538,7 @@ describe.skipIf(!linux)("stale sandbox scratch sweep edge cases", () => {
     const owner = spawn("sleep", ["30"], { stdio: "ignore" });
     strays.push(owner.pid!);
     writeFileSync(`${dir}.owner`, `${owner.pid}\n`);
-    old(dir, 10 * 60 * 60_000);
+    old(`${dir}.owner`, 10 * 60 * 60_000);
     expect(sweepStaleSandboxScratch(root)).toEqual([]);
     expect(existsSync(dir)).toBe(true);
     const exited = new Promise((resolve) => owner.once("exit", resolve));
@@ -547,7 +553,7 @@ describe.skipIf(!linux)("stale sandbox scratch sweep edge cases", () => {
     const dir = path.join(root, "run-placeholder");
     mkdirSync(dir);
     writeFileSync(`${dir}.owner`, `${process.pid}\n`);
-    old(dir, 10 * 60 * 60_000);
+    old(`${dir}.owner`, 10 * 60 * 60_000);
     expect(sweepStaleSandboxScratch(root)).toEqual([]);
   });
 });
