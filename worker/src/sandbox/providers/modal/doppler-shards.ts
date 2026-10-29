@@ -5,7 +5,7 @@ import { SHARD_PROFILES, shardCapacity } from "../../../temporal/page-shard-prof
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import type { UsageEvent } from "../../../models.js";
 import { currentPerfContext } from "../../../lib/perf-context.js";
-import { executeDopplerVm, GUEST_CHUNK_PAGES, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, PAGE_COUNT_MISMATCH_MESSAGE, SHARDS_UNSUPPORTED_MESSAGE, type DopplerVmJob } from "./doppler-vm.js";
+import { declaredGuestProtocol, executeDopplerVm, GUEST_CHUNK_PAGES, MAX_OUTPUT_BYTES, MAX_PDF_BYTES, PAGE_COUNT_MISMATCH_MESSAGE, SHARDS_UNSUPPORTED_MESSAGE, type DopplerVmJob } from "./doppler-vm.js";
 
 /** Most pages one guest VM converts; a longer document must be split into shards no larger than this. */
 export const GUEST_MAX_VM_PAGES = 10_000;
@@ -64,8 +64,8 @@ export function dopplerShardSettings(env: NodeJS.ProcessEnv = process.env): Dopp
   const overhead = Number.parseFloat(env.DOCSLURP_DOPPLER_SHARD_COST_OVERHEAD ?? "");
   return {
     // Sharding needs a range-aware guest; the image's protocol is declared with its digest, never assumed.
-    enabled: /^(1|true|on)$/i.test(env.DOCSLURP_DOPPLER_SHARDS?.trim() ?? "") && env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() === "3",
-    rangesSupported: env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() === "3",
+    enabled: /^(1|true|on)$/i.test(env.DOCSLURP_DOPPLER_SHARDS?.trim() ?? "") && declaredGuestProtocol(env) >= 3,
+    rangesSupported: declaredGuestProtocol(env) >= 3,
     globalParallel: int("DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL", 16, 1, 256),
     vmParallel: int("DOCSLURP_DOPPLER_VM_MAX_PARALLEL", 8, 1, 64),
     maxCostOverhead: Number.isFinite(overhead) && overhead >= 0 ? Math.min(overhead, 10) : 0.5,
@@ -358,7 +358,7 @@ export async function executeDopplerShards(
       wallMs: Date.now() - dispatched, shardPages: plan.shardPages, parallel: plan.parallel, vms: usages.filter(Boolean).length,
       predictedWallMs: plan.predictedWallMs, unshardedWallMs: plan.unshardedWallMs, outputBytes: total });
     return {
-      stdout: JSON.stringify({ protocol: "doppler-vm@3", engine: "doppler", outputBytes: total,
+      stdout: JSON.stringify({ protocol: `doppler-vm@${Math.max(3, declaredGuestProtocol())}`, engine: "doppler", outputBytes: total,
         conversion: { pages: pageCount, first: 1, last: pageCount, documentPages: pageCount, shards: plan.shards.length,
           shardPages: plan.shardPages, parallel: plan.parallel, predictedWallMs: plan.predictedWallMs } }),
       stderr: "",

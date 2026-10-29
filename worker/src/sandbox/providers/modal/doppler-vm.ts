@@ -24,6 +24,19 @@ export type DopplerVmJob = {
 
 export const PAGE_COUNT_MISMATCH_MESSAGE = "Document VM page count disagrees with the host";
 
+/** The image's guest protocol as declared by the deploy beside its digest (0 when unset or invalid). */
+export function declaredGuestProtocol(env: NodeJS.ProcessEnv = process.env): number {
+  const value = env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() ?? "";
+  return /^[2-4]$/.test(value) ? Number(value) : 0;
+}
+
+/** Protocol 4 guests confine themselves with no_new_privs, Landlock (ABI >= 4) and seccomp, and report it. */
+export function validHardening(hardening: unknown): boolean {
+  const h = hardening as { noNewPrivs?: unknown; landlockAbi?: unknown; seccompDenied?: unknown } | null;
+  return h?.noNewPrivs === true && Number.isSafeInteger(h.landlockAbi) && (h.landlockAbi as number) >= 4 &&
+    Number.isSafeInteger(h.seccompDenied) && (h.seccompDenied as number) > 0;
+}
+
 /** Thrown when a ranged job reaches a guest that predates shards; callers stop sharding on it. */
 export const SHARDS_UNSUPPORTED_MESSAGE = "Document VM image does not support page-range shards";
 export const MAX_PDF_BYTES = DOPPLER_MAX_PDF_BYTES;
@@ -66,10 +79,14 @@ export function dopplerVmUsage(image: string, seconds: number): UsageEvent {
  * so a worker can roll out ahead of its image.
  */
 export function validEnvelope(
-  diagnostics: { protocol?: unknown; engine?: unknown; outputBytes?: unknown; conversion?: Record<string, unknown> },
+  diagnostics: { protocol?: unknown; engine?: unknown; outputBytes?: unknown; hardening?: unknown; conversion?: Record<string, unknown> },
   output: Buffer,
   range: DopplerVmJob["range"],
+  declared = declaredGuestProtocol(),
 ): boolean {
+  // An image declared hardened must prove it on every result: an older or unconfined guest fails closed.
+  if (declared >= 4 && (diagnostics.protocol !== "doppler-vm@4" || !validHardening(diagnostics.hardening))) return false;
+  if (diagnostics.protocol === "doppler-vm@4" && !validHardening(diagnostics.hardening)) return false;
   const conversion = diagnostics.conversion ?? {};
   const pages = conversion.pages;
   if (diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length || !Number.isSafeInteger(pages) || (pages as number) < 1) return false;
@@ -77,7 +94,7 @@ export function validEnvelope(
   let separators = 0;
   for (const byte of output) if (byte === 0x0c) separators++;
   if (diagnostics.protocol === "doppler-vm@2") return !range;
-  if (diagnostics.protocol !== "doppler-vm@3") return false;
+  if (diagnostics.protocol !== "doppler-vm@3" && diagnostics.protocol !== "doppler-vm@4") return false;
   const documentPages = conversion.documentPages;
   if (separators !== (pages as number) - 1 || !Number.isSafeInteger(documentPages)) return false;
   const first = range?.first ?? 1;

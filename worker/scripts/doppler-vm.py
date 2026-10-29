@@ -5,17 +5,19 @@ No URLs, credentials, user flags or host paths. The host supplies a single PDF
 and, for a parallel shard, an optional page range; all page counting, range
 validation, parsing and merging happen behind the VM boundary.
 """
+import ctypes
 import json
 import os
 import re
 import resource
 import stat
+import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-DOPPLER_GUEST_PROTOCOL = "doppler-vm@3"
+DOPPLER_GUEST_PROTOCOL = "doppler-vm@4"
 MAX_SHARD_REQUEST = 256
 MAX_INPUT = 500 * 1024 * 1024
 MAX_RAW = 256 * 1024 * 1024
@@ -26,6 +28,102 @@ MAX_PAGES = 10000
 MAX_DOCUMENT_PAGES = 100000
 CHUNK_PAGES = 32
 JOB_SECONDS = 150
+
+
+# ---- defense in depth inside the VM (the VM is the boundary) ----
+# Landlock confines the parser to read/execute system paths and read/write /job; seccomp refuses kernel
+# attack surface a PDF parser never needs. Both apply to this process and every child. Failure to apply
+# either refuses the job: the guest never runs an untrusted parse with weaker confinement than declared.
+LANDLOCK_MIN_ABI = 4
+_FS_EXECUTE, _FS_WRITE_FILE, _FS_READ_FILE, _FS_READ_DIR = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+_FS_REMOVE_DIR, _FS_REMOVE_FILE, _FS_MAKE_CHAR, _FS_MAKE_DIR = 1 << 4, 1 << 5, 1 << 6, 1 << 7
+_FS_MAKE_REG, _FS_MAKE_SOCK, _FS_MAKE_FIFO, _FS_MAKE_BLOCK = 1 << 8, 1 << 9, 1 << 10, 1 << 11
+_FS_MAKE_SYM, _FS_REFER, _FS_TRUNCATE, _FS_IOCTL_DEV = 1 << 12, 1 << 13, 1 << 14, 1 << 15
+_NET_BIND_TCP, _NET_CONNECT_TCP = 1 << 0, 1 << 1
+_SCOPE_ABSTRACT_UNIX, _SCOPE_SIGNAL = 1 << 0, 1 << 1
+_SYS_CREATE_RULESET, _SYS_ADD_RULE, _SYS_RESTRICT_SELF = 444, 445, 446  # x86-64 and the generic table
+READ_ONLY_PATHS = ('/usr', '/lib', '/lib64', '/bin', '/etc', '/opt/doppler', '/opt/docslurp', '/proc', '/var/cache/fontconfig')
+SECCOMP_DENY = (
+    'ptrace', 'process_vm_readv', 'process_vm_writev', 'mount', 'umount2', 'pivot_root', 'chroot', 'move_mount',
+    'open_tree', 'fsopen', 'fsconfig', 'fsmount', 'fspick', 'mount_setattr', 'unshare', 'setns', 'bpf',
+    'perf_event_open', 'userfaultfd', 'keyctl', 'add_key', 'request_key', 'kexec_load', 'kexec_file_load',
+    'init_module', 'finit_module', 'delete_module', 'io_uring_setup', 'io_uring_enter', 'io_uring_register',
+    'open_by_handle_at', 'name_to_handle_at', 'socket', 'socketpair', 'swapon', 'swapoff', 'reboot', 'acct',
+    'quotactl', 'syslog', 'settimeofday', 'clock_settime', 'adjtimex', 'fanotify_init', 'lookup_dcookie', 'vhangup',
+)
+
+
+def _landlock(libc, job):
+    libc.syscall.restype = ctypes.c_long
+    abi = libc.syscall(_SYS_CREATE_RULESET, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
+    if abi < LANDLOCK_MIN_ABI:
+        raise ValueError('landlock unavailable')
+    handled = (1 << 13) - 1 | _FS_REFER | _FS_TRUNCATE | (_FS_IOCTL_DEV if abi >= 5 else 0)
+    fields = [('fs', ctypes.c_uint64), ('net', ctypes.c_uint64)] + ([('scoped', ctypes.c_uint64)] if abi >= 6 else [])
+    attr = type('RulesetAttr', (ctypes.Structure,), {'_fields_': fields})()
+    attr.fs = handled
+    attr.net = _NET_BIND_TCP | _NET_CONNECT_TCP  # no TCP rules: every bind and connect is refused
+    if abi >= 6:
+        attr.scoped = _SCOPE_ABSTRACT_UNIX | _SCOPE_SIGNAL
+    ruleset = libc.syscall(_SYS_CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0))
+    if ruleset < 0:
+        raise ValueError('landlock ruleset refused')
+    try:
+        def allow(path, access):
+            fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            try:
+                # struct landlock_path_beneath_attr is packed: u64 allowed_access, s32 parent_fd.
+                rule = ctypes.create_string_buffer(struct.pack('<Qi', access & handled, fd), 12)
+                if libc.syscall(_SYS_ADD_RULE, ctypes.c_int(ruleset), ctypes.c_int(1), rule, ctypes.c_uint32(0)) != 0:
+                    raise ValueError('landlock rule refused')
+            finally:
+                os.close(fd)
+        for path in READ_ONLY_PATHS:
+            if os.path.isdir(path):
+                allow(path, _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR)
+        allow(job, _FS_READ_FILE | _FS_READ_DIR | _FS_WRITE_FILE | _FS_MAKE_REG | _FS_REMOVE_FILE | _FS_TRUNCATE)
+        allow('/dev/null', _FS_READ_FILE | _FS_WRITE_FILE)
+        if libc.syscall(_SYS_RESTRICT_SELF, ctypes.c_int(ruleset), ctypes.c_uint32(0)) != 0:
+            raise ValueError('landlock restrict refused')
+    finally:
+        os.close(ruleset)
+    return abi
+
+
+def _seccomp():
+    lib = ctypes.CDLL('libseccomp.so.2', use_errno=True)
+    lib.seccomp_init.restype = ctypes.c_void_p
+    lib.seccomp_init.argtypes = [ctypes.c_uint32]
+    lib.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint]
+    lib.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
+    lib.seccomp_load.argtypes = [ctypes.c_void_p]
+    lib.seccomp_release.argtypes = [ctypes.c_void_p]
+    ctx = lib.seccomp_init(0x7FFF0000)  # SCMP_ACT_ALLOW
+    if not ctx:
+        raise ValueError('seccomp unavailable')
+    try:
+        denied = 0
+        for name in SECCOMP_DENY:
+            nr = lib.seccomp_syscall_resolve_name(name.encode())
+            if nr < 0:
+                continue  # not on this architecture
+            if lib.seccomp_rule_add(ctx, 0x00050000 | 1, nr, 0) != 0:  # SCMP_ACT_ERRNO(EPERM)
+                raise ValueError('seccomp rule refused')
+            denied += 1
+        if lib.seccomp_load(ctx) != 0:
+            raise ValueError('seccomp load refused')
+    finally:
+        lib.seccomp_release(ctx)
+    return denied
+
+
+def harden(job='/job'):
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
+        raise ValueError('no_new_privs refused')
+    abi = _landlock(libc, job)
+    denied = _seccomp()
+    return {'noNewPrivs': True, 'landlockAbi': abi, 'seccompDenied': denied}
 
 
 def page_ranges(pages, first=1, last=None):
@@ -100,6 +198,7 @@ def main():
     resource.setrlimit(resource.RLIMIT_CPU, (JOB_SECONDS, JOB_SECONDS))
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RAW,) * 2)
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+    hardening = harden()
     info = os.lstat('/job/input')
     if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_INPUT:
         raise ValueError('invalid PDF input')
@@ -149,7 +248,7 @@ def main():
             # Reuse bounded files; never accumulate intermediates per chunk.
             for name in ('raw.xhtml', 'chunk.md', 'converter-report.json'):
                 Path('/job', name).unlink()
-    print(json.dumps({'protocol': DOPPLER_GUEST_PROTOCOL, 'engine': 'doppler',
+    print(json.dumps({'protocol': DOPPLER_GUEST_PROTOCOL, 'engine': 'doppler', 'hardening': hardening,
                       'elapsedMs': round((time.monotonic() - started) * 1000), 'outputBytes': total_bytes,
                       'conversion': {'pages': shard_last - shard_first + 1, 'first': shard_first, 'last': shard_last,
                                      'documentPages': pages, 'chunks': len(ranges), 'chunkPages': CHUNK_PAGES,

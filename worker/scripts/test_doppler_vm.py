@@ -118,4 +118,42 @@ class ShardRequestTest(unittest.TestCase):
             link = Path(d) / "shard.json"; link.symlink_to(target)
             with self.assertRaises(ValueError): guest.shard_request(67, link)
 
+class HardeningTest(unittest.TestCase):
+    """Applies the real Landlock and seccomp layers in a child process (needs Landlock ABI >= 4 and libseccomp)."""
+
+    def run_hardened(self, probe):
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as job, tempfile.TemporaryDirectory() as outside:
+            code = (f"import importlib.util, json, os, socket, ctypes\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"job, outside = {job!r}, {outside!r}\n"
+                    f"report = g.harden(job)\n{probe}")
+            return subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+
+    def test_job_directory_still_works(self):
+        out = self.run_hardened("open(os.path.join(job, 'x'), 'w').write('ok'); os.unlink(os.path.join(job, 'x')); print(json.dumps(report))")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        report = json.loads(out.stdout)
+        self.assertTrue(report['noNewPrivs']); self.assertGreaterEqual(report['landlockAbi'], 4); self.assertGreater(report['seccompDenied'], 30)
+
+    def test_refuses_writes_outside_job_sockets_ptrace_and_namespaces(self):
+        probe = """
+results = {}
+for name, attempt in {
+    'write_outside': lambda: open(os.path.join(outside, 'x'), 'w'),
+    'write_etc': lambda: open('/etc/doppler-escape', 'w'),
+    'socket': lambda: socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+    'unix_socket': lambda: socket.socket(socket.AF_UNIX, socket.SOCK_STREAM),
+}.items():
+    try: attempt(); results[name] = 'allowed'
+    except OSError: results[name] = 'refused'
+libc = ctypes.CDLL(None, use_errno=True)
+results['ptrace'] = 'refused' if libc.ptrace(0, 0, None, None) == -1 else 'allowed'
+results['unshare'] = 'refused' if libc.unshare(0x10000000) == -1 else 'allowed'
+print(json.dumps(results))"""
+        out = self.run_hardened(probe)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(set(json.loads(out.stdout).values()), {'refused'}, out.stdout)
+
 if __name__ == "__main__": unittest.main()
