@@ -52,7 +52,6 @@ describe("mergePipelineFeatures", () => {
         target: "local",
         modelUri: "llm://local-cli/microsoft/Florence-2-small-ft",
         prompt: "<OCR>",
-        maxPagesPerDocument: 4,
         remoteFallbackModelUri: null,
         benchmarkProfile: "difficult-pages"
       }

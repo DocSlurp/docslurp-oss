@@ -8,6 +8,7 @@
  */
 import type { CommandRunner } from "../tools/runner.js";
 
+// "over-cap" is no longer produced (the per-document vision page cap was removed on 2026-10-29); older rows keep it.
 export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap";
 
 export interface PageFactUpsert {
@@ -149,7 +150,7 @@ export async function probePdfPageFacts(args: {
 
 /**
  * Vision outcome per page for one document. `selected` pages the triage chose (in priority order),
- * `processed` pages that returned text, `cap` the per-document page limit.
+ * `processed` pages that returned text.
  */
 export function buildVisionPageFacts(args: {
   documentId: string;
@@ -157,16 +158,11 @@ export function buildVisionPageFacts(args: {
   pageCount: number;
   selected: number[];
   processed: Array<{ pageNumber: number; text?: string | null }>;
-  cap: number;
   costCapped?: boolean;
 }): PageFactUpsert[] {
   const pageCount = Math.min(Math.max(0, Math.trunc(args.pageCount)), PAGE_FACTS_MAX_PAGES);
   const processed = new Map(args.processed.map((page) => [page.pageNumber, page.text ?? ""]));
-  // `selected` is in vision's priority order (pages without native text first); the
-  // per-document cap keeps a prefix of it, so do not re-sort before slicing.
-  const selected = [...new Set(args.selected)].filter((page) => page >= 1 && page <= pageCount);
-  const attempted = new Set(selected.slice(0, Math.max(0, args.cap)));
-  const selectedSet = new Set(selected);
+  const selectedSet = new Set(args.selected.filter((page) => page >= 1 && page <= pageCount));
   return Array.from({ length: pageCount }, (_, index) => {
     const pageNumber = index + 1;
     const text = processed.get(pageNumber);
@@ -176,9 +172,7 @@ export function buildVisionPageFacts(args: {
         ? "extracted"
         : !selectedSet.has(pageNumber)
           ? "not-selected"
-          : !attempted.has(pageNumber)
-            ? "over-cap"
-            : "failed";
+          : "failed";
     return {
       documentId: args.documentId,
       runId: args.runId,

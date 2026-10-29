@@ -50,7 +50,6 @@ function fingerprint(plan: WorkspaceChangePlan): string {
 const PIPELINE_LABELS: Record<string, string> = {
   "mediaVideo.enabled": "Video frame analysis",
   "vision.forceAllPages": "Read every page with vision",
-  "vision.maxPagesPerDocument": "Vision pages per file",
 };
 function changedValues(before: PipelineFeatures, after: PipelineFeatures, patch: z.infer<typeof workspaceSettingsPipelinePatchSchema>) {
   return Object.entries(patch).flatMap(([key, value]) => {

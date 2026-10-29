@@ -41,7 +41,6 @@ import { workspaceRunsUsageCost } from "./usage-attribution.js";
 const MAX_PAGES_PER_DOCUMENT = 5_000;
 /** Embedding planning constant, as in run-processing-preview.ts (local profiles are free). */
 const EMBED_CENTS_PER_PAGE = 0.002;
-const VISION_PAGE_CAP_MAX = 32;
 const EXAMPLE_LIMIT = 20;
 
 export interface IngestReportDocumentRow {
@@ -199,10 +198,9 @@ export function visionModelUri(pipeline: PipelineFeatures): string {
   return applyDefaultVisionOverride(pipeline).vision.modelUri ?? visionProfileCatalog[pipeline.vision.profile]?.config.modelUri ?? "";
 }
 
-/** Pages per file vision may read: forceAllPages uses vision.maxPagesPerDocument, otherwise the playbook's cap wins. */
-export function effectiveVisionPageCap(pipeline: PipelineFeatures): number {
-  if (pipeline.vision.forceAllPages) return pipeline.vision.maxPagesPerDocument;
-  return parserPlaybookCatalog[pipeline.parserPlaybook]?.guidance?.visionMaxPagesPerDocument ?? pipeline.vision.maxPagesPerDocument;
+/** Whether the workspace's playbook lets vision read pages at all (there is no per-file page count). */
+export function playbookAllowsVision(pipeline: PipelineFeatures): boolean {
+  return pipeline.vision.forceAllPages || parserPlaybookCatalog[pipeline.parserPlaybook]?.guidance?.visionAllowed !== false;
 }
 
 interface PageView extends IngestReportPage {
@@ -582,7 +580,6 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
   const items: IngestReportConfigItem[] = [];
   const kinds = new Set(observed.docs.map((doc) => fileKind(doc.mimeType, doc.filename)));
   const paged = kinds.has("pdf") || kinds.has("image");
-  const cap = effectiveVisionPageCap(pipeline);
   const model = visionModelUri(pipeline);
   const perPage = visionModelCatalogByUri[model]?.estimatedCostPerPageCents;
   if (paged) {
@@ -595,14 +592,8 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
     items.push({
       key: "vision.forceAllPages", label: "Vision on every page", value: onOff(pipeline.vision.forceAllPages),
       note: pipeline.vision.forceAllPages
-        ? `Every page up to the per-file limit is read with vision${perPage ? ` (about ${formatCents(perPage)} per page)` : ""}.`
+        ? `Every page is read with vision${perPage ? ` (about ${formatCents(perPage)} per page)` : ""}.`
         : "Only pages that page triage selects are read with vision.",
-    });
-    items.push({
-      key: "vision.maxPagesPerDocument", label: "Vision pages per file", value: String(cap),
-      note: pipeline.vision.forceAllPages
-        ? "Vision stops after this many pages in each file."
-        : `The "${pipeline.parserPlaybook}" playbook caps vision at ${cap} page${cap === 1 ? "" : "s"} per file; vision.maxPagesPerDocument applies only with vision on every page.`,
     });
     items.push({
       key: "vision.modelUri", label: "Vision model", value: model.replace(/^llm:\/\//, "") || "default",
@@ -682,7 +673,7 @@ function reprocessEstimate(observed: Observed, documentIds: string[], visionPage
  */
 export const INGEST_RECOMMENDATION_CATALOG = {
   "turn-on-vision": { proposal: "pipeline-patch", note: "visionFallback and vision page selection are proposable." },
-  "vision-all-pages": { proposal: "pipeline-patch", note: "vision.forceAllPages and vision.maxPagesPerDocument are proposable." },
+  "vision-all-pages": { proposal: "pipeline-patch", note: "vision.forceAllPages is proposable." },
   "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
   "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
   "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
@@ -713,38 +704,34 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   const recordedPages = observed.textPages;
 
   if (affected.length > 0) {
-    const longest = Math.max(...observed.docs.filter((doc) => affectedDocIds.includes(doc.id)).map((doc) => doc.pageCount), 1);
-    // Never lower an existing limit; raise it to the longest affected file, up to the schema maximum.
-    const cap = Math.max(pipeline.vision.maxPagesPerDocument, Math.min(VISION_PAGE_CAP_MAX, longest));
-    const patch = { visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: cap } };
-    // Already configured this way: the pages predate the setting (or exceed the 32-page maximum), so only reprocessing helps.
+    const patch = { visionFallback: true, vision: { forceAllPages: true } };
+    // Already configured this way: the pages predate the setting, so only reprocessing helps.
     const settingInPlace = patchHolds(pipeline, patch);
-    const estimate = reprocessEstimate(observed, affectedDocIds, (doc) => Math.min(cap, Math.max(0, doc.pageCount)), vision.cents);
-    const capNote = longest > VISION_PAGE_CAP_MAX ? ` Files longer than ${VISION_PAGE_CAP_MAX} pages get vision on their first ${VISION_PAGE_CAP_MAX} pages only.` : "";
+    const estimate = reprocessEstimate(observed, affectedDocIds, (doc) => Math.max(0, doc.pageCount), vision.cents);
     const evidence = missedScans.length > 0
       ? `${plural(missedScans.length, "page")}${recordedPages ? ` of ${recordedPages.toLocaleString("en-US")} measured` : ""} ${agree(missedScans.length, "has", "have")} images and almost no text layer (${agree(missedScans.length, "it looks", "they look")} scanned) and no searchable text`
-      : `${plural(overCap.length, "page")} ${agree(overCap.length, "was", "were")} selected for vision but went past the per-file vision page limit`;
+      : `${plural(overCap.length, "page")} ${agree(overCap.length, "was", "were")} selected for vision but went past the former per-file vision page limit`;
     const why = !pipeline.visionFallback
       ? "Vision is off, so nothing reads text from page images."
-      : pipeline.vision.forceAllPages
-        ? `Vision stops after ${pipeline.vision.maxPagesPerDocument} pages per file.`
-        : `Page triage did not send them to vision, and the "${pipeline.parserPlaybook}" playbook reads at most ${effectiveVisionPageCap(pipeline)} vision pages per file.`;
+      : !playbookAllowsVision(pipeline)
+        ? `The "${pipeline.parserPlaybook}" playbook never sends pages to vision.`
+        : "Page triage did not send them to vision.";
     recs.push({
       id: settingInPlace ? "reprocess-with-vision" : pipeline.visionFallback ? "vision-all-pages" : "turn-on-vision",
       severity: "high",
       title: settingInPlace ? "Reprocess scanned pages with vision" : pipeline.visionFallback ? "Read every page with vision" : "Turn on vision for scanned pages",
       reason: settingInPlace
-        ? `${evidence}. Vision already reads every page (up to ${cap} per file), so these files were processed before that setting${longest > VISION_PAGE_CAP_MAX ? " or are longer than the vision page maximum" : ""}.`
+        ? `${evidence}. Vision already reads every page, so these files were processed before that setting (or before the per-file vision page limit was removed).`
         : `${evidence}. ${why}`,
       effect: settingInPlace
-        ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so ${agree(affectedDocIds.length, "its", "their")} scanned pages are read from the page images.${capNote}`
-        : `Pages are read from their images, so scanned text becomes searchable and citable. Applies to new uploads; reprocess the ${plural(affectedDocIds.length, "affected file")} to fix existing pages.${capNote}`,
+        ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so ${agree(affectedDocIds.length, "its", "their")} scanned pages are read from the page images.`
+        : `Pages are read from their images, so scanned text becomes searchable and citable. Applies to new uploads; reprocess the ${plural(affectedDocIds.length, "affected file")} to fix existing pages.`,
       affectedPages: affected.length,
       affectedDocuments: affectedDocIds.length,
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),
         reprocessCents: round(estimate.cents, 2),
-        basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}), charged on every page up to ${cap} per file. Reprocessing re-runs the ${plural(estimate.pages, "page")} of the affected files${estimate.baseKnown ? " at this workspace's observed cost per page" : ""} plus vision.`,
+        basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}), charged on every page. Reprocessing re-runs the ${plural(estimate.pages, "page")} of the affected files${estimate.baseKnown ? " at this workspace's observed cost per page" : ""} plus vision.`,
       },
       patch: settingInPlace ? null : patch,
       reprocessDocumentIds: affectedDocIds,

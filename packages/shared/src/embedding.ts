@@ -853,8 +853,9 @@ export type ParserPlaybookPreset = {
     multiStrategyVoting: boolean;
     // Page-level OCR escalation density threshold override (0..1). Lower = escalate more.
     visionDensityThreshold?: number;
-    // Hard cap on OCR pages per document.
-    visionMaxPagesPerDocument?: number;
+    // False: this playbook never sends pages to vision (text layer only). Vision reads every page the
+    // routing selects otherwise; there is no per-document page count (spend is bounded by maxCostCents).
+    visionAllowed?: boolean;
   };
 };
 
@@ -1013,7 +1014,7 @@ export const parserPlaybookCatalog: Record<
       preferLayoutMarkdown: false,
       multiStrategyVoting: false,
       visionDensityThreshold: 0.12,
-      visionMaxPagesPerDocument: 0,
+      visionAllowed: false,
     },
   },
   balanced: {
@@ -1025,7 +1026,6 @@ export const parserPlaybookCatalog: Record<
       preferLayoutMarkdown: true,
       multiStrategyVoting: true,
       visionDensityThreshold: 0.25,
-      visionMaxPagesPerDocument: 4,
     },
   },
   "layout-aware": {
@@ -1037,7 +1037,6 @@ export const parserPlaybookCatalog: Record<
       preferLayoutMarkdown: true,
       multiStrategyVoting: true,
       visionDensityThreshold: 0.22,
-      visionMaxPagesPerDocument: 6,
     },
   },
   agentic: {
@@ -1049,7 +1048,6 @@ export const parserPlaybookCatalog: Record<
       preferLayoutMarkdown: true,
       multiStrategyVoting: true,
       visionDensityThreshold: 0.2,
-      visionMaxPagesPerDocument: 8,
     },
   },
   "review-grade": {
@@ -1061,7 +1059,6 @@ export const parserPlaybookCatalog: Record<
       preferLayoutMarkdown: true,
       multiStrategyVoting: true,
       visionDensityThreshold: 0.3,
-      visionMaxPagesPerDocument: 12,
     },
   },
 };
@@ -1137,13 +1134,20 @@ export const defaultEmbeddingConfig: EmbeddingConfig = {
   lateChunkingWindow: 2,
 };
 
-export const visionConfigSchema = z
+// `maxPagesPerDocument` (a per-document vision page cap, default 4, max 32) was removed on 2026-10-29: stored
+// pipelines still carry it, so it is accepted and dropped instead of failing the strict schema.
+const dropLegacyVisionKeys = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("maxPagesPerDocument" in value)) return value;
+  const { maxPagesPerDocument: _legacy, ...rest } = value as Record<string, unknown>;
+  return rest;
+};
+
+const visionConfigObjectSchema = z
   .object({
     profile: visionProfileKeySchema.default(DEFAULT_VISION_PROFILE),
     target: modelTargetSchema.optional(),
     modelUri: llmModelUriSchema.optional(),
     prompt: z.string().trim().min(1).max(200).default("<OCR>"),
-    maxPagesPerDocument: z.number().int().positive().max(32).default(4),
     forceAllPages: z.boolean().default(false),
     remoteFallbackModelUri: llmModelUriSchema.nullable().default(null),
     benchmarkProfile: visionBenchmarkProfileSchema.default("difficult-pages"),
@@ -1194,12 +1198,12 @@ export const visionConfigSchema = z
       target: value.target ?? inferModelTarget(modelUri),
     };
   });
-export type VisionConfig = z.infer<typeof visionConfigSchema>;
+export const visionConfigSchema = z.preprocess(dropLegacyVisionKeys, visionConfigObjectSchema);
+export type VisionConfig = z.output<typeof visionConfigObjectSchema>;
 
 export const defaultVisionConfig: VisionConfig = {
   ...visionProfileCatalog[DEFAULT_VISION_PROFILE].config,
   prompt: "<OCR>",
-  maxPagesPerDocument: 4,
   forceAllPages: false,
   remoteFallbackModelUri: null,
   benchmarkProfile: "difficult-pages",
@@ -1267,7 +1271,6 @@ export type VisionExecutionConfig = {
   model: string;
   baseUrl: string | null;
   prompt: string;
-  maxPagesPerDocument: number;
   remoteFallbackModelUri: string | null;
   benchmarkProfile: VisionBenchmarkProfile;
 };
@@ -1290,7 +1293,6 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
       model: parsed.model,
       baseUrl: lookup.ok ? lookup.route.baseUrl : null,
       prompt: config.prompt,
-      maxPagesPerDocument: config.maxPagesPerDocument,
       remoteFallbackModelUri: config.remoteFallbackModelUri,
       benchmarkProfile: config.benchmarkProfile,
     };
@@ -1309,7 +1311,6 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
     model: preset?.id ?? parsed.model,
     baseUrl: parsed.params.get("baseUrl") ?? defaultBaseUrl,
     prompt: config.prompt,
-    maxPagesPerDocument: config.maxPagesPerDocument,
     remoteFallbackModelUri: config.remoteFallbackModelUri,
     benchmarkProfile: config.benchmarkProfile,
   };
