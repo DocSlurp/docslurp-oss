@@ -29,7 +29,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { executeVisionRuntime, rejectedVisionUsageInput, visionCall } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, rejectedVisionUsageInput, visionCall, visionMaxOutputTokens } from "../tools/vision-runtime.js";
 import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
@@ -40,7 +40,13 @@ import {
   type CanonicalReconciliationDecision,
 } from "../lib/canonical-reconciliation.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
-import { selectLegacyVisionPages } from "./classify-route.js";
+import { DRAWN_CONTENT_SIGNAL, selectLegacyVisionPages } from "./classify-route.js";
+import { renderLooksBlank } from "../lib/page-image-evidence.js";
+import {
+  VisionRunGuard,
+  resolveVisionGuardConfig,
+  type VisionGuardStop,
+} from "../lib/vision-spend-guard.js";
 import { resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
@@ -55,7 +61,7 @@ import {
   type RoutedExecution,
 } from "../routing/runtime.js";
 import type { PlanValidation, RoutePlan } from "@docslurp/shared";
-import { buildVisionPageFacts, recordPageFacts } from "../pipeline/page-facts.js";
+import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
 
 type PipelineWithPlaybook = WorkflowState["run"]["pipeline"] & {
   parserPlaybook?: ParserPlaybookKey;
@@ -82,6 +88,57 @@ export interface VisionPageOutput {
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
 }
+
+/**
+ * A selected page that produced no vision output, and why. Page tasks store it as their result
+ * (instead of null), so the stage pass that assembles the document knows each page's outcome.
+ */
+export interface VisionPageSkip extends VisionPageOutcome {
+  pageNumber: number;
+}
+
+/** Per-page hints from page triage for the legacy path. */
+export interface LegacyPageHints {
+  /** Pages nominated only by drawn-content bytes: call vision only if the render is not blank. */
+  inkCheckPages: ReadonlySet<number>;
+  /** Pages with usable native or OCR text to keep when vision gives nothing. */
+  fallbackTextPages: ReadonlySet<number>;
+}
+
+/** Thrown by `callVisionOnImage` when the run's vision guard refuses a call; no provider call was made. */
+export class VisionGuardStopError extends Error {
+  constructor(readonly stop: VisionGuardStop) {
+    super(`vision stopped for the run: ${stop.reason} (provider ${stop.providerCostCents.toFixed(2)}c of ` +
+      `${stop.budgetCents}c budget, ${stop.rejectedPages}/${stop.attemptedPages} pages rejected)`);
+    this.name = "VisionGuardStopError";
+  }
+}
+
+export function isVisionPageSkip(value: unknown): value is VisionPageSkip {
+  return typeof value === "object" && value !== null && typeof (value as { outcome?: unknown }).outcome === "string" &&
+    typeof (value as { pageNumber?: unknown }).pageNumber === "number";
+}
+
+/** Text a page keeps when vision gives nothing is usable when it has some words and is not garbled. */
+const USABLE_FALLBACK_DENSITY = 0.02;
+
+export function legacyPageHints(pages: Array<{ pageNumber: number; textDensityScore: number; signals: string[];
+  ocrDecision?: { signals: string[] } }>): LegacyPageHints {
+  const inkCheckPages = new Set<number>();
+  const fallbackTextPages = new Set<number>();
+  for (const page of pages) {
+    if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
+    if (page.textDensityScore >= USABLE_FALLBACK_DENSITY && !page.signals.includes("garbled-text")) {
+      fallbackTextPages.add(page.pageNumber);
+    }
+  }
+  return { inkCheckPages, fallbackTextPages };
+}
+
+/** Input tokens a page image and prompt typically take, for the per-call reservation. */
+const VISION_RESERVE_INPUT_TOKENS = 3_000;
+
+const NO_HINTS: LegacyPageHints = { inkCheckPages: new Set(), fallbackTextPages: new Set() };
 
 export class VisionExtractStage implements Stage {
   readonly name = "vision-extract";
@@ -130,7 +187,13 @@ export class VisionExtractStage implements Stage {
       const routing = await this.checkNeedsVision(document, maxInt(1, document.pageCount), state, signal);
       if (!routing.needed) continue;
       const pages = routing.selectedPages.slice(0, this.resolveMaxVisionPages(vision)).sort((a, b) => a - b);
-      for (const pageNumber of pages) tasks.push({ runId: state.run.id, documentId: document.id, pageNumber, pageCount: pages.length, vision });
+      for (const pageNumber of pages) {
+        tasks.push({
+          runId: state.run.id, documentId: document.id, pageNumber, pageCount: pages.length, vision,
+          ...(routing.hints.inkCheckPages.has(pageNumber) ? { inkCheck: true } : {}),
+          ...(routing.hints.fallbackTextPages.has(pageNumber) ? { fallbackText: true } : {}),
+        });
+      }
     }
     return tasks.length > 1 ? tasks : [];
   }
@@ -138,9 +201,18 @@ export class VisionExtractStage implements Stage {
   async runPageTask(state: WorkflowState, task: import("../temporal/shared.js").VisionPageTask, signal?: AbortSignal) {
     const document = state.documents.find((doc) => doc.id === task.documentId);
     if (!document) throw new Error("Page task document is not part of run");
-    const outputs = await this.extractVisionPagesFromCache(state, document, task.vision, [task.pageNumber], signal);
-    // An optional fail-open result is also a checkpoint; do not repeatedly call the provider.
-    return outputs[0] ?? null;
+    // The page's own lease counts as this guard's reservation, not as another task in flight.
+    this.guardFor(state, { documentId: task.documentId, pageNumber: task.pageNumber });
+    const skips = new Map<number, VisionPageSkip>();
+    const hints: LegacyPageHints = {
+      inkCheckPages: new Set(task.inkCheck ? [task.pageNumber] : []),
+      fallbackTextPages: new Set(task.fallbackText ? [task.pageNumber] : []),
+    };
+    const outputs = await this.extractVisionPagesFromCache(state, document, task.vision, [task.pageNumber], signal,
+      undefined, undefined, false, { hints, skips });
+    // An optional fail-open result is also a checkpoint; do not repeatedly call the provider. A
+    // skipped page stores why, never model text.
+    return outputs[0] ?? skips.get(task.pageNumber) ?? null;
   }
 
   /**
@@ -261,6 +333,7 @@ export class VisionExtractStage implements Stage {
                 pages,
                 selectedPages: needsVision.selectedPages,
                 routing: needsVision.routing,
+                routingVersion: routingVersion(routingV2),
               });
 
               await recordPageFacts(state.store, buildVisionPageFacts({
@@ -282,6 +355,7 @@ export class VisionExtractStage implements Stage {
 
             let outputs: any[] = [];
             let routedResult: RoutedVisionResult | null = null;
+            const skips = new Map<number, VisionPageSkip>();
 
             try {
               if (routed) {
@@ -295,6 +369,9 @@ export class VisionExtractStage implements Stage {
                   needsVision.selectedPages,
                   signal,
                   key,
+                  undefined,
+                  false,
+                  { hints: needsVision.hints, skips },
                 );
               }
             } catch (error) {
@@ -318,6 +395,8 @@ export class VisionExtractStage implements Stage {
                 pages,
                 selectedPages: needsVision.selectedPages,
                 routing: needsVision.routing,
+                routingVersion: routingVersion(routingV2),
+                visionGuard: error instanceof VisionGuardStopError ? error.stop : null,
               });
 
               state.pendingPerformance.push({
@@ -358,6 +437,10 @@ export class VisionExtractStage implements Stage {
               ? await this.recordRoutedValidation(state, document, routed.plan, routed.execution, routedResult, key)
               : null;
 
+            const failedPages = [...skips.values()].sort((left, right) => left.pageNumber - right.pageNumber);
+            const guardStop = this.guardFor(state).stop;
+            this.recordVisionOutcomeTelemetry(state, document, outputs.length, failedPages, guardStop, routingV2);
+
             const inputTokens = outputs.reduce(
               (sum, page) => sum + page.inputTokens,
               0,
@@ -386,7 +469,11 @@ export class VisionExtractStage implements Stage {
               selectedPages: needsVision.selectedPages,
               routing: needsVision.routing,
               ...(routed ? { pageRouter: this.routedSummary(routed, routedResult, routedValidation) } : {}),
+              routingVersion: routingVersion(routingV2),
               processedPages: outputs.length,
+              // Selected pages without vision output and why; their model text (if any) is never kept.
+              failedPages: failedPages,
+              visionGuard: guardStop,
               totals: {
                 inputTokens,
                 outputTokens,
@@ -449,6 +536,7 @@ export class VisionExtractStage implements Stage {
             await recordPageFacts(state.store, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
               selected: needsVision.selectedPages, processed: outputs, cap: routed ? pages : selection.maxPagesPerDocument,
+              outcomes: skips,
             }));
 
             const reconciliation = await this.reconcileExtractionArtifacts(
@@ -478,6 +566,8 @@ export class VisionExtractStage implements Stage {
                 selectedPages: needsVision.selectedPages,
                 routingPolicy: needsVision.routing?.visionPolicy ?? null,
                 routingVersion: routingVersion(routingV2),
+                failedPages: failedPages.map((page) => ({ pageNumber: page.pageNumber, reason: page.outcome, fallbackText: page.fallbackText })),
+                visionGuard: guardStop?.reason ?? null,
                 reconciledPages: reconciliation.changedPages,
                 reconciliationDecisions: reconciliation.decisions.map((decision) => ({
                   pageNumber: decision.pageNumber,
@@ -508,6 +598,7 @@ export class VisionExtractStage implements Stage {
       visionPolicy: string;
       dominantRoutes: string[];
     } | null;
+    hints: LegacyPageHints;
   }> {
     const routing = await this.loadAdaptiveRouting(state, document.id);
     const routingV2 = resolveRunRoutingV2(state);
@@ -585,6 +676,7 @@ export class VisionExtractStage implements Stage {
       score,
       selectedPages,
       reason,
+      hints: routing ? legacyPageHints(routing.pages) : NO_HINTS,
       routing: routing
         ? {
             documentComplexity: routing.documentComplexity,
@@ -709,7 +801,7 @@ export class VisionExtractStage implements Stage {
         .map((request) => request.assignment.pageNumber),
     ])].sort((a, b) => a - b);
     const needed = selectedPages.length > 0;
-    return { needed, score: 0, selectedPages, reason: needed ? "page-router-plan" : "page-router-no-pixels", routing: null };
+    return { needed, score: 0, selectedPages, reason: needed ? "page-router-plan" : "page-router-no-pixels", routing: null, hints: NO_HINTS };
   }
 
   private async extractRoutedPages(
@@ -896,7 +988,14 @@ export class VisionExtractStage implements Stage {
     storageKey?: string,
     usageSink?: (event: UsageEvent | null, pageNumber: number) => void,
     bypassCache = false,
+    pageOptions: { hints?: LegacyPageHints; skips?: Map<number, VisionPageSkip> } = {},
   ): Promise<VisionPageOutput[]> {
+    const hints = pageOptions.hints ?? NO_HINTS;
+    const skip = (pageNumber: number, outcome: VisionPageSkip["outcome"]): VisionPageSkip => {
+      const entry: VisionPageSkip = { pageNumber, outcome, fallbackText: hints.fallbackTextPages.has(pageNumber) };
+      pageOptions.skips?.set(pageNumber, entry);
+      return entry;
+    };
     const maxPages = this.resolveMaxVisionPages(vision);
     const requestedPages = selectedPageNumbers.slice(0, maxPages).sort((a, b) => a - b);
     if (maxPages === 0 || requestedPages.length === 0) {
@@ -907,10 +1006,21 @@ export class VisionExtractStage implements Stage {
     const cached = requestedPages.filter(isCached);
     const missing = requestedPages.filter((page) => !isCached(page));
     const completed = cached.flatMap((page) => {
-      const output = state.distributedVisionPages.get(`${document.id}:${page}`) as VisionPageOutput | null;
+      const result = state.distributedVisionPages.get(`${document.id}:${page}`);
+      if (isVisionPageSkip(result)) {
+        pageOptions.skips?.set(page, { ...result, pageNumber: page });
+        return [];
+      }
+      const output = result as VisionPageOutput | null;
       return output ? [output] : [];
     });
     if (!missing.length) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+    // The run's vision guard already stopped: no render, no call.
+    const stopped = this.guardFor(state).stop;
+    if (stopped) {
+      for (const page of missing) skip(page, stopped.reason);
+      return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+    }
     const rasterPages = await this.rasters.renderSelectedPages({
       document,
       runId: state.run.id,
@@ -926,6 +1036,11 @@ export class VisionExtractStage implements Stage {
         trustedTempDownloadPattern("docslurp-vision-raster-", document),
       );
       try {
+        // Nominated only by byte counts (drawn content): a blank render has nothing to read.
+        if (hints.inkCheckPages.has(page.pageNumber) && renderLooksBlank(page)) {
+          console.log(`[vision-extract] document=${document.id} page=${page.pageNumber} skipped=blank-render bytes=${page.sizeBytes}`);
+          return { output: null, error: null, skip: skip(page.pageNumber, "blank-render") };
+        }
         await emitDocumentPageProgress(
           state,
           document,
@@ -956,11 +1071,17 @@ export class VisionExtractStage implements Stage {
             latencyMs: result.latencyMs,
           },
         );
-        return { output, error: null };
+        return { output, error: null, skip: null };
       } catch (error) {
+        // Refused before any provider call: nothing to record as an attempt.
+        if (error instanceof VisionGuardStopError) {
+          return { output: null, error: null, skip: skip(page.pageNumber, error.stop.reason) };
+        }
         const message = toError(error).message;
         this.recordFailedVisionAttempt(state, document, vision, page, message, error);
-        return { output: null, error };
+        if (!shouldFailOpenVisionError(error)) return { output: null, error, skip: null };
+        // Fail open: the page keeps its native or OCR text, never the rejected model text.
+        return { output: null, error, skip: skip(page.pageNumber, findVisionOutputRejected(error) ? "rejected" : "failed") };
       } finally {
         await cleanupTempFile(imagePath);
       }
@@ -1013,6 +1134,10 @@ export class VisionExtractStage implements Stage {
     const imagePath = image.imagePath;
     const page = { mimeType: image.mimeType, pageNumber: image.pageNumber, artifactUri: image.artifactUri ?? "" };
     const outputPath = `${imagePath}.vision.json`;
+    // Every vision call of the run, legacy page or routed region, passes the run's guard.
+    const guard = this.guardFor(state);
+    const admission = await guard.admit(this.visionReserveCents(vision));
+    if (!admission.admitted) throw new VisionGuardStopError(admission.stop);
     try {
       const result = await executeVisionRuntime({
         imagePath,
@@ -1069,11 +1194,13 @@ export class VisionExtractStage implements Stage {
           },
         },
       );
+      guard.observe(usageEvent);
       usageSink?.(usageEvent, page.pageNumber);
       return output;
     } finally {
       // Sidecar only: cleanupTempFile would delete the directory holding the caller's image.
       await rm(outputPath, { force: true });
+      admission.release();
     }
   }
 
@@ -1094,7 +1221,7 @@ export class VisionExtractStage implements Stage {
         inputTokens: rejected.inputTokens, outputTokens: rejected.outputTokens,
       });
       const input = rejectedVisionUsageInput(rejected, costCents, route.model);
-      state.usageLedger.record({
+      const recorded = state.usageLedger.record({
         ...input,
         metadata: {
           ...input.metadata,
@@ -1104,6 +1231,7 @@ export class VisionExtractStage implements Stage {
           runtime: route.runtime,
         },
       });
+      this.guardFor(state).observe(recorded);
     } else state.usageLedger.enqueue(
       buildFailedVisionAttemptUsage({
         documentId: document.id,
@@ -1129,7 +1257,104 @@ export class VisionExtractStage implements Stage {
         runtime: route.runtime,
         reason,
         usagePersisted: true,
+        rejected: rejected !== null,
+        routingVersion: routingVersion(resolveRunRoutingV2(state)),
       },
+    });
+  }
+
+  /**
+   * Per-document vision outcome telemetry: the rejection rate (alertable per org in SigNoz from
+   * the `[vision-rejections]` log line and the `vision-rejection-rate` performance metric), each
+   * page without output, and a guard stop with its reason.
+   */
+  private recordVisionOutcomeTelemetry(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    extractedPages: number,
+    failedPages: VisionPageSkip[],
+    guardStop: VisionGuardStop | null,
+    routingV2: boolean,
+  ): void {
+    const rejected = failedPages.filter((page) => page.outcome === "rejected").length;
+    const attempted = extractedPages + failedPages.filter((page) => page.outcome === "rejected" || page.outcome === "failed").length;
+    const orgId = state.run.orgId ?? null;
+    if (attempted > 0) {
+      const rate = rejected / attempted;
+      console.log(
+        `[vision-rejections] org=${orgId ?? "none"} run=${state.run.id} document=${document.id} ` +
+          `rejected=${rejected} attempted=${attempted} rate=${rate.toFixed(4)} routingVersion=${routingVersion(routingV2)}`,
+      );
+      state.pendingPerformance.push({
+        documentId: document.id,
+        scope: "document",
+        stageName: this.name,
+        metric: "vision-rejection-rate",
+        value: rate,
+        unit: "ratio",
+        tags: ["document", "vision", "rejection", "alert"],
+        metadata: { orgId, rejectedPages: rejected, attemptedPages: attempted, routingVersion: routingVersion(routingV2) },
+      });
+    }
+    for (const page of failedPages) {
+      if (page.outcome === "blank-render") continue;
+      state.pendingPerformance.push({
+        documentId: document.id,
+        scope: "page",
+        stageName: this.name,
+        metric: "vision-page-outcome",
+        pageNumber: page.pageNumber,
+        value: 1,
+        unit: "page",
+        tags: ["page", "vision", page.outcome],
+        metadata: { outcome: page.outcome, fallbackText: page.fallbackText, routingVersion: routingVersion(routingV2) },
+      });
+    }
+    if (guardStop) {
+      console.warn(
+        `[vision-guard] org=${orgId ?? "none"} run=${state.run.id} document=${document.id} stopped=${guardStop.reason} ` +
+          `providerCents=${guardStop.providerCostCents} reservedCents=${guardStop.reservedCents} budgetCents=${guardStop.budgetCents} ` +
+          `rejected=${guardStop.rejectedPages} attempted=${guardStop.attemptedPages}`,
+      );
+      state.pendingPerformance.push({
+        documentId: document.id,
+        scope: "document",
+        stageName: this.name,
+        metric: "vision-guard-stop",
+        value: 1,
+        unit: "document",
+        tags: ["document", "vision", "cost", guardStop.reason],
+        metadata: { orgId, ...guardStop, routingVersion: routingVersion(routingV2) },
+      });
+    }
+  }
+
+  private readonly guards = new WeakMap<WorkflowState, VisionRunGuard>();
+
+  /**
+   * The run's vision provider budget and rejection breaker for this state (one per activity).
+   * `exclude` names the page task the state belongs to, whose own lease is not another call.
+   */
+  private guardFor(state: WorkflowState, exclude?: { documentId: string; pageNumber: number }): VisionRunGuard {
+    let guard = this.guards.get(state);
+    if (!guard) {
+      guard = new VisionRunGuard(state.run.id, resolveVisionGuardConfig(state.run), () => state.usageLedger.snapshot(),
+        state.visionRunSpend, exclude);
+      this.guards.set(state, guard);
+    }
+    return guard;
+  }
+
+  /**
+   * Provider cost reserved for one vision page call before it runs: two attempts (the stream
+   * guard retries a rejected output once on an alternate route) of a full output at list price
+   * over a page image's typical input.
+   */
+  private visionReserveCents(vision: VisionConfig): number {
+    const route = resolveVisionRoute(vision);
+    return 2 * this.calculateVisionCost({
+      model: route.model, runtime: route.runtime, baseUrl: route.baseUrl,
+      inputTokens: VISION_RESERVE_INPUT_TOKENS, outputTokens: visionMaxOutputTokens(route.model),
     });
   }
 
@@ -1370,8 +1595,14 @@ export function shouldFailOpenVisionError(error: unknown): boolean {
   // Temporal retries it, rather than silently dropping the page's content.
   if (findProviderRetryableError(error)) return false;
   // Output rejected after the alternate-route retry (degenerate, refusal, truncated): the page
-  // keeps its native or OCR text instead of failing the whole document.
+  // keeps its native or OCR text instead of failing the whole document (and records `rejected`,
+  // or `failed` when it has no usable text).
   if (findVisionOutputRejected(error)) return true;
+  // The run's vision provider budget or rejection breaker stopped vision: no call was made.
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (cur instanceof VisionGuardStopError) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
   const message = toError(error).message.toLowerCase();
 
   return [

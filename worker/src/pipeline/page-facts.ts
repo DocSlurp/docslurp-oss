@@ -8,7 +8,33 @@
  */
 import type { CommandRunner } from "../tools/runner.js";
 
-export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap";
+/**
+ * `rejected`: vision ran but its output was rejected (degenerate, refusal, truncated) and the page
+ * kept usable native or OCR text; a rejected page without usable text is `failed`. `guarded`: the
+ * run's vision provider budget or rejection breaker stopped vision before the page.
+ */
+export type PageVisionStatus = "extracted" | "failed" | "rejected" | "guarded" | "not-selected" | "over-cap" | "cost-cap";
+
+/** Why a selected page has no vision output (vision-extract `VisionPageSkip`). */
+export interface VisionPageOutcome {
+  outcome: "rejected" | "failed" | "provider-budget" | "rejection-breaker" | "blank-render";
+  /** The page has usable native or OCR text to keep when vision gives nothing. */
+  fallbackText: boolean;
+}
+
+export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionStatus {
+  switch (outcome.outcome) {
+    case "rejected":
+      return outcome.fallbackText ? "rejected" : "failed";
+    case "provider-budget":
+    case "rejection-breaker":
+      return "guarded";
+    case "blank-render":
+      return "not-selected";
+    default:
+      return "failed";
+  }
+}
 
 export interface PageFactUpsert {
   documentId: string;
@@ -163,6 +189,8 @@ export function buildVisionPageFacts(args: {
   processed: Array<{ pageNumber: number; text?: string | null }>;
   cap: number;
   costCapped?: boolean;
+  /** Why attempted pages without output have none; absent pages read as `failed`. */
+  outcomes?: ReadonlyMap<number, VisionPageOutcome>;
 }): PageFactUpsert[] {
   const pageCount = Math.min(Math.max(0, Math.trunc(args.pageCount)), PAGE_FACTS_MAX_PAGES);
   const processed = new Map(args.processed.map((page) => [page.pageNumber, page.text ?? ""]));
@@ -182,7 +210,9 @@ export function buildVisionPageFacts(args: {
           ? "not-selected"
           : !attempted.has(pageNumber)
             ? "over-cap"
-            : "failed";
+            : args.outcomes?.has(pageNumber)
+              ? visionStatusForOutcome(args.outcomes.get(pageNumber)!)
+              : "failed";
     return {
       documentId: args.documentId,
       runId: args.runId,

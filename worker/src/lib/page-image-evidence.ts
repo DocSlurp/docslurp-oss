@@ -185,6 +185,23 @@ export function drawnBytesPerPage(fileBytes: number | null, imageBytes: number |
 }
 
 /**
+ * Whether a PNG page render (pdftoppm, RGB) is blank: its compressed size is within 5% of a white
+ * page of the same pixel count (about 3.6 KB per megapixel plus 0.75 KB of headers at 72 to 300
+ * dpi; one short line of anti-aliased text adds 15 to 35%). A page holding only a few solid bars
+ * also reads as blank; it has nothing for vision to transcribe. The size of our own render needs no decoding
+ * and cannot be inflated by bytes the PDF carries but never draws (padding, metadata,
+ * attachments, unused fonts). Unknown dimensions or a non-PNG raster are never called blank.
+ */
+export function renderLooksBlank(raster: { sizeBytes: number; widthPx: number | null; heightPx: number | null; mimeType: string }): boolean {
+  if (raster.mimeType !== "image/png" || !raster.widthPx || !raster.heightPx || !(raster.sizeBytes > 0)) return false;
+  const megapixels = (raster.widthPx * raster.heightPx) / 1e6;
+  const whitePageBytes = 3.6 * 1024 * megapixels + 0.75 * 1024;
+  return raster.sizeBytes <= whitePageBytes * BLANK_RENDER_TOLERANCE;
+}
+
+const BLANK_RENDER_TOLERANCE = 1.05;
+
+/**
  * Evidence for an uploaded image file: one page with no text layer whose content is a single
  * full-page raster. Any text extracted for it came from OCR.
  */

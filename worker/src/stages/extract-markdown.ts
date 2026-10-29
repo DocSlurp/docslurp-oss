@@ -744,12 +744,8 @@ export class ExtractMarkdownStage implements Stage {
                     parserScores.length > 0
                       ? this.storage.uri(parserEvalKey)
                       : null;
-                  const pageImageEvidenceUri =
-                    isPdf && state.run.pipeline.visionFallback
-                      ? await this.recordPageImageEvidence(document, tempFile, winningText, state, signal)
-                      : format === "image" && state.run.pipeline.visionFallback && resolveRunRoutingV2(state)
-                        ? await this.storePageImageEvidence(document, state, imageFilePageEvidence(), "image-file")
-                        : null;
+                  const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
+                    document, tempFile, winningText, state, { isPdf, format }, signal);
                   registerHash(state, contentHash, artifactUri);
 
                   for (const parserArtifact of parserArtifacts) {
@@ -1077,6 +1073,27 @@ export class ExtractMarkdownStage implements Stage {
     if (!listing) return null;
     const stdout = await listing.stdout.catch(() => null);
     return stdout === null ? null : splitFormFeedPages(stdout, listing.lastPage);
+  }
+
+  /**
+   * Raster evidence for classify-route: PDFs get page triage (`pdfimages`), and with routing v2
+   * an uploaded image gets one full-page raster page (`image-file`). Null when vision fallback is
+   * off or the format has none.
+   */
+  async recordDocumentImageEvidence(
+    document: import("../models.js").Document,
+    sourcePath: string,
+    winningText: string,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    source: { isPdf: boolean; format: string },
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (!state.run.pipeline.visionFallback) return null;
+    if (source.isPdf) return await this.recordPageImageEvidence(document, sourcePath, winningText, state, signal);
+    if (source.format === "image" && resolveRunRoutingV2(state)) {
+      return await this.storePageImageEvidence(document, state, imageFilePageEvidence(), "image-file");
+    }
+    return null;
   }
 
   /**
