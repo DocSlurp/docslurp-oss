@@ -199,7 +199,7 @@ describe("worker private endpoint vision", () => {
     await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     const result = await runWithPrivacyAuditScope({ workspaceId: "ws-1", runId: "run-1", documentId: "doc-1" }, () => executeVisionRuntime({
       imagePath,
-      outputPath: `${imagePath}.json`,
+      outputPath: `${imagePath}.json`, gate: null,
       vision: visionConfigSchema.parse({ modelUri: "llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", prompt: "markdown" }),
       cfg: fromEnv(),
       runner: new CommandRunner(),

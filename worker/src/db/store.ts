@@ -54,7 +54,7 @@ import {
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
-import { PostgresVisionSpendBackend } from "./vision-spend-store.js";
+import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -2485,12 +2485,12 @@ export class Store {
     }
   }
 
-  private visionSpendBackend: PostgresVisionSpendBackend | null = null;
+  private visionAttemptBackend: PostgresVisionAttemptBackend | null = null;
 
-  /** The shared vision spend ledger every vision call of a run admits against (lib/vision-spend-guard.ts). */
-  get visionSpend(): PostgresVisionSpendBackend {
-    this.visionSpendBackend ??= new PostgresVisionSpendBackend(this.sql);
-    return this.visionSpendBackend;
+  /** The shared vision attempt ledger every vision request of a run is admitted against (lib/vision-attempt-guard.ts). */
+  get visionAttempts(): PostgresVisionAttemptBackend {
+    this.visionAttemptBackend ??= new PostgresVisionAttemptBackend(this.sql);
+    return this.visionAttemptBackend;
   }
 
   /**

@@ -32,7 +32,7 @@ async function requestBody(model: string, prompt?: string) {
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await executeVisionRuntime({
     imagePath,
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),

@@ -149,8 +149,8 @@ export async function loadRunState(
   store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState"> & {
     /** Reads the run's stage checkpoints so they travel beside the run and document reads. */
     readStageStates?(runId: string): Promise<unknown>;
-    /** The shared vision spend ledger (vision provider budget, rejection breaker, org limit). */
-    visionSpend?: import("../lib/vision-spend-guard.js").VisionSpendBackend;
+    /** The shared vision attempt ledger (page bound, rejection breaker, org bound). */
+    visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend;
   },
   runId: string,
   options: LoadRunOptions = {},
@@ -165,7 +165,7 @@ export async function loadRunState(
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
-  if (store.visionSpend) state.visionSpend = store.visionSpend;
+  if (store.visionAttempts) state.visionAttempts = store.visionAttempts;
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
   if (options.totalStages !== undefined) {
     state.totalStages = typeof options.totalStages === "function" ? options.totalStages(state.run) : options.totalStages;

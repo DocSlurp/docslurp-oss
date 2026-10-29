@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { visionModelCatalog } from "@docslurp/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const visionRuntime = vi.hoisted(() => ({ execute: vi.fn() }));
@@ -24,20 +25,26 @@ import {
 import { attachVisionBilledUsage, VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { buildVisionPageFacts } from "../pipeline/page-facts.js";
+import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { drawnBytesPerPage, renderLooksBlank, totalEmbeddedImageBytes, type PageImageEvidence } from "../lib/page-image-evidence.js";
 import {
-  MemoryVisionSpendBackend,
+  defaultOrgAttemptLimit,
+  MemoryVisionAttemptBackend,
+  recordVisionRead,
   resetVisionGuardWarningsForTest,
   resolveVisionGuardConfig,
-  visionInputTokenBound,
+  visionGuardFor,
   VisionRunGuard,
+  type VisionCallGate,
   type VisionGuardConfig,
-} from "../lib/vision-spend-guard.js";
-import { visionReserveCents } from "../lib/vision-reserve.js";
+  type VisionGuardStop,
+  type VisionRequestGate,
+} from "../lib/vision-attempt-guard.js";
+import { worstCaseVisionRequestCents } from "../lib/vision-pricing.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { CommandRunner } from "../tools/runner.js";
-import type { UsageEvent, WorkspaceRun } from "../models.js";
+import type { WorkspaceRun } from "../models.js";
 import type { Config } from "../config.js";
 import type { Document } from "../models.js";
 
@@ -45,153 +52,197 @@ const MODEL = "google/gemini-3.1-flash-lite";
 const VISION = { target: "remote", modelUri: `llm://openrouter/${MODEL}`, maxPagesPerDocument: 1_000 } as const;
 const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
 
-/** A run state with its own vision ledger (never the process-wide one other tests share). */
-function runState(pipeline: Record<string, unknown> = {}, backend = new MemoryVisionSpendBackend()): WorkflowState {
+/** A run state with its own attempt ledger (never the process-wide one other tests share). */
+function runState(pipeline: Record<string, unknown> = {}, backend = new MemoryVisionAttemptBackend(), orgId: string | null = "org-1"): WorkflowState {
   const state = WorkflowState.create({
-    id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
+    id: "run-1", orgId, workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
     pipeline: { vision: VISION, privacyMode: "standard", visionFallback: true, ...pipeline },
   } as unknown as WorkspaceRun, []);
-  state.visionSpend = backend;
+  state.visionAttempts = backend;
   return state;
 }
 
-function ledgerOf(state: WorkflowState): MemoryVisionSpendBackend {
-  return state.visionSpend as MemoryVisionSpendBackend;
+function ledgerOf(state: WorkflowState): MemoryVisionAttemptBackend {
+  return state.visionAttempts as MemoryVisionAttemptBackend;
 }
 
 describe("vision guard config", () => {
   beforeEach(() => resetVisionGuardWarningsForTest());
 
-  it("defaults, the run cost cap and malformed values", () => {
-    expect(resolveVisionGuardConfig({ pipeline: {} }, {})).toEqual({
-      budgetCents: 2_500, breakerMinRejectedPages: 10, breakerRejectedRate: 0.2, orgUnbilledLimitCents: 5_000, orgWindowHours: 24,
+  it("defaults, overrides and clamped ranges", () => {
+    expect(resolveVisionGuardConfig({})).toEqual({
+      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 20, breakerFailureRate: 0.25, orgAttemptLimit: defaultOrgAttemptLimit({}),
     });
-    expect(resolveVisionGuardConfig({ pipeline: {} }, { VISION_ORG_UNBILLED_LIMIT_CENTS: "800", VISION_ORG_UNBILLED_WINDOW_HOURS: "6" }))
-      .toMatchObject({ orgUnbilledLimitCents: 800, orgWindowHours: 6 });
-    expect(resolveVisionGuardConfig({ pipeline: { maxCostCents: 300 } }, {}).budgetCents).toBe(300);
-    expect(resolveVisionGuardConfig({ pipeline: { maxCostCents: 9_000 } }, { VISION_RUN_PROVIDER_BUDGET_CENTS: "4000" }).budgetCents)
-      .toBe(4_000);
+    expect(resolveVisionGuardConfig({ VISION_ORG_UNCHARGED_ATTEMPT_LIMIT: "800", VISION_REGION_ATTEMPTS_PER_PAGE: "4" }))
+      .toMatchObject({ orgAttemptLimit: 800, regionAttempts: 4 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    // A typo never turns the guard off.
-    expect(resolveVisionGuardConfig({ pipeline: {} }, {
-      VISION_RUN_PROVIDER_BUDGET_CENTS: "off", VISION_REJECTION_BREAKER_MIN_PAGES: "0", VISION_REJECTION_BREAKER_RATE: "2",
-      VISION_ORG_UNBILLED_LIMIT_CENTS: "0", VISION_ORG_UNBILLED_WINDOW_HOURS: "1000",
-    })).toEqual({ budgetCents: 2_500, breakerMinRejectedPages: 10, breakerRejectedRate: 0.2, orgUnbilledLimitCents: 5_000, orgWindowHours: 24 });
+    // A typo never turns the guard off; an out-of-range value is clamped.
+    expect(resolveVisionGuardConfig({
+      VISION_PAGE_ATTEMPTS: "off", VISION_REGION_ATTEMPTS_PER_PAGE: "1000", VISION_BREAKER_MIN_FAILURES: "0",
+      VISION_BREAKER_FAILURE_RATE: "2", VISION_ORG_UNCHARGED_ATTEMPT_LIMIT: "-5",
+    })).toEqual({ pageAttempts: 2, regionAttempts: 64, breakerMinFailures: 1, breakerFailureRate: 1, orgAttemptLimit: 1 });
     expect(warn).toHaveBeenCalledTimes(5);
     warn.mockRestore();
+  });
+
+  it("sizes the default org limit to about $40 of worst-case requests on the configured vision model", () => {
+    const hosted = visionModelCatalog.filter((model) => model.target === "hosted" && model.tokenPricing);
+    expect(hosted.length).toBeGreaterThan(2);
+    for (const model of [null, ...hosted]) {
+      const env = model ? { DOCSLURP_VISION_MODEL_URI: model.uri } : {};
+      const worst = worstCaseVisionRequestCents(model?.id ?? "deepseek/deepseek-v4.1-flash-1017")!;
+      const limit = defaultOrgAttemptLimit(env);
+      // limit x worst-case price of one request: the most an org can cost us per day in uncharged requests.
+      expect(limit * worst).toBeGreaterThanOrEqual(3_000);
+      expect(limit * worst).toBeLessThanOrEqual(5_000);
+    }
   });
 });
 
 describe("VisionRunGuard", () => {
   const config: VisionGuardConfig = {
-    budgetCents: 100, breakerMinRejectedPages: 10, breakerRejectedRate: 0.2, orgUnbilledLimitCents: 1_000, orgWindowHours: 24,
+    pageAttempts: 2, regionAttempts: 3, breakerMinFailures: 4, breakerFailureRate: 0.5, orgAttemptLimit: 1_000,
   };
-  const run = (id = "run-1", orgId: string | null = "org-1") => ({ id, orgId });
-  const page = (pageNumber: number, rejected = false) => ({ documentId: "doc", pageNumber, rejected });
+  const guardOf = (backend: MemoryVisionAttemptBackend, run = "run-1", org: string | null = "org-1", overrides: Partial<VisionGuardConfig> = {}) =>
+    new VisionRunGuard({ id: run, orgId: org }, { ...config, ...overrides }, backend);
+  const target = (pageNumber: number, purpose: "page" | "region" | "critique" = "page") => ({ documentId: "doc", pageNumber, purpose });
 
-  async function spend(guard: VisionRunGuard, cents: number, settlement: { billable: boolean; page?: ReturnType<typeof page> }) {
-    const admission = await guard.admit(cents);
-    if (!admission.admitted) throw new Error(`expected admission, got ${admission.stop.reason}`);
-    await admission.settle({ costCents: cents, ...settlement });
+  /** One call that sends `requests` requests, each failed or not, then settles. */
+  async function call(guard: VisionRunGuard, pageNumber: number, requests: number, outcome: { failed?: boolean; charged?: boolean } = {},
+    purpose: "page" | "region" | "critique" = "page") {
+    const gate = guard.call(target(pageNumber, purpose));
+    try {
+      for (let n = 0; n < requests; n += 1) {
+        await gate.admit();
+        if (outcome.failed) gate.failed();
+      }
+      if (outcome.charged) gate.charged();
+    } finally {
+      await gate.finish();
+    }
   }
 
-  it("counts rejected (unbilled) attempts toward the provider budget", async () => {
-    const backend = new MemoryVisionSpendBackend();
-    const guard = new VisionRunGuard(run(), config, backend);
-    for (let n = 1; n <= 5; n += 1) await spend(guard, 19, { billable: false, page: page(n, true) });
-    // 95 cents of rejected attempts + a 10 cent reservation passes 100.
-    expect(await guard.admit(10)).toMatchObject({ admitted: false, stop: { reason: "provider-budget", providerCostCents: 95 } });
-    // Sticky: no later call is admitted, even a free one.
-    expect((await guard.admit(0)).admitted).toBe(false);
+  it("bounds requests per page and purpose, refusing only that page", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const guard = guardOf(backend);
+    await call(guard, 1, 2);
+    await expect(call(guard, 1, 1)).rejects.toMatchObject({ stop: { reason: "page-attempt-limit", sticky: false, pageAttempts: 2, pageLimit: 2 } });
+    // Routed regions have their own bound; other pages keep theirs.
+    await call(guard, 1, 3, {}, "region");
+    await expect(call(guard, 1, 1, {}, "region")).rejects.toMatchObject({ stop: { reason: "page-attempt-limit", pageLimit: 3 } });
+    await call(guard, 2, 2);
+    expect(guard.stop).toBeNull();
   });
 
-  it("holds each concurrent call's own reservation across guards of the run and settles to actual cost", async () => {
-    const backend = new MemoryVisionSpendBackend();
-    // Two activities of one run (a page task and a shard), calling different models at once.
-    const pageTask = new VisionRunGuard(run(), config, backend);
-    const shard = new VisionRunGuard(run(), config, backend);
-    const [expensive, cheap] = await Promise.all([pageTask.admit(60), shard.admit(30)]);
-    expect(expensive.admitted && cheap.admitted).toBe(true);
-    // 60 + 30 reserved: a third call of 20 does not fit, whoever asks.
-    expect(await new VisionRunGuard(run(), config, backend).admit(20))
-      .toMatchObject({ admitted: false, stop: { reason: "provider-budget", reservedCents: 110 } });
-    if (!expensive.admitted || !cheap.admitted) throw new Error("expected admissions");
-    // The expensive call actually cost 10: 10 + 30 reserved + 20 fits.
-    await expensive.settle({ costCents: 10, billable: true, page: page(1) });
-    // Settling twice is ignored.
-    await expensive.settle({ costCents: 500, billable: true, page: page(1) });
-    expect((await shard.admit(20)).admitted).toBe(true);
-    expect(backend.inspect("run-1")).toMatchObject({ costCents: 10, liveReservations: 2 });
+  it("trips the rejection breaker on failed and rejected requests, retries included", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const guard = guardOf(backend);
+    // Two reads, then pages whose two requests each fail (an inline retry or the alternate route).
+    await call(guard, 1, 1, { charged: true });
+    await call(guard, 2, 1, { charged: true });
+    await call(guard, 3, 2, { failed: true });
+    // 2 failed of 4: rate 0.5 but below the minimum count of 4.
+    await call(guard, 4, 2, { failed: true });
+    // 4 failed of 6 (0.67): stop, sticky for the run.
+    await expect(call(guard, 5, 1)).rejects.toMatchObject({ stop: { reason: "rejection-breaker", sticky: true, runFailures: 4, runAttempts: 6 } });
+    expect(guard.stop?.reason).toBe("rejection-breaker");
   });
 
-  it("trips the rejection breaker at the minimum count and rate", async () => {
-    const tripped = async (rejected: number, read: number) => {
-      const guard = new VisionRunGuard(run(), config, new MemoryVisionSpendBackend());
-      for (let n = 1; n <= read; n += 1) await spend(guard, 0, { billable: true, page: page(1_000 + n) });
-      for (let n = 1; n <= rejected; n += 1) await spend(guard, 0, { billable: false, page: page(n, true) });
-      return guard.admit(0);
-    };
-    // 10 rejected of 100 attempted (10%): below the rate, keep going.
-    expect((await tripped(10, 90)).admitted).toBe(true);
-    // 9 of 9: above the rate but below the minimum count.
-    expect((await tripped(9, 0)).admitted).toBe(true);
-    // 10 of 10: stop.
-    expect(await tripped(10, 0))
-      .toMatchObject({ admitted: false, stop: { reason: "rejection-breaker", rejectedPages: 10, attemptedPages: 10 } });
-  });
-
-  it("many small runs of one org stop at the org's unbilled limit; another org is unaffected", async () => {
-    const backend = new MemoryVisionSpendBackend();
-    const stops: string[] = [];
+  it("many small runs of one org stop at the org's uncharged count; another org is unaffected", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const limit = 25;
+    const stops: VisionGuardStop[] = [];
     let runs = 0;
-    // Each run rejects 5 pages at 40 cents (200 cents): under its own budget of 2,500 and its breaker.
-    const perRun = { ...config, budgetCents: 2_500 };
-    for (; runs < 20; runs += 1) {
-      const guard = new VisionRunGuard(run(`small-${runs}`), perRun, backend);
-      for (let n = 1; n <= 5; n += 1) {
-        const admission = await guard.admit(40);
-        if (!admission.admitted) {
-          stops.push(admission.stop.reason);
+    // Each run rejects 2 pages with 2 requests each (4 uncharged): under its own page bound and breaker.
+    for (; runs < 20 && stops.length === 0; runs += 1) {
+      const guard = guardOf(backend, `small-${runs}`, "org-1", { orgAttemptLimit: limit, breakerMinFailures: 1_000 });
+      for (let page = 1; page <= 2; page += 1) {
+        try {
+          await call(guard, page, 2, { failed: true });
+        } catch (error) {
+          stops.push((error as VisionGuardStopError).stop);
           break;
         }
-        await admission.settle({ costCents: 40, billable: false, page: page(n, true) });
       }
-      if (stops.length > 0) break;
     }
-    // 1,000 cents of unbilled spend: the sixth run is refused at its first call.
-    expect(stops).toEqual(["org-unbilled-limit"]);
-    expect(runs).toBe(5);
-    const stopped = await new VisionRunGuard(run("small-next"), perRun, backend).admit(1);
-    expect(stopped).toMatchObject({ admitted: false, stop: { reason: "org-unbilled-limit", orgUnbilledCents: 1_000, orgLimitCents: 1_000 } });
-    // Another org, and billable (read) pages of the same org, are not unbilled spend.
-    expect((await new VisionRunGuard(run("other", "org-2"), perRun, backend).admit(40)).admitted).toBe(true);
+    // 25 uncharged requests: the seventh run's second request is refused, not sticky while its first is in flight.
+    expect(stops.map((stop) => [stop.reason, stop.sticky])).toEqual([["org-attempt-limit", false]]);
+    expect(runs).toBe(7);
+    expect(backend.inspect("small-6", "org-1")).toMatchObject({ orgAttempts: 25, orgSettledAttempts: 25 });
+    // Every request settled uncharged: the next run is refused and stays refused.
+    const next = guardOf(backend, "small-next", "org-1", { orgAttemptLimit: limit });
+    await expect(call(next, 1, 1)).rejects.toMatchObject({ stop: { reason: "org-attempt-limit", sticky: true, orgAttempts: 25, orgLimit: 25 } });
+    expect(next.stop?.reason).toBe("org-attempt-limit");
+    // Another org starts from zero.
+    await call(guardOf(backend, "other", "org-2", { orgAttemptLimit: limit }), 1, 2, { failed: true });
   });
 
-  it("billable reads do not count toward the org's unbilled limit; the limit window rolls", async () => {
-    let now = 0;
-    const backend = new MemoryVisionSpendBackend(() => now);
-    const perRun = { ...config, budgetCents: 100_000, orgUnbilledLimitCents: 100 };
-    for (let r = 0; r < 5; r += 1) await spend(new VisionRunGuard(run(`read-${r}`), perRun, backend), 90, { billable: true, page: page(1) });
-    await spend(new VisionRunGuard(run("rejects"), perRun, backend), 90, { billable: false, page: page(1, true) });
-    expect((await new VisionRunGuard(run("late"), perRun, backend).admit(20)).admitted).toBe(false);
-    now += 25 * 3_600_000;
-    expect((await new VisionRunGuard(run("next-day"), perRun, backend).admit(20)).admitted).toBe(true);
+  it("in-flight work never makes a refusal sticky", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const guard = guardOf(backend, "run-1", "org-1", { orgAttemptLimit: 2 });
+    // Two calls in flight hold the org's whole count.
+    const first = guard.call(target(1));
+    const second = guard.call(target(2));
+    await first.admit();
+    await second.admit();
+    const third = guard.call(target(3));
+    await expect(third.admit()).rejects.toMatchObject({ stop: { reason: "org-attempt-limit", sticky: false, orgAttempts: 2, orgSettledAttempts: 0 } });
+    expect(guard.stop).toBeNull();
+    // The first read charges its page: its request leaves the count, and page 3 is admitted.
+    first.charged();
+    await first.finish();
+    await third.admit();
+    await Promise.all([second.finish(), third.finish()]);
+    // Now the limit is filled by finished uncharged requests: sticky.
+    await expect(call(guard, 4, 1)).rejects.toMatchObject({ stop: { reason: "org-attempt-limit", sticky: true } });
+    expect(guard.stop?.reason).toBe("org-attempt-limit");
   });
 
-  it("reserves at each call's own model price over a bounded input", () => {
-    const flash = { ...VISION } as never;
-    const cheaper = { ...VISION, modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } as never;
-    const small = visionReserveCents(flash, CFG, { widthPx: 1275, heightPx: 1650 });
-    const large = visionReserveCents(flash, CFG, { widthPx: 4000, heightPx: 4000 });
-    const unknown = visionReserveCents(flash, CFG, null);
-    expect(small).toBeGreaterThan(0);
-    expect(large).toBeGreaterThan(small);
-    // An unknown size reserves for the largest raster.
-    expect(unknown).toBeCloseTo(large, 6);
-    expect(visionReserveCents(cheaper, CFG, { widthPx: 1275, heightPx: 1650 })).toBeLessThan(small);
-    expect(visionInputTokenBound({ widthPx: 1275, heightPx: 1650 })).toBeGreaterThanOrEqual(2_200);
+  it("a run with no org is refused, never unbounded", async () => {
+    const guard = guardOf(new MemoryVisionAttemptBackend(), "orphan", null);
+    await expect(call(guard, 1, 1)).rejects.toMatchObject({ stop: { reason: "unscoped-run", sticky: true } });
+    expect(guard.stop?.reason).toBe("unscoped-run");
+  });
+
+  it("only a request that creates a new customer charge leaves the org count: critique and second reads stay uncharged", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const guard = guardOf(backend);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    const read = async (pageNumber: number, purpose: "page" | "region" | "critique", metric: string, l = ledger) => {
+      const gate = guard.call(target(pageNumber, purpose));
+      try {
+        await gate.admit();
+        recordVisionRead(l, gate, { documentId: "doc", pageNumber }, {
+          provider: "openrouter", model: MODEL, metric, amount: 1, unit: "page", costCents: 0.5, inputTokens: 2_000, outputTokens: 400,
+          metadata: { documentId: "doc", pageNumber },
+        });
+      } finally {
+        await gate.finish();
+      }
+    };
+    await read(1, "page", "page-analysis");
+    expect(backend.inspect("run-1", "org-1").orgAttempts).toBe(0);
+    // A routed region of the same page and a self-critique pass create no new charge.
+    await read(1, "region", "page-analysis");
+    await read(1, "critique", "self-critique");
+    expect(backend.inspect("run-1", "org-1").orgAttempts).toBe(2);
+    // A later activity of the run (a fresh ledger) re-reading the page: the run already charged it.
+    const fresh = new PipelineUsageEventLedger();
+    fresh.runId = "run-1";
+    await read(1, "page", "page-analysis", fresh);
+    expect(backend.inspect("run-1", "org-1").orgAttempts).toBe(3);
+    expect(ledger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toHaveLength(1);
   });
 });
+
+/** Emulates the requests of one vision call through the gate the stage passes (a rejection sends two). */
+async function sendRequests(gate: VisionRequestGate | null, count: number, failed: boolean) {
+  for (let n = 0; n < count; n += 1) {
+    await gate?.admit();
+    if (failed) gate?.failed();
+  }
+}
 
 /** A stage whose pages all render as `render` and whose provider answers with `answer(page)`. */
 async function pageStage(args: {
@@ -216,10 +267,14 @@ async function pageStage(args: {
       return file;
     },
   };
-  visionRuntime.execute.mockImplementation(async ({ imagePath }: { imagePath: string }) => {
+  visionRuntime.execute.mockImplementation(async ({ imagePath, gate }: { imagePath: string; gate: VisionRequestGate | null }) => {
     const pageNumber = Number(/page-(\d+)\.png$/.exec(imagePath)?.[1]);
     const answer = args.answer(pageNumber);
-    if (answer instanceof Error) throw answer;
+    if (answer instanceof Error) {
+      await sendRequests(gate, answer instanceof VisionOutputRejectedError ? 2 : 1, true);
+      throw answer;
+    }
+    await sendRequests(gate, 1, false);
     return {
       runtime: "openai-compatible", model: MODEL, prompt: "p", text: answer.text, raw: "", costCents: 0.5,
       latencyMs: 1, inputTokens: 2_000, outputTokens: 400, usageSource: "provider", baseUrl: "https://openrouter.ai/api/v1",
@@ -268,48 +323,50 @@ describe("vision page loop under the guard", () => {
     const skips = new Map<number, VisionPageSkip>();
     const outputs = await harness.run(state, noHints, skips);
     expect(outputs).toEqual([]);
-    // Ten rejections trip the breaker; one more may already be in flight (two calls at a time).
-    expect(visionRuntime.execute.mock.calls.length).toBeGreaterThanOrEqual(10);
-    expect(visionRuntime.execute.mock.calls.length).toBeLessThanOrEqual(11);
+    // Twenty failed requests (ten pages of two) trip the breaker; a page more may already be in flight.
+    const { runAttempts } = ledgerOf(state).inspect("run-1", "org-1");
+    expect(runAttempts).toBeGreaterThanOrEqual(20);
+    expect(runAttempts).toBeLessThanOrEqual(22);
     const outcomes = [...skips.values()];
-    expect(outcomes.filter((skip) => skip.outcome === "rejected")).toHaveLength(visionRuntime.execute.mock.calls.length);
-    expect(outcomes.filter((skip) => skip.outcome === "rejection-breaker").length)
-      .toBe(40 - visionRuntime.execute.mock.calls.length);
+    const rejected = outcomes.filter((skip) => skip.outcome === "rejected").length;
+    expect(rejected).toBeGreaterThanOrEqual(10);
+    expect(outcomes.filter((skip) => skip.outcome === "rejection-breaker").length).toBe(40 - rejected);
+    expect(visionGuardFor(state).stop?.reason).toBe("rejection-breaker");
     // Rejected spend is recorded for us (unbilled); nothing stored carries model text.
     const events = state.usageLedger.snapshot();
     expect(events.every((event) => event.metadata?.billable === false)).toBe(true);
     expect(JSON.stringify([...skips.values(), ...events])).not.toMatch(/"text"/);
   });
 
-  it("stops at the provider budget, counting rejected attempts", async () => {
-    vi.stubEnv("VISION_RUN_PROVIDER_BUDGET_CENTS", "20");
-    vi.stubEnv("VISION_REJECTION_BREAKER_MIN_PAGES", "1000");
+  it("stops at the org's uncharged-attempt limit, counting every rejected request", async () => {
+    vi.stubEnv("VISION_ORG_UNCHARGED_ATTEMPT_LIMIT", "6");
+    vi.stubEnv("VISION_BREAKER_MIN_FAILURES", "1000");
     const harness = await pageStage({ pages: 40, answer: () => rejection(undefined, 3) });
     scratch = harness.scratch;
     const state = runState();
     const skips = new Map<number, VisionPageSkip>();
     await harness.run(state, noHints, skips);
-    const calls = visionRuntime.execute.mock.calls.length;
-    expect(calls).toBeGreaterThan(0);
-    expect(calls).toBeLessThan(40);
-    expect([...skips.values()].filter((skip) => skip.outcome === "provider-budget")).toHaveLength(40 - calls);
-    const spent = state.usageLedger.snapshot().reduce((sum, event) => sum + Number(event.metadata?.providerCostCents ?? 0), 0);
-    expect(spent).toBe(calls * 3);
-    expect(spent).toBeLessThanOrEqual(20);
+    // Three pages of two requests fill the limit; no page gets a request past it.
+    expect(ledgerOf(state).inspect("run-1", "org-1")).toMatchObject({ orgAttempts: 6, orgSettledAttempts: 6 });
+    expect([...skips.values()].filter((skip) => skip.outcome === "org-attempt-limit").length).toBeGreaterThanOrEqual(36);
+    expect(visionGuardFor(state).stop?.reason).toBe("org-attempt-limit");
   });
 
-  it("a stopped guard renders nothing and calls nothing", async () => {
+  it("a stopped guard renders nothing and calls nothing; a run with no org is never skipped past the guard", async () => {
     const harness = await pageStage({ pages: 3, answer: () => ({ text: "x" }) });
     scratch = harness.scratch;
-    const state = runState({ maxCostCents: 0.001 });
+    const state = runState({}, new MemoryVisionAttemptBackend(), null);
     const skips = new Map<number, VisionPageSkip>();
     await harness.run(state, noHints, skips);
-    expect(visionRuntime.execute).not.toHaveBeenCalled();
-    expect([...skips.values()].map((skip) => skip.outcome)).toEqual(["provider-budget", "provider-budget", "provider-budget"]);
+    // The unscoped run is refused at its first request: nothing reaches a provider.
+    expect(visionRuntime.execute).toHaveBeenCalled();
+    expect([...skips.values()].map((skip) => skip.outcome)).toEqual(["unscoped-run", "unscoped-run", "unscoped-run"]);
     const again = new Map<number, VisionPageSkip>();
     await harness.run(state, noHints, again);
+    // Sticky: the second pass renders nothing.
     expect(harness.rasters.renderSelectedPages).toHaveBeenCalledTimes(1);
-    expect(again.size).toBe(3);
+    expect([...again.values()].map((skip) => skip.outcome)).toEqual(["unscoped-run", "unscoped-run", "unscoped-run"]);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric.startsWith("page-analysis"))).toEqual([]);
   });
 
   it("records mixed outcomes: read, rejected with text, rejected without text", async () => {
@@ -330,6 +387,8 @@ describe("vision page loop under the guard", () => {
     // A rejected page with usable text keeps it (`rejected`); without any it is an explicit failure.
     expect(statuses).toEqual(["extracted", "rejected", "failed"]);
     expect(facts[1]!.visionTextBytes).toBeNull();
+    // The read page's request created its Rich charge and left the org count; the four rejected requests stay.
+    expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 5, runFailures: 4, orgAttempts: 4, orgSettledAttempts: 4 });
   });
 
   it("a page task stores the skip, not model text", async () => {
@@ -349,17 +408,17 @@ describe("vision page loop under the guard", () => {
     expect(skips.get(1)).toEqual({ pageNumber: 1, outcome: "rejected", fallbackText: true });
   });
 
-  it("records a rejected page once and settles its reservation to the rejected cost", async () => {
+  it("records a rejected page once and counts both of its requests failed and uncharged", async () => {
     const harness = await pageStage({ pages: 3, answer: () => rejection(undefined, 2) });
     scratch = harness.scratch;
     const state = runState();
     await harness.run(state, noHints, new Map());
     const rejected = state.usageLedger.snapshot().filter((event) => event.metadata?.outcome === "rejected");
     expect(rejected.map((event) => event.metadata?.pageNumber).sort()).toEqual([1, 2, 3]);
-    expect(ledgerOf(state).inspect("run-1")).toEqual({ costCents: 6, attemptedPages: 3, rejectedPages: 3, liveReservations: 0 });
+    expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 6, runFailures: 6, orgAttempts: 6, orgSettledAttempts: 6 });
   });
 
-  it("records the billed cost of a failed, not rejected, call for the guard", async () => {
+  it("records the billed usage of a failed, not rejected, call", async () => {
     const harness = await pageStage({
       pages: 1,
       answer: () => {
@@ -378,7 +437,7 @@ describe("vision page loop under the guard", () => {
     expect(failures).toHaveLength(1);
     // Unbilled: 0 credits, the provider cost kept for us.
     expect(failures[0]).toMatchObject({ costCents: 0, inputTokens: 2_000, metadata: { outcome: "failure", billable: false, providerCostCents: 0.75 } });
-    expect(ledgerOf(state).inspect("run-1")).toMatchObject({ costCents: 0.75, liveReservations: 0 });
+    expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 1, runFailures: 1, orgAttempts: 1, orgSettledAttempts: 1 });
   });
 
   it("a sidecar cleanup failure neither replaces the call's error nor skips settlement", async () => {
@@ -394,7 +453,7 @@ describe("vision page loop under the guard", () => {
     const skips = new Map<number, VisionPageSkip>();
     await harness.run(state, noHints, skips);
     expect(skips.get(1)?.outcome).toBe("rejected");
-    expect(ledgerOf(state).inspect("run-1")).toEqual({ costCents: 2, attemptedPages: 1, rejectedPages: 1, liveReservations: 0 });
+    expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 2, runFailures: 2, orgAttempts: 2, orgSettledAttempts: 2 });
   });
 
   it("an ink-check page whose render cannot be confirmed is never sent", async () => {
@@ -408,35 +467,46 @@ describe("vision page loop under the guard", () => {
   });
 
   it("fails open on a guard stop", () => {
-    const stop = { reason: "rejection-breaker" as const, providerCostCents: 1, reservedCents: 0, budgetCents: 10, attemptedPages: 10, rejectedPages: 10,
-      orgUnbilledCents: 0, orgLimitCents: 5_000 };
+    const stop: VisionGuardStop = { reason: "rejection-breaker", sticky: true, pageAttempts: 0, pageLimit: 2, runAttempts: 40,
+      runFailures: 20, orgAttempts: 20, orgSettledAttempts: 20, orgLimit: 2_000 };
     expect(shouldFailOpenVisionError(new VisionGuardStopError(stop))).toBe(true);
     expect(shouldFailOpenVisionError(new Error("routed", { cause: new VisionGuardStopError(stop) }))).toBe(true);
   });
 });
 
 describe("guardedVisionCall (document-map OCR, self-critique, materialization)", () => {
-  beforeEach(() => vi.spyOn(console, "log").mockImplementation(() => undefined));
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
   afterEach(() => vi.restoreAllMocks());
 
-  it("records a rejected call's spend once, settles it, and refuses once the run's budget is spent", async () => {
-    // Room for one call's reservation (no image: the largest raster) plus a cent.
-    const state = runState({ maxCostCents: visionReserveCents(VISION as never, CFG, null) + 1 });
-    const call = vi.fn(async () => { throw rejection(undefined, 2); });
+  it("records a rejected call's spend once and refuses the page past its attempt bound without sending", async () => {
+    const state = runState();
+    let sent = 0;
+    const call = vi.fn(async (gate: VisionCallGate) => {
+      for (let n = 0; n < 2; n += 1) {
+        await gate.admit();
+        sent += 1;
+        gate.failed();
+      }
+      throw rejection(undefined, 2);
+    });
     const guarded = () => guardedVisionCall({
-      host: state, vision: VISION as never, cfg: CFG, page: { documentId: "doc", pageNumber: 1 },
-      record: (input) => state.usageLedger.record(input), metadata: { critique: true }, call, price: () => 0,
+      host: state, vision: VISION as never, cfg: CFG, target: { documentId: "doc", pageNumber: 1, purpose: "critique" },
+      record: (input) => state.usageLedger.record(input), metadata: { critique: true }, call,
     });
     await expect(guarded()).rejects.toThrow(/degenerate/);
     const events = state.usageLedger.snapshot();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ metric: "page-analysis-attempt", metadata: { outcome: "rejected", critique: true, providerCostCents: 2 } });
-    expect(ledgerOf(state).inspect("run-1")).toEqual({ costCents: 2, attemptedPages: 1, rejectedPages: 1, liveReservations: 0 });
-    // 2 spent: a second call's reservation no longer fits the cap, so it is never made.
-    expect(await guarded()).toMatchObject({ admitted: false, stop: { reason: "provider-budget" } });
-    expect(call).toHaveBeenCalledTimes(1);
+    // Two critique requests used the page's bound: a second critique of page 1 is refused before sending.
+    expect(await guarded()).toMatchObject({ admitted: false, stop: { reason: "page-attempt-limit" } });
+    expect(sent).toBe(2);
+    expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 2, runFailures: 2, orgAttempts: 2, orgSettledAttempts: 2 });
   });
 });
+
 
 describe("fallback text and drawn-content hints", () => {
   const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };

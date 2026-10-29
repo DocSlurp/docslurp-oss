@@ -96,6 +96,11 @@ export class PipelineUsageEventLedger {
     return this.buffer(event);
   }
 
+  /** Whether this ledger already charged the page as Rich. */
+  hasRichCharge(documentId: string, pageNumber: number): boolean {
+    return this.richCharged.has(`${documentId}:${pageNumber}`);
+  }
+
   /** Pages of a document this ledger charged as Rich (so Fast charges skip them). */
   richPagesOf(documentId: string): Set<number> {
     const pages = new Set<number>();

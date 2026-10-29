@@ -76,7 +76,9 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
     async extractText(_doc, range) {
       return Array.from({ length: range.last - range.first + 1 }, (_, i) => pageTexts[range.first + i] ?? "");
     },
-    async ocrPage(_doc, page) {
+    async ocrPage(_doc, page, ctx) {
+      // One vision request, admitted like the real runtime does before sending it.
+      await ctx.gate.admit();
       h.ocrCalls.push(page);
       return { text: `${LONG} scanned page ${page}`, model: "vision-x", provider: "test", inputTokens: 1000, outputTokens: 200, costCents: 2 };
     },
@@ -230,19 +232,21 @@ describe("materializePageRange", () => {
     log.mockRestore();
   });
 
-  it("refuses OCR once the org's unbilled vision limit is reached, releasing the page for later", async () => {
-    // Earlier runs of this org already left more unbilled vision spend than the default limit.
-    await db.exec(`insert into vision_org_unbilled_spend (org_id, hour, cents) values ('o1', date_trunc('hour', now()), 10000) on conflict (org_id, hour) do update set cents = 10000`);
+  it("refuses OCR once the org's uncharged vision attempts reach the limit, releasing the page for later", async () => {
+    // Earlier runs of this org already left the limit's worth of uncharged vision requests.
+    vi.stubEnv("VISION_ORG_UNCHARGED_ATTEMPT_LIMIT", "3");
+    await db.exec(`insert into vision_org_attempts (id, org_id, settled) values ('a1', 'o1', true), ('a2', 'o1', true), ('a3', 'o1', true)`);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const h = harness({ 1: LONG, 2: "" });
       const result = await materializePageRange(h.deps, input(h, [1, 2]));
       expect(h.ocrCalls).toEqual([]);
       expect(result.indexed).toEqual([1]);
-      expect(result.failed).toEqual([{ page: 2, reason: "vision-stopped:org-unbilled-limit" }]);
+      expect(result.failed).toEqual([{ page: 2, reason: "vision-stopped:org-attempt-limit" }]);
     } finally {
       warn.mockRestore();
-      await db.exec(`delete from vision_org_unbilled_spend`);
+      vi.unstubAllEnvs();
+      await db.exec(`delete from vision_org_attempts`);
     }
   });
 

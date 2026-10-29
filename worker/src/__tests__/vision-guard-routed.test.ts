@@ -39,7 +39,7 @@ import { VisionExtractStage, type VisionPageSkip } from "../stages/vision-extrac
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { buildVisionPageFacts } from "../pipeline/page-facts.js";
-import { MemoryVisionSpendBackend } from "../lib/vision-spend-guard.js";
+import { MemoryVisionAttemptBackend, visionGuardFor, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import { HeuristicRouter } from "../routing/routers/heuristic.js";
 import { groupAssignmentsByTarget } from "../routing/runtime.js";
 import { BIG_BUDGET, makePage, testCatalog } from "../routing/testing.js";
@@ -82,12 +82,12 @@ function rejection(costCents = 2) {
   return error;
 }
 
-function runState(pipeline: Record<string, unknown> = {}): WorkflowState {
+function runState(pipeline: Record<string, unknown> = {}, orgId: string | null = "org-1"): WorkflowState {
   const state = WorkflowState.create({
-    id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
+    id: "run-1", orgId, workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
     pipeline: { vision: VISION, privacyMode: "standard", visionFallback: true, ...pipeline },
   } as unknown as WorkspaceRun, []);
-  state.visionSpend = new MemoryVisionSpendBackend();
+  state.visionAttempts = new MemoryVisionAttemptBackend();
   return state;
 }
 
@@ -98,9 +98,16 @@ describe("routed extraction under the vision guard", () => {
     rasterDir.path = scratch;
     for (let page = 1; page <= 4; page += 1) await writeFile(path.join(scratch, `page-${page}.png`), "png");
     visionRuntime.execute.mockReset();
-    // Page 3 reads; everything else is rejected after both attempts.
-    visionRuntime.execute.mockImplementation(async ({ imagePath }: { imagePath: string }) => {
-      if (!/page-3\.png$/.test(imagePath)) throw rejection();
+    // Page 3 reads (one request); everything else is rejected after both requests (the alternate route).
+    visionRuntime.execute.mockImplementation(async ({ imagePath, gate }: { imagePath: string; gate: VisionRequestGate | null }) => {
+      if (!/page-3\.png$/.test(imagePath)) {
+        for (let n = 0; n < 2; n += 1) {
+          await gate?.admit();
+          gate?.failed();
+        }
+        throw rejection();
+      }
+      await gate?.admit();
       return {
         runtime: "openai-compatible", model: MODEL, prompt: "p", text: "page three read by vision", raw: "", costCents: 0.5,
         latencyMs: 1, inputTokens: 2_000, outputTokens: 400, usageSource: "provider", baseUrl: "https://openrouter.ai/api/v1",
@@ -140,7 +147,7 @@ describe("routed extraction under the vision guard", () => {
     return { stage, document, rasters, extractRouted };
   }
 
-  it("records a rejected region call and its fallback once each, settles every reservation, and keeps each page's outcome", async () => {
+  it("records a rejected region call and its fallback once each, counts every request, and keeps each page's outcome", async () => {
     const { document, extractRouted } = harness();
     const state = runState();
     // A page task already stored page 4's outcome.
@@ -153,8 +160,9 @@ describe("routed extraction under the vision guard", () => {
     const rejected = state.usageLedger.snapshot().filter((event) => event.metadata?.outcome === "rejected");
     expect(rejected.map((event) => event.metadata?.pageNumber).sort()).toEqual([1, 2]);
     expect(rejected.every((event) => event.metadata?.providerCostCents === 2)).toBe(true);
-    expect((state.visionSpend as MemoryVisionSpendBackend).inspect("run-1"))
-      .toEqual({ costCents: 4.5, attemptedPages: 3, rejectedPages: 2, liveReservations: 0 });
+    // Four rejected requests stay uncharged; page 3's read charged the page and left the org count.
+    expect((state.visionAttempts as MemoryVisionAttemptBackend).inspect("run-1", "org-1"))
+      .toEqual({ runAttempts: 5, runFailures: 4, orgAttempts: 4, orgSettledAttempts: 4 });
 
     expect(Object.fromEntries([...skips].map(([page, skip]) => [page, skip.outcome])))
       .toEqual({ 1: "rejected", 2: "rejected", 4: "rejection-breaker" });
@@ -165,18 +173,19 @@ describe("routed extraction under the vision guard", () => {
     expect(facts.map((fact) => fact.visionStatus)).toEqual(["failed", "failed", "extracted", "guarded"]);
   });
 
-  it("a stopped guard refuses the region call and its fallback without a provider call, and reports why", async () => {
+  it("a refused run sends no region request and renders no fallback, and reports why", async () => {
     const { document, rasters, extractRouted } = harness();
-    const state = runState({ maxCostCents: 0.0001 });
+    // A run with no org is refused at its first request (sticky), never run unbounded.
+    const state = runState({}, null);
     const skips = new Map<number, VisionPageSkip>();
     const result = await extractRouted(state, document, VISION, await routedPlan(), undefined, "runs/run-1/vision/doc.json", skips);
 
     expect(result.outputs).toEqual([]);
-    expect(visionRuntime.execute).not.toHaveBeenCalled();
+    expect(visionGuardFor(state).stop?.reason).toBe("unscoped-run");
     // The fallback pages are refused before any render.
     expect(rasters.renderSelectedPages).not.toHaveBeenCalled();
     expect(Object.fromEntries([...skips].map(([page, skip]) => [page, skip.outcome])))
-      .toEqual({ 1: "provider-budget", 2: "provider-budget", 3: "provider-budget", 4: "provider-budget" });
+      .toEqual({ 1: "unscoped-run", 2: "unscoped-run", 3: "unscoped-run", 4: "unscoped-run" });
     const facts = buildVisionPageFacts({
       documentId: "doc", runId: "run-1", pageCount: 4, selected: [1, 2, 3, 4], processed: [], cap: 4, outcomes: skips,
     });

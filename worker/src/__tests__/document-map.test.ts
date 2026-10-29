@@ -15,7 +15,7 @@ import type { MapDraft } from "../deferred/siphon-agent.js";
 import { DocumentMapStage, mapCoverage, type DocumentMapOps } from "../stages/document-map.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
-import { MemoryVisionSpendBackend, visionGuardFor } from "../lib/vision-spend-guard.js";
+import { MemoryVisionAttemptBackend, visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { makeTestPdf, type TestPdfOptions } from "../test/make-outline-pdf.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -367,10 +367,12 @@ describe("mapCoverage", () => {
 describe("document-map OCR under the vision guard", () => {
   it("renders nothing and calls nothing once vision stopped for the run", async () => {
     const { stage, state } = await setup({ pages: ["", ""] }, ["", ""]);
-    const run = state as unknown as { run: { id: string; orgId: string }; visionSpend?: MemoryVisionSpendBackend };
-    run.visionSpend = new MemoryVisionSpendBackend();
-    // A call larger than the run budget stops the guard (sticky for this state).
-    expect((await visionGuardFor(run as never).admit(1e9)).admitted).toBe(false);
+    const run = state as unknown as { run: { id: string; orgId: string | null }; visionAttempts?: MemoryVisionAttemptBackend };
+    run.visionAttempts = new MemoryVisionAttemptBackend();
+    // A run with no org is refused at its first request; the refusal is sticky for this state.
+    run.run = { ...run.run, orgId: null };
+    await expect(visionGuardFor(run as never).call({ documentId: "doc", pageNumber: 1, purpose: "map-ocr" }).admit())
+      .rejects.toMatchObject({ stop: { reason: "unscoped-run", sticky: true } });
     const render = vi.spyOn((stage as unknown as { rasters: { renderSelectedPages: () => Promise<unknown[]> } }).rasters, "renderSelectedPages");
     const result = await (stage as unknown as {
       ocrPages(args: unknown): Promise<{ pageTexts: string[]; costCents: number }>;

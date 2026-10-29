@@ -89,7 +89,7 @@ import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
-import { visionGuardFor } from "../lib/vision-spend-guard.js";
+import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 
@@ -1551,7 +1551,7 @@ export class ExtractMarkdownStage implements Stage {
     if (critiquePages.length === 0) {
       return null;
     }
-    // Vision already stopped for the run (provider budget, rejection breaker, org limit): no renders, no calls.
+    // Vision already stopped for the run (rejection breaker, org attempt limit): no renders, no calls.
     if (visionGuardFor(args.state).stop) {
       return null;
     }
@@ -1609,18 +1609,17 @@ export class ExtractMarkdownStage implements Stage {
             result.provider === "private" && result.costCents !== undefined ? result.costCents : calculateCritiqueCost(
               this.cfg, result.runtime, result.baseUrl, result.inputTokens, result.outputTokens,
             );
-          // The run's vision guard bounds critique calls like every other vision call; a rejected or
-          // failed call records its spend there.
+          // The run's vision attempt guard admits every critique request like every other vision
+          // request; critique never creates a customer charge, so its requests stay uncharged. A
+          // rejected or failed call records its spend there.
           const guarded = await guardedVisionCall({
             host: args.state,
             vision: critiqueVision,
             cfg: this.cfg,
-            imagePath,
-            prompt: critiqueVision.prompt,
-            page: { documentId: args.document.id, pageNumber },
+            target: { documentId: args.document.id, pageNumber, purpose: "critique" },
             record: (input) => args.state.usageLedger.record(input),
             metadata: { critique: true },
-            call: () => executeVisionRuntime({
+            call: (gate) => executeVisionRuntime({
               imagePath,
               outputPath: `${imagePath}.json`,
               privacyMode: args.state.run.pipeline.privacyMode,
@@ -1628,8 +1627,8 @@ export class ExtractMarkdownStage implements Stage {
               cfg: this.cfg,
               runner: this.runner,
               signal: args.signal,
+              gate,
             }),
-            price: critiqueCost,
           });
           if (!guarded.admitted) throw new Error(`vision-stopped: ${guarded.stop.reason}`);
           const result = guarded.result;

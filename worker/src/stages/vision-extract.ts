@@ -42,8 +42,15 @@ import {
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
 import { DRAWN_CONTENT_SIGNAL, selectLegacyVisionPages } from "./classify-route.js";
 import { inkCheckVerdict, readPngFileFacts } from "../lib/page-image-evidence.js";
-import { visionGuardFor, type VisionGuardStop, type VisionSettlement } from "../lib/vision-spend-guard.js";
-import { isBillableVisionRuntime, visionReserveCents } from "../lib/vision-reserve.js";
+import {
+  findVisionGuardStop,
+  recordVisionRead,
+  visionGuardFor,
+  withVisionCall,
+  type VisionAttemptPurpose,
+  type VisionGuardStop,
+} from "../lib/vision-attempt-guard.js";
+import { isBillableVisionRuntime } from "../lib/vision-pricing.js";
 import { VISION_ROUTING_VERSION_SLOT, resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
@@ -102,14 +109,7 @@ export interface LegacyPageHints {
   fallbackTextPages: ReadonlySet<number>;
 }
 
-/** Thrown by `callVisionOnImage` when the run's vision guard refuses a call; no provider call was made. */
-export class VisionGuardStopError extends Error {
-  constructor(readonly stop: VisionGuardStop) {
-    super(`vision stopped for the run: ${stop.reason} (provider ${stop.providerCostCents.toFixed(2)}c of ` +
-      `${stop.budgetCents}c budget, ${stop.rejectedPages}/${stop.attemptedPages} pages rejected)`);
-    this.name = "VisionGuardStopError";
-  }
-}
+export { VisionGuardStopError } from "../lib/vision-attempt-guard.js";
 
 export function isVisionPageSkip(value: unknown): value is VisionPageSkip {
   return typeof value === "object" && value !== null && typeof (value as { outcome?: unknown }).outcome === "string" &&
@@ -391,7 +391,7 @@ export class VisionExtractStage implements Stage {
                 selectedPages: needsVision.selectedPages,
                 routing: needsVision.routing,
                 routingVersion: routingVersion(routingV2),
-                visionGuard: error instanceof VisionGuardStopError ? error.stop : null,
+                visionGuard: findVisionGuardStop(error),
               });
 
               state.pendingPerformance.push({
@@ -818,8 +818,9 @@ export class VisionExtractStage implements Stage {
     /** Why a page's executor call gave nothing; kept only if the page ends with no output at all. */
     const executorOutcomes = new Map<number, VisionPageSkip>();
     const noteExecutorFailure = (pageNumber: number, error: unknown) => {
-      const outcome: VisionPageSkip["outcome"] = error instanceof VisionGuardStopError
-        ? error.stop.reason
+      const stop = findVisionGuardStop(error);
+      const outcome: VisionPageSkip["outcome"] = stop
+        ? stop.reason
         : findVisionOutputRejected(error) ? "rejected" : "failed";
       const previous = executorOutcomes.get(pageNumber);
       // A guard stop or rejection says more than a generic failure on another region of the page.
@@ -838,7 +839,8 @@ export class VisionExtractStage implements Stage {
           allow,
           callVision: async (vision, image, abort) => {
             try {
-              return await this.callVisionOnImage(state, document, vision, image, abort);
+              // Routed regions have their own per-page request bound.
+              return await this.callVisionOnImage(state, document, vision, image, abort, undefined, "region");
             } catch (error) {
               noteExecutorFailure(image.pageNumber, error);
               throw error;
@@ -1118,9 +1120,10 @@ export class VisionExtractStage implements Stage {
         );
         return { output, error: null, skip: null };
       } catch (error) {
-        // Refused before any provider call: nothing to record as an attempt.
-        if (error instanceof VisionGuardStopError) {
-          return { output: null, error: null, skip: skip(page.pageNumber, error.stop.reason) };
+        // Refused by the guard: no further request was sent (earlier ones were recorded by callVisionOnImage).
+        const stop = findVisionGuardStop(error);
+        if (stop) {
+          return { output: null, error: null, skip: skip(page.pageNumber, stop.reason) };
         }
         // A failed provider call was recorded by callVisionOnImage; anything else (download,
         // progress) is recorded here as a zero-cost attempt.
@@ -1181,21 +1184,32 @@ export class VisionExtractStage implements Stage {
     },
     signal?: AbortSignal,
     usageSink?: (event: UsageEvent | null, pageNumber: number) => void,
+    purpose: VisionAttemptPurpose = "page",
   ): Promise<VisionPageOutput> {
     const imagePath = image.imagePath;
     const page = { mimeType: image.mimeType, pageNumber: image.pageNumber, artifactUri: image.artifactUri ?? "" };
     const outputPath = `${imagePath}.vision.json`;
-    // Every vision call of the run (legacy page, routed region, refusal fallback, cascade leg)
-    // passes the run's guard, reserving this call's own model price over this image's size.
-    const size = image.widthPx && image.heightPx
-      ? { widthPx: image.widthPx, heightPx: image.heightPx }
-      : await readPngFileFacts(imagePath).catch(() => null);
-    const reserveCents = visionReserveCents(vision, this.cfg, size, { outputSchema: state.run.pipeline.outputSchema });
-    const admission = await visionGuardFor(state).admit(reserveCents);
-    if (!admission.admitted) throw new VisionGuardStopError(admission.stop);
     const pageRef = { documentId: document.id, pageNumber: page.pageNumber };
-    // Until the call says otherwise it counts in full, unbilled.
-    let settlement: VisionSettlement = { costCents: reserveCents, billable: false, page: { ...pageRef, rejected: false } };
+    // Every request of every vision call of the run (legacy page, routed region, refusal fallback,
+    // cascade leg; first try, inline retries, streaming fallback, alternate route) is admitted by the
+    // run's attempt guard through this gate before it is sent.
+    return await withVisionCall(state, { ...pageRef, purpose }, (gate) => this.runVisionCall(
+      state, document, vision, { ...image, imagePath, outputPath }, page, gate, signal, usageSink,
+    ));
+  }
+
+  private async runVisionCall(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    vision: VisionConfig,
+    image: { imagePath: string; outputPath: string },
+    page: { mimeType: string; pageNumber: number; artifactUri: string },
+    gate: import("../lib/vision-attempt-guard.js").VisionCallGate,
+    signal?: AbortSignal,
+    usageSink?: (event: UsageEvent | null, pageNumber: number) => void,
+  ): Promise<VisionPageOutput> {
+    const { imagePath, outputPath } = image;
+    const pageRef = { documentId: document.id, pageNumber: page.pageNumber };
     try {
       let result: Awaited<ReturnType<typeof executeVisionRuntime>>;
       try {
@@ -1209,15 +1223,16 @@ export class VisionExtractStage implements Stage {
           runner: this.runner,
           outputSchema: state.run.pipeline.outputSchema,
           signal,
+          gate,
         });
       } catch (caught) {
-        // Recorded here, once, for every caller (whole page, routed region and their fallbacks),
-        // before the reservation settles: a rejected or failed call is never unreserved and
-        // uncounted at once.
+        // Recorded here, once, for every caller (whole page, routed region and their fallbacks). A
+        // request refused by the guard was never sent; requests before it are recorded if billed.
         const error = caught instanceof Object ? caught : toError(caught);
-        const recorded = this.recordFailedVisionAttempt(state, document, vision, page, toError(error).message, error);
+        if (!findVisionGuardStop(error) || findVisionBilledUsage(error)) {
+          this.recordFailedVisionAttempt(state, document, vision, page, toError(error).message, error);
+        }
         recordedVisionErrors.add(error);
-        settlement = { costCents: recorded.providerCostCents, billable: false, page: { ...pageRef, rejected: recorded.rejected } };
         throw error;
       }
       const output: VisionPageOutput = {
@@ -1238,8 +1253,9 @@ export class VisionExtractStage implements Stage {
         ...(result.servedModel ? { servedModel: result.servedModel } : {}),
         ...(result.modelSwap ? { modelSwap: result.modelSwap } : {}),
       };
-      settlement = { costCents: output.costCents, billable: true, page: { ...pageRef, rejected: false } };
-      const usageEvent = state.usageLedger.record({
+      // A page read charges the customer one Rich page, once per run and page: the first read of the
+      // page un-counts its request from the org's uncharged attempts; a second read does not.
+      const usageEvent = recordVisionRead(state.usageLedger, gate, pageRef, {
           provider: result.provider ?? (result.baseUrl?.includes("openrouter.ai") ? "openrouter" : result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
           model: result.model,
           metric: "page-analysis",
@@ -1274,8 +1290,6 @@ export class VisionExtractStage implements Stage {
       } catch (error) {
         // A cleanup failure never replaces the call's own result or error.
         console.warn(`[vision-extract] document=${document.id} page=${page.pageNumber} sidecar cleanup failed: ${toError(error).message}`);
-      } finally {
-        await admission.settle(settlement);
       }
     }
   }
@@ -1407,8 +1421,7 @@ export class VisionExtractStage implements Stage {
     if (guardStop) {
       console.warn(
         `[vision-guard] org=${orgId ?? "none"} run=${state.run.id} document=${document.id} stopped=${guardStop.reason} ` +
-          `providerCents=${guardStop.providerCostCents} reservedCents=${guardStop.reservedCents} budgetCents=${guardStop.budgetCents} ` +
-          `rejected=${guardStop.rejectedPages} attempted=${guardStop.attemptedPages}`,
+          `runFailures=${guardStop.runFailures}/${guardStop.runAttempts} orgAttempts=${guardStop.orgAttempts}/${guardStop.orgLimit}`,
       );
       state.pendingPerformance.push({
         documentId: document.id,
@@ -1657,11 +1670,8 @@ export function shouldFailOpenVisionError(error: unknown): boolean {
   // keeps its native or OCR text instead of failing the whole document (and records `rejected`,
   // or `failed` when it has no usable text).
   if (findVisionOutputRejected(error)) return true;
-  // The run's vision provider budget or rejection breaker stopped vision: no call was made.
-  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
-    if (cur instanceof VisionGuardStopError) return true;
-    cur = (cur as { cause?: unknown }).cause;
-  }
+  // The run's vision attempt guard refused the request: it was never sent.
+  if (findVisionGuardStop(error)) return true;
   const message = toError(error).message.toLowerCase();
 
   return [

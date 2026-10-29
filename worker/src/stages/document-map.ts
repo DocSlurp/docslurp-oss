@@ -30,7 +30,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
-import { visionGuardFor } from "../lib/vision-spend-guard.js";
+import { recordVisionRead, visionGuardFor } from "../lib/vision-attempt-guard.js";
 
 export const MAP_BLOCK_PAGES = 15;
 export const COVERAGE_THRESHOLD = 0.85;
@@ -433,34 +433,40 @@ export class DocumentMapStage implements Stage {
         const vision = state.run.pipeline.vision;
         const price = (result: { costCents?: number; inputTokens: number; outputTokens: number }) =>
           result.costCents ?? calculateAiUsageCostCents({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens });
-        // The run's vision guard (provider budget, rejection breaker, org unbilled limit) bounds
-        // map OCR too; a rejected or failed call records its spend there and still throws.
+        const page = { documentId: document.id, pageNumber };
+        // The run's vision attempt guard admits every request of map OCR too; a rejected or failed
+        // call records its spend there and still throws.
         const guarded = await guardedVisionCall({
-          host: state, vision, cfg: this.config, imagePath,
-          page: { documentId: document.id, pageNumber },
+          host: state, vision, cfg: this.config,
+          target: { ...page, purpose: "map-ocr" },
           record: (input) => state.usageLedger.record(input),
           metadata: { mapOcr: true },
-          call: () => executeVisionRuntime({
+          call: (gate) => executeVisionRuntime({
             imagePath, mimeType: artifact.mimeType, outputPath: `${imagePath}.vision.json`, vision,
             cfg: this.config, runner: this.runner, privacyMode: state.run.pipeline.privacyMode,
-            signal: args.signal,
+            signal: args.signal, gate,
           }),
-          price,
+          // A map OCR read charges the page Rich: its request leaves the org's uncharged count.
+          onResult: (result, gate) => {
+            const cents = price(result);
+            costCents += cents;
+            recordVisionRead(state.usageLedger, gate, page, {
+              provider: result.provider ?? "vision-runtime", model: result.model, metric: "document-map-ocr", amount: 1, unit: "page",
+              inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents: cents, metadata: page,
+            });
+          },
         });
         if (!guarded.admitted) {
-          // Vision stopped for the run: no more OCR calls; the remaining pages stay without text.
-          console.warn(`[document-map] document=${document.id} page=${pageNumber} ocr stopped: ${guarded.stop.reason}`);
-          while (pageTexts.length < pageNumbers.length) pageTexts.push("");
-          break;
+          // Refused: the page stays without text; a sticky refusal stops the remaining pages too.
+          console.warn(`[document-map] document=${document.id} page=${pageNumber} ocr refused: ${guarded.stop.reason}`);
+          pageTexts.push("");
+          if (guarded.stop.sticky) {
+            while (pageTexts.length < pageNumbers.length) pageTexts.push("");
+            break;
+          }
+          continue;
         }
-        const result = guarded.result;
-        const cents = price(result);
-        costCents += cents;
-        state.usageLedger.record({
-          provider: result.provider ?? "vision-runtime", model: result.model, metric: "document-map-ocr", amount: 1, unit: "page",
-          inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents: cents, metadata: { documentId: document.id, pageNumber },
-        });
-        pageTexts.push(result.text);
+        pageTexts.push(guarded.result.text);
       } finally {
         await rm(`${imagePath}.vision.json`, { force: true });
         await rm(path.dirname(imagePath), { recursive: true, force: true });

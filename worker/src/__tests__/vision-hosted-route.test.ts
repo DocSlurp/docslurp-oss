@@ -36,7 +36,7 @@ describe("hosted OpenRouter vision request shape", () => {
     const imagePath = await pageImage();
     const result = await executeVisionRuntime({
       imagePath,
-      outputPath: `${imagePath}.json`,
+      outputPath: `${imagePath}.json`, gate: null,
       vision: visionConfigSchema.parse({ profile: "open-weights-hosted" }),
       cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
       runner: new CommandRunner(),
@@ -65,7 +65,7 @@ describe("hosted OpenRouter vision request shape", () => {
     const imagePath = await pageImage();
     await executeVisionRuntime({
       imagePath,
-      outputPath: `${imagePath}.json`,
+      outputPath: `${imagePath}.json`, gate: null,
       vision: visionConfigSchema.parse({}),
       cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
       runner: new CommandRunner(),

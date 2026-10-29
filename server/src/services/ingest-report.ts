@@ -689,7 +689,7 @@ export const INGEST_RECOMMENDATION_CATALOG = {
   "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
   "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
   "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
-  "vision-stopped": { proposal: "outside-allowlist", note: "The vision provider budget, rejection breaker and organization unbilled limit are operator settings." },
+  "vision-stopped": { proposal: "outside-allowlist", note: "The per-page vision attempt bound, rejection breaker and organization attempt limit are operator settings." },
   "vision-rejected-pages": { proposal: "informational", note: "Pages kept their own text; nothing to change." },
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
   "turn-on-embeddings": { proposal: "pipeline-patch", note: "embed and indexVectors are proposable." },
@@ -779,7 +779,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "vision-stopped", severity: "medium",
       title: "Vision stopped for the run",
-      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the run or your organization reached its vision spend limit, or too many pages returned unusable vision output.`,
+      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, or too many vision requests in the run returned unusable output.`,
       effect: "These pages keep only their own text. Reprocess the files once the cause is fixed; contact support if the limit is too low for your files.",
       affectedPages: stopped.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },

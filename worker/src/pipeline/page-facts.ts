@@ -11,7 +11,7 @@ import type { CommandRunner } from "../tools/runner.js";
 /**
  * `rejected`: vision ran but its output was rejected (degenerate, refusal, truncated) and the page
  * kept usable native or OCR text; a rejected page without usable text is `failed`. `guarded`: the
- * run's vision provider budget or rejection breaker stopped vision before the page.
+ * run's vision attempt guard (page bound, rejection breaker, org attempt bound) refused the page.
  */
 export type PageVisionStatus = "extracted" | "failed" | "rejected" | "guarded" | "not-selected" | "over-cap" | "cost-cap";
 
@@ -20,9 +20,10 @@ export interface VisionPageOutcome {
   outcome:
     | "rejected"
     | "failed"
-    | "provider-budget"
+    | "page-attempt-limit"
     | "rejection-breaker"
-    | "org-unbilled-limit"
+    | "org-attempt-limit"
+    | "unscoped-run"
     | "blank-render"
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
     | "unverified-render";
@@ -34,9 +35,10 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
   switch (outcome.outcome) {
     case "rejected":
       return outcome.fallbackText ? "rejected" : "failed";
-    case "provider-budget":
+    case "page-attempt-limit":
     case "rejection-breaker":
-    case "org-unbilled-limit":
+    case "org-attempt-limit":
+    case "unscoped-run":
       return "guarded";
     case "blank-render":
     case "unverified-render":

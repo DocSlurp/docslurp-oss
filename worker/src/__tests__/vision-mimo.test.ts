@@ -34,7 +34,7 @@ async function sentBody(vision: Record<string, unknown>) {
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await executeVisionRuntime({
     imagePath,
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse(vision),
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),

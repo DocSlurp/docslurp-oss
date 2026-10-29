@@ -107,11 +107,11 @@ export class WorkflowState {
   docConcurrency = 1;
   distributedVisionPages = new Map<string, unknown>();
   /**
-   * The shared vision spend ledger (vision provider budget, rejection breaker and org unbilled
-   * limit, lib/vision-spend-guard.ts). Set by loadRunState from the store; absent in tests and
+   * The shared vision attempt ledger (page bound, rejection breaker and org uncharged-attempt
+   * bound, lib/vision-attempt-guard.ts). Set by loadRunState from the store; absent in tests and
    * store-less runs, where the guard uses a process-local ledger.
    */
-  visionSpend?: import("../lib/vision-spend-guard.js").VisionSpendBackend;
+  visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend;
   /** Page-level progress for granular percent-complete computation */
   pageProgress: Map<string, PageProgress> = new Map();
   /** Last time updateProgress was called (throttle granular flushes) */

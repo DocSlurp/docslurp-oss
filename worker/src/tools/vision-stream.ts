@@ -12,6 +12,7 @@ import { CHINA_PROVIDER_SLUGS, readProviderCharge } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
+import type { VisionRequestGate } from "../lib/vision-attempt-guard.js";
 
 export type DegenerateReason = "repeated-pattern" | "low-diversity" | "whitespace-run" | "leader-run";
 export interface DegenerateSignal {
@@ -250,6 +251,8 @@ export function findVisionOutputRejected(error: unknown): VisionOutputRejectedEr
 }
 
 const acceptedAttemptErrors = new WeakSet<object>();
+/** What an accepted stream delivered before it broke (text so far, usage if a usage chunk arrived). */
+const partialAttempts = new WeakMap<object, VisionAttempt>();
 
 /** Provider usage a failed (not rejected) vision call was still billed for. */
 export interface VisionBilledUsage {
@@ -257,6 +260,8 @@ export interface VisionBilledUsage {
   outputTokens: number;
   /** Provider charge when known; otherwise the caller prices the tokens. */
   costCents?: number;
+  /** Token counts came from the provider's usage, or were estimated (prompt estimate, streamed text). */
+  usageSource?: "provider" | "estimated";
 }
 
 const billedUsage = new WeakMap<object, VisionBilledUsage>();
@@ -280,7 +285,8 @@ export interface AttemptSummary {
   provider: string | null;
   model: string | null;
   streamed: boolean;
-  outcome: RetryableOutcome | "ok";
+  /** `stream-failed`: the provider accepted a streaming request that broke before its first chunk. */
+  outcome: RetryableOutcome | "ok" | "stream-failed";
   finishReason: string | null;
   inputTokens: number;
   outputTokens: number;
@@ -348,6 +354,8 @@ async function consumeStream(response: Response, abort: () => void): Promise<Vis
   } catch (error) {
     if (attempt.degenerate) return attempt;
     if (!sawChunk && !(error instanceof Error && error.name === "AbortError")) throw new StreamStartError(error instanceof Error ? error.message : String(error));
+    // Interrupted mid-stream: keep what arrived so the usage record counts the streamed output.
+    if (error && typeof error === "object") partialAttempts.set(error, attempt);
     throw error;
   }
   return attempt;
@@ -390,6 +398,11 @@ export interface GuardedCompletionArgs {
   inputTokenEstimate: number;
   /** Profile-preferred route for the retry after a refusal or content filter (see `alternateRouteBody`). */
   preferredRetryRoute?: RetryRoute;
+  /**
+   * The vision attempt guard's admission for every HTTP request this call sends (first try, inline
+   * retries, the streaming fallback, the alternate-route retry); null only outside a run (benchmarks).
+   */
+  gate: VisionRequestGate | null;
   /** Prices a discarded attempt that has no provider charge (config per-1k rates). */
   estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
 }
@@ -428,8 +441,10 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       label: "vision request",
       signal: controller.signal,
       rateLimit: { model: args.model, tokens: args.inputTokenEstimate, onLease: (l) => { lease = l; } },
+      ...(args.gate ? { gate: args.gate } : {}),
     });
     if (!response.ok) {
+      args.gate?.failed();
       const text = await response.text();
       if (streaming && [400, 404, 405, 415, 422, 501].includes(response.status)) throw new StreamStartError(`${response.status} ${text.slice(0, 200)}`);
       throw new Error(`vision request failed: ${response.status} ${text}`);
@@ -438,6 +453,7 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
     try {
       attempt = isSse ? await consumeStream(response, () => controller.abort(new Error("degenerate vision output"))) : await consumeJson(response);
     } catch (error) {
+      args.gate?.failed();
       // The provider accepted the request: it may bill the input even though no usage came back.
       if (error && typeof error === "object") acceptedAttemptErrors.add(error);
       throw error;
@@ -462,6 +478,16 @@ function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: n
   return {
     attempt: index, provider: attempt.provider, model: attempt.model, streamed: attempt.streamed, outcome: outcome ?? "ok",
     finishReason: attempt.finishReason, inputTokens, outputTokens, costCents, usageSource: hasUsage ? "provider" : "estimated", charge,
+  };
+}
+
+/** A streaming request the provider accepted (200) that broke before any chunk: input estimated, no output. */
+function acceptedWithoutOutput(args: GuardedCompletionArgs, index: number): AttemptSummary & { charge: ReturnType<typeof readProviderCharge> } {
+  const inputTokens = args.inputTokenEstimate;
+  return {
+    attempt: index, provider: null, model: null, streamed: true, outcome: "stream-failed", finishReason: null,
+    inputTokens, outputTokens: 0, costCents: args.estimateCostCents?.({ inputTokens, outputTokens: 0 }),
+    usageSource: "estimated", charge: readProviderCharge(null),
   };
 }
 
@@ -493,6 +519,12 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
         attempt = await runAttempt(args, body, streaming);
       } catch (error) {
         if (!(error instanceof StreamStartError)) throw error;
+        // A 200 stream that broke before its first chunk was still accepted (and may be billed): count it.
+        if (acceptedAttemptErrors.has(error)) {
+          const summary = acceptedWithoutOutput(args, index);
+          log.push(summary);
+          logAttempt(summary, args.model);
+        }
         // Endpoint rejects or fails streaming before the first chunk: one non-streaming retry of the same attempt.
         console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
         streaming = false;
@@ -502,15 +534,22 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
       // Earlier attempts (and an accepted one that broke mid-response) were billed: keep that for the caller.
       const accepted = error !== null && typeof error === "object" && acceptedAttemptErrors.has(error);
       const totals = log.length > 0 ? totalsOf(log, args) : null;
-      const estimate = accepted ? { inputTokens: args.inputTokenEstimate, outputTokens: 0 } : null;
+      const partial = accepted ? partialAttempts.get(error as object) ?? null : null;
+      // An interrupted stream counts its streamed output (provider usage when a usage chunk arrived).
+      const estimate = accepted ? {
+        inputTokens: partial?.usage?.prompt_tokens ?? args.inputTokenEstimate,
+        outputTokens: partial?.usage?.completion_tokens ?? estimateTokens(partial?.text ?? ""),
+      } : null;
       if (totals || estimate) {
         const inputTokens = (totals?.inputTokens ?? 0) + (estimate?.inputTokens ?? 0);
         const outputTokens = (totals?.outputTokens ?? 0) + (estimate?.outputTokens ?? 0);
         const known = totals?.costCents ?? (totals ? undefined : 0);
-        const estimated = estimate ? args.estimateCostCents?.(estimate) : 0;
+        const estimated = estimate ? readProviderCharge(partial?.usage ?? null).costCents ?? args.estimateCostCents?.(estimate) : 0;
+        const providerUsage = (!totals || totals.usageSource === "provider") && (!estimate || Boolean(partial?.usage));
         attachVisionBilledUsage(error, {
           inputTokens, outputTokens,
           ...(known !== undefined && estimated !== undefined ? { costCents: known + estimated } : {}),
+          usageSource: providerUsage ? "provider" : "estimated",
         });
       }
       throw error;
@@ -522,6 +561,7 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     log.push(summary);
     logAttempt(summary, args.model);
     if (!verdict) break;
+    args.gate?.failed();
     console.warn(`[vision-stream] attempt ${index} rejected: ${verdict.kind} (${verdict.detail}) provider=${attempt.provider ?? "unknown"}`);
     if (index === 2) throw rejected(index, verdict);
     if (args.openRouter) {
@@ -546,7 +586,8 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     model: finalAttempt.model,
     provider: finalAttempt.provider,
     ...totals,
-    attempts: log.length,
+    // Attempts that returned output; a stream broken before its first chunk is only in the log (and usage).
+    attempts: log.filter((s) => s.outcome !== "stream-failed").length,
     attemptLog: log.map(stripCharge),
     /** The signal that triggered a retry (the accepted output itself is never degenerate). */
     degenerate,
@@ -562,9 +603,11 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
   const inputTokens = log.reduce((n, s) => n + s.inputTokens, 0);
   const outputTokens = log.reduce((n, s) => n + s.outputTokens, 0);
   const anyCharge = log.some((s) => s.charge.costCents !== undefined);
-  // Without any provider charge, leave cost to the caller's per-token pricing of the summed tokens.
-  const costCents = anyCharge || log.length > 1 && log.some((s) => s.costCents !== undefined)
-    ? log.reduce((n, s) => n + (s.charge.costCents ?? s.costCents ?? 0), 0)
+  // Without any provider charge, leave cost to the caller's per-token pricing of the summed tokens
+  // (estimated ones included). With one, attempts without a charge add their estimate.
+  const costCents = anyCharge
+    ? log.reduce((n, s) => n + (s.charge.costCents ?? s.costCents ??
+      args.estimateCostCents?.({ inputTokens: s.inputTokens, outputTokens: s.outputTokens }) ?? 0), 0)
     : undefined;
   const usageSource: "provider" | "estimated" = log.every((s) => s.usageSource === "provider") ? "provider" : "estimated";
   const costMetadata = anyCharge ? {
@@ -572,6 +615,5 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
     providerCostUsd: log.reduce((n, s) => n + (s.charge.costCents ?? 0), 0) / 100,
     ...(log.length > 1 ? { visionAttempts: log.map(stripCharge) } : log[0]!.charge.metadata),
   } : log.length > 1 ? { visionAttempts: log.map(stripCharge) } : undefined;
-  void args;
   return { inputTokens, outputTokens, usageSource, costCents, costMetadata };
 }

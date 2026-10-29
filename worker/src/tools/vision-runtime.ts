@@ -14,6 +14,7 @@ import {
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
 import { attachVisionBilledUsage, estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
+import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -154,6 +155,12 @@ export async function executeVisionRuntime(args: {
   /** Workspace privacy mode; hosted vision routes are refused outside `standard`. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
+  /**
+   * The run's vision attempt guard (lib/vision-attempt-guard.ts), admitting every request this call
+   * sends, the fallback route's included. Required so no call path can skip it; null only outside a
+   * run (benchmarks).
+   */
+  gate: VisionRequestGate | null;
 }): Promise<VisionExecutionResult> {
   const selected = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
   assertProviderAllowed(args.privacyMode, visionCall(selected));
@@ -161,6 +168,8 @@ export async function executeVisionRuntime(args: {
   try {
     return await runRouteVisionRequest(selected, selected.prompt, args);
   } catch (error) {
+    // A refused request is not a route failure: the fallback route would be refused the same way.
+    if (findVisionGuardStop(error)) throw error;
     if (!selected.remoteFallbackModelUri || selected.runtime === "remote-openai") {
       throw error;
     }
@@ -202,7 +211,7 @@ export async function executeVisionRuntime(args: {
 async function runRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null },
 ): Promise<VisionExecutionResult> {
   const base = {
     imagePath: args.imagePath,
@@ -210,6 +219,7 @@ async function runRouteVisionRequest(
     outputPath: args.outputPath,
     runner: args.runner,
     signal: args.signal,
+    gate: args.gate,
     runtime: route.runtime,
     prompt,
   };
@@ -330,6 +340,8 @@ export async function runVisionRequest(args: {
   swapPolicy?: VisionModelSwapPolicy;
   streaming?: boolean;
   estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
+  /** Admission for every request (see `executeVisionRuntime`). */
+  gate: VisionRequestGate | null;
 }): Promise<VisionExecutionResult> {
   args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -370,7 +382,14 @@ export async function runVisionRequest(args: {
           throw new Error(`local vision model unavailable: ${args.model}`);
         }
 
-        await args.runner.run(plan, args.signal);
+        // The local runtime is one request too: admitted like a hosted one.
+        await args.gate?.admit();
+        try {
+          await args.runner.run(plan, args.signal);
+        } catch (error) {
+          args.gate?.failed();
+          throw error;
+        }
         const payload = await readJsonFile<{
           text?: string;
           raw?: unknown;
@@ -460,6 +479,7 @@ export async function runVisionRequest(args: {
         estimateCostCents: args.estimateCostCents,
         // Profiles that measured a refusal-free route send refused or filtered pages there on the single retry.
         preferredRetryRoute: contentFilterRetryProvider(args.model),
+        gate: args.gate,
       }).catch((error: unknown) => {
         // Both attempts were billed even though no page came out: tell the caller whom to attribute it to.
         if (error instanceof VisionOutputRejectedError) {
@@ -481,6 +501,7 @@ export async function runVisionRequest(args: {
       if (modelSwap) {
         console.warn(`[vision-model-swap] requested=${modelSwap.requested} served=${modelSwap.served} provider=${modelSwap.provider ?? "unknown"} policy=${args.swapPolicy ?? "warn"}`);
         if (args.swapPolicy === "fail") {
+          args.gate?.failed();
           const error = new ProviderRetryableError(
             `vision model swap: requested ${modelSwap.requested} but ${modelSwap.provider ?? "provider"} served ${modelSwap.served}`,
             args.providerLabel ?? providerFromBaseUrl(args.baseUrl),

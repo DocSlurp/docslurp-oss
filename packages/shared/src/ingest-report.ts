@@ -46,7 +46,7 @@ export const ingestReportPageReasonSchema = z.enum([
   "vision-failed",
   "vision-page-limit",
   "vision-cost-cap",
-  /** The run's vision provider budget or rejection breaker stopped vision before this page. */
+  /** The run's vision attempt guard (page bound, rejection breaker, org attempt limit) refused this page. */
   "vision-stopped",
   "not-indexed",
   "document-failed",
@@ -281,7 +281,7 @@ export const ingestReportSchema = z.object({
     visionCostCapPages: count,
     /** Vision output was rejected (degenerate, refusal, truncated); the page kept its native or OCR text. */
     visionRejectedPages: count.optional(),
-    /** The run's vision provider budget or rejection breaker stopped vision before these pages. */
+    /** The run's vision attempt guard (page bound, rejection breaker, org attempt limit) refused these pages. */
     visionStoppedPages: count.optional(),
     nativeTextPages: count,
     visionCents: nullableCount,

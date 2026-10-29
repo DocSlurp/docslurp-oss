@@ -34,7 +34,7 @@ async function run(model: string, prompt: string | undefined, responses: Array<R
   const imagePath = await page();
   const result = await executeVisionRuntime({
     imagePath,
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg,
     runner: new CommandRunner(),

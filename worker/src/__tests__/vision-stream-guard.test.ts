@@ -23,7 +23,7 @@ async function run(config: Config = cfg) {
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   return executeVisionRuntime({
-    imagePath, outputPath: `${imagePath}.json`, vision: visionConfigSchema.parse({ profile: "open-weights-hosted" }),
+    imagePath, outputPath: `${imagePath}.json`, vision: visionConfigSchema.parse({ profile: "open-weights-hosted" }), gate: null,
     cfg: config, runner: new CommandRunner(), privacyMode: "standard",
   });
 }

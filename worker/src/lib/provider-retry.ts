@@ -205,6 +205,12 @@ export interface ProviderRetryOptions {
   onRetry?: (info: { attempt: number; status: number | null; delayMs: number }) => void;
   /** Fleet-wide TPM/RPM limiting for this provider+model; `onLease` receives the successful attempt's lease. */
   rateLimit?: { model: string; tokens: number; limiter?: ProviderRateLimiter; onLease?: (lease: ProviderRateLease) => void };
+  /**
+   * Admission for every HTTP request, inline retries included (the vision attempt guard): `admit` runs
+   * before each request is sent and its refusal propagates as is; `failed` marks a request that got a
+   * retryable status or a network error.
+   */
+  gate?: { admit(): Promise<void>; failed(): void };
 }
 
 /**
@@ -225,6 +231,8 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
     let retryAfterMs: number | null = null;
     let detail: string;
     const rateLimiter = options.rateLimit ? options.rateLimit.limiter ?? providerRateLimiter() : null;
+    // Outside the try: a refusal is not a network error to retry.
+    await options.gate?.admit();
     try {
       const lease = rateLimiter
         ? await rateLimiter.acquire({ provider: options.provider, model: options.rateLimit!.model, tokens: options.rateLimit!.tokens, signal: options.signal })
@@ -236,6 +244,7 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
         if (lease) options.rateLimit?.onLease?.(lease);
         return response;
       }
+      options.gate?.failed();
       status = response.status;
       retryAfterMs = parseRetryAfterMs(response.headers);
       if (status === 429 && rateLimiter) {
@@ -248,6 +257,7 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       }
       detail = `${status} ${body.slice(0, 300)}`;
     } catch (error) {
+      options.gate?.failed();
       if (options.signal?.aborted) throw error;
       // The fleet limiter already waited its budget; hand the wait to Temporal.
       if (isProviderRetryableError(error)) throw error;

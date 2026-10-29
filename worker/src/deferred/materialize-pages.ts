@@ -35,6 +35,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
 import { guardedVisionCall, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
+import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
 
@@ -63,7 +64,8 @@ export interface PageMaterializerOps {
   /** Text layer for pages first..last (inclusive), one string per page. */
   extractText(document: Document, range: { first: number; last: number }, signal?: AbortSignal): Promise<string[]>;
   /** Rasterize + vision-OCR one page. */
-  ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; signal?: AbortSignal }): Promise<OcrPageResult>;
+  /** `gate` admits every vision request the read sends (the run's vision attempt guard). */
+  ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; signal?: AbortSignal; gate: VisionRequestGate }): Promise<OcrPageResult>;
   embed(args: {
     chunks: string[];
     profile: EmbeddingProfile;
@@ -143,6 +145,7 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
           runner: deps.runner,
           privacyMode: ctx.pipeline.privacyMode,
           signal: ctx.signal,
+          gate: ctx.gate,
         });
         const costCents = result.costCents ?? calculateAiUsageCostCents({
           inputTokens: result.inputTokens,
@@ -282,9 +285,9 @@ export async function materializePageRange(
     else ocrPages.push(page);
   }
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
-  // Every OCR call passes the run's vision guard: the run's provider budget and rejection breaker
-  // and the org's rolling unbilled limit, beside this materialization's own credit budget.
-  const guardHost = { run, ...(deps.store?.visionSpend ? { visionSpend: deps.store.visionSpend } : {}) };
+  // Every OCR request passes the run's vision attempt guard (page bound, rejection breaker, the org's
+  // rolling uncharged-attempt bound), beside this materialization's own credit budget.
+  const guardHost = { run, ...(deps.store?.visionAttempts ? { visionAttempts: deps.store.visionAttempts } : {}) };
   await mapLimit(ocrPages, OCR_CONCURRENCY, async (page) => {
     if (spentCents >= budgetCents) {
       released.push(page);
@@ -297,11 +300,25 @@ export async function materializePageRange(
         host: guardHost,
         vision: pipeline.vision,
         cfg: deps.config,
-        page: { documentId, pageNumber: page },
+        target: { documentId, pageNumber: page, purpose: "page" },
         record: (usage) => deps.usage.record(usage),
         metadata: { materializedBy: input.reason, sessionId: input.sessionId },
-        call: () => ops.ocrPage(document, page, { runId: input.runId, pipeline }),
-        price: (ocr) => ocr.costCents,
+        call: (gate) => ops.ocrPage(document, page, { runId: input.runId, pipeline, gate }),
+        // Customer credits: an OCR-read page bills Rich (the usage ledger charges it, once per run and
+        // page); that request leaves the org's uncharged count. Provider cost is ours.
+        onResult: (ocr, gate) => {
+          recordVisionRead(deps.usage, gate, { documentId, pageNumber: page }, {
+            provider: ocr.provider ?? "vision-runtime",
+            model: ocr.model,
+            metric: "page-analysis",
+            amount: 1,
+            unit: "page",
+            costCents: ocr.costCents,
+            inputTokens: ocr.inputTokens,
+            outputTokens: ocr.outputTokens,
+            metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+          });
+        },
       });
     } catch (error) {
       // A page rejected on every attempt (or failed after billing) was recorded with its provider
@@ -310,25 +327,12 @@ export async function materializePageRange(
       return;
     }
     if (!guarded.admitted) {
-      // Vision stopped for the run or the org: the page stays claimable for later.
+      // Refused by the run's or org's attempt bound: the page stays claimable for later.
       released.push(page);
       failed.set(page, `vision-stopped:${guarded.stop.reason}`);
       return;
     }
     const ocr = guarded.result;
-    const event = deps.usage.record({
-      provider: ocr.provider ?? "vision-runtime",
-      model: ocr.model,
-      metric: "page-analysis",
-      amount: 1,
-      unit: "page",
-      costCents: ocr.costCents,
-      inputTokens: ocr.inputTokens,
-      outputTokens: ocr.outputTokens,
-      metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
-    });
-    // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
-    void event;
     const cost = pageCredits("rich", richPagesForOutputTokens(ocr.outputTokens));
     spentCents += cost;
     if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");

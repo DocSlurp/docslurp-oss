@@ -78,7 +78,7 @@ async function run(model: string, responses: Response[]) {
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   const result = await executeVisionRuntime({
-    imagePath, outputPath: `${imagePath}.json`,
+    imagePath, outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}` }),
     cfg, runner: new CommandRunner(), privacyMode: "standard",
   });
