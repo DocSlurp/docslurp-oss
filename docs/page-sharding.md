@@ -81,3 +81,26 @@ temporal-workflow-changes.md)
 2. Page-range shard activity: extend `runPipelineStageShard` from document IDs to
    `(documentId, pageRange)` for render-images and embed.
 3. Feed observed shard timings back through `calibrateShardProfile` (per stage, executor class).
+
+## Implemented on feat/page-shard-media
+
+- **Media windows** (`MEDIA_WINDOW_CONCURRENCY`, default 1): `media/windows.ts` overlaps the
+  remote transcription and frame-description calls of one document, up to
+  min(flag, `MEDIA_MAX_CONCURRENT`, windows), and applies results in window order. ffmpeg cuts
+  stay serial, so no extra sandboxed processes run. Audio keeps its existing
+  `MEDIA_CHUNK_OVERLAP_SECONDS` overlap. Video frame batches get no overlap, because a batch
+  description is free text keyed by its frames and repeated context frames could not be
+  de-duplicated. Leased capacity stays sequential: its lease is acquired lazily on the first call.
+- **render-images page-range shards** (`WORKER_PAGE_RANGE_SHARDS`, default off, capability
+  `workflow.page-range-shards`, input field `pageRangeSharding`): `planPageRangeShards` plans
+  ranges with the calibrated profile, the workflow fans them out through
+  `runPipelineStageShard({ pageRanges })`, and the stage pass then writes the manifest,
+  ledger and checkpoints, finding the rendered pages in the per-page raster cache.
+  Ranges are validated against the shard's own documents; a foreign document or bad bounds
+  rejects the shard before any work.
+- **embed: not range-sharded.** Each chunk's embedding input depends on per-document state, an
+  LLM-generated contextual preamble and late-chunking windows. Concurrent range shards
+  would race to generate, and pay for, the same document context. It needs a document-context
+  step that runs once before the shards; until then `embed` stays whole-document, with
+  document shards only.
+

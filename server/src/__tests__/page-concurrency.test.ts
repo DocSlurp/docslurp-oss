@@ -33,6 +33,18 @@ describe("resolveWorkflowScalingInput", () => {
     expect(resolveWorkflowScalingInput({ TEMPORAL_ACTIVITY_TASK_QUEUE: "acts" }, { loadtest: true }).activityTaskQueue).toBeUndefined();
   });
 
+  it("records page-range shards only when enabled and the whole fleet supports them", () => {
+    expect(resolveWorkflowScalingInput({}).pageRangeSharding).toBeUndefined();
+    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 8 }).pageRangeSharding)
+      .toEqual({ stages: ["render-images"], maxShards: 8 });
+    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 64 }, new Set()).pageRangeSharding)
+      .toBeUndefined();
+    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 64 },
+      new Set(["workflow.page-range-shards" as const])).pageRangeSharding).toEqual({ stages: ["render-images"], maxShards: 32 });
+    expect(resolveWorkflowScalingInput({ WORKER_PAGE_RANGE_SHARDS: "true" }, { loadtest: false }, { workerSlots: 1 }).pageRangeSharding)
+      .toBeUndefined();
+  });
+
   it("shards documents up to the org's worker slots", () => {
     expect(resolveWorkflowScalingInput({}, { loadtest: false }, { workerSlots: 64 }).documentSharding)
       .toEqual({ minDocsPerShard: 2, maxShards: 32, minPagesPerShard: 16 });

@@ -13,6 +13,7 @@ import { loadActiveRoutePlan } from "../routing/active-plan.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
 import { prioritizePagesWithoutNativeText } from "./classify-route.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
+import { pageInRanges, type DocumentPageRanges } from "../pipeline/page-ranges.js";
 
 export class RenderImagesStage implements Stage {
   readonly name = "render-images";
@@ -41,32 +42,7 @@ export class RenderImagesStage implements Stage {
             ? await state.store.getCompletedPages(state.run.id, document.id, this.name)
             : new Set<number>();
           const remaining = skipCompletedPages(completedPages, allPages);
-          const request = await this.loadRasterRequest(state, document.id);
-          // Native text-only runs leave previews on demand. Classification can
-          // suggest images, but must not override the workspace feature choices.
-          const wantsRasters = state.run.pipeline.preserveImages || state.run.pipeline.visionFallback;
-          // Only PDFs and images have a raster form. HTML, text and other
-          // split documents keep on-demand previews instead of failing here
-          // ("Native image documents only support page 1").
-          const mimeType = document.mimeType ?? "";
-          const isPdf = mimeType === "application/pdf";
-          const isImage = mimeType.startsWith("image/");
-          // Active page router: render exactly the pages whose plan needs pixels (accept-text
-          // pages need none). Off/shadow, or no plan for this document: the classification path.
-          const routed = wantsRasters && isPdf ? await loadActiveRoutePlan(state, this.storage, document.id, this.cfg) : null;
-          const selected = routed
-            ? pagesNeedingPixels(routed)
-            : wantsRasters && (isPdf || isImage)
-              ? selectRasterPagesFromClassification(
-                  request,
-                  // With vision on, pre-render only what vision can use; vision renders any
-                  // further page it needs on demand, and previews render on demand.
-                  state.run.pipeline.visionFallback
-                    ? { maxPages: resolveVisionPageBudget(state.run.pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook")) }
-                    : {},
-                )
-              : [];
-          const pageNumbers = isImage ? selected.filter((pageNumber) => pageNumber === 1) : selected;
+          const { pageNumbers, request, routed } = await this.selectPages(state, document);
           const pages = await this.rasters.renderSelectedPages({
             document,
             runId: state.run.id,
@@ -112,6 +88,58 @@ export class RenderImagesStage implements Stage {
         },
         signal,
       );
+    });
+  }
+
+  /** Pages this document renders, chosen the same way for whole documents and page-range shards. */
+  private async selectPages(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document) {
+    const request = await this.loadRasterRequest(state, document.id);
+    // Native text-only runs leave previews on demand. Classification can
+    // suggest images, but must not override the workspace feature choices.
+    const wantsRasters = state.run.pipeline.preserveImages || state.run.pipeline.visionFallback;
+    // Only PDFs and images have a raster form. HTML, text and other
+    // split documents keep on-demand previews instead of failing here
+    // ("Native image documents only support page 1").
+    const mimeType = document.mimeType ?? "";
+    const isPdf = mimeType === "application/pdf";
+    const isImage = mimeType.startsWith("image/");
+    // Active page router: render exactly the pages whose plan needs pixels (accept-text
+    // pages need none). Off/shadow, or no plan for this document: the classification path.
+    const routed = wantsRasters && isPdf ? await loadActiveRoutePlan(state, this.storage, document.id, this.cfg) : null;
+    const selected = routed
+      ? pagesNeedingPixels(routed)
+      : wantsRasters && (isPdf || isImage)
+        ? selectRasterPagesFromClassification(
+            request,
+            // With vision on, pre-render only what vision can use; vision renders any
+            // further page it needs on demand, and previews render on demand.
+            state.run.pipeline.visionFallback
+              ? { maxPages: resolveVisionPageBudget(state.run.pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook")) }
+              : {},
+          )
+        : [];
+    const pageNumbers = isImage ? selected.filter((pageNumber) => pageNumber === 1) : selected;
+    return { pageNumbers, request, routed };
+  }
+
+  /**
+   * Page-range shard: renders this shard's share of the selected pages into the content-keyed
+   * raster cache and nothing else. The unsharded pass that follows writes the manifest, ledger
+   * entries and checkpoints, and finds these pages as cache hits.
+   */
+  async runPageRanges(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    ranges: DocumentPageRanges,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const documents = healthyDocuments(state).filter((document) => ranges.has(document.id)
+      && state.documentStages?.get(document.id)?.get(this.name)?.status !== "completed");
+    await runDocuments(documents, state.docConcurrency, async (document) => {
+      signal?.throwIfAborted();
+      const { pageNumbers } = await this.selectPages(state, document);
+      const mine = pageNumbers.filter((pageNumber) => pageInRanges(pageNumber, ranges.get(document.id)));
+      if (mine.length === 0) return;
+      await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers: mine, signal });
     });
   }
 

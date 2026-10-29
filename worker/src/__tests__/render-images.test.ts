@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RenderImagesStage, selectRasterPagesFromClassification } from "../stages/render-images.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -72,4 +72,56 @@ it("writes an extract run's page manifest under the extract prefix, not <user>/<
   expect(keys.length).toBeGreaterThan(0);
   expect(keys.every((key) => key.startsWith("extracts/org/ext_1/"))).toBe(true);
   expect(keys.some((key) => key.startsWith("user/"))).toBe(false);
+});
+
+describe("page-range shards", () => {
+  const classification = (pages: number[]) => ({
+    status: "ready", documentId: "doc", label: "mixed", confidence: 0.8, signals: [], suggestedPlaybook: "balanced",
+    documentComplexity: "mixed", dominantRoutes: ["image-heavy"], visionPolicy: "selective", specializedContentSummary: [],
+    evidence: { source: "canonical-document", artifactUri: "s3://bucket/c.json", characterCount: 1000, pageCount: 100 },
+    pages: pages.map(pageNumber => ({ pageNumber, route: "image-heavy", confidence: 0.8, textDensityScore: 0.1, signals: [], extractorHint: "vision-rescue", specializedContent: [] })),
+  });
+  const setup = (status?: string) => {
+    const artifactLedger = DocumentArtifactLedger.create({});
+    const state = { artifactLedger, documents: [{ id: "doc", userId: "user", pageCount: 100, mimeType: "application/pdf" }],
+      documentStages: new Map(status ? [["doc", new Map([["render-images", { status }]])]] : []),
+      docConcurrency: 1, run: { id: "run", pipeline: { preserveImages: true, visionFallback: false } } } as unknown as WorkflowState;
+    const renderSelectedPages = vi.fn(async (args: { pageNumbers: number[] }) => args.pageNumbers.map(pageNumber =>
+      ({ pageNumber, artifactUri: `s3://bucket/page-${pageNumber}.png`, cacheHit: false })));
+    const putJson = vi.fn();
+    const stage = new RenderImagesStage({ renderSelectedPages } as unknown as PdfRasterCache,
+      { putJson, uri: (key: string) => `s3://bucket/${key}` } as unknown as ArtifactStore);
+    vi.spyOn(stage as any, "loadRasterRequest").mockResolvedValue(classification([3, 40, 41, 90]));
+    return { state, stage, renderSelectedPages, putJson, artifactLedger };
+  };
+
+  it("renders only the selected pages inside the range and leaves manifest, ledger and checkpoints to the stage pass", async () => {
+    const { state, stage, renderSelectedPages, putJson, artifactLedger } = setup();
+    await stage.runPageRanges(state, new Map([["doc", [{ first: 33, last: 64 }]]]));
+    expect(renderSelectedPages).toHaveBeenCalledTimes(1);
+    expect(renderSelectedPages).toHaveBeenCalledWith(expect.objectContaining({ pageNumbers: [40, 41] }));
+    expect(putJson).not.toHaveBeenCalled();
+    expect(artifactLedger.readDocument("doc", "page-40")).toBeUndefined();
+  });
+
+  it("does nothing for ranges without selected pages, other documents or completed documents", async () => {
+    const empty = setup();
+    await empty.stage.runPageRanges(empty.state, new Map([["doc", [{ first: 50, last: 60 }]]]));
+    expect(empty.renderSelectedPages).not.toHaveBeenCalled();
+    const other = setup();
+    await other.stage.runPageRanges(other.state, new Map([["someone-elses-doc", [{ first: 1, last: 100 }]]]));
+    expect(other.renderSelectedPages).not.toHaveBeenCalled();
+    const done = setup("completed");
+    await done.stage.runPageRanges(done.state, new Map([["doc", [{ first: 1, last: 100 }]]]));
+    expect(done.renderSelectedPages).not.toHaveBeenCalled();
+  });
+
+  it("selects the same pages for shards and the stage pass, so shards plus the pass render each page once", async () => {
+    const { state, stage, renderSelectedPages } = setup();
+    for (const range of [{ first: 1, last: 50 }, { first: 51, last: 100 }]) await stage.runPageRanges(state, new Map([["doc", [range]]]));
+    await stage.run(state);
+    const calls = renderSelectedPages.mock.calls.map((call) => call[0].pageNumbers);
+    expect(calls).toEqual([[3, 40, 41], [90], [3, 40, 41, 90]]);
+    // The stage pass asks for every page again; the raster cache (keyed per page) serves the sharded ones as hits.
+  });
 });

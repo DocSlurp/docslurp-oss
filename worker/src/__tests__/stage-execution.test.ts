@@ -128,6 +128,47 @@ describe("Stage Execution", () => {
     expect(output.artifacts).toEqual({});
   });
 
+  it("runs a page-range shard through runPageRanges and leaves the stage and documents to the stage pass", async () => {
+    const store = new FakeStore();
+    store.documents = [{ ...makeDocument(), pageCount: 100 }];
+    const seen: Array<[string, unknown]> = [];
+    let wholeRuns = 0;
+    const execution = createStageExecution({
+      store, config,
+      stages: [{ name: "render-images", run: async () => { wholeRuns++; },
+        runPageRanges: async (_state, ranges) => { for (const [id, list] of ranges) seen.push([id, list]); } }],
+    });
+    const { runtime: rt } = runtime();
+    await execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 33, last: 64 }], shardIndex: 1, shardCount: 3 });
+    expect(seen).toEqual([["doc-1", [{ first: 33, last: 64 }]]]);
+    expect(wholeRuns).toBe(0);
+    expect(store.shardsFinished).toEqual([["doc-1"]]);
+    expect(store.stageStatus.has("render-images")).toBe(false);
+  });
+
+  it("refuses page-range shards for unsupported stages, foreign documents and bad bounds before doing any work", async () => {
+    const work: string[] = [];
+    const make = () => {
+      const store = new FakeStore();
+      store.documents = [{ ...makeDocument(), pageCount: 10 }, { ...makeDocument(), id: "doc-2", pageCount: 10 }];
+      return { store, execution: createStageExecution({ store, config, stages: [
+        stage("embed", async () => { work.push("embed"); }),
+        { name: "render-images", run: async () => { work.push("run"); }, runPageRanges: async () => { work.push("ranges"); } },
+      ] }) };
+    };
+    const { runtime: rt } = runtime();
+    await expect(make().execution.runStage(input("embed"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 1, last: 5 }] }))
+      .rejects.toThrow("does not support page-range shards");
+    // doc-2 belongs to the run but not to this shard: beginShard drops it, so its range is foreign here.
+    await expect(make().execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-2", first: 1, last: 5 }] }))
+      .rejects.toThrow("outside this shard");
+    await expect(make().execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 1, last: 11 }] }))
+      .rejects.toThrow("invalid range");
+    await expect(make().execution.runStage(input("render-images"), { ...rt, pageRanges: [{ documentId: "doc-1", first: 1, last: 5 }] }))
+      .rejects.toThrow("requires its document ids");
+    expect(work).toEqual([]);
+  });
+
   it("leaves a failed shard's stage to the unsharded pass", async () => {
     const store = new FakeStore();
     const execution = createStageExecution({
