@@ -30,10 +30,13 @@ export function declaredGuestProtocol(env: NodeJS.ProcessEnv = process.env): num
   return /^[2-4]$/.test(value) ? Number(value) : 0;
 }
 
+/** The guest hardening policy this host accepts; the guest refuses rather than apply a partial policy. */
+export const HARDENING_POLICY = "doppler-guest-hardening@2";
+
 /** Protocol 4 guests confine themselves with no_new_privs, Landlock (ABI >= 4) and seccomp, and report it. */
 export function validHardening(hardening: unknown): boolean {
-  const h = hardening as { noNewPrivs?: unknown; landlockAbi?: unknown; seccompDenied?: unknown } | null;
-  return h?.noNewPrivs === true && Number.isSafeInteger(h.landlockAbi) && (h.landlockAbi as number) >= 4 &&
+  const h = hardening as { policy?: unknown; noNewPrivs?: unknown; landlockAbi?: unknown; seccompDenied?: unknown } | null;
+  return h?.policy === HARDENING_POLICY && h.noNewPrivs === true && Number.isSafeInteger(h.landlockAbi) && (h.landlockAbi as number) >= 4 &&
     Number.isSafeInteger(h.seccompDenied) && (h.seccompDenied as number) > 0;
 }
 

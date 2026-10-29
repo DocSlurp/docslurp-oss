@@ -12,6 +12,10 @@ export const GUEST_MAX_VM_PAGES = 10_000;
 /** Most pages in a document the guest accepts at all (only as shards of at most GUEST_MAX_VM_PAGES). */
 export const GUEST_MAX_DOCUMENT_PAGES = 100_000;
 
+function hardeningOf(stdout: string): unknown {
+  try { return (JSON.parse(stdout) as { hardening?: unknown }).hardening; } catch { return undefined; }
+}
+
 /** Slug for a shard failure: log keys stay stable for SigNoz queries. */
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
@@ -266,6 +270,7 @@ export async function executeDopplerShards(
   // The final shard runs first: it alone proves the host's page count matches the guest's last page.
   const order = [plan.shards.length - 1, ...plan.shards.keys()].slice(0, plan.shards.length);
   let completedBytes = 0;
+  let shardHardening: unknown;
   // Every exit below carries the cost of the VMs that already ran.
   const fail = (message: string, extra: Array<UsageEvent | undefined> = []): never => {
     throw new SandboxRunError(message, mergeVmUsage([...usages, ...extra], plan.shards.length));
@@ -288,6 +293,7 @@ export async function executeDopplerShards(
               range: { ...shard, final: shard.last === pageCount } }, controller.signal);
           } finally { release(); }
           usages[index] = result.usage;
+          shardHardening ??= hardeningOf(result.stdout);
           deps.onProgress?.();
           // Stop paying for shards as soon as the merged output can no longer fit.
           // Await first, then add: concurrent completions must not overwrite each other's increments.
@@ -358,7 +364,9 @@ export async function executeDopplerShards(
       wallMs: Date.now() - dispatched, shardPages: plan.shardPages, parallel: plan.parallel, vms: usages.filter(Boolean).length,
       predictedWallMs: plan.predictedWallMs, unshardedWallMs: plan.unshardedWallMs, outputBytes: total });
     return {
+      // Every shard's envelope was validated (hardening included when declared); the merge carries one shard's report.
       stdout: JSON.stringify({ protocol: `doppler-vm@${Math.max(3, declaredGuestProtocol())}`, engine: "doppler", outputBytes: total,
+        ...(shardHardening ? { hardening: shardHardening } : {}),
         conversion: { pages: pageCount, first: 1, last: pageCount, documentPages: pageCount, shards: plan.shards.length,
           shardPages: plan.shardPages, parallel: plan.parallel, predictedWallMs: plan.predictedWallMs } }),
       stderr: "",

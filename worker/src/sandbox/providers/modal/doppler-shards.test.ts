@@ -304,7 +304,7 @@ describe("doppler-vm@3 envelope", () => {
   });
 
   it("requires proof of in-VM hardening when the image is declared protocol 4", () => {
-    const hardened = { noNewPrivs: true, landlockAbi: 10, seccompDenied: 46 };
+    const hardened = { policy: "doppler-guest-hardening@2", noNewPrivs: true, landlockAbi: 10, seccompDenied: 92 };
     const env4 = (diag: Record<string, unknown>, declared: number) =>
       validEnvelope({ engine: "doppler", outputBytes: 5, conversion: { pages: 3, first: 1, last: 3, documentPages: 3 }, ...diag }, Buffer.from("a\fb\fc"), undefined, declared);
     expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 4)).toBe(true);
@@ -313,6 +313,7 @@ describe("doppler-vm@3 envelope", () => {
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, landlockAbi: 3 } }, 4)).toBe(false);
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, seccompDenied: 0 } }, 4)).toBe(false);
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, noNewPrivs: "true" } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, policy: "doppler-guest-hardening@1" } }, 4)).toBe(false);
     expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 3)).toBe(true);            // rolling forward
     expect(env4({ protocol: "doppler-vm@4" }, 3)).toBe(false);                                 // a @4 guest always reports
     expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on", DOCSLURP_DOPPLER_VM_PROTOCOL: "4" }).enabled).toBe(true);

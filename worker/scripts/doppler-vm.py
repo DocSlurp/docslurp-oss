@@ -42,7 +42,9 @@ _FS_MAKE_SYM, _FS_REFER, _FS_TRUNCATE, _FS_IOCTL_DEV = 1 << 12, 1 << 13, 1 << 14
 _NET_BIND_TCP, _NET_CONNECT_TCP = 1 << 0, 1 << 1
 _SCOPE_ABSTRACT_UNIX, _SCOPE_SIGNAL = 1 << 0, 1 << 1
 _SYS_CREATE_RULESET, _SYS_ADD_RULE, _SYS_RESTRICT_SELF = 444, 445, 446  # x86-64 and the generic table
-READ_ONLY_PATHS = ('/usr', '/lib', '/lib64', '/bin', '/etc', '/opt/doppler', '/opt/docslurp', '/proc', '/var/cache/fontconfig')
+# No /proc: a parser child must not reach the guest's descriptors (/proc/<pid>/fd) or other processes' state.
+READ_ONLY_PATHS = ('/usr', '/lib', '/lib64', '/bin', '/etc', '/opt/doppler', '/opt/docslurp', '/var/cache/fontconfig')
+HARDENING_POLICY = 'doppler-guest-hardening@2'
 SECCOMP_DENY = (
     'ptrace', 'process_vm_readv', 'process_vm_writev', 'mount', 'umount2', 'pivot_root', 'chroot', 'move_mount',
     'open_tree', 'fsopen', 'fsconfig', 'fsmount', 'fspick', 'mount_setattr', 'unshare', 'setns', 'bpf',
@@ -50,7 +52,17 @@ SECCOMP_DENY = (
     'init_module', 'finit_module', 'delete_module', 'io_uring_setup', 'io_uring_enter', 'io_uring_register',
     'open_by_handle_at', 'name_to_handle_at', 'socket', 'socketpair', 'swapon', 'swapoff', 'reboot', 'acct',
     'quotactl', 'syslog', 'settimeofday', 'clock_settime', 'adjtimex', 'fanotify_init', 'lookup_dcookie', 'vhangup',
+    # Metadata outside Landlock's content rules: modes, owners, xattrs, timestamps.
+    'chmod', 'fchmod', 'fchmodat', 'fchmodat2', 'chown', 'fchown', 'lchown', 'fchownat', 'setxattr', 'lsetxattr',
+    'fsetxattr', 'removexattr', 'lremovexattr', 'fremovexattr', 'setxattrat', 'removexattrat', 'utime', 'utimes',
+    'futimesat', 'utimensat',
+    # Anonymous executables, SysV IPC and cross-process control.
+    'memfd_create', 'execveat', 'shmget', 'shmat', 'shmdt', 'shmctl', 'msgget', 'msgsnd', 'msgrcv', 'msgctl',
+    'semget', 'semop', 'semtimedop', 'semctl', 'process_madvise', 'pidfd_open', 'pidfd_getfd', 'pidfd_send_signal', 'kcmp',
 )
+# clone3 cannot be filtered by flag (its flags live in memory): ENOSYS makes glibc fall back to clone, where the
+# namespace flags are refused below.
+CLONE_NAMESPACE_FLAGS = (0x00020000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000)
 
 
 def _landlock(libc, job):
@@ -95,6 +107,7 @@ def _seccomp():
     lib.seccomp_init.restype = ctypes.c_void_p
     lib.seccomp_init.argtypes = [ctypes.c_uint32]
     lib.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint]
+    lib.seccomp_rule_add_array.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p]
     lib.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
     lib.seccomp_load.argtypes = [ctypes.c_void_p]
     lib.seccomp_release.argtypes = [ctypes.c_void_p]
@@ -102,14 +115,24 @@ def _seccomp():
     if not ctx:
         raise ValueError('seccomp unavailable')
     try:
-        denied = 0
-        for name in SECCOMP_DENY:
+        def resolve(name):
             nr = lib.seccomp_syscall_resolve_name(name.encode())
             if nr < 0:
-                continue  # not on this architecture
-            if lib.seccomp_rule_add(ctx, 0x00050000 | 1, nr, 0) != 0:  # SCMP_ACT_ERRNO(EPERM)
+                raise ValueError('seccomp syscall unknown')  # every listed call is mandatory: never silently skipped
+            return nr
+        denied = 0
+        for name in SECCOMP_DENY:
+            if lib.seccomp_rule_add(ctx, 0x00050000 | 1, resolve(name), 0) != 0:  # SCMP_ACT_ERRNO(EPERM)
                 raise ValueError('seccomp rule refused')
             denied += 1
+        if lib.seccomp_rule_add(ctx, 0x00050000 | 38, resolve('clone3'), 0) != 0:  # SCMP_ACT_ERRNO(ENOSYS)
+            raise ValueError('seccomp rule refused')
+        clone = resolve('clone')
+        for flag in CLONE_NAMESPACE_FLAGS:
+            # struct scmp_arg_cmp {unsigned arg; enum op; u64 datum_a; u64 datum_b}: (arg0 & flag) == flag
+            cmp = ctypes.create_string_buffer(struct.pack('<IIQQ', 0, 7, flag, flag), 24)  # SCMP_CMP_MASKED_EQ = 7
+            if lib.seccomp_rule_add_array(ctx, 0x00050000 | 1, clone, 1, cmp) != 0:
+                raise ValueError('seccomp rule refused')
         if lib.seccomp_load(ctx) != 0:
             raise ValueError('seccomp load refused')
     finally:
@@ -121,9 +144,11 @@ def harden(job='/job'):
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
         raise ValueError('no_new_privs refused')
+    if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE 0: no ptrace-mode access to the guest from its children
+        raise ValueError('dumpable refused')
     abi = _landlock(libc, job)
     denied = _seccomp()
-    return {'noNewPrivs': True, 'landlockAbi': abi, 'seccompDenied': denied}
+    return {'policy': HARDENING_POLICY, 'noNewPrivs': True, 'landlockAbi': abi, 'seccompDenied': denied}
 
 
 def page_ranges(pages, first=1, last=None):

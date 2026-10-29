@@ -156,4 +156,51 @@ print(json.dumps(results))"""
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(set(json.loads(out.stdout).values()), {'refused'}, out.stdout)
 
+    def test_council_gaps_are_closed(self):
+        probe = r"""
+import errno, subprocess
+results = {}
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+def errno_of(rc): return 'refused' if rc == -1 else 'allowed'
+results['clone3'] = 'refused' if libc.syscall(435, None, 0) == -1 and ctypes.get_errno() == errno.ENOSYS else 'allowed'
+results['clone_newuser'] = errno_of(libc.syscall(56, 0x10000000 | 17, 0, 0, 0, 0))
+results['chmod_outside'] = 'allowed'
+victim = os.path.join(outside, 'v')
+try:
+    os.chmod(victim, 0o777)
+except OSError:
+    results['chmod_outside'] = 'refused'
+results['memfd'] = errno_of(libc.syscall(319, b'x', 0))
+results['shmget'] = errno_of(libc.shmget(0, 4096, 0o1600))
+try:
+    open(f'/proc/{os.getppid()}/fd/2', 'w'); results['parent_fd'] = 'allowed'
+except OSError:
+    results['parent_fd'] = 'refused'
+results['child_runs'] = 'ok' if subprocess.run(['/usr/bin/true']).returncode == 0 else 'broken'
+print(json.dumps(results))"""
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as job, tempfile.TemporaryDirectory() as outside:
+            Path(outside, 'v').write_text('x')
+            code = (f"import importlib.util, json, os, ctypes\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"job, outside = {job!r}, {outside!r}\nreport = g.harden(job)\n{probe}")
+            out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        results = json.loads(out.stdout)
+        self.assertEqual(results.pop('child_runs'), 'ok')
+        self.assertEqual(set(results.values()), {'refused'}, results)
+
+    def test_unknown_syscall_name_refuses_instead_of_skipping(self):
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as job:
+            code = (f"import importlib.util\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"g.SECCOMP_DENY = g.SECCOMP_DENY + ('no_such_syscall_doppler',)\n"
+                    f"try:\n    g.harden({job!r}); print('applied')\nexcept ValueError as e:\n    print('refused', e)")
+            out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        self.assertTrue(out.stdout.startswith('refused'), out.stdout + out.stderr)
+
 if __name__ == "__main__": unittest.main()
