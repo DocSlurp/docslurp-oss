@@ -8,6 +8,7 @@ import { CHINA_PROVIDER_SLUGS, visionConfigSchema } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 import { alternateRouteBody } from "../tools/vision-stream.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 
@@ -96,8 +97,8 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("Together"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Fireworks", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
-    expect(bodies[0]!.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
-    expect(bodies[1]!.provider).toEqual({ order: ["fireworks", "parasail"], allow_fallbacks: false, ignore: ["Together"] });
+    expect(bodies[0]!.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[1]!.provider).toEqual({ order: ["fireworks", "parasail"], allow_fallbacks: false, ignore: ["Together"], max_price: visionMaxPrice(DEEPSEEK) });
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });
   });
 
@@ -106,7 +107,7 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("Relace"),
       sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]);
-    expect(bodies[1]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: ["Relace"] });
+    expect(bodies[1]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: ["Relace"], max_price: visionMaxPrice(MIMO) });
   });
 
   it("Luna goes to its preferred retry route over SSE", async () => {
@@ -114,7 +115,7 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("OpenAI"),
       sse([{ id: "g", model: LUNA, provider: "Amazon Bedrock", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]);
-    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false });
+    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
   });
 });
 
@@ -124,7 +125,7 @@ describe("org China-provider restriction", () => {
       filtered("Relace"),
       sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]));
-    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS] });
+    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(MIMO) });
     expect(bodies[1]!.provider.ignore).toEqual([...CHINA_PROVIDER_SLUGS, "Relace"]);
   });
 
@@ -132,7 +133,7 @@ describe("org China-provider restriction", () => {
     const { bodies } = await runWithProviderRateScope({ orgId: "org" }, () => run(MIMO, [
       sse([{ id: "g", model: MIMO, provider: "Relace", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]));
-    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
+    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, max_price: visionMaxPrice(MIMO) });
   });
 });
 

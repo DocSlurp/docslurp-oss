@@ -27,6 +27,12 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.25,
+        "completion": 1.5
+      }
     }
   },
   "google/gemini-3.1-flash-lite|layout": {
@@ -57,6 +63,12 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.25,
+        "completion": 1.5
+      }
     }
   },
   "nvidia/nemotron-3.5-super-vl|": {
@@ -90,6 +102,12 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.15,
+        "completion": 0.5
+      }
     }
   },
   "nvidia/nemotron-3.5-super-vl|layout": {
@@ -123,6 +141,12 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.15,
+        "completion": 0.5
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash|": {
@@ -156,6 +180,12 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.4,
+        "completion": 1.6
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash|layout": {
@@ -189,6 +219,12 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.4,
+        "completion": 1.6
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash-1017|": {
@@ -225,7 +261,11 @@
         "fireworks",
         "parasail"
       ],
-      "allow_fallbacks": false
+      "allow_fallbacks": false,
+      "max_price": {
+        "prompt": 0.3,
+        "completion": 1.2
+      }
     },
     "stream": true,
     "stream_options": {
@@ -266,7 +306,11 @@
         "fireworks",
         "parasail"
       ],
-      "allow_fallbacks": false
+      "allow_fallbacks": false,
+      "max_price": {
+        "prompt": 0.3,
+        "completion": 1.2
+      }
     },
     "stream": true,
     "stream_options": {
@@ -306,7 +350,11 @@
         "relace",
         "deepinfra"
       ],
-      "allow_fallbacks": true
+      "allow_fallbacks": true,
+      "max_price": {
+        "prompt": 0.14,
+        "completion": 0.28
+      }
     },
     "stream": true,
     "stream_options": {
@@ -346,7 +394,11 @@
         "relace",
         "deepinfra"
       ],
-      "allow_fallbacks": true
+      "allow_fallbacks": true,
+      "max_price": {
+        "prompt": 0.14,
+        "completion": 0.28
+      }
     },
     "stream": true,
     "stream_options": {

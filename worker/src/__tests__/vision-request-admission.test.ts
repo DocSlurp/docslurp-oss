@@ -206,6 +206,61 @@ describe("admission happens right before fetch, inside the limiter", () => {
     expect(backend.inspect("run-1", "org-1")).toEqual({ runAttempts: 0, runFailures: 0, orgAttempts: 0, orgSettledAttempts: 0 });
   });
 
+  it("an already aborted call with a free slot sends nothing, consumes nothing and takes no slot", async () => {
+    const limiter = new ProviderConcurrencyLimiter(() => 4);
+    const fetch = vi.fn(async () => plain());
+    const controller = new AbortController();
+    controller.abort(new Error("activity cancelled"));
+    const gate = gateOf();
+    const admit = vi.spyOn(gate, "admit");
+    await expect(fetchWithProviderRetry("https://openrouter.ai/api/v1/chat/completions", { method: "POST" }, {
+      provider: "openrouter", label: "vision request", fetchImpl: fetch, limiter, signal: controller.signal, gate,
+    })).rejects.toThrow(/activity cancelled/);
+    await gate.finish();
+    expect(admit).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(limiter.inFlight("openrouter")).toBe(0);
+    expect(backend.inspect("run-1", "org-1")).toEqual({ runAttempts: 0, runFailures: 0, orgAttempts: 0, orgSettledAttempts: 0 });
+    // The limiter alone refuses an aborted caller even with free slots.
+    await expect(limiter.run("openrouter", async () => "ran", controller.signal)).rejects.toThrow(/activity cancelled/);
+    expect(limiter.inFlight("openrouter")).toBe(0);
+  });
+
+  it("a call aborted while its admission is in the database is handed back unsent", async () => {
+    let admitted!: () => void;
+    const inDb = new Promise<void>((resolve) => { admitted = resolve; });
+    // The ledger's admission (a Postgres round trip) is still pending when the activity is cancelled.
+    const slow = new (class extends MemoryVisionAttemptBackend {
+      override async admit(...args: Parameters<MemoryVisionAttemptBackend["admit"]>) {
+        const admission = await super.admit(...args);
+        await inDb;
+        return admission;
+      }
+    })();
+    const slowGuard = new VisionRunGuard({ id: "run-1", orgId: "org-1" }, config, slow);
+    const gate = slowGuard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
+    const fetch = vi.fn(async () => plain());
+    const controller = new AbortController();
+    const pending = fetchWithProviderRetry("https://openrouter.ai/api/v1/chat/completions", { method: "POST" }, {
+      provider: "openrouter", label: "vision request", fetchImpl: fetch, limiter: new ProviderConcurrencyLimiter(() => 4), signal: controller.signal, gate,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort(new Error("activity cancelled"));
+    admitted();
+    await expect(pending).rejects.toThrow(/activity cancelled/);
+    await gate.finish();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(gate.requests).toBe(0);
+    expect(slow.inspect("run-1", "org-1")).toEqual({ runAttempts: 0, runFailures: 0, orgAttempts: 0, orgSettledAttempts: 0 });
+    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback] org=org-1 run=run-1 kind=cancelled"))).toBe(true);
+  });
+
+  it("logs each unbilled throttle hand-back with its org", async () => {
+    stubFetch([() => new Response("slow down", { status: 429 }), plain]);
+    await read();
+    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback] org=org-1 run=run-1 kind=throttle document=doc page=1"))).toBe(true);
+  });
+
   it("a fleet rate limiter refusal sends nothing and consumes nothing", async () => {
     const fetch = vi.fn(async () => plain());
     const refusing = {

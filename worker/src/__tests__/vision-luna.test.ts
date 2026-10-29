@@ -10,6 +10,7 @@ import { CommandRunner } from "../tools/runner.js";
 import { unwrapWholeMarkdownFence } from "../tools/vision-markdown-fence.js";
 import { postProcessVisionText, visionModelProfile, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 
 const LUNA = "openai/gpt-6-luna";
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
@@ -81,7 +82,9 @@ describe("GPT-6 Luna vision profile", () => {
     expect(body.messages[1].content[1].image_url.detail).toBe("high");
     expect(body.max_tokens).toBe(16384);
     expect(body.temperature).toBe(0);
-    expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "reasoning", "stream", "stream_options", "temperature"]);
+    expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "provider", "reasoning", "stream", "stream_options", "temperature"]);
+    // Only the price cap the guard weighed the request at.
+    expect(body.provider).toEqual({ max_price: visionMaxPrice(LUNA) });
   });
 
   it("matches the golden default-prompt request body", async () => {
@@ -113,8 +116,8 @@ describe("GPT-6 Luna vision profile", () => {
       { provider: "Amazon Bedrock", choices: [{ message: { content: "# Full page" }, finish_reason: "stop" }], usage: { prompt_tokens: 2000, completion_tokens: 600, cost: 0.00055 } },
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies[0]!.provider).toBeUndefined();
-    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false });
+    expect(bodies[0]!.provider).toEqual({ max_price: visionMaxPrice(LUNA) });
+    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
     expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600, attempts: 2 });
     expect(result.costCents).toBeCloseTo(0.059, 10);
   });
@@ -134,7 +137,7 @@ describe("GPT-6 Luna vision profile", () => {
       ok,
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies[1]!.provider).toEqual({ ignore: ["Google AI Studio"] });
+    expect(bodies[1]!.provider).toEqual({ ignore: ["Google AI Studio"], max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
     expect(result.finishReason).toBe("stop");
   });
 });

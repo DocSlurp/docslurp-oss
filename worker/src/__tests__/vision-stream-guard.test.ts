@@ -8,6 +8,7 @@ import { OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 import { detectDegeneration, VisionOutputRejectedError, withIgnoredProvider } from "../tools/vision-stream.js";
 
 afterEach(() => {
@@ -123,7 +124,7 @@ describe("guarded hosted vision request", () => {
     const { bodies } = stubFetch([loop, okStream("# Good")]);
     const result = await run();
     expect(cancelled).toBe(true);
-    expect(bodies[1]!.provider).toEqual({ ignore: ["ProvA"] });
+    expect(bodies[1]!.provider).toEqual({ ignore: ["ProvA"], max_price: visionMaxPrice(bodies[0]!.model) });
     expect(result.text).toBe("# Good");
     expect(result.attempts).toBe(2);
     expect(result.degenerate).toMatchObject({ reason: "repeated-pattern" });
@@ -146,7 +147,7 @@ describe("guarded hosted vision request", () => {
     const result = await run();
     expect(result).toMatchObject({ text: "# Contents", attempts: 2 });
     expect(result.degenerate?.reason).toBe("leader-run");
-    expect(bodies[1]!.provider).toEqual({ ignore: ["ProvA"] });
+    expect(bodies[1]!.provider).toEqual({ ignore: ["ProvA"], max_price: visionMaxPrice(bodies[0]!.model) });
   });
 
   it("uses the last streamed usage when the stream aborts after a usage chunk", async () => {
@@ -175,7 +176,7 @@ describe("guarded hosted vision request", () => {
     const refusal = sse([delta("partial text"), finish("error", { prompt_tokens: 1500, completion_tokens: 600, cost: 0.0008 }, { error: { code: 403, message: "Output blocked by content filtering policy", metadata: { error_type: "refusal" } } })]);
     const { bodies } = stubFetch([refusal, okStream("# Ok", "ProvB")]);
     const result = await run();
-    expect(bodies[1]!.provider).toEqual({ ignore: ["ProvA"] });
+    expect(bodies[1]!.provider).toEqual({ ignore: ["ProvA"], max_price: visionMaxPrice(bodies[0]!.model) });
     expect(result).toMatchObject({ text: "# Ok", attempts: 2, finishReason: "stop", inputTokens: 2500, outputTokens: 650 });
     expect(result.costCents).toBeCloseTo(0.18, 10);
   });
@@ -188,8 +189,8 @@ describe("guarded hosted vision request", () => {
     }), { headers: { "content-type": "application/json" } });
     const { bodies } = stubFetch([filtered, okStream("# Ok", "Bedrock")]);
     const result = await run();
-    expect(bodies[0]!.provider).toBeUndefined();
-    expect(bodies[1]!.provider).toEqual({ ignore: ["Azure"] });
+    expect(bodies[0]!.provider).toEqual({ max_price: visionMaxPrice(bodies[0]!.model) });
+    expect(bodies[1]!.provider).toEqual({ ignore: ["Azure"], max_price: visionMaxPrice(bodies[0]!.model) });
     expect(result.text).toBe("# Ok");
     expect(result.attempts).toBe(2);
   });

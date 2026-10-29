@@ -8,6 +8,7 @@ import { visionConfigSchema, visionModelCatalog } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { MARKDOWN_LATEX_VISION_PROMPT, VISION_MODEL_PROFILES, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
 const SNAPSHOT = "deepseek/deepseek-v4.1-flash-1017";
@@ -48,12 +49,12 @@ describe("per-model vision profiles", () => {
     expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
+    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(SNAPSHOT) });
   });
 
   it("routes every organization to the same US-hosted providers", async () => {
     const { body } = await send(SNAPSHOT);
-    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
+    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(SNAPSHOT) });
     expect(body.provider.order).not.toContain("deepseek");
   });
 
@@ -66,7 +67,8 @@ describe("per-model vision profiles", () => {
     const { body, userText } = await send("deepseek/deepseek-v4.1-flash");
     expect(userText).toBe(visionPromptTemplates["<OCR>"]);
     expect(body.max_tokens).toBe(16_384);
-    expect(body.provider).toBeUndefined();
+    // Uncataloged: capped at prices above every catalog model, as its guard weight assumes.
+    expect(body.provider).toEqual({ max_price: visionMaxPrice("deepseek/deepseek-v4.1-flash") });
     expect(body.reasoning).toEqual({ effort: "none" });
   });
 

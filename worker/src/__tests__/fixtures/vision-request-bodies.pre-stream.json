@@ -23,7 +23,13 @@
       }
     ],
     "temperature": 0,
-    "max_tokens": 16384
+    "max_tokens": 16384,
+    "provider": {
+      "max_price": {
+        "prompt": 0.25,
+        "completion": 1.5
+      }
+    }
   },
   "google/gemini-3.1-flash-lite|layout": {
     "model": "google/gemini-3.1-flash-lite",
@@ -49,7 +55,13 @@
       }
     ],
     "temperature": 0,
-    "max_tokens": 16384
+    "max_tokens": 16384,
+    "provider": {
+      "max_price": {
+        "prompt": 0.25,
+        "completion": 1.5
+      }
+    }
   },
   "nvidia/nemotron-3.5-super-vl|": {
     "model": "nvidia/nemotron-3.5-super-vl",
@@ -78,6 +90,12 @@
     "max_tokens": 16384,
     "reasoning": {
       "enabled": false
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.15,
+        "completion": 0.5
+      }
     }
   },
   "nvidia/nemotron-3.5-super-vl|layout": {
@@ -107,6 +125,12 @@
     "max_tokens": 16384,
     "reasoning": {
       "enabled": false
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.15,
+        "completion": 0.5
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash|": {
@@ -136,6 +160,12 @@
     "max_tokens": 16384,
     "reasoning": {
       "effort": "none"
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.4,
+        "completion": 1.6
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash|layout": {
@@ -165,6 +195,12 @@
     "max_tokens": 16384,
     "reasoning": {
       "effort": "none"
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.4,
+        "completion": 1.6
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash-1017|": {
@@ -201,7 +237,11 @@
         "fireworks",
         "parasail"
       ],
-      "allow_fallbacks": false
+      "allow_fallbacks": false,
+      "max_price": {
+        "prompt": 0.3,
+        "completion": 1.2
+      }
     }
   },
   "deepseek/deepseek-v4.1-flash-1017|layout": {
@@ -238,7 +278,11 @@
         "fireworks",
         "parasail"
       ],
-      "allow_fallbacks": false
+      "allow_fallbacks": false,
+      "max_price": {
+        "prompt": 0.3,
+        "completion": 1.2
+      }
     }
   },
   "xiaomi/mimo-v2.6-flash|": {
@@ -274,7 +318,11 @@
         "relace",
         "deepinfra"
       ],
-      "allow_fallbacks": true
+      "allow_fallbacks": true,
+      "max_price": {
+        "prompt": 0.14,
+        "completion": 0.28
+      }
     }
   },
   "xiaomi/mimo-v2.6-flash|layout": {
@@ -310,7 +358,11 @@
         "relace",
         "deepinfra"
       ],
-      "allow_fallbacks": true
+      "allow_fallbacks": true,
+      "max_price": {
+        "prompt": 0.14,
+        "completion": 0.28
+      }
     }
   }
 }

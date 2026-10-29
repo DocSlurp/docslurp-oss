@@ -136,6 +136,9 @@ export interface VisionAttemptBackend {
   settle(request: VisionSettleRequest): Promise<void>;
 }
 
+/** Why a request leaves the counts: refused before acceptance, or cancelled before it was sent. */
+export type VisionUnbilledKind = "throttle" | "unsupported" | "cancelled";
+
 /** One request admission per HTTP request a vision call sends (`executeVisionRuntime` requires one). */
 export interface VisionRequestGate {
   /**
@@ -148,9 +151,11 @@ export interface VisionRequestGate {
   /**
    * The provider refused the latest admitted request before accepting it: a throttle (429, 503/529)
    * or, on a streaming request, a capability error. It leaves the page bound, breaker and org count.
-   * Returns false once the call's throttle allowance is spent (`unsupported` is not limited).
+   * `cancelled` hands back a request the caller aborted after admission and before sending it.
+   * Returns false once the call's throttle allowance is spent (`unsupported` and `cancelled` are not
+   * limited).
    */
-  unbilled(kind: "throttle" | "unsupported"): Promise<boolean>;
+  unbilled(kind: VisionUnbilledKind): Promise<boolean>;
 }
 
 export const DEFAULT_VISION_PAGE_ATTEMPTS = 2;
@@ -426,7 +431,13 @@ export class VisionRunGuard {
   }
 
   /** @internal Hand back a request refused before acceptance; a failure leaves it counted (stricter). */
-  async releaseRequest(target: VisionAttemptTarget, ticketId: string): Promise<void> {
+  async releaseRequest(target: VisionAttemptTarget, ticketId: string, kind: VisionUnbilledKind): Promise<void> {
+    // Hand-backs rest on "the provider did not bill this" (provider-retry.ts isUnbilledThrottleStatus):
+    // logged per org so provider spend without matching counted requests can be traced.
+    console.warn(
+      `[vision-throttle-handback] org=${this.run.orgId ?? "none"} run=${this.run.id} kind=${kind} ` +
+        `document=${target.documentId} page=${target.pageNumber} purpose=${target.purpose}`,
+    );
     try {
       await this.backend.release({ runId: this.run.id, target, ticketId });
     } catch (error) {
@@ -469,14 +480,14 @@ export class VisionCallGate implements VisionRequestGate {
     if (last && !last.released) last.failed = true;
   }
 
-  async unbilled(kind: "throttle" | "unsupported"): Promise<boolean> {
+  async unbilled(kind: VisionUnbilledKind): Promise<boolean> {
     const last = this.tickets.at(-1);
     if (kind === "throttle") this.throttles += 1;
     if (last && !last.released && !last.failed) {
       last.released = true;
-      await this.guard.releaseRequest(this.target, last.id);
+      await this.guard.releaseRequest(this.target, last.id, kind);
     }
-    return kind === "unsupported" || this.throttles <= this.guard.throttleAllowance;
+    return kind !== "throttle" || this.throttles <= this.guard.throttleAllowance;
   }
 
   /** Requests admitted so far and not handed back. */

@@ -134,6 +134,8 @@ export class ProviderConcurrencyLimiter {
   }
 
   private async acquire(provider: string, signal?: AbortSignal): Promise<void> {
+    // An aborted caller never takes a slot, free or not.
+    if (signal?.aborted) throw abortReason(signal);
     const limit = Math.max(1, this.limitFor(provider));
     if ((this.active.get(provider) ?? 0) < limit) {
       this.active.set(provider, (this.active.get(provider) ?? 0) + 1);
@@ -144,7 +146,7 @@ export class ProviderConcurrencyLimiter {
       const onAbort = () => {
         const index = queue.indexOf(grant);
         if (index >= 0) queue.splice(index, 1);
-        reject(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+        reject(abortReason(signal));
       };
       const grant = () => {
         signal?.removeEventListener("abort", onAbort);
@@ -168,6 +170,10 @@ export class ProviderConcurrencyLimiter {
   }
 }
 
+function abortReason(signal: AbortSignal | undefined): Error {
+  return signal?.reason instanceof Error ? signal.reason : new Error("aborted");
+}
+
 export const providerLimiter = new ProviderConcurrencyLimiter((provider) =>
   readIntEnv(`AI_PROVIDER_MAX_CONCURRENCY_${providerKey(provider)}`, readIntEnv("AI_PROVIDER_MAX_CONCURRENCY", 16)) || 16,
 );
@@ -175,7 +181,7 @@ export const providerLimiter = new ProviderConcurrencyLimiter((provider) =>
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+      reject(abortReason(signal));
       return;
     }
     const timer = setTimeout(() => {
@@ -184,7 +190,7 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+      reject(abortReason(signal));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
@@ -212,7 +218,8 @@ export interface ProviderRetryOptions {
    * refusal) is admitted or counted. `failed` marks a sent request that may have been accepted and
    * billed (5xx other than overload, a network error or timeout after sending). `unbilled` hands back a
    * request the provider refused before accepting it (429, 503/529 overload): it returns false once the
-   * call's throttle allowance is spent, and the wait then goes to Temporal.
+   * call's throttle allowance is spent, and the wait then goes to Temporal. A request cancelled after
+   * admission but before `fetch` is handed back with `unbilled("cancelled")`.
    */
   gate?: ProviderRequestGate;
 }
@@ -221,10 +228,19 @@ export interface ProviderRetryOptions {
 export interface ProviderRequestGate {
   admit(): Promise<void>;
   failed(): void;
-  unbilled(kind: "throttle"): Promise<boolean>;
+  unbilled(kind: "throttle" | "cancelled"): Promise<boolean>;
 }
 
-/** Statuses a provider returns before accepting a request (nothing billed): rate limits and overload. */
+/**
+ * Statuses a provider returns before accepting a request: rate limits and overload.
+ *
+ * Assumption (not contractual): OpenAI, Anthropic and OpenRouter document 429 as rejected before any
+ * inference and do not bill it; 503 and 529 are their overload answers, also returned before a model
+ * runs. No provider we use documents billing either. The vision guard hands these back (they leave
+ * its counts), bounded by `VISION_THROTTLE_ALLOWANCE` per call, and each hand-back logs
+ * `[vision-throttle-handback]` with the org, so a provider that starts billing them shows up as
+ * provider spend with no matching admitted requests.
+ */
 export function isUnbilledThrottleStatus(status: number): boolean {
   return status === 429 || status === 503 || status === 529;
 }
@@ -258,7 +274,13 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       // Each attempt is bounded (WORKER_AI_REQUEST_TIMEOUT_MS); a timeout is a network error and retries here.
       const response = await limiter.run(options.provider, async () => {
         // Admitted inside the limiter's task, right before sending: queue waits never consume admissions.
+        if (options.signal?.aborted) throw abortReason(options.signal);
         await options.gate?.admit();
+        // Cancelled while the admission was pending (a database round trip): hand it back unsent.
+        if (options.signal?.aborted) {
+          await options.gate?.unbilled("cancelled");
+          throw abortReason(options.signal);
+        }
         sent = true;
         return await doFetch(url, { ...init, signal: withRequestTimeout(options.signal) });
       }, options.signal);

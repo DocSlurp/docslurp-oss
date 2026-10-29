@@ -15,7 +15,8 @@ import {
 } from "./vision-model-profiles.js";
 import { attachVisionBilledUsage, estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
-import { visionRequestWeightCents } from "../lib/vision-pricing.js";
+import { isBillableVisionRuntime, VISION_MAX_PROMPT_BYTES, visionInputTokenBound, visionRequestPricing, type VisionTokenPrice } from "../lib/vision-pricing.js";
+import { imageDimensions } from "../native-pdf/render.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -37,7 +38,7 @@ const VISION_MAX_OUTPUT_TOKENS_CONFIGURED = (() => {
 export function visionMaxOutputTokens(model: string | undefined): number {
   return visionOutputCapForModel(model, { value: VISION_MAX_OUTPUT_TOKENS, configured: VISION_MAX_OUTPUT_TOKENS_CONFIGURED });
 }
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 
 import {
   assertProviderAllowed,
@@ -223,19 +224,33 @@ async function runRouteVisionRequest(
   prompt: string,
   args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null },
 ): Promise<VisionExecutionResult> {
+  // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
+  const promptBytes = Buffer.byteLength(prompt, "utf8");
+  if (promptBytes > VISION_MAX_PROMPT_BYTES) {
+    throw new Error(`vision prompt is ${promptBytes} bytes, over the ${VISION_MAX_PROMPT_BYTES}-byte limit; refusing to send`);
+  }
+  const isPrivate = route.provider === PRIVATE_MODEL_PROVIDER;
+  // Each request weighs what it can cost at most against the org bound: this prompt, this image's size,
+  // the route's enforced output cap and its model's price (fails closed for an unpriced billed route).
+  const pricing = visionRequestPricing({
+    model: isPrivate ? route.modelUri : route.model,
+    runtime: route.runtime,
+    billable: !isPrivate && isBillableVisionRuntime(route, args.cfg),
+    openRouter: !isPrivate && Boolean(route.baseUrl?.includes("openrouter.ai")),
+    inputTokens: visionInputTokenBound(route.runtime === "local-cli" ? null : await readImageSize(args.imagePath), prompt),
+  });
   const base = {
     imagePath: args.imagePath,
     mimeType: args.mimeType ?? "image/png",
     outputPath: args.outputPath,
     runner: args.runner,
     signal: args.signal,
-    // Each request weighs its route's worst case against the org bound (a private route has no list price).
-    gate: args.gate ? weightedGate(args.gate, visionRequestWeightCents(route.provider === PRIVATE_MODEL_PROVIDER ? route.modelUri : route.model, route.runtime)) : null,
+    gate: args.gate ? weightedGate(args.gate, pricing.weightCents) : null,
     runtime: route.runtime,
     prompt,
   };
-  if (route.provider !== PRIVATE_MODEL_PROVIDER) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, ...streamGuard(args.cfg) });
+  if (!isPrivate) {
+    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, ...streamGuard(args.cfg) });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, ...streamGuard(args.cfg) });
@@ -247,6 +262,19 @@ async function runRouteVisionRequest(
     costCents: cost.costCents,
     costMetadata: { ...cost.metadata, servedModel: call.model },
   };
+}
+
+/** Pixel size from the image header (PNG IHDR, JPEG SOF); unknown sizes are priced at the largest raster. */
+async function readImageSize(imagePath: string): Promise<{ widthPx: number | null; heightPx: number | null } | null> {
+  const file = await open(imagePath, "r").catch(() => null);
+  if (!file) return null;
+  try {
+    const header = Buffer.alloc(65_536);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    return imageDimensions(header.subarray(0, bytesRead));
+  } finally {
+    await file.close().catch(() => undefined);
+  }
 }
 
 /** Privacy descriptor for a resolved vision route; remote-openai and OpenRouter are hosted. */
@@ -323,9 +351,30 @@ export function buildSchemaAwareVisionPrompt(
   if (prompt?.trim() !== "schema-form-fields" || !outputSchema) return base;
   const properties = outputSchema.properties;
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return base;
-  const labels = Object.keys(properties).slice(0, 100);
+  const labels = schemaPromptLabels(Object.keys(properties));
   if (labels.length === 0) return base;
   return `${base}\n\nWorkspace-requested labels: ${JSON.stringify(labels)}. Return one clearly labelled value for every requested label.`;
+}
+
+/** Schema labels sent in a vision prompt: at most 100, each cut to 80 characters, 4 KB in total. */
+export const SCHEMA_LABEL_LIMIT = 100;
+export const SCHEMA_LABEL_MAX_CHARS = 80;
+export const SCHEMA_LABEL_TOTAL_BYTES = 4_096;
+
+/** Tenant-supplied label names, bounded so the prompt (and the request's price) stays bounded. */
+function schemaPromptLabels(keys: string[]): string[] {
+  const labels: string[] = [];
+  let bytes = 0;
+  for (const key of keys.slice(0, SCHEMA_LABEL_LIMIT)) {
+    const label = Array.from(key.trim()).slice(0, SCHEMA_LABEL_MAX_CHARS).join("");
+    if (!label) continue;
+    // JSON-quoted with its separator, as it appears in the prompt.
+    const size = Buffer.byteLength(JSON.stringify(label), "utf8") + 1;
+    if (bytes + size > SCHEMA_LABEL_TOTAL_BYTES) break;
+    bytes += size;
+    labels.push(label);
+  }
+  return labels;
 }
 
 export function resolveVisionPromptTemplate(
@@ -353,6 +402,8 @@ export async function runVisionRequest(args: {
   estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
   /** Admission for every request (see `executeVisionRuntime`). */
   gate: VisionRequestGate | null;
+  /** Prices the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
+  maxPrice?: VisionTokenPrice | null;
 }): Promise<VisionExecutionResult> {
   args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -393,8 +444,14 @@ export async function runVisionRequest(args: {
           throw new Error(`local vision model unavailable: ${args.model}`);
         }
 
-        // The local runtime is one request too: admitted like a hosted one.
+        // The local runtime is one request too: admitted like a hosted one, and handed back when
+        // cancelled before it runs.
+        args.signal?.throwIfAborted();
         await args.gate?.admit();
+        if (args.signal?.aborted) {
+          await args.gate?.unbilled("cancelled");
+          args.signal.throwIfAborted();
+        }
         try {
           await args.runner.run(plan, args.signal);
         } catch (error) {
@@ -471,6 +528,12 @@ export async function runVisionRequest(args: {
         const own = (body as { provider?: Record<string, unknown> }).provider ?? {};
         const ignore = [...new Set([...(Array.isArray(own.ignore) ? own.ignore as string[] : []), ...CHINA_PROVIDER_SLUGS])];
         Object.assign(body, { provider: { ...own, ignore } });
+      }
+      // No upstream provider (or OpenRouter fallback) may bill above the price the guard weighed this
+      // request at; OpenRouter refuses the request when none qualifies. Kept on the alternate-route retry.
+      if (isOpenRouter && args.maxPrice) {
+        const own = (body as { provider?: Record<string, unknown> }).provider ?? {};
+        Object.assign(body, { provider: { ...own, max_price: openRouterMaxPrice(args.maxPrice) } });
       }
       const result = await runGuardedChatCompletion({
         url: resolveChatCompletionsUrl(args.baseUrl),
@@ -579,6 +642,11 @@ export function rejectedVisionUsageInput(error: VisionOutputRejectedError, costC
       ...(error.degenerate ? { degenerate: { ...error.degenerate } } : {}),
     },
   };
+}
+
+/** OpenRouter `provider.max_price`: USD per million prompt and completion tokens. */
+export function openRouterMaxPrice(price: VisionTokenPrice): { prompt: number; completion: number } {
+  return { prompt: price.inputUsdPerMillion, completion: price.outputUsdPerMillion };
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {

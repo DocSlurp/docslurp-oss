@@ -27,6 +27,12 @@
     "max_tokens": 16384,
     "reasoning": {
       "effort": "none"
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.1,
+        "completion": 0.5
+      }
     }
   }
 }
