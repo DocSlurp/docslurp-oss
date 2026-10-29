@@ -68,6 +68,54 @@ async function collect(binding: ProbeBinding, opts: Partial<Parameters<typeof pr
 afterEach(() => setProbeBindingForTesting(null));
 
 describe("native page probe", () => {
+  it("renders on a second handle while reading features, with the same rows as one handle", async () => {
+    const pages: FakePage[] = [
+      { spans: [{ text: PROSE.repeat(4), bbox: [50, 50, 550, 700] }] },
+      { images: [{ bbox: [0, 0, 612, 792] }] },
+    ];
+    const base = fakeBinding(pages);
+    const opened: Array<{ renders: number; closed: boolean }> = [];
+    const binding: ProbeBinding = {
+      ...base,
+      openPath: (file, options) => {
+        const doc = base.openPath(file, options);
+        const handle = { renders: 0, closed: false };
+        opened.push(handle);
+        return {
+          ...doc,
+          close: () => { handle.closed = true; },
+          page: (i: number) => {
+            const page = doc.page(i);
+            return { ...page, renderAsync: async (o) => { handle.renders += 1; return await page.renderAsync(o); } };
+          },
+        };
+      },
+    };
+    const strip = (rows: NativeProbeRow[]) => rows.map(({ probeMs: _probeMs, ...row }) => row);
+    const overlapped = await collect(binding);
+    expect(opened.map((h) => h.renders)).toEqual([0, 2]);
+    expect(opened.every((h) => h.closed)).toBe(true);
+    opened.length = 0;
+    const sequential = await collect(binding, { overlapRender: false });
+    expect(opened.map((h) => h.renders)).toEqual([2]);
+    expect(strip(overlapped)).toEqual(strip(sequential));
+  });
+
+  it("keeps a page whose early render fails as a failed row, like the sequential probe", async () => {
+    const base = fakeBinding([{ spans: [{ text: PROSE, bbox: [50, 50, 550, 700] }] }]);
+    let opens = 0;
+    const binding: ProbeBinding = {
+      ...base,
+      openPath: (file, options) => {
+        const doc = base.openPath(file, options);
+        const second = ++opens === 2;
+        return { ...doc, page: (i: number) => ({ ...doc.page(i), renderAsync: async () => { if (second) throw new Error("render boom"); return png; } }) };
+      },
+    };
+    const [row] = await collect(binding);
+    expect(row!.unusualFeatures).toContain("probe-error");
+  });
+
   it("classifies text, blank and raster pages like the Python probe", async () => {
     const rows = await collect(fakeBinding([
       { spans: [{ text: PROSE.repeat(4), bbox: [50, 50, 550, 700] }] },
