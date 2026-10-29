@@ -56,6 +56,8 @@ export interface CheckpointStore {
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.
    */
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
+  /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
+  loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }
 
 export interface Stage {
