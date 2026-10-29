@@ -5,6 +5,7 @@ import {
   adaptiveRoutingDecisionSurfaceSchema,
   defaultPageRouterConfig,
   pageRouterDecisionModels,
+  qualityAllowsPageReading,
   routePlanSchema,
   type AdaptiveRoutingArtifact,
   type BBox,
@@ -157,6 +158,12 @@ export class RoutePagesStage implements Stage {
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const mode = effectivePageRouterMode(state, this.cfg);
     if (mode === "off") return;
+    // Fast reads no page: routing would re-OCR probe pages and send thumbnails to decision models, and Fast's
+    // render-images and vision stages never execute a plan anyway.
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
+      console.log(`[route-pages] skipped run=${state.run.id} reason=quality-fast mode=${mode}`);
+      return;
+    }
     if (mode === "active") assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
