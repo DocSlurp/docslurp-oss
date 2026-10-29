@@ -22,8 +22,10 @@ import type { Pool } from "pg";
  * Auth reads it; the session carries it, and the MFA gate drops any session
  * whose fingerprint no longer matches the account's password on its next use
  * (auth-mfa.ts). A sign-in still in flight when a reset commits therefore
- * yields a dead session. `/change-password` carries the sessions it keeps over
- * to the new password.
+ * yields a dead session. A second-factor challenge started by a password
+ * sign-in keeps that fingerprint, and the session its completion creates
+ * inherits it. `/change-password` carries the sessions it keeps over to the
+ * new password.
  */
 
 export const VERIFY_WITH_PASSWORD_CODE = "VERIFY_WITH_PASSWORD";
@@ -38,9 +40,36 @@ export function credentialFingerprint(storedHash: string): string {
 const passwordSignIn = defineRequestState<{ fingerprint: string | null }>(() => ({ fingerprint: null }));
 const passwordChange = defineRequestState<{ userId: string | null; fingerprint: string | null }>(() => ({ userId: null, fingerprint: null }));
 
-/** For `session.create.before`: the password this request's sign-in proved, if any. */
+/** The password this request's sign-in proved, if any. */
 export async function newSessionCredentialFingerprint(): Promise<string | null> {
   return await hasRequestState() ? (await passwordSignIn.get()).fingerprint : null;
+}
+
+/** Where a pending second-factor challenge keeps the fingerprint of the password that started it. */
+export function challengeCredentialIdentifier(challenge: string): string {
+  return `2fa-credential-${challenge}`;
+}
+
+const SECOND_FACTOR_PATHS = new Set(["/two-factor/verify-totp", "/two-factor/verify-backup-code"]);
+
+type FingerprintContext = {
+  path?: string;
+  getSignedCookie?: (name: string, secret: string) => Promise<string | null | false>;
+  context?: { secret: string; createAuthCookie: (name: string) => { name: string } };
+} | null | undefined;
+
+/**
+ * For `session.create.before`: the password a new session rests on. A password
+ * sign-in's own; or, for a second factor completing a challenge, the one that
+ * started the challenge.
+ */
+export async function sessionCredentialFingerprint(pool: Pick<Pool, "query">, ctx: FingerprintContext): Promise<string | null> {
+  const own = await newSessionCredentialFingerprint();
+  if (own || !ctx?.path || !SECOND_FACTOR_PATHS.has(ctx.path) || !ctx.getSignedCookie || !ctx.context) return own;
+  const challenge = await ctx.getSignedCookie(ctx.context.createAuthCookie("two_factor").name, ctx.context.secret);
+  if (!challenge) return null;
+  const { rows } = await pool.query<{ value: string }>(`select value from verification where identifier = $1`, [challengeCredentialIdentifier(challenge)]);
+  return rows[0]?.value ?? null;
 }
 
 const normalizeEmail = (value: unknown) => typeof value === "string" ? value.trim().toLowerCase() : "";

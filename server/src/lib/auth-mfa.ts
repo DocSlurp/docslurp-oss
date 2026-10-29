@@ -11,6 +11,7 @@ import { serialize, type CookieOptions } from "hono/utils/cookie";
 import type { Pool } from "pg";
 
 import { assertReviewedBetterAuth } from "./auth-compat.js";
+import { challengeCredentialIdentifier, newSessionCredentialFingerprint } from "./auth-credential-binding.js";
 import { hasSensitiveAccess } from "./auth-sensitive-access.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
@@ -363,6 +364,9 @@ async function beginChallenge(ctx: HookContext, userId: string, maxAge: number):
   const expiresAt = new Date(Date.now() + maxAge * 1000);
   await ctx.context.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
   await ctx.context.internalAdapter.createVerificationValue({ value: "0", identifier: `2fa-attempts-${identifier}`, expiresAt });
+  // A challenge started by a password keeps that password's fingerprint for the session it ends in.
+  const fingerprint = await newSessionCredentialFingerprint();
+  if (fingerprint) await ctx.context.internalAdapter.createVerificationValue({ value: fingerprint, identifier: challengeCredentialIdentifier(identifier), expiresAt });
   await ctx.setSignedCookie(cookie.name, identifier, ctx.context.secret, cookie.attributes);
 }
 
@@ -600,6 +604,8 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
       : ctx.context.session?.user?.id ?? null;
     if (!userId || isAPIError(ctx.context.returned)) return;
     await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [userId]);
+    // Pending second-factor challenges too (their sessions are also bound to the old password).
+    await pool.query(`delete from verification where identifier like '2fa-%' and value = $1`, [userId]);
   });
 
   /**

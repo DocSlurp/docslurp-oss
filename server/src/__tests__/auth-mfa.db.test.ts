@@ -237,6 +237,35 @@ describe("TOTP enrolment", () => {
 });
 
 describe("sign-in challenge", () => {
+  it("binds the session a challenge ends in to the password that started it", async () => {
+    const { user, secret } = await enrolledUser();
+    const browser = new Browser();
+    expect((await signInPassword(browser, user.email)).body.twoFactorRedirect).toBe(true);
+    expect((await browser.json("/two-factor/verify-totp", { code: totp(secret) })).status).toBe(200);
+    const hash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    const { credentialFingerprint } = await import("../lib/auth-credential-binding.js");
+    const session = await browser.session();
+    expect((await pool.query<{ fingerprint: string }>(`select "credentialFingerprint" as fingerprint from session where id = $1`, [session!.session.id])).rows[0]!.fingerprint)
+      .toBe(credentialFingerprint(hash));
+    // The password changes (by any path): the session the challenge produced ends at its next use.
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    expect(await browser.session()).toBeNull();
+  });
+
+  it("cancels a pending challenge when the password is reset", async () => {
+    const { user, secret } = await enrolledUser();
+    const attacker = new Browser();
+    expect((await signInPassword(attacker, user.email)).body.twoFactorRedirect).toBe(true);
+    const owner = new Browser();
+    expect((await owner.json("/email-otp/request-password-reset", { email: user.email })).status).toBe(200);
+    const code = sentEmails.filter((sent) => sent.to === user.email).at(-1)!.code;
+    expect((await owner.json("/email-otp/reset-password", { email: user.email, otp: code, password: "a brand new password" })).status).toBe(200);
+    expect((await attacker.json("/two-factor/verify-totp", { code: totp(secret) })).status).not.toBe(200);
+    expect(await attacker.session()).toBeNull();
+    expect((await pool.query(`select 1 from session where "userId" = $1`, [user.id])).rowCount).toBe(0);
+  });
+
   it("issues no session after the password; the second factor issues an MFA-verified one", async () => {
     const { user, secret } = await enrolledUser();
     const before = await sessionsFor(user.id);

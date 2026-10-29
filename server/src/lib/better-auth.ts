@@ -13,7 +13,7 @@ import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
 import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
 import { uniformCodeRefusal } from "./auth-recovery.js";
-import { credentialBindingPlugin, newSessionCredentialFingerprint } from "./auth-credential-binding.js";
+import { credentialBindingPlugin, sessionCredentialFingerprint } from "./auth-credential-binding.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
@@ -224,7 +224,7 @@ export const auth = betterAuth({
             .catch(error => console.warn("[account-kind] not applied", error instanceof Error ? error.message : error));
           // Whether this session passed a second factor, decided by the endpoint
           // that created it (see sessionAssuranceFor), never by request input.
-          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId), credentialFingerprint: await newSessionCredentialFingerprint() } };
+          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId), credentialFingerprint: await sessionCredentialFingerprint(pool, ctx as Parameters<typeof sessionCredentialFingerprint>[1]) } };
         }
       }
     },
