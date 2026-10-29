@@ -62,6 +62,26 @@ SECCOMP_DENY = (
 )
 # clone3 cannot be filtered by flag (its flags live in memory): ENOSYS makes glibc fall back to clone, where the
 # namespace flags are refused below.
+# x86-64 numbers (Linux uapi asm/unistd_64.h) for every filtered call: an older libseccomp that does not know a
+# newer name still gets the rule by number, and a known name must agree with this table.
+X86_64_SYSCALLS = {
+    'shmget': 29, 'shmat': 30, 'shmctl': 31, 'socket': 41, 'socketpair': 53, 'clone': 56, 'semget': 64,
+    'semop': 65, 'semctl': 66, 'shmdt': 67, 'msgget': 68, 'msgsnd': 69, 'msgrcv': 70, 'msgctl': 71, 'chmod': 90,
+    'fchmod': 91, 'chown': 92, 'fchown': 93, 'lchown': 94, 'ptrace': 101, 'syslog': 103, 'utime': 132,
+    'vhangup': 153, 'pivot_root': 155, 'adjtimex': 159, 'chroot': 161, 'acct': 163, 'settimeofday': 164,
+    'mount': 165, 'umount2': 166, 'swapon': 167, 'swapoff': 168, 'reboot': 169, 'init_module': 175,
+    'delete_module': 176, 'quotactl': 179, 'setxattr': 188, 'lsetxattr': 189, 'fsetxattr': 190, 'removexattr': 197,
+    'lremovexattr': 198, 'fremovexattr': 199, 'lookup_dcookie': 212, 'semtimedop': 220, 'clock_settime': 227,
+    'utimes': 235, 'kexec_load': 246, 'add_key': 248, 'request_key': 249, 'keyctl': 250, 'fchownat': 260,
+    'futimesat': 261, 'fchmodat': 268, 'unshare': 272, 'utimensat': 280, 'perf_event_open': 298,
+    'fanotify_init': 300, 'name_to_handle_at': 303, 'open_by_handle_at': 304, 'setns': 308,
+    'process_vm_readv': 310, 'process_vm_writev': 311, 'kcmp': 312, 'finit_module': 313, 'memfd_create': 319,
+    'kexec_file_load': 320, 'bpf': 321, 'execveat': 322, 'userfaultfd': 323, 'pidfd_send_signal': 424,
+    'io_uring_setup': 425, 'io_uring_enter': 426, 'io_uring_register': 427, 'open_tree': 428, 'move_mount': 429,
+    'fsopen': 430, 'fsconfig': 431, 'fsmount': 432, 'fspick': 433, 'pidfd_open': 434, 'clone3': 435,
+    'pidfd_getfd': 438, 'process_madvise': 440, 'mount_setattr': 442, 'fchmodat2': 452, 'setxattrat': 463,
+    'removexattrat': 466,
+}
 CLONE_NAMESPACE_FLAGS = (0x00020000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000)
 
 
@@ -115,10 +135,16 @@ def _seccomp():
     if not ctx:
         raise ValueError('seccomp unavailable')
     try:
+        x86_64 = os.uname().machine == 'x86_64'
         def resolve(name):
             nr = lib.seccomp_syscall_resolve_name(name.encode())
+            pinned = X86_64_SYSCALLS.get(name) if x86_64 else None
             if nr < 0:
-                raise ValueError('seccomp syscall unknown')  # every listed call is mandatory: never silently skipped
+                nr = pinned if pinned is not None else -1
+            elif pinned is not None and nr != pinned:
+                raise ValueError(f'seccomp syscall number mismatch: {name}')
+            if nr < 0:
+                raise ValueError(f'seccomp syscall unknown: {name}')  # every listed call is mandatory: never skipped
             return nr
         denied = 0
         for name in SECCOMP_DENY:
