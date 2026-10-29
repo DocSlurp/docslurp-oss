@@ -230,6 +230,22 @@ describe("materializePageRange", () => {
     log.mockRestore();
   });
 
+  it("refuses OCR once the org's unbilled vision limit is reached, releasing the page for later", async () => {
+    // Earlier runs of this org already left more unbilled vision spend than the default limit.
+    await db.exec(`insert into vision_org_unbilled_spend (org_id, hour, cents) values ('o1', date_trunc('hour', now()), 10000) on conflict (org_id, hour) do update set cents = 10000`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({ 1: LONG, 2: "" });
+      const result = await materializePageRange(h.deps, input(h, [1, 2]));
+      expect(h.ocrCalls).toEqual([]);
+      expect(result.indexed).toEqual([1]);
+      expect(result.failed).toEqual([{ page: 2, reason: "vision-stopped:org-unbilled-limit" }]);
+    } finally {
+      warn.mockRestore();
+      await db.exec(`delete from vision_org_unbilled_spend`);
+    }
+  });
+
   it("removes stale chunk rows when a page re-chunks to fewer chunks", async () => {
     const many = Array.from({ length: 4 }, (_, i) => `# Part ${i}\n\n${LONG} ${i}`).join("\n\n");
     const h = harness({ 1: many });

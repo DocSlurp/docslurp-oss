@@ -58,12 +58,12 @@ describe("VISION_ROUTING_V2", () => {
 
   it("pins the version in the run's artifacts at run start", () => {
     const started = run("ws-a");
-    expect(pinRunRoutingVersion(started)).toBe("v2");
+    expect(pinRunRoutingVersion(started, { VISION_ROUTING_V2: "ws-a" })).toBe("v2");
     expect(started.run.artifacts[VISION_ROUTING_VERSION_SLOT]).toBe("v2");
     // Later reads in the same process ignore a changed environment.
     expect(resolveRunRoutingV2(started)).toBe(true);
     // A retried start keeps the first value.
-    expect(pinRunRoutingVersion(started)).toBe("v2");
+    expect(pinRunRoutingVersion(started, { VISION_ROUTING_V2: "off" })).toBe("v2");
   });
 
   it("rehydrated runs read the pinned version whatever this worker's environment says", () => {

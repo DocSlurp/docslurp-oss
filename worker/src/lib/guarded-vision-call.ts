@@ -24,13 +24,6 @@ export function priceVisionUsage(
     (usage.inputTokens / 1000) * cfg.costPer1kInputTokens + (usage.outputTokens / 1000) * cfg.costPer1kOutputTokens;
 }
 
-const failureCosts = new WeakMap<object, number>();
-
-/** Provider cost `guardedVisionCall` recorded for the failed call behind `error`, or null. */
-export function guardedVisionFailureCost(error: unknown): number | null {
-  return error && typeof error === "object" && failureCosts.has(error) ? failureCosts.get(error)! : null;
-}
-
 export type GuardedVisionOutcome<T = VisionExecutionResult> =
   | { admitted: true; result: T }
   | { admitted: false; stop: VisionGuardStop };
@@ -40,8 +33,8 @@ export type GuardedVisionOutcome<T = VisionExecutionResult> =
  * materialization) under the run's vision guard (lib/vision-spend-guard.ts): admits a reservation
  * at the call's own model price over this image's size, runs it, and settles once. A refused call
  * makes no provider call. A rejected or failed call records its billed spend here (unbilled, once)
- * and rethrows; `guardedVisionFailureCost(error)` returns what was recorded. A successful call's
- * usage stays with the caller, which `price`s it for the settlement.
+ * and rethrows. A successful call's usage stays with the caller, which `price`s it for the
+ * settlement.
  */
 export async function guardedVisionCall<T = VisionExecutionResult>(args: {
   host: VisionGuardHost;
@@ -71,7 +64,6 @@ export async function guardedVisionCall<T = VisionExecutionResult>(args: {
     } catch (error) {
       const recorded = recordFailure(args, error);
       settlement = { costCents: recorded.costCents, billable: false, page: { ...args.page, rejected: recorded.rejected } };
-      if (error && typeof error === "object") failureCosts.set(error, recorded.costCents);
       throw error;
     }
     settlement = { costCents: args.price(result), billable: true, page: { ...args.page, rejected: false } };

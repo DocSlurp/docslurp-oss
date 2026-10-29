@@ -15,6 +15,7 @@ import type { MapDraft } from "../deferred/siphon-agent.js";
 import { DocumentMapStage, mapCoverage, type DocumentMapOps } from "../stages/document-map.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { MemoryVisionSpendBackend, visionGuardFor } from "../lib/vision-spend-guard.js";
 import { makeTestPdf, type TestPdfOptions } from "../test/make-outline-pdf.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -362,3 +363,20 @@ describe("mapCoverage", () => {
     expect(mapCoverage([], 20)).toBe(0);
   });
 });
+
+describe("document-map OCR under the vision guard", () => {
+  it("renders nothing and calls nothing once vision stopped for the run", async () => {
+    const { stage, state } = await setup({ pages: ["", ""] }, ["", ""]);
+    const run = state as unknown as { run: { id: string; orgId: string }; visionSpend?: MemoryVisionSpendBackend };
+    run.visionSpend = new MemoryVisionSpendBackend();
+    // A call larger than the run budget stops the guard (sticky for this state).
+    expect((await visionGuardFor(run as never).admit(1e9)).admitted).toBe(false);
+    const render = vi.spyOn((stage as unknown as { rasters: { renderSelectedPages: () => Promise<unknown[]> } }).rasters, "renderSelectedPages");
+    const result = await (stage as unknown as {
+      ocrPages(args: unknown): Promise<{ pageTexts: string[]; costCents: number }>;
+    }).ocrPages({ document: document(2), first: 1, last: 2, state });
+    expect(result).toEqual({ pageTexts: ["", ""], costCents: 0 });
+    expect(render).not.toHaveBeenCalled();
+  });
+});
+

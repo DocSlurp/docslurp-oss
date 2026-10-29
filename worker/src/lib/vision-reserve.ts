@@ -9,7 +9,7 @@ type PricingConfig = Pick<Config, "openAiBaseUrl" | "costPer1kInputTokens" | "co
 /** Whether a vision route bills us per token (OpenAI, OpenRouter); local and self-hosted runtimes do not. */
 export function isBillableVisionRuntime(route: { runtime: string; baseUrl: string | null }, cfg: Pick<Config, "openAiBaseUrl">): boolean {
   const normalizedBaseUrl = route.baseUrl?.replace(/\/+$/, "") ?? null;
-  const normalizedOpenAiBaseUrl = cfg.openAiBaseUrl.replace(/\/+$/, "");
+  const normalizedOpenAiBaseUrl = cfg.openAiBaseUrl?.replace(/\/+$/, "") ?? null;
   return (
     route.runtime === "remote-openai" ||
     (route.runtime === "openai-compatible" &&

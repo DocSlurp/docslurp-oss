@@ -120,11 +120,11 @@ function envNumber(
 }
 
 export function resolveVisionGuardConfig(
-  run: { pipeline: { maxCostCents?: number | null } },
+  run: { pipeline?: { maxCostCents?: number | null } },
   env: Record<string, string | undefined> = process.env,
 ): VisionGuardConfig {
   const budget = envNumber(env, "VISION_RUN_PROVIDER_BUDGET_CENTS", DEFAULT_VISION_RUN_PROVIDER_BUDGET_CENTS, (v) => v > 0);
-  const cap = run.pipeline.maxCostCents;
+  const cap = run.pipeline?.maxCostCents;
   return {
     budgetCents: typeof cap === "number" && cap > 0 ? Math.min(budget, cap) : budget,
     breakerMinRejectedPages: Math.trunc(envNumber(env, "VISION_REJECTION_BREAKER_MIN_PAGES",
@@ -207,6 +207,17 @@ export class MemoryVisionSpendBackend implements VisionSpendBackend {
     return { admitted: true, reservationId };
   }
 
+  /** Settled spend, pages and live reservations of one run (tests and diagnostics). */
+  inspect(runId: string): { costCents: number; attemptedPages: number; rejectedPages: number; liveReservations: number } {
+    const run = this.runs.get(runId);
+    return {
+      costCents: run?.costCents ?? 0,
+      attemptedPages: run?.pages.size ?? 0,
+      rejectedPages: run ? [...run.pages.values()].filter(Boolean).length : 0,
+      liveReservations: [...this.reservations.values()].filter((r) => r.runId === runId).length,
+    };
+  }
+
   async settle(reservationId: string, settlement: VisionSettlement): Promise<void> {
     const reservation = this.reservations.get(reservationId);
     if (!reservation) return;
@@ -231,7 +242,7 @@ export class MemoryVisionSpendBackend implements VisionSpendBackend {
 const processBackend = new MemoryVisionSpendBackend();
 
 export interface VisionGuardHost {
-  run: { id: string; orgId?: string | null; pipeline: { maxCostCents?: number | null } };
+  run: { id: string; orgId?: string | null; pipeline?: { maxCostCents?: number | null } };
   /** Set by loadRunState from the store; absent in tests and store-less runs. */
   visionSpend?: VisionSpendBackend;
 }

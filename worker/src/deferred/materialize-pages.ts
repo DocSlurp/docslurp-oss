@@ -34,7 +34,7 @@ import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-wri
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
-import { guardedVisionCall, guardedVisionFailureCost, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
+import { guardedVisionCall, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
 
@@ -304,9 +304,8 @@ export async function materializePageRange(
         price: (ocr) => ocr.costCents,
       });
     } catch (error) {
-      // A page rejected on every attempt (or failed after billing) was recorded with its spend by
-      // the guarded call: count it against the budget.
-      spentCents += guardedVisionFailureCost(error) ?? 0;
+      // A page rejected on every attempt (or failed after billing) was recorded with its provider
+      // spend by the guarded call (unbilled: no customer credits); the guard bounds that spend.
       failed.set(page, error instanceof Error ? error.message : String(error));
       return;
     }

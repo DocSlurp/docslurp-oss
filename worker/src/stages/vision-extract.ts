@@ -1271,6 +1271,9 @@ export class VisionExtractStage implements Stage {
       try {
         // Sidecar only: cleanupTempFile would delete the directory holding the caller's image.
         await rm(outputPath, { force: true });
+      } catch (error) {
+        // A cleanup failure never replaces the call's own result or error.
+        console.warn(`[vision-extract] document=${document.id} page=${page.pageNumber} sidecar cleanup failed: ${toError(error).message}`);
       } finally {
         await admission.settle(settlement);
       }
