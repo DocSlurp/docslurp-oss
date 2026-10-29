@@ -8,15 +8,18 @@ import {
   PdfRasterCache,
   PdfSourceCache,
   contiguousPageRanges,
+  PDFTOPPM_CONCURRENCY_MAX,
+  Semaphore,
   defaultPdftoppmConcurrency,
+  defaultPdftoppmProcessConcurrency,
   normalizePageNumbers,
   parsePdfPageSizes,
 } from "../pipeline/pdf-asset-cache.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
 
-/** pdfinfo -f/-l output: one numbered size line per page. */
+/** pdfinfo -f/-l output: the "Pages:" line, then one numbered size line per page. */
 function pdfinfoSizes(first: number, last: number): string {
-  return Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`).join("\n");
+  return [`Pages:           ${last}`, "Encrypted:       no", ...Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`)].join("\n");
 }
 
 const tempRoots: string[] = [];
@@ -202,7 +205,7 @@ describe("PdfRasterCache", () => {
     await sourceCache.clear();
   });
 
-  it("sizes every page with one pdfinfo call and renders pages in bounded parallel lanes", async () => {
+  it("sizes each contiguous run with one pdfinfo call and renders pages in bounded parallel lanes", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -242,7 +245,7 @@ describe("PdfRasterCache", () => {
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 3 });
     const pages = await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 20 }, runId: "run-1", pageNumbers: [9, 2, 4, 7, 5, 11] });
 
-    expect(calls.filter((call) => call.startsWith("pdfinfo"))).toEqual(["pdfinfo:11"]);
+    expect(calls.filter((call) => call.startsWith("pdfinfo")).sort()).toEqual(["pdfinfo:11", "pdfinfo:2", "pdfinfo:5", "pdfinfo:7", "pdfinfo:9"]);
     // Same per-page command (page, DPI, bounded edge) as the sequential path.
     expect(calls.filter((call) => call.startsWith("pdftoppm")).sort()).toEqual(
       [2, 4, 5, 7, 9, 11].map((page) => `pdftoppm:${page},${page},150,1650`).sort(),
@@ -294,16 +297,167 @@ describe("PdfRasterCache", () => {
   });
 
   it("refuses to render a page pdfinfo did not size", async () => {
-    expect(parsePdfPageSizes("Page    3 size: 595.28 x 841.89 pts (A4)\nPage    5 size: 612 x 792 pts", 3, 5))
+    const head = "Title:          t\nPages:          9\nEncrypted:      no\n";
+    expect(parsePdfPageSizes(`${head}Page    3 size: 595.28 x 841.89 pts (A4)\nPage    5 size: 612 x 792 pts`, 3, 5))
       .toEqual(new Map([[3, { widthPt: 595.28, heightPt: 841.89 }], [5, { widthPt: 612, heightPt: 792 }]]));
-    expect(parsePdfPageSizes("Page size: 612 x 792 pts", 4, 4)).toEqual(new Map([[4, { widthPt: 612, heightPt: 792 }]]));
+    expect(parsePdfPageSizes(`${head}Page size: 612 x 792 pts`, 4, 4)).toEqual(new Map([[4, { widthPt: 612, heightPt: 792 }]]));
     // The unnumbered form is ambiguous across a range; out-of-range numbered lines are ignored.
-    expect(parsePdfPageSizes("Page size: 612 x 792 pts\nPage    9 size: 1 x 1 pts", 4, 6).size).toBe(0);
+    expect(parsePdfPageSizes(`${head}Page size: 612 x 792 pts\nPage    9 size: 1 x 1 pts`, 4, 6).size).toBe(0);
+    // Without the "Pages:" line nothing counts.
+    expect(parsePdfPageSizes("Page    3 size: 612 x 792 pts", 3, 3).size).toBe(0);
   });
 
-  it("defaults pdftoppm lanes to at most two unless PDF_RASTER_CONCURRENCY is set", () => {
-    expect(defaultPdftoppmConcurrency({})).toBeLessThanOrEqual(2);
-    expect(defaultPdftoppmConcurrency({ PDF_RASTER_CONCURRENCY: "3" })).toBe(3);
+  it("ignores size lines a document title injects before the Pages line", () => {
+    // A title can hold newlines and size-looking text; pdfinfo prints it before "Pages:".
+    const injected = [
+      "Title:          Page    3 size: 99999 x 99999 pts",
+      "Page    3 size: 99999 x 99999 pts",
+      "Page size: 99999 x 99999 pts",
+      "Pages:          1",
+      "Subject:        x Page    3 size: 88888 x 88888 pts",
+      "Pages:          12",
+      "Encrypted:      no",
+      "Page    3 size: 612 x 792 pts (letter)",
+      "File size:      1234 bytes",
+    ].join("\n");
+    expect(parsePdfPageSizes(injected, 3, 3)).toEqual(new Map([[3, { widthPt: 612, heightPt: 792 }]]));
+    // A title-only size line with no real one after "Pages:" sizes nothing (the render then refuses).
+    expect(parsePdfPageSizes("Title: a\nPage    3 size: 99999 x 99999 pts\nPages:  3\nEncrypted: no", 3, 3).size).toBe(0);
+  });
+
+  it("caps pdftoppm lanes with PDF_PDFTOPPM_CONCURRENCY (default 2, at most 4), independent of native lanes", () => {
+    expect(defaultPdftoppmConcurrency({})).toBe(2);
+    expect(defaultPdftoppmConcurrency({ PDF_RASTER_CONCURRENCY: "32" })).toBe(2);
+    expect(defaultPdftoppmConcurrency({ PDF_PDFTOPPM_CONCURRENCY: "3" })).toBe(3);
+    expect(defaultPdftoppmConcurrency({ PDF_PDFTOPPM_CONCURRENCY: "32" })).toBe(PDFTOPPM_CONCURRENCY_MAX);
+    expect(PDFTOPPM_CONCURRENCY_MAX).toBe(4);
+    for (const value of ["0", "-1", "x"]) expect(defaultPdftoppmConcurrency({ PDF_PDFTOPPM_CONCURRENCY: value })).toBe(2);
+    expect(defaultPdftoppmProcessConcurrency({})).toBe(8);
+    expect(defaultPdftoppmProcessConcurrency({ PDF_PDFTOPPM_PROCESS_CONCURRENCY: "3" })).toBe(3);
+    expect(defaultPdftoppmProcessConcurrency({ PDF_PDFTOPPM_PROCESS_CONCURRENCY: "1000" })).toBe(32);
+  });
+
+  it("aborts in-flight sibling commands on the first failure and uploads nothing after it", async () => {
+    const sourceStorage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "pdf bytes");
+        return filePath;
+      },
+    };
+    const uploads: string[] = [];
+    const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
+    let siblingAborted = false;
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
+      async run(plan: { binary?: string; args: string[] }, signal?: AbortSignal) {
+        if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
+        const page = Number(plan.args[1]);
+        if (page === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          throw new Error("pdftoppm crashed");
+        }
+        // The sibling only finishes when its signal aborts, like a killed child process; it has already written output.
+        await writeFile(`${plan.args[0]}-${page}.png`, "x");
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        siblingAborted = true;
+        throw signal!.reason;
+      },
+    };
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 2, rasterSlots: new Semaphore(4) });
+    await expect(cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 10 }, runId: "run-1", pageNumbers: [1, 2, 3] }))
+      .rejects.toThrow("pdftoppm crashed");
+    expect(siblingAborted).toBe(true);
+    expect(uploads).toEqual([]);
+    await sourceCache.clear();
+  });
+
+  it("bounds sandboxed raster commands across concurrent renders with the process-wide slots", async () => {
+    const sourceStorage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "pdf bytes");
+        return filePath;
+      },
+    };
+    const storage = { async objectSize() { return null; }, async putBytes() {}, uri(key: string) { return `s3://test/${key}`; } };
+    let active = 0;
+    let peak = 0;
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
+      async run(plan: { binary?: string; args: string[] }) {
+        active += 1;
+        peak = Math.max(peak, active);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
+          await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+          return { stdout: "", stderr: "" };
+        } finally {
+          active -= 1;
+        }
+      },
+    };
+    const slots = new Semaphore(3);
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    // Four documents x four lanes would run 16 commands at once without the shared slots.
+    const caches = Array.from({ length: 4 }, () => new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 4, rasterSlots: slots }));
+    const rendered = await Promise.all(caches.map((cache, index) => cache.renderSelectedPages({
+      document: { ...makeDocument(), id: `doc-${index}`, pageCount: 20 }, runId: "run-1", pageNumbers: [1, 3, 5, 7, 9, 11],
+    })));
+    expect(rendered.flat()).toHaveLength(24);
+    expect(peak).toBe(3);
+    expect(slots.inUse).toBe(0);
+    await sourceCache.clear();
+  });
+
+  it("sizes distant selected pages with one pdfinfo call each, not one call over their span", async () => {
+    const sourceStorage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "pdf bytes");
+        return filePath;
+      },
+    };
+    const storage = { async objectSize() { return null; }, async putBytes() {}, uri(key: string) { return `s3://test/${key}`; } };
+    const sized: Array<[number, number]> = [];
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { sized.push([first, last]); return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
+      async run(plan: { binary?: string; args: string[] }) {
+        if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
+        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { rasterSlots: new Semaphore(4) });
+    await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 40_000 }, runId: "run-1", pageNumbers: [1, 2, 3, 40_000] });
+    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 3], [40_000, 40_000]]);
+    await sourceCache.clear();
+  });
+
+  it("releases a waiting semaphore slot request when its signal aborts", async () => {
+    const slots = new Semaphore(1);
+    let release!: () => void;
+    const holder = slots.run(undefined, () => new Promise<void>((resolve) => { release = resolve; }));
+    const controller = new AbortController();
+    const waiter = slots.run(controller.signal, async () => "ran");
+    controller.abort(new Error("cancelled"));
+    await expect(waiter).rejects.toThrow("cancelled");
+    release();
+    await holder;
+    expect(slots.inUse).toBe(0);
+    expect(await slots.run(undefined, async () => "next")).toBe("next");
   });
 
   it("normalizes page requests and batches contiguous pages", () => {

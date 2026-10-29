@@ -8,9 +8,9 @@ import { PdfRasterCache, PdfSourceCache, readRasterEngine } from "../pipeline/pd
 import { imageDimensions, renderClipNative, renderPagesNative } from "./render.js";
 import type { NativePdfEngine, NativePdfRenderOptions } from "./types.js";
 
-/** pdfinfo -f/-l output: one numbered size line per page. */
+/** pdfinfo -f/-l output: the "Pages:" line, then one numbered size line per page. */
 function pdfinfoSizes(first: number, last: number): string {
-  return Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`).join("\n");
+  return [`Pages:           ${last}`, "Encrypted:       no", ...Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`)].join("\n");
 }
 
 function png(width: number, height: number): Buffer {

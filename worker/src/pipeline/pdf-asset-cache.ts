@@ -12,7 +12,7 @@ import { documentArtifactRoot } from "../lib/artifact-root.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
-import { defaultRenderConcurrency, renderClipNative, renderPagesNative } from "../native-pdf/render.js";
+import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
 
@@ -37,14 +37,87 @@ export interface RasterCacheOptions {
   concurrency?: number;
   /** Max parallel pdftoppm commands per selected-page render (default `defaultPdftoppmConcurrency`). */
   pdftoppmConcurrency?: number;
+  /** Process-wide limiter for sandboxed raster commands (default `sandboxedRasterSlots()`). */
+  rasterSlots?: Semaphore;
 }
 
-/**
- * pdftoppm lanes per render: `PDF_RASTER_CONCURRENCY` when set (as for native renders), else at most 2,
- * since each lane is a separate sandboxed process holding a full-page bitmap.
- */
+/** Hard ceiling for `PDF_PDFTOPPM_CONCURRENCY`: each lane is a sandboxed process holding a full-page bitmap. */
+export const PDFTOPPM_CONCURRENCY_MAX = 4;
+
+/** pdftoppm lanes per selected-page render: `PDF_PDFTOPPM_CONCURRENCY` (default 2, 1-4). Independent of native lanes. */
 export function defaultPdftoppmConcurrency(env: NodeJS.ProcessEnv = process.env): number {
-  return env.PDF_RASTER_CONCURRENCY?.trim() ? defaultRenderConcurrency(env) : Math.min(2, defaultRenderConcurrency(env));
+  const configured = Number.parseInt(env.PDF_PDFTOPPM_CONCURRENCY ?? "", 10);
+  return Number.isInteger(configured) && configured >= 1 ? Math.min(configured, PDFTOPPM_CONCURRENCY_MAX) : 2;
+}
+
+/** Hard ceiling for `PDF_PDFTOPPM_PROCESS_CONCURRENCY`. */
+export const PDFTOPPM_PROCESS_CONCURRENCY_MAX = 32;
+
+/**
+ * Sandboxed raster commands (pdfinfo, pdftoppm) one worker process runs at once across every document:
+ * `PDF_PDFTOPPM_PROCESS_CONCURRENCY` (default 8, 1-32). Per-render lanes multiply with document concurrency;
+ * this keeps the total bounded (8 matches eight busy slots at one command each, as before lanes).
+ */
+export function defaultPdftoppmProcessConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number.parseInt(env.PDF_PDFTOPPM_PROCESS_CONCURRENCY ?? "", 10);
+  return Number.isInteger(configured) && configured >= 1 ? Math.min(configured, PDFTOPPM_PROCESS_CONCURRENCY_MAX) : 8;
+}
+
+/** Counting semaphore; waiters run in FIFO order and leave the queue when their signal aborts. */
+export class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(readonly limit: number) {}
+
+  get inUse(): number {
+    return this.active;
+  }
+
+  async run<T>(signal: AbortSignal | undefined, task: () => Promise<T>): Promise<T> {
+    await this.acquire(signal);
+    try {
+      return await task();
+    } finally {
+      this.release();
+    }
+  }
+
+  private async acquire(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.active < this.limit) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.waiters.indexOf(grant);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(signal!.reason);
+      };
+      // The releasing task hands its slot straight to this waiter (`active` is not decremented in between).
+      const grant = () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      this.waiters.push(grant);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private release(): void {
+    const next = this.waiters.shift();
+    if (next) next();
+    else this.active -= 1;
+  }
+}
+
+let processRasterSlots: Semaphore | null = null;
+
+/** The worker process's shared limiter for sandboxed raster commands (sized once, from the environment). */
+export function sandboxedRasterSlots(): Semaphore {
+  processRasterSlots ??= new Semaphore(defaultPdftoppmProcessConcurrency());
+  return processRasterSlots;
 }
 
 let rasterEngineUnavailableReported = false;
@@ -233,18 +306,21 @@ export class PdfRasterCache {
     return (await this.sources.get(document)).path;
   }
 
-  /** Page sizes (CropBox, points) for `pageNumbers` from one pdfinfo call over their span. */
+  /** Page sizes (CropBox, points) for the pages first..last from one pdfinfo call. */
   private async pdfPageSizes(
     sourcePath: string,
-    pageNumbers: number[],
-    signal?: AbortSignal,
+    first: number,
+    last: number,
+    signal: AbortSignal,
   ): Promise<Map<number, { widthPt: number; heightPt: number }>> {
-    const first = Math.min(...pageNumbers);
-    const last = Math.max(...pageNumbers);
     const sizePlan = await this.runner.pdfPageSizes(sourcePath, first, last);
     if (!sizePlan.available) throw new Error("pdfinfo unavailable for bounded rasterization");
-    const { stdout } = await this.runner.run(sizePlan, signal);
+    const { stdout } = await this.rasterSlots.run(signal, () => this.runner.run(sizePlan, signal));
     return parsePdfPageSizes(stdout, first, last);
+  }
+
+  private get rasterSlots(): Semaphore {
+    return this.options.rasterSlots ?? sandboxedRasterSlots();
   }
 
   async renderSelectedPages(args: {
@@ -322,51 +398,42 @@ export class PdfRasterCache {
         : [];
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
-        // One pdfinfo call sizes every page to render; each page then renders in its own pdftoppm call,
-        // a few at a time, so a multi-page selection no longer waits on 2N sequential sandboxed commands.
-        const sizes = pdftoppmPages.length > 0
-          ? await this.pdfPageSizes(source.path, pdftoppmPages, args.signal)
-          : new Map<number, { widthPt: number; heightPt: number }>();
-        const lanes = Math.max(1, Math.min(this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency(), pdftoppmPages.length));
-        let cursor = 0;
-        let failure: { error: unknown } | null = null;
-        // The first failure stops every lane; all lanes drain before the scratch directory is removed.
-        await Promise.all(Array.from({ length: lanes }, async () => {
-          while (cursor < pdftoppmPages.length && !failure) {
-            try {
-              args.signal?.throwIfAborted();
-              const selectedPage = pdftoppmPages[cursor++]!;
-              const size = sizes.get(selectedPage);
-              if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
-              const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
-              const prefix = path.join(scratch, `page-${selectedPage}-${selectedPage}`);
-              const plan = await this.runner.renderPdfPageRange(
-                source.path,
-                prefix,
-                selectedPage,
-                selectedPage,
-                renderDpi,
-                boundedRasterEdge(size.widthPt, size.heightPt, renderDpi),
-              );
-              if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
-              await this.runner.run(plan, args.signal);
+        // One pdfinfo call per contiguous run sizes the pages to render; each page then renders in its own pdftoppm
+        // call, a few at a time. Lanes share one abort signal: the first failure aborts every in-flight sibling
+        // command, the lanes drain, and nothing is uploaded after it. Every command also takes a process-wide slot.
+        const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
+        const sizes = new Map<number, { widthPt: number; heightPt: number }>();
+        await runLanes(contiguousPageRanges(pdftoppmPages), lanes, args.signal, async (range, signal) => {
+          for (const [pageNumber, size] of await this.pdfPageSizes(source.path, range.first, range.last, signal)) sizes.set(pageNumber, size);
+        });
+        await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
+          const size = sizes.get(selectedPage);
+          if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+          const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
+          const prefix = path.join(scratch, `page-${selectedPage}-${selectedPage}`);
+          const plan = await this.runner.renderPdfPageRange(
+            source.path,
+            prefix,
+            selectedPage,
+            selectedPage,
+            renderDpi,
+            boundedRasterEdge(size.widthPt, size.heightPt, renderDpi),
+          );
+          if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
+          await this.rasterSlots.run(signal, () => this.runner.run(plan, signal));
 
-              const stem = `${path.basename(prefix)}-`;
-              const filename = (await readdir(scratch)).find((candidate) => {
-                if (!candidate.startsWith(stem)) return false;
-                const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
-                return suffix !== null && Number(suffix[1]) === selectedPage;
-              });
-              if (!filename) throw new Error(`pdftoppm did not produce page ${selectedPage}`);
-              const bytes = await readFile(path.join(scratch, filename));
-              await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
-              generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
-            } catch (error) {
-              failure ??= { error };
-            }
-          }
-        }));
-        if (failure) throw (failure as { error: unknown }).error;
+          const stem = `${path.basename(prefix)}-`;
+          const filename = (await readdir(scratch)).find((candidate) => {
+            if (!candidate.startsWith(stem)) return false;
+            const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
+            return suffix !== null && Number(suffix[1]) === selectedPage;
+          });
+          if (!filename) throw new Error(`pdftoppm did not produce page ${selectedPage}`);
+          const bytes = await readFile(path.join(scratch, filename));
+          signal.throwIfAborted();
+          await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
+          generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+        });
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }
@@ -427,19 +494,65 @@ async function hashFile(filePath: string): Promise<string> {
 }
 
 /**
+ * Runs `task` over `items` on at most `lanes` concurrent lanes. Each task gets a signal linked to `signal` that
+ * aborts on the first failure, so sibling commands stop; every lane drains before the first error is rethrown.
+ */
+export async function runLanes<T>(
+  items: readonly T[],
+  lanes: number,
+  signal: AbortSignal | undefined,
+  task: (item: T, signal: AbortSignal) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const controller = new AbortController();
+  const forward = () => controller.abort(signal!.reason);
+  if (signal?.aborted) forward();
+  else signal?.addEventListener("abort", forward, { once: true });
+  let cursor = 0;
+  let failure: { error: unknown } | null = null;
+  try {
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(lanes, items.length)) }, async () => {
+      while (cursor < items.length && !failure) {
+        try {
+          controller.signal.throwIfAborted();
+          await task(items[cursor++]!, controller.signal);
+        } catch (error) {
+          failure ??= { error };
+          controller.abort(error);
+        }
+      }
+    }));
+  } finally {
+    signal?.removeEventListener("abort", forward);
+  }
+  if (failure) throw (failure as { error: unknown }).error;
+}
+
+/**
  * Per-page sizes from `pdfinfo -f first -l last` ("Page    N size: W x H pts"). A one-page call may print the
- * unnumbered "Page size:" form instead; it applies to `first` only when first === last.
+ * unnumbered "Page size:" form instead; it applies to `first` only when first === last. Only lines after the last
+ * line-start "Pages:" count: metadata such as the title prints before it and may contain newlines.
  */
 export function parsePdfPageSizes(stdout: string, first: number, last: number): Map<number, { widthPt: number; heightPt: number }> {
   const sizes = new Map<number, { widthPt: number; heightPt: number }>();
-  for (const match of stdout.matchAll(/Page\s+(\d+)\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/g)) {
-    const pageNumber = Number(match[1]);
-    if (pageNumber >= first && pageNumber <= last) sizes.set(pageNumber, { widthPt: Number(match[2]), heightPt: Number(match[3]) });
+  const lines = stdout.split(/\r?\n/);
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) if (/^Pages:\s/.test(lines[index]!)) start = index + 1;
+  if (start < 0) return sizes;
+  let single: { widthPt: number; heightPt: number } | null = null;
+  for (const line of lines.slice(start)) {
+    const numbered = line.match(/^Page\s+(\d+)\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
+    if (numbered) {
+      const pageNumber = Number(numbered[1]);
+      if (pageNumber >= first && pageNumber <= last && !sizes.has(pageNumber)) {
+        sizes.set(pageNumber, { widthPt: Number(numbered[2]), heightPt: Number(numbered[3]) });
+      }
+      continue;
+    }
+    const unnumbered = line.match(/^Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
+    if (unnumbered && !single) single = { widthPt: Number(unnumbered[1]), heightPt: Number(unnumbered[2]) };
   }
-  if (first === last && !sizes.has(first)) {
-    const single = stdout.match(/Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
-    if (single) sizes.set(first, { widthPt: Number(single[1]), heightPt: Number(single[2]) });
-  }
+  if (first === last && !sizes.has(first) && single) sizes.set(first, single);
   return sizes;
 }
 

@@ -179,6 +179,10 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When page OCR may come from the native engine (tesseract otherwise). |
 | `PDF_RASTER_ENGINE` | `pdftoppm` | pdftoppm, native-pdf | Page and crop raster engine (native falls back to pdftoppm/sharp). Stays pdftoppm: native renders add 670-810 MB per 8-slot worker process, over the 512 MB off-heap budget, for ~2.4x throughput. |
 | `PDF_RASTER_CONCURRENCY` | min(4, cores) | 1-32 | Native render lanes per document render. |
+| `PDF_PDFTOPPM_CONCURRENCY` | 2 | 1-4 | pdftoppm lanes per selected-page render (each lane is a sandboxed process holding a full-page bitmap). Independent of `PDF_RASTER_CONCURRENCY`. |
+| `PDF_PDFTOPPM_PROCESS_CONCURRENCY` | 8 | 1-32 | Process-wide semaphore for sandboxed raster commands (pdfinfo, pdftoppm): per-render lanes multiply with document concurrency, this bounds the total. On the first failed page the render aborts its sibling commands and uploads nothing more. |
+| `PROBE_OVERLAP_RENDER` | on | 0, false, off | Probe renders each page's 72 DPI image on a second handle while features are read. At most one render is in flight per handle; it settles before the page ends and before close. |
+| `PROBE_OVERLAP_MAX_PAGES` | 1000 | pages | Documents with more pages probe on one handle (the second handle holds its own xref and object cache). |
 | image build args | off | `DOCSLURP_NATIVE_PDF`, `DOCSLURP_NATIVE_PDF_OCR_MODELS`, `DOCSLURP_NATIVE_PDF_CJK_FONTS` | Ship the binding, OCR models (~30 MB) and CJK fonts (~54 MB); see `vendor-artifacts/native-pdf/README.md` and `fly.worker.toml`. |
 
 `.env.example` lists every flag above with its default.
