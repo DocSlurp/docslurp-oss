@@ -1,3 +1,6 @@
+vi.mock("../lib/require-sensitive-session.js", () => ({
+  requireSensitiveSession: async (_c: unknown, next: () => Promise<void>) => next(),
+}));
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestSession } from "./helpers/session-app.js";

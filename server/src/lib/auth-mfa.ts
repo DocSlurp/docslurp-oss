@@ -10,6 +10,7 @@ import { twoFactor } from "better-auth/plugins";
 import { serialize, type CookieOptions } from "hono/utils/cookie";
 import type { Pool } from "pg";
 
+import { hasSensitiveAccess } from "./auth-sensitive-access.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
 /**
@@ -311,7 +312,7 @@ const POLICY_BLOCKED_ALLOWED_PATHS = new Set([
 function allowedWhilePolicyBlocked(path: string): boolean {
   // Exact paths (plus sign-in and OAuth callbacks), so a newly enabled account
   // endpoint such as an email change stays blocked by default.
-  return POLICY_BLOCKED_ALLOWED_PATHS.has(path) || path.startsWith("/sign-in/") || path.startsWith("/callback/");
+  return path === "/sensitive-access" || path.startsWith("/sensitive-access/") || POLICY_BLOCKED_ALLOWED_PATHS.has(path) || path.startsWith("/sign-in/") || path.startsWith("/callback/");
 }
 
 async function loadSessionRow(pool: Pick<Pool, "query">, token: string): Promise<SessionRow | null> {
@@ -518,9 +519,8 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
       throw forbidden(MFA_REQUIRED_CODE, "Sign in with your second factor or passkey to change sign-in methods");
     }
     if (FACTOR_REMOVAL_PATHS.has(ctx.path)) {
-      const authenticatedAt = toDate(row.authenticated_at) ?? toDate(row.created_at);
-      if (!authenticatedAt || Date.now() - authenticatedAt.getTime() > config.reauthMaxAgeSeconds * 1000) {
-        throw forbidden(REAUTH_REQUIRED_CODE, "Sign in again to remove a sign-in method");
+      if (!await hasSensitiveAccess(pool, row.user_id, row.session_id)) {
+        throw forbidden(REAUTH_REQUIRED_CODE, "Verify your identity to change a sign-in method");
       }
     }
     if (PASSKEY_REGISTRATION_PATHS.has(ctx.path) && await isSsoEnforced(row.email)) {

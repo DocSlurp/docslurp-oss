@@ -25,10 +25,11 @@ describe("apiError", () => {
 });
 
 describe("closed code vocabulary", () => {
-  it("has unique snake_case codes and reviewed copy for each", () => {
+  it("has unique native codes, the shared Better Auth reauth code, and reviewed copy for each", () => {
     expect(new Set(API_ERROR_CODES).size).toBe(API_ERROR_CODES.length);
     for (const code of API_ERROR_CODES) {
-      expect(code).toMatch(/^[a-z]+(_[a-z]+)*$/);
+      // One shared code bridges Better Auth and native action recovery.
+      if (code !== "REAUTH_REQUIRED") expect(code).toMatch(/^[a-z]+(_[a-z]+)*$/);
       expect(API_ERROR_PUBLIC_MESSAGES[code]).toBeTruthy();
     }
     expect(isApiErrorCode("chat_disabled")).toBe(true);

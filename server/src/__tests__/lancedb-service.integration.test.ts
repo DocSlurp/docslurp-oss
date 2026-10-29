@@ -6,6 +6,14 @@ import { VectorNamespaceManager } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 
+// This suite passes explicit user IDs and tests real SQL tenant authorization,
+// not cookie sessions. Avoid an unrelated eager Better Auth schema-validation
+// pool competing with the fixture's single-connection Postgres wire server.
+vi.mock("../lib/better-auth.js", () => ({
+  auth: { api: { getSession: async () => null } },
+  appDbPool: { query: async () => { throw new Error("Cookie authentication is outside this retrieval fixture"); } },
+}));
+
 // Real postgres.js queries; PGlite's local wire server accepts one connection at a time.
 vi.mock("../db.js", async () => {
   const { default: postgres } = await import("postgres");

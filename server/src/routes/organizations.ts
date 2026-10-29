@@ -1,3 +1,4 @@
+import { requireSensitiveSession } from "../lib/require-sensitive-session.js";
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
@@ -71,7 +72,7 @@ export const organizationsRoutes = new Hono()
     return c.json(scopeAccess(await getOrganizationAccess(c.req.param("orgId"), actor.userId), actor));
   })
   // Permanent: owner only, from a signed-in session, confirmed by the org name (docs/data-deletion.md).
-  .delete("/:orgId", zValidator("json", deleteOrganizationSchema, validationHook), async c => {
+  .delete("/:orgId", requireSensitiveSession, zValidator("json", deleteOrganizationSchema, validationHook), async c => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
       return apiStatusError(c, 403, "Deleting an organization requires a signed-in owner", { code: "session_required" });
@@ -83,7 +84,7 @@ export const organizationsRoutes = new Hono()
     c.json(await updateOrganization(c.req.param("orgId"), getRequestActor(c).userId, c.req.valid("json"))))
   .get("/:orgId/security-policy", async c => c.json(await getOrganizationMfaPolicy(c.req.param("orgId"), getRequestActor(c).userId)))
   // Session only: changing who must use MFA needs an MFA-verified admin session, which an API key can't show.
-  .put("/:orgId/security-policy", zValidator("json", updateOrganizationMfaPolicySchema, validationHook), async c => {
+  .put("/:orgId/security-policy", requireSensitiveSession, zValidator("json", updateOrganizationMfaPolicySchema, validationHook), async c => {
     const actor = getRequestActor(c);
     if (actor.type !== "session") return apiStatusError(c, 403, "Change the MFA policy while signed in", { code: "session_required" });
     return c.json(await updateOrganizationMfaPolicy(c.req.param("orgId"), actor.userId, c.req.valid("json"), { mfaVerified: actor.mfaVerified === true }));
@@ -92,7 +93,12 @@ export const organizationsRoutes = new Hono()
   .get("/:orgId/api-keys", async c => c.json({ keys: await listOrganizationApiKeys(c.req.param("orgId"), getRequestActor(c).userId) }))
   .post("/", zValidator("json", createOrganizationSchema, validationHook), async c =>
     c.json(await createOrganization({ ...c.req.valid("json"), userId: getRequestActor(c).userId }), 201))
-  .delete("/:orgId/api-keys", async c => {
+  .delete("/:orgId/api-keys", async (c, next) => {
+    // The router's preceding guard checks machine keys' server type, org and
+    // organizations:manage scope; the service still checks the owner's role.
+    if (getRequestActor(c).type === "apiKey") return next();
+    return requireSensitiveSession(c, next);
+  }, async c => {
     const keys = await revokeOrganizationApiKeys(c.req.param("orgId"), getRequestActor(c).userId);
     return c.json({ keys, revokedCount: keys.length });
   })
