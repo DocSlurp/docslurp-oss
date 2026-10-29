@@ -78,15 +78,16 @@ export type ProbeRunner = (args: {
 }) => Promise<string>;
 
 /**
- * Probe render overlap settings. `PROBE_OVERLAP_RENDER=0|false|off` renders each page's 72 DPI image on the feature
- * handle instead of a second handle (default on). `PROBE_OVERLAP_MAX_PAGES` (default 1000) caps the page count of
- * documents that get the second handle; non-numeric or negative values keep the default.
+ * Probe render overlap settings. `PROBE_OVERLAP_RENDER=1|true|on` renders each page's 72 DPI image on a second handle
+ * while the feature handle reads the page (default off: the second handle parses the untrusted file a second time inside
+ * the worker process, which holds secrets, so it stays opt-in). `PROBE_OVERLAP_MAX_PAGES` (default 1000) caps the page
+ * count of documents that get the second handle; non-numeric or negative values keep the default.
  */
 export function readProbeOverlap(env: NodeJS.ProcessEnv = process.env): { overlapRender: boolean; overlapRenderMaxPages: number } {
   const flag = env.PROBE_OVERLAP_RENDER?.trim().toLowerCase();
   const max = Number(env.PROBE_OVERLAP_MAX_PAGES?.trim() || Number.NaN);
   return {
-    overlapRender: !(flag === "0" || flag === "false" || flag === "off"),
+    overlapRender: flag === "1" || flag === "true" || flag === "on",
     overlapRenderMaxPages: Number.isInteger(max) && max >= 0 ? max : PROBE_OVERLAP_MAX_PAGES,
   };
 }

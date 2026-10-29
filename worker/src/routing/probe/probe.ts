@@ -41,8 +41,9 @@ export interface NativeProbeOptions {
   recognise?: Recogniser;
   /**
    * Render each page's 72 DPI image on a second handle of the same document while this handle reads the page's
-   * text, image and vector features (default true). The binding renders off the JS thread, so the render no longer
+   * text, image and vector features (default false). The binding renders off the JS thread, so the render no longer
    * sits behind the synchronous feature work; rows are unchanged. One handle per concurrent render, as `renderPagesNative` does.
+   * Opt-in: the second handle parses the untrusted file again inside the worker process, which holds secrets.
    */
   overlapRender?: boolean;
   /** Open the second render handle only for documents of at most this many pages (default `PROBE_OVERLAP_MAX_PAGES`). */
@@ -417,7 +418,7 @@ export async function* probeNativePdf(binding: ProbeBinding, options: NativeProb
     // The first handle opened, so a second normally does too; without one the probe renders on the first, as before.
     // Large documents skip the second handle: it holds its own parsed xref and object cache. Past the object
     // ceiling its open fails with PDF_LIMIT and the probe renders on the first handle.
-    if ((options.overlapRender ?? true) && count <= (options.overlapRenderMaxPages ?? PROBE_OVERLAP_MAX_PAGES)) {
+    if ((options.overlapRender ?? false) && count <= (options.overlapRenderMaxPages ?? PROBE_OVERLAP_MAX_PAGES)) {
       try {
         renderDoc = binding.openPath(options.pdfPath, { limits: { ...PROBE_LIMITS, maxObjects: PROBE_OVERLAP_MAX_OBJECTS } });
       } catch {

@@ -92,7 +92,7 @@ describe("native page probe", () => {
       },
     };
     const strip = (rows: NativeProbeRow[]) => rows.map(({ probeMs: _probeMs, ...row }) => row);
-    const overlapped = await collect(binding);
+    const overlapped = await collect(binding, { overlapRender: true });
     expect(opened.map((h) => h.renders)).toEqual([0, 2]);
     expect(opened.every((h) => h.closed)).toBe(true);
     opened.length = 0;
@@ -112,7 +112,7 @@ describe("native page probe", () => {
         return { ...doc, page: (i: number) => ({ ...doc.page(i), renderAsync: async () => { if (second) throw new Error("render boom"); return png; } }) };
       },
     };
-    const [row] = await collect(binding);
+    const [row] = await collect(binding, { overlapRender: true });
     expect(row!.unusualFeatures).toContain("probe-error");
   });
 
@@ -161,7 +161,7 @@ describe("native page probe", () => {
   it("settles the early render before failing a page whose feature read throws, and before close", async () => {
     const pages: FakePage[] = [{ spans: [{ text: PROSE, bbox: [50, 50, 550, 700] }] }, { spans: [{ text: PROSE, bbox: [50, 50, 550, 700] }] }, {}];
     const { binding, handles } = trackedBinding(pages, { spansThrow: (i) => i !== 1 });
-    const rows = await collect(binding);
+    const rows = await collect(binding, { overlapRender: true });
     expect(rows.map((r) => r.unusualFeatures?.includes("probe-error"))).toEqual([true, false, true]);
     expect(handles).toHaveLength(2);
     expect(handles[1]!.renders).toBe(3);
@@ -175,7 +175,7 @@ describe("native page probe", () => {
     const controller = new AbortController();
     const pages: FakePage[] = [{ spans: [{ text: PROSE, bbox: [50, 50, 550, 700] }] }, {}, {}];
     const { binding, handles } = trackedBinding(pages, { onRender: (handle) => { if (handle === 1) controller.abort(); } });
-    await expect(collect(binding, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(collect(binding, { overlapRender: true, signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
     expect(handles[1]!.renders).toBe(1);
     for (const handle of handles) {
       expect(handle.maxInFlight).toBeLessThanOrEqual(1);
@@ -186,7 +186,7 @@ describe("native page probe", () => {
   it("closes both handles with no render in flight when the consumer returns early", async () => {
     const pages: FakePage[] = [{ spans: [{ text: PROSE, bbox: [50, 50, 550, 700] }] }, {}, {}];
     const { binding, handles } = trackedBinding(pages, { spansThrow: (i) => i === 0 });
-    for await (const row of probeNativePdf(binding, { pdfPath: "/tmp/x.pdf" })) {
+    for await (const row of probeNativePdf(binding, { pdfPath: "/tmp/x.pdf", overlapRender: true })) {
       expect(row.pageNumber).toBe(1);
       break;
     }
@@ -207,23 +207,27 @@ describe("native page probe", () => {
         return { ...doc, page: (i: number) => ({ ...doc.page(i), renderAsync: async () => { renders += 1; return png; } }) };
       },
     };
-    const rows = await collect(binding);
+    const rows = await collect(binding, { overlapRender: true });
     expect(limits).toEqual([PROBE_LIMITS, { ...PROBE_LIMITS, maxObjects: PROBE_OVERLAP_MAX_OBJECTS }]);
     expect(rows.every((row) => !row.unusualFeatures?.includes("probe-error"))).toBe(true);
     expect(renders).toBe(2);
   });
 
-  it("opens no second handle when overlap is off or the document exceeds the page ceiling", async () => {
+  it("opens no second handle by default, when overlap is off, or when the document exceeds the page ceiling", async () => {
     const pages: FakePage[] = [{}, {}, {}];
     const off = trackedBinding(pages);
     await collect(off.binding, { overlapRender: false });
     expect(off.handles).toHaveLength(1);
+    // Off by default: the second handle parses the untrusted file again inside the worker process.
+    const unset = trackedBinding(pages);
+    await collect(unset.binding);
+    expect(unset.handles).toHaveLength(1);
     const large = trackedBinding(pages);
-    await collect(large.binding, { overlapRenderMaxPages: 2 });
+    await collect(large.binding, { overlapRender: true, overlapRenderMaxPages: 2 });
     expect(large.handles).toHaveLength(1);
     expect(large.handles[0]!.renders).toBe(3);
     const within = trackedBinding(pages);
-    await collect(within.binding, { overlapRenderMaxPages: 3 });
+    await collect(within.binding, { overlapRender: true, overlapRenderMaxPages: 3 });
     expect(within.handles).toHaveLength(2);
   });
 
@@ -394,10 +398,10 @@ describe("probe helpers", () => {
 });
 
 describe("probe overlap settings", () => {
-  it("reads PROBE_OVERLAP_RENDER as an off switch and PROBE_OVERLAP_MAX_PAGES as the page ceiling", () => {
-    expect(readProbeOverlap({})).toEqual({ overlapRender: true, overlapRenderMaxPages: PROBE_OVERLAP_MAX_PAGES });
-    for (const value of ["0", "false", "OFF", " off "]) expect(readProbeOverlap({ PROBE_OVERLAP_RENDER: value }).overlapRender).toBe(false);
-    expect(readProbeOverlap({ PROBE_OVERLAP_RENDER: "1" }).overlapRender).toBe(true);
+  it("reads PROBE_OVERLAP_RENDER as an opt-in (default off) and PROBE_OVERLAP_MAX_PAGES as the page ceiling", () => {
+    expect(readProbeOverlap({})).toEqual({ overlapRender: false, overlapRenderMaxPages: PROBE_OVERLAP_MAX_PAGES });
+    for (const value of ["1", "true", "ON", " on "]) expect(readProbeOverlap({ PROBE_OVERLAP_RENDER: value }).overlapRender).toBe(true);
+    for (const value of ["", "0", "false", "off", "yes", "2"]) expect(readProbeOverlap({ PROBE_OVERLAP_RENDER: value }).overlapRender).toBe(false);
     expect(readProbeOverlap({ PROBE_OVERLAP_MAX_PAGES: "250" }).overlapRenderMaxPages).toBe(250);
     for (const value of ["", "-1", "abc", "1.5"]) expect(readProbeOverlap({ PROBE_OVERLAP_MAX_PAGES: value }).overlapRenderMaxPages).toBe(PROBE_OVERLAP_MAX_PAGES);
   });
