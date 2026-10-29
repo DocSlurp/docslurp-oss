@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, kreuzbergExtractorOptionsSchema, type ExtractorDescriptor } from "@docslurp/shared";
 import type { DocumentExtractionResult } from "../lib/document-extraction-adapter.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
@@ -254,8 +254,14 @@ function kreuzbergOcrLanguage(configJson?: string): string | undefined {
   }
 }
 
+/**
+ * One extractor's options as the JSON its script receives. Kreuzberg's are re-parsed through the shared allow-list
+ * (kreuzbergExtractorOptionsSchema) even when the pipeline already was, so no other key reaches extractFile.
+ */
 export function serializeExtractorOptions(options: Record<string, unknown>, id: string): string | undefined {
-  return options[id] === undefined ? undefined : JSON.stringify(options[id]);
+  const value = options[id];
+  if (value === undefined) return undefined;
+  return JSON.stringify(id === "kreuzberg" ? kreuzbergExtractorOptionsSchema.parse(value) : value);
 }
 
 export const documentExtractorRegistry = new ExtractorRegistry();

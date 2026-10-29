@@ -121,6 +121,28 @@ export const dolphinAdapterConfigSchema = z.object({
 });
 export type DolphinAdapterConfig = z.infer<typeof dolphinAdapterConfigSchema>;
 
+/**
+ * Kreuzberg options a workspace may set. The worker spreads them into Kreuzberg's extractFile config, so only these
+ * keys survive parsing: anything else (structured extraction, a VLM OCR config with its own base URL, cache
+ * namespaces) would let a workspace make the parser call out or share caches.
+ */
+export const kreuzbergExtractorOptionsSchema = z.object({
+  outputFormat: z.literal("markdown").optional(),
+  forceOcr: z.boolean().optional(),
+  forceOcrPages: z.array(z.number().int().positive()).max(5_000).optional(),
+  disableOcr: z.boolean().optional(),
+  ocr: z.object({
+    backend: extractionOcrBackendSchema.optional(),
+    language: z.string().trim().min(2).max(32).optional(),
+  }).optional(),
+});
+export type KreuzbergExtractorOptions = z.infer<typeof kreuzbergExtractorOptionsSchema>;
+
+/** Extractor options by extractor id; `kreuzberg` is allow-listed (kreuzbergExtractorOptionsSchema). */
+export const documentExtractorOptionsSchema = z
+  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional() })
+  .catchall(z.unknown());
+
 /** A workspace policy. The document router can emit the same ordered IDs per document. */
 export const documentExtractionConfigSchema = z.object({
   target: z.string().min(1).default("document/markdown"),
@@ -136,7 +158,7 @@ export const documentExtractionConfigSchema = z.object({
     enabled: z.boolean().default(false),
     secondary: z.string().min(1).default("next-in-order"),
   }).default({ enabled: false, secondary: "next-in-order" }),
-  options: z.record(z.string(), z.unknown()).default({}),
+  options: documentExtractorOptionsSchema.default({}),
   forceOcr: z.boolean().default(false),
   ocr: z.object({
     language: z.string().trim().min(2).max(16).default("eng"),

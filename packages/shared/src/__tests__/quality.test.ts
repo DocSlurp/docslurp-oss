@@ -6,6 +6,8 @@ import {
   defaultPipelineFeatures,
   blankPages,
   defaultDocumentExtractionConfig,
+  documentExtractionConfigSchema,
+  type DocumentExtractionConfig,
   documentExtractionForQuality,
   isPageImageReferenceBlock,
   pageImageExtension,
@@ -161,6 +163,7 @@ describe("quality good turns vision on", () => {
 });
 
 describe("documentExtractionForQuality", () => {
+  // An unparsed config: documentExtractionForQuality must hold even for keys the schema would strip.
   const hostile = {
     ...defaultDocumentExtractionConfig,
     order: { pdf: ["dolphin", "graph-local", "kreuzberg"], image: ["dolphin"] },
@@ -171,7 +174,7 @@ describe("documentExtractionForQuality", () => {
     enrich: ["page/ocr-text"],
     voting: { enabled: true, secondary: "dolphin" },
     forceOcr: true,
-  };
+  } as unknown as DocumentExtractionConfig;
 
   it("leaves auto and good unchanged", () => {
     expect(documentExtractionForQuality(hostile, "auto")).toEqual({ config: hostile, removed: [] });
@@ -202,6 +205,28 @@ describe("documentExtractionForQuality", () => {
     const pipeline = normalizePipelineFeatures({ quality: "fast", documentExtraction: { options: { kreuzberg: { forceOcr: true } } } });
     expect(documentExtractionForQuality(pipeline.documentExtraction, pipeline.quality).config.options)
       .toEqual({ kreuzberg: { disableOcr: true } });
+  });
+});
+
+describe("Kreuzberg options allow-list", () => {
+  it("keeps only the allow-listed Kreuzberg keys in Auto and Good", () => {
+    const pipeline = normalizePipelineFeatures({
+      quality: "auto",
+      documentExtraction: { options: { kreuzberg: {
+        forceOcr: true,
+        ocr: { backend: "paddleocr", language: "deu", vlmConfig: { model: "x" }, baseUrl: "http://169.254.169.254" },
+        structuredExtraction: { schema: {} },
+        baseUrl: "http://attacker.invalid",
+        cacheNamespace: "other-tenant",
+        useCache: false,
+      } } } as never,
+    });
+    expect(pipeline.documentExtraction.options.kreuzberg).toEqual({ forceOcr: true, ocr: { backend: "paddleocr", language: "deu" } });
+    expect(documentExtractionConfigSchema.parse({ options: { kreuzberg: { structuredExtraction: {} } } }).options).toEqual({ kreuzberg: {} });
+  });
+
+  it("rejects an unknown OCR backend", () => {
+    expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: "vlm" } } } })).toThrow();
   });
 });
 
