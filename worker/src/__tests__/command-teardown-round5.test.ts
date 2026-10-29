@@ -164,7 +164,7 @@ describe.skipIf(!linux)("H1: an activity whose command teardown failed always en
     const outcome = await runActivity(containedSession(), async () => {
       recordUnverifiedTeardown(new CommandTeardownError("pandoc teardown could not be verified"), "label=pandoc");
       // What activities.ts produced for a stall or a shutdown: a retryable interruption.
-      throw interruptionFailure(new HungWorkError("[hung-work] stage parse made no progress", "stage-stalled"));
+      throw interruptionFailure(new HungWorkError("stage-stalled", "stage parse made no progress"));
     });
     expectTeardownFailure(outcome);
   });

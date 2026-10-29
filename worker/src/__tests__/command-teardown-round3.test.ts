@@ -422,6 +422,8 @@ describe.skipIf(!pidNamespace || !python)("stdio held by a process outside the P
 
 describe("containment the runner accepts", () => {
   it("refuses a process-group child from a provider other than unisolated none, after stopping it", async () => {
+    // Two refused commands in a row: keep the breaker (which would refuse the second) out of it.
+    vi.stubEnv("WORKER_UNVERIFIED_TEARDOWN_LIMIT", "100");
     let child: ReturnType<typeof spawnContained> | undefined;
     let exitedBeforeRelease = false;
     const runner = new CommandRunner({

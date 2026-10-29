@@ -199,7 +199,8 @@ describe("PdfRasterCache", () => {
       pageNumbers: [2, 3, 5],
     });
 
-    expect(ranges).toEqual([[2, 2], [3, 3], [5, 5]]);
+    // Lanes create their own directories first, so they reach the planner in any order.
+    expect(ranges.sort((a, b) => a[0] - b[0])).toEqual([[2, 2], [3, 3], [5, 5]]);
     expect(first.map((page) => page.pageNumber)).toEqual([2, 3, 5]);
     expect(first.every((page) => !page.cacheHit)).toBe(true);
     expect(second.every((page) => page.cacheHit)).toBe(true);
