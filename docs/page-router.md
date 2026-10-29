@@ -171,7 +171,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `VISION_REGION_ATTEMPTS_PER_PAGE` | `12` | integer 0..64 (clamped) | Routed region requests per page per run. |
 | `VISION_BREAKER_MIN_FAILURES` | `20` | integer 1..10000 (clamped) | Failed or rejected requests before the rejection breaker can stop vision for the run. |
 | `VISION_BREAKER_FAILURE_RATE` | `0.25` | 0.01..1 (clamped) | Failed share of the run's requests that trips the breaker. |
-| `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its route's worst case). |
+| `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its own prompt, image and route's worst case). |
 | `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529) one vision call may hand back before the wait goes to Temporal. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
@@ -243,7 +243,8 @@ no reported cost (`worker/src/lib/vision-attempt-guard.ts`).
 Every HTTP request a vision call made through `executeVisionRuntime` sends is admitted before it is
 sent, at the lowest common request point: `fetchWithProviderRetry` (each try, inline retries
 included; admitted inside its concurrency limiter immediately before `fetch`, so limiter waits,
-timeouts and aborts before sending consume nothing) and the local runtime call, through the
+timeouts and aborts before sending consume nothing, and an admission whose call is cancelled before
+`fetch` is handed back) and the local runtime call, through the
 `VisionRequestGate` that `executeVisionRuntime` requires (only operator benchmarks pass `null`). That
 covers legacy pages, page-router regions and their refusal fallbacks, cascade legs and
 workspace-model fallbacks, document-map OCR, extract-markdown self-critique and deferred page
@@ -252,8 +253,13 @@ end of this section).
 
 Requests the provider refuses before accepting them are handed back and leave every count (page
 bound, breaker, org): 429, 503 and 529, and on a streaming request a 400/404/405/415/422/501, which
-only says the endpoint does not stream (the same request then goes out without streaming; when that
-succeeds, later calls to that endpoint and model skip streaming for the life of the process). A call
+only says the endpoint does not stream (the same request then goes out without streaming). After two
+such 404/405/415/501 refusals within 10 minutes, each followed by a successful non-streaming retry,
+later calls to that endpoint and model skip streaming for 10 minutes in that process; 400 and 422,
+which usually describe the request, never turn streaming off. Every hand-back logs
+`[vision-throttle-handback]` with org, run and kind. Treating 429, 503 and 529 as unbilled is an
+assumption (providers document 429 as rejected before inference; none documents billing overload
+answers), bounded per call by the allowance below. A call
 may hand back `VISION_THROTTLE_ALLOWANCE` throttles; past that the wait goes to Temporal as a
 retryable provider error with its Retry-After. Anything that may have been accepted stays counted:
 other 5xx, timeouts and network errors after sending, accepted streams that break.
@@ -286,13 +292,28 @@ critique and second reads stay counted. The count is keyed by org only, with no 
 or workspaces, so deleting either cannot reset it; it holds across runs, reprocessing and
 extraction, and another org is never affected.
 
-Weights: each request weighs the worst case its own route can cost at catalog list price, a 16 MP
-image (about 23,000 input tokens) plus the prompt and the model's full output cap (enforced as
-`max_tokens`). A model without a list price (uncataloged or private) weighs the costliest catalog
-model; the in-process local runtime weighs 2 cents. So the most an org can cost us per day in
-uncharged requests is the $40 bound, whichever models its workspaces route to: 2,388 requests on the
-default `deepseek/deepseek-v4.1-flash-1017` (23,058 x $0.30/M + 8,192 x $1.20/M = 1.675 cents),
-1,128 on `gpt-4.1-mini` (3.544 cents), and any mix of the two in one org shares the same bound.
+Weights: each request weighs what it can cost at most, priced when it is sent: its actual prompt
+(UTF-8 bytes, an upper bound on tokens for any tokenizer), its image at the header's pixel size (one
+token per 700 pixels, at least 2,200; a 16 MP raster, about 23,000 tokens, when the size is
+unreadable), a fixed overhead for the chat template and system message, and the model's full output
+cap (enforced as `max_tokens`), at catalog list price. Workspace schema labels in the
+`schema-form-fields` prompt are capped (100 labels, 80 characters each, 4 KB in total) and a prompt
+over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`
+(USD per million prompt and completion tokens) equal to the prices the weight assumes, on the
+alternate-route retry too, so no upstream provider or fallback can bill above the weight; OpenRouter
+refuses the request when no provider qualifies. A model without a list price is priced at per-million
+prices above every catalog model on OpenRouter (and capped there), refused on a direct billed route
+such as OpenAI (`UnpricedVisionRouteError`, never sent), and weighed at those prices on a self-hosted
+or private route; the in-process local runtime weighs 2 cents. So the most an org can cost us per day
+in uncharged requests is the $40 bound, whichever models its workspaces route to: at the largest
+raster, 2,388 requests on the default `deepseek/deepseek-v4.1-flash-1017` (23,058 x $0.30/M + 8,192
+x $1.20/M = 1.675 cents), 1,128 on `gpt-4.1-mini` (3.544 cents), and any mix in one org shares the
+same bound.
+
+The worker refuses to start (`assertSchema`, `worker/src/db/vision-attempt-store.ts`) when the
+ledger is missing or comes from an earlier draft of migration 0101 (no
+`vision_org_attempts.weight_cents`, or a leftover `vision_run_charged_pages`): that database needs a
+reset, since 0101 was replaced in place before reaching main.
 
 **Refusals.** A refused request is never sent; requests sent before it in the same call record their
 billed usage once. A refusal is sticky for the activity only when a count limit is reached: the

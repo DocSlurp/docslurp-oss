@@ -143,18 +143,53 @@ describe("vision request admission", () => {
     expect(backend.inspect("run-1", "org-1")).toEqual({ runAttempts: 0, runFailures: 0, orgAttempts: 0, orgSettledAttempts: 0 });
   });
 
-  it("a streaming request refused as unsupported is not a failure, and later calls skip streaming", async () => {
+  it("a streaming request refused as unsupported is not a failure; a 400 never turns streaming off", async () => {
     const unsupported = () => new Response("stream not supported", { status: 400 });
-    const fetch = stubFetch([unsupported, plain]);
+    stubFetch([unsupported, plain]);
     expect((await read()).text).toBe("plain");
     // The refused stream consumed nothing: one admission, no breaker failure.
     expect(backend.inspect("run-1", "org-1")).toEqual({ runAttempts: 1, runFailures: 0, orgAttempts: 1, orgSettledAttempts: 1 });
-    // Memoized per endpoint and model: the next call goes straight to JSON.
+    // A 400 usually describes the request, not the endpoint: the next call streams again.
     stubFetch([plain]);
-    expect((await read(2)).text).toBe("plain");
+    await read(2);
     const body = JSON.parse(String((vi.mocked(globalThis.fetch).mock.calls[0] as unknown as [string, RequestInit])[1].body));
-    expect(body.stream).toBeUndefined();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(body.stream).toBe(true);
+  });
+
+  it("turns streaming off only after two capability refusals, for ten minutes", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const notFound = () => new Response("no streaming here", { status: 404 });
+    const streamedFlag = () => JSON.parse(String((vi.mocked(globalThis.fetch).mock.calls[0] as unknown as [string, RequestInit])[1].body)).stream;
+    stubFetch([notFound, plain]);
+    await read(1);
+    // One observation is not enough.
+    stubFetch([notFound, plain]);
+    await read(2);
+    expect(streamedFlag()).toBe(true);
+    // The second refused-then-served pair turned it off: the next call goes straight to JSON.
+    stubFetch([plain]);
+    await read(3);
+    expect(streamedFlag()).toBeUndefined();
+    // After the TTL, streaming is tried again.
+    now += 10 * 60_000 + 1;
+    stubFetch([plain]);
+    await read(4);
+    expect(streamedFlag()).toBe(true);
+  });
+
+  it("does not combine two capability refusals more than ten minutes apart", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const notFound = () => new Response("no streaming here", { status: 405 });
+    stubFetch([notFound, plain]);
+    await read(1);
+    now += 10 * 60_000 + 1;
+    stubFetch([notFound, plain]);
+    await read(2);
+    stubFetch([plain]);
+    await read(3);
+    expect(JSON.parse(String((vi.mocked(globalThis.fetch).mock.calls[0] as unknown as [string, RequestInit])[1].body)).stream).toBe(true);
   });
 
   it("a request rejected with and without streaming does not turn streaming off, and its JSON failure counts", async () => {

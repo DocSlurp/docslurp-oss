@@ -28,6 +28,33 @@ const ORG_ROW_RETENTION_HOURS = VISION_ORG_WINDOW_HOURS + 1;
 export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
   constructor(private readonly sql: Client) {}
 
+  /**
+   * Startup check (temporal/worker.ts): throws unless the database has the current migration 0101.
+   * 0101 was replaced in place before reaching main, so a database that applied the earlier version
+   * records it as applied but lacks `vision_org_attempts.weight_cents` and still has
+   * `vision_run_charged_pages`; migrating cannot fix that, and the guard would misbehave on it.
+   */
+  async assertSchema(): Promise<void> {
+    const [row] = await this.sql<{ org_table: boolean; weight: boolean; stale: boolean }[]>`
+      select
+        to_regclass('vision_org_attempts') is not null as org_table,
+        exists (
+          select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'vision_org_attempts' and column_name = 'weight_cents'
+        ) as weight,
+        to_regclass('vision_run_charged_pages') is not null as stale`;
+    if (!row?.org_table) {
+      throw new Error("vision attempt ledger missing (migration 0101_vision_attempt_ledger not applied); run pnpm db:migrate");
+    }
+    if (!row.weight || row.stale) {
+      throw new Error(
+        "vision attempt ledger is from an earlier draft of migration 0101 " +
+          `(${[!row.weight ? "vision_org_attempts.weight_cents missing" : null, row.stale ? "stale vision_run_charged_pages present" : null].filter(Boolean).join(", ")}); ` +
+          "database reset required: 0101 was replaced in place and cannot be upgraded by pnpm db:migrate",
+      );
+    }
+  }
+
   async admit(request: VisionAdmitRequest): Promise<VisionBackendAdmission> {
     const { runId, target, config, weightCents } = request;
     return await this.sql.begin(async (tx) => {

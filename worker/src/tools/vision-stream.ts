@@ -300,19 +300,50 @@ class StreamStartError extends Error {}
  * The endpoint refused the streaming request itself (400/404/405/415/422/501) before accepting it: a
  * capability answer, not a billed failure. Its request is handed back to the vision guard.
  */
-class StreamUnsupportedError extends StreamStartError {}
+class StreamUnsupportedError extends StreamStartError {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
 
 const STREAM_UNSUPPORTED_STATUSES: ReadonlySet<number> = new Set([400, 404, 405, 415, 422, 501]);
+/**
+ * Statuses that say the endpoint or method itself is unsupported. 400 and 422 are left out: they
+ * usually describe the request (a bad image, a schema), so they never turn streaming off.
+ */
+const STREAM_MEMO_STATUSES: ReadonlySet<number> = new Set([404, 405, 415, 501]);
+/** Refusals (each followed by a successful non-streaming retry) before streaming is turned off. */
+const STREAM_MEMO_OBSERVATIONS = 2;
+/** How long an endpoint stays non-streaming, and how far apart its two observations may be. */
+const STREAM_MEMO_TTL_MS = 10 * 60_000;
 
 /**
- * Endpoints (chat completions URL + model) whose streaming request was refused while the same request
- * without streaming then succeeded: later calls in this process go straight to non-streaming. Learned
- * only from that pair, so a refusal caused by the request itself never turns streaming off.
+ * Endpoints (chat completions URL + model) whose streaming request was refused with a capability
+ * status while the same request without streaming then succeeded, twice within the TTL: calls in this
+ * process go straight to non-streaming until the TTL ends. Learned only from that pair, so a refusal
+ * caused by the request itself never turns streaming off, and one stray answer cannot either.
  */
-const streamingUnsupported = new Set<string>();
+const streamingUnsupported = new Map<string, { observations: number; firstAt: number; disabledUntil: number }>();
 
 function streamingKey(args: { url: string; model: string }): string {
   return `${args.url}\u0000${args.model}`;
+}
+
+function streamingDisabled(key: string, now = Date.now()): boolean {
+  const entry = streamingUnsupported.get(key);
+  return Boolean(entry && entry.disabledUntil > now);
+}
+
+/** Records one refused-then-served pair; true when it turns streaming off for this endpoint. */
+function noteStreamingUnsupported(key: string, status: number, now = Date.now()): boolean {
+  if (!STREAM_MEMO_STATUSES.has(status)) return false;
+  const previous = streamingUnsupported.get(key);
+  const entry = previous && now - previous.firstAt <= STREAM_MEMO_TTL_MS && previous.disabledUntil <= now
+    ? { ...previous, observations: previous.observations + 1 }
+    : { observations: 1, firstAt: now, disabledUntil: 0 };
+  if (entry.observations >= STREAM_MEMO_OBSERVATIONS) entry.disabledUntil = now + STREAM_MEMO_TTL_MS;
+  streamingUnsupported.set(key, entry);
+  return entry.disabledUntil > now;
 }
 
 /** Test hook: forget which endpoints refused streaming. */
@@ -472,7 +503,7 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
         // Refused before acceptance: no page admission, no breaker failure, no org count.
         await args.gate?.unbilled("unsupported");
-        throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`);
+        throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`, response.status);
       }
       args.gate?.failed();
       throw new Error(`vision request failed: ${response.status} ${text}`);
@@ -525,7 +556,7 @@ function logAttempt(s: AttemptSummary, model: string) {
 
 /** One guarded call: stream (with non-streaming fallback), classify, retry once on another route. */
 export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Promise<GuardedCompletion> {
-  let streaming = args.streaming && !streamingUnsupported.has(streamingKey(args));
+  let streaming = args.streaming && !streamingDisabled(streamingKey(args));
   const log: Array<ReturnType<typeof summarize>> = [];
   let body = args.body;
   let last: VisionAttempt | null = null;
@@ -557,9 +588,8 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
         console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
         streaming = false;
         attempt = await runAttempt(args, body, false);
-        if (error instanceof StreamUnsupportedError) {
-          streamingUnsupported.add(streamingKey(args));
-          console.warn(`[vision-stream] model=${args.model} streaming unsupported by this endpoint; non-streaming from now on in this process`);
+        if (error instanceof StreamUnsupportedError && noteStreamingUnsupported(streamingKey(args), error.status)) {
+          console.warn(`[vision-stream] model=${args.model} streaming unsupported by this endpoint (${error.status}); non-streaming for ${STREAM_MEMO_TTL_MS / 60_000} min in this process`);
         }
       }
     } catch (error) {

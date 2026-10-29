@@ -8,8 +8,9 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * failed request, an inline retry, the alternate-route retry, the streaming-to-JSON fallback, a
  * self-critique pass and a second read of a page already charged create no new charge. Provider cost
  * data cannot bound that (interrupted streams, inline retries and failures before the first chunk
- * report estimated or no usage), so the guard counts requests, each weighted by the worst case its
- * route can cost (list price, 16 MP image, enforced output cap), and never reads a reported cost.
+ * report estimated or no usage), so the guard counts requests, each weighted by the most it can cost
+ * (its actual prompt bytes and image size, the enforced output cap, the route's list price, which
+ * OpenRouter is told as `max_price`; lib/vision-pricing.ts), and never reads a reported cost.
  *
  * Every vision call made through `executeVisionRuntime` (vision-extract pages and routed regions,
  * document-map OCR, deferred materialization, self-critique) admits each HTTP request it sends, at

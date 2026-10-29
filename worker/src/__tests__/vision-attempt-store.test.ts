@@ -3,7 +3,8 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Store } from "../db/store.js";
-import { persistRunUsageEvents } from "../db/usage-event-store.js";
+import { recordMaterializedPageFee } from "../db/page-base-fee.js";
+import { debitRunUsageCredits, persistRunUsageEvents } from "../db/usage-event-store.js";
 import { recordVisionRead, VisionRunGuard, type VisionAttemptPurpose, type VisionGuardConfig } from "../lib/vision-attempt-guard.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import type { VisionPageTask } from "../temporal/shared.js";
@@ -293,6 +294,65 @@ describe("PostgresVisionAttemptBackend", () => {
       expect(Number(charge?.cost_cents)).toBeGreaterThan(0);
       expect(await count(`select count(*)::int as n from credit_debits_pending where org_id = 'o9' and run_id = 'null-org-billed'`)).toBe(1);
     }, 60_000);
+
+    describe("a failing credit debit rolls back the charge and the ticket release together", () => {
+      beforeAll(async () => {
+        await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o10', 'Ten', 'ten', 'u1');
+          insert into workspaces(id, org_id, user_id, name) values ('w10', 'o10', 'u1', 'W10');
+          create function test_fail_o10_debit() returns trigger language plpgsql as $$
+          begin
+            if new.org_id = 'o10' then raise exception 'injected debit failure'; end if;
+            return new;
+          end $$;
+          create trigger test_fail_o10_debit before insert on credit_debits_pending
+            for each row execute function test_fail_o10_debit();`);
+      });
+
+      afterAll(async () => {
+        await db.exec(`drop trigger test_fail_o10_debit on credit_debits_pending; drop function test_fail_o10_debit();`);
+      });
+
+      it("in the run checkpoint", async () => {
+        await insertRuns([["debit-fail", "o10", "w10"]]);
+        await insertDocument("debit-fail-doc", "o10", "w10", "debit-fail");
+        const state = await stateOf("debit-fail");
+        await readPage(state, "debit-fail-doc", 1);
+        expect(await orgCount("o10")).toBe(1);
+        await expect(store.updateProgress(state)).rejects.toThrow(/injected debit failure/);
+        // Neither the charge nor the release survived: the request is still counted for the org.
+        expect(await count(`select count(*)::int as n from usage_events where id = 'rich:debit-fail:debit-fail-doc:1'`)).toBe(0);
+        expect(await orgCount("o10")).toBe(1);
+      }, 60_000);
+
+      it("in the page-task path (persistRunUsageEvents then debitRunUsageCredits)", async () => {
+        await insertRuns([["debit-fail-task", "o10", "w10"]]);
+        await insertDocument("debit-fail-task-doc", "o10", "w10", "debit-fail-task");
+        const before = await orgCount("o10");
+        const state = await stateOf("debit-fail-task");
+        await readPage(state, "debit-fail-task-doc", 1);
+        const sql = (store as unknown as { sql: import("postgres").Sql<Record<string, unknown>> }).sql;
+        await expect(sql.begin(async (tx) => {
+          const client = tx as unknown as import("postgres").Sql<Record<string, unknown>>;
+          const cost = await persistRunUsageEvents({ client, state, usageEvents: state.usageLedger.checkpoint().events });
+          // The release happened inside the transaction before the debit fails.
+          expect(Number((await client`select count(*)::int as n from vision_org_attempts where org_id = 'o10'`)[0]!.n)).toBe(before);
+          await debitRunUsageCredits({ client, state, costCents: cost });
+        })).rejects.toThrow(/injected debit failure/);
+        expect(await count(`select count(*)::int as n from usage_events where id = 'rich:debit-fail-task:debit-fail-task-doc:1'`)).toBe(0);
+        expect(await orgCount("o10")).toBe(before + 1);
+      }, 60_000);
+    });
+
+    it("bills a null-org run's materialized pages under its workspace's org", async () => {
+      await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o11', 'Eleven', 'eleven', 'u1');
+        insert into workspaces(id, org_id, user_id, name) values ('w11', 'o11', 'u1', 'W11');`);
+      await insertRuns([["null-org-fee", null, "w11"]]);
+      await insertDocument("null-org-fee-doc", "o11", "w11", "null-org-fee");
+      const sql = (store as unknown as { sql: import("postgres").Sql<Record<string, unknown>> }).sql;
+      expect(await recordMaterializedPageFee(sql, "null-org-fee", "null-org-fee-doc", [1, 2])).toBeGreaterThan(0);
+      expect(await count(`select count(*)::int as n from usage_events where run_id = 'null-org-fee' and org_id = 'o11'`)).toBe(2);
+      expect(await count(`select count(*)::int as n from credit_debits_pending where org_id = 'o11' and run_id = 'null-org-fee'`)).toBe(1);
+    }, 60_000);
   });
 });
 
@@ -322,3 +382,22 @@ async function readPage(state: WorkflowState, documentId: string, pageNumber: nu
     await gate.finish();
   }
 }
+
+describe("startup schema check", () => {
+  it("passes on the current 0101 and refuses an earlier draft loudly, asking for a reset", async () => {
+    await expect(store.visionAttempts.assertSchema()).resolves.toBeUndefined();
+    await db.exec(`alter table vision_org_attempts rename column weight_cents to weight_cents_old;`);
+    try {
+      await expect(store.visionAttempts.assertSchema()).rejects.toThrow(/weight_cents missing.*database reset required/);
+    } finally {
+      await db.exec(`alter table vision_org_attempts rename column weight_cents_old to weight_cents;`);
+    }
+    await db.exec(`create table vision_run_charged_pages (run_id text);`);
+    try {
+      await expect(store.visionAttempts.assertSchema()).rejects.toThrow(/stale vision_run_charged_pages present.*database reset required/);
+    } finally {
+      await db.exec(`drop table vision_run_charged_pages;`);
+    }
+    await expect(store.visionAttempts.assertSchema()).resolves.toBeUndefined();
+  }, 60_000);
+});

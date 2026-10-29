@@ -118,6 +118,10 @@ async function main(): Promise<void> {
   await assertNativePdfEngineAtStartup(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
+  // The vision guard's ledger must be the current migration 0101: an earlier draft needs a reset.
+  await store.visionAttempts.assertSchema().catch((error) => {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  });
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
