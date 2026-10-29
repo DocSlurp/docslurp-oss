@@ -34,6 +34,7 @@ import {
   UnreadableSourceError,
 } from "./source-metadata.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
+import { assertVisualModeAllowed } from "./workspace-indexing-mode.js";
 import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
@@ -904,6 +905,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     const access = await getWorkspaceAccess(input.workspaceId, input.userId);
     if (!access) throw new Error("Workspace not found");
     if (!canContributeToWorkspace(access, input.userId)) throw new Error("Forbidden");
+    // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
+    // with Fast (or a refused privacy/PII policy) is refused whatever the workspace or request says
+    // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
+    if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual") assertVisualModeAllowed(input.pipeline);
 
     const { sources } = input;
     let sourceDocuments: SourceDocumentRow[] = [];
