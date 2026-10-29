@@ -130,7 +130,7 @@ def _seccomp():
         clone = resolve('clone')
         for flag in CLONE_NAMESPACE_FLAGS:
             # struct scmp_arg_cmp {unsigned arg; enum op; u64 datum_a; u64 datum_b}: (arg0 & flag) == flag
-            cmp = ctypes.create_string_buffer(struct.pack('<IIQQ', 0, 7, flag, flag), 24)  # SCMP_CMP_MASKED_EQ = 7
+            cmp = ctypes.create_string_buffer(struct.pack('=IIQQ', 0, 7, flag, flag), 24)  # SCMP_CMP_MASKED_EQ = 7
             if lib.seccomp_rule_add_array(ctx, 0x00050000 | 1, clone, 1, cmp) != 0:
                 raise ValueError('seccomp rule refused')
         if lib.seccomp_load(ctx) != 0:
@@ -154,17 +154,17 @@ def _status(field):
 
 def _drop_capabilities(libc):
     # The guest may run as root: drop every capability (ambient, bounding, then effective/permitted/inheritable).
-    if int(_status('CapEff'), 16) or int(_status('CapPrm'), 16) or int(_status('CapBnd'), 16):
-        libc.prctl(47, 4, 0, 0, 0)  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL (no-op when unsupported)
-        for cap in range(64):
-            if libc.prctl(24, cap, 0, 0, 0) != 0 and ctypes.get_errno() not in (22, 1):  # PR_CAPBSET_DROP; EINVAL ends, EPERM checked below
-                raise HardeningError('capability drop refused')
-        header = ctypes.create_string_buffer(struct.pack('=Ii', 0x20080522, 0), 8)  # _LINUX_CAPABILITY_VERSION_3
-        data = ctypes.create_string_buffer(24)  # two zeroed {effective, permitted, inheritable}
-        libc.syscall.restype = ctypes.c_long
-        if libc.syscall(126, header, data) != 0:  # capset (x86-64)
-            raise HardeningError('capset refused')
-    if int(_status('CapEff'), 16) or int(_status('CapPrm'), 16):
+    # Always clear: ambient, bounding (needs CAP_SETPCAP; EPERM when not root), then all three sets via capset.
+    libc.prctl(47, 4, 0, 0, 0)  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL (no-op when unsupported)
+    for cap in range(64):
+        if libc.prctl(24, cap, 0, 0, 0) != 0 and ctypes.get_errno() not in (22, 1):  # PR_CAPBSET_DROP; EINVAL ends
+            raise HardeningError('capability drop refused')
+    header = ctypes.create_string_buffer(struct.pack('=Ii', 0x20080522, 0), 8)  # _LINUX_CAPABILITY_VERSION_3
+    data = ctypes.create_string_buffer(24)  # two zeroed {effective, permitted, inheritable}
+    libc.syscall.restype = ctypes.c_long
+    if libc.syscall(126, header, data) != 0:  # capset (x86-64)
+        raise HardeningError('capset refused')
+    if any(int(_status(field), 16) for field in ('CapEff', 'CapPrm', 'CapInh', 'CapAmb')):
         raise HardeningError('capabilities remain')
     return int(_status('CapBnd'), 16) == 0
 

@@ -306,10 +306,11 @@ export async function executeDopplerVm(
       const [out, err, exit] = await control(() => Promise.allSettled([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
       // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
       // recognised even when its whole-document output overran this shard's cap.
-      if (job.range && err.status === "fulfilled" && guestProtocol(err.value) === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      // A declared-hardened image that is not is terminal and takes precedence over the old-image range check.
       if (declaredGuestProtocol() >= 4 && err.status === "fulfilled" && exit.status === "fulfilled" && exit.value === 0 && !hardenedEnvelope(err.value)) {
         throw new DopplerVmFailure(HARDENING_MISMATCH_MESSAGE);
       }
+      if (job.range && err.status === "fulfilled" && guestProtocol(err.value) === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
       if (out.status === "rejected") throw out.reason;
       if (err.status === "rejected") throw err.reason;
       if (exit.status === "rejected") throw exit.reason;
@@ -352,7 +353,9 @@ export async function executeDopplerVm(
         exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
           estimateReason: "VM termination unconfirmed; reserve full configured lifetime" };
         // Keep an old-image refusal recognisable: callers stop sharding on it.
-        throw new SandboxRunError(primaryMessage === SHARDS_UNSUPPORTED_MESSAGE ? SHARDS_UNSUPPORTED_MESSAGE
+        // Keep classifications callers act on (stop sharding, no fallback); the cost is reserved either way.
+        const keep = [SHARDS_UNSUPPORTED_MESSAGE, HARDENING_MISMATCH_MESSAGE, CONFINEMENT_UNAVAILABLE_MESSAGE];
+        throw new SandboxRunError(primaryMessage && keep.includes(primaryMessage) ? primaryMessage
           : "Document VM termination failed or exceeded cleanup deadline", exposure);
       }
       if (vm && allocationUsage) Object.assign(allocationUsage, usage());
