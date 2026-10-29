@@ -104,10 +104,12 @@ export function credentialBindingPlugin(options: { pool: Pick<Pool, "query"> }):
         matcher: (ctx) => ctx.path === "/change-password",
         handler: createAuthMiddleware(async (ctx) => {
           const { userId, fingerprint } = await passwordChange.get();
-          if (!userId || !fingerprint || isAPIError(ctx.context.returned)) return;
+          // Signing out other devices keeps only the session this change creates (it carries no
+          // fingerprint); carrying old-password sessions over would revive one still in flight.
+          if (!userId || !fingerprint || ctx.body?.revokeOtherSessions === true || isAPIError(ctx.context.returned)) return;
           const hash = await storedHash(`u.id = $1`, userId);
           if (!hash) return;
-          // Sessions this change keeps (all, or none when others were signed out) move to the new password.
+          // The sessions this change keeps move to the new password.
           await pool.query(`update session set "credentialFingerprint" = $3 where "userId" = $1 and "credentialFingerprint" = $2`,
             [userId, fingerprint, credentialFingerprint(hash)]);
         }),
