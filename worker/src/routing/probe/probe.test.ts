@@ -9,7 +9,7 @@ import { setProbeBindingForTesting, type Box, type ProbeBinding, type ProbeBindi
 import { laplacianVariance, parsePages, percentiles, textLayerStatus } from "./features.js";
 import type { CommandPlan } from "../../tools/runner.js";
 import { sandboxedTesseract } from "./ocr-layer.js";
-import { PROBE_OVERLAP_MAX_PAGES, probeNativePdf, type NativeProbeRow } from "./probe.js";
+import { PROBE_LIMITS, PROBE_OVERLAP_MAX_OBJECTS, PROBE_OVERLAP_MAX_PAGES, probeNativePdf, type NativeProbeRow } from "./probe.js";
 
 const png = await sharp({ create: { width: 612, height: 792, channels: 3, background: { r: 255, g: 255, b: 255 } } }).png().toBuffer();
 
@@ -192,6 +192,25 @@ describe("native page probe", () => {
     }
     expect(handles[1]!.renders).toBe(1);
     for (const handle of handles) expect(handle.closedWithInFlight).toBe(0);
+  });
+
+  it("opens the second handle under the probe limits plus an object ceiling, and probes on one handle when that open fails", async () => {
+    const base = fakeBinding([{}, {}]);
+    const limits: unknown[] = [];
+    let renders = 0;
+    const binding: ProbeBinding = {
+      ...base,
+      openPath: (file, options) => {
+        limits.push(options?.limits);
+        if (limits.length === 2) throw Object.assign(new Error("too many objects"), { code: "PDF_LIMIT", limit: "object_count" });
+        const doc = base.openPath(file, options);
+        return { ...doc, page: (i: number) => ({ ...doc.page(i), renderAsync: async () => { renders += 1; return png; } }) };
+      },
+    };
+    const rows = await collect(binding);
+    expect(limits).toEqual([PROBE_LIMITS, { ...PROBE_LIMITS, maxObjects: PROBE_OVERLAP_MAX_OBJECTS }]);
+    expect(rows.every((row) => !row.unusualFeatures?.includes("probe-error"))).toBe(true);
+    expect(renders).toBe(2);
   });
 
   it("opens no second handle when overlap is off or the document exceeds the page ceiling", async () => {

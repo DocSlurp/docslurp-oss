@@ -52,6 +52,13 @@ export interface NativeProbeOptions {
 /** Page-count ceiling for the probe's second render handle (`PROBE_OVERLAP_MAX_PAGES`). */
 export const PROBE_OVERLAP_MAX_PAGES = 1000;
 
+/**
+ * Object ceiling for the second handle, on top of `PROBE_LIMITS`: its memory follows the indirect-object count
+ * (~3 KB each, object streams included), not pages or file size. 10,000 objects measured +29-32 MB peak RSS;
+ * a 474 KB, 250-page object-stream PDF with 51,000 objects measured +150 MB. Larger documents probe on one handle.
+ */
+export const PROBE_OVERLAP_MAX_OBJECTS = 10_000;
+
 /** Without a sandboxed recogniser the OCR layer stays unverified, as when tesseract is not installed. */
 const noRecogniser: Recogniser = async () => null;
 
@@ -408,10 +415,11 @@ export async function* probeNativePdf(binding: ProbeBinding, options: NativeProb
     const count = doc.pageCount();
     const docFeatures = documentFeatures(doc, meta.encrypted);
     // The first handle opened, so a second normally does too; without one the probe renders on the first, as before.
-    // Large documents skip the second handle: it holds its own parsed xref and object cache.
+    // Large documents skip the second handle: it holds its own parsed xref and object cache. Past the object
+    // ceiling its open fails with PDF_LIMIT and the probe renders on the first handle.
     if ((options.overlapRender ?? true) && count <= (options.overlapRenderMaxPages ?? PROBE_OVERLAP_MAX_PAGES)) {
       try {
-        renderDoc = binding.openPath(options.pdfPath, { limits: PROBE_LIMITS });
+        renderDoc = binding.openPath(options.pdfPath, { limits: { ...PROBE_LIMITS, maxObjects: PROBE_OVERLAP_MAX_OBJECTS } });
       } catch {
         renderDoc = undefined;
       }
