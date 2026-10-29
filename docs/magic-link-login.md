@@ -1,6 +1,6 @@
 # Email sign-in links
 
-DocSlurp uses Better Auth 1.7.14's native magic-link plugin for existing-account sign-in. The plugin generates, hashes and atomically consumes the token; the application adds an explicit confirmation step so email scanners do not sign users in or consume their links.
+DocSlurp uses Better Auth's native magic-link plugin for existing-account sign-in. The plugin generates, hashes and atomically consumes the token; the application adds an explicit confirmation step so email scanners do not sign users in or consume their links.
 
 ## Configuration
 
@@ -16,7 +16,7 @@ Links expire in five minutes, work once, and do not create accounts. Registratio
 4. The person clicks **Continue to sign in**. The app sends a bounded JSON `POST /api/auth/magic-link/confirm` with `{ token, callbackURL }` from a trusted origin.
 5. The server delegates verification to the native API, preserves its session/MFA cookies and returns only `{ redirectTo }`. Native GET verification is server-only; public attempts cannot bypass the confirmation step.
 
-Native issuance is limited to three requests per minute in the production Better Auth database limiter. Confirmation has an independent atomic database budget of ten requests per minute per trusted client address, including a shared unknown-address bucket. This gate remains enabled when optional API limits are disabled and fails closed on storage failure. Tokens, email bodies and session values must never be logged.
+Native issuance is limited to three requests per minute per client address in the production Better Auth database limiter, and every address shares the per-recipient email budget described in [account recovery](account-recovery.md#rate-limits). Confirmation has an independent atomic database budget (`auth_rate_limits`) of ten requests per minute per trusted client address, including a shared unknown-address bucket. This gate remains enabled when optional API limits are disabled and fails closed on storage failure. Tokens, email bodies and session values must never be logged.
 
 ## Security and recovery
 

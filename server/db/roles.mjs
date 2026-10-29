@@ -103,6 +103,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   admin_credit_requests: "billing administration",
   admin_stats: "admin dashboard materialized view",
   api_keys: "API key hashes and scopes",
+  auth_rate_limits: "authentication budgets: per-recipient email, code checks, SSO",
   budget_alerts: "API-managed budget alert settings",
   chat_answer_evidence_spans: "chat (API only)",
   chat_message_feedback: "chat (API only)",

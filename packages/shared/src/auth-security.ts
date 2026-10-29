@@ -166,14 +166,9 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
           window: 60,
           max: 3
         },
-        "/forget-password": {
-          window: 60,
-          max: 3
-        },
-        "/reset-password": {
-          window: 60,
-          max: 5
-        },
+        // Password reset is native Email OTP (/email-otp/*, limited by that
+        // plugin); the link-based /request-password-reset and /reset-password
+        // are disabled in server/src/lib/better-auth.ts.
         // Second-factor codes: per-IP limits on top of the twoFactor plugin's
         // per-challenge (5) and per-account (10, then a 15-minute lock) budgets.
         "/two-factor/verify-totp": {
