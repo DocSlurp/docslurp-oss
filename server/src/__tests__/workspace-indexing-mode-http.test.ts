@@ -257,6 +257,25 @@ describe("stored extractor settings the strict schemas reject (round 4 M2)", () 
     }
   });
 
+  it("full index and its estimate succeed on a stale workspace row, and the run row drops the rejected paths (round 5 M1)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await seedWorkspace("t-stale-fi", "gold", "map", { documentExtraction: { ...defaultPipelineFeatures.documentExtraction, ...hostile } });
+      await seedDoc("t-stale-fi-a", "t-stale-fi", "gold", 5, 2);
+      const estimate = await app.request("/v1/workspaces/t-stale-fi/full-index/estimate", json("POST", {}));
+      expect(estimate.status).toBe(200);
+      const res = await app.request("/v1/workspaces/t-stale-fi/full-index", json("POST", {}));
+      expect(res.status).toBe(202);
+      const [run] = await sql<{ pipeline: unknown }[]>`select pipeline from workspace_runs where kind = 'full-index' and workspace_id = 't-stale-fi'`;
+      expect(run).toBeDefined();
+      expect(JSON.stringify(run!.pipeline)).not.toContain("/tmp/attacker");
+      expect(JSON.stringify(run!.pipeline)).not.toContain("useCache");
+      expect((run!.pipeline as { documentExtraction: { ocr: { language: string } } }).documentExtraction.ocr.language).not.toBe("en");
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("rejects the same settings on write with 400", async () => {
     await seedWorkspace("t-strict-x", "gold", "full");
     for (const documentExtraction of [

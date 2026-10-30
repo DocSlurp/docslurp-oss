@@ -107,3 +107,92 @@ describe("bulkReprocessDocuments", () => {
     expect(startWorkflow).not.toHaveBeenCalled();
   });
 });
+
+describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
+  // A run row written before the per-extractor option schemas: a Dolphin repoPath and an unknown option key.
+  const stale = {
+    ...defaultPipelineFeatures,
+    documentExtraction: {
+      ...defaultPipelineFeatures.documentExtraction,
+      options: { dolphin: { mode: "page", repoPath: "/tmp/attacker" }, kreuzberg: { useCache: false } },
+    },
+  };
+  // Fails validation for good: no sanitizing can make it start.
+  const invalid = { ...defaultPipelineFeatures, quality: "turbo" };
+  const counts = async () => (await sql<{ runs: number; docs: number }[]>`
+    select (select count(*)::int from workspace_runs) as runs, (select count(*)::int from documents) as docs`)[0];
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("bulk reprocess and its estimate succeed on a stale row, with the rejected path dropped", async () => {
+    const errors = quiet();
+    try {
+      await seedDocument("s", stale);
+      const { estimateDocumentReprocess } = await import("../services/work-estimates.js");
+      expect(await estimateDocumentReprocess({ documentIds: ["s"], userId: "u" })).not.toBeNull();
+      const result = await bulkReprocessDocuments(["s"], "u");
+      expect(result.failed).toEqual([]);
+      expect(result.runs).toHaveLength(1);
+      const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from workspace_runs where id = ${result.runs[0]!.id}`;
+      expect(JSON.stringify(row!.pipeline)).not.toContain("/tmp/attacker");
+      expect(JSON.stringify(row!.pipeline)).not.toContain("useCache");
+      expect(startWorkflow).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(startWorkflow.mock.calls[0]![1])).not.toContain("/tmp/attacker");
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("refuses a permanently invalid row before anything is written (no orphan run or document version)", async () => {
+    await seedDocument("x", invalid);
+    const before = await counts();
+    await expect(bulkReprocessDocuments(["x"], "u")).rejects.toThrow();
+    expect(await counts()).toEqual(before);
+    expect(startWorkflow).not.toHaveBeenCalled();
+  });
+
+  describe("queued-run recovery", () => {
+    const queued = async (id: string, pipeline: object) => {
+      await sql`
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
+        values (${id}, 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as postgres.JSONValue)}, 0, now())`;
+    };
+    const sweeper = async () => {
+      const { createRunLifecycle } = await import("../services/run-lifecycle.js");
+      const { createRunStartRecovery } = await import("../services/run-start-recovery.js");
+      const lifecycle = createRunLifecycle({ sql: sql as never, startWorkflow, failureThreshold: 3 });
+      return createRunStartRecovery({ sql: sql as never, lifecycle, config: { batchSize: 25, leaseMs: 30_000 } });
+    };
+
+    it("starts a queued run whose stored pipeline is stale, with the rejected path dropped", async () => {
+      const errors = quiet();
+      try {
+        await queued("q-stale", stale);
+        const pass = await (await sweeper()).sweepOnce({ ignoreBackoff: true });
+        expect(pass).toMatchObject({ claimed: 1, started: 1, failed: 0 });
+        expect(startWorkflow.mock.calls[0]![0]).toBe("q-stale");
+        expect(JSON.stringify(startWorkflow.mock.calls[0]![1])).not.toContain("/tmp/attacker");
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
+    it("fails a permanently invalid queued run once, with a category, and never claims it again", async () => {
+      const errors = quiet();
+      try {
+        await queued("q-bad", invalid);
+        const recovery = await sweeper();
+        expect(await recovery.sweepOnce({ ignoreBackoff: true })).toMatchObject({ claimed: 1, started: 0, failed: 1 });
+        const [row] = await sql<{ status: string; error: string; stats: { startFailure?: { category?: string } } }[]>`
+          select status, error, stats from workspace_runs where id = 'q-bad'`;
+        expect(row!.status).toBe("failed");
+        expect(row!.stats.startFailure?.category).toBe("invalid_pipeline");
+        // The public error does not echo the raw validation message.
+        expect(row!.error).not.toContain("turbo");
+        expect(await recovery.sweepOnce({ ignoreBackoff: true })).toMatchObject({ claimed: 0 });
+        expect(startWorkflow).not.toHaveBeenCalled();
+      } finally {
+        errors.mockRestore();
+      }
+    });
+  });
+});

@@ -623,14 +623,14 @@ describe("runMaterializeRange activity", () => {
         // m1 OCRs page 3 slowly: meanwhile its claim expires and m2 claims, reads and bills the page.
         const stallingOps: Partial<PageMaterializerOps> = {
           ...ocrOps,
-          async ocrPage(d, page) {
+          async ocrPage(d, page, ...rest) {
             if (!stalled) {
               stalled = true;
               await db.exec(`update document_page_states set claim_expires_at = now() - interval '1 second' where document_id = 'd1' and page_number = 3`);
               const peer = await runMaterializeRange(ocrDeps(), input("m2", [3]));
               expect(peer.indexed).toEqual([3]);
             }
-            return await ocrOps.ocrPage!(d, page);
+            return await ocrOps.ocrPage!(d, page, ...rest);
           },
         };
         const base = deps() as { materializer: Record<string, unknown> };

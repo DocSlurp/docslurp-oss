@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
   documentTagsSchema,
   pipelineFeatureOverridesSchema,
+  sanitizeStoredPipeline,
   workspaceTemplateKeySchema,
   type ExtractRecord,
   type PipelineFeatureOverrides,
@@ -239,7 +240,8 @@ export async function confirmDirectUploadWorkspaceIntake(
       workspace: session.workspace_id ?? session.workspace_name,
       newWorkspace: !session.workspace_id && !session.workspace_name,
       templateKey: session.template_key ? workspaceTemplateKeySchema.parse(session.template_key) : undefined,
-      pipeline: session.pipeline ?? undefined,
+      // Stored with the session; a session created before an extractor schema tightened is read leniently.
+      pipeline: session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined,
       tags: session.tags ?? [],
       apiKeyId: session.api_key_id,
       allowedWorkspaceIds: session.allowed_workspace_ids,

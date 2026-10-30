@@ -8,6 +8,7 @@ import {
   isBillingEnforced,
   getPrivateModelEndpointRegistry,
   compilePipelinePlan,
+  sanitizeStoredPipeline,
   type CostEstimate,
   type IndexingMode,
   type MaterializationPolicy,
@@ -315,7 +316,8 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
   if (todo.length === 0) throw new IndexingModeError("A full index is already running for these documents.", 409, "index_in_progress");
   assertDocumentCap(todo.length);
   const docs = await liveDocs(args.workspaceId, todo.map((row) => row.id));
-  const pipeline = { ...(ws.pipeline as PipelineFeatures), indexingMode: "full" as const };
+  // Stored extractor settings the strict schemas now reject are dropped before the run row is written.
+  const pipeline = { ...sanitizeStoredPipeline(ws.pipeline as PipelineFeatures, `workspace ${args.workspaceId}`), indexingMode: "full" as const };
   const batches: RunBatch[] = [{ docs, pipeline, mode: "full", partial: false }];
   await validateBatches(batches);
   const unindexed = todo.reduce((sum, row) => sum + row.unindexed, 0);
@@ -450,7 +452,7 @@ export async function estimateFullIndex(args: {
   const pending = (await unindexedPages(args.workspaceId, args.documentIds)).filter((row) => row.unindexed > 0);
   const busy = await inFlightSourceIds(sql as unknown as Client, args.workspaceId, pending.map((row) => row.id), null);
   const todo = pending.filter((row) => !busy.has(row.id));
-  const features = { ...ws.pipeline, indexingMode: "full" as const } as PipelineFeatures;
+  const features = { ...sanitizeStoredPipeline(ws.pipeline, `workspace ${args.workspaceId}`), indexingMode: "full" as const } as PipelineFeatures;
   return await estimateWork({
     features,
     stages: compilePipelinePlan(features).stageOrder,

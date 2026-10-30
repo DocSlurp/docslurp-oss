@@ -4,6 +4,7 @@ import {
   documentVersionKey,
   effectiveIndexingMode,
   pageRouterModeSchema,
+  sanitizeStoredPipeline,
   stageSelectionKeys,
   withoutStageSelection,
   withPlatformPageRouterMode,
@@ -901,7 +902,11 @@ export function createRunCreation(deps: RunCreationDeps) {
     }
   }
 
-  async function create(input: CreateRunInput): Promise<CreatedRun> {
+  async function create(request: CreateRunInput): Promise<CreatedRun> {
+    // Callers often pass a stored workspace or run pipeline (reprocess, bulk reprocess, full index, connectors).
+    // Extractor settings the strict schemas now reject are dropped here, before anything is written, so the
+    // Run row never carries them (a Dolphin repoPath, an unknown extractor id). Request schemas stay strict.
+    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(request.pipeline, `run creation in workspace ${request.workspaceId}`) };
     const access = await getWorkspaceAccess(input.workspaceId, input.userId);
     if (!access) throw new Error("Workspace not found");
     if (!canContributeToWorkspace(access, input.userId)) throw new Error("Forbidden");
@@ -934,6 +939,22 @@ export function createRunCreation(deps: RunCreationDeps) {
     await assertCreditFloor(access.orgId);
     await enforceLiveBudgetCaps(input.workspaceId, access.orgId);
 
+    // Validated before the insert: a pipeline the preview schema rejects must fail the request with nothing
+    // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).
+    const costForecastFor = (documentCount: number) => buildRunProcessingPreview({
+      request: {
+        workspace: input.workspaceId,
+        pipeline: input.pipeline,
+        files: Array.from({ length: documentCount }, (_, index) => ({
+          filename: `document-${index + 1}.pdf`,
+          mimeType: "application/pdf",
+          sizeBytes: 900_000,
+        })),
+        urls: [],
+      },
+    }).current.estimatedCost;
+    costForecastFor(sources.kind === "files" ? sources.files.length : sourceDocuments.length);
+
     const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
     const row = await insertRun({
@@ -959,18 +980,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     const run = mapWorkspaceRun(row);
     run.totalDocuments = published.documents.length;
     run.pagesTotal = published.pagesTotal;
-    run.costForecast = buildRunProcessingPreview({
-      request: {
-        workspace: input.workspaceId,
-        pipeline: input.pipeline,
-        files: Array.from({ length: published.documents.length }, (_, index) => ({
-          filename: `document-${index + 1}.pdf`,
-          mimeType: "application/pdf",
-          sizeBytes: 900_000,
-        })),
-        urls: [],
-      },
-    }).current.estimatedCost;
+    run.costForecast = costForecastFor(published.documents.length);
 
     // The Run is committed from here on: failing the request now would leave a
     // Run the caller never learns about, so a start failure defers instead.
