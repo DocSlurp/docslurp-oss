@@ -60,10 +60,10 @@ by credits, budgets or policy; saving settings does not imply the job finished.
 Supported pipeline toggles are video frames, chunk overlap, summaries, embeddings, vector
 indexing, table/code/image preservation, PDF region extraction and vision
 fallback, plus vision page selection: `vision.forceAllPages` (read every page with
-vision, up to `vision.maxPagesPerDocument`, 1 to 32). Vision page selection is
+vision; there is no per-file page limit). Vision page selection is
 what the [ingest report](api-sdk.md#ingest-report) recommends for scanned pages
 that page triage skipped, so its `patch` can be proposed as
-`{"changes":{"pipeline":{"visionFallback":true,"vision":{"forceAllPages":true,"maxPagesPerDocument":8}}}}`.
+`{"changes":{"pipeline":{"visionFallback":true,"vision":{"forceAllPages":true}}}}`.
 Its impact is `reindex-recommended`: it adds per-page vision cost and applies to
 new uploads, existing files keep their text until you reprocess them (optional,
 with the usual cost estimate and a separate consent), and reprocessing is never
