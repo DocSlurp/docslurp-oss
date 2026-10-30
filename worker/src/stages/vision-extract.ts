@@ -913,9 +913,23 @@ export class VisionExtractStage implements Stage {
       if (missing.length > 1) {
         for (const pageNumber of missing) {
           if (isCostCapExceeded(state)) break;
-          completed.push(...await this.extractVisionPagesFromCache(
-            state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache,
-          ));
+          try {
+            completed.push(...await this.extractVisionPagesFromCache(
+              state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache,
+            ));
+          } catch (error) {
+            // The inner single-page attempt cannot see earlier successes. Keep
+            // those results in the partial manifest when a later page fails.
+            if (storageKey) await this.storage.putJson(storageKey, {
+              documentId: document.id, partial: completed.length > 0,
+              reason: toError(error).message, processedPages: completed.length,
+              pagesDetail: completed,
+            });
+            throw new DocumentStageError(toError(error).message, {
+              artifactUri: storageKey ? this.storage.uri(storageKey) : undefined,
+              stats: { partial: completed.length > 0, processedPages: completed.length, error: toError(error).message },
+            });
+          }
         }
         return completed.sort((a, b) => a.pageNumber - b.pageNumber);
       }

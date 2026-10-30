@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildVisionPageFacts } from "../pipeline/page-facts.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENROUTER_VISION_MODEL, visionListPriceCents, visionModelCatalog } from "@docslurp/shared";
@@ -315,4 +316,34 @@ describe("legacy vision page cost admission", () => {
     expect(outputs).toHaveLength(expected);
     expect(Number(spentCents) + state.usageLedger.pendingBillableCents).toBe(Number(spentCents) + Number(expected) * 0.25);
   });
+});
+
+
+it("preserves completed and nonselected facts when later selected pages hit the cap", () => {
+  expect(buildVisionPageFacts({ documentId: "d", runId: "r", pageCount: 4,
+    selected: [1, 2, 3], processed: [{ pageNumber: 1, text: "read" }, { pageNumber: 2, text: "read" }], costCapped: true,
+  }).map(p => p.visionStatus)).toEqual(["extracted", "extracted", "cost-cap", "not-selected"]);
+});
+
+
+it("keeps earlier capped-page results in the partial manifest when a later page fails", async () => {
+  const document = { id: "partial-doc", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "scan.pdf" } as Document;
+  const state = WorkflowState.create({ id: "partial-run", spentCents: 0, pipeline: { ...defaultPipelineFeatures, maxCostCents: 10 } } as never, [document]);
+  const putJson = vi.fn(async () => {});
+  const storage = { putJson, uri: (key: string) => `s3://bucket/${key}`,
+    downloadToTempFile: async () => join(await mkdtemp(join(tmpdir(), "vision-partial-")), "page.png") };
+  const rasters = { renderSelectedPages: async ({ pageNumbers }: { pageNumbers: number[] }) => pageNumbers.map(pageNumber => ({
+    pageNumber, artifactKey: `p${pageNumber}`, artifactUri: `s3://bucket/p${pageNumber}`, mimeType: "image/png",
+  })) };
+  const stage = new VisionExtractStage({} as CommandRunner, storage as unknown as ArtifactStore, {} as Config, rasters as never);
+  const internals = stage as unknown as { callVisionOnImage: (...args: any[]) => Promise<any>; extractVisionPagesFromCache: (...args: any[]) => Promise<any[]> };
+  vi.spyOn(internals, "callVisionOnImage").mockImplementation(async (_state, _doc, _vision, image) => {
+    if (image.pageNumber === 2) throw new Error("fatal renderer fault");
+    return { pageNumber: image.pageNumber, inputTokens: 100, outputTokens: 50, latencyMs: 1, text: "retained result" };
+  });
+  await expect(internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2, 3], undefined, "manifest.json"))
+    .rejects.toMatchObject({ stats: { partial: true, processedPages: 1 } });
+  expect(putJson).toHaveBeenLastCalledWith("manifest.json", expect.objectContaining({
+    partial: true, processedPages: 1, pagesDetail: [expect.objectContaining({ pageNumber: 1, text: "retained result" })],
+  }));
 });

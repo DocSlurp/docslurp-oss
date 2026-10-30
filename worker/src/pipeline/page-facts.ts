@@ -166,10 +166,10 @@ export function buildVisionPageFacts(args: {
   return Array.from({ length: pageCount }, (_, index) => {
     const pageNumber = index + 1;
     const text = processed.get(pageNumber);
-    const visionStatus: PageVisionStatus = args.costCapped
-      ? "cost-cap"
-      : text !== undefined
-        ? "extracted"
+    const visionStatus: PageVisionStatus = text !== undefined
+      ? "extracted"
+      : args.costCapped && (selectedSet.has(pageNumber) || args.selected.length === 0)
+        ? "cost-cap"
         : !selectedSet.has(pageNumber)
           ? "not-selected"
           : "failed";
