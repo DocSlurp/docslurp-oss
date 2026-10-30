@@ -144,35 +144,24 @@ except socket.timeout:
     }
   }, 30_000);
 
-  it("only clamdscan gets --unix, and only for a socket among its readable paths", () => {
+  it("only clamdscan gets --unix, and only for a socket among its readable paths", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "docslurp-landlock-clamd-"));
+    const socketPath = path.join(dir, "clamd.ctl");
+    const file = path.join(dir, "clamd.conf");
+    writeFileSync(file, `LocalSocket ${socketPath}\n`);
+    const server = spawn(python || "python3", ["-I", "-c", "import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(30)", socketPath]);
     try {
-      const socketPath = path.join(dir, "clamd.ctl");
-      const file = path.join(dir, "clamd.conf");
-      writeFileSync(file, `LocalSocket ${socketPath}\n`);
-      const server = spawn(python || "python3", ["-I", "-c", "import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(5)", socketPath]);
-      return new Promise<void>((resolve, reject) => {
-        const check = () => {
-          if (!existsSync(socketPath)) return setTimeout(check, 20);
-          try {
-            const base = { args: [], env: {}, readablePaths: [file, socketPath], writablePaths: [] };
-            const clamd = landrunArgs({ ...base, binary: "/usr/bin/clamdscan" });
-            expect(clamd.slice(clamd.indexOf("--unix"), clamd.indexOf("--unix") + 2)).toEqual(["--unix", socketPath]);
-            expect(clamd[clamd.indexOf("--ro") + 1]).not.toContain(socketPath);
-            expect(landrunArgs({ ...base, binary: "/usr/bin/pdftotext" })).not.toContain("--unix");
-            resolve();
-          } catch (error) {
-            reject(error);
-          } finally {
-            server.kill("SIGKILL");
-          }
-        };
-        check();
-      });
+      for (let i = 0; i < 400 && !existsSync(socketPath); i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      const base = { args: [], env: {}, readablePaths: [file, socketPath], writablePaths: [] };
+      const clamd = landrunArgs({ ...base, binary: "/usr/bin/clamdscan" });
+      expect(clamd.slice(clamd.indexOf("--unix"), clamd.indexOf("--unix") + 2)).toEqual(["--unix", socketPath]);
+      expect(clamd[clamd.indexOf("--ro") + 1]).not.toContain(socketPath);
+      expect(landrunArgs({ ...base, binary: "/usr/bin/pdftotext" })).not.toContain("--unix");
     } finally {
-      setTimeout(() => rmSync(dir, { recursive: true, force: true }), 100);
+      server.kill("SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it("an older landrun is not trusted to scope sockets", () => {
     expect(landrunScopesUnixSockets("landrun version 0.1.17")).toBe(true);

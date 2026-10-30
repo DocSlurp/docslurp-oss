@@ -365,8 +365,9 @@ describe("M3: concurrent raster lanes share no writable directory", () => {
 
 describe("M3: UNIX-socket seccomp filter", () => {
   it("is generated for x64 and arm64 only", () => {
-    expect(seccompFilter("deny-unix-sockets", "x64")?.length).toBe(16 * 8);
-    expect(seccompFilter("deny-unix-sockets", "arm64")?.length).toBe(15 * 8);
+    // Round 7 added the namespace and kernel-surface deny list.
+    expect(seccompFilter("deny-unix-sockets", "x64")?.length).toBe(52 * 8);
+    expect(seccompFilter("deny-unix-sockets", "arm64")?.length).toBe(51 * 8);
     expect(seccompFilter("deny-unix-sockets", "riscv64")).toBeNull();
     expect(() => ensureSeccompFilterFile(scratch("docslurp-seccomp-"), "deny-unix-sockets", "riscv64")).toThrow(/refusing/);
   });
