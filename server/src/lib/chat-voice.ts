@@ -2,7 +2,7 @@ import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { MastraVoice } from "@mastra/core/voice";
 import { z } from "zod";
-import { assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, lookupPrivateModelRoute, privacyModeAllowsHosted, readProviderCharge, type PrivacyMode } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterRoutingFetch, isPrivateModelUri, lookupPrivateModelRoute, privacyModeAllowsHosted, readProviderCharge, type PrivacyMode } from "@docslurp/shared";
 import { CHAT_VOICE_MODEL, CHAT_VOICE_MAX_BYTES } from "@docslurp/shared/chat-voice";
 import { recordUsageEvent, type UsageScope } from "./ai-usage.js";
 import { resolveOpenRouterApiKey } from "./ai.js";
@@ -142,7 +142,8 @@ export class WorkspaceChatVoice extends MastraVoice {
     }, { kind: "client" });
     let response: Response;
     try {
-      response = await span.run(() => fetch("https://openrouter.ai/api/v1/audio/transcriptions", {
+      // The routing fetch adds the org/workspace China-provider restriction (or refuses) like every OpenRouter call.
+      response = await span.run(() => createOpenRouterRoutingFetch()("https://openrouter.ai/api/v1/audio/transcriptions", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body,

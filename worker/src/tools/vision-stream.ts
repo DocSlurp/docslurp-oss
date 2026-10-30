@@ -8,7 +8,7 @@
  * `[ai-usage]` line) and summed into the returned totals, so a discarded attempt
  * is still billed honestly; the caller logs the single `[ai-usage]` total.
  */
-import { CHINA_PROVIDER_SLUGS, readProviderCharge } from "@docslurp/shared";
+import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readProviderCharge } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
@@ -491,7 +491,21 @@ export interface GuardedCompletion {
   degenerate: DegenerateSignal | null;
 }
 
+/**
+ * The body as sent: on OpenRouter the current organization/workspace provider policy is applied to every
+ * attempt (first try, inline retries, alternate route, streaming fallback), whatever routing built the body.
+ * Throws ProviderRegionRefusedError, before anything is sent, when no allowed provider is left.
+ */
+async function withProviderPolicy(args: GuardedCompletionArgs, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!args.openRouter) return body;
+  const policy = await currentOpenRouterProviderPolicy();
+  if (!policy || policy.allowChinaProviders) return body;
+  const own = body.provider && typeof body.provider === "object" ? body.provider as Record<string, unknown> : undefined;
+  return { ...body, provider: applyOpenRouterProviderPolicy(own, policy) };
+}
+
 async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unknown>, streaming: boolean): Promise<VisionAttempt> {
+  body = await withProviderPolicy(args, body);
   const controller = new AbortController();
   const onCaller = () => controller.abort(args.signal?.reason);
   if (args.signal?.aborted) controller.abort(args.signal.reason);

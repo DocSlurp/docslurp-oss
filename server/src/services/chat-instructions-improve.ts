@@ -4,7 +4,6 @@ import { z } from "zod";
 import {
   BILLABLE_UNIT_METRICS,
   CHAT_INSTRUCTIONS_MAX_CHARS,
-  CHINA_PROVIDER_SLUGS,
   chatAnswerCredits,
   chatModelPricePerToken,
   chatModelTier,
@@ -27,17 +26,12 @@ import { defaultChatInstructionsTemplate, sanitizeWorkspaceInstructions, type Ch
 
 /**
  * Default model: GLM 5.3 Flash, the workspace chat default ($0.15 / $0.50 per
- * 1M tokens, checked 2026-10-25), pinned to Western hosts. The pipeline text
- * default (qwen3.5-flash) is served only by Alibaba, so it is not used here.
+ * 1M tokens, checked 2026-10-25). Hosts follow the shared routing: cheapest
+ * FP8-or-better host first, China-based hosts only when the org and workspace
+ * allow them (openrouter-routing.ts). The pipeline text default (qwen3.5-flash)
+ * is served only by Alibaba, so a restricted workspace could not use it here.
  */
 export const IMPROVE_DEFAULT_MODEL = "z-ai/glm-5.3-flash";
-
-/**
- * Western (US/EU) OpenRouter hosts of the default model at FP8 or better
- * (checked 2026-10-26 against /api/v1/models/z-ai/glm-5.3-flash/endpoints).
- * The model's own lab (Z.AI) and every other China-based host are excluded.
- */
-export const IMPROVE_WESTERN_PROVIDERS = ["baseten", "gmicloud", "near-ai", "fireworks", "together"] as const;
 
 /** Output price ceiling for any improve model: the repo rule is < $50 per 1M output tokens. */
 const MAX_OUTPUT_USD_PER_MTOK = 50;
@@ -222,8 +216,6 @@ export async function improveChatInstructions(args: {
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: buildImprovePrompt(args),
       signal,
-      // Western hosts only, whatever the organization allows; China-based hosts (including the model's lab) are excluded.
-      providerPreferences: { only: [...IMPROVE_WESTERN_PROVIDERS], ignore: [...CHINA_PROVIDER_SLUGS], allow_fallbacks: true },
     });
   } catch (error) {
     // Raw provider errors go to telemetry, never to the user.

@@ -641,10 +641,11 @@ export const visionModelCatalog = [
     tags: ["hosted", "cost", "open-weights"],
     runtime: "openai-compatible",
     description:
-      "Open-weights (MIT) DeepSeek multimodal snapshot via US-hosted providers; Markdown/LaTeX page transcription.",
-    // Measured 0.103 cents per page (2026-10-22 select split, docs/model-configuration.md). The token prices are the
-    // pinned US route's (Together, Fireworks, Parasail: $0.30/$1.20 per 1M, OpenRouter endpoints checked 2026-10-26),
-    // not the $0.15/$0.60 model list price, which is DeepSeek's own China-hosted endpoint and is never used. At list
+      "Open-weights (MIT) DeepSeek multimodal snapshot via the cheapest measured host (China-based StreamLake or DeepSeek unless turned off; else US-hosted); Markdown/LaTeX page transcription.",
+    // Measured 0.103 cents per page on the US route (2026-10-22 select split, docs/model-configuration.md). The token
+    // prices are the route's most expensive allowed host ($0.30/$1.20 per 1M: Together, Fireworks, Parasail, and
+    // DeepSeek's own endpoint at weekday peak; StreamLake lists $0.15/$0.60; docs/evals/vision-route-prices-2026-10-29.json),
+    // so the guard weight and max_price hold on every host. Billing uses the served host's reported charge. At list
     // price the SELF_HOSTED_PAGE_TOKENS formula gave 0.0705 cents, 32% under the measurement (the 2026-10-26 margin
     // audit); at the route price it gives 0.141 cents, a conservative bound for flat-tier eligibility.
     estimatedCostPerPageCents: 0.103,
@@ -653,7 +654,7 @@ export const visionModelCatalog = [
       outputUsdPerMillion: 1.2,
       checked: "2026-10-26",
       basis: "pinned-route",
-      providers: ["together", "fireworks", "parasail"],
+      providers: ["streamlake", "deepseek", "together", "fireworks", "parasail"],
     },
     imageTokens: { kind: "fixed", tokens: 1_024, basis: "processor-max:deepseek-v4.1" },
   },
@@ -750,8 +751,9 @@ export type VisionTokenPricing = {
   outputUsdPerMillion: number;
   checked: string;
   /**
-   * `pinned-route`: the highest price among the OpenRouter providers the model's vision profile pins with fallbacks off
-   * (`providers`), used when that route costs more than the model's list price. Absent: the OpenRouter list price.
+   * `pinned-route`: the highest price among the OpenRouter providers the model's vision profile restricts it to
+   * (`providers`: its pinned `order` with fallbacks off, or its `only` allowlist), used when that route costs more than
+   * the model's list price. Absent: the OpenRouter list price.
    */
   basis?: "pinned-route";
   providers?: readonly string[];

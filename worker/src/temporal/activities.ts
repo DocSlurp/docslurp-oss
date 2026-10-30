@@ -503,7 +503,7 @@ export function createActivities(deps: ActivityDependencies) {
       };
       console.log(`[page-task] run=${task.runId} document=${task.documentId} page=${task.pageNumber} worker=${workerId} started`);
       try {
-        const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.orgAllowChinaProviders },
+        const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders },
           () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId: task.runId, documentId: task.documentId },
             () => stage.runPageTask(state, task, controller.signal)));
         recordPageCompute();

@@ -1889,6 +1889,8 @@ export const workspaces = pgTable(
     }),
     isDefault: boolean("is_default").default(false).notNull(),
     slug: text().default(sql`generate_workspace_slug()`).notNull(),
+    /** Narrows organizations.allow_china_providers; both must be true (0102). */
+    allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
   },
   (table) => [
     uniqueIndex("workspaces_slug_idx").using("btree", table.slug.asc().nullsLast().op("text_ops")),

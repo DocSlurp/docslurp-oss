@@ -77,15 +77,19 @@ describe("per-model vision profiles", () => {
 });
 
 describe("vision catalog route pricing", () => {
-  it("prices a pinned-route catalog entry from exactly the providers its profile pins, with fallbacks off", () => {
+  it("prices a pinned-route catalog entry from exactly the providers its profile restricts it to", () => {
     const pinned = visionModelCatalog.filter((entry) => entry.tokenPricing && "basis" in entry.tokenPricing && entry.tokenPricing.basis === "pinned-route");
     expect(pinned.map((entry) => entry.id)).toContain(SNAPSHOT);
     for (const entry of pinned) {
       const route = VISION_MODEL_PROFILES[entry.id]?.openRouterProvider;
       expect(route, entry.id).toBeDefined();
-      expect(route!.allow_fallbacks, entry.id).toBe(false);
       if (!entry.tokenPricing || !("providers" in entry.tokenPricing)) throw new Error(`Missing pinned providers: ${entry.id}`);
-      expect(route!.order, entry.id).toEqual(entry.tokenPricing.providers);
+      // An `only` allowlist confines fallbacks to its hosts; a pinned `order` must turn fallbacks off.
+      if ("only" in route!) expect(route.only, entry.id).toEqual(entry.tokenPricing.providers);
+      else {
+        expect(route!.allow_fallbacks, entry.id).toBe(false);
+        expect(route!.order, entry.id).toEqual(entry.tokenPricing.providers);
+      }
     }
   });
 });

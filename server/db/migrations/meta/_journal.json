@@ -715,6 +715,13 @@
       "when": 1793300000005,
       "tag": "0101_vision_attempt_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1793300000006,
+      "tag": "0102_workspace_china_providers",
+      "breakpoints": true
     }
   ]
 }

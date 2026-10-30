@@ -3,6 +3,7 @@ import { applyDefaultVisionOverride, mergePipelineFeatures, type MaterializePage
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee } from "../db/page-base-fee.js";
+import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { Store } from "../db/store.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { coerceIndexingModeForFlag } from "../pipeline/stage-execution.js";
@@ -119,10 +120,11 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
     const beat = heartbeat ? setInterval(heartbeat, deps.heartbeatIntervalMs ?? 20_000) : null;
     heartbeat?.();
     try {
-      const own = await materializePageRange(
+      // Provider calls carry the run's org for fair share and its China-provider policy (org AND workspace).
+      const own = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders }, () => materializePageRange(
         { ...deps.materializer, sql, store, usage: state.usageLedger },
         { ...input, reason, pages, document, pipeline: run.pipeline, run: state.run },
-      );
+      ));
       result.indexed.push(...own.indexed);
       result.blocked.push(...own.blocked);
       result.failed.push(...own.failed);
