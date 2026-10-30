@@ -4,7 +4,7 @@ import { CHAT_AGENT_LIMIT_DEFAULTS } from "@docslurp/shared";
 import { asSchema } from "ai";
 import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT, withoutEvidence } from "./chat-mcp-tools.js";
 import { mcpManifest, uploadStatusInput, mediaEvidenceInput } from "./mcp-catalog.js";
-import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
+import { searchInputSchema, batchSearchInputSchema } from "../lib/search-input.js";
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
@@ -23,7 +23,6 @@ describe("chat MCP tools", () => {
   it.each([
     ["search", { q: "question", workspace: "foreign", workspaceId: "legacy" }, searchInputSchema],
     ["search", { queries: [{ q: "question", workspace: "foreign", workspaceId: "legacy" }] }, batchSearchInputSchema],
-    ["chat", { q: "question", workspace: "foreign", workspaceId: "legacy" }, workspaceChatInputSchema],
     ["getUploadStatus", { workspace: "foreign", workspaceId: "legacy" }, uploadStatusInput],
     ["getMediaEvidence", { documentId: "video", workspace: "foreign", workspaceId: "legacy" }, mediaEvidenceInput],
   ] as const)("dispatches %s with valid MCP arguments pinned to the selected workspace", async (name, input, schema) => {
@@ -40,8 +39,7 @@ describe("chat MCP tools", () => {
     const t = setup(["search", "chat"]);
     await t.execute("search", { q: "question", workspaceId: "injected" });
     expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string)).toEqual({ q: "question", workspace: "selected" });
-    await t.execute("chat", { q: "x", workspaceId: "injected" });
-    expect(JSON.parse(t.dispatch.mock.calls[1]![1]!.body as string).workspace).toBe("selected");
+    expect(t.tools.chat).toBeUndefined();
   });
 
   it("pins every batch query to the selected workspace", async () => {
@@ -272,7 +270,7 @@ describe("chat MCP tool call details", () => {
 });
 
 describe("chat MCP tool retrieval controls", () => {
-  it("enforces resolved retrieval controls on every search, batch query and nested chat", async () => {
+  it("enforces resolved retrieval controls on every search and batch query", async () => {
     const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");
     const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
     const context = createChatMcpTools({ manifest: { capabilities: ["search", "chat"].map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
@@ -284,8 +282,7 @@ describe("chat MCP tool retrieval controls", () => {
     expect(JSON.parse(dispatch.mock.calls[0]![1]!.body as string)).toMatchObject({ workspace: "selected", limit: 4, hyde: false, rerank: false, mmr: true, resultOrder: "relevance" });
     await execute("search", { queries: [{ q: "a", hyde: true, limit: 100 }, { q: "b" }] });
     for (const query of JSON.parse(dispatch.mock.calls[1]![1]!.body as string).queries) expect(query).toMatchObject({ workspace: "selected", limit: 4, hyde: false, mmr: true });
-    await execute("chat", { q: "a", retrieval: { useHyDE: true } });
-    expect(JSON.parse(dispatch.mock.calls[2]![1]!.body as string)).toMatchObject({ workspace: "selected", retrieval: { resultCount: 4, useHyDE: false, useMmr: true, resultOrder: "relevance" } });
+    expect(context.tools.chat).toBeUndefined();
   });
 });
 
@@ -319,6 +316,21 @@ describe("first-party-app settings tools", () => {
 });
 
 describe("chat agent tool schemas", () => {
+  it("does not nest a second answer generator inside the answering agent", () => {
+    const t = setup(["search", "chat"]);
+    expect(t.tools.search).toBeDefined();
+    expect(t.tools.chat).toBeUndefined();
+  });
+
+  it("advertises one unambiguous batch search shape, including for a single query", async () => {
+    const context = createChatMcpTools({ manifest: mcpManifest("http://mcp.internal"), dispatch: vi.fn<McpDispatch>(),
+      workspaceId: "selected", signal: new AbortController().signal });
+    const schema = await asSchema(context.tools.search!.inputSchema).jsonSchema as { required?: string[]; properties: Record<string, unknown> };
+    expect(schema.required).toContain("queries");
+    expect(schema.properties).not.toHaveProperty("q");
+    expect(schema.properties).toHaveProperty("queries");
+  });
+
   // Anthropic (direct, Bedrock, Vertex) answers 400 "input_schema does not support oneOf,
   // allOf, or anyOf at the top level"; OpenAI rejects them (and `not`) at the top level too.
   const COMBINATORS = ["oneOf", "anyOf", "allOf", "not"];
@@ -327,7 +339,8 @@ describe("chat agent tool schemas", () => {
     const context = createChatMcpTools({ manifest: mcpManifest("http://mcp.internal"),
       dispatch: vi.fn<McpDispatch>(), workspaceId: "selected", signal: new AbortController().signal });
     const names = Object.keys(context.tools);
-    expect(names).toEqual(expect.arrayContaining(["search", "chat"]));
+    expect(names).toContain("search");
+    expect(names).not.toContain("chat");
     for (const name of names) {
       const schema = await asSchema(context.tools[name]!.inputSchema).jsonSchema as Record<string, unknown>;
       expect(schema.type, name).toBe("object");

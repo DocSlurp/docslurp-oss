@@ -41,3 +41,55 @@ it("reports the routed OpenRouter build as resolvedModel, not the requested alia
   expect(result.usage.costCents).toBeCloseTo(0.00216, 10);
   expect(record.mock.calls[0]![0].usage.metadata).toMatchObject({ responseModel: "deepseek/deepseek-v4.1-flash-20261017", costSource: "provider" });
 });
+
+
+it.each(["headers", "heartbeat"])("ends a stalled %s response at the first-token deadline without replaying the request", async (stall) => {
+  vi.stubEnv("CHAT_AGENT_FIRST_TOKEN_TIMEOUT_MS", "30");
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL) => !String(_input).includes("chat/completions") ? Response.json({ data: [] }) : stall === "headers" ? new Promise<Response>(() => {}) : new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode(": OPENROUTER PROCESSING\n\n")); },
+  }), { headers: { "content-type": "text/event-stream" } }));
+  vi.stubGlobal("fetch", fetchMock);
+  const startedAt = Date.now();
+  try {
+    await expect(runChatMcpAgent({
+      actor: { type: "session", userId: "user", sessionId: "s", user: { id: "user", name: "User", email: "" } },
+      workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
+      privacyMode: "standard", model: "deepseek/deepseek-v4.1-flash", maxOutputTokens: 100,
+      timeBudget: { turnDeadlineMs: 500, stepTimeoutMs: 400, toolTimeoutMs: 100, finalReserveMs: 100 },
+      abortedStepLookupDelayMs: 0,
+    })).rejects.toMatchObject({ code: "chat_deadline_exceeded", status: 424 });
+    // A short timer must end the call well before the existing step deadline.
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(fetchMock.mock.calls.filter(call => String(call[0]).includes("chat/completions"))).toHaveLength(1);
+    await vi.waitFor(() => expect(record).toHaveBeenCalledOnce());
+    expect(record.mock.calls[0]![0]).toMatchObject({ scope: { orgId: "org", workspaceId: "ws", sessionId: "conversation" },
+      usage: { metadata: { turnOutcome: "aborted", usageEstimated: true } } });
+  } finally { vi.unstubAllEnvs(); }
+});
+
+
+it.each(["content", "reasoning"])("allows %s output to continue beyond the first-token budget", async (field) => {
+  vi.stubEnv("CHAT_AGENT_FIRST_TOKEN_TIMEOUT_MS", "30");
+  const base = { id: "gen-test", model: "deepseek/deepseek-v4.1-flash", object: "chat.completion.chunk", created: 1 };
+  const encoder = new TextEncoder();
+  const frame = (delta: Record<string, string>, finish_reason: string | null = null) => encoder.encode(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream({
+    async start(controller) {
+      controller.enqueue(frame({ [field]: "Hello" }));
+      await new Promise(resolve => setTimeout(resolve, 80));
+      controller.enqueue(frame({ content: " answer" }));
+      controller.enqueue(frame({}, "stop"));
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ...base, choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0.00001 } })}\n\ndata: [DONE]\n\n`));
+      controller.close();
+    },
+  }), { headers: { "content-type": "text/event-stream" } })));
+  try {
+    const result = await runChatMcpAgent({
+      actor: { type: "session", userId: "user", sessionId: "s", user: { id: "user", name: "User", email: "" } },
+      workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
+      privacyMode: "standard", model: "deepseek/deepseek-v4.1-flash", maxOutputTokens: 100,
+    });
+    expect(result.answer).toContain("answer");
+    expect(record).toHaveBeenCalledOnce();
+  } finally { vi.unstubAllEnvs(); }
+});
