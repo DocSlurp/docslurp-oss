@@ -319,6 +319,10 @@ describe("admission happens right before fetch, inside the limiter", () => {
     await gate.finish();
     expect(backend.inspect("run-1", "org-1")).toMatchObject({ runAttempts: 1, runFailures: 1 });
     expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback]"))).toBe(false);
+    // Logged once, with provider, label and status, so an image cap excluding every pinned provider is visible.
+    const exclusions = vi.mocked(console.warn).mock.calls.map(([line]) => String(line)).filter((line) => line.startsWith("[provider-routing-exclusion]"));
+    expect(exclusions).toHaveLength(1);
+    expect(exclusions[0]).toContain("provider=openrouter label=\"vision request\" status=503 detail=");
   });
 
   it("fails a page whose max_price excludes every provider without retrying it", async () => {

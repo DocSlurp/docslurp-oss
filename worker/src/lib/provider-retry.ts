@@ -305,6 +305,11 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       if (isRoutingExclusion(status, body)) {
         // No provider meets the request's routing constraints (max_price included): retrying cannot help, and
         // handing it back as a throttle would loop in Temporal. Counted as a failure and returned to the caller.
+        // Logged: on vision it means max_price (its image cap included) excluded every pinned provider.
+        console.warn(
+          `[provider-routing-exclusion] provider=${options.provider} label="${options.label}" status=${status} ` +
+            `detail=${JSON.stringify(body.slice(0, 200))}`,
+        );
         options.gate?.failed();
         if (lease) options.rateLimit?.onLease?.(lease);
         return new Response(body, { status, headers: response.headers });
