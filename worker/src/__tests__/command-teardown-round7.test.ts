@@ -1,14 +1,42 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { defaultPipelineFeatures } from "@docslurp/shared";
+import { documentExtractorRegistry } from "../extractors/registry.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { runWithPerfContext } from "../lib/perf-context.js";
+import type { Document, WorkspaceRun } from "../models.js";
+import { runDocumentStage } from "../pipeline/checkpoints.js";
+import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
+import { resolveCommandPaths } from "../sandbox/paths.js";
 import bubblewrap from "../sandbox/providers/bubblewrap/index.js";
+import {
+  resetStagedSourcesForTests,
+  SourceIntegrityError,
+  stagedSourceSha256,
+  stageSourceFile,
+  verifyStagedSource,
+} from "../sandbox/source-integrity.js";
+import {
+  admitCommandSource,
+  configureSourceQuarantine,
+  findQuarantinedSourceError,
+  flushSourceQuarantine,
+  QuarantinedOrgError,
+  type SourceQuarantineStore,
+} from "../sandbox/source-quarantine.js";
+import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
+import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import { teardownBreakerState } from "../sandbox/teardown-breaker.js";
 import {
   CommandTeardownError,
   probePidNamespace,
+  recordUnverifiedTeardown,
   resetUnverifiedTeardownsForTests,
   spawnContained,
   superviseChild,
@@ -44,6 +72,8 @@ afterEach(() => {
     }
   }
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  configureSourceQuarantine(null);
+  resetStagedSourcesForTests();
   resetUnverifiedTeardownsForTests();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
@@ -208,5 +238,270 @@ describe("H1: the sandbox never holds the worker's stdio", () => {
     expect(held.stdout).toBe("before\n");
     expect(held.status).toBe(0);
     expect(Date.now() - started).toBeLessThan(3_000);
+  });
+});
+
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+function makeDocument(overrides: Partial<Document> = {}): Document {
+  return {
+    id: "doc-1", userId: "user-1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf", sourceKey: "user-1/raw/a.pdf",
+    status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: new Date(), updatedAt: new Date(), ...overrides,
+  };
+}
+
+function makeRun(): WorkspaceRun {
+  return {
+    id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload", status: "processing",
+    stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
+    pipeline: { ...defaultPipelineFeatures }, error: null, stats: {}, artifacts: {}, claimId: null,
+    createdAt: new Date(), updatedAt: new Date(),
+  };
+}
+
+/** Storage whose object can be replaced after the server hashed it (the H2 attack). */
+function mutableStorage(initial: string) {
+  let body = initial;
+  const downloads: string[] = [];
+  return {
+    replace(next: string) {
+      body = next;
+    },
+    downloads,
+    async downloadToTempFile(_key: string, pattern: string) {
+      const dir = mkdtempSync(path.join(tmpdir(), "docslurp-"));
+      roots.push(dir);
+      const file = path.join(dir, pattern.replace(/\*/g, "x"));
+      writeFileSync(file, body);
+      downloads.push(file);
+      return file;
+    },
+    async getBytes() {
+      return Buffer.from(body);
+    },
+  };
+}
+
+describe("H2: the worker parses only the bytes the server hashed", () => {
+  it("refuses, loudly and for good, a source whose staged bytes differ from documents.source_sha256", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const document = makeDocument({ sourceSha256: sha("popular public PDF") });
+    const storage = mutableStorage("popular public PDF");
+    // Verified bytes stage fine and their staged hash is remembered for the quarantine.
+    const file = await stageSourceFile(storage, document, "source-*.pdf");
+    expect(stagedSourceSha256("doc-1")).toBe(sha("popular public PDF"));
+    // The client PUTs hostile bytes to the still-valid URL after the server hashed P.
+    storage.replace("hostile bytes");
+    const refused = await stageSourceFile(storage, document, "source-*.pdf").catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(SourceIntegrityError);
+    expect(refused).toMatchObject({ expectedSha256: sha("popular public PDF"), stagedSha256: sha("hostile bytes") });
+    // The refused download is removed; the earlier verified one is untouched.
+    expect(existsSync(storage.downloads[1]!)).toBe(false);
+    expect(existsSync(file)).toBe(true);
+    expect(errors.mock.calls.map((call) => String(call[0])).join("\n")).toMatch(
+      /\[worker-source\] status=source-hash-mismatch .*document=doc-1 .*expected_sha256=[0-9a-f]{64} staged_sha256=[0-9a-f]{64}/,
+    );
+    // Final: no fallback catches it, no strategy retries it, and it fails the Document.
+    expect(findQuarantinedSourceError(refused)).toBe(refused);
+    expect(() => rethrowIfTeardown(refused)).toThrow(refused as Error);
+    expect(isDocumentLevelFailure(refused)).toBe(true);
+    const state = WorkflowState.create(makeRun(), [document]);
+    const run = vi.fn(async () => {
+      throw refused;
+    });
+    await runDocumentStage(state, document, "extract-markdown", "doc-1:markdown", "extracted", run, undefined, {
+      retryStrategies: ["docling", "poppler-text"],
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(state.documentStage("doc-1", "extract-markdown")?.status).toBe("failed");
+    // Bytes read in memory (embedding fallbacks) are checked the same way.
+    const { readSourceBytes } = await import("../sandbox/source-integrity.js");
+    await expect(readSourceBytes(storage, document)).rejects.toBeInstanceOf(SourceIntegrityError);
+  });
+
+  it("the shared PDF source cache verifies every document against its hash and drops a mismatched entry", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const storage = mutableStorage("version one");
+    const cache = new PdfSourceCache(storage as never);
+    const first = makeDocument({ sourceSha256: sha("version one") });
+    expect((await cache.get(first)).sha256).toBe(sha("version one"));
+    // Another document (a new version) with the same key but different server hash is refused from the cache.
+    const other = makeDocument({ id: "doc-2", sourceSha256: sha("version two") });
+    await expect(cache.get(other)).rejects.toBeInstanceOf(SourceIntegrityError);
+    // The entry was dropped: the next call downloads again and verifies the current bytes.
+    storage.replace("version two");
+    expect((await cache.get(other)).sha256).toBe(sha("version two"));
+    expect(storage.downloads).toHaveLength(2);
+    await cache.clear();
+  });
+
+  it("a document without a server hash is staged and keyed by its staged hash", () => {
+    verifyStagedSource(makeDocument({ id: "unhashed", sourceSha256: null }), sha("x"));
+    expect(stagedSourceSha256("unhashed")).toBe(sha("x"));
+  });
+
+  it("the quarantine records and checks the staged hash", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const finds: Array<[string, string | null | undefined]> = [];
+    const records: Array<{ documentId: string; stagedSha256?: string | null }> = [];
+    configureSourceQuarantine({
+      async find(documentId, staged) {
+        finds.push([documentId, staged]);
+        return null;
+      },
+      async record(entry) {
+        records.push(entry);
+        return { sourceSha256: entry.stagedSha256 ?? "none", orgId: "org-1", workspaceId: "ws-1" };
+      },
+      async noteRefusal() {},
+      async recordOrgFailure() {
+        return null;
+      },
+      async orgFailures() {
+        return null;
+      },
+    });
+    verifyStagedSource(makeDocument({ sourceSha256: sha("bytes") }), sha("bytes"));
+    await inDocument(() => admitCommandSource());
+    expect(finds).toEqual([["doc-1", sha("bytes")]]);
+    recordUnverifiedTeardown(new CommandTeardownError("held", { attributable: true }), "label=x", {
+      attribution: { document_id: "doc-1", run_id: "run-1", stage: "extract-markdown" },
+    });
+    await flushSourceQuarantine();
+    expect(records[0]).toMatchObject({ documentId: "doc-1", stagedSha256: sha("bytes") });
+  });
+});
+
+const inDocument = <T>(fn: () => Promise<T>, documentId = "doc-1") =>
+  runWithPerfContext(
+    { runId: "run-1", documentId, orgId: "org-1", workspaceId: "ws-1", scope: "document", stageName: "extract-markdown", pushPerformance: () => {} },
+    fn,
+  );
+
+describe("H1: an organization whose parser work keeps defeating teardown is refused fleet-wide", () => {
+  function orgStore(initial = 0) {
+    let count = initial;
+    const recorded: Array<{ documentId: string; attributable: boolean }> = [];
+    const store: SourceQuarantineStore = {
+      async find() {
+        return null;
+      },
+      async record() {
+        return null;
+      },
+      async noteRefusal() {},
+      async recordOrgFailure(entry) {
+        recorded.push({ documentId: entry.documentId, attributable: entry.attributable });
+        count += 1;
+        return { orgId: "org-1", count };
+      },
+      async orgFailures() {
+        return count > 0 ? { orgId: "org-1", count } : null;
+      },
+    };
+    return { store, recorded };
+  }
+
+  it("counts every teardown (attributable or not), alerts at the limit, and then refuses the organization's documents", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("WORKER_ORG_TEARDOWN_LIMIT", "2");
+    const { store, recorded } = orgStore();
+    configureSourceQuarantine(store);
+    for (const [documentId, attributable] of [["doc-a", false], ["doc-b", true]] as const) {
+      await inDocument(() => admitCommandSource(), documentId);
+      recordUnverifiedTeardown(new CommandTeardownError("held", { attributable }), "label=x", {
+        attribution: { document_id: documentId, run_id: "run-1" },
+      });
+      await flushSourceQuarantine();
+    }
+    expect(recorded).toEqual([{ documentId: "doc-a", attributable: false }, { documentId: "doc-b", attributable: true }]);
+    expect(errors.mock.calls.map((call) => String(call[0])).join("\n")).toMatch(
+      /status=org-breaker-open metric=org_teardown_breaker_open org=org-1 failures=2 limit=2/,
+    );
+    // A new document of that organization (new bytes: the source denylist would not catch it) is refused.
+    const refused = await inDocument(() => admitCommandSource(), "doc-c").catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(QuarantinedOrgError);
+    expect(isDocumentLevelFailure(refused)).toBe(true);
+    expect(findQuarantinedSourceError(refused)).toBe(refused);
+    expect(errors.mock.calls.map((call) => String(call[0])).join("\n")).toMatch(/status=org-refused metric=org_parser_refused org=org-1/);
+    // The runner refuses before opening a sandbox session (on a worker whose own breaker is closed:
+    // this one opened at the first teardown).
+    resetUnverifiedTeardownsForTests();
+    const opened = vi.fn(async () => {
+      throw new Error("must not open a session");
+    });
+    const runner = new CommandRunner({ openSession: opened });
+    await expect(inDocument(() => runner.run({ binary: "/bin/true", args: [], available: true }), "doc-d")).rejects.toBeInstanceOf(QuarantinedOrgError);
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it("below the limit the organization's documents still run", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store } = orgStore(2);
+    configureSourceQuarantine(store);
+    await expect(inDocument(() => admitCommandSource())).resolves.toBeUndefined();
+  });
+});
+
+describe("M2: the shared PDF source is read-only for every command", () => {
+  it("no plan gets the cached source's directory writable, and writing beside it is refused", async () => {
+    const storage = mutableStorage("%PDF-1.4");
+    const cache = new PdfSourceCache(storage as never);
+    const cached = await cache.get(makeDocument({ sourceSha256: sha("%PDF-1.4") }));
+    const resolve = (args: string[], readOnlyInputs = false) =>
+      resolveCommandPaths({
+        plan: { binary: "/usr/bin/pdftotext", args, available: true, ...(readOnlyInputs ? { readOnlyInputs } : {}) },
+        venvBin: "/nonexistent/bin",
+        scratchRoot: "/nonexistent/scratch",
+        configuredWritablePaths: [],
+        scriptsDir: resolveScriptsDir(),
+      });
+    // Without readOnlyInputs (a parser activity of another document version): still read-only.
+    const paths = resolve([cached.path, "-"]);
+    expect(paths.writablePaths).toEqual([]);
+    expect(paths.readablePaths).toContain(cached.path);
+    // An output beside the shared source would make its directory writable: fail closed.
+    expect(() => resolve([cached.path, `${cached.path}.doppler.md`])).toThrow(/shared source/);
+    await cache.clear();
+    // Once evicted the path is an ordinary file again.
+    expect(() => resolve([cached.path, `${cached.path}.doppler.md`])).not.toThrow();
+  });
+});
+
+describe("Low: candidate isolation settles every sibling before failing", () => {
+  it("a failing candidate waits for its sibling's copy before the caller removes the directories", async () => {
+    const sourceDir = mkdtempSync(path.join(tmpdir(), "docslurp-source-cache-"));
+    roots.push(sourceDir);
+    const source = path.join(sourceDir, "doc.pdf");
+    writeFileSync(source, "%PDF-1.4");
+    let siblingSettled = false;
+    vi.spyOn(documentExtractorRegistry, "prepare").mockImplementation(async (id: string) => {
+      if (id === "kreuzberg") throw new Error("prepare failed");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      siblingSettled = true;
+      return { label: id, plan: { binary: "pdftotext", args: [], available: true } } as never;
+    });
+    const stage = new ExtractMarkdownStage({} as never, {} as never, {} as never);
+    const dirs: string[] = [];
+    const error = await (stage as unknown as { isolateConcurrentCandidates(args: object): Promise<unknown> })
+      .isolateConcurrentCandidates({
+        primary: { label: "kreuzberg" },
+        secondary: { label: "poppler-text" },
+        sourcePath: source,
+        format: "pdf",
+        options: {},
+        dirs,
+      })
+      .catch((caught: unknown) => caught);
+    roots.push(...dirs);
+    expect((error as Error).message).toBe("prepare failed");
+    // With Promise.all the rejection came first and the sibling was still copying and preparing.
+    expect(siblingSettled).toBe(true);
+    expect(dirs).toHaveLength(2);
+    // Removing them now leaves nothing behind (no sibling recreates its directory later).
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(dirs.filter((dir) => existsSync(dir))).toEqual([]);
+    expect(readdirSync(sourceDir)).toEqual(["doc.pdf"]);
   });
 });

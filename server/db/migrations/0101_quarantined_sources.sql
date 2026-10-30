@@ -29,3 +29,22 @@ CREATE TABLE IF NOT EXISTS quarantined_sources (
   teardown_count integer NOT NULL DEFAULT 1,
   refused_count integer NOT NULL DEFAULT 0
 );
+
+-- Every unverified parser teardown, counted against the document's organization
+-- (worker/src/sandbox/source-quarantine.ts). Each one quarantines a worker,
+-- whether or not it was attributable to the bytes, so byte-varied files from
+-- one organization could otherwise walk the fleet. Once an organization has
+-- WORKER_ORG_TEARDOWN_LIMIT (default 3) rows within
+-- WORKER_ORG_TEARDOWN_WINDOW_HOURS (default 24), workers refuse its parser
+-- work until the window slides past them. Delete rows to lift it sooner.
+CREATE TABLE IF NOT EXISTS org_teardown_failures (
+  id bigserial PRIMARY KEY,
+  org_id text NOT NULL,
+  document_id text,
+  run_id text,
+  stage text,
+  attributable boolean NOT NULL DEFAULT false,
+  detail text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS org_teardown_failures_org_created_idx ON org_teardown_failures (org_id, created_at);

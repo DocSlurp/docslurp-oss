@@ -278,8 +278,10 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
     expect(writable.flat()).not.toContain(sourceDir);
   });
 
-  it("a single or serialized candidate keeps the cached source", async () => {
-    const source = path.join(scratch("docslurp-source-cache-"), "doc.pdf");
+  // Round 7 (M2): the cached source is shared across activities, so even a lone candidate gets a copy.
+  it("a single or serialized candidate also gets its own copy; the cached source stays read-only", async () => {
+    const sourceDir = scratch("docslurp-source-cache-");
+    const source = path.join(sourceDir, "doc.pdf");
     writeFileSync(source, "%PDF-1.4");
     const runner = new CommandRunner();
     const { documentExtractorRegistry } = await import("../extractors/registry.js");
@@ -289,8 +291,10 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
       const dirs: string[] = [];
       const isolated = await (stage as unknown as { isolateConcurrentCandidates(args: object): Promise<{ primary: { source: string } }> })
         .isolateConcurrentCandidates({ primary: candidate, secondary, sourcePath: source, format: "pdf", options: {}, dirs });
-      expect(isolated.primary.source).toBe(source);
-      expect(dirs).toEqual([]);
+      roots.push(...dirs);
+      expect(isolated.primary.source).not.toBe(source);
+      expect(path.dirname(isolated.primary.source)).toBe(dirs[0]);
+      expect(dirs).toHaveLength(secondary ? 2 : 1);
     }
   });
 });
@@ -307,6 +311,12 @@ describe("M3: only a teardown the command caused lists its source, and only for 
         return { sourceSha256: "sha", orgId: "org-1", workspaceId: "ws-1" };
       },
       async noteRefusal() {},
+      async recordOrgFailure() {
+        return null;
+      },
+      async orgFailures() {
+        return null;
+      },
     };
     return { store, records };
   }

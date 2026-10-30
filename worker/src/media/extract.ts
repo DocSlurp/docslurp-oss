@@ -19,6 +19,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { stageSourceFile } from "../sandbox/source-integrity.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { mediaConfig, type MediaConfig } from "./config.js";
 import { configuredMediaProvider } from "./providers.js";
@@ -84,7 +85,7 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
     if (!(await allowHostedCall(state, { provider: provider.id, model: provider.model, operation: "media.transcribe", target: "hosted" }, [document.id]))) {
       throw new RunPolicyError("Workspace privacy mode disallows the configured media provider");
     }
-    const source = await storage.downloadToTempFile(document.sourceKey, "source.media", { maxBytes: config.maxSourceBytes });
+    const source = await stageSourceFile(storage, document, "source.media", { maxBytes: config.maxSourceBytes });
     try {
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
       // Missing workspace configuration opts in; explicit false wins even for silent video.

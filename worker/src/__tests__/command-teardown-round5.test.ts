@@ -293,6 +293,12 @@ describe("M3: source quarantine", () => {
         return { sourceSha256: `sha-${entry.documentId}`, orgId: "org-1", workspaceId: "ws-1" };
       },
       async noteRefusal() {},
+      async recordOrgFailure() {
+        return null;
+      },
+      async orgFailures() {
+        return null;
+      },
     };
     return { store, records };
   }
@@ -310,7 +316,8 @@ describe("M3: source quarantine", () => {
       attribution: { org_id: "org-1", workspace_id: "ws-1", run_id: "run-1", document_id: "doc-1", stage: "render-images" },
     });
     await flushSourceQuarantine();
-    expect(records).toEqual([{ documentId: "doc-1", runId: "run-1", stage: "render-images", detail: teardown.message, ttlHours: 168 }]);
+    // stagedSha256: null (nothing staged in this test): the store falls back to the server's hash.
+    expect(records).toEqual([{ documentId: "doc-1", stagedSha256: null, runId: "run-1", stage: "render-images", detail: teardown.message, ttlHours: 168 }]);
     const logs = errors.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logs).toMatch(/status=teardown-unverified .*org_id=org-1 workspace_id=ws-1 run_id=run-1 document_id=doc-1/);
     expect(logs).toMatch(/status=source-quarantined .*org=org-1 workspace=ws-1 run=run-1 document=doc-1 .*source_sha256=sha-doc-1/);

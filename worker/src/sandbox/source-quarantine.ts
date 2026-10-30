@@ -2,6 +2,7 @@ import type { Sql } from "postgres";
 
 import { currentPerfContext } from "../lib/perf-context.js";
 import { sandboxScopeStorage, type SandboxSessionScope } from "./session-context.js";
+import { SourceRefusalError, stagedSourceSha256 } from "./source-integrity.js";
 import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
 
 /**
@@ -18,9 +19,20 @@ import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
  * (default 168, 7 days), so a false positive heals itself; a later attributable failure extends it.
  * Every organization whose document hit the row (teardown or refusal) is kept for attribution.
  *
- * Limits: a document without a source hash is not covered; two workers that start the same source
- * before the first record lands can both be quarantined; and the check runs per activity at the
- * first command of each document, not at upload.
+ * Hashes are the staged ones: the bytes this worker downloaded and hashed (source-integrity.ts),
+ * which must equal the server's `documents.source_sha256` or the document is refused before any
+ * command. So a source swapped after upload can neither list another file's hash nor hide listed
+ * bytes behind a fresh one. A document without a server hash is keyed by its staged hash.
+ *
+ * Organization breaker: every unverified teardown with a document (attributable or not: each one
+ * costs a worker) is also counted against the document's organization (`org_teardown_failures`).
+ * Once an organization reaches WORKER_ORG_TEARDOWN_LIMIT (default 3) within
+ * WORKER_ORG_TEARDOWN_WINDOW_HOURS (default 24), every worker refuses its parser work
+ * (QuarantinedOrgError, final, `[worker-quarantine] status=org-refused`), so byte-varied files
+ * cannot walk the fleet one worker at a time. The window slides: the refusal lifts by itself.
+ *
+ * Limits: two workers that start the same source before the first record lands can both be
+ * quarantined; and the check runs per activity at the first command of each document, not at upload.
  */
 
 export interface QuarantinedSource {
@@ -30,12 +42,33 @@ export interface QuarantinedSource {
 }
 
 export interface SourceQuarantineStore {
-  /** The unexpired quarantine record for this document's source bytes, or null if it is not listed. */
-  find(documentId: string): Promise<QuarantinedSource | null>;
-  /** List the document's source for `ttlHours`; null when the document has no source hash. */
-  record(entry: { documentId: string; runId?: string; stage?: string; detail: string; ttlHours: number }): Promise<QuarantinedSource | null>;
+  /**
+   * The unexpired quarantine record for this document's source bytes (`stagedSha256` when this worker
+   * staged them, else the server's hash), or null if it is not listed.
+   */
+  find(documentId: string, stagedSha256?: string | null): Promise<QuarantinedSource | null>;
+  /** List the document's source (staged hash, else the server's) for `ttlHours`; null when neither is known. */
+  record(entry: {
+    documentId: string;
+    stagedSha256?: string | null;
+    runId?: string;
+    stage?: string;
+    detail: string;
+    ttlHours: number;
+  }): Promise<QuarantinedSource | null>;
   /** Note that the document was refused (its organization joins the row's attribution). */
   noteRefusal(entry: { documentId: string; sourceSha256: string }): Promise<void>;
+  /** Count a teardown failure against the document's organization; its failures within the window. */
+  recordOrgFailure(entry: {
+    documentId: string;
+    runId?: string;
+    stage?: string;
+    attributable: boolean;
+    detail: string;
+    windowHours: number;
+  }): Promise<{ orgId: string; count: number } | null>;
+  /** The document's organization and its failures within the window, or null if it has none. */
+  orgFailures(documentId: string, windowHours: number): Promise<{ orgId: string; count: number } | null>;
 }
 
 const DEFAULT_TTL_HOURS = 168;
@@ -47,36 +80,71 @@ export function sourceQuarantineTtlHours(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /** A document whose source bytes defeated command teardown before: final, never retried. */
-export class QuarantinedSourceError extends Error {
-  constructor(readonly documentId: string, readonly sourceSha256: string) {
-    super(`document ${documentId} refused: its source was quarantined after a parser command could not be torn down`);
+export class QuarantinedSourceError extends SourceRefusalError {
+  constructor(documentId: string, readonly sourceSha256: string) {
+    super(`document ${documentId} refused: its source was quarantined after a parser command could not be torn down`, documentId);
     this.name = "QuarantinedSourceError";
   }
 }
 
-export function findQuarantinedSourceError(error: unknown): QuarantinedSourceError | null {
+/** A document of an organization whose parser work defeated teardown too often: final, never retried. */
+export class QuarantinedOrgError extends SourceRefusalError {
+  constructor(documentId: string, readonly orgId: string, readonly failures: number) {
+    super(
+      `document ${documentId} refused: parser work for this organization is paused after repeated sandbox teardown failures`,
+      documentId,
+    );
+    this.name = "QuarantinedOrgError";
+  }
+}
+
+const DEFAULT_ORG_LIMIT = 3;
+const DEFAULT_ORG_WINDOW_HOURS = 24;
+
+/** Teardown failures an organization may cause within the window before its parser work is refused. */
+export function orgTeardownLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.WORKER_ORG_TEARDOWN_LIMIT);
+  return Number.isInteger(raw) && raw >= 1 ? raw : DEFAULT_ORG_LIMIT;
+}
+
+export function orgTeardownWindowHours(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.WORKER_ORG_TEARDOWN_WINDOW_HOURS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_ORG_WINDOW_HOURS;
+}
+
+/**
+ * Any refusal of a document for its source or organization (quarantined source, quarantined
+ * organization, source changed after upload): final, no fallback, no retry.
+ */
+export function findQuarantinedSourceError(error: unknown): SourceRefusalError | null {
   let current: unknown = error;
   for (let depth = 0; current && depth < 8; depth++) {
-    if (current instanceof QuarantinedSourceError) return current;
+    if (current instanceof SourceRefusalError) return current;
     current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
   }
   return null;
 }
 
 export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): SourceQuarantineStore {
+  const countOrgFailures = async (orgId: string, windowHours: number) => {
+    const [row] = await sql`
+      select count(*)::int as count from org_teardown_failures
+      where org_id = ${orgId} and created_at > now() - ${windowHours}::double precision * interval '1 hour'`;
+    return { orgId, count: Number(row?.count ?? 0) };
+  };
   const mapRow = (row: Record<string, unknown> | undefined): QuarantinedSource | null =>
     row ? { sourceSha256: String(row.source_sha256), orgId: (row.org_id as string | null) ?? null, workspaceId: (row.workspace_id as string | null) ?? null } : null;
   return {
-    async find(documentId) {
+    async find(documentId, stagedSha256 = null) {
       const rows = await sql`
         select q.source_sha256, q.org_id, q.workspace_id
         from documents d
-        join quarantined_sources q on q.source_sha256 = d.source_sha256
+        join quarantined_sources q on q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256)
         where d.id = ${documentId} and q.expires_at > now()
         limit 1`;
       return mapRow(rows[0]);
     },
-    async record({ documentId, runId, stage, detail, ttlHours }) {
+    async record({ documentId, stagedSha256 = null, runId, stage, detail, ttlHours }) {
       // The first attribution is kept; a later failure (another worker raced it, or the row expired)
       // extends the expiry and adds its organization.
       const rows = await sql`
@@ -84,11 +152,11 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
           source_sha256, org_id, workspace_id, run_id, document_id, stage, detail, expires_at,
           org_ids, last_org_id, last_document_id
         )
-        select d.source_sha256, d.org_id, d.workspace_id, ${runId ?? null}, d.id, ${stage ?? null}, ${detail.slice(0, 2000)},
-          now() + ${ttlHours}::double precision * interval '1 hour',
+        select coalesce(${stagedSha256}::text, d.source_sha256), d.org_id, d.workspace_id, ${runId ?? null}, d.id, ${stage ?? null},
+          ${detail.slice(0, 2000)}, now() + ${ttlHours}::double precision * interval '1 hour',
           case when d.org_id is null then '{}'::text[] else array[d.org_id] end, d.org_id, d.id
         from documents d
-        where d.id = ${documentId} and d.source_sha256 is not null
+        where d.id = ${documentId} and coalesce(${stagedSha256}::text, d.source_sha256) is not null
         on conflict (source_sha256) do update set
           expires_at = greatest(q.expires_at, excluded.expires_at),
           org_ids = case when excluded.last_org_id is null or excluded.last_org_id = any(q.org_ids) then q.org_ids
@@ -109,7 +177,30 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
           last_seen_at = now(),
           refused_count = q.refused_count + 1
         from documents d
-        where q.source_sha256 = ${sourceSha256} and d.id = ${documentId} and d.source_sha256 = q.source_sha256`;
+        where q.source_sha256 = ${sourceSha256} and d.id = ${documentId}
+          -- A hashed document's bytes are its server hash (staging refuses anything else); an
+          -- unhashed one was found by its staged hash.
+          and (d.source_sha256 is null or d.source_sha256 = q.source_sha256)`;
+    },
+    async recordOrgFailure({ documentId, runId, stage, attributable, detail, windowHours }) {
+      const [inserted] = await sql`
+        insert into org_teardown_failures (org_id, document_id, run_id, stage, attributable, detail)
+        select d.org_id, d.id, ${runId ?? null}, ${stage ?? null}, ${attributable}, ${detail.slice(0, 2000)}
+        from documents d
+        where d.id = ${documentId} and d.org_id is not null
+        returning org_id`;
+      if (!inserted) return null;
+      return await countOrgFailures(String(inserted.org_id), windowHours);
+    },
+    async orgFailures(documentId, windowHours) {
+      const [row] = await sql`
+        select d.org_id, count(f.id)::int as count
+        from documents d
+        join org_teardown_failures f on f.org_id = d.org_id
+          and f.created_at > now() - ${windowHours}::double precision * interval '1 hour'
+        where d.id = ${documentId}
+        group by d.org_id`;
+      return row ? { orgId: String(row.org_id), count: Number(row.count) } : null;
     },
   };
 }
@@ -140,6 +231,7 @@ export function configureSourceQuarantine(store: SourceQuarantineStore | null): 
 
 async function quarantineSourceOf(store: SourceQuarantineStore, error: CommandTeardownError): Promise<void> {
   const { run_id: runId, document_id: documentId, stage } = error.attribution;
+  if (typeof documentId === "string" && documentId) await countOrgFailure(store, error, documentId);
   if (!error.attributable) {
     // Timing or a host cause, not the bytes: the worker quarantines itself, the source stays admitted.
     console.error(
@@ -155,6 +247,7 @@ async function quarantineSourceOf(store: SourceQuarantineStore, error: CommandTe
   try {
     const listed = await store.record({
       documentId,
+      stagedSha256: stagedSourceSha256(documentId),
       ...(typeof runId === "string" ? { runId } : {}),
       ...(typeof stage === "string" ? { stage } : {}),
       detail: error.message,
@@ -171,6 +264,32 @@ async function quarantineSourceOf(store: SourceQuarantineStore, error: CommandTe
   } catch (recordError) {
     console.error(
       `[worker-quarantine] status=source-record-failed run=${runId ?? "none"} document=${documentId} ` +
+        `error=${JSON.stringify(recordError instanceof Error ? recordError.message : String(recordError))}`,
+    );
+  }
+}
+
+async function countOrgFailure(store: SourceQuarantineStore, error: CommandTeardownError, documentId: string): Promise<void> {
+  const { run_id: runId, stage } = error.attribution;
+  try {
+    const counted = await store.recordOrgFailure({
+      documentId,
+      ...(typeof runId === "string" ? { runId } : {}),
+      ...(typeof stage === "string" ? { stage } : {}),
+      attributable: error.attributable,
+      detail: error.message,
+      windowHours: orgTeardownWindowHours(),
+    });
+    if (counted && counted.count >= orgTeardownLimit()) {
+      // Alertable: this organization's parser work is now refused on every worker.
+      console.error(
+        `[worker-quarantine] status=org-breaker-open metric=org_teardown_breaker_open org=${counted.orgId} ` +
+          `failures=${counted.count} limit=${orgTeardownLimit()} window_hours=${orgTeardownWindowHours()} document=${documentId}`,
+      );
+    }
+  } catch (recordError) {
+    console.error(
+      `[worker-quarantine] status=org-record-failed run=${runId ?? "none"} document=${documentId} ` +
         `error=${JSON.stringify(recordError instanceof Error ? recordError.message : String(recordError))}`,
     );
   }
@@ -200,7 +319,17 @@ export async function admitCommandSource(): Promise<void> {
   if (scope && !checks) admitted.set(scope, (checks = new Map()));
   let check = checks?.get(documentId);
   if (!check) {
-    check = store.find(documentId).then(async (listed) => {
+    check = Promise.all([
+      store.find(documentId, stagedSourceSha256(documentId)),
+      store.orgFailures(documentId, orgTeardownWindowHours()),
+    ]).then(async ([listed, org]) => {
+      if (org && org.count >= orgTeardownLimit()) {
+        console.error(
+          `[worker-quarantine] status=org-refused metric=org_parser_refused org=${org.orgId} failures=${org.count} ` +
+            `limit=${orgTeardownLimit()} run=${currentPerfContext()?.runId ?? "none"} document=${documentId}`,
+        );
+        throw new QuarantinedOrgError(documentId, org.orgId, org.count);
+      }
       if (!listed) return;
       const context = currentPerfContext();
       console.error(
@@ -219,7 +348,7 @@ export async function admitCommandSource(): Promise<void> {
     // A failed lookup is retried by the next command; a refusal stays cached.
     checks?.set(documentId, check);
     check.catch((error: unknown) => {
-      if (!(error instanceof QuarantinedSourceError)) checks?.delete(documentId);
+      if (!(error instanceof SourceRefusalError)) checks?.delete(documentId);
     });
   }
   await check;

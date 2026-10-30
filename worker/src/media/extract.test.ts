@@ -20,6 +20,12 @@ vi.mock("./video-processing.js", () => ({
 }));
 vi.mock("./processing.js", () => ({ transcribeChunk: vi.fn(async () => ({ text: "speech", segments: [{ start: 0, end: .5, text: "speech" }], costUsd: 0, costSource: "estimate" })) }));
 vi.mock("../tools/storage.js", () => ({ cleanupTempFile: vi.fn(async () => {}) }));
+// The staged bytes are fake here; source-integrity has its own tests.
+vi.mock("../sandbox/source-integrity.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../sandbox/source-integrity.js")>(),
+  stageSourceFile: vi.fn(async (storage: { downloadToTempFile(key: string, pattern: string, options?: unknown): Promise<string> }, document: { sourceKey: string }, pattern: string, options?: unknown) =>
+    await storage.downloadToTempFile(document.sourceKey, pattern, options)),
+}));
 function fixture() {
   const document = { id: "doc", userId: "user", sourceKey: "source", pageCount: 0, status: "uploaded" } as Document;
   const state = new WorkflowState({ id: "run", userId: "user", orgId: "org", workspaceId: "workspace", stats: {}, artifacts: {},

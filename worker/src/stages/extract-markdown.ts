@@ -1436,13 +1436,13 @@ export class ExtractMarkdownStage implements Stage {
     primary: { extractor: PreparedExtractor; source: string };
     secondary: { extractor: PreparedExtractor; source: string } | null;
   }> {
-    if (!args.secondary || this.cfg.serializePdfCandidateExtraction) {
-      return {
-        primary: { extractor: args.primary, source: args.sourcePath },
-        secondary: args.secondary ? { extractor: args.secondary, source: args.sourcePath } : null,
-      };
-    }
+    // Every candidate, single, serialized or concurrent, gets its own copy: the cached source is
+    // shared by every activity on this worker that processes the same key (a reprocess, a new
+    // version) and stays read-only (sandbox/paths.ts), while extractors write beside their input.
+    const registered = new Set(documentExtractorRegistry.list().map((descriptor) => descriptor.id));
     const isolate = async (extractor: PreparedExtractor) => {
+      // In-process stand-ins (image-textless) run no command and are not in the registry.
+      if (!registered.has(extractor.label)) return { extractor, source: args.sourcePath };
       const dir = await mkdtemp(path.join(tmpdir(), "docslurp-candidate-"));
       args.dirs.push(dir);
       const source = path.join(dir, path.basename(args.sourcePath));
@@ -1456,8 +1456,15 @@ export class ExtractMarkdownStage implements Stage {
       );
       return { extractor: prepared, source };
     };
-    const [primary, secondary] = await Promise.all([isolate(args.primary), isolate(args.secondary)]);
-    return { primary, secondary };
+    // Settle both before failing: the caller removes `dirs` as soon as this throws, and a sibling
+    // still copying would otherwise recreate its directory (or copy into a removed one) afterwards.
+    const [primary, secondary] = await Promise.allSettled([
+      isolate(args.primary),
+      args.secondary ? isolate(args.secondary) : Promise.resolve(null),
+    ]);
+    if (primary.status === "rejected") throw primary.reason;
+    if (secondary.status === "rejected") throw secondary.reason;
+    return { primary: primary.value, secondary: secondary.value };
   }
 
   private async collectCandidateResults(args: {

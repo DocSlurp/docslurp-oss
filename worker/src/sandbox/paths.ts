@@ -22,13 +22,35 @@ export function resolveCommandPaths(args: {
     inputPaths: resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }),
     writablePaths: resolveSandboxWritablePaths({
       configuredPaths: args.configuredWritablePaths,
-      // Inputs of a readOnlyInputs plan stay read-only (bound as readable files above).
-      commandArgs: args.plan.readOnlyInputs
-        ? args.plan.args.filter((arg) => !(path.isAbsolute(arg) && isExistingFile(arg)))
-        : args.plan.args,
+      // Inputs of a readOnlyInputs plan stay read-only (bound as readable files above), and so does
+      // a registered shared source in any plan: its directory never becomes writable.
+      commandArgs: args.plan.args.filter(
+        (arg) => !(path.isAbsolute(arg) && (isReadOnlySource(arg) || (args.plan.readOnlyInputs && isExistingFile(arg)))),
+      ),
       runtimeProjectDir,
     }),
   };
+}
+
+/**
+ * Source files shared across commands and activities (PdfSourceCache: one download per source key
+ * per worker, used by every activity that processes it). A command always gets such a file
+ * read-only and never its directory writable, whatever its plan says: otherwise two activities
+ * (a reprocess and a new version of the same source) would share a writable directory where one
+ * command could rewrite the source or meet the other on a socket file.
+ */
+const readOnlySources = new Set<string>();
+
+export function registerReadOnlySource(file: string): void {
+  readOnlySources.add(path.resolve(file));
+}
+
+export function unregisterReadOnlySource(file: string): void {
+  readOnlySources.delete(path.resolve(file));
+}
+
+export function isReadOnlySource(file: string): boolean {
+  return readOnlySources.has(path.resolve(file));
 }
 
 function isExistingFile(candidate: string): boolean {
@@ -78,6 +100,12 @@ export function resolveSandboxWritablePaths(args: {
     if (resolvedArg === args.runtimeProjectDir || resolvedArg.startsWith(`${args.runtimeProjectDir}${path.sep}`)) continue;
     const tempWorkspace = inferDocslurpTempWorkspace(arg);
     if (tempWorkspace) {
+      // Fail closed: a shared read-only source (registerReadOnlySource) never shares a writable directory.
+      for (const source of readOnlySources) {
+        if (source.startsWith(`${tempWorkspace}${path.sep}`)) {
+          throw new Error(`refusing to make the directory of a shared source writable: ${tempWorkspace}`);
+        }
+      }
       writable.add(tempWorkspace);
     }
   }

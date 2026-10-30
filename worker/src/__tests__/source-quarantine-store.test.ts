@@ -26,7 +26,9 @@ beforeAll(async () => {
       values ('hostile', 'o1', 'u1', 'w1', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 1, 'aaaa'),
              ('same-bytes-other-org', 'o2', 'u2', 'w2', 'run-2', 'b.pdf', 'application/pdf', 'k2', 'processing', 1, 'aaaa'),
              ('innocent', 'o1', 'u1', 'w1', 'run-1', 'c.pdf', 'application/pdf', 'k3', 'processing', 1, 'bbbb'),
-             ('unhashed', 'o1', 'u1', 'w1', 'run-1', 'd.pdf', 'application/pdf', 'k4', 'processing', 1, null);
+             ('unhashed', 'o1', 'u1', 'w1', 'run-1', 'd.pdf', 'application/pdf', 'k4', 'processing', 1, null),
+             ('swapped', 'o1', 'u1', 'w1', 'run-1', 'p.pdf', 'application/pdf', 'k5', 'processing', 1, 'pppp'),
+             ('popular-other-org', 'o2', 'u2', 'w2', 'run-2', 'p.pdf', 'application/pdf', 'k6', 'processing', 1, 'pppp');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -83,5 +85,47 @@ describe("postgres source quarantine", () => {
     const store = postgresSourceQuarantine(sql);
     expect(await store.record({ documentId: "unhashed", detail: "x", ttlHours: 168 })).toBeNull();
     expect(await store.find("unhashed")).toBeNull();
+  });
+});
+
+// #234 round 7 (H2): the quarantine keys on the hash of the bytes the worker staged, so a source
+// replaced after upload cannot list another tenant's popular file, nor hide listed hostile bytes.
+describe("postgres source quarantine keyed by the staged hash", () => {
+  it("cross-tenant poisoning: a teardown on swapped bytes lists those bytes, never the hash the server recorded", async () => {
+    const store = postgresSourceQuarantine(sql);
+    await sql`delete from quarantined_sources`;
+    // 'swapped' claims P's hash (pppp) but the worker staged other bytes (xxxx). (Staging refuses such a
+    // mismatch before any command; this is the store's own guarantee if a record ever happened.)
+    expect(await store.record({ documentId: "swapped", stagedSha256: "x".repeat(64), detail: "held", ttlHours: 168 }))
+      .toEqual({ sourceSha256: "x".repeat(64), orgId: "o1", workspaceId: "w1" });
+    // The other organization's popular file P stays admitted.
+    expect(await store.find("popular-other-org", "pppp")).toBeNull();
+    expect(await store.find("popular-other-org")).toBeNull();
+    // The staged hash is what is checked: the listed bytes are refused under any server hash.
+    expect(await store.find("innocent", "x".repeat(64))).toMatchObject({ sourceSha256: "x".repeat(64) });
+    // A document without a server hash is keyed by its staged hash.
+    expect(await store.record({ documentId: "unhashed", stagedSha256: "u".repeat(64), detail: "held", ttlHours: 1 }))
+      .toMatchObject({ sourceSha256: "u".repeat(64) });
+    expect(await store.find("unhashed", "u".repeat(64))).toMatchObject({ sourceSha256: "u".repeat(64) });
+    expect(await store.find("unhashed")).toBeNull();
+  });
+});
+
+describe("postgres organization teardown breaker", () => {
+  it("counts every teardown against the document's organization within the window", async () => {
+    const store = postgresSourceQuarantine(sql);
+    await sql`delete from org_teardown_failures`;
+    expect(await store.orgFailures("hostile", 24)).toBeNull();
+    expect(await store.recordOrgFailure({ documentId: "hostile", runId: "run-1", stage: "extract-markdown", attributable: false, detail: "held", windowHours: 24 }))
+      .toEqual({ orgId: "o1", count: 1 });
+    expect(await store.recordOrgFailure({ documentId: "innocent", attributable: true, detail: "held", windowHours: 24 })).toEqual({ orgId: "o1", count: 2 });
+    // Another organization's documents are not affected.
+    expect(await store.orgFailures("same-bytes-other-org", 24)).toBeNull();
+    expect(await store.orgFailures("hostile", 24)).toEqual({ orgId: "o1", count: 2 });
+    // The window slides: old failures stop counting.
+    await sql`update org_teardown_failures set created_at = now() - interval '25 hours' where document_id = 'hostile'`;
+    expect(await store.orgFailures("innocent", 24)).toEqual({ orgId: "o1", count: 1 });
+    // An unknown document records nothing.
+    expect(await store.recordOrgFailure({ documentId: "missing", attributable: true, detail: "x", windowHours: 24 })).toBeNull();
   });
 });

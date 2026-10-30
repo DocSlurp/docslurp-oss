@@ -65,6 +65,7 @@ export const WORKER_TABLES = Object.freeze({
   notification_deliveries: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts notification emails" },
   notification_prefs: { privileges: ["select"], evidence: "worker/src/db/store.ts run/cost emails" },
   organizations: { privileges: ["select", "update"], evidence: "worker/src/db/store.ts budget alerts; superseded-purge.ts retention_swept_at; debit_org_credits()" },
+  org_teardown_failures: { privileges: ["select", "insert"], evidence: "worker/src/sandbox/source-quarantine.ts (recordOrgFailure insert ... returning; orgFailures count); operators delete rows" },
   page_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts page stage state" },
   page_work_tasks: { privileges: DML, evidence: "worker/src/db/page-task-store.ts" },
   parser_eval_results: { privileges: ["insert"], evidence: "worker/src/db/store.ts parser evaluations" },

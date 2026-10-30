@@ -17,6 +17,8 @@ import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
+import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
+import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/paths.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -180,12 +182,30 @@ export class PdfSourceCache {
     private readonly maxEntries = 16,
   ) {}
 
+  /**
+   * The cached source for `document`, verified against its server hash on every call (a cached entry
+   * may serve another document or version with the same key). On a mismatch the entry is dropped and
+   * the document refused (SourceIntegrityError). The file is a read-only source for every command
+   * (sandbox/paths.ts registerReadOnlySource): activities sharing it can neither write it nor share
+   * its directory.
+   */
   async get(document: Document): Promise<CachedPdfSource> {
+    const { entry, cacheHit } = await this.entry(document);
+    try {
+      verifyStagedSource(document, entry.sha256);
+    } catch (error) {
+      if (error instanceof SourceIntegrityError) await this.drop(document.sourceKey);
+      throw error;
+    }
+    return { ...entry, cacheHit };
+  }
+
+  private async entry(document: Document): Promise<{ entry: SourceEntry; cacheHit: boolean }> {
     const existing = this.entries.get(document.sourceKey);
     if (existing) {
       const entry = await existing;
       entry.lastAccess = Date.now();
-      return { ...entry, cacheHit: true };
+      return { entry, cacheHit: true };
     }
 
     await this.evictIfNeeded();
@@ -193,16 +213,26 @@ export class PdfSourceCache {
     if (raced) {
       const entry = await raced;
       entry.lastAccess = Date.now();
-      return { ...entry, cacheHit: true };
+      return { entry, cacheHit: true };
     }
     const pending = this.download(document);
     this.entries.set(document.sourceKey, pending);
     try {
-      const entry = await pending;
-      return { ...entry, cacheHit: false };
+      return { entry: await pending, cacheHit: false };
     } catch (error) {
       this.entries.delete(document.sourceKey);
       throw error;
+    }
+  }
+
+  private async drop(sourceKey: string): Promise<void> {
+    const pending = this.entries.get(sourceKey);
+    if (!pending) return;
+    this.entries.delete(sourceKey);
+    const entry = await pending.catch(() => null);
+    if (entry) {
+      unregisterReadOnlySource(entry.path);
+      await cleanupTempFile(entry.path);
     }
   }
 
@@ -211,7 +241,10 @@ export class PdfSourceCache {
     this.entries.clear();
     await Promise.all(entries.map(async (pending) => {
       const entry = await pending.catch(() => null);
-      if (entry) await cleanupTempFile(entry.path);
+      if (entry) {
+        unregisterReadOnlySource(entry.path);
+        await cleanupTempFile(entry.path);
+      }
     }));
   }
 
@@ -221,6 +254,7 @@ export class PdfSourceCache {
       trustedTempDownloadPattern("docslurp-source-cache-", document),
     );
     const [sha256, fileStat] = await Promise.all([hashFile(filePath), stat(filePath)]);
+    registerReadOnlySource(filePath);
     return { path: filePath, sha256, sizeBytes: fileStat.size, lastAccess: Date.now() };
   }
 
@@ -235,6 +269,7 @@ export class PdfSourceCache {
       .sort((left, right) => left.entry.lastAccess - right.entry.lastAccess)[0];
     if (!oldest) return;
     this.entries.delete(oldest.key);
+    unregisterReadOnlySource(oldest.entry.path);
     await cleanupTempFile(oldest.entry.path);
   }
 }
