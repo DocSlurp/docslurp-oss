@@ -14,7 +14,7 @@ import { createMcpDispatcher, mcpManifest } from "./mcp-tools.js";
 import { ChatToolBlockedError } from "./chat-tool-error.js";
 import { isCancellation } from "@docslurp/shared/cancellation";
 import { createChatMcpTools, type ChatSearchCallStats, type ChatToolActivity } from "./chat-mcp-tools.js";
-import { ChatClientAbortError, ChatTurnDeadline, ChatTurnDeadlineError, chatTurnTimeBudget, type ChatTurnTimeBudget } from "./chat-turn-deadline.js";
+import { ChatClientAbortError, ChatTurnDeadline, ChatTurnDeadlineError, chatTurnTimeBudget, raceAbort, type ChatTurnTimeBudget } from "./chat-turn-deadline.js";
 import type { SearchResult, WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
 
 const MAX_AGENT_OUTPUT_TOKENS = 4096;
@@ -226,6 +226,8 @@ interface InFlightStep {
   toolCalls: string[];
   /** This call's budget: a child of the turn signal that also aborts at the step timeout. */
   child: ReturnType<ChatTurnDeadline["child"]>;
+  firstToken: ReturnType<ChatTurnDeadline["child"]>;
+  modelSignal: AbortSignal;
   /** Token usage from the stream's `finish` part: the model call completed (tools may still be running). */
   finishUsage?: { inputTokens: number; outputTokens: number };
   recorded: boolean;
@@ -375,29 +377,40 @@ export async function runChatMcpAgent(args: {
         const final = nextStep.final;
         // The provider's fetch is cancelled at the step budget, not only at the turn deadline.
         const child = deadline.child("step", deadline.stepBudgetMs(final));
-        inFlight = { stepNumber: nextStep.number, final, startedAt: Date.now(), child,
+        const configured = Number(process.env.CHAT_AGENT_FIRST_TOKEN_TIMEOUT_MS);
+        const firstTokenMs = Number.isFinite(configured) && configured > 0 ? Math.min(60_000, configured) : 15_000;
+        const firstToken = deadline.child("step", Math.min(firstTokenMs, deadline.stepBudgetMs(final)));
+        const modelSignal = AbortSignal.any([child.signal, firstToken.signal]);
+        inFlight = { firstToken, modelSignal, stepNumber: nextStep.number, final, startedAt: Date.now(), child,
           promptChars: JSON.stringify(params.prompt).length, outputChars: 0, toolCalls: [], recorded: false };
-        return { ...params, abortSignal: child.signal };
+        return { ...params, abortSignal: modelSignal };
       },
       wrapStream: async ({ doStream }) => {
         const step = inFlight!;
         const child = step.child;
         lastStepTimedOut = false;
-        const onAbort = () => { if (child.timedOut()) { stepTimeouts++; lastStepTimedOut = true; } };
-        child.signal.addEventListener("abort", onAbort, { once: true });
+        const onAbort = () => { if (child.timedOut() || step.firstToken.timedOut()) { stepTimeouts++; lastStepTimedOut = true; } };
+        step.modelSignal.addEventListener("abort", onAbort, { once: true });
         let failStream: ((reason: unknown) => void) | undefined;
-        const onStepAbort = () => failStream?.(child.signal.reason);
+        const onStepAbort = () => failStream?.(step.modelSignal.reason);
         const done = () => {
           child.dispose();
-          child.signal.removeEventListener("abort", onAbort);
-          child.signal.removeEventListener("abort", onStepAbort);
+          step.firstToken.dispose();
+          step.modelSignal.removeEventListener("abort", onAbort);
+          step.modelSignal.removeEventListener("abort", onStepAbort);
         };
         let result: Awaited<ReturnType<typeof doStream>>;
         try {
-          result = await doStream();
+          const pending = Promise.resolve(doStream());
+          // Some transports settle after cancellation; release their unread stream.
+          void pending.then(late => {
+            if (step.modelSignal.aborted) return late.stream.cancel(step.modelSignal.reason).catch(() => undefined);
+          }, () => undefined);
+          result = await raceAbort(pending, step.modelSignal);
         } catch (error) {
-          // No response at all (connection or HTTP error): no generation was started, nothing to bill.
-          step.recorded = true;
+          // A pre-header timeout may still have started a billable generation.
+          // Preserve the existing aborted-call accounting path in that case.
+          step.recorded = !step.modelSignal.aborted;
           done();
           throw error;
         }
@@ -405,16 +418,18 @@ export async function runChatMcpAgent(args: {
           start(controller) {
             // Ends the step at its budget even if the provider ignores the abort signal.
             failStream = (reason) => { done(); try { controller.error(reason); } catch { /* already closed */ } };
-            if (child.signal.aborted) onStepAbort();
-            else child.signal.addEventListener("abort", onStepAbort, { once: true });
+            if (step.modelSignal.aborted) onStepAbort();
+            else step.modelSignal.addEventListener("abort", onStepAbort, { once: true });
           },
           transform(chunk, controller) {
             if (chunk.type === "response-metadata") {
               if (chunk.id) step.generationId = chunk.id;
               if (chunk.modelId) step.responseModel = chunk.modelId;
             } else if (chunk.type === "text-delta" || chunk.type === "reasoning-delta" || chunk.type === "tool-input-delta") {
+              if (chunk.delta.length > 0) step.firstToken.dispose();
               step.outputChars += chunk.delta.length;
             } else if (chunk.type === "tool-call") {
+              step.firstToken.dispose();
               step.toolCalls.push(chunk.toolName);
               step.outputChars += chunk.input.length;
             } else if (chunk.type === "finish") {

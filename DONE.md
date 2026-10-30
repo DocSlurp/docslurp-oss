@@ -161,3 +161,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
 
 - Fix dashboard chat nested-generation timeouts: retrieve evidence and synthesize in one agent, expose an unambiguous batch search contract, and retain direct answers for chat-only keys.
+
+- Add a configurable 15-second first-token deadline to agent chat model calls; retain native provider fallback and account for aborted calls without replaying requests.

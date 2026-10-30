@@ -192,6 +192,7 @@ An agent turn has a deadline below the ~120-second timeout of common edge proxie
 |---|---|---|
 | `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Hard stop for the whole turn. Everything the turn started (model calls, tools, nested searches and their SQL, nested answers) is cancelled at it. |
 | `CHAT_AGENT_STEP_TIMEOUT_MS` | `45000` | Longest model call for a step that may still call tools, further capped to end before the final reserve. The final answer step may use all the time left. |
+| `CHAT_AGENT_FIRST_TOKEN_TIMEOUT_MS` | `15000` | Time to the first non-empty text, reasoning or tool-call output for each agent model step (maximum 60000 ms, bounded by the existing step/turn deadline). Headers and heartbeats do not count. Existing OpenRouter provider fallback remains enabled; this timeout cancels the call without replaying it. |
 | `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest tool call, also capped to end before the final reserve. A tool over budget is cancelled and blocks the turn with HTTP 424 `chat_tool_failed`. |
 | `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Time kept for the answer (at most half the deadline). Inside it, tools are disabled; a late tool call is refused and blocks the turn without running. |
 
