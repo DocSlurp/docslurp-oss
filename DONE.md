@@ -1,3 +1,7 @@
+## HTML table chunk preservation (2026-10-30)
+
+- Preserve bounded table/cell context in fallback and canonical embedding chunks; scan nested repository integrity without inheriting parent documentation exclusions. See [evidence and limits](docs/evals/html-table-chunks.md).
+
 ## Error recovery audit (2026-10-28)
 
 - [#228](https://github.com/DocSlurp/docslurp-oss/issues/228) (2026-10-29): Add native Better Auth magic-link sign-in with hashed five-minute single-use tokens, scanner-safe confirmation, trusted-origin and shared database rate guards, preserving MFA/SSO and separate sensitive grants.

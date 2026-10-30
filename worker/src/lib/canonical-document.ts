@@ -1,3 +1,4 @@
+import { tableChunks, TableBoundary } from "../pipeline/table-chunking.js";
 import {
   normalizePageNumbers,
   splitTextIntoPages,
@@ -101,6 +102,23 @@ export function buildCanonicalDocumentFromMarkdown(args: {
           lineStart: startLine,
           lineEnd: lineIndex,
           metadata: {}
+        }));
+        continue;
+      }
+
+      if (/^ {0,3}<table(?=\s|>|$)/i.test(line)) {
+        const tableLines: string[] = [];
+        const boundary = new TableBoundary();
+        while (lineIndex < lines.length) {
+          const nextLine = lines[lineIndex++] ?? "";
+          tableLines.push(nextLine);
+          boundary.feed(nextLine);
+          if (boundary.closed) break;
+        }
+        blocks.push(createBlock({
+          documentId: args.documentId, order: order++, type: "table",
+          text: tableLines.join("\n").trim(), headingPath: activeHeadingPath(headingStack),
+          pageNumber, lineStart: startLine, lineEnd: lineIndex, metadata: { encoding: "html" }
         }));
         continue;
       }
@@ -209,6 +227,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
           CODE_FENCE_RE.test(nextLine.trim()) ||
           HEADING_RE.test(nextLine) ||
           isTableStart(lines, lineIndex) ||
+          /^ {0,3}<table(?=\s|>|$)/i.test(nextLine) ||
           isListLine(nextLine) ||
           QUOTE_RE.test(nextLine)
         ) {
@@ -279,6 +298,7 @@ export function buildCanonicalChunksFromDocument(
   options?: { chunkOverlap?: boolean; maxChars?: number; sourceKind?: "image" | null; evidenceBoundaries?: boolean }
 ): CanonicalChunk[] {
   const maxChars = options?.maxChars ?? MAX_CHARS;
+  if (!Number.isSafeInteger(maxChars) || maxChars <= 0) throw new RangeError("maxChars must be a positive safe integer");
   const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0);
 
   if (meaningfulBlocks.length === 0) {
@@ -469,6 +489,7 @@ function withOverlap(
     }
 
     const next = baseChunks[index + 1]!;
+    if (current.blockTypes.includes("table") || next.blockTypes.includes("table")) continue;
     const tailLength = Math.floor(current.text.length * overlapFraction);
     const headLength = Math.floor(next.text.length * overlapFraction);
     const overlapText = `${current.text.slice(-tailLength)} ${next.text.slice(0, headLength)}`.trim();
@@ -616,6 +637,10 @@ function buildTableChunks(
   block: CanonicalBlock,
   maxChars: number
 ): Array<Omit<CanonicalChunk, "chunkIndex" | "overlapIndex">> {
+  if (/^\s*<table(?=\s|>|$)/i.test(block.text)) {
+    return [...tableChunks(block.text.trim(), maxChars, block.order + 1)]
+      .map(text => materializeChunk(text, [block], { tableGranularity: "table" }));
+  }
   const parsed = parseMarkdownTable(block.text);
   const chunks = materializeOversizedBlock(block, maxChars, {
     tableGranularity: "table",

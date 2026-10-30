@@ -1,3 +1,4 @@
+import { tableChunks, TableBoundary } from "./table-chunking.js";
 import { leadingFrontmatterLineCount, plainHeadingText } from "../lib/markdown-structure.js";
 
 export interface ChunkMeta {
@@ -18,6 +19,7 @@ export function* chunkTextWithMeta(
   maxChars: number,
   options?: { overlapFraction?: number }
 ): Generator<ChunkMeta> {
+  if (!Number.isSafeInteger(maxChars) || maxChars <= 0) throw new RangeError("maxChars must be a positive safe integer");
   const clean = text.trim();
   if (!clean) {
     return;
@@ -41,12 +43,12 @@ export function* chunkTextWithMeta(
   }
 
   // Collect all base chunks, then insert overlap chunks between adjacent pairs
-  const baseChunks: { text: string; headingPath: string[] }[] = [];
+  const baseChunks: { text: string; headingPath: string[]; table: boolean }[] = [];
   for (const section of sections) {
     for (const chunk of emitSection(section, maxChars)) {
       const trimmed = chunk.trim();
       if (trimmed) {
-        baseChunks.push({ text: trimmed, headingPath: section.headingPath });
+        baseChunks.push({ text: trimmed, headingPath: section.headingPath, table: section.tableIndex !== undefined });
       }
     }
   }
@@ -59,6 +61,7 @@ export function* chunkTextWithMeta(
 
     if (i + 1 < baseChunks.length) {
       const next = baseChunks[i + 1]!;
+      if (current.table || next.table) continue;
       const tailLen = Math.floor(current.text.length * overlapFraction);
       const headLen = Math.floor(next.text.length * overlapFraction);
       const tail = current.text.slice(-tailLen);
@@ -76,6 +79,7 @@ interface Section {
   headingPath: string[];
   headingLevel: number;
   body: string;
+  tableIndex?: number;
 }
 
 function parseSections(text: string): Section[] {
@@ -99,8 +103,25 @@ function parseSections(text: string): Section[] {
   // A leading metadata block is not content and must not become a heading.
   const startLine = leadingFrontmatterLineCount(lines);
   let fence: string | null = null;
+  let tableBody: string | null = null;
+  let tableBoundary = new TableBoundary();
+  let tableIndex = 0;
+  function pushTable() {
+    sections.push({ headingPath: headingStack.map(h => h.text), headingLevel: currentLevel, body: tableBody!, tableIndex: ++tableIndex });
+    tableBody = null; tableBoundary = new TableBoundary();
+  }
 
   for (const line of lines.slice(startLine)) {
+    if (tableBody !== null || (fence === null && /^ {0,3}<table(?=\s|>|$)/i.test(line))) {
+      if (tableBody === null) {
+        if (currentBody.trim()) { pushSection(); currentBody = ""; }
+        tableBody = "";
+      }
+      tableBody += (tableBody ? "\n" : "") + line;
+      tableBoundary.feed(line);
+      if (tableBoundary.closed) pushTable();
+      continue;
+    }
     // Lines inside fenced code (shell comments, Markdown samples) are never headings.
     const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
     if (fenceMatch) {
@@ -139,6 +160,8 @@ function parseSections(text: string): Section[] {
     }
   }
 
+  if (tableBody !== null) pushTable();
+
   // Flush remaining
   if (currentBody.trim()) {
     pushSection();
@@ -149,6 +172,7 @@ function parseSections(text: string): Section[] {
 
 function* emitSection(section: Section, maxChars: number): Generator<string> {
   const body = section.body;
+  if (section.tableIndex !== undefined) { yield* tableChunks(body, maxChars, section.tableIndex); return; }
   if (!body) {
     return;
   }
