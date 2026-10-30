@@ -17,6 +17,7 @@ import {
 } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
+import { inAllowingRun } from "../test/provider-scope.js";
 
 const MIMO_VISION_MODEL = "xiaomi/mimo-v2.6-flash";
 
@@ -33,14 +34,14 @@ async function sentBody(vision: Record<string, unknown>) {
   const dir = await mkdtemp(join(tmpdir(), "mimo-vision-"));
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-  await executeVisionRuntime({
+  await inAllowingRun(() => executeVisionRuntime({
     imagePath,
     outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse(vision),
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
     privacyMode: "standard",
-  });
+  }));
   return bodies[0]!;
 }
 

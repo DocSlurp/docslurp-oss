@@ -10,6 +10,7 @@ import { CommandRunner } from "../tools/runner.js";
 import { MARKDOWN_LATEX_VISION_PROMPT, VISION_MODEL_PROFILES, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { inAllowingRun } from "../test/provider-scope.js";
 
 const SNAPSHOT = "deepseek/deepseek-v4.1-flash-1017";
 
@@ -29,33 +30,34 @@ async function send(model: string, prompt?: string) {
   const dir = await mkdtemp(join(tmpdir(), "vision-profile-"));
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-  await executeVisionRuntime({
+  await inAllowingRun(() => executeVisionRuntime({
     imagePath,
     outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
     privacyMode: "standard",
-  });
+  }));
   const body = bodies[0]!;
   return { body, userText: body.messages[1].content[0].text as string };
 }
 
 describe("per-model vision profiles", () => {
-  it("sends the DeepSeek V4.1 Flash 1017 snapshot the Markdown/LaTeX prompt, an 8k cap, no reasoning and pinned providers", async () => {
+  it("sends the DeepSeek V4.1 Flash 1017 snapshot the Markdown/LaTeX prompt, an 8k cap, no reasoning and its measured hosts", async () => {
     const { body, userText } = await send(SNAPSHOT);
     expect(body.model).toBe(SNAPSHOT);
     expect(userText).toBe(MARKDOWN_LATEX_VISION_PROMPT);
     expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(SNAPSHOT) });
+    expect(body.provider).toEqual({ only: ["streamlake", "deepseek", "together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(SNAPSHOT) });
   });
 
-  it("routes every organization to the same US-hosted providers", async () => {
+  it("sends a default org to the cheapest measured host, China-based ones included, under the route's max_price", async () => {
     const { body } = await send(SNAPSHOT);
-    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(SNAPSHOT) });
-    expect(body.provider.order).not.toContain("deepseek");
+    expect(body.provider.sort).toBe("price");
+    expect(body.provider.only.slice(0, 2)).toEqual(["streamlake", "deepseek"]);
+    expect(body.provider.ignore).toBeUndefined();
   });
 
   it("keeps an explicit non-default template for the snapshot", async () => {

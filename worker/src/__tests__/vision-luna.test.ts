@@ -11,6 +11,7 @@ import { unwrapWholeMarkdownFence } from "../tools/vision-markdown-fence.js";
 import { postProcessVisionText, visionModelProfile, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
+import { inAllowingRun } from "../test/provider-scope.js";
 
 const LUNA = "openai/gpt-6-luna";
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
@@ -33,14 +34,14 @@ async function run(model: string, prompt: string | undefined, responses: Array<R
     return new Response(JSON.stringify(responses[Math.min(bodies.length, responses.length) - 1]), { status: 200, headers: { "content-type": "application/json" } });
   }));
   const imagePath = await page();
-  const result = await executeVisionRuntime({
+  const result = await inAllowingRun(() => executeVisionRuntime({
     imagePath,
     outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg,
     runner: new CommandRunner(),
     privacyMode: "standard",
-  });
+  }));
   return { bodies, result };
 }
 
