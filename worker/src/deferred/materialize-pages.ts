@@ -572,15 +572,17 @@ export async function materializePageRange(
       // mistake the missing rows for a lost claim.
       const [exists] = await client`select materialization_generation, source_materialization_blocked from documents where id = ${documentId} for share`;
       if (!exists) throw new DocumentNotFoundError(documentId);
+      const sourceInvalidated = exists.source_materialization_blocked || exists.materialization_generation !== sourceVersion.materialization_generation;
+      // The revocation is durable even if subsequent page locking/refusal fails.
+      if (sourceInvalidated) deps.usage.takeRichPageCharges(documentId, page => rangePages.includes(page)).commit();
       const locked = await lockPageRows(client as unknown as Sql<Record<string, unknown>>, documentId, rangePages);
       held = new Set(locked.filter((row) => row.claimed_by_run === claimedBy).map((row) => row.page_number));
-      if (exists.source_materialization_blocked || exists.materialization_generation !== sourceVersion.materialization_generation) {
+      if (sourceInvalidated) {
         // Hold the document lock through refusal: invalidation writers take the
         // same lock before touching page content. No fresh or reused read may
         // publish, retain text, or bill after its source generation is revoked.
         await markPages(client, documentId, rangePages, "failed", { claimedBy, failureReason: "source-content-invalidated" });
         for (const page of rangePages) failed.set(page, "source-content-invalidated");
-        batches.push(deps.usage.takeRichPageCharges(documentId, page => rangePages.includes(page)));
         bodyDone = true;
         return;
       }

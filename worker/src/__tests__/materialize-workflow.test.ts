@@ -980,6 +980,28 @@ describe("runMaterializeRange activity", () => {
             }
           });
 
+          it("keeps provider usage but drops revoked OCR charges when refusal marking fails", async () => {
+            const t = tracked();
+            await db.exec(`create function reject_revoked_page() returns trigger language plpgsql as $$
+              begin if NEW.failure_reason = 'source-content-invalidated' then raise exception 'refusal write failed'; end if; return NEW; end $$;
+              create trigger reject_revoked_page before update on document_page_states for each row execute function reject_revoked_page()`);
+            try {
+              await expect(runMaterializeRange(withOps("m1", t, {
+                async embed(args) {
+                  await db.exec(`update documents set materialization_generation = materialization_generation + 1,
+                    source_materialization_blocked = true where id = 'd1'`);
+                  return ops.embed!(args);
+                },
+              }), input("m1", [3]))).rejects.toThrow("refusal write failed");
+              expect(await charges()).toEqual([]);
+              expect((await page3()).chunks).toEqual([]);
+              expect(await readState()).toMatchObject({ kept: false });
+              expect((await db.query(`select id from usage_events where run_id = 'm1' and metric = 'page-analysis'`)).rows.length).toBe(1);
+            } finally {
+              await db.exec(`drop trigger reject_revoked_page on document_page_states; drop function reject_revoked_page()`);
+            }
+          });
+
           it("retention purge clears the kept read: a later query publishes none of it and charges nothing again (M1)", async () => {
             const t = tracked();
             await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
