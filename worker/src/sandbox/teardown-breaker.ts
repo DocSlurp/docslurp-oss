@@ -29,8 +29,11 @@ import {
  * the `[worker-command] status=teardown-unverified` log lines (org, workspace, run, document,
  * stage) first. The activity in which the teardown failed always ends as a non-retryable teardown
  * failure, even if a stage swallowed or replaced the error (activity-interceptor.ts latches it),
- * and the document's source hash is denylisted fleet-wide (source-quarantine.ts), so a hostile
- * document cannot walk the fleet quarantining one worker after another. Raising the limit trades
+ * the document's staged source hash is denylisted fleet-wide when the command caused it, and every
+ * failure counts against the document's organization, whose parser work is refused fleet-wide past
+ * a limit (source-quarantine.ts), so hostile documents cannot walk the fleet quarantining one worker
+ * after another. Behind the stdio relay (scripts/stdio-relay.pl) a sandbox cannot hold the worker's
+ * stdio at all. Raising the limit trades
  * that safety for capacity and is meant for debugging only.
  */
 

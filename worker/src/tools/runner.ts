@@ -1917,7 +1917,7 @@ let warnedUnfilteredSockets = false;
 /**
  * A local provider that cannot enforce the AF_UNIX filter (landlock, none) must not run a command
  * that asks for it: two such commands could meet on a socket and trip the teardown breaker, or
- * worse. DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway for local development; it is
+ * worse. bubblewrap filters with seccomp, landlock with landrun's socket scoping (>= 0.1.17). DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway for local development; it is
  * refused when NODE_ENV=production. Remote providers are exempt: their commands run in the
  * session's own VM, terminated with the activity, and never hold a worker-side teardown.
  */
