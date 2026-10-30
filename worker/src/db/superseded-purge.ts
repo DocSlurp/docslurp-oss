@@ -1053,7 +1053,7 @@ export async function drainStorageCleanupQueue(
         const txStorage = forgettingEmbeddingReuseRefs(client, storage);
         const [row] = await client<StorageCleanupRow[]>`
           select id::text, kind, org_id, target, payload, artifact_uris from storage_cleanup_queue
-          where attempts < 10 and not_before <= now()
+          where (attempts < 10 or kind = 'upload_original') and not_before <= now()
             and id::text <> all(${client.array(failedIds)}::text[])
           order by created_at, id
           limit 1
@@ -1069,11 +1069,23 @@ export async function drainStorageCleanupQueue(
               row.target.endsWith("/") || row.target.includes("..")) {
             throw new Error("Refusing invalid original-upload cleanup target");
           }
+          // Resolve ownership from the sealed source, not from the cleanup payload's claim.
+          const [owner] = await client`select 1 from upload_session_files f
+            join upload_sessions s on s.id = f.session_id
+            where f.source_key = ${sealed} and s.org_id = ${row.org_id}
+            union all select 1 from documents where source_key = ${sealed} and org_id = ${row.org_id}
+            limit 1`;
+          if (!row.org_id || !owner) throw new Error("Original upload ownership cannot be verified");
           // Never delete a source still referenced by a document or an unfinished finalization.
           const [reference] = await client`select 1 from documents where source_key = ${row.target}
             union all select 1 from upload_session_files where source_key = ${row.target} limit 1`;
           if (reference) throw new Error("Original upload is still referenced");
           await txStorage.deleteKeys([row.target]);
+          // Keep a tombstone: a PUT started before authorization expired may finish later.
+          await client`update storage_cleanup_queue set attempts = 0, last_error = null,
+            not_before = now() + interval '1 day' where id = ${row.id}`;
+          result.purged += 1;
+          return;
         } else if (row.kind === "storage_prefix") {
           if (!SAFE_RUN_PREFIX.test(row.target)) throw new Error(`Refusing unsafe storage prefix: ${row.target}`);
           // Direct-upload recovery deliberately reuses the session ID as its
@@ -1136,7 +1148,8 @@ export async function drainStorageCleanupQueue(
         failedIds.push(row.id);
         await sql`
           update storage_cleanup_queue
-          set attempts = attempts + 1, last_error = ${message.slice(0, 2000)}
+          set attempts = attempts + 1, last_error = ${message.slice(0, 2000)},
+            not_before = case when kind = 'upload_original' then now() + interval '1 hour' else not_before end
           where id = ${row.id}
         `.catch(() => {});
       }

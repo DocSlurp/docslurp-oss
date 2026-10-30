@@ -121,6 +121,9 @@ describe("delete triggers enqueue external cleanup", () => {
     const original = "u1/upload/raw/original.pdf";
     const sealed = "u1/upload/raw/sealed-file.pdf";
     const other = "u2/upload/raw/original.pdf";
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('sealed-session', 'u1', 'o1', 'confirmed')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
+      values ('sealed-file', 'sealed-session', 'source.pdf', 'application/pdf', ${sealed}, 'single')`;
     const stores = fakeExternalStores([sealed, other], {});
     await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
       values ('upload_original', 'o1', ${original}, ${sql.json({sealedKey: sealed})}, 'sealed_upload', now() + interval '1 day')`;
@@ -129,12 +132,23 @@ describe("delete triggers enqueue external cleanup", () => {
     expect(stores.objects.has(original)).toBe(true);
     await sql`update storage_cleanup_queue set not_before = now()`;
     const failing = {...stores.storage, deleteKeys: async () => { throw new Error("storage unavailable"); }};
-    expect((await drainStorageCleanupQueue(sql, failing, stores.options)).failed).toBe(1);
+    for (let failure = 0; failure < 11; failure++) {
+      await sql`update storage_cleanup_queue set not_before = now()`;
+      expect((await drainStorageCleanupQueue(sql, failing, stores.options)).failed).toBe(1);
+    }
     expect((await sql`select * from storage_cleanup_queue`).length).toBe(1);
     await sql`update storage_cleanup_queue set not_before = now()`;
     await drainStorageCleanupQueue(sql, stores.storage, stores.options);
     expect([...stores.objects]).toEqual([sealed, other]);
-    expect((await sql`select * from storage_cleanup_queue`).length).toBe(0);
+    expect((await sql`select * from storage_cleanup_queue`).length).toBe(1);
+    stores.objects.add(original); // A late PUT finishes after the first successful cleanup.
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect([...stores.objects]).toEqual([sealed, other]);
+    stores.objects.add(original);
+    await sql`update storage_cleanup_queue set org_id = 'wrong-org', not_before = now()`;
+    expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(1);
+    expect(stores.objects.has(original)).toBe(true);
   });
 
   it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {
