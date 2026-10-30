@@ -55,16 +55,47 @@ export function runWithSandboxScope<T>(scope: SandboxSessionScope, fn: () => Pro
   return sandboxScopeStorage.run(scope, fn);
 }
 
+const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
+
+/** How long an activity waits for its sandbox session to close (WORKER_SANDBOX_CLOSE_TIMEOUT_MS). */
+export function sandboxCloseTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.WORKER_SANDBOX_CLOSE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CLOSE_TIMEOUT_MS;
+}
+
 /**
  * Close a session without letting a close failure replace the caller's outcome: a
  * completed activity must not fail (and retry billed work) because teardown failed,
  * and a failing activity must keep its own error. Providers keep secrets out of messages.
+ *
+ * The wait is bounded (`timeoutMs`): a close or a session open that never settles must not hold
+ * the activity's result, in particular a latched teardown failure, which has to reach Temporal as
+ * non-retryable rather than be lost to the worker's force exit. The close keeps running after the
+ * bound; a remote session also ends at its own provider-side timeout.
  */
-export async function closeSandboxQuietly(close: () => Promise<void>, label: string): Promise<void> {
+export async function closeSandboxQuietly(
+  close: () => Promise<void>,
+  label: string,
+  timeoutMs = sandboxCloseTimeoutMs(),
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const closing = (async () => close())();
   try {
-    await close();
+    const result = await Promise.race([
+      closing.then(() => "closed" as const),
+      new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), timeoutMs))),
+    ]);
+    if (result === "timeout") {
+      console.error(`[parser-sandbox] status=close-timeout ${label} timeout_ms=${timeoutMs}`);
+      closing.catch((error: unknown) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        console.warn(`[parser-sandbox] session close failed ${label}: ${reason}`);
+      });
+    }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     console.warn(`[parser-sandbox] session close failed ${label}: ${reason}`);
+  } finally {
+    clearTimeout(timer);
   }
 }

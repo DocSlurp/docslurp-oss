@@ -133,10 +133,18 @@ export class CommandTeardownError extends Error {
   readonly poisoned = true;
   /** Who the command ran for (run, document, stage, ...), set when it is recorded. */
   attribution: Record<string, string | number | undefined> = {};
+  /**
+   * The command itself defeated teardown: its stdio stayed open after every one of its own processes
+   * was confirmed gone, so something it handed the descriptor to holds it. Only such a failure lists
+   * its source (source-quarantine.ts). Timing and host causes (processes not reaped within the
+   * verify bound, a refused provider) are not attributable: the worker still quarantines itself.
+   */
+  readonly attributable: boolean;
   /** `cause` carries why the command was being stopped (timeout, budget, abort), if it was. */
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: ErrorOptions & { attributable?: boolean }) {
     super(message, options);
     this.name = "CommandTeardownError";
+    this.attributable = options?.attributable ?? false;
   }
 }
 
@@ -467,9 +475,12 @@ export function superviseChild(
     rejectDone(error);
   };
 
-  const unverified = (detail: string) =>
+  const unverified = (detail: string, attributable = false) =>
     fail(
-      new CommandTeardownError(`${options.label} teardown could not be verified: ${detail}`, reason ? { cause: reason } : undefined),
+      new CommandTeardownError(`${options.label} teardown could not be verified: ${detail}`, {
+        ...(reason ? { cause: reason } : {}),
+        attributable,
+      }),
       true,
     );
 
@@ -517,10 +528,13 @@ export function superviseChild(
         checking = false;
         if (stdioClosed || settled) return;
         if (!capped && (bytesRead() !== lastBytes || !waitingOnWriter())) return;
+        // Every process of the command is confirmed gone (verifyAfterExit), and our side is waiting:
+        // a descriptor the command handed out holds its stdio. That is the command's doing.
         unverified(
           capped
             ? `stdio kept us waiting ${capMs} ms after the command's processes exited (${stdioHolder}, still writing)`
             : `stdio is still held open after the command's processes exited (${stdioHolder})`,
+          true,
         );
       });
     }, STDIO_TICK_MS);

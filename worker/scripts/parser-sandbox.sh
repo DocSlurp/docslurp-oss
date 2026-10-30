@@ -128,11 +128,14 @@ done
 # bwrap exits on TERM; --die-with-parent and the PID namespace then take the whole parser tree with
 # it. Async jobs ignore SIGINT in a non-interactive shell, so both signals forward as TERM. The EXIT
 # trap still removes the instance directory, after bwrap has exited.
-# A seccomp filter the worker wrote (sandbox/seccomp.ts: socket/socketpair(AF_UNIX) fail). It is
-# opened here, outside the sandbox, and bwrap installs it for the parser.
+# A seccomp filter the worker wrote (sandbox/seccomp.ts: io_uring denied, and for socketless tools
+# socket/socketpair(AF_UNIX) too). The worker's bubblewrap provider passes one for every command. It
+# is opened here, outside the sandbox, and bwrap installs it for the parser.
 SECCOMP_FILE="${DOCSLURP_PARSER_SANDBOX_SECCOMP:-}"
 if [[ -n "${SECCOMP_FILE}" ]]; then
-  if [[ "${SECCOMP_FILE}" != "${SANDBOX_ROOT%/}"/deny-unix-sockets-*.bpf || -L "${SECCOMP_FILE}" \
+  # Directly inside the sandbox root (a `*` in a [[ ]] pattern would also match `/` and `..`).
+  if [[ "$(dirname -- "${SECCOMP_FILE}")" != "${SANDBOX_ROOT%/}" || "$(basename -- "${SECCOMP_FILE}")" != seccomp-*.bpf \
+        || -L "${SECCOMP_FILE}" \
         || ! -f "${SECCOMP_FILE}" || ! -O "${SECCOMP_FILE}" ]]; then
     echo "[parser-sandbox] refusing seccomp filter outside the sandbox root" >&2
     exit 70

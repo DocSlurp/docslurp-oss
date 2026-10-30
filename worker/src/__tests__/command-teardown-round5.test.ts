@@ -16,7 +16,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { createSandboxActivityInterceptor } from "../sandbox/activity-interceptor.js";
 import { resolveCommandPaths } from "../sandbox/paths.js";
 import bubblewrap from "../sandbox/providers/bubblewrap/index.js";
-import { denyUnixSocketsFilter, ensureDenyUnixSocketsFilterFile } from "../sandbox/seccomp.js";
+import { ensureSeccompFilterFile, seccompFilter } from "../sandbox/seccomp.js";
 import { runWithSandboxScope, SandboxSessionScope } from "../sandbox/session-context.js";
 import {
   admitCommandSource,
@@ -249,7 +249,7 @@ describe("H1: document checkpoints never retry or fail a Document over a teardow
     silence();
     const state = WorkflowState.create(makeRun(), [makeDocument()]);
     const run = vi.fn(async (_strategy?: string) => {
-      const teardown = new CommandTeardownError("pdftoppm teardown could not be verified");
+      const teardown = new CommandTeardownError("pdftoppm teardown could not be verified", { attributable: true });
       recordUnverifiedTeardown(teardown, "label=pdftoppm");
       if (thrown) throw teardown;
       return {};
@@ -292,6 +292,7 @@ describe("M3: source quarantine", () => {
         listed.add(entry.documentId);
         return { sourceSha256: `sha-${entry.documentId}`, orgId: "org-1", workspaceId: "ws-1" };
       },
+      async noteRefusal() {},
     };
     return { store, records };
   }
@@ -304,12 +305,12 @@ describe("M3: source quarantine", () => {
     const { store, records } = fakeStore(new Set());
     configureSourceQuarantine(store);
     await inDocument(async () => expect(admitCommandSource()).resolves.toBeUndefined());
-    const teardown = new CommandTeardownError("pdftoppm teardown could not be verified");
+    const teardown = new CommandTeardownError("pdftoppm teardown could not be verified", { attributable: true });
     recordUnverifiedTeardown(teardown, "label=pdftoppm", {
       attribution: { org_id: "org-1", workspace_id: "ws-1", run_id: "run-1", document_id: "doc-1", stage: "render-images" },
     });
     await flushSourceQuarantine();
-    expect(records).toEqual([{ documentId: "doc-1", runId: "run-1", stage: "render-images", detail: teardown.message }]);
+    expect(records).toEqual([{ documentId: "doc-1", runId: "run-1", stage: "render-images", detail: teardown.message, ttlHours: 168 }]);
     const logs = errors.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logs).toMatch(/status=teardown-unverified .*org_id=org-1 workspace_id=ws-1 run_id=run-1 document_id=doc-1/);
     expect(logs).toMatch(/status=source-quarantined .*org=org-1 workspace=ws-1 run=run-1 document=doc-1 .*source_sha256=sha-doc-1/);
@@ -357,10 +358,10 @@ describe("M3: concurrent raster lanes share no writable directory", () => {
 
 describe("M3: UNIX-socket seccomp filter", () => {
   it("is generated for x64 and arm64 only", () => {
-    expect(denyUnixSocketsFilter("x64")?.length).toBe(12 * 8);
-    expect(denyUnixSocketsFilter("arm64")?.length).toBe(11 * 8);
-    expect(denyUnixSocketsFilter("riscv64")).toBeNull();
-    expect(() => ensureDenyUnixSocketsFilterFile(scratch("docslurp-seccomp-"), "riscv64")).toThrow(/refusing/);
+    expect(seccompFilter("deny-unix-sockets", "x64")?.length).toBe(16 * 8);
+    expect(seccompFilter("deny-unix-sockets", "arm64")?.length).toBe(15 * 8);
+    expect(seccompFilter("deny-unix-sockets", "riscv64")).toBeNull();
+    expect(() => ensureSeccompFilterFile(scratch("docslurp-seccomp-"), "deny-unix-sockets", "riscv64")).toThrow(/refusing/);
   });
 
   const probe = [
@@ -389,7 +390,7 @@ describe("M3: UNIX-socket seccomp filter", () => {
   it.skipIf(!bwrapAvailable)("the launcher refuses a filter path outside the sandbox root or a symlinked one", () => {
     const root = scratch("docslurp-seccomp-launcher-");
     const sandboxRoot = path.join(root, "sandbox");
-    const outside = ensureDenyUnixSocketsFilterFile(root);
+    const outside = ensureSeccompFilterFile(root, "deny-unix-sockets");
     const launcher = path.join(resolveScriptsDir(), "parser-sandbox.sh");
     const run = (file: string) =>
       spawnSync("bash", [launcher, "/usr/bin/true"], {
@@ -397,7 +398,7 @@ describe("M3: UNIX-socket seccomp filter", () => {
         encoding: "utf8",
       });
     expect(run(outside).stderr).toMatch(/refusing seccomp filter/);
-    const link = path.join(sandboxRoot, "deny-unix-sockets-x64.bpf");
+    const link = path.join(sandboxRoot, "seccomp-deny-unix-sockets-x64.bpf");
     mkdirSync(sandboxRoot, { recursive: true });
     symlinkSync(outside, link);
     const refused = run(link);

@@ -49,8 +49,8 @@ export interface SandboxCommand {
   writablePaths: string[];
   limits: SandboxLimits;
   /**
-   * Make creating a UNIX socket fail inside the sandbox (seccomp). bubblewrap enforces it; a provider
-   * that cannot logs that it ran the command without it (see sandbox/seccomp.ts).
+   * Make creating a UNIX socket fail inside the sandbox (seccomp, sandbox/seccomp.ts). Only a session
+   * with `filtersUnixSockets` may run such a command; the runner refuses it on any other.
    */
   denyUnixSockets?: boolean;
 }
@@ -79,6 +79,12 @@ export class SandboxRunError extends Error {
 export interface SandboxSession {
   readonly providerId: string;
   readonly isolation: SandboxIsolation;
+  /**
+   * The session enforces `SandboxCommand.denyUnixSockets` (bubblewrap's seccomp filter). Without it
+   * the runner refuses those commands unless DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS opts in
+   * (development only).
+   */
+  readonly filtersUnixSockets?: boolean;
   /**
    * Local providers return a child started by `spawnContained` (sandbox/teardown.ts); the runner
    * refuses any other. The caller owns abort, limits and teardown through `superviseChild`.

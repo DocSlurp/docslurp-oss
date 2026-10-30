@@ -74,9 +74,10 @@ export interface CommandPlan {
   /** Extra environment from vendor bundles (worker/vendor-bundles.json `env`). */
   bundleEnv?: Record<string, string>;
   /**
-   * The command never needs a UNIX socket: providers that can (bubblewrap) make creating one fail,
-   * so it cannot meet a concurrent command on a socket and pass file descriptors. Set for poppler
-   * and qpdf tools.
+   * Make creating a UNIX socket fail (bubblewrap's seccomp filter), so the command cannot meet a
+   * concurrent command on a socket and pass file descriptors. Unset, it defaults to true for every
+   * binary except the audited UNIX_SOCKET_CLIENTS. A local provider that cannot enforce it refuses
+   * the command (see assertUnixSocketFilter).
    */
   denyUnixSockets?: boolean;
   /**
@@ -1265,8 +1266,7 @@ export class CommandRunner {
     invocation: DocumentToolInvocation,
   ): Promise<CommandPlan> {
     const planned = planDocumentToolInvocation(invocation);
-    const plan = await this.plan(planned.binary, ...planned.args);
-    return SOCKETLESS_DOCUMENT_TOOLS.has(path.basename(planned.binary)) ? { ...plan, denyUnixSockets: true } : plan;
+    return await this.plan(planned.binary, ...planned.args);
   }
 
   private async isAvailable(binary: string): Promise<boolean> {
@@ -1374,6 +1374,7 @@ export class CommandRunner {
     try {
       if (session.spawn) {
         assertProcessTeardown(session);
+        assertUnixSocketFilter(session, command);
         const child = session.spawn(command);
         const containment = containmentOf(child);
         if (containment !== "pid-namespace" && !(containment && allowsUnisolated(session))) {
@@ -1875,8 +1876,65 @@ function assertProcessTeardown(session: SandboxSession): void {
   );
 }
 
-/** Document tools that never use a UNIX socket (see CommandPlan.denyUnixSockets). */
-const SOCKETLESS_DOCUMENT_TOOLS = new Set(["pdfinfo", "pdfseparate", "pdftoppm", "pdftocairo", "pdftotext", "pdftohtml", "pdfimages", "pdfunite", "qpdf"]);
+/**
+ * Binaries that may need a UNIX socket, so they run without the AF_UNIX filter (sandbox/seccomp.ts);
+ * every other command gets it. Audited 2026-10-29 against every binary the runner plans:
+ * - clamdscan talks to clamd over its LocalSocket.
+ * - LibreOffice (soffice, soffice.bin, libreoffice, unoconv) uses one for its own IPC.
+ * - Python interpreters and Python entry points (docling, ocrmypdf, xlsx2csv): asyncio's self-pipe
+ *   and multiprocessing (forkserver, Manager, duplex Pipe) use socketpair(AF_UNIX).
+ * - node: libuv's child-process stdio and IPC use socketpair(AF_UNIX).
+ * - kreuzberg: a tokio runtime's signal driver uses a UNIX socket pair.
+ * Poppler, qpdf, tesseract, pandoc, unrtf, catdoc, tiffcp and clamscan do not use one. A tool not
+ * listed here gets the filter: add it only after checking that it needs a socket.
+ */
+const UNIX_SOCKET_CLIENTS = new Set([
+  "clamdscan", "soffice", "soffice.bin", "libreoffice", "unoconv",
+  "docling", "ocrmypdf", "xlsx2csv", "node", "kreuzberg",
+]);
+
+export function needsUnixSockets(binary: string): boolean {
+  const name = path.basename(binary);
+  return UNIX_SOCKET_CLIENTS.has(name) || /^python[0-9.]*$/.test(name);
+}
+
+/** Commands that must not create a UNIX socket, unless the plan says otherwise. */
+export function deniesUnixSockets(plan: Pick<CommandPlan, "binary" | "denyUnixSockets">): boolean {
+  return plan.denyUnixSockets ?? !needsUnixSockets(plan.binary);
+}
+
+let warnedUnfilteredSockets = false;
+
+/**
+ * A local provider that cannot enforce the AF_UNIX filter (landlock, none) must not run a command
+ * that asks for it: two such commands could meet on a socket and trip the teardown breaker, or
+ * worse. DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway for local development; it is
+ * refused when NODE_ENV=production. Remote providers are exempt: their commands run in the
+ * session's own VM, terminated with the activity, and never hold a worker-side teardown.
+ */
+export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId" | "filtersUnixSockets">, command: Pick<SandboxCommand, "binary" | "denyUnixSockets">): void {
+  if (!command.denyUnixSockets || session.filtersUnixSockets) return;
+  const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
+  const production = process.env.NODE_ENV === "production";
+  if (optIn && !production) {
+    if (!warnedUnfilteredSockets) {
+      warnedUnfilteredSockets = true;
+      console.warn(
+        `[parser-sandbox] status=degraded provider=${session.providerId} reason=unfiltered-unix-sockets ` +
+          "detail=DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS runs commands without the UNIX-socket filter; development only",
+      );
+    }
+    return;
+  }
+  console.error(
+    `[parser-sandbox] status=refused provider=${session.providerId} reason=no-unix-socket-filter ` +
+      `binary=${path.basename(command.binary)}${optIn ? " detail=opt-in ignored under NODE_ENV=production" : ""}`,
+  );
+  throw new SandboxPolicyError(
+    `parser sandbox provider '${session.providerId}' cannot stop '${path.basename(command.binary)}' from creating UNIX sockets; ` +
+      "refusing to run it (use bubblewrap)",
+  );
+}
 
 /** How long a cancelled command output may take to finish destroying before the call gives up on it. */
 const OUTPUT_CANCEL_GRACE_MS = 1_000;
@@ -2020,7 +2078,7 @@ export function buildSandboxCommand(args: {
     inputPaths: paths.inputPaths,
     writablePaths: paths.writablePaths,
     limits: args.limits,
-    ...(args.plan.denyUnixSockets ? { denyUnixSockets: true } : {}),
+    ...(deniesUnixSockets(args.plan) ? { denyUnixSockets: true } : {}),
   };
 }
 

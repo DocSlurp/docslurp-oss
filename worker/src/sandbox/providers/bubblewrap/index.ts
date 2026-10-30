@@ -5,7 +5,7 @@ import path from "node:path";
 import { resolveScriptsDir } from "../../../tools/scripts-dir.js";
 import { readSandboxConfig } from "../../config-schema.js";
 import { spawnOwned, startSandboxScratchSweeper } from "../../scratch-sweep.js";
-import { ensureDenyUnixSocketsFilterFile } from "../../seccomp.js";
+import { ensureSeccompFilterFile, seccompSupported } from "../../seccomp.js";
 import { probePidNamespace, runContained, spawnContained } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
@@ -70,15 +70,26 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
     };
   },
   async probe(config) {
+    // Every command runs under a seccomp filter (sandbox/seccomp.ts); without one, refuse to start.
+    if (!seccompSupported()) {
+      return { ok: false, isolation: ISOLATION, detail: `no seccomp filter for architecture ${process.arch}` };
+    }
     // bwrap's own PID namespace holds the parser; the outer one (see openSession) holds the launcher.
     const pidNamespace = probePidNamespace();
     if (!pidNamespace.ok) return { ok: false, isolation: { ...ISOLATION, processes: false }, detail: pidNamespace.detail };
-    // Probe exactly as commands run: the launcher as init of its own PID namespace, so a host that
-    // cannot nest bwrap's namespace inside it stops the worker here instead of failing every command.
+    // Probe exactly as commands run: the launcher as init of its own PID namespace, under the
+    // stricter filter, so a host that cannot nest bwrap's namespace inside it (or install the
+    // filter) stops the worker here instead of failing every command.
     let detail: string;
     try {
+      mkdirSync(config.scratchRoot, { recursive: true, mode: 0o700 });
+      const seccomp = ensureSeccompFilterFile(config.scratchRoot, "deny-unix-sockets");
       const result = await runContained(launcherPath(), ["/usr/bin/true"], {
-        env: { PATH: process.env.PATH ?? "", ...launcherEnv(config, { readablePaths: [], writablePaths: [] }) },
+        env: {
+          PATH: process.env.PATH ?? "",
+          ...launcherEnv(config, { readablePaths: [], writablePaths: [] }),
+          DOCSLURP_PARSER_SANDBOX_SECCOMP: seccomp,
+        },
         containment: "pid-namespace",
         timeoutMs: PROBE_TIMEOUT_MS,
         label: "bubblewrap-probe",
@@ -95,14 +106,16 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
     return {
       providerId: "bubblewrap",
       isolation: ISOLATION,
+      filtersUnixSockets: true,
       // The launcher runs as init of its own PID namespace, so killing it (after its descendants,
       // giving its EXIT trap a chance to remove the instance directory) leaves nothing behind.
       spawn: (command) => {
         // The worker owns the instance directory: it is removed once teardown is verified, and a
         // poisoned command's is left to the sweep (its owner file names the command's root pid).
         mkdirSync(config.scratchRoot, { recursive: true, mode: 0o700 });
-        // Throws on an unsupported architecture: such a command never runs without its filter.
-        const seccomp = command.denyUnixSockets ? ensureDenyUnixSocketsFilterFile(config.scratchRoot) : null;
+        // Every command gets a filter (io_uring denied); socketless ones also lose AF_UNIX. Throws on
+        // an unsupported architecture: no command runs without its filter.
+        const seccomp = ensureSeccompFilterFile(config.scratchRoot, command.denyUnixSockets ? "deny-unix-sockets" : "base");
         const instance = mkdtempSync(path.join(config.scratchRoot, "run-"));
         const cleanup = () => {
           rmSync(instance, { recursive: true, force: true });
@@ -116,7 +129,7 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
                 ...command.env,
                 ...launcherEnv(config, command),
                 DOCSLURP_PARSER_SANDBOX_INSTANCE: instance,
-                ...(seccomp ? { DOCSLURP_PARSER_SANDBOX_SECCOMP: seccomp } : {}),
+                DOCSLURP_PARSER_SANDBOX_SECCOMP: seccomp,
               },
               containment: "pid-namespace",
             }),

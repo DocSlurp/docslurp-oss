@@ -1,10 +1,12 @@
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import { defineSandboxContract, execInSession } from "./contract.js";
 import landlock, { networkForKernel } from "../providers/landlock/index.js";
+import { SandboxPolicyError } from "../types.js";
+import { CommandRunner } from "../../tools/runner.js";
 
 // Per-command scratch lives here, not under the default /tmp root.
 const scratchRoot = mkdtempSync(path.join(tmpdir(), "docslurp-landlock-scratch-"));
@@ -51,5 +53,36 @@ describe("landlock per-command scratch", () => {
     });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(readdirSync(scratchRoot)).toEqual([]);
+  });
+});
+
+describe("landlock refuses commands that need the UNIX-socket filter", () => {
+  it("the runner refuses a socketless tool under landlock unless the development opt-in is set", async (ctx) => {
+    const config = landlock.readConfig(landlockEnv);
+    const probe = await landlock.probe(config);
+    if (!probe.ok) ctx.skip(`landlock unavailable: ${probe.detail}`);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const session = await landlock.openSession(config, { activityId: "socket-filter" });
+      const spawned = vi.spyOn(session, "spawn");
+      const runner = new CommandRunner({ openSession: async () => session });
+      // pdftotext is not an audited socket client: it asks for the filter, which landrun cannot apply.
+      const plan = { binary: "/usr/bin/pdftotext", args: ["-v"], available: true };
+      vi.stubEnv("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS", "");
+      await expect(runner.run(plan)).rejects.toBeInstanceOf(SandboxPolicyError);
+      vi.stubEnv("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS", "1");
+      vi.stubEnv("NODE_ENV", "production");
+      await expect(runner.run(plan)).rejects.toBeInstanceOf(SandboxPolicyError);
+      expect(spawned).not.toHaveBeenCalled();
+      // Development opt-in: it runs (pdftotext -v exits 0 and prints its version on stderr).
+      vi.stubEnv("NODE_ENV", "development");
+      const result = await runner.run(plan);
+      expect(result.stderr).toMatch(/pdftotext version/);
+      expect(spawned).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+    }
   });
 });
