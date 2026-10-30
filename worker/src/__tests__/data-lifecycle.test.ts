@@ -509,7 +509,7 @@ describe("cleanup sweep", () => {
     await seedRun("r1");
     await seedDocument("d1", "r1");
     const live = "d1:p1:g0000aaaa:c0";
-    const orphans = ["d1:p1:g1111bbbb:c0", "d1:p1:g1111bbbb:c1"];
+    const orphans = ["d1:p1:g1111bbbb:c0", "d1:p1:g1111bbbb:c1", "d1:p1:c0"];
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text) values (${live}, 'd1', 'r1', 'u1', 1, 'live')`;
     const queue = async (target: string, payload: Record<string, unknown>) => {
       await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)

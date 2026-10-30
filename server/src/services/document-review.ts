@@ -923,10 +923,11 @@ export async function reindexDocumentCorrection(args: {
       where document_id = ${args.docId}
     `;
 
-    await transaction`delete from document_chunks where document_id = ${args.docId}`;
-    await transaction`delete from document_pages where document_id = ${args.docId}`;
     // The corrected pages replace the document's content: a kept model read must not republish the old text.
     await transaction`update document_page_states set read_text = null where document_id = ${args.docId} and read_text is not null`;
+
+    await transaction`delete from document_chunks where document_id = ${args.docId}`;
+    await transaction`delete from document_pages where document_id = ${args.docId}`;
 
     for (const page of pageRows) {
       await transaction`

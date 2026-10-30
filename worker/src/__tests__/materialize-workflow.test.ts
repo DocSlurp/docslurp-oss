@@ -912,6 +912,37 @@ describe("runMaterializeRange activity", () => {
           const costOf = async () => Number((await db.query<{ c: string | null }>(
             `select cost_credits::float8 as c from document_page_states where document_id = 'd1' and page_number = 3`)).rows[0]!.c ?? 0);
 
+          it.each(["retention", "correction"])("does not republish an in-flight kept read invalidated by %s", async (kind) => {
+            const t = tracked();
+            await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
+            expect(await readState()).toMatchObject({ kept: true });
+            try {
+              const late = await runMaterializeRange(withOps("m2", t, {
+                async embed(args) {
+                  if (kind === "retention") {
+                    await db.exec(`update workspaces set artifact_retention_days = 1 where id = 'w';
+                      update workspace_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
+                    await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                      .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
+                  } else {
+                    await db.exec(`update document_page_states set read_text = null where document_id = 'd1';
+                      delete from document_chunks where document_id = 'd1'; delete from document_pages where document_id = 'd1'`);
+                  }
+                  return ops.embed!(args);
+                },
+              }), input("m2", [3]));
+              expect(late.indexed).toEqual([]);
+              expect((await page3()).chunks).toEqual([]);
+              expect((await page3()).text).toEqual([]);
+              expect(t.writes.m2 ?? []).toEqual([]);
+              expect(await readState()).toMatchObject({ kept: false });
+              expect(await charges()).toEqual(m1Rich);
+            } finally {
+              await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
+                update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
+            }
+          });
+
           it("retention purge clears the kept read: a later query publishes none of it and charges nothing again (M1)", async () => {
             const t = tracked();
             await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));

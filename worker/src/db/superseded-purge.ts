@@ -1028,7 +1028,7 @@ type StorageCleanupRow = {
 };
 
 /** A deferred-materialization vector id of one document: `${documentId}:p<page>:g<generation>:c<index>`. */
-const DEFERRED_VECTOR_ID = /^([A-Za-z0-9_-]+):p[0-9]{1,9}:g[0-9a-f]{1,32}:c[0-9]{1,9}$/;
+const DEFERRED_VECTOR_ID = /^([A-Za-z0-9_-]+):p[0-9]{1,9}(?::g[0-9a-f]{1,32})?:c[0-9]{1,9}$/;
 
 /**
  * `vector_rows` (materialize-pages.ts queueOrphanVectors): vector ids of one document whose delete failed or whose

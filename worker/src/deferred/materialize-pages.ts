@@ -565,6 +565,18 @@ export async function materializePageRange(
       if (!exists) throw new DocumentNotFoundError(documentId);
       const locked = await lockPageRows(client as unknown as Sql<Record<string, unknown>>, documentId, rangePages);
       held = new Set(locked.filter((row) => row.claimed_by_run === claimedBy).map((row) => row.page_number));
+      // A retained read can be cleared during extraction/embedding. Revalidate
+      // it under the same page lock used by invalidation, before any vectors or
+      // searchable rows are written. Never resurrect the copied old content.
+      for (const row of locked) {
+        if (!held.has(row.page_number) || !storedReads.has(row.page_number)) continue;
+        if (row.read_text !== storedReads.get(row.page_number)) {
+          prepared.delete(row.page_number);
+          keptReads.delete(row.page_number);
+          modelReads.delete(row.page_number);
+          failed.set(row.page_number, "stored-read-invalidated");
+        }
+      }
       const publish = [...prepared.keys()].filter((page) => held.has(page)).sort((a, b) => a - b);
       let publishChunks = chunks.map((c, i) => ({ ...c, vector: vectors[i] })).filter((c) => held.has(c.page) && prepared.has(c.page));
       if (publishChunks.length > 0) {

@@ -211,8 +211,8 @@ export async function recordMaterializedPageFee(
  * on the pages they share and never deadlock on run rows.
  */
 export async function lockPageRows(client: Sql<Record<string, unknown>>, documentId: string, pages: number[]) {
-  return await client<{ page_number: number; claimed_by_run: string | null; state: string }[]>`
-    select page_number, claimed_by_run, state from document_page_states
+  return await client<{ page_number: number; claimed_by_run: string | null; state: string; read_text: string | null }[]>`
+    select page_number, claimed_by_run, state, read_text from document_page_states
     where document_id = ${documentId} and page_number = any(${pages}::int[])
     order by page_number for update
   `;
