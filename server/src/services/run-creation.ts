@@ -4,6 +4,7 @@ import {
   documentVersionKey,
   effectiveIndexingMode,
   pageRouterModeSchema,
+  sanitizeStoredPipeline,
   stageSelectionKeys,
   withoutStageSelection,
   withPlatformPageRouterMode,
@@ -26,7 +27,7 @@ import {
 import { canContributeToWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
-import { runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
+import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
 import { mapDocument, mapWorkspaceRun, type DocumentRow, type WorkspaceRunRow } from "./run-records.js";
 import {
   AllSourcesUnreadableError,
@@ -34,6 +35,7 @@ import {
   UnreadableSourceError,
 } from "./source-metadata.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
+import { assertVisualModeAllowed, IndexingModeError } from "./workspace-indexing-mode.js";
 import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
@@ -900,10 +902,18 @@ export function createRunCreation(deps: RunCreationDeps) {
     }
   }
 
-  async function create(input: CreateRunInput): Promise<CreatedRun> {
+  async function create(request: CreateRunInput): Promise<CreatedRun> {
+    // Callers often pass a stored workspace or run pipeline (reprocess, bulk reprocess, full index, connectors).
+    // Extractor settings the strict schemas now reject are dropped here, before anything is written, so the
+    // Run row never carries them (a Dolphin repoPath, an unknown extractor id). Request schemas stay strict.
+    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(request.pipeline, `run creation in workspace ${request.workspaceId}`) };
     const access = await getWorkspaceAccess(input.workspaceId, input.userId);
     if (!access) throw new Error("Workspace not found");
     if (!canContributeToWorkspace(access, input.userId)) throw new Error("Forbidden");
+    // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
+    // with Fast (or a refused privacy/PII policy) is refused whatever the workspace or request says
+    // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
+    if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual") assertVisualModeAllowed(input.pipeline);
 
     const { sources } = input;
     let sourceDocuments: SourceDocumentRow[] = [];
@@ -928,6 +938,23 @@ export function createRunCreation(deps: RunCreationDeps) {
     // the reserved insert.
     await assertCreditFloor(access.orgId);
     await enforceLiveBudgetCaps(input.workspaceId, access.orgId);
+
+    // Validated before the insert: a pipeline the preview schema rejects must fail the request with nothing
+    // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).
+    const costForecastFor = (documentCount: number) => buildRunProcessingPreview({
+      request: {
+        workspace: input.workspaceId,
+        pipeline: input.pipeline,
+        files: Array.from({ length: documentCount }, (_, index) => ({
+          filename: `document-${index + 1}.pdf`,
+          mimeType: "application/pdf",
+          sizeBytes: 900_000,
+        })),
+        urls: [],
+      },
+    }).current.estimatedCost;
+    // The preview schema needs at least one file; the count here only validates the pipeline.
+    costForecastFor(Math.max(1, sources.kind === "files" ? sources.files.length : sourceDocuments.length));
 
     const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
@@ -954,18 +981,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     const run = mapWorkspaceRun(row);
     run.totalDocuments = published.documents.length;
     run.pagesTotal = published.pagesTotal;
-    run.costForecast = buildRunProcessingPreview({
-      request: {
-        workspace: input.workspaceId,
-        pipeline: input.pipeline,
-        files: Array.from({ length: published.documents.length }, (_, index) => ({
-          filename: `document-${index + 1}.pdf`,
-          mimeType: "application/pdf",
-          sizeBytes: 900_000,
-        })),
-        urls: [],
-      },
-    }).current.estimatedCost;
+    run.costForecast = costForecastFor(published.documents.length);
 
     // The Run is committed from here on: failing the request now would leave a
     // Run the caller never learns about, so a start failure defers instead.
@@ -975,6 +991,15 @@ export function createRunCreation(deps: RunCreationDeps) {
       const outcome = await start({ id: run.id, pipeline: run.pipeline });
       if (outcome.status === "deferred") deferredReason = outcome.reason;
     } catch (error) {
+      // A pipeline that does not compile never starts: start() already failed the Run (category invalid_pipeline),
+      // so the request fails as invalid input instead of promising a deferred start that will never come.
+      if (error instanceof RunPipelineInvalidError) {
+        throw new IndexingModeError(
+          "The run's pipeline settings are invalid, so it cannot start. Check the pipeline and try again.",
+          400,
+          "invalid_pipeline",
+        );
+      }
       console.error(`[run-creation] workflow start failed for run=${run.id}; deferring:`, error instanceof Error ? error.message : String(error));
       deferredReason = RUN_START_FAILED_DEFERRED_MESSAGE;
     }

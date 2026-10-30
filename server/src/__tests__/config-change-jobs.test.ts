@@ -424,9 +424,9 @@ describe("estimator prices the compiled plan the run will execute", () => {
     ["summarize", { summarize: true }],
     ["pii policy", { piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, action: "block_indexing" as const } }],
     ["structured extraction", { structuredExtraction: { ...defaultPipelineFeatures.structuredExtraction, supportingPrompt: "Extract totals." } }],
-    ["vision", { vision: { ...defaultPipelineFeatures.vision, forceAllPages: true } }],
+    ["vision", { vision: { ...defaultPipelineFeatures.vision, benchmarkProfile: "ocr-heavy" as const } }],
     ["document extraction", { documentExtraction: { ...defaultPipelineFeatures.documentExtraction, forceOcr: true } }],
-    ["parser playbook", { parserPlaybook: "agentic" as never }],
+    ["quality", { quality: "good" }],
     ["preserve tables", { preserveTables: !defaultPipelineFeatures.preserveTables }],
     ["propositions", { propositionIndex: true as never }],
   ];

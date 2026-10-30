@@ -50,6 +50,8 @@ import {
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
+import { IndexingModeError } from "../services/workspace-indexing-mode.js";
+import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { workspaceInputNotFoundError } from "../services/default-workspace.js";
 import { estimateUpload } from "../services/work-estimates.js";
 import { ExtractError } from "../services/extracts.js";
@@ -188,6 +190,8 @@ export function workspaceIntakeErrorResponse(
   c: Context,
   error: unknown,
 ): Response | null {
+  // Fast (or a refused privacy policy) with visual indexing, from the request's overrides (run-creation.ts).
+  if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
   if (error instanceof WorkspaceAccessError) {
     return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }

@@ -8,7 +8,51 @@
  */
 import type { CommandRunner } from "../tools/runner.js";
 
-export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap";
+/**
+ * `rejected`: vision ran but its output was rejected (degenerate, refusal, truncated) and the page
+ * kept usable native or OCR text; a rejected page without usable text is `failed`. `guarded`: the
+ * run's vision attempt guard (page bound, rejection breaker, org attempt bound) refused the page.
+ */
+export type PageVisionStatus = "extracted" | "failed" | "rejected" | "guarded" | "not-selected" | "over-cap" | "cost-cap" | "kept-as-image" | "not-read";
+
+/** Why a selected page has no vision output (vision-extract `VisionPageSkip`). */
+export interface VisionPageOutcome {
+  outcome:
+    | "rejected"
+    | "failed"
+    | "page-attempt-limit"
+    | "rejection-breaker"
+    | "org-attempt-limit"
+    | "unscoped-run"
+    | "no-attempt-ledger"
+    | "route-overrun"
+    | "overrun-unreconciled"
+    | "blank-render"
+    /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
+    | "unverified-render";
+  /** The page has usable native or OCR text to keep when vision gives nothing. */
+  fallbackText: boolean;
+}
+
+export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionStatus {
+  switch (outcome.outcome) {
+    case "rejected":
+      return outcome.fallbackText ? "rejected" : "failed";
+    case "page-attempt-limit":
+    case "rejection-breaker":
+    case "org-attempt-limit":
+    case "unscoped-run":
+    case "no-attempt-ledger":
+    case "route-overrun":
+    case "overrun-unreconciled":
+      return "guarded";
+    case "blank-render":
+    case "unverified-render":
+      return "not-selected";
+    default:
+      return "failed";
+  }
+}
 
 export interface PageFactUpsert {
   documentId: string;
@@ -125,6 +169,11 @@ export async function probePdfPageFacts(args: {
    * soon as it starts, so other per-page evidence (page triage) can reuse the same run.
    */
   onImagesList?: (listing: { lastPage: number; stdout: Promise<string | null> }) => void;
+  /**
+   * Called with the pending `pdftotext` output (pages 1..lastPage, null on failure), so page
+   * triage can tell a page's native text layer apart from text OCR produced for it.
+   */
+  onPageText?: (listing: { lastPage: number; stdout: Promise<string | null> }) => void;
 }): Promise<PageFactUpsert[]> {
   const pageCount = Math.min(Math.max(0, args.pageCount), pageFactsProbePages());
   if (pageCount === 0) return [];
@@ -140,16 +189,15 @@ export async function probePdfPageFacts(args: {
   };
   const imagesListing = args.runner.listImages(args.sourcePath, pageCount).then(capture);
   args.onImagesList?.({ lastPage: pageCount, stdout: imagesListing });
-  const [pageText, imagesList] = await Promise.all([
-    args.runner.pageText(args.sourcePath, pageCount).then(capture),
-    imagesListing,
-  ]);
+  const pageTextListing = args.runner.pageText(args.sourcePath, pageCount).then(capture);
+  args.onPageText?.({ lastPage: pageCount, stdout: pageTextListing });
+  const [pageText, imagesList] = await Promise.all([pageTextListing, imagesListing]);
   return buildPdfPageFacts({ documentId: args.documentId, runId: args.runId, pageCount, pageText, imagesList });
 }
 
 /**
  * Vision outcome per page for one document. `selected` pages the triage chose (in priority order),
- * `processed` pages that returned text, `cap` the per-document page limit.
+ * `processed` pages that returned text.
  */
 export function buildVisionPageFacts(args: {
   documentId: string;
@@ -157,27 +205,24 @@ export function buildVisionPageFacts(args: {
   pageCount: number;
   selected: number[];
   processed: Array<{ pageNumber: number; text?: string | null }>;
-  cap: number;
   costCapped?: boolean;
+  /** Why attempted pages without output have none; absent pages read as `failed`. */
+  outcomes?: ReadonlyMap<number, VisionPageOutcome>;
 }): PageFactUpsert[] {
   const pageCount = Math.min(Math.max(0, Math.trunc(args.pageCount)), PAGE_FACTS_MAX_PAGES);
   const processed = new Map(args.processed.map((page) => [page.pageNumber, page.text ?? ""]));
-  // `selected` is in vision's priority order (pages without native text first); the
-  // per-document cap keeps a prefix of it, so do not re-sort before slicing.
-  const selected = [...new Set(args.selected)].filter((page) => page >= 1 && page <= pageCount);
-  const attempted = new Set(selected.slice(0, Math.max(0, args.cap)));
-  const selectedSet = new Set(selected);
+  const selectedSet = new Set(args.selected.filter((page) => page >= 1 && page <= pageCount));
   return Array.from({ length: pageCount }, (_, index) => {
     const pageNumber = index + 1;
     const text = processed.get(pageNumber);
-    const visionStatus: PageVisionStatus = args.costCapped
-      ? "cost-cap"
-      : text !== undefined
-        ? "extracted"
+    const visionStatus: PageVisionStatus = text !== undefined
+      ? "extracted"
+      : args.costCapped && (selectedSet.has(pageNumber) || args.selected.length === 0)
+        ? "cost-cap"
         : !selectedSet.has(pageNumber)
           ? "not-selected"
-          : !attempted.has(pageNumber)
-            ? "over-cap"
+          : args.outcomes?.has(pageNumber)
+            ? visionStatusForOutcome(args.outcomes.get(pageNumber)!)
             : "failed";
     return {
       documentId: args.documentId,

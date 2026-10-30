@@ -322,6 +322,9 @@ export const usageEvents = pgTable(
 export const documents = pgTable(
   "documents",
   {
+
+    materializationGeneration: integer("materialization_generation").default(0).notNull(),
+    sourceMaterializationBlocked: boolean("source_materialization_blocked").default(false).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     workspaceId: text("workspace_id").notNull(),
@@ -1889,6 +1892,8 @@ export const workspaces = pgTable(
     }),
     isDefault: boolean("is_default").default(false).notNull(),
     slug: text().default(sql`generate_workspace_slug()`).notNull(),
+    /** Narrows organizations.allow_china_providers; both must be true (0102). */
+    allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
   },
   (table) => [
     uniqueIndex("workspaces_slug_idx").using("btree", table.slug.asc().nullsLast().op("text_ops")),
@@ -3490,6 +3495,10 @@ export const documentPageStates = pgTable(
     attempts: integer().default(0).notNull(),
     feeBilledRun: text("fee_billed_run"),
     feeBilledAt: timestamp("fee_billed_at", { withTimezone: true, mode: "string" }),
+    modelReadRun: text("model_read_run"),
+    modelReadPages: integer("model_read_pages"),
+    readBilledRun: text("read_billed_run"),
+    readText: text("read_text"),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   },
   (table) => [

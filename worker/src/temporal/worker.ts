@@ -21,6 +21,7 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 
 import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
+import { assertVisionLedgerSchemaWithRetry, VisionLedgerSchemaError } from "../db/vision-attempt-store.js";
 import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
 import { CommandRunner } from "../tools/runner.js";
@@ -122,6 +123,12 @@ async function main(): Promise<void> {
   // (or a mode that needs it) refuses to start without it rather than serving every PDF without it.
   await assertNativePdfEngineAtStartup(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  });
+  // The vision guard's ledger must be the current migration 0101: an earlier draft needs a reset (fatal).
+  // A connection failure is retried here and, if it persists, exits as a retryable startup failure.
+  await assertVisionLedgerSchemaWithRetry(() => store.visionAttempts.assertSchema()).catch((error) => {
+    if (error instanceof VisionLedgerSchemaError) throw new FatalWorkerError("startup", error.message, { cause: error });
+    throw error;
   });
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);

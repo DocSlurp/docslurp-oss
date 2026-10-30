@@ -47,10 +47,20 @@ function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTar
   return { newWorkspace: false, workspace: resolveWorkspace(flags) };
 }
 
+const QUALITY_MODES = ["fast", "auto", "good"] as const;
+
+/** `--quality fast|auto|good` as a pipeline override, or {} when the workspace setting applies. */
+export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: (typeof QUALITY_MODES)[number] } } {
+  if (flags.quality === undefined) return {};
+  const quality = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
+  if (!(QUALITY_MODES as readonly string[]).includes(quality)) throw new Error("--quality must be fast, auto or good.");
+  return { pipeline: { quality: quality as (typeof QUALITY_MODES)[number] } };
+}
+
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--watch] [--api-url <url>]
+  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
@@ -87,6 +97,10 @@ commands use the "default" workspace: your organization's default workspace.
 the same workspace. Uploads and URL ingests into a name that matches no workspace create
 it with that name (and --template, if given); other commands answer workspace not found.
 --new-workspace (or --template alone) uploads into a fresh self-titled workspace.
+--quality sets processing quality for the upload (default: the workspace's, auto unless changed):
+fast reads the text layer only and keeps scanned pages as images, not read ($0.05 per 1,000 pages);
+auto reads each page the cheapest faithful way ($0.05 to $2.50 per 1,000 pages, depending on the mix);
+good reads every page with a vision model ($2.50 per 1,000 pages).
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -271,7 +285,7 @@ function parseCliArgs(argv: string[]) {
       i++;
     } else if (arg === "--workspace-name" || arg === "--workspace-id") {
       throw new Error(`${arg} was removed: pass a workspace ID, slug or name with --workspace (a name that matches no workspace is created on upload).`);
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download") {
+    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -355,6 +369,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
     ...(field("workspace") ? { workspace: field("workspace") } : {}),
     ...(field("newWorkspace") === "true" ? { newWorkspace: true } : {}),
     ...(field("templateKey") ? { templateKey: field("templateKey") } : {}),
+    ...(field("pipeline") ? { pipeline: JSON.parse(field("pipeline")!) } : {}),
     files: files.map(({ blob, name }) => ({
       filename: name, mimeType: blob.type || mimeTypeForPath(name), sizeBytes: blob.size,
       ...(field("canonicalId") ? { canonicalId: field("canonicalId") } : {}),
@@ -420,6 +435,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (target.workspace) formData.append("workspace", target.workspace);
   if (target.newWorkspace) formData.append("newWorkspace", "true");
   if (target.templateKey) formData.append("templateKey", target.templateKey);
+  const qualityPipeline = resolveQualityPipeline(flags).pipeline;
+  if (qualityPipeline) formData.append("pipeline", JSON.stringify(qualityPipeline));
   if (typeof flags.canonicalId === "string") {
     // Re-uploading with the same canonical ID replaces the previous version in search.
     if (files.length !== 1) throw new Error("--canonical-id applies to a single file.");
@@ -644,7 +661,7 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
   const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...intake.fields }),
+    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...resolveQualityPipeline(flags), ...intake.fields }),
   });
   if (!response.ok) {
     printFailure(await responseFailure(response));

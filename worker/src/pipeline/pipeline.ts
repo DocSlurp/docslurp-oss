@@ -51,6 +51,8 @@ export interface CheckpointStore {
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
+  /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */
+  reserveFastPageImageRenders?(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number>;
   /**
    * Stores the derived display title in documents.metadata unless one is already set
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.
@@ -106,6 +108,12 @@ export class WorkflowState {
   totalStages: number;
   docConcurrency = 1;
   distributedVisionPages = new Map<string, unknown>();
+  /**
+   * The shared vision attempt ledger (page bound, rejection breaker and org uncharged bound,
+   * lib/vision-attempt-guard.ts). Set by loadRunState from the store, null when that store has none
+   * (vision then refuses every request); absent only in store-less runs, which count per process.
+   */
+  visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend | null;
   /** Page-level progress for granular percent-complete computation */
   pageProgress: Map<string, PageProgress> = new Map();
   /** Last time updateProgress was called (throttle granular flushes) */

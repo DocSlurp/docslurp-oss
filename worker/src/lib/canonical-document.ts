@@ -1,5 +1,6 @@
 import { tableChunks, TableBoundary } from "../pipeline/table-chunking.js";
 import {
+  isPageImageReferenceBlock,
   normalizePageNumbers,
   splitTextIntoPages,
   type CanonicalBlock,
@@ -287,6 +288,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
 
 export function canonicalDocumentToText(document: CanonicalDocument): string {
   return document.blocks
+    .filter((block) => !isPageImageReferenceBlock(block))
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join("\n\n");
@@ -299,7 +301,8 @@ export function buildCanonicalChunksFromDocument(
 ): CanonicalChunk[] {
   const maxChars = options?.maxChars ?? MAX_CHARS;
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) throw new RangeError("maxChars must be a positive safe integer");
-  const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0);
+  // Image-only pages carry no text to embed.
+  const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0 && !isPageImageReferenceBlock(block));
 
   if (meaningfulBlocks.length === 0) {
     return [{

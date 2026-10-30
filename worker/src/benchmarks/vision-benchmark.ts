@@ -102,7 +102,7 @@ export async function runVisionBenchmarks(args: VisionBenchmarkArgs): Promise<{
           cfg: args.cfg,
           runner,
           manifestPath,
-          maxPagesPerFixture: args.maxPagesPerFixture ?? selectedPrimary.maxPagesPerDocument
+          maxPagesPerFixture: args.maxPagesPerFixture ?? 4
         }));
       }
     }
@@ -175,7 +175,9 @@ async function runFixtureBenchmark(args: {
         cfg: args.cfg,
         // Operator benchmark over evaluation fixtures, not workspace content.
         privacyMode: "standard",
-        runner: args.runner
+        runner: args.runner,
+        // Operator tool outside any run or org: no attempt guard.
+        gate: null,
       });
 
       combinedText += `${result.text}\n`;

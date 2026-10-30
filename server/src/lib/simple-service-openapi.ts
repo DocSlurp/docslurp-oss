@@ -140,6 +140,12 @@ export const simpleServiceSchemas = {
   },
 };
 
+const qualityDescription = "Processing quality for these files; omitted uses the workspace's (auto by default). fast: text layer only, scanned pages kept as page images and not read ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50).";
+const pipelineOverrides = {
+  type: "object", description: "Per-upload pipeline overrides merged onto the workspace pipeline.",
+  properties: { quality: { type: "string", enum: ["fast", "auto", "good"], description: qualityDescription } },
+};
+
 const canonicalServicePaths = {
   "/v1/workspaces/{workspaceId}/tags": { get: {
     tags: ["workspaces"], summary: "List workspace document tags", security: serviceSecurity,
@@ -153,12 +159,13 @@ const canonicalServicePaths = {
     parameters: [{ in: "header", name: "Idempotency-Key", schema: { type: "string" }, description: "Reuse only for identical uploads" }],
     requestBody: { required: true, content: { "multipart/form-data": { schema: { type: "object", required: ["files"], properties: {
       files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, tags: { type: "string", description: "JSON array of document tags, e.g. [\"finance\",\"FY26\"]. Up to 24 labels of 1–100 characters." }, newWorkspace: { type: "string", enum: ["true"], description: uploadTarget.newWorkspace.description },
+      pipeline: { type: "string", description: `JSON pipeline overrides, e.g. {"quality":"fast"}. ${qualityDescription}` },
     } } } } },
     responses: { "201": response("Accepted for asynchronous processing. Poll run progress before searching.", ref("UploadResponse")), ...errors },
   } },
   "/v1/uploads/url": { post: {
     tags: ["ingest"], summary: "Ingest remote documents into a workspace", security: serviceSecurity,
-    requestBody: request({ type: "object", required: ["urls"], properties: { urls: { type: "array", minItems: 1, items: { type: "string", format: "uri" } }, ...uploadTarget } }),
+    requestBody: request({ type: "object", required: ["urls"], properties: { urls: { type: "array", minItems: 1, items: { type: "string", format: "uri" } }, ...uploadTarget, pipeline: pipelineOverrides } }),
     responses: { "201": response("Ingestion accepted", ref("UploadResponse")), ...errors },
   } },
   "/v1/runs/{runId}/progress": { get: {

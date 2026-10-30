@@ -505,6 +505,30 @@ describe("cleanup sweep", () => {
     expect(await sql`select count(*)::int as count from storage_cleanup_queue where target = 'u1/old/'`).toEqual([{ count: 0 }]);
   });
 
+  it("deletes queued orphan materialization vectors that no chunk row names, in the queuing workspace only (round 8 L3)", async () => {
+    await seedRun("r1");
+    await seedDocument("d1", "r1");
+    const live = "d1:p1:g0000aaaa:c0";
+    const orphans = ["d1:p1:g1111bbbb:c0", "d1:p1:g1111bbbb:c1", "d1:p1:c0"];
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text) values (${live}, 'd1', 'r1', 'u1', 1, 'live')`;
+    const queue = async (target: string, payload: Record<string, unknown>) => {
+      await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+        values ('vector_rows', 'o1', ${target}, ${sql.json(payload as never)}, 'materialize-orphan-vectors')`;
+    };
+    const space = { workspaceId: "w", documentId: "d1", embeddingModel: MODEL.embeddingModel, dimension: MODEL.dimension };
+    await queue("d1#a", { ...space, ids: [live, ...orphans] });
+    // Malformed entries are refused: an id of another document, and a non-deferred id.
+    await queue("d1#b", { ...space, ids: ["d2:p1:g1111bbbb:c0"] });
+    await queue("d1#c", { ...space, ids: ["d1-c0"] });
+    const deletes: Array<{ uri: string; table: string; ids: string[] }> = [];
+    const stores = fakeExternalStores([], {});
+    await drainStorageCleanupQueue(sql, stores.storage, { ...stores.options, deleteVectorIds: async (args) => { deletes.push(args); } });
+
+    expect(deletes).toEqual([{ uri: TABLE_URI, table: "chunks", ids: orphans }]);
+    expect(await sql`select target, attempts from storage_cleanup_queue order by target`)
+      .toEqual([{ target: "d1#b", attempts: 1 }, { target: "d1#c", attempts: 1 }]);
+  });
+
   it("refuses to purge a prefix wider than one run", async () => {
     await sql`insert into storage_cleanup_queue (kind, target, reason) values ('storage_prefix', 'u1/', 'test')`;
     const stores = fakeExternalStores(["u1/anything.json"], {});

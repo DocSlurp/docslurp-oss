@@ -17,6 +17,8 @@ import {
   type DecisionQuestion,
 } from "./decision-client.js";
 import { catalogModel } from "./routing-test-fixtures.js";
+import { inAllowingRun } from "../test/provider-scope.js";
+import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 
 const questions: Record<string, DecisionQuestion> = {
   p01_has_math: { type: "noul", instructions: "math?" },
@@ -69,12 +71,12 @@ describe("decision client request shapes", () => {
     const fetchImpl = mockFetch();
     const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
     const model = catalogModel("typesafe/jev-1.13");
-    await client.ask(model, "P01: 412 words, 0 images, text layer ok", questions);
+    await inAllowingRun(() => client.ask(model, "P01: 412 words, 0 images, text layer ok", questions));
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe(OPENROUTER_SYSTEMONE_URL);
     expect((init!.headers as Record<string, string>).authorization).toBe("Bearer ok");
     expect(JSON.parse(String(init!.body)).model).toBe("typesafe/jev-1.13");
-    await expect(client.ask(model, ["x", imageDataUrlPart(Buffer.from("a"))], questions)).rejects.toThrow(/text-only/);
+    await expect(inAllowingRun(() => client.ask(model, ["x", imageDataUrlPart(Buffer.from("a"))], questions))).rejects.toThrow(/text-only/);
   });
 
   it("liquid systemone: direct endpoint, 8 image cap and 4.5 MB body cap", async () => {
@@ -82,17 +84,33 @@ describe("decision client request shapes", () => {
     const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
     const model = catalogModel("liquid/d1:direct");
     expect(wireModelId(model)).toBe("liquid/d1");
-    await client.ask(model, [imageDataUrlPart(Buffer.from("a"))], questions);
+    await inAllowingRun(() => client.ask(model, [imageDataUrlPart(Buffer.from("a"))], questions));
     expect(fetchImpl.mock.calls[0]![0]).toBe(LIQUID_SYSTEMONE_URL);
 
     const nine = Array.from({ length: 9 }, () => imageDataUrlPart(Buffer.from("a")));
-    await expect(client.ask(model, nine, questions)).rejects.toThrow(/exceeds/);
+    await expect(inAllowingRun(() => client.ask(model, nine, questions))).rejects.toThrow(/exceeds/);
     const big = [imageDataUrlPart(Buffer.alloc(3_500_000, 1))];
-    await expect(client.ask(model, big, questions)).rejects.toThrow(/body .* exceeds/);
+    await expect(inAllowingRun(() => client.ask(model, big, questions))).rejects.toThrow(/body .* exceeds/);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects more questions than the model allows and empty question sets", async () => {
+  it("refuses an upstream the China-provider policy does not allow, before sending anything", async () => {
+    const fetchImpl = mockFetch();
+    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
+    const restricted = <T>(fn: () => Promise<T>) => runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, fn);
+    // Typesafe (via OpenRouter /systemone) and Liquid have no known region: refused when opted out, and outside any scope.
+    for (const id of ["typesafe/jev-1.13", "liquid/d1:direct"]) {
+      await expect(restricted(() => client.ask(catalogModel(id), "s", questions))).rejects.toBeInstanceOf(DecisionUnavailableError);
+      await expect(client.ask(catalogModel(id), "s", questions)).rejects.toBeInstanceOf(DecisionUnavailableError);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // US-based upstreams still serve a restricted org.
+    await restricted(() => client.ask(catalogModel("perplexity/pplx-decider-v1.1-27b"), "s", questions));
+    await restricted(() => client.ask(catalogModel("cloudflare/clef-flash"), "s", questions));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+    it("rejects more questions than the model allows and empty question sets", async () => {
     const fetchImpl = mockFetch();
     const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
     const model = catalogModel("perplexity/pplx-decider-v1.1-27b");

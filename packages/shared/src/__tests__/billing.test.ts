@@ -14,6 +14,8 @@ import {
   MAX_TOPUP_CENTS,
   MIN_TOPUP_CENTS,
   PRICE_CARD,
+  QUALITY_MODE_ORDER,
+  QUALITY_MODES,
   STARTER_CREDITS,
   STARTER_WORKER_SLOTS,
   autoTopUpSettingsSchema,
@@ -279,26 +281,53 @@ describe("ingest estimator", () => {
     expect(estimateIngest({ pages: 10_000, mix: { text: 1 }, documents: 20 }).effectiveParallelism).toBe(FUNDED_WORKER_SLOTS);
   });
 
-  it("charges deep profiles more for complex layouts", () => {
+  it("charges good more than auto, and auto more than fast", () => {
     const mix = { text: 0.6, complex: 0.3, scanned: 0.1 };
-    const [fast, standard, deep] = (["fast", "standard", "deep"] as const).map((profile) =>
+    const [fast, auto, good] = (["fast", "auto", "good"] as const).map((profile) =>
       estimateIngest({ pages: 1_000, mix, profile }).credits.totalCredits,
     );
-    expect(fast).toBeLessThanOrEqual(standard!);
-    expect(standard).toBeLessThan(deep!);
+    expect(fast).toBeLessThan(auto!);
+    expect(auto).toBeLessThan(good!);
+  });
+
+  it("defaults the estimator to auto", () => {
+    expect(estimateIngest({ pages: 10, mix: { text: 1 } }).profile).toBe("auto");
+  });
+
+  it("prices each quality mode inside its catalog range", () => {
+    for (const mode of QUALITY_MODE_ORDER) {
+      const { min, max } = QUALITY_MODES[mode].creditsPer1kPages;
+      for (const mix of [{ text: 1 }, { complex: 1 }, { scanned: 1 }, { text: 0.5, complex: 0.3, scanned: 0.2 }]) {
+        const per1k = estimateIngest({ pages: 1_000, mix, profile: mode }).creditsPer1000Pages;
+        expect(per1k, `${mode} ${JSON.stringify(mix)}`).toBeGreaterThanOrEqual(min - 1e-9);
+        expect(per1k, `${mode} ${JSON.stringify(mix)}`).toBeLessThanOrEqual(max + 1e-9);
+      }
+    }
+    // Both ends of auto are reachable: born-digital text bills Fast, scans bill Rich.
+    expect(estimateIngest({ pages: 1_000, mix: { text: 1 }, profile: "auto" }).creditsPer1000Pages).toBe(QUALITY_MODES.auto.creditsPer1kPages.min);
+    expect(estimateIngest({ pages: 1_000, mix: { scanned: 1 }, profile: "auto" }).creditsPer1000Pages).toBe(QUALITY_MODES.auto.creditsPer1kPages.max);
+  });
+
+  it("bills scanned pages Fast in fast mode (kept as page images, never read)", () => {
+    const estimate = estimateIngest({ pages: 1_000, mix: { scanned: 1 }, profile: "fast" });
+    expect(estimate.richPages).toBe(0);
+    expect(estimate.fastPages).toBe(1_000);
+    expect(estimate.creditsPer1000Pages).toBe(PRICE_CARD.fastPer1kPages);
+    expect(estimate.storage.indexBytes).toBe(0);
   });
 
   it("keeps profile worker seconds ordered and on the production slot basis", () => {
     expect(PIPELINE_PROFILE_BASIS).toMatchObject({ slotsPerHost: 2, slotTuner: "resource" });
     for (const pageClass of ["text", "complex", "scanned"] as const) {
-      const [fast, standard, deep] = (["fast", "standard", "deep"] as const).map((id) => PIPELINE_PROFILES[id].pages[pageClass].workerSeconds);
-      expect(fast, pageClass).toBeLessThanOrEqual(standard!);
-      expect(standard, pageClass).toBeLessThanOrEqual(deep!);
+      const [fast, auto, good] = (["fast", "auto", "good"] as const).map((id) => PIPELINE_PROFILES[id].pages[pageClass].workerSeconds);
+      expect(fast, pageClass).toBeLessThanOrEqual(auto!);
+      expect(auto, pageClass).toBeLessThanOrEqual(good!);
     }
     // Measured 2026-10: text pages hold a slot for roughly 0.2-0.4 s, a model-read page for about 4 s.
-    expect(PIPELINE_PROFILES.standard.pages.text.workerSeconds).toBeGreaterThanOrEqual(0.22);
-    expect(PIPELINE_PROFILES.standard.pages.text.workerSeconds).toBeLessThanOrEqual(0.4);
-    expect(PIPELINE_PROFILES.standard.pages.scanned.workerSeconds).toBeGreaterThanOrEqual(4);
+    expect(PIPELINE_PROFILES.auto.pages.text.workerSeconds).toBeGreaterThanOrEqual(0.22);
+    expect(PIPELINE_PROFILES.auto.pages.text.workerSeconds).toBeLessThanOrEqual(0.4);
+    expect(PIPELINE_PROFILES.auto.pages.scanned.workerSeconds).toBeGreaterThanOrEqual(4);
+    expect(PIPELINE_PROFILES.good.pages.text.mode).toBe("rich");
   });
 
   it("handles empty input", () => {

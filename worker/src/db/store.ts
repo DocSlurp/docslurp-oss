@@ -7,14 +7,14 @@ import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
+import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
-import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
@@ -54,6 +54,7 @@ import {
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
+import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -70,9 +71,14 @@ import {
 type WorkspaceRunRow = {
   id: string;
   org_id: string;
+  /**
+   * The run's org, else its workspace's (runRowQuery): the one org admission, usage attribution and the
+   * credit debit all use. Absent from other run queries.
+   */
+  canonical_org_id?: string | null;
   /** Joined from organizations by loadRun; absent from other run queries. */
   org_funded?: boolean | null;
-  org_allow_china_providers?: boolean | null;
+  allow_china_providers?: boolean | null;
   workspace_id: string;
   user_id: string;
   kind: string;
@@ -374,11 +380,19 @@ type StageStateRows = (StageStateRow & { scope: "run" | "document" })[];
 
 function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   // The org's plan rides along (no extra round trip): it sets the AI credit
-  // factor for bonus plans in the usage ledger.
+  // factor for bonus plans in the usage ledger. A run without an org takes
+  // its workspace's, as the vision attempt guard does (vision-attempt-store.ts),
+  // so usage rows, the credit debit and admission agree on one org.
   return client<WorkspaceRunRow[]>`
-    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded,
-      (select o.allow_china_providers from organizations o where o.id = r.org_id) as org_allow_china_providers
+    select r.*, c.org_id as canonical_org_id,
+      (select o.funded_at is not null from organizations o where o.id = c.org_id) as org_funded,
+      -- China-based providers only when the org and the run's workspace both allow them; no org is restricted.
+      coalesce((select o.allow_china_providers from organizations o where o.id = c.org_id), false)
+        and coalesce((select w.allow_china_providers from workspaces w where w.id = r.workspace_id), false) as allow_china_providers
     from workspace_runs r
+    cross join lateral (
+      select coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id
+    ) c
     where r.id = ${runId}
     limit 1
   `;
@@ -2485,6 +2499,20 @@ export class Store {
     }
   }
 
+  private visionAttemptBackend: PostgresVisionAttemptBackend | null = null;
+
+  /** The shared vision attempt ledger every vision request of a run is admitted against (lib/vision-attempt-guard.ts). */
+  get visionAttempts(): PostgresVisionAttemptBackend {
+    this.visionAttemptBackend ??= new PostgresVisionAttemptBackend(this.sql);
+    return this.visionAttemptBackend;
+  }
+
+  /** Reserves a document's share of the run's Fast page-image render budget, shared by every worker (fast-page-image-budget.ts). */
+  async reserveFastPageImageRenders(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number> {
+    return await reserveFastPageImageRenders(this.sql, args);
+
+  }
+
   /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
@@ -3280,6 +3308,10 @@ export class Store {
     );
 
     for (const row of rows) {
+      // Revoke source reads before external deletion. A failed purge retries
+      // cleanup, but cannot make content eligible for materialization again.
+      await this.sql`update documents set materialization_generation = materialization_generation + 1,
+        source_materialization_blocked = true where run_id = ${row.run_id}`;
       const keys = new Set<string>();
 
       for (const sourceKey of row.source_keys ?? []) {
@@ -3305,6 +3337,17 @@ export class Store {
         await this.sql`delete from embedding_reuse_refs where artifact_uri = any(${this.sql.array(artifactUris)}::text[])`;
       }
       await storage.deleteKeys([...keys]);
+
+      if (await this.tableExists("document_page_states")) {
+        // A kept model read (read_text) is page content too: a later query must not republish it. The billing
+        // decision (read_billed_run) stays, so the page is never charged again.
+        await this.sql`
+          update document_page_states s
+          set read_text = null
+          from documents d
+          where d.id = s.document_id and d.run_id = ${row.run_id} and s.read_text is not null
+        `;
+      }
 
       if (await this.tableExists("document_propositions")) {
         await this.sql`
@@ -3824,9 +3867,9 @@ export class Store {
 function mapRun(row: WorkspaceRunRow): WorkspaceRun {
   return {
     id: row.id,
-    orgId: row.org_id ?? null,
+    orgId: row.canonical_org_id ?? row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
-    ...(row.org_allow_china_providers === false ? { orgAllowChinaProviders: false } : {}),
+    allowChinaProviders: row.allow_china_providers === true,
     userId: row.user_id,
     workspaceId: row.workspace_id,
     kind: row.kind,
@@ -3838,7 +3881,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
-    pipeline: applyDefaultVisionOverride(mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures)),
+    pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`)),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},
@@ -3922,9 +3965,7 @@ export function buildStorageIntegrityReport(args: {
       continue;
     }
 
-    const pipeline = mergePipelineFeatures(
-      run.pipeline ?? defaultPipelineFeatures,
-    );
+    const pipeline = normalizeStoredPipelineFeatures(run.pipeline ?? defaultPipelineFeatures, `run ${run.runId}`);
     if ((pipeline.embed || pipeline.indexVectors) && run.chunkCount === 0) {
       findings.push({
         kind: "missing-index-rows",

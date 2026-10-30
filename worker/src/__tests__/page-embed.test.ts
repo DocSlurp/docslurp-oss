@@ -4,7 +4,7 @@ import postgres, { type Sql } from "postgres";
 import sharp from "sharp";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { embedPageImages, PAGE_EMBED_WINDOW, withinCostCap } from "../stages/page-embed.js";
+import { embedPageImages, PAGE_EMBED_WINDOW, PageEmbedStage, withinCostCap } from "../stages/page-embed.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { Document } from "../models.js";
 import type { PageImageEmbedder } from "../deferred/page-image-embedders.js";
@@ -186,6 +186,31 @@ describe("embedPageImages", () => {
     const n = await db.query<{ n: number }>(`select count(*)::int as n from document_page_vectors`);
     expect(n.rows[0]!.n).toBe(2);
     expect(f.objects.size).toBe(0);
+  });
+
+  it("refuses under quality fast: nothing rendered, embedded or charged (M3 backstop)", async () => {
+    const f = fixture();
+    const spy = vi.spyOn(f.embedder, "embedImages");
+    const usage = new PipelineUsageEventLedger();
+    usage.runId = "run-fast";
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await embedPageImages(
+      { sql, rasters: f.rasters, storage: f.storage, embedder: f.embedder, usage },
+      { document, pages: [1, 2, 3], run: { ...run, pipeline: { quality: "fast" } } },
+    );
+    expect(result).toMatchObject({ embeddedPages: [], stoppedBy: "quality-fast" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(f.renderCalls).toEqual([]);
+    expect(usage.pendingCount).toBe(0);
+    expect(usage.pendingBillableCents).toBe(0);
+
+    // The stage skips every document under Fast before resolving an embedder.
+    const stage = new PageEmbedStage(f.rasters as never, f.storage as never, () => sql, f.embedder);
+    const state = { run: { id: "run-fast", pipeline: { quality: "fast", indexingMode: "visual" } }, documents: [document], usageLedger: usage } as never;
+    await stage.run(state);
+    expect(spy).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("withinCostCap blocks on estimated spend and ignores unset caps", () => {

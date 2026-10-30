@@ -536,6 +536,8 @@ export const documentsRoutes = new Hono()
       bulk = await bulkReprocessDocuments(body.documentIds, userId);
     } catch (error) {
       if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
+      // Every group refused (for example Fast with visual indexing); a partial refusal is reported in `failed`.
+      if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
       throw error;
     }
     const { runs, failed, warnings } = bulk;

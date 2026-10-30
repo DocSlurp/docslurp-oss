@@ -3,7 +3,7 @@ import {
   embeddingModelCatalogByUri,
   indexConfigHash,
   indexConfigOf,
-  normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   resolveEmbeddingRoute,
   type EmbeddingConfig,
   type IndexConfig,
@@ -95,7 +95,7 @@ export async function pruneIndexConfigs(workspaceId: string, sql: SqlClient = de
     select pipeline from workspaces where id = ${workspaceId} and index_configs is not null
   `;
   if (!ws) return {};
-  const current = indexConfigOf(normalizePipelineFeatures(ws.pipeline ?? null));
+  const current = indexConfigOf(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `workspace ${workspaceId}`));
   const currentHash = indexConfigHash(current);
   const unchanged = ws.pipeline === null
     ? sql`ws.pipeline is null`

@@ -45,7 +45,7 @@ function stateWith(plan: RoutePlan | null, mode: PageRouterMode | undefined, ext
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
       preserveImages: true, visionFallback: true, privacyMode: "standard", maxCostCents: null,
-      vision: { forceAllPages: false, maxPagesPerDocument: 4, modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}` },
+      vision: { modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}` },
       // These execution tests deliberately exercise cost-only routing. Defaults are tested below.
       pageRouter: { ...defaultPageRouterConfig, marginFloor: 0, mode },
       ...extra,
@@ -155,7 +155,10 @@ describe("vision-extract with the page router", () => {
     ({ stage, state } = make(null));
     expect(await load(stage, state)).toBeNull();
     ({ stage, state } = make(plan));
-    (state.run.pipeline.vision as { forceAllPages: boolean }).forceAllPages = true;
+    (state.run.pipeline as { quality: string }).quality = "good";
+    expect(await load(stage, state)).toBeNull();
+    ({ stage, state } = make(plan));
+    (state.run.pipeline as { quality: string }).quality = "fast";
     expect(await load(stage, state)).toBeNull();
   });
 

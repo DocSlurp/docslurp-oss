@@ -36,6 +36,8 @@ import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from 
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
+import { IndexingModeError } from "../services/workspace-indexing-mode.js";
 
 /** A server key with `ingest` may reprocess runs in the workspaces it can use; null when the actor may proceed. */
 async function denyRunContentUpdate(c: Context, runId: string): Promise<Response | null> {
@@ -317,6 +319,8 @@ export const runsRoutes = new Hono()
       if (isRunCreationBlockedError(error)) {
         return apiStatusError(c, error.statusCode, error.message, { code: error.code });
       }
+      // A stored run that combined Fast with visual indexing is not run again (visual_mode_quality, 400).
+      if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
       throw error;
     }
 
