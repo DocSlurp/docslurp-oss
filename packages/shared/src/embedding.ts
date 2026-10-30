@@ -657,6 +657,8 @@ export const visionModelCatalog = [
       basis: "pinned-route",
       providers: ["streamlake", "deepseek", "together", "fireworks", "parasail"],
     },
+    // StreamLake and DeepSeek billed the same input tokens per page as Together on the 2026-10-29 tune/select
+    // pages (difference -2 to 0, maximum 1,158), so they serve the same image limit.
     imageTokens: { kind: "fixed", tokens: 1_024, basis: "processor-max:deepseek-v4.1" },
   },
   {

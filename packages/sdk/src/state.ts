@@ -76,7 +76,13 @@ export type OrganizationInvite = {
 };
 export type CreateOrganizationInviteInput = { email: string; role?: OrganizationRole; expiresInDays?: number };
 export type CreateOrganizationInput = { name: string; slug?: string };
-export type UpdateOrganizationInput = { name?: string; slug?: string | null };
+export type UpdateOrganizationInput = {
+  name?: string;
+  slug?: string | null;
+  retainDocumentVersions?: number | null;
+  /** False keeps China-based model providers out of every request made for the organization (default true). */
+  allowChinaProviders?: boolean;
+};
 export type OrganizationApiKey = {
   id: string; userId: string; orgId: string | null; name: string; keyType: "server" | "client";
   allowedDomains: string[]; scopes: string[];

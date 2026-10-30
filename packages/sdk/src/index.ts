@@ -130,6 +130,8 @@ export type UpdateWorkspaceInput = JsonObject & {
   apply?: "new-uploads" | "reindex";
   autoConfirmReindex?: boolean;
   retainDocumentVersions?: number | null;
+  /** False keeps China-based model providers out of this workspace's requests; true cannot widen an organization opt-out. */
+  allowChinaProviders?: boolean;
 };
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
