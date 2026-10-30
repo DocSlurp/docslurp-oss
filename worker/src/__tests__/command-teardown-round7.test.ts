@@ -14,6 +14,8 @@ import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { resolveCommandPaths } from "../sandbox/paths.js";
+import { deniedSyscalls, seccompFilter } from "../sandbox/seccomp.js";
+import { buildTestPdf, proseLines } from "../test/make-pdf.js";
 import bubblewrap from "../sandbox/providers/bubblewrap/index.js";
 import {
   resetStagedSourcesForTests,
@@ -504,4 +506,155 @@ describe("Low: candidate isolation settles every sibling before failing", () => 
     expect(dirs.filter((dir) => existsSync(dir))).toEqual([]);
     expect(readdirSync(sourceDir)).toEqual(["doc.pdf"]);
   });
+});
+
+/**
+ * Raw system calls (x86_64 numbers passed in as JSON) that a contained parser could use to reach
+ * kernel attack surface. Prints one JSON object: name -> errno (0 = it worked).
+ */
+const NAMESPACE_PROBE = String.raw`
+import ctypes, json, os, subprocess, sys, threading
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+nr = json.loads(sys.argv[1])
+def call(n, *args):
+    ctypes.set_errno(0)
+    r = libc.syscall(ctypes.c_long(n), *[ctypes.c_long(a) for a in args])
+    if r == 0 and n == nr["clone"]:
+        libc._exit(0)
+    if r > 0 and n == nr["clone"]:
+        os.waitpid(r, 0)
+    return 0 if r >= 0 else ctypes.get_errno()
+out = {}
+out["unshare_user"] = call(nr["unshare"], 0x10000000)
+out["unshare_net"] = call(nr["unshare"], 0x40000000)
+out["clone_newuser"] = call(nr["clone"], 0x10000000 | 17, 0, 0, 0, 0)
+out["clone3"] = call(nr["clone3"], 0, 0)
+out["setns"] = call(nr["setns"], -1, 0)
+out["keyctl"] = call(nr["keyctl"], 0, -3, 0)
+out["add_key"] = call(nr["add_key"], 0, 0, 0, 0, 0)
+out["userfaultfd"] = call(nr["userfaultfd"], 0)
+attr = ctypes.create_string_buffer(128)
+out["perf_event_open"] = call(nr["perf_event_open"], ctypes.addressof(attr), 0, -1, -1, 0)
+out["bpf"] = call(nr["bpf"], 0, 0, 0)
+out["process_vm_readv"] = call(nr["process_vm_readv"], os.getpid(), 0, 0, 0, 0, 0)
+out["mount"] = call(nr["mount"], 0, 0, 0, 0, 0)
+out["fsopen"] = call(nr["fsopen"], 0, 0)
+# What parsers do keeps working: fork, threads (glibc tries clone3, then clone) and subprocess.
+pid = os.fork()
+if pid == 0:
+    os._exit(7)
+out["fork"] = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+t = threading.Thread(target=lambda: None); t.start(); t.join()
+out["thread"] = 0
+out["subprocess"] = subprocess.run(["/bin/sh", "-c", "exit 3"]).returncode
+print(json.dumps(out))
+`;
+
+describe("M1: every sandboxed command is denied namespaces and kernel attack surface", () => {
+  it("both profiles deny the Docker-default-like list on x64 and arm64; clone3 is ENOSYS, clone with CLONE_NEW* EPERM", () => {
+    for (const arch of ["x64", "arm64"]) {
+      const denied = deniedSyscalls(arch)!;
+      expect(Object.keys(denied)).toEqual(
+        expect.arrayContaining(["unshare", "setns", "mount", "bpf", "perf_event_open", "userfaultfd", "keyctl", "add_key", "request_key", "process_vm_readv", "process_vm_writev", "fsopen", "open_tree"]),
+      );
+      for (const profile of ["base", "deny-unix-sockets"] as const) {
+        const filter = seccompFilter(profile, arch)!;
+        const ks = Array.from({ length: filter.length / 8 }, (_, index) => filter.readUInt32LE(index * 8 + 4));
+        expect(ks).toEqual(expect.arrayContaining([...Object.values(denied), 435, 0x00050000 | 1, 0x00050000 | 38, 0x7e020080]));
+      }
+    }
+  });
+
+  const x64 = process.arch === "x64";
+  it.skipIf(!bwrapAvailable || !pidNamespace || !pythonAvailable || !x64)(
+    "under real bwrap: namespaces, keyrings, userfaultfd, perf, bpf, process_vm and the mount API fail; fork, threads and subprocess work",
+    async () => {
+      const numbers = JSON.stringify({ ...deniedSyscalls("x64"), clone: 56, clone3: 435 });
+      // Positive control on the host, no filter: a user namespace can be created here.
+      const host = JSON.parse(spawnSync(python, ["-I", "-c", NAMESPACE_PROBE, numbers], { encoding: "utf8" }).stdout) as Record<string, number>;
+      const root = scratch("docslurp-bwrap-namespaces-");
+      const config = { scratchRoot: path.join(root, "sandbox"), writablePaths: [] };
+      vi.stubEnv("DOCSLURP_PARSER_SANDBOX_ROOT", config.scratchRoot);
+      const session = await bubblewrap.openSession(config, { activityId: "namespaces" });
+      const runner = new CommandRunner({ openSession: async () => session });
+      for (const denyUnixSockets of [false, true]) {
+        const result = await runner.run({ binary: python, args: ["-I", "-c", NAMESPACE_PROBE, numbers], available: true, denyUnixSockets });
+        const probe = JSON.parse(result.stdout) as Record<string, number>;
+        for (const name of ["unshare_user", "unshare_net", "clone_newuser", "setns", "keyctl", "add_key", "userfaultfd", "perf_event_open", "bpf", "process_vm_readv", "mount", "fsopen"]) {
+          expect([name, probe[name]]).toEqual([name, 1]);
+        }
+        expect(probe.clone3).toBe(38);
+        expect(probe).toMatchObject({ fork: 7, thread: 0, subprocess: 3 });
+      }
+      // The host control differs where it matters: without the filter these are not EPERM.
+      expect(host.keyctl).not.toBe(1);
+      expect(host.clone3).not.toBe(38);
+    },
+    60_000,
+  );
+
+  const has = (binary: string) => spawnSync("sh", ["-c", `command -v ${binary}`]).status === 0;
+  it.skipIf(!bwrapAvailable || !pidNamespace || !filterArch || !has("pdftoppm") || !has("qpdf") || !has("tesseract"))(
+    "poppler, qpdf, tesseract and python still run under the filters with real bwrap",
+    async () => {
+      const root = scratch("docslurp-bwrap-tools-");
+      const config = { scratchRoot: path.join(root, "sandbox"), writablePaths: [] };
+      vi.stubEnv("DOCSLURP_PARSER_SANDBOX_ROOT", config.scratchRoot);
+      const session = await bubblewrap.openSession(config, { activityId: "tools" });
+      const runner = new CommandRunner({ openSession: async () => session });
+      const sourceDir = scratch("docslurp-source-");
+      const source = path.join(sourceDir, "in.pdf");
+      writeFileSync(source, buildTestPdf([{ kind: "text", lines: proseLines(5) }]));
+      const outDir = scratch("docslurp-page-");
+      const bin = (name: string) => realpathSync(spawnSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).stdout.trim());
+      await runner.run({ binary: bin("pdftoppm"), args: ["-png", "-r", "60", "-f", "1", "-l", "1", "--", source, path.join(outDir, "page")], available: true, readOnlyInputs: true });
+      const png = readdirSync(outDir).find((name) => name.endsWith(".png"))!;
+      expect(png).toBeTruthy();
+      expect((await runner.run({ binary: bin("pdftotext"), args: [source, "-"], available: true })).stdout.length).toBeGreaterThan(20);
+      expect((await runner.run({ binary: bin("qpdf"), args: ["--check", source], available: true })).stdout).toMatch(/No syntax or stream encoding errors/);
+      const ocr = await runner.run({ binary: bin("tesseract"), args: [path.join(outDir, png), "-", "--psm", "6"], available: true });
+      expect(ocr.stdout.trim().length).toBeGreaterThan(0);
+      const py = await runner.run({ binary: python, args: ["-I", "-c", "import multiprocessing as m, concurrent.futures as f\nwith f.ThreadPoolExecutor(2) as e: print(sum(e.map(abs, [-1, -2])))"], available: true });
+      expect(py.stdout.trim()).toBe("3");
+    },
+    120_000,
+  );
+
+  // The launcher's minimal /etc does not start this host's LibreOffice (it hangs at 466defe9 too, with no
+  // filter), so this runs bwrap directly with the host's /etc and the filter on descriptor 9, as the
+  // launcher passes it.
+  it.skipIf(!bwrapAvailable || !filterArch || !has("soffice"))(
+    "LibreOffice (an audited UNIX-socket client: base profile) still converts a document under the filter (real bwrap --seccomp)",
+    async () => {
+      const work = scratch("docslurp-office-");
+      for (const profile of ["base"] as const) {
+        const input = path.join(work, `note-${profile}.txt`);
+        writeFileSync(input, "Sandboxed LibreOffice conversion\n");
+        const filter = (await import("node:fs")).openSync((await import("../sandbox/seccomp.js")).ensureSeccompFilterFile(work, profile), "r");
+        const home = path.join(work, `home-${profile}`);
+        mkdirSync(home);
+        const child = spawn(
+          "bwrap",
+          [
+            "--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent", "--cap-drop", "ALL",
+            "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc",
+            ...["/bin", "/lib", "/lib64", "/sbin"].flatMap((dir) => (existsSync(dir) ? ["--ro-bind", dir, dir] : [])),
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", work, work, "--setenv", "HOME", home,
+            "--seccomp", "9", "--",
+            realpathSync(spawnSync("sh", ["-c", "command -v soffice"], { encoding: "utf8" }).stdout.trim()),
+            "--headless", "--convert-to", "pdf", input, "--outdir", work,
+          ],
+          { stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", filter] },
+        );
+        strays.push(child.pid!);
+        let stderr = "";
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+        expect([profile, code, stderr.slice(0, 400)]).toEqual([profile, 0, expect.any(String)]);
+        expect(readdirSync(work)).toContain(`note-${profile}.pdf`);
+      }
+    },
+    120_000,
+  );
 });

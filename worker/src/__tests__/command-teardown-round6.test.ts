@@ -111,8 +111,9 @@ describe("H1: io_uring cannot create sockets past the seccomp filter", () => {
         expect(ks).toEqual(expect.arrayContaining([425, 426, 427, 0x00050000 | 38]));
       }
     }
-    expect(seccompFilter("base", "x64")?.length).toBe(10 * 8);
-    expect(seccompFilter("base", "arm64")?.length).toBe(9 * 8);
+    // Round 7 added the namespace and kernel-surface deny list (command-teardown-round7.test.ts).
+    expect(seccompFilter("base", "x64")?.length).toBe(46 * 8);
+    expect(seccompFilter("base", "arm64")?.length).toBe(45 * 8);
     expect(seccompFilter("base", "riscv64")).toBeNull();
   });
 
