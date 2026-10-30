@@ -1,0 +1,289 @@
+{
+  "observedAt": "2026-10-30T00:00:00Z",
+  "sources": [
+    "npm registry audit API via pnpm audit",
+    "pnpm outdated -r",
+    "PyPI advisory service via pip-audit",
+    "Docker Hub registry manifest digests",
+    "GitHub releases API for pinned Actions",
+    "nodejs.org release index"
+  ],
+  "npmUpdates": [
+    {
+      "package": "docslurp-oss",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1157.0",
+      "after": "^3.1159.0"
+    },
+    {
+      "package": "docslurp-oss",
+      "packageManager": true,
+      "before": "pnpm@10.34.7",
+      "after": "pnpm@10.34.9"
+    },
+    {
+      "package": "@docslurp/cli",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    },
+    {
+      "package": "@docslurp/contrib-algolia-server",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    },
+    {
+      "package": "@docslurp/contrib-search-compat",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    },
+    {
+      "package": "@docslurp/sdk",
+      "dependency": "@huggingface/transformers",
+      "before": "^4.3.1",
+      "after": "^4.3.2"
+    },
+    {
+      "package": "@docslurp/sdk",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "ai",
+      "before": "7.0.154",
+      "after": "7.0.156"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/openai",
+      "before": "4.0.103",
+      "after": "4.0.104"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/otel",
+      "before": "^1.0.154",
+      "after": "^1.0.156"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1157.0",
+      "after": "^3.1159.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@aws-sdk/s3-request-presigner",
+      "before": "^3.1157.0",
+      "after": "^3.1159.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@huggingface/transformers",
+      "before": "^4.3.1",
+      "after": "^4.3.2"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@mastra/core",
+      "before": "1.79.0",
+      "after": "1.80.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@posthog/ai",
+      "before": "^8.17.0",
+      "after": "^8.17.1"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@temporalio/client",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@temporalio/common",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "ai",
+      "before": "7.0.154",
+      "after": "7.0.156"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "jose",
+      "before": "^6.2.13",
+      "after": "^6.2.14"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "redis",
+      "before": "^6.3.0",
+      "after": "^6.3.1"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/react",
+      "before": "^4.0.158",
+      "after": "^4.0.160"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@ai-sdk/anthropic",
+      "before": "4.0.89",
+      "after": "4.0.91"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@ai-sdk/openai",
+      "before": "4.0.103",
+      "after": "4.0.104"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1157.0",
+      "after": "^3.1159.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@huggingface/transformers",
+      "before": "^4.3.1",
+      "after": "^4.3.2"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@temporalio/activity",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@temporalio/client",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@temporalio/common",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@temporalio/worker",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@temporalio/workflow",
+      "before": "^1.24.0",
+      "after": "^1.25.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "ai",
+      "before": "7.0.154",
+      "after": "7.0.156"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "redis",
+      "before": "^6.3.0",
+      "after": "^6.3.1"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite",
+      "before": "0.5.12",
+      "after": "0.5.13"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite-socket",
+      "before": "0.2.15",
+      "after": "0.2.16"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@temporalio/testing",
+      "before": "1.24.0",
+      "after": "1.25.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@types/node",
+      "before": "^26.6.5",
+      "after": "^26.6.6"
+    }
+  ],
+  "audits": {
+    "npmBefore": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0
+      }
+    },
+    "npmAfter": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0
+      }
+    },
+    "python": {
+      "requirements-base.lock.txt": "no known vulnerabilities (production images install only this lock)",
+      "requirements.lock.txt / requirements-fallback.lock.txt": "filelock 3.32.7 (3 advisories, fixed in 4.2.1, still blocked; see compatibilityHolds)"
+    }
+  },
+  "securityChanges": [
+    "Node 24.22.1 -> 24.22.2 (2026-10-27, non-security) plus Debian base refresh in server and worker images by refreshing node:24-bookworm-slim and node:24-trixie-slim digests",
+    "pnpm 10.34.7 -> 10.34.9 (packageManager, sha512-pinned)",
+    "astral-sh/setup-uv v10.3.0 -> v10.3.3, pinned by commit SHA (fetches the uv version manifest from the Astral mirror; checksums still verified)"
+  ],
+  "compatibilityHolds": {
+    "typescript": "6.0.3: Astro check supports TypeScript 5/6, not 7",
+    "openai": "6.49.0: 7.x is a major API change; held with the AI SDK family",
+    "opentelemetry": "2.12/0.223/API 1.9.1: 3.0/0.300 is a breaking family change; Langfuse 6 requires SDK 2. API 1.10.0 is the 3.0-line API and fails the 2.x SDK peer range, so the root override stays at 1.9.1. sdk-trace-base/sdk-trace-node 2.12.0 are deprecated upstream in favour of the 3.0 layout; they go with the family upgrade",
+    "@simplewebauthn/server": "13.3.3: 14.x is a major passkey API change reached through @better-auth/passkey; needs its own change and council",
+    "@lancedb/lancedb": "0.40.0: 0.41.0 is a 0.x minor (breaking by semver) released ~29h before this audit; revisit with the LanceDB legacy-table drop",
+    "filelock": "3.32.7 in dev-only ML locks: unstructured 0.27.36 (latest) still requires filelock<4"
+  },
+  "limitations": [
+    "Worker images were not rebuilt or smoke-tested here; the digest refresh takes effect on the next worker-images run",
+    "Python locks were audited, not regenerated",
+    "No production deployment, model download or hosted quality evaluation was run"
+  ],
+  "validation": {
+    "checkout": "standalone core worktree at OSS main 70df8187 plus this change",
+    "typecheck": "passed",
+    "build": "passed",
+    "suites": "CI on the pull request"
+  }
+}
