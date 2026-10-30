@@ -18,7 +18,7 @@ Design: [deferred search profiles](superpowers/specs/2026-10-12-deferred-search-
 
 - **Every organization** starts with `full`. `map` and `visual` are explicit, cheaper choices open to everyone (`visual` is never a default: no template or credit balance selects it for you). The default does not depend on what an organization has bought. Indexing work is admitted against the credit balance like any other spend, so an organization with no credits gets the usual 402 (`credit_exhausted`) when the work starts.
 
-Pages are billed as they are indexed, at the same per-page prices as `full` (5 credits per 1,000 text pages, 250 per 1,000 pages read by OCR or embedded as images). A page is billed once, whether a query or a full index materializes it.
+Pages are billed as they are indexed, at the same per-page prices as `full` (5 credits per 1,000 text pages, 250 per 1,000 pages read by OCR or embedded as images). A page is billed once, whether a query or a full index materializes it. When two queries race for the same page, only the run that still holds the page's claim publishes its text, chunks and vectors; the other publishes nothing. The page then carries one charge. It is Rich if any run read that page of that document version with a model, even a run whose result was not used, and Fast otherwise.
 
 The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the workspace setting, the workspace template's recommendation, then the organization default. The mode is stored per document, so one workspace can hold documents ingested under different modes.
 

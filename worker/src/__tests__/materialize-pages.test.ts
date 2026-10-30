@@ -239,6 +239,21 @@ describe("materializePageRange", () => {
     log.mockRestore();
   });
 
+  it("a failed vector write fails the pages, publishes no chunk and deletes any partial vector write", async () => {
+    const h = harness({ 1: LONG, 2: LONG + " second" }, {
+      async writeVectors() { throw new Error("lance unavailable"); },
+      async deleteVectors(_uri, _table, ids) { h.lanceDeletes.push(...ids); },
+    });
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
+    expect(result.indexed).toEqual([]);
+    expect(result.failed).toEqual([{ page: 1, reason: "lance unavailable" }, { page: 2, reason: "lance unavailable" }]);
+    expect((await db.query(`select 1 from document_chunks where document_id = 'd1'`)).rows).toHaveLength(0);
+    expect((await db.query(`select 1 from document_pages where document_id = 'd1'`)).rows).toHaveLength(0);
+    expect(h.lanceDeletes.sort()).toEqual(["d1:p1:c0", "d1:p2:c0"]);
+    const states = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number in (1, 2)`);
+    expect(states.rows.map((r) => r.state)).toEqual(["failed", "failed"]);
+  });
+
   it("removes stale chunk rows when a page re-chunks to fewer chunks", async () => {
     const many = Array.from({ length: 4 }, (_, i) => `# Part ${i}\n\n${LONG} ${i}`).join("\n\n");
     const h = harness({ 1: many });

@@ -520,6 +520,7 @@ export async function materializePageRange(
   const billsHere = input.reason !== "full-index";
   const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
   let written: string[] = [];
+  let discard: string[] = [];
   let staleIds: string[] = [];
   let held = new Set<number>();
   let owned: number[] = [];
@@ -543,8 +544,11 @@ export async function materializePageRange(
             metadata: { documentId, sourceKey: document.sourceKey, filename: document.filename, pageNumber: c.page },
           })));
         } catch (error) {
+          // A partial write leaves ids with no chunk row of this publication: unsearchable, deleted below.
           const reason = error instanceof Error ? error.message : String(error);
           for (const page of publish) { failed.set(page, reason); prepared.delete(page); }
+          discard = written;
+          written = [];
           publishChunks = [];
         }
       }
@@ -627,6 +631,7 @@ export async function materializePageRange(
       }
     });
   } catch (error) {
+    written = [...written, ...discard];
     if (written.length > 0) {
       // The transaction rolled back: these ids have no committed chunk row, so they are unsearchable; drop them.
       await ops.deleteVectors(location.uri, location.table, written).catch((cleanup: unknown) => {
@@ -636,8 +641,9 @@ export async function materializePageRange(
     throw error;
   }
   for (const batch of batches) batch.commit();
-  if (staleIds.length > 0 && run.orgId && run.workspaceId) {
-    await ops.deleteVectors(location.uri, location.table, staleIds).catch((error: unknown) => {
+  const unpublished = [...staleIds.filter(() => Boolean(run.orgId && run.workspaceId)), ...discard];
+  if (unpublished.length > 0) {
+    await ops.deleteVectors(location.uri, location.table, unpublished).catch((error: unknown) => {
       console.warn(`[materialize] stale vector cleanup failed for ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
