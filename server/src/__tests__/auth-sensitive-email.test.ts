@@ -8,7 +8,7 @@ vi.mock("better-auth/api", () => ({
   sessionMiddleware: () => undefined,
 }));
 vi.mock("better-auth/crypto", () => ({ generateRandomString: () => "123456" }));
-vi.mock("../lib/auth-email.js", () => ({ sendAuthEmailCode: mocks.send }));
+vi.mock("../lib/auth-email.js", () => ({ sendAuthEmailCode: mocks.send, EMAIL_CODE_SECONDS: 12 * 60 * 60 }));
 vi.mock("../lib/auth-mfa.js", () => ({
   evaluateMfaPolicy: async () => ({ required: mocks.requireMfa }), ssoEnforcedForEmail: async () => mocks.sso,
 }));
@@ -56,7 +56,7 @@ beforeEach(() => {
 
 describe("current-email sensitive verification", () => {
   it("uses only the current verified database email and never stores the raw code", async () => {
-    await expect(send()).resolves.toMatchObject({ sent: true, expiresIn: 600 });
+    await expect(send()).resolves.toMatchObject({ sent: true, expiresIn: 12 * 60 * 60 });
     expect(mocks.send).toHaveBeenCalledWith({ email: "current@example.test", otp: "123456" });
     expect(sessions.get("session")!.hash).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(query.mock.calls)).not.toContain('"123456"');
