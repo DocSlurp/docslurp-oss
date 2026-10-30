@@ -2,8 +2,8 @@ import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
+import { copyFile, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -78,6 +78,7 @@ import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { nativePdfEngineState } from "../native-pdf/loader.js";
 import { logNativePdfFallback } from "../native-pdf/types.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
@@ -263,6 +264,8 @@ export class ExtractMarkdownStage implements Stage {
               // Track partial artifacts so we can fall through with usable assets on failure
               let partialArtifactUri = "";
               let partialStats: Record<string, unknown> = {};
+              // Private source copies of concurrent candidates (isolateConcurrentCandidates).
+              const candidateDirs: string[] = [];
 
               try {
                 const contentHash = cachedSource.sha256;
@@ -335,15 +338,29 @@ export class ExtractMarkdownStage implements Stage {
 
                 attemptLedger.reserve(plannedExtractors.primary.label);
                 if (plannedExtractors.secondary) attemptLedger.reserve(plannedExtractors.secondary.label);
-                const [resultA, resultB] = await this.collectCandidateResults({
+                const isolated = await this.isolateConcurrentCandidates({
                   primary: plannedExtractors.primary,
-                  primaryKey: candidateAKey,
                   secondary: plannedExtractors.secondary,
+                  sourcePath: tempFile,
+                  format,
+                  options: extractionConfig.options,
+                  dirs: candidateDirs,
+                });
+                const [resultA, resultB] = await this.collectCandidateResults({
+                  primary: isolated.primary.extractor,
+                  primaryKey: candidateAKey,
+                  secondary: isolated.secondary?.extractor ?? null,
                   secondaryKey: candidateBKey,
-                  sourceTempFile: tempFile,
+                  primarySource: isolated.primary.source,
+                  secondarySource: isolated.secondary?.source ?? tempFile,
                   graphContext: { sourceHash: contentHash, pageCount, documentId: document.id },
                   signal,
                 });
+                // A candidate whose command could not be torn down ends the stage: never let the
+                // other candidate (possibly the in-process engine) take over as a fallback.
+                for (const result of [resultA, resultB]) {
+                  if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                }
 
                 for (const [planned, result] of [
                   [plannedExtractors.primary, resultA],
@@ -971,6 +988,7 @@ export class ExtractMarkdownStage implements Stage {
                   ]);
                 }
               } catch (error) {
+                rethrowIfTeardown(error);
                 const message = error instanceof Error ? error.message : String(error);
                 console.error(
                   `[extract-error] stage=${this.name} document=${document.id} ` +
@@ -1017,6 +1035,8 @@ export class ExtractMarkdownStage implements Stage {
                   });
                 }
                 throw error;
+              } finally {
+                await Promise.all(candidateDirs.map((dir) => rm(dir, { recursive: true, force: true })));
               }
             },
             signal,
@@ -1108,6 +1128,7 @@ export class ExtractMarkdownStage implements Stage {
       );
       return this.storage.uri(key);
     } catch (error) {
+      rethrowIfTeardown(error);
       if (signal?.aborted) throw error;
       console.warn(
         `[extract-markdown] page image evidence unavailable document=${document.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1148,6 +1169,7 @@ export class ExtractMarkdownStage implements Stage {
       });
       await recordPageFacts(state.store, rows);
     } catch (error) {
+      rethrowIfTeardown(error);
       console.warn(`[page-facts] skipped document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -1413,12 +1435,64 @@ export class ExtractMarkdownStage implements Stage {
     }
   }
 
+  /**
+   * Two candidates that run at once each get a private copy of the source, prepared against it, in
+   * a directory of its own: a candidate's command can write only its own directory, never the cached
+   * source's directory that the other candidate (and every other command of the document) uses. Two
+   * commands sharing a writable directory could meet on a UNIX socket there and pass descriptors,
+   * one holding the other's stdout to defeat its teardown. A single or serialized candidate keeps
+   * the cached source. The copy is a reflink where the filesystem supports it. `dirs` collects the
+   * directories for the caller to remove.
+   */
+  private async isolateConcurrentCandidates(args: {
+    primary: PreparedExtractor;
+    secondary: PreparedExtractor | null;
+    sourcePath: string;
+    format: string;
+    options: Record<string, unknown>;
+    dirs: string[];
+  }): Promise<{
+    primary: { extractor: PreparedExtractor; source: string };
+    secondary: { extractor: PreparedExtractor; source: string } | null;
+  }> {
+    // Every candidate, single, serialized or concurrent, gets its own copy: the cached source is
+    // shared by every activity on this worker that processes the same key (a reprocess, a new
+    // version) and stays read-only (sandbox/paths.ts), while extractors write beside their input.
+    const registered = new Set(documentExtractorRegistry.list().map((descriptor) => descriptor.id));
+    const isolate = async (extractor: PreparedExtractor) => {
+      // In-process stand-ins (image-textless) run no command and are not in the registry.
+      if (!registered.has(extractor.label)) return { extractor, source: args.sourcePath };
+      const dir = await mkdtemp(path.join(tmpdir(), "docslurp-candidate-"));
+      args.dirs.push(dir);
+      const source = path.join(dir, path.basename(args.sourcePath));
+      await copyFile(args.sourcePath, source, fsConstants.COPYFILE_FICLONE);
+      const prepared = await documentExtractorRegistry.prepare(
+        extractor.label,
+        this.runner,
+        source,
+        serializeExtractorOptions(args.options, extractor.label),
+        { format: args.format },
+      );
+      return { extractor: prepared, source };
+    };
+    // Settle both before failing: the caller removes `dirs` as soon as this throws, and a sibling
+    // still copying would otherwise recreate its directory (or copy into a removed one) afterwards.
+    const [primary, secondary] = await Promise.allSettled([
+      isolate(args.primary),
+      args.secondary ? isolate(args.secondary) : Promise.resolve(null),
+    ]);
+    if (primary.status === "rejected") throw primary.reason;
+    if (secondary.status === "rejected") throw secondary.reason;
+    return { primary: primary.value, secondary: secondary.value };
+  }
+
   private async collectCandidateResults(args: {
     primary: PreparedExtractor;
     primaryKey: string;
     secondary: PreparedExtractor | null;
     secondaryKey: string | null;
-    sourceTempFile: string;
+    primarySource: string;
+    secondarySource: string;
     graphContext: { sourceHash: string; pageCount: number; documentId: string };
     signal?: AbortSignal;
   }): Promise<
@@ -1431,7 +1505,7 @@ export class ExtractMarkdownStage implements Stage {
       await this.extractCandidate(
         args.primary,
         args.primaryKey,
-        args.sourceTempFile,
+        args.primarySource,
         args.signal,
         args.graphContext,
       );
@@ -1442,7 +1516,7 @@ export class ExtractMarkdownStage implements Stage {
       return await this.extractCandidate(
         args.secondary,
         args.secondaryKey,
-        args.sourceTempFile,
+        args.secondarySource,
         args.signal,
         args.graphContext,
       );
@@ -1766,6 +1840,7 @@ export class ExtractMarkdownStage implements Stage {
         ? enrichCanonicalDocumentWithPptx(args.document, payload)
         : enrichCanonicalDocumentWithXlsx(args.document, payload);
     } catch (error) {
+      rethrowIfTeardown(error);
       console.warn(`[extract-markdown] skipped office structure sidecar kind=${kind} document=${args.documentId} reason=${toError(error).message}`);
       return args.document;
     }
@@ -1860,6 +1935,7 @@ export class ExtractMarkdownStage implements Stage {
           payload,
         });
       } catch (error) {
+        rethrowIfTeardown(error);
         console.warn(
           `[extract-markdown] skipped optional parser artifact parser=${job.parser} document=${document.id} reason=${toError(error).message}`,
         );
@@ -1893,6 +1969,7 @@ export class ExtractMarkdownStage implements Stage {
           });
         }
       } catch (error) {
+        rethrowIfTeardown(error);
         console.warn(
           `[extract-markdown] skipped pdf region extraction document=${document.id} reason=${toError(error).message}`,
         );

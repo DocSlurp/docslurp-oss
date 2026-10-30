@@ -19,12 +19,25 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Readable } from "node:stream";
 import { platform } from "node:os";
 import { pipeline } from "node:stream/promises";
+import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
 import { resolveCommandPaths } from "../sandbox/paths.js";
-import { sandboxScopeStorage } from "../sandbox/session-context.js";
+import { latchedTeardownError, sandboxScopeStorage } from "../sandbox/session-context.js";
+import { admitCommandSource } from "../sandbox/source-quarantine.js";
+import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
-import { SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
+import { SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
+import {
+  CommandTeardownError,
+  containmentOf,
+  isCommandTeardownError,
+  recordUnverifiedTeardown,
+  spawnContained,
+  superviseChild,
+  teardownTimings,
+  type SupervisedChild,
+} from "../sandbox/teardown.js";
 import { resolveScriptsDir } from "./scripts-dir.js";
 import { createPool, type PythonPool } from "./python-pool.js";
 import {
@@ -60,6 +73,18 @@ export interface CommandPlan {
   pythonPath?: string[];
   /** Extra environment from vendor bundles (worker/vendor-bundles.json `env`). */
   bundleEnv?: Record<string, string>;
+  /**
+   * Make creating a UNIX socket fail (bubblewrap's seccomp filter), so the command cannot meet a
+   * concurrent command on a socket and pass file descriptors. Unset, it defaults to true for every
+   * binary except the audited UNIX_SOCKET_CLIENTS. A local provider that cannot enforce it refuses
+   * the command (see assertUnixSocketFilter).
+   */
+  denyUnixSockets?: boolean;
+  /**
+   * Existing file arguments are inputs only: their directories are not made writable. The command
+   * writes only to the directories of its output arguments.
+   */
+  readOnlyInputs?: boolean;
 }
 
 export interface CommandResult {
@@ -79,7 +104,7 @@ export interface CommandRunnerOptions {
 
 /** A started command: a local child process to monitor, or a remote run that completes on its own. */
 export type LaunchedCommand =
-  | { child: ChildProcess; release(): Promise<void> }
+  | { child: ChildProcess; supervised: SupervisedChild; release(): Promise<void> }
   | { remote: Promise<SandboxResult>; timeoutMs: number; release(): Promise<void> };
 
 const DEFAULT_SCRATCH_ROOT = "/tmp/docslurp-parser-sandbox";
@@ -233,9 +258,9 @@ export class CommandRunner {
             if (result.exitCode === 0) return { stdout: result.stdout, stderr: result.stderr };
             throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim());
           }
-          const { child } = launched;
+          const { child, supervised } = launched;
           return await new Promise<CommandResult>((resolve, reject) => {
-          const monitor = this.startCommandMonitor(plan, child);
+          const monitor = this.startCommandMonitor(plan, child, supervised);
 
           let stdout = "";
           let stderr = "";
@@ -252,7 +277,7 @@ export class CommandRunner {
               outputLimitError = new Error(
                 `${plan.binary} stdout exceeded ${maxOutputBytes} bytes`,
               );
-              void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+              supervised.terminate(outputLimitError, { immediate: true });
               return;
             }
             stdout += chunk.toString();
@@ -263,15 +288,17 @@ export class CommandRunner {
               outputLimitError = new Error(
                 `${plan.binary} stderr exceeded ${maxOutputBytes} bytes`,
               );
-              void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+              supervised.terminate(outputLimitError, { immediate: true });
               return;
             }
             stderr += chunk.toString();
           });
-          child.on("error", (error) => {
-            reject(monitor.finish() ?? error);
-          });
-          child.on("close", (code) => {
+          // Settles only after every process of the command is gone (see sandbox/teardown.ts).
+          supervised.done.then(({ code, reason }) => {
+            if (reason && reason.name === "AbortError") {
+              reject(monitor.finish(code) ?? reason);
+              return;
+            }
             if (outputLimitError) {
               reject(outputLimitError);
               return;
@@ -291,7 +318,7 @@ export class CommandRunner {
                 `${plan.binary} (${code ?? "unknown"}): ${stderr || stdout}`.trim(),
               ),
             );
-          });
+          }, (error: Error) => reject(commandFailure(error, monitor.finish())));
           });
         } finally {
           await launched.release();
@@ -321,7 +348,7 @@ export class CommandRunner {
             await pipeline(Readable.from([result.stdout]), destination);
             return { stderr: result.stderr };
           }
-          return await this.streamToWritable(plan, launched.child, destination);
+          return await this.streamToWritable(plan, launched.child, launched.supervised, destination, signal);
         } finally {
           await launched.release();
         }
@@ -332,9 +359,15 @@ export class CommandRunner {
   private async streamToWritable(
     plan: CommandPlan,
     child: ChildProcess,
+    supervised: SupervisedChild,
     destination: Writable,
+    signal?: AbortSignal,
   ): Promise<{ stderr: string }> {
-    const monitor = this.startCommandMonitor(plan, child);
+    const monitor = this.startCommandMonitor(plan, child, supervised);
+    // The command's wall-clock deadline also bounds its output: the monitor stops counting when the
+    // command exits, but the destination (an upload) must still finish by then, or within
+    // WORKER_COMMAND_OUTPUT_FINISH_MS of the exit if that is later.
+    const outputDeadlineAt = Date.now() + (plan.timeoutMs ?? resolveCommandTimeoutMs(plan.pages ?? currentPerfContext()?.pageCount));
     let stderr = "";
     let stderrBytes = 0;
     let outputLimitError: Error | null = null;
@@ -343,10 +376,11 @@ export class CommandRunner {
       DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
 
     const exitPromise = new Promise<void>((resolve, reject) => {
-      child.on("error", (error) => {
-        reject(monitor.finish() ?? error);
-      });
-      child.on("close", (code) => {
+      supervised.done.then(({ code, reason }) => {
+        if (reason && reason.name === "AbortError") {
+          reject(monitor.finish(code) ?? reason);
+          return;
+        }
         if (outputLimitError) {
           reject(outputLimitError);
           return;
@@ -366,7 +400,7 @@ export class CommandRunner {
             `${plan.binary} (${code ?? "unknown"}): ${stderr}`.trim(),
           ),
         );
-      });
+      }, (error: Error) => reject(commandFailure(error, monitor.finish())));
     });
 
     child.stderr!.on("data", (chunk) => {
@@ -375,18 +409,116 @@ export class CommandRunner {
         outputLimitError = new Error(
           `${plan.binary} stderr exceeded ${maxOutputBytes} bytes`,
         );
-        void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+        supervised.terminate(outputLimitError, { immediate: true });
         return;
       }
       stderr += chunk.toString();
     });
 
-    await Promise.all([
-      pipeline(child.stdout!, destination).catch((error) => {
-        throw monitor.peekBudgetError() ?? error;
-      }),
-      exitPromise,
-    ]);
+    // Never fail fast: a destination failure (a full disk) stops the command, and the call settles
+    // only after its teardown is verified. An unverified teardown wins over every other error.
+    // The output is cancelled as soon as the command is being stopped (timeout, abort, budget) or
+    // its root exits non-zero, and whenever the command's exit fails, so a destination that never
+    // calls back (a stalled upload) can keep neither the command's stdio nor this call open. A
+    // command that succeeded waits for its destination: a slow final upload part is legitimate.
+    // Cancelling destroys only the destination. The command's stdout is unpiped and drained to its
+    // real EOF: teardown verification counts only an EOF as closed stdio, never our own destroy.
+    const source = child.stdout!;
+    let outputSettled = false;
+    let outputCancelled = false;
+    let cancelReason: unknown = null;
+    let onOutputCancelled: (() => void) | null = null;
+    // Why we stopped waiting on a destination after a successful exit (deadline, caller abort).
+    let outputStopError: Error | null = null;
+    const discardRest = () => {
+      source.unpipe(destination);
+      source.resume();
+    };
+    const cancelOutput = (why: unknown) => {
+      if (outputSettled || outputCancelled) return;
+      outputCancelled = true;
+      cancelReason = why;
+      discardRest();
+      const error = new Error("command output cancelled", { cause: why });
+      error.name = "AbortError";
+      destination.destroy(error);
+      onOutputCancelled?.();
+    };
+    const piped = new Promise<void>((resolve, reject) => {
+      finished(destination, (error) => {
+        outputSettled = true;
+        if (error) reject(error);
+        else resolve();
+      });
+      // pipe() does not forward a source error; without this the destination would wait forever.
+      source.once("error", (error) => cancelOutput(error));
+      source.pipe(destination);
+    }).catch((error: Error) => {
+      discardRest();
+      const failure = monitor.peekBudgetError() ?? error;
+      if (!outputCancelled) supervised.terminate(failure, { immediate: true });
+      throw failure;
+    });
+    // Observed now and awaited after the exit: it can settle first, and must not count as unhandled.
+    piped.catch(() => {});
+    const onTerminated = () => cancelOutput(supervised.terminated.reason);
+    if (supervised.terminated.aborted) onTerminated();
+    else supervised.terminated.addEventListener("abort", onTerminated, { once: true });
+    void supervised.exited.then(({ code, signal }) => {
+      if (code !== 0 || signal) cancelOutput(new Error(`${plan.binary} exited with ${code ?? signal}`));
+    });
+    const exit = await exitPromise.then(
+      () => ({ status: "fulfilled" as const }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
+    );
+    supervised.terminated.removeEventListener("abort", onTerminated);
+    if (exit.status === "rejected") cancelOutput(exit.reason);
+    type Settled = { status: "fulfilled" } | { status: "rejected"; reason: unknown };
+    const outputDone = piped.then(
+      (): Settled => ({ status: "fulfilled" }),
+      (reason: unknown): Settled => ({ status: "rejected", reason }),
+    );
+    // Bounded: a successful command's destination gets until the output deadline (and no longer
+    // than the caller's signal); a cancelled destination gets OUTPUT_CANCEL_GRACE_MS to finish
+    // destroying, so neither a stalled write nor a stalled _final or _destroy holds this call.
+    const output = await new Promise<Settled>((resolve) => {
+      const timers: NodeJS.Timeout[] = [];
+      const onAbort = () => {
+        outputStopError ??= abortReasonOf(signal!);
+        cancelOutput(outputStopError);
+      };
+      const done = (value: Settled) => {
+        for (const timer of timers) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        onOutputCancelled = null;
+        resolve(value);
+      };
+      const armCancelGrace = () =>
+        timers.push(setTimeout(() => done({ status: "rejected", reason: cancelReason }), OUTPUT_CANCEL_GRACE_MS));
+      if (outputCancelled) armCancelGrace();
+      else onOutputCancelled = armCancelGrace;
+      if (exit.status === "fulfilled" && !outputSettled && !outputCancelled) {
+        const waitMs = Math.max(outputDeadlineAt - Date.now(), outputFinishFloorMs());
+        timers.push(setTimeout(() => {
+          outputStopError ??= Object.assign(
+            new Error(`${path.basename(plan.binary)} output did not finish within ${waitMs} ms after the command exited`),
+            { name: "CommandOutputTimeoutError" },
+          );
+          cancelOutput(outputStopError);
+        }, waitMs));
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+      }
+      void outputDone.then(done);
+    });
+    if (exit.status === "rejected" && isCommandTeardownError(exit.reason)) {
+      throw commandFailure(exit.reason, output.status === "rejected" && !outputCancelled ? (output.reason as Error) : null);
+    }
+    // A successful command whose destination did not finish in time, or whose caller gave up on it.
+    if (outputStopError) throw outputStopError;
+    // The output failing first (a full disk) is the cause; its cancellation by a stopped or failed command is not.
+    if (output.status === "rejected" && !(outputCancelled && exit.status === "rejected")) throw output.reason;
+    if (exit.status === "rejected") throw exit.reason;
 
     return { stderr };
   }
@@ -976,7 +1108,7 @@ export class CommandRunner {
       outcome =
         "remote" in launched
           ? await this.settleRemote(selected.plan, launched, "malware-scan")
-          : await this.collectChild(selected.plan, launched.child, "malware-scan");
+          : await this.collectChild(selected.plan, launched.child, launched.supervised, "malware-scan");
     } finally {
       await launched.release();
     }
@@ -1001,9 +1133,14 @@ export class CommandRunner {
   }
 
   /** Run a monitored local child to completion; rejects on spawn errors and budget or timeout kills. */
-  private collectChild(plan: CommandPlan, child: ChildProcess, metricPrefix: string): Promise<SandboxResult> {
+  private collectChild(
+    plan: CommandPlan,
+    child: ChildProcess,
+    supervised: SupervisedChild,
+    metricPrefix: string,
+  ): Promise<SandboxResult> {
     return new Promise<SandboxResult>((resolve, reject) => {
-      const monitor = this.startCommandMonitor(plan, child, { metricPrefix });
+      const monitor = this.startCommandMonitor(plan, child, supervised, { metricPrefix });
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (chunk) => {
@@ -1012,14 +1149,12 @@ export class CommandRunner {
       child.stderr?.on("data", (chunk) => {
         stderr += chunk.toString();
       });
-      child.on("error", (error) => {
-        reject(monitor.finish() ?? error);
-      });
-      child.on("close", (code) => {
+      supervised.done.then(({ code, reason }) => {
         const budgetError = monitor.finish(code);
         if (budgetError) reject(budgetError);
+        else if (reason) reject(reason);
         else resolve({ exitCode: code, stdout, stderr });
-      });
+      }, (error: Error) => reject(commandFailure(error, monitor.finish())));
     });
   }
 
@@ -1200,15 +1335,18 @@ export class CommandRunner {
     return {
       ...(calibration ? { profile: () => calibration.profile("extract-markdown:doppler-vm") } : {}),
       recordTiming: (timing) => recordShardTimingInContext(timing),
+      onProgress: () => noteWorkProgress("command:doppler-shard"),
     };
   }
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    await admitCommand();
     if (plan.dopplerVm) {
       // DOCSLURP_DOPPLER_SHARDS=on fans long PDFs out across parallel VMs (needs a doppler-vm@3 image).
       const settings = dopplerShardSettings();
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
-      const waves = settings.enabled ? Math.ceil(settings.maxShards / settings.vmParallel) + 1 : 1;
+      // Long documents split even with optional sharding off; shards also note progress as they finish.
+      const waves = settings.rangesSupported ? Math.ceil(settings.maxShards / settings.vmParallel) + 1 : 1;
       return {
         remote: executeDopplerShards(plan.dopplerVm, pages, signal, settings, this.dopplerShardDeps()),
         timeoutMs: VM_TIMEOUT_MS * waves,
@@ -1217,8 +1355,9 @@ export class CommandRunner {
     }
     if (isVectorBackendCommand(plan.args, this.scriptsDir)) {
       const env = buildCommandEnv({ plan, venvBin: this.venvBin, isVectorBackend: true });
-      const child = spawn(plan.binary, plan.args, { env, stdio: ["ignore", "pipe", "pipe"], signal });
-      return { child, release: async () => {} };
+      // Trusted code that holds backend credentials, not a parser: a process group is enough.
+      const child = spawnContained(plan.binary, plan.args, { env, containment: "process-group" });
+      return { child, supervised: superviseCommand(plan, child, signal), release: async () => {} };
     }
     const { scratchRoot, writablePaths } = await this.sandboxPathConfig();
     const pages = plan.pages ?? currentPerfContext()?.pageCount;
@@ -1235,8 +1374,30 @@ export class CommandRunner {
     });
     const { session, release } = await this.acquireSession();
     try {
-      if (session.spawn) return { child: session.spawn(command, signal), release };
-      if (session.run) return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
+      if (session.spawn) {
+        assertProcessTeardown(session);
+        assertUnixSocketFilter(session, command);
+        const child = session.spawn(command);
+        const containment = containmentOf(child);
+        if (containment !== "pid-namespace" && !(containment && allowsUnisolated(session))) {
+          const refusal = new SandboxPolicyError(
+            `parser sandbox provider '${session.providerId}' started a command ` +
+              `${containment ? `with ${containment} containment instead of a PID namespace` : "without process containment"}; refusing to run it`,
+          );
+          await stopRefusedChild(plan, child, containment !== undefined, refusal);
+        }
+        return { child, supervised: superviseCommand(plan, child, signal), release };
+      }
+      if (session.run) {
+        // Only a remote session (its own VM, terminated with the activity) may skip process
+        // containment and the socket filter; a local provider offering `run` would run unchecked.
+        if (session.isolation.location !== "remote") {
+          throw new SandboxPolicyError(
+            `parser sandbox provider '${session.providerId}' offers run() but is not remote; refusing to run a command it does not contain`,
+          );
+        }
+        return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
+      }
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {
       await release();
@@ -1302,6 +1463,7 @@ export class CommandRunner {
   private startCommandMonitor(
     plan: CommandPlan,
     child: ReturnType<typeof spawn>,
+    supervised: SupervisedChild,
     options?: { metricPrefix?: string },
   ) {
     const context = currentPerfContext();
@@ -1330,9 +1492,8 @@ export class CommandRunner {
           console.error(
             `[worker-command] status=timeout binary=${plan.binary} timeout_ms=${timeoutMs} pages=${pages ?? "unknown"} pid=${pid}`,
           );
-          void inspectProcessTree(pid)
-            .then((snapshot) => killProcessTree(snapshot?.pids ?? [pid]))
-            .catch(() => killProcessTree([pid]));
+          // The same verified teardown as an abort: TERM, then KILL, settling once all of it is gone.
+          supervised.terminate(timeoutError);
         }, timeoutMs)
       : undefined;
     wallClockTimer?.unref?.();
@@ -1377,7 +1538,7 @@ export class CommandRunner {
             `rss_mb=${formatMemoryMb(snapshot.rssKb)} limit_mb=${formatMemoryMb(this.commandRssBudgetKb)} ` +
             `pid=${pid} args=${JSON.stringify(plan.args)}`,
         );
-        await killProcessTree(snapshot.pids);
+        supervised.terminate(budgetError, { immediate: true });
       }
     };
 
@@ -1643,12 +1804,196 @@ async function inspectProcessTree(
   });
 }
 
-async function killProcessTree(pids: number[]): Promise<void> {
-  for (const pid of [...pids].reverse()) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {}
+/**
+ * Untrusted parser work needs a provider that guarantees every process a command starts dies with it
+ * (a PID namespace). Without one, a parser's descendant can outlive the command, its slot and its
+ * scratch. Refuse loudly, unless this is the explicitly unisolated `none` mode.
+ */
+/**
+ * The error a failed command rejects with. An unverified teardown always wins over whatever was
+ * stopping the command (a timeout, a budget, a failed destination), so its slot stays poisoned;
+ * that error rides along as its cause.
+ */
+function commandFailure(error: unknown, stopping: Error | null): Error {
+  if (isCommandTeardownError(error)) {
+    if (stopping && stopping !== error && error.cause === undefined) {
+      Object.defineProperty(error, "cause", { value: stopping, configurable: true, writable: true });
+    }
+    return error;
   }
+  return stopping ?? (error as Error);
+}
+
+/** Only provider none, with the explicit override, may run parser work without a PID namespace. */
+function allowsUnisolated(session: SandboxSession): boolean {
+  return session.providerId === "none" && process.env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true";
+}
+
+/**
+ * Stop a child the runner refuses to run. It always ends in CommandTeardownError (cause: the
+ * refusal): it was refused because its containment cannot prove that its processes are gone (a
+ * setsid'd descendant leaves the process group, and an uncontained child has no group we own), so
+ * root exit or an empty group proves nothing. Its slot is poisoned, its scratch is kept for the
+ * sweep, and the worker's teardown circuit breaker counts it.
+ */
+async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, contained: boolean, refusal: Error): Promise<never> {
+  const label = path.basename(plan.binary);
+  if (contained) {
+    const supervised = superviseCommand(plan, child, undefined, `${label} was refused (${refusal.message}); its teardown cannot be proven`);
+    supervised.terminate(refusal, { immediate: true });
+    try {
+      await supervised.done;
+    } catch (error) {
+      throw commandFailure(error, refusal);
+    }
+    // superviseChild never resolves an unprovable command; fail closed if that ever changes.
+    const error = new CommandTeardownError(`${label} (refused) teardown could not be verified`, { cause: refusal });
+    recordUnverifiedTeardown(error, `label=${label} containment=${containmentOf(child)}`, { attribution: commandAttribution() });
+    throw error;
+  }
+  // Not ours to supervise: kill its group (if it was spawned detached) and itself, and wait (bounded) for its exit.
+  let detail = "it was started without process containment, so no descendant of it can be proven gone";
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    const exited = new Promise<boolean>((resolve) => child.once("exit", () => resolve(true)));
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      /* not a group leader */
+    }
+    child.kill("SIGKILL");
+    const { verifyMs } = teardownTimings();
+    let timer: NodeJS.Timeout | undefined;
+    const gone = await Promise.race([exited, new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), verifyMs)))]);
+    clearTimeout(timer);
+    if (!gone) detail = `it did not exit within ${verifyMs} ms of SIGKILL`;
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  const error = new CommandTeardownError(`${label} (refused, uncontained) teardown could not be verified: ${detail}`, { cause: refusal });
+  recordUnverifiedTeardown(error, `label=${label} pid=${child.pid} containment=none`, { attribution: commandAttribution() });
+  throw error;
+}
+
+function assertProcessTeardown(session: SandboxSession): void {
+  if (session.isolation.processes) return;
+  if (allowsUnisolated(session)) return;
+  console.error(
+    `[parser-sandbox] status=refused provider=${session.providerId} reason=no-process-teardown ` +
+      "detail=provider cannot guarantee a parser's descendants die with it",
+  );
+  throw new SandboxPolicyError(
+    `parser sandbox provider '${session.providerId}' cannot guarantee that a command's processes die with it ` +
+      "(no PID namespace); refusing untrusted parser work",
+  );
+}
+
+/**
+ * Binaries that may need a UNIX socket, so they run without the AF_UNIX filter (sandbox/seccomp.ts);
+ * every other command gets it. Audited 2026-10-29 against every binary the runner plans:
+ * - clamdscan talks to clamd over its LocalSocket.
+ * - LibreOffice (soffice, soffice.bin, libreoffice, unoconv) uses one for its own IPC.
+ * - Python interpreters and Python entry points (docling, ocrmypdf, xlsx2csv): asyncio's self-pipe
+ *   and multiprocessing (forkserver, Manager, duplex Pipe) use socketpair(AF_UNIX).
+ * - node: libuv's child-process stdio and IPC use socketpair(AF_UNIX).
+ * - kreuzberg: a tokio runtime's signal driver uses a UNIX socket pair.
+ * Poppler, qpdf, tesseract, pandoc, unrtf, catdoc, tiffcp and clamscan do not use one. A tool not
+ * listed here gets the filter: add it only after checking that it needs a socket.
+ */
+const UNIX_SOCKET_CLIENTS = new Set([
+  "clamdscan", "soffice", "soffice.bin", "libreoffice", "unoconv",
+  "docling", "ocrmypdf", "xlsx2csv", "node", "kreuzberg",
+]);
+
+export function needsUnixSockets(binary: string): boolean {
+  const name = path.basename(binary);
+  return UNIX_SOCKET_CLIENTS.has(name) || /^python[0-9.]*$/.test(name);
+}
+
+/** Commands that must not create a UNIX socket, unless the plan says otherwise. */
+export function deniesUnixSockets(plan: Pick<CommandPlan, "binary" | "denyUnixSockets">): boolean {
+  return plan.denyUnixSockets ?? !needsUnixSockets(plan.binary);
+}
+
+let warnedUnfilteredSockets = false;
+
+/**
+ * A local provider that cannot enforce the AF_UNIX filter (landlock, none) must not run a command
+ * that asks for it: two such commands could meet on a socket and trip the teardown breaker, or
+ * worse. bubblewrap filters with seccomp, landlock with landrun's socket scoping (>= 0.1.17). DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway for local development; it is
+ * refused when NODE_ENV=production. Remote providers are exempt: their commands run in the
+ * session's own VM, terminated with the activity, and never hold a worker-side teardown.
+ */
+export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId" | "filtersUnixSockets">, command: Pick<SandboxCommand, "binary" | "denyUnixSockets">): void {
+  if (session.filtersUnixSockets) return;
+  // Landlock must scope even parsers that need sockets to their own domain.
+  if (session.providerId !== "landlock" && !command.denyUnixSockets) return;
+  const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
+  const production = process.env.NODE_ENV === "production";
+  if (optIn && !production) {
+    if (!warnedUnfilteredSockets) {
+      warnedUnfilteredSockets = true;
+      console.warn(
+        `[parser-sandbox] status=degraded provider=${session.providerId} reason=unfiltered-unix-sockets ` +
+          "detail=DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS runs commands without the UNIX-socket filter; development only",
+      );
+    }
+    return;
+  }
+  console.error(
+    `[parser-sandbox] status=refused provider=${session.providerId} reason=no-unix-socket-filter ` +
+      `binary=${path.basename(command.binary)}${optIn ? " detail=opt-in ignored under NODE_ENV=production" : ""}`,
+  );
+  throw new SandboxPolicyError(
+    `parser sandbox provider '${session.providerId}' cannot stop '${path.basename(command.binary)}' from creating UNIX sockets; ` +
+      "refusing to run it (use bubblewrap)",
+  );
+}
+
+/** How long a cancelled command output may take to finish destroying before the call gives up on it. */
+const OUTPUT_CANCEL_GRACE_MS = 1_000;
+
+/** After a successful exit, the least time a command's destination gets to finish (a final upload part). */
+function outputFinishFloorMs(): number {
+  return readPositiveNumber(process.env.WORKER_COMMAND_OUTPUT_FINISH_MS) ?? 60_000;
+}
+
+function abortReasonOf(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  return Object.assign(new Error("The operation was aborted", { cause: signal.reason }), { name: "AbortError" });
+}
+
+/** Supervise a launched child with its run and document ids attached to every teardown log line. */
+function superviseCommand(plan: CommandPlan, child: ChildProcess, signal?: AbortSignal, unprovable?: string): SupervisedChild {
+  return superviseChild(child, {
+    label: path.basename(plan.binary),
+    signal,
+    ...(unprovable ? { unprovable } : {}),
+    context: commandAttribution(),
+  });
+}
+
+/** Who a command runs for, on every teardown log line and quarantine record. */
+function commandAttribution(): Record<string, string | undefined> {
+  const context = currentPerfContext();
+  return {
+    org_id: context?.orgId ?? undefined,
+    workspace_id: context?.workspaceId,
+    run_id: context?.runId,
+    document_id: context?.documentId,
+    stage: context?.stageName,
+  };
+}
+
+/**
+ * Before any parser command: an activity whose command teardown already failed gets that failure
+ * (it ends as a non-retryable teardown), any other activity on a quarantined worker a retryable
+ * WorkerQuarantinedError, and a document whose source is quarantined a QuarantinedSourceError.
+ */
+async function admitCommand(): Promise<void> {
+  const latched = latchedTeardownError();
+  if (latched) throw latched;
+  assertTeardownBreakerClosed();
+  await admitCommandSource();
 }
 
 export { resolveScriptsDir };
@@ -1746,6 +2091,7 @@ export function buildSandboxCommand(args: {
     inputPaths: paths.inputPaths,
     writablePaths: paths.writablePaths,
     limits: args.limits,
+    ...(deniesUnixSockets(args.plan) ? { denyUnixSockets: true } : {}),
   };
 }
 

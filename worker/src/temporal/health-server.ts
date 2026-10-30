@@ -29,9 +29,13 @@ export interface WorkerHealth {
   inFlightActivities: number;
 }
 
-/** Pure: healthy only while every worker runs and no poller has failed. */
-export function evaluateWorkerHealth(statuses: readonly WorkerStatusLike[]): WorkerHealth {
+/**
+ * Pure: healthy only while every worker runs, no poller has failed and the worker is not
+ * quarantined (`quarantine` names why: the teardown circuit breaker, sandbox/teardown-breaker.ts).
+ */
+export function evaluateWorkerHealth(statuses: readonly WorkerStatusLike[], quarantine?: string | null): WorkerHealth {
   const inFlightActivities = statuses.reduce((sum, status) => sum + (status.numInFlightActivities ?? 0), 0);
+  if (quarantine) return { ok: false, state: "quarantined", detail: quarantine, inFlightActivities };
   if (statuses.length === 0) return { ok: false, state: "starting", detail: "no Temporal worker created yet", inFlightActivities };
   const notRunning = statuses.find((status) => status.runState !== "RUNNING");
   if (notRunning) {

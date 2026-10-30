@@ -48,6 +48,7 @@ beforeEach(async () => {
   await sql`delete from workspaces`;
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
+  await sql`delete from upload_cleanup_owners`;
   await sql`delete from vector_index_outbox`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('keep', 'o1', 'u1', 'Keep')`;
 });
@@ -116,6 +117,55 @@ async function drainAll(stores: ReturnType<typeof fakeExternalStores>) {
 }
 
 describe("delete triggers enqueue external cleanup", () => {
+  it("cleans a replayed original after its delay without deleting the sealed source or other tenants", async () => {
+    await seedRun("live");
+    const original = "u1/upload/raw/original.pdf";
+    const sealed = "u1/upload/raw/sealed-file.pdf";
+    const other = "u2/upload/raw/original.pdf";
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('sealed-session', 'u1', 'o1', 'confirmed')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
+      values ('sealed-file', 'sealed-session', 'source.pdf', 'application/pdf', ${sealed}, 'single')`;
+    await sql`insert into upload_cleanup_owners (original_key, sealed_key, org_id) values (${original}, ${sealed}, 'o1')`;
+    await sql`delete from upload_sessions where id = 'sealed-session'`;
+    const stores = fakeExternalStores([sealed, other], {});
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+      values ('upload_original', 'o1', ${original}, ${sql.json({sealedKey: sealed})}, 'sealed_upload', now() + interval '1 day')`;
+    stores.objects.add(original); // A replayed PUT after immediate deletion.
+    await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect(stores.objects.has(original)).toBe(true);
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    const failing = {...stores.storage, deleteKeys: async () => { throw new Error("storage unavailable"); }};
+    for (let failure = 0; failure < 11; failure++) {
+      await sql`update storage_cleanup_queue set not_before = now()`;
+      expect((await drainStorageCleanupQueue(sql, failing, stores.options)).failed).toBe(1);
+    }
+    expect((await sql`select * from storage_cleanup_queue`).length).toBe(1);
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect([...stores.objects]).toEqual([sealed, other]);
+    expect((await sql`select * from storage_cleanup_queue`).length).toBe(1);
+    stores.objects.add(original); // A late PUT finishes after the first successful cleanup.
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect([...stores.objects]).toEqual([sealed, other]);
+    stores.objects.add(original);
+    await sql`update storage_cleanup_queue set org_id = 'wrong-org', not_before = now()`;
+    expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(1);
+    expect(stores.objects.has(original)).toBe(true);
+    expect((await sql`select not_before = 'infinity'::timestamptz as quarantined from storage_cleanup_queue`)[0]?.quarantined).toBe(true);
+    // A legacy row has lost its owner; merely making it due must not authorize deletion.
+    await sql`delete from upload_cleanup_owners where original_key = ${original}`;
+    await sql`update storage_cleanup_queue set org_id = 'o1', not_before = now()`;
+    expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(1);
+    expect(stores.objects.has(original)).toBe(true);
+    // Operator restores the tuple from independently verified historical evidence.
+    await sql`insert into upload_cleanup_owners (original_key, sealed_key, org_id) values (${original}, ${sealed}, 'o1')`;
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(0);
+    expect([...stores.objects]).toEqual([sealed, other]);
+    expect((await sql`select last_error from storage_cleanup_queue`)[0]?.last_error).toBeNull();
+  });
+
   it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {
     const source = "u1/upload/raw/source.pdf";
     await sql`insert into upload_sessions (id, user_id, org_id, status) values ('recover', 'u1', 'o1', 'ingesting')`;

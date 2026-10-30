@@ -71,4 +71,4 @@ ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "read_text" text;
 ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queue_kind_check;
 --> statement-breakpoint
 ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
-  CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows'));
+  CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows', 'upload_original'));

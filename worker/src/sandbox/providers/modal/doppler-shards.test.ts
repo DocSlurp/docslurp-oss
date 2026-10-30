@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
 import { SHARD_PROFILES } from "../../../temporal/page-shard-profiles.js";
-import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerShards, resetDopplerShardStateForTest, type DopplerShardSettings } from "./doppler-shards.js";
-import { MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
+import { dopplerShardSettings, executeDopplerShards, mergeVmUsage, planDopplerShards, resetDopplerShardStateForTest, shardVmsInUseForTest, type DopplerShardSettings } from "./doppler-shards.js";
+import { declaredGuestProtocol, MAX_PDF_BYTES, SHARDS_UNSUPPORTED_MESSAGE, validEnvelope, validShardRange, type DopplerVmJob } from "./doppler-vm.js";
 import { planPageShards } from "../../../temporal/page-shards.js";
 
-const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32, globalParallel: 64 };
+const on: DopplerShardSettings = { enabled: true, vmParallel: 8, maxCostOverhead: 3, maxTransferBytes: 512 * 1024 * 1024, maxShards: 32, globalParallel: 64, rangesSupported: true };
 const usage = (seconds: number) => ({
   provider: "modal", model: "doppler-document-vm", metric: "sandbox_compute", amount: seconds, unit: "cent", costCents: seconds,
   metadata: { wallSeconds: seconds, costFloorCents: seconds / 2 },
@@ -57,7 +57,8 @@ describe("executeDopplerShards", () => {
     const timings: number[] = [];
     const result = await executeDopplerShards(job, 477, undefined, on, { execute: vm.execute, recordTiming: (t) => timings.push(t.pages) });
     expect(await readFile(job.output, "utf8")).toBe(pagesText(1, 477));
-    const ranges = vm.calls.map((c) => c.range!);
+    const ranges = vm.calls.map((c) => c.range!).sort((a, b) => a.first - b.first);
+    expect(vm.calls[0]!.range!.final).toBe(true); // the final shard runs first
     expect(ranges.length).toBeGreaterThan(1);
     expect(ranges.every((r) => (r.first - 1) % 32 === 0)).toBe(true);
     expect(ranges.filter((r) => r.final)).toEqual([{ first: ranges.at(-1)!.first, last: 477, final: true }]);
@@ -123,18 +124,16 @@ describe("executeDopplerShards", () => {
     expect(vm.calls).toHaveLength(0);
   });
 
-  it("keeps every VM's cost when the merge fails on the filesystem", async () => {
-    const vm = fakeVm(async (j) => j.range && j.range.final ? new Error("unreachable") : pagesText(j.range?.first ?? 1, j.range?.last ?? 477));
-    // The final shard "succeeds" without writing output: the merge read fails with ENOENT.
+  it("treats a shard that reports success without output as failed and keeps every VM's cost through the fallback", async () => {
+    const vm = fakeVm();
     const execute = vi.fn(async (vmJob: DopplerVmJob, signal?: AbortSignal): Promise<SandboxResult> => {
       if (vmJob.range?.final) return { stdout: "", stderr: "", exitCode: 0, usage: usage(2) };
       return vm.execute(vmJob, signal);
     });
-    const error = await executeDopplerShards(job, 477, undefined, on, { execute }).catch((e) => e);
-    expect(error).toBeInstanceOf(SandboxRunError);
-    expect(error.message).toBe("Document VM shard merge failed");
-    expect(error.usage.costCents).toBe(2 * execute.mock.calls.length);
-    expect(await readdir(dir)).toEqual(["in.pdf"]);
+    const result = await executeDopplerShards(job, 477, undefined, on, { execute });
+    expect(execute.mock.calls.at(-1)![0].range).toBeUndefined(); // whole-document fallback
+    expect(result.usage!.costCents).toBe(2 * execute.mock.calls.length);
+    expect(await readdir(dir)).toEqual(["in.pdf", "out.md"]);
   });
 
   it("stops sharding after an image refuses ranges", async () => {
@@ -145,11 +144,123 @@ describe("executeDopplerShards", () => {
     expect(vm.calls.slice(before).map((c) => c.range)).toEqual([undefined]);
   });
 
-  it("runs whole when the process VM budget is saturated or the document exceeds the guest's page limit", async () => {
-    const vm = fakeVm(async (j) => pagesText(1, j.range ? 0 : 1));
+  it("runs an optional split whole when the process VM budget is saturated", async () => {
+    const vm = fakeVm(async () => pagesText(1, 477));
     await executeDopplerShards(job, 477, undefined, { ...on, globalParallel: 1 }, { execute: vm.execute });
-    await executeDopplerShards(job, 10_001, undefined, on, { execute: vm.execute });
-    expect(vm.calls.map((c) => c.range)).toEqual([undefined, undefined]);
+    expect(vm.calls.map((c) => c.range)).toEqual([undefined]);
+  });
+
+  it("always splits a document longer than one VM may convert, in waves when the budget is full", async () => {
+    const vm = fakeVm(async (j) => pagesText(j.range!.first, j.range!.last));
+    const pages = 25_000;
+    await executeDopplerShards(job, pages, undefined, { ...on, enabled: false, globalParallel: 1 }, { execute: vm.execute });
+    const ranges = vm.calls.map((c) => c.range!).sort((a, b) => a.first - b.first);
+    expect(ranges.every((r) => r && r.last - r.first + 1 <= 10_000 && (r.first - 1) % 32 === 0)).toBe(true);
+    expect(ranges.at(-1)).toMatchObject({ last: pages, final: true });
+    expect(vm.stats.maxActive).toBe(1);
+    expect(await readFile(job.output, "utf8")).toBe(pagesText(1, pages));
+  });
+
+  it("refuses a long document on the host, with no VM, when the image cannot take ranges, it is over the document limit or an image refused ranges", async () => {
+    const vm = fakeVm();
+    await expect(executeDopplerShards(job, 25_000, undefined, { ...on, rangesSupported: false }, { execute: vm.execute })).rejects.toThrow(/ranges-unsupported/);
+    await expect(executeDopplerShards(job, 100_001, undefined, on, { execute: vm.execute })).rejects.toThrow(/over-document-limit/);
+    const refusing = fakeVm(async (j) => j.range ? new SandboxRunError(SHARDS_UNSUPPORTED_MESSAGE, usage(1)) : pagesText(1, 477));
+    await executeDopplerShards(job, 477, undefined, on, { execute: refusing.execute });
+    await expect(executeDopplerShards(job, 25_000, undefined, on, { execute: vm.execute })).rejects.toThrow(/image-refused-ranges/);
+    expect(vm.calls).toHaveLength(0);
+  });
+
+  it("splits 100,000 pages of a normal-sized file, or refuses it on the host with the numbers needed", async () => {
+    const vm = fakeVm(async (j) => pagesText(j.range!.first, j.range!.last));
+    await truncate(job.input, 30 * 1024 * 1024);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const error = await executeDopplerShards(job, 100_000, undefined, on, { execute: vm.execute }).catch((e) => e);
+      expect(error).toBeInstanceOf(SandboxRunError); // 30 MiB x the 22+ shards needed exceeds the 512 MiB transfer cap
+      expect(vm.calls).toHaveLength(0);
+      expect(String(info.mock.calls.at(-1)![0])).toMatch(/outcome=refused shards=0 pages=100000 reason=split-infeasible wallMs=0 needShards=22 maxShards=17 configuredMaxShards=32 transferShards=17 legalShardPages=4608 fileMiB=30 transferCapMiB=512/);
+      await executeDopplerShards(job, 100_000, undefined, { ...on, maxTransferBytes: 1024 * 1024 * 1024 }, { execute: vm.execute });
+      expect(vm.calls.length).toBeGreaterThan(10);
+      expect(vm.calls.every((c) => c.range!.last - c.range!.first + 1 <= 4_640)).toBe(true); // forced shards stay inside 60 s
+    } finally { info.mockRestore(); }
+  });
+
+  it("fails at once when a shard's guest counts a different number of pages", async () => {
+    const vm = fakeVm(async (j) => j.range && !j.range.final ? new SandboxRunError("Document VM page count disagrees with the host", usage(1)) : pagesText(j.range!.first, j.range!.last));
+    const error = await executeDopplerShards(job, 25_000, undefined, on, { execute: vm.execute }).catch((e) => e);
+    expect(error.message).toMatch(/disagrees/);
+    expect(vm.calls.every((c) => c.expectedDocumentPages === 25_000)).toBe(true);
+  });
+
+  it("counts concurrent shard completions correctly and stops before the remaining waves", async () => {
+    const big = "x".repeat(25 * 1024 * 1024);
+    const vm = fakeVm(async (j) => big + pagesText(j.range!.first, j.range!.last));
+    const error = await executeDopplerShards(job, 25_000, undefined, { ...on, vmParallel: 3 }, { execute: vm.execute }).catch((e) => e);
+    expect(error.message).toBe("Document VM merged output exceeds limit");
+    expect(vm.calls.length).toBeLessThanOrEqual(5); // 6 shards planned; the third 25 MiB completion trips the cap
+    expect(error.usage.costCents).toBe(2 * vm.calls.length);
+  });
+
+  it("stops paying for shards once the merged output cannot fit", async () => {
+    const big = "x".repeat(40 * 1024 * 1024);
+    const vm = fakeVm(async (j) => j.range!.final ? pagesText(j.range!.first, j.range!.last) : big + pagesText(j.range!.first, j.range!.last));
+    const error = await executeDopplerShards(job, 25_000, undefined, { ...on, vmParallel: 1 }, { execute: vm.execute }).catch((e) => e);
+    expect(error.message).toBe("Document VM merged output exceeds limit");
+    expect(vm.calls.length).toBeLessThan(5);
+  });
+
+  it("does not fall back to one VM when a forced split fails", async () => {
+    const vm = fakeVm(async (j) => j.range?.first === 1 ? new SandboxRunError("Document VM parser failed (1)", usage(4)) : pagesText(j.range!.first, j.range!.last));
+    const error = await executeDopplerShards(job, 25_000, undefined, on, { execute: vm.execute }).catch((e) => e);
+    expect(error).toBeInstanceOf(SandboxRunError);
+    expect(vm.calls.every((c) => c.range)).toBe(true);
+    expect(error.usage.costCents).toBeGreaterThanOrEqual(4);
+  });
+
+  it("never runs more shard VMs than the process ceiling across concurrent forced splits", async () => {
+    const vm = fakeVm(async (j) => pagesText(j.range!.first, j.range!.last));
+    const jobs = await Promise.all([0, 1, 2, 3, 4].map(async (i) => {
+      const output = join(dir, `out-${i}.md`);
+      return executeDopplerShards({ ...job, output }, 25_000, undefined, { ...on, globalParallel: 1 }, { execute: vm.execute }).then(() => output);
+    }));
+    expect(vm.stats.maxActive).toBe(1);
+    for (const output of jobs) expect(await readFile(output, "utf8")).toBe(pagesText(1, 25_000));
+    expect(shardVmsInUseForTest()).toBe(0);
+  });
+
+  it("does not run a doomed fallback VM when the image cannot confine itself or misreports confinement", async () => {
+    for (const message of ["Document VM image does not report the declared confinement", "Document VM guest confinement unavailable"]) {
+      const vm = fakeVm(async (j) => j.range?.final ? new SandboxRunError(message, usage(1)) : pagesText(j.range?.first ?? 1, j.range?.last ?? 477));
+      const error = await executeDopplerShards(job, 477, undefined, on, { execute: vm.execute }).catch((e) => e);
+      expect(error.message).toBe(message);
+      expect(vm.calls.every((c) => c.range)).toBe(true);
+    }
+  });
+
+  it("refuses an infeasible forced split without starting any VM", async () => {
+    const vm = fakeVm();
+    await expect(executeDopplerShards(job, 25_000, undefined, { ...on, maxShards: 1 }, { execute: vm.execute })).rejects.toThrow(/cannot split/);
+    expect(vm.calls).toHaveLength(0);
+  });
+
+  it("releases a waiting forced split's slot request on abort", async () => {
+    const controller = new AbortController();
+    const vm = fakeVm(async (j) => { controller.abort(); return pagesText(j.range!.first, j.range!.last); });
+    await expect(executeDopplerShards(job, 25_000, controller.signal, { ...on, globalParallel: 1 }, { execute: vm.execute })).rejects.toThrow(/aborted/);
+    expect(shardVmsInUseForTest()).toBe(0);
+  });
+
+  it("logs one searchable line per sharding decision", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await executeDopplerShards(job, 477, undefined, on, { execute: fakeVm().execute });
+      await executeDopplerShards(job, 20, undefined, on, { execute: fakeVm(async () => pagesText(1, 20)).execute });
+      const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[document-vm]"));
+      expect(lines[0]).toMatch(/^\[document-vm\] outcome=merged shards=\d+ pages=477 reason=planned wallMs=\d+ shardPages=\d+ parallel=\d+ vms=\d+/);
+      expect(lines[1]).toMatch(/^\[document-vm\] outcome=whole shards=1 pages=20 reason=plan-unsharded wallMs=0$/);
+      for (const line of lines) expect(line.split(" ").slice(1).every((kv) => /^[A-Za-z]+=\S+$/.test(kv))).toBe(true);
+    } finally { info.mockRestore(); }
   });
 
   it("requires the image protocol to be declared before sharding", () => {
@@ -199,6 +310,26 @@ describe("doppler-vm@3 envelope", () => {
     expect(shard({ pages: 3, first: 65, last: 67, documentPages: 67 }, pagesText(65, 67), { first: 65, last: 67, final: true })).toBe(true);
     expect(shard({ pages: 3, first: 65, last: 67, documentPages: 70 }, pagesText(65, 67), { first: 65, last: 67, final: true })).toBe(false);
     expect(env({ pages: 3, first: 1, last: 3, documentPages: 3 }, "a\fb\fc")).toBe(true);
+  });
+
+  it("requires proof of in-VM hardening when the image is declared protocol 4", () => {
+    const hardened = { policy: "doppler-guest-hardening@2", noNewPrivs: true, landlockAbi: 10, seccompDenied: 85 };
+    const env4 = (diag: Record<string, unknown>, declared: number) =>
+      validEnvelope({ engine: "doppler", outputBytes: 5, conversion: { pages: 3, first: 1, last: 3, documentPages: 3 }, ...diag }, Buffer.from("a\fb\fc"), undefined, declared);
+    expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 4)).toBe(true);
+    expect(env4({ protocol: "doppler-vm@3" }, 4)).toBe(false);                                 // older image under a hardened declaration
+    expect(env4({ protocol: "doppler-vm@4" }, 4)).toBe(false);                                 // missing report
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, landlockAbi: 3 } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, seccompDenied: 0 } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, noNewPrivs: "true" } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, policy: "doppler-guest-hardening@1" } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, seccompDenied: 79 } }, 4)).toBe(false);
+    expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, landlockAbi: 4.5 } }, 4)).toBe(false);
+    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "04" })).toBe(0);
+    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "5" })).toBe(0);
+    expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 3)).toBe(true);            // rolling forward
+    expect(env4({ protocol: "doppler-vm@4" }, 3)).toBe(false);                                 // a @4 guest always reports
+    expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on", DOCSLURP_DOPPLER_VM_PROTOCOL: "4" }).enabled).toBe(true);
   });
 
   it("rejects ranges off the guest chunk grid", () => {

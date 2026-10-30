@@ -28,6 +28,25 @@ class ChunkMergeTest(unittest.TestCase):
         for pages in (0, -1, 10001, True, 1.5):
             with self.assertRaises(ValueError): guest.page_ranges(pages)
 
+    def test_long_documents_convert_only_in_bounded_shards(self):
+        pages = 25000
+        with self.assertRaises(ValueError): guest.page_ranges(pages)                      # whole document: refused
+        with self.assertRaises(ValueError): guest.page_ranges(pages, 1, 10016)            # one VM over the limit
+        self.assertEqual(guest.page_ranges(pages, 9985, 19968)[-1], (19937, 19968))       # 9,984-page shard: allowed
+        self.assertEqual(guest.page_ranges(pages, 19969, 25000)[-1], (24993, 25000))
+        with self.assertRaises(ValueError): guest.page_ranges(guest.MAX_DOCUMENT_PAGES + 1, 1, 32)
+        self.assertEqual(self_request(pages, {"first": 19969, "last": 25000, "final": True}), (19969, 25000))
+
+    def test_document_limit_boundaries_and_settings_scale(self):
+        self.assertEqual(guest.page_ranges(100000, 1, 10000)[-1], (9985, 10000))
+        with self.assertRaises(ValueError): guest.page_ranges(100000, 1, 10001)
+        with self.assertRaises(ValueError): guest.page_ranges(100001, 1, 32)
+        self.assertEqual(self_request(100000, {"first": 99969, "last": 100000, "final": True}), (99969, 100000))
+        for pages in (25000, 100000):
+            for count in (32, 1):
+                share = json.loads(guest.chunk_settings('{}', pages, count))['furniture_min_share']
+                self.assertTrue(share == share and share < float('inf'))  # finite; furniture never repeats past 1.0
+
     def test_order_and_blank_slots_across_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d); output = p / "merged"; size = 0
@@ -45,6 +64,11 @@ class ChunkMergeTest(unittest.TestCase):
             with (p / "out").open("wb") as f:
                 with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 2, True, 0)
                 with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 1, False, guest.MAX_OUTPUT - 2)
+
+def self_request(pages, body):
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "shard.json"; path.write_text(json.dumps(body))
+        return guest.shard_request(pages, path)
 
 class ShardRequestTest(unittest.TestCase):
     def request(self, pages, body):
@@ -93,5 +117,133 @@ class ShardRequestTest(unittest.TestCase):
             target = Path(d) / "real"; target.write_text('{"first":1,"last":32,"final":false}')
             link = Path(d) / "shard.json"; link.symlink_to(target)
             with self.assertRaises(ValueError): guest.shard_request(67, link)
+
+def _layers_available():
+    try:
+        import ctypes
+        if ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1) < 4:
+            return False
+        ctypes.CDLL('libseccomp.so.2')
+        return True
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(_layers_available(), "needs Landlock ABI >= 4 and libseccomp (CI asserts both on Linux)")
+class HardeningTest(unittest.TestCase):
+    """Applies the real Landlock and seccomp layers in a child process (needs Landlock ABI >= 4 and libseccomp)."""
+
+    def run_hardened(self, probe):
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as job, tempfile.TemporaryDirectory() as outside:
+            code = (f"import importlib.util, json, os, socket, ctypes\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"job, outside = {job!r}, {outside!r}\n"
+                    f"report = g.harden(job)\n{probe}")
+            return subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+
+    def test_job_directory_still_works(self):
+        out = self.run_hardened("open(os.path.join(job, 'x'), 'w').write('ok'); os.unlink(os.path.join(job, 'x')); print(json.dumps(report))")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        report = json.loads(out.stdout)
+        self.assertTrue(report['noNewPrivs']); self.assertGreaterEqual(report['landlockAbi'], 4); self.assertGreater(report['seccompDenied'], 30)
+
+    def test_refuses_writes_outside_job_sockets_ptrace_and_namespaces(self):
+        probe = """
+results = {}
+for name, attempt in {
+    'write_outside': lambda: open(os.path.join(outside, 'x'), 'w'),
+    'write_etc': lambda: open('/etc/doppler-escape', 'w'),
+    'socket': lambda: socket.socket(socket.AF_INET, socket.SOCK_STREAM),
+    'unix_socket': lambda: socket.socket(socket.AF_UNIX, socket.SOCK_STREAM),
+}.items():
+    try: attempt(); results[name] = 'allowed'
+    except OSError: results[name] = 'refused'
+libc = ctypes.CDLL(None, use_errno=True)
+results['ptrace'] = 'refused' if libc.ptrace(0, 0, None, None) == -1 else 'allowed'
+results['unshare'] = 'refused' if libc.unshare(0x10000000) == -1 else 'allowed'
+print(json.dumps(results))"""
+        out = self.run_hardened(probe)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(set(json.loads(out.stdout).values()), {'refused'}, out.stdout)
+
+    def test_council_gaps_are_closed(self):
+        probe = r"""
+import errno, subprocess
+results = {}
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+def errno_of(rc): return 'refused' if rc == -1 else 'allowed'
+results['clone3'] = 'refused' if libc.syscall(435, None, 0) == -1 and ctypes.get_errno() == errno.ENOSYS else 'allowed'
+results['clone_newuser'] = errno_of(libc.syscall(56, 0x10000000 | 17, 0, 0, 0, 0))
+results['chmod_outside'] = 'allowed'
+victim = os.path.join(outside, 'v')
+try:
+    os.chmod(victim, 0o777)
+except OSError:
+    results['chmod_outside'] = 'refused'
+results['memfd'] = errno_of(libc.syscall(319, b'x', 0))
+results['shmget'] = errno_of(libc.shmget(0, 4096, 0o1600))
+try:
+    open(f'/proc/{os.getppid()}/fd/2', 'w'); results['parent_fd'] = 'allowed'
+except OSError:
+    results['parent_fd'] = 'refused'
+results['child_runs'] = 'ok' if subprocess.run(['/usr/bin/true']).returncode == 0 else 'broken'
+print(json.dumps(results))"""
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as job, tempfile.TemporaryDirectory() as outside:
+            Path(outside, 'v').write_text('x')
+            code = (f"import importlib.util, json, os, ctypes\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"job, outside = {job!r}, {outside!r}\nreport = g.harden(job)\n{probe}")
+            out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        results = json.loads(out.stdout)
+        self.assertEqual(results.pop('child_runs'), 'ok')
+        self.assertEqual(set(results.values()), {'refused'}, results)
+
+    def test_unknown_syscall_name_refuses_instead_of_skipping(self):
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as job:
+            code = (f"import importlib.util\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"g.SECCOMP_DENY = g.SECCOMP_DENY + ('no_such_syscall_doppler',)\n"
+                    f"try:\n    g.harden({job!r}); print('applied')\nexcept ValueError as e:\n    print('refused', e)")
+            out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        self.assertTrue(out.stdout.startswith('refused'), out.stdout + out.stderr)
+
+    def test_root_capabilities_are_dropped(self):
+        import shutil, subprocess, sys
+        if not shutil.which('unshare'):
+            self.skipTest('unshare unavailable')
+        with tempfile.TemporaryDirectory() as job:
+            code = (f"import importlib.util, json\n"
+                    f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                    f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                    f"before = g._status('CapEff')\nreport = g.harden({job!r})\n"
+                    f"print(json.dumps({{'before': before, 'report': report}}))")
+            out = subprocess.run(['unshare', '--map-root-user', sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        if out.returncode != 0 and 'unshare' in out.stderr:
+            self.skipTest('user namespaces unavailable: ' + out.stderr[:80])
+        self.assertEqual(out.returncode, 0, out.stderr)
+        result = json.loads(out.stdout)
+        self.assertNotEqual(int(result['before'], 16), 0)        # root in the namespace held capabilities
+        self.assertEqual(result['report']['capabilities'], 0)
+        self.assertTrue(result['report']['boundingCleared'])
+
+    def test_confinement_failure_exits_with_its_own_code(self):
+        import subprocess, sys
+        code = (f"import importlib.util\n"
+                f"spec = importlib.util.spec_from_file_location('g', {str(Path(__file__).with_name('doppler-vm.py'))!r})\n"
+                f"g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                f"g.resource.setrlimit = lambda *a: None\n"
+                f"def broken(job='/job'): raise ValueError('landlock unavailable')\n"
+                f"g.harden = broken\ng.entry()")
+        out = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 3, out.stderr)
+        self.assertIn('confinement unavailable', out.stderr)
 
 if __name__ == "__main__": unittest.main()
