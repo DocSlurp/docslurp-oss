@@ -619,7 +619,7 @@ export const visionModelCatalog = [
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
-    imageTokens: { kind: "patch", patchPx: 14, tokensPerPatch: 1, basis: "vit-patch-ceiling" },
+    imageTokens: { kind: "fixed", tokens: 3_330, basis: "processor-max:nemotron-h-omni" },
   },
   // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
   // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
@@ -645,7 +645,7 @@ export const visionModelCatalog = [
       basis: "pinned-route",
       providers: ["together", "fireworks", "parasail"],
     },
-    imageTokens: { kind: "patch", patchPx: 14, tokensPerPatch: 1, basis: "vit-patch-ceiling" },
+    imageTokens: { kind: "fixed", tokens: 1_024, basis: "processor-max:deepseek-v4.1" },
   },
   {
     id: "xiaomi/mimo-v2.6-flash",
@@ -658,7 +658,7 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
     estimatedCostPerPageCents: 0.056,
     tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-25" },
-    imageTokens: { kind: "patch", patchPx: 14, tokensPerPatch: 1, basis: "vit-patch-ceiling" },
+    imageTokens: { kind: "fixed", tokens: 8_194, basis: "processor-max:qwen2-vl" },
   },
   {
     id: "openai/gpt-6-luna",
@@ -685,7 +685,7 @@ export const visionModelCatalog = [
     // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
     estimatedCostPerPageCents: 0.073,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
-    imageTokens: { kind: "patch", patchPx: 14, tokensPerPatch: 1, basis: "vit-patch-ceiling" },
+    imageTokens: { kind: "fixed", tokens: 8_002, basis: "processor-max:glm5-next" },
   },
   {
     id: "gpt-4.1-mini",
@@ -775,8 +775,21 @@ export function visionListPriceCents(
  * - `gemini-media-resolution`: Gemini 3's largest per-image count (`ultra_high`, 2,240; the default is 1,120).
  * - `gemini-tiles`: Gemini 2.x's 258 tokens per tile, counted per 256-px square rather than its documented 768-px
  *   tile (9x), which covers its crop-unit rescaling.
- * - `vit-patch-ceiling`: no provider formula published; one token per 14-px ViT patch before any patch merge, 4x
- *   the one token per 28 px that the Qwen2.5-VL, GLM-V and MiMo-VL encoders emit after their 2x2 merge.
+ * - `processor-max:<processor>`: the most tokens the model's published Hugging Face image processor can give one
+ *   image at any size, after its minimum-size upscaling, resizing, tiling and patch merging, plus the image's
+ *   framing tokens (start/end markers, row separators). Open-weights models only; read from the model repository's
+ *   `preprocessor_config.json` / `processor_config.json` and processor code (checked 2026-10-29):
+ *   - `nemotron-h-omni` (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B): one dynamic-resolution tile of at most
+ *     `max_num_patches` 13,312 16-px patches (upscaled to at least `min_num_patches` 1,024, which stays far below the
+ *     maximum), 0.5 pixel-shuffle downsample: 13,312 / 4 = 3,328 tokens, plus `<img>` and `</img>`: 3,330.
+ *   - `deepseek-v4.1` (deepseek-ai/DeepSeek-V4.1-Flash-1017, `inference/image_processor.py`): the resize plan keeps
+ *     the full image span (start, rows with their new-line tokens, end) at or below `vision_max_n_token` 1,024,
+ *     after `vision_min_pixels` upscaling.
+ *   - `qwen2-vl` (XiaomiMiMo/MiMo-V2.6-Flash, `Qwen2VLImageProcessor`): `smart_resize` to at most `max_pixels`
+ *     8,388,608 on a 32-px grid (16-px patches, 2x2 merge), one token per 1,024 px: 8,192, plus
+ *     `<|vision_start|>` and `<|vision_end|>`: 8,194.
+ *   - `glm5-next` (zai-org/GLM-5.3-Flash, `Glm5NextImageProcessor`): `smart_resize` to at most `max_image_tokens`
+ *     8,000 merged 28-px tokens, plus the image start and end tokens: 8,002.
  */
 export type VisionImageTokenBound =
   | { kind: "patch"; patchPx: number; tokensPerPatch: number; basis: string }
@@ -812,6 +825,8 @@ export const VISION_MAX_OUTPUT_USD_PER_MILLION = 50;
 export const HOSTED_VISION_PROVIDERS = ["openai", "openrouter"] as const;
 /** Local providers a vision route may use: in-process, or a loopback OpenAI-compatible server. */
 export const LOCAL_VISION_PROVIDERS = ["local-cli", "ollama", "vllm", "lmstudio"] as const;
+/** Local providers whose server address a `baseUrl` parameter may set (loopback hosts only). */
+export const LOCAL_BASE_URL_PROVIDERS = ["ollama", "vllm", "lmstudio"] as const;
 
 /** OpenAI "Pro" / "Ultra" tiers (`o3-pro`, `gpt-5-pro-2025-10-06`, `…-ultra`): never offered or called. */
 export function isProhibitedPremiumModelId(model: string): boolean {
@@ -826,8 +841,14 @@ export function isProhibitedPremiumModelId(model: string): boolean {
  * Pro/Ultra ids and models at or above `VISION_MAX_OUTPUT_USD_PER_MILLION` output are refused on every provider.
  */
 export function visionModelUriProblem(uri: string): string | null {
-  const { provider, model } = parseLlmModelUri(uri);
+  const { provider, model, params } = parseLlmModelUri(uri);
   if (isProhibitedPremiumModelId(model)) return `Vision model ${model} is a Pro/Ultra tier, which is never used`;
+  // A baseUrl moves the request's destination (and so its billing and key): only a local server on a loopback host.
+  const baseUrl = params.get("baseUrl");
+  if (baseUrl !== null) {
+    if (!(LOCAL_BASE_URL_PROVIDERS as readonly string[]).includes(provider)) return "baseUrl overrides are only supported for local model providers";
+    if (!isLoopbackModelBaseUrl(baseUrl)) return "Local model baseUrl must use a loopback host";
+  }
   if (provider === PRIVATE_MODEL_PROVIDER) return null;
   if ((LOCAL_VISION_PROVIDERS as readonly string[]).includes(provider)) return null;
   if (!(HOSTED_VISION_PROVIDERS as readonly string[]).includes(provider)) {
@@ -1267,22 +1288,6 @@ export const visionConfigSchema = z
       if (!llmModelUriSchema.safeParse(uri).success) continue;
       const problem = visionModelUriProblem(uri);
       if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message: problem });
-      const { provider, params } = parseLlmModelUri(uri);
-      const baseUrl = params.get("baseUrl");
-      if (baseUrl && !["ollama", "vllm", "lmstudio"].includes(provider)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [path],
-          message: "baseUrl overrides are only supported for local model providers",
-        });
-      }
-      if (baseUrl && !isLoopbackModelBaseUrl(baseUrl)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [path],
-          message: "Local model baseUrl must use a loopback host",
-        });
-      }
     }
   })
   .transform((value) => {

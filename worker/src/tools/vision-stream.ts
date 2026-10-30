@@ -236,9 +236,6 @@ export class VisionOutputRejectedError extends Error {
     super(message);
     this.name = "VisionOutputRejectedError";
   }
-
-  /** Requested model and usage-ledger provider; set by `runVisionRequest` so callers can record the spend. */
-  route?: { model: string; provider: string };
 }
 
 /** The rejection behind `error` (it may be wrapped as a `cause`), whose summed usage was billed but produced no page. */

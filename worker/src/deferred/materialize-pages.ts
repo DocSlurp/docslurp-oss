@@ -33,8 +33,8 @@ import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type Vector
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime } from "../tools/vision-runtime.js";
-import { guardedVisionCall, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
+import { executeVisionRuntime, type VisionPrimaryFailure } from "../tools/vision-runtime.js";
+import { guardedVisionCall, priceVisionResult, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
 import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
@@ -57,6 +57,8 @@ export interface OcrPageResult {
   outputTokens: number;
   costCents: number;
   metadata?: Record<string, unknown>;
+  /** The primary route's billed failure when the fallback read the page; the guarded call records it. */
+  primaryFailure?: VisionPrimaryFailure;
 }
 
 /** Side-effecting edges, injectable so tests need no poppler, vision model, embedder or LanceDB. */
@@ -147,16 +149,13 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
           signal: ctx.signal,
           gate: ctx.gate,
         });
-        const costCents = result.costCents ?? calculateAiUsageCostCents({
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          costPer1kInputTokens: deps.config.costPer1kInputTokens,
-          costPer1kOutputTokens: deps.config.costPer1kOutputTokens,
-        });
+        // Priced on the route that served it: 0 on a local, loopback or private route, list price on a billed one.
+        const costCents = priceVisionResult(result, deps.config);
         return {
           text: result.text,
-          model: result.model,
-          provider: result.provider ?? (result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
+          model: result.route.model,
+          provider: result.route.provider,
+          ...(result.primaryFailure ? { primaryFailure: result.primaryFailure } : {}),
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
           costCents,

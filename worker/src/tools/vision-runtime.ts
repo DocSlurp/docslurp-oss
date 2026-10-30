@@ -13,18 +13,25 @@ import {
   visionReasoningParams,
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
-import { attachVisionBilledUsage, estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
+import { attachVisionBilledUsage, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import {
+  attachVisionServedRoute,
+  configuredOpenAiBaseUrl,
+  DEFAULT_OPENAI_BASE_URL,
+  effectiveVisionBaseUrl,
+  findVisionServedRoute,
   isOpenRouterBaseUrl,
   UnpricedVisionRouteError,
   VISION_MAX_PROMPT_BYTES,
   visionImageTokenBound,
   visionInputTokenBound,
   visionRequestPricing,
+  visionLedgerProvider,
   visionRouteBilling,
   type VisionMaxPrice,
   type VisionRouteBilling,
+  type VisionServedRoute,
 } from "../lib/vision-pricing.js";
 import { imageDimensions } from "../native-pdf/render.js";
 
@@ -99,6 +106,16 @@ export interface VisionExecutionResult {
   /** Usage-ledger provider label when the runtime knows it (`private` for registered endpoints). */
   provider?: string;
   model: string;
+  /**
+   * The route that served this result (the fallback's when `fallbackUsed`), at its effective destination. Price
+   * and label the result's usage from it (lib/vision-pricing.ts `priceVisionServedUsage`).
+   */
+  route: VisionServedRoute;
+  /**
+   * The primary route's billed failure or rejection when the fallback served this result: that spend is ours too
+   * and is recorded beside the result's own usage.
+   */
+  primaryFailure?: VisionPrimaryFailure;
   prompt: string;
   text: string;
   raw: unknown;
@@ -123,6 +140,25 @@ export interface VisionExecutionResult {
   attempts?: number;
   /** Set when the degeneration detector aborted an attempt (the signal that triggered the retry or failure). */
   degenerate?: DegenerateSignal;
+}
+
+/** One route's result, before the caller stamps the route that served it. */
+export type VisionRequestResult = Omit<VisionExecutionResult, "route" | "primaryFailure">;
+
+export interface VisionPrimaryFailure {
+  route: VisionServedRoute;
+  error: unknown;
+}
+
+const primaryFailures = new WeakMap<object, VisionPrimaryFailure>();
+
+/** The billed primary-route failure behind a failed fallback call (`error` may be wrapped as a `cause`), or null. */
+export function findVisionPrimaryFailure(error: unknown): VisionPrimaryFailure | null {
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (typeof cur === "object" && primaryFailures.has(cur)) return primaryFailures.get(cur)!;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 export interface VisionModelSwap {
@@ -199,6 +235,12 @@ export async function executeVisionRuntime(args: {
     }
 
     const fallbackReason = error instanceof Error ? error.message : String(error);
+    // The primary's requests may have been billed (a rejected output, a stream cut off): kept for the caller to
+    // record on the primary's own route, whatever the fallback does.
+    const servedPrimary = findVisionServedRoute(error);
+    const primaryFailure = servedPrimary && (findVisionOutputRejected(error) || findVisionBilledUsage(error))
+      ? { route: servedPrimary, error }
+      : undefined;
     const fallbackConfig = normalizeVisionConfig({
       ...args.vision,
       target: inferModelTarget(selected.remoteFallbackModelUri),
@@ -206,14 +248,50 @@ export async function executeVisionRuntime(args: {
       remoteFallbackModelUri: null,
     }, args.cfg, args.outputSchema);
     assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
-    const fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, args);
+    let fallback: VisionExecutionResult;
+    try {
+      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, args);
+    } catch (fallbackError) {
+      if (primaryFailure && fallbackError && typeof fallbackError === "object") primaryFailures.set(fallbackError, primaryFailure);
+      throw fallbackError;
+    }
 
     return {
       ...fallback,
+      ...(primaryFailure ? { primaryFailure } : {}),
       fallbackUsed: true,
       fallbackReason
     };
   }
+}
+
+/**
+ * The route a resolved vision config is sent on (the configured primary, before anything is sent): what a failure
+ * raised before any route attached its own is recorded under.
+ */
+export function configuredVisionServedRoute(vision: VisionConfig, cfg: Pick<Config, "openAiBaseUrl">): VisionServedRoute {
+  const route = resolveVisionRoute(vision);
+  return servedRoute({ ...route, baseUrl: routeBaseUrl(route, cfg) }, cfg, route.provider === PRIVATE_MODEL_PROVIDER ? route.modelUri : route.model);
+}
+
+function servedRoute(
+  route: Pick<VisionExecutionConfig, "runtime" | "baseUrl" | "provider">,
+  cfg: Pick<Config, "openAiBaseUrl">,
+  model: string,
+): VisionServedRoute {
+  const billing = visionRouteBilling(route, cfg);
+  return { runtime: route.runtime, baseUrl: route.baseUrl, provider: visionLedgerProvider(billing), model, billing };
+}
+
+/**
+ * Where a resolved route sends its requests: nowhere for the in-process runtime, the registry URL for a private
+ * route, else its own base URL or the configured OpenAI base URL (`effectiveVisionBaseUrl`). The request goes to
+ * exactly this URL, so billing and the key follow it.
+ */
+function routeBaseUrl(route: Pick<VisionExecutionConfig, "runtime" | "baseUrl" | "provider">, cfg: Pick<Config, "openAiBaseUrl">): string | null {
+  if (route.runtime === "local-cli" || route.provider === PRIVATE_MODEL_PROVIDER) return route.baseUrl;
+  if (route.runtime === "remote-openai") return configuredOpenAiBaseUrl(cfg);
+  return effectiveVisionBaseUrl(route.baseUrl, cfg);
 }
 
 /** `gate` with every admission weighted `weightCents`. */
@@ -238,9 +316,31 @@ async function runRouteVisionRequest(
   // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
   assertVisionPromptSize(prompt);
   const isPrivate = route.provider === PRIVATE_MODEL_PROVIDER;
-  // Billing follows the request's effective destination (no base URL = api.openai.com), never the provider name.
+  // Billing follows the request's effective destination (`routeBaseUrl`), never the provider name.
   const billing = visionRouteBilling(route, args.cfg);
   const model = isPrivate ? route.modelUri : route.model;
+  let served = servedRoute(route, args.cfg, model);
+  try {
+    const result = await sendRouteVisionRequest(route, prompt, args, billing, model, (usageModel) => {
+      served = { ...served, model: usageModel };
+    });
+    return { ...result, route: served };
+  } catch (error) {
+    // Whatever was billed before the failure is priced and labelled on this route, not the configured primary.
+    attachVisionServedRoute(error, served);
+    throw error;
+  }
+}
+
+async function sendRouteVisionRequest(
+  route: VisionExecutionConfig,
+  prompt: string,
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null },
+  billing: VisionRouteBilling,
+  model: string,
+  onUsageModel: (model: string) => void,
+): Promise<VisionRequestResult> {
+  const isPrivate = route.provider === PRIVATE_MODEL_PROVIDER;
   // Each request weighs what it can cost at most against the org bound: this prompt, this image's size on
   // this model, the route's enforced output cap and its model's price. A billed route outside the priced
   // catalog, or an unknown hosted destination, is refused here: nothing is admitted or sent.
@@ -252,6 +352,12 @@ async function runRouteVisionRequest(
     inputTokens: visionInputTokenBound(imageSize, prompt, model),
     imageTokens: visionImageTokenBound(imageSize, model),
   });
+  const knownSize = Boolean(imageSize?.widthPx && imageSize.heightPx);
+  console.log(
+    `[vision-weight] model=${model} billing=${billing} weightCents=${pricing.weightCents.toFixed(4)} ` +
+      `basis=${knownSize ? `known-size:${imageSize!.widthPx}x${imageSize!.heightPx}` : "worst-case"} ` +
+      `imageTokens=${visionImageTokenBound(imageSize, model)}`,
+  );
   const base = {
     imagePath: args.imagePath,
     mimeType: args.mimeType ?? "image/png",
@@ -266,6 +372,7 @@ async function runRouteVisionRequest(
     return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, ...streamGuard(args.cfg) });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
+  onUsageModel(call.usageModel);
   const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, ...streamGuard(args.cfg) });
   const cost = call.cost({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, durationMs: result.latencyMs });
   return {
@@ -358,9 +465,7 @@ function normalizeVisionConfig(
   const selected = resolveVisionRoute(vision);
   return {
     ...selected,
-    baseUrl: selected.runtime === "remote-openai"
-      ? cfg.openAiBaseUrl
-      : selected.baseUrl,
+    baseUrl: routeBaseUrl(selected, cfg),
     prompt: buildSchemaAwareVisionPrompt(visionPromptKeyForModel(selected.prompt, selected.model), outputSchema),
   };
 }
@@ -426,7 +531,7 @@ export async function runVisionRequest(args: {
   gate: VisionRequestGate | null;
   /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
   maxPrice?: VisionMaxPrice | null;
-}): Promise<VisionExecutionResult> {
+}): Promise<VisionRequestResult> {
   args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
     {
@@ -435,7 +540,7 @@ export async function runVisionRequest(args: {
       model: args.model,
       input: { prompt: args.prompt, mimeType: args.mimeType },
       metadata: { runtime: args.runtime },
-      result: (result: VisionExecutionResult) => ({
+      result: (result: VisionRequestResult) => ({
         output: result.text,
         usageDetails:
           result.usageSource === "provider"
@@ -454,7 +559,7 @@ export async function runVisionRequest(args: {
         },
       }),
     },
-    async (): Promise<VisionExecutionResult> => {
+    async (): Promise<VisionRequestResult> => {
       if (args.runtime === "local-cli") {
         const plan = await args.runner.florence2(
           args.imagePath,
@@ -576,15 +681,6 @@ export async function runVisionRequest(args: {
         // Profiles that measured a refusal-free route send refused or filtered pages there on the single retry.
         preferredRetryRoute: contentFilterRetryProvider(args.model),
         gate: args.gate,
-      }).catch((error: unknown) => {
-        // Both attempts were billed even though no page came out: tell the caller whom to attribute it to.
-        if (error instanceof VisionOutputRejectedError) {
-          error.route = {
-            model: args.model,
-            provider: isOpenRouter ? "openrouter" : args.runtime === "remote-openai" ? "openai" : "vision-runtime",
-          };
-        }
-        throw error;
       });
       const text = postProcessVisionText(args.model, result.text);
 
@@ -642,11 +738,10 @@ export async function runVisionRequest(args: {
  * so the spend (summed over attempts) is recorded as a `page-analysis-attempt` rather than lost.
  * `costCents` is the caller's resolved price (the provider charge when present, else its pricing fallback).
  */
-export function rejectedVisionUsageInput(error: VisionOutputRejectedError, costCents: number, model: string) {
-  const route = error.route;
+export function rejectedVisionUsageInput(error: VisionOutputRejectedError, costCents: number, route: Pick<VisionServedRoute, "provider" | "model">) {
   return {
-    provider: route?.provider ?? "vision-runtime",
-    model: route?.model ?? model,
+    provider: route.provider,
+    model: route.model,
     metric: "page-analysis-attempt",
     amount: 1,
     unit: "attempt",
@@ -675,7 +770,8 @@ export function openRouterMaxPrice(price: VisionMaxPrice): { prompt: number; com
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {
-  const root = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  // Routes reach here with their effective base URL (`routeBaseUrl`); a direct caller without one gets OpenAI's.
+  const root = (baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
   if (root.endsWith("/chat/completions")) {
     return root;
   }

@@ -42,8 +42,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { visionListPriceCents, type CanonicalDocument } from "@docslurp/shared";
-import { isBillableVisionRuntime } from "../lib/vision-pricing.js";
+import type { CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -88,8 +87,9 @@ import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore } from "../tools/storage.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
-import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
-import { guardedVisionCall } from "../lib/guarded-vision-call.js";
+import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { guardedVisionCall, priceVisionResult } from "../lib/guarded-vision-call.js";
+import type { VisionServedRoute } from "../lib/vision-pricing.js";
 import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
@@ -1590,6 +1590,8 @@ export class ExtractMarkdownStage implements Stage {
         }),
       );
 
+      // The route the critique was served on (a fallback's when it served), for the usage label below.
+      let critiqueRoute: VisionServedRoute | undefined;
       const corrections = await Promise.all(
         critiquePages.map(async (pageNumber): Promise<SelfCritiqueCorrection> => {
         const imagePath = path.join(
@@ -1606,8 +1608,6 @@ export class ExtractMarkdownStage implements Stage {
               args.state.run.pipeline.preserveCode,
             ),
           };
-          const critiqueCost = (result: Awaited<ReturnType<typeof executeVisionRuntime>>) =>
-            result.costCents !== undefined ? result.costCents : calculateCritiqueCost(this.cfg, result);
           // The run's vision attempt guard admits every critique request like every other vision
           // request; critique never creates a customer charge, so its requests stay uncharged. A
           // rejected or failed call records its spend there.
@@ -1631,6 +1631,7 @@ export class ExtractMarkdownStage implements Stage {
           });
           if (!guarded.admitted) throw new Error(`vision-stopped: ${guarded.stop.reason}`);
           const result = guarded.result;
+          critiqueRoute ??= result.route;
           const normalizedText = normalizeCritiqueText(result.text);
           const originalPlausibilityScore = scoreExtractionPlausibility(
             originalText,
@@ -1654,7 +1655,8 @@ export class ExtractMarkdownStage implements Stage {
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
             latencyMs: result.latencyMs,
-            costCents: critiqueCost(result),
+            // Priced on the route that served it (a fallback's, the configured OpenAI base URL).
+            costCents: priceVisionResult(result, this.cfg),
             text: normalizedText,
             reason: accepted ? "plausibility-gain" : "requires-review",
           };
@@ -1699,12 +1701,11 @@ export class ExtractMarkdownStage implements Stage {
       const acceptedCorrections = corrections.filter(
         (correction) => correction.accepted,
       );
+      // Labelled with the route that served the critique (the first served one; a fallback's when it served).
+      const servedRoute = critiqueRoute ?? configuredVisionServedRoute(args.state.run.pipeline.vision, this.cfg);
       args.state.usageLedger.record({
-          provider:
-            resolveVisionRoute(args.state.run.pipeline.vision).runtime === "remote-openai"
-              ? "openai"
-              : "vision-runtime",
-          model: resolveVisionRoute(args.state.run.pipeline.vision).model,
+          provider: servedRoute.provider,
+          model: servedRoute.model,
           metric: "page-critique",
           amount: corrections.length,
           unit: "page",
@@ -2635,20 +2636,6 @@ function buildCritiquePrompt(
     pageMarkdown.slice(0, 12_000),
   ].filter(Boolean);
   return constraints.join("\n");
-}
-
-/**
- * Provider cost of a critique call without a provider charge, by the same billed-route decision as the
- * request's pricing (lib/vision-pricing.ts `isBillableVisionRuntime`: its effective destination): catalog
- * list price, else the configured rates; 0 only on local, loopback and private routes.
- */
-function calculateCritiqueCost(
-  cfg: Config,
-  result: { model: string; runtime: string; baseUrl: string | null; provider?: string; inputTokens: number; outputTokens: number },
-): number {
-  if (!isBillableVisionRuntime(result, cfg)) return 0;
-  return visionListPriceCents(result.model, result) ??
-    (result.inputTokens / 1000) * cfg.costPer1kInputTokens + (result.outputTokens / 1000) * cfg.costPer1kOutputTokens;
 }
 
 class FanoutWritable extends Writable {

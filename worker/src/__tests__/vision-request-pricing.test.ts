@@ -9,6 +9,7 @@ import {
   visionImageTokens,
   visionModelCatalog,
   visionModelTokenPricing,
+  visionModelUriProblem,
   type VisionConfig,
 } from "@docslurp/shared";
 
@@ -155,8 +156,8 @@ describe("request weight from the actual prompt and image", () => {
   });
 
   it("weighs a small page image by its size and an unreadable one at the largest raster", async () => {
-    // A patch-counted model (Gemini 3 counts a fixed number of tokens per image).
-    const MODEL = "deepseek/deepseek-v4.1-flash-1017";
+    // A patch-counted model (Gemini 3 and the open-weights processors cap tokens per image at any size).
+    const MODEL = "openai/gpt-6-luna";
     const small = await read({ modelUri: `llm://openrouter/${MODEL}`, image: pngHeader(1_000, 1_400) });
     const unknown = await read({ modelUri: `llm://openrouter/${MODEL}` });
     const prompt = small.bodies[0]!.messages[1].content[0].text as string;
@@ -220,9 +221,13 @@ describe("image-token bounds from each provider's own formula", () => {
     expect(visionImageTokenBound({ widthPx: 2_048, heightPx: 2_048 }, "google/gemini-2.5-flash-lite")).toBeGreaterThanOrEqual(tiles * 258);
   });
 
-  it("open-weights models: at least one token per 28-px merged ViT patch (Qwen2.5-VL family)", () => {
-    for (const model of ["deepseek/deepseek-v4.1-flash-1017", "xiaomi/mimo-v2.6-flash", "z-ai/glm-5.3-flash", "nvidia/nemotron-3.5-super-vl"]) {
-      expect(visionImageTokenBound({ widthPx: 2_048, heightPx: 2_048 }, model)).toBeGreaterThanOrEqual(Math.ceil(2_048 / 28) ** 2);
+  it("open-weights models: their processor's per-image maximum at every size, tiny images included", () => {
+    // Re-derived from each processor in packages/shared/src/__tests__/vision-image-token-bounds.test.ts.
+    const maxima = { "nvidia/nemotron-3.5-super-vl": 3_330, "deepseek/deepseek-v4.1-flash-1017": 1_024, "xiaomi/mimo-v2.6-flash": 8_194, "z-ai/glm-5.3-flash": 8_002 };
+    for (const [model, max] of Object.entries(maxima)) {
+      for (const size of [{ widthPx: 14, heightPx: 14 }, { widthPx: 1, heightPx: 4_000 }, { widthPx: 2_048, heightPx: 2_048 }, null]) {
+        expect(visionImageTokenBound(size, model), model).toBe(max);
+      }
     }
   });
 
@@ -248,6 +253,11 @@ describe("hosted vision is limited to the priced catalog", () => {
     "llm://openrouter/openai/o3-pro",
     "llm://openrouter/openai/gpt-5-pro-2025-10-06",
     "llm://vllm/acme/vision-ultra",
+    // A baseUrl only on a local provider, and only to a loopback host.
+    "llm://openai/gpt-4.1-mini?baseUrl=https://evil.example/v1",
+    "llm://openrouter/google/gemini-3.1-flash-lite?baseUrl=http://127.0.0.1:8000/v1",
+    "llm://vllm/acme/plain-vl?baseUrl=https://gpu.example/v1",
+    "llm://ollama/llava?baseUrl=",
   ];
 
   it.each(refusedAtValidation)("refuses %s as a model and as a fallback at config validation", (uri) => {
@@ -262,7 +272,10 @@ describe("hosted vision is limited to the priced catalog", () => {
     expect(visionConfigSchema.safeParse({ modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8" }).success).toBe(true);
   });
 
-  it.each(["llm://acme/o3-pro", "llm://anthropic/gpt-5-pro", "llm://huggingface/Qwen/Qwen2.5-VL-7B-Instruct", "llm://openrouter/someone/unlisted-vl", "llm://openai/gpt-unlisted-vision"])(
+  it.each([
+    "llm://acme/o3-pro", "llm://anthropic/gpt-5-pro", "llm://huggingface/Qwen/Qwen2.5-VL-7B-Instruct", "llm://openrouter/someone/unlisted-vl",
+    "llm://openai/gpt-unlisted-vision", "llm://vllm/acme/plain-vl?baseUrl=https://gpu.example/v1", "llm://openai/gpt-4.1-mini?baseUrl=https://evil.example/v1",
+  ])(
     "refuses an unvalidated %s config at run time: zero sends, zero weight",
     async (uri) => {
       const { result, fetch, weights } = await read({ modelUri: uri, vision: unvalidated(uri) });
@@ -284,11 +297,19 @@ describe("hosted vision is limited to the priced catalog", () => {
     },
   );
 
+  it("applies the same baseUrl rule at validation and in the runtime re-check (visionModelUriProblem)", () => {
+    expect(visionModelUriProblem("llm://vllm/acme/plain-vl?baseUrl=https://gpu.example/v1")).toMatch(/loopback host/);
+    expect(visionModelUriProblem("llm://openai/gpt-4.1-mini?baseUrl=http://127.0.0.1:8000/v1")).toMatch(/only supported for local model providers/);
+    expect(visionModelUriProblem("llm://lmstudio/acme/vl?baseUrl=http://localhost:1234/v1")).toBeNull();
+  });
+
   it("decides billing from the effective destination, never a substring or the provider name", () => {
     const at = (baseUrl: string | null, runtime = "openai-compatible") => visionRouteBilling({ runtime, baseUrl }, cfg);
     // No base URL is api.openai.com: billed, never "self-hosted".
     expect(at(null)).toBe("openai");
-    expect(visionRouteBilling({ runtime: "openai-compatible", baseUrl: null }, { openAiBaseUrl: "https://gateway.example/v1" })).toBe("unknown-hosted");
+    // ... or the configured OpenAI base URL, which is where the runtime sends it (and which gets the OpenAI key).
+    expect(visionRouteBilling({ runtime: "openai-compatible", baseUrl: null }, { openAiBaseUrl: "https://gateway.example/v1" })).toBe("openai");
+    expect(visionRouteBilling({ runtime: "remote-openai", baseUrl: null }, { openAiBaseUrl: "http://127.0.0.1:9000/v1" })).toBe("loopback");
     expect(at("https://openrouter.ai/api/v1")).toBe("openrouter");
     expect(at("https://openrouter.ai.evil.example/api/v1")).toBe("unknown-hosted");
     expect(at("https://evil.example/openrouter.ai/v1")).toBe("unknown-hosted");

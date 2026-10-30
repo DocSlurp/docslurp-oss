@@ -29,7 +29,7 @@ import { embedPageImages, withinCostCap, type PageEmbedDeps } from "./page-embed
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
-import { guardedVisionCall } from "../lib/guarded-vision-call.js";
+import { guardedVisionCall, priceVisionResult } from "../lib/guarded-vision-call.js";
 import { recordVisionRead, visionGuardFor } from "../lib/vision-attempt-guard.js";
 
 export const MAP_BLOCK_PAGES = 15;
@@ -431,8 +431,6 @@ export class DocumentMapStage implements Stage {
       const imagePath = await this.storage.downloadToTempFile(artifact.artifactKey, `map-${pageNumber}-*.png`);
       try {
         const vision = state.run.pipeline.vision;
-        const price = (result: { costCents?: number; inputTokens: number; outputTokens: number }) =>
-          result.costCents ?? calculateAiUsageCostCents({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens });
         const page = { documentId: document.id, pageNumber };
         // The run's vision attempt guard admits every request of map OCR too; a rejected or failed
         // call records its spend there and still throws.
@@ -448,10 +446,11 @@ export class DocumentMapStage implements Stage {
           }),
           // A map OCR read charges the page Rich: its request leaves the org's uncharged count.
           onResult: (result, gate) => {
-            const cents = price(result);
+            // Priced on the route that served it: 0 on a local, loopback or private route, list price on a billed one.
+            const cents = priceVisionResult(result, this.config);
             costCents += cents;
             recordVisionRead(state.usageLedger, gate, page, {
-              provider: result.provider ?? "vision-runtime", model: result.model, metric: "document-map-ocr", amount: 1, unit: "page",
+              provider: result.route.provider, model: result.route.model, metric: "document-map-ocr", amount: 1, unit: "page",
               inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents: cents, metadata: page,
             });
           },

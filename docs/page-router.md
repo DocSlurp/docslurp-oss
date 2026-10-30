@@ -310,8 +310,10 @@ overhead for the chat template and system message, and the model's full output c
 `max_tokens`), at catalog list price. The image bounds come from each provider's own formula:
 OpenAI's 32-px patches times the model multiplier (1.62 for `gpt-4.1-mini`, no credit for
 downscaling), Gemini 3's largest per-image count (2,240), Gemini 2.x's 258-token tiles counted per
-256 px, and, for open-weights models with no published formula, one token per 14-px ViT patch (4x
-the 28-px merged patches of the Qwen2.5-VL family). Workspace schema labels in the
+256 px, and, for open-weights models, the most tokens their published Hugging Face image processor
+gives one image at any size, after minimum-size upscaling, resizing, tiling and patch merging, plus
+framing tokens (Nemotron 3.5 Super VL 3,330; DeepSeek V4.1 Flash 1,024; MiMo V2.6 Flash 8,194; GLM
+5.3 Flash 8,002; see `visionModelImageTokenBound` in `packages/shared/src/embedding.ts`). Workspace schema labels in the
 `schema-form-fields` prompt are capped (100 labels, 80 characters each, 4 KB in total) and a prompt
 over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`:
 `prompt` and `completion` (USD per million tokens) equal to the prices the weight assumes, `image`

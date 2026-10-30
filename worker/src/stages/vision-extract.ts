@@ -29,8 +29,9 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { executeVisionRuntime, rejectedVisionUsageInput, visionCall } from "../tools/vision-runtime.js";
+import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
+import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { maxInt } from "./utils.js";
@@ -50,7 +51,7 @@ import {
   type VisionAttemptPurpose,
   type VisionGuardStop,
 } from "../lib/vision-attempt-guard.js";
-import { isBillableVisionRuntime, isOpenRouterBaseUrl } from "../lib/vision-pricing.js";
+import { findVisionServedRoute, isBilledVisionRoute, type VisionServedRoute } from "../lib/vision-pricing.js";
 import { VISION_ROUTING_VERSION_SLOT, resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
@@ -1235,6 +1236,10 @@ export class VisionExtractStage implements Stage {
         recordedVisionErrors.add(error);
         throw error;
       }
+      // The fallback served this page: the primary route's billed failure is ours too.
+      recordVisionFailureUsages(state, primaryFailureUsages(result.primaryFailure, this.cfg, {
+        documentId: document.id, pageNumber: page.pageNumber, rasterArtifactUri: page.artifactUri,
+      }));
       const output: VisionPageOutput = {
         pageNumber: page.pageNumber,
         runtime: result.runtime,
@@ -1248,7 +1253,7 @@ export class VisionExtractStage implements Stage {
         fallbackUsed: result.fallbackUsed,
         fallbackReason: result.fallbackReason,
         text: result.text,
-        costCents: this.calculateVisionCost(result),
+        costCents: priceVisionResult(result, this.cfg),
         ...(result.finishReason !== undefined ? { finishReason: result.finishReason } : {}),
         ...(result.servedModel ? { servedModel: result.servedModel } : {}),
         ...(result.modelSwap ? { modelSwap: result.modelSwap } : {}),
@@ -1256,7 +1261,7 @@ export class VisionExtractStage implements Stage {
       // A page read charges the customer one Rich page, once per run and page: the first read of the
       // page un-counts its request from the org's uncharged attempts; a second read does not.
       const usageEvent = recordVisionRead(state.usageLedger, gate, pageRef, {
-          provider: result.provider ?? (isOpenRouterBaseUrl(result.baseUrl) ? "openrouter" : result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
+          provider: result.route.provider,
           model: result.model,
           metric: "page-analysis",
           amount: 1,
@@ -1267,7 +1272,8 @@ export class VisionExtractStage implements Stage {
           metadata: {
             ...result.costMetadata,
             costSource: result.costMetadata?.costSource ?? (result.costCents !== undefined ? "provider" : "estimate"),
-            ...(result.costCents === undefined ? { pricingSource: this.visionPricingSource(result) } : {}),
+            ...(result.costCents === undefined ? { pricingSource: visionPricingSource(result.route) } : {}),
+            billing: result.route.billing,
             documentId: document.id,
             pageNumber: page.pageNumber,
             rasterArtifactUri: page.artifactUri,
@@ -1307,47 +1313,23 @@ export class VisionExtractStage implements Stage {
     reason: string,
     error?: unknown,
   ): { providerCostCents: number; rejected: boolean } {
-    const route = resolveVisionRoute(vision);
-    const price = (usage: { inputTokens: number; outputTokens: number; costCents?: number }) => this.calculateVisionCost({
-      model: route.model, runtime: route.runtime, baseUrl: route.baseUrl,
-      inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
-      ...(usage.costCents !== undefined ? { costCents: usage.costCents } : {}),
-    });
-    // Both attempts of a rejected page were billed: record that spend (one [ai-usage] line) instead of a zero-cost marker.
+    // Priced and labelled on the route each request was billed on (a fallback's, the configured OpenAI base URL),
+    // never the configured primary: both attempts of a rejected page, a failure billed mid-stream, and the primary's
+    // billed failure before a failed fallback.
+    const pageMetadata = { documentId: document.id, pageNumber: page.pageNumber, rasterArtifactUri: page.artifactUri };
+    const usages = visionFailureUsages(error, vision, this.cfg, pageMetadata);
+    const route = findVisionServedRoute(error) ?? configuredVisionServedRoute(vision, this.cfg);
     const rejected = findVisionOutputRejected(error);
-    let providerCostCents = 0;
-    if (rejected) {
-      providerCostCents = price({ inputTokens: rejected.inputTokens, outputTokens: rejected.outputTokens,
-        ...(rejected.costCents !== undefined ? { costCents: rejected.costCents } : {}) });
-      const input = rejectedVisionUsageInput(rejected, providerCostCents, route.model);
-      state.usageLedger.record({
-        ...input,
-        metadata: {
-          ...input.metadata,
-          documentId: document.id,
-          pageNumber: page.pageNumber,
-          rasterArtifactUri: page.artifactUri,
-          runtime: route.runtime,
-        },
-      });
-    } else {
-      const billed = findVisionBilledUsage(error);
-      providerCostCents = billed ? price(billed) : 0;
-      const event = buildFailedVisionAttemptUsage({
-        documentId: document.id,
-        pageNumber: page.pageNumber,
-        rasterArtifactUri: page.artifactUri,
-        runtime: route.runtime,
+    const providerCostCents = recordVisionFailureUsages(state, usages);
+    if (!rejected && !findVisionBilledUsage(error)) {
+      // The provider never accepted the call on its last route: a zero-cost marker.
+      state.usageLedger.enqueue(buildFailedVisionAttemptUsage({
+        ...pageMetadata,
+        runtime: route.runtime as VisionRuntime,
+        provider: route.provider,
         model: route.model,
         reason,
-      });
-      state.usageLedger.enqueue(billed ? {
-        ...event,
-        costCents: providerCostCents,
-        inputTokens: billed.inputTokens,
-        outputTokens: billed.outputTokens,
-        metadata: { ...event.metadata, providerCostCents, usageSource: billed.costCents !== undefined ? "provider" : "estimated" },
-      } : event, { logAiUsage: true });
+      }), { logAiUsage: true });
     }
     state.pendingPerformance.push({
       documentId: document.id,
@@ -1361,6 +1343,7 @@ export class VisionExtractStage implements Stage {
       metadata: {
         model: route.model,
         runtime: route.runtime,
+        billing: route.billing,
         reason,
         usagePersisted: true,
         rejected: rejected !== null,
@@ -1595,43 +1578,36 @@ export class VisionExtractStage implements Stage {
       decisions: reconciled.decisions,
     };
   }
+}
 
-  /** Same decision as the request's pricing (lib/vision-pricing.ts `visionRouteBilling`): its effective destination. */
-  private isBillableVisionRuntime(result: { runtime: string; baseUrl: string | null; provider?: string }): boolean {
-    return isBillableVisionRuntime(result, this.cfg);
-  }
-
-  /** How a receipt-less vision call was priced; recorded on the usage event. */
-  private visionPricingSource(result: { model: string; runtime: string; baseUrl: string | null; provider?: string }) {
-    if (!this.isBillableVisionRuntime(result)) return "non-billable-runtime";
-    return visionModelTokenPricing(result.model) ? "vision-catalog-list-price" : "configured-fallback";
-  }
-
-  private calculateVisionCost(result: {
-    costCents?: number;
-    model: string;
-    runtime: string;
-    baseUrl: string | null;
-    provider?: string;
-    inputTokens: number;
-    outputTokens: number;
-  }): number {
-    if (result.costCents !== undefined) return result.costCents;
-    if (!this.isBillableVisionRuntime(result)) {
-      return 0;
+/**
+ * Records billed vision failures (one [ai-usage] line each): a rejected page's summed attempts as an AI call, a
+ * failure billed mid-stream as a cost event. Returns the provider cost recorded.
+ */
+function recordVisionFailureUsages(state: WorkflowState, usages: VisionFailureUsage[]): number {
+  let providerCostCents = 0;
+  for (const usage of usages) {
+    providerCostCents += usage.input.costCents ?? 0;
+    if (usage.kind === "rejected") {
+      state.usageLedger.record(usage.input);
+      continue;
     }
-
-    // Without a provider charge (OpenAI direct never returns one; OpenRouter BYOK may not), price cataloged
-    // hosted models at their own list price. The generic COST_PER_1K_* fallback is in cents per 1k tokens
-    // (defaults $0.10/M input, $0.30/M output), below most cataloged hosted list prices, so this usually raises
-    // receipt-less charges to list price; the cheapest entries (GLM 5.3 Flash) list below the fallback and
-    // are priced at their real, lower list price.
-    return (
-      visionListPriceCents(result.model, result) ??
-        (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +
-          (result.outputTokens / 1000) * this.cfg.costPer1kOutputTokens
-    );
+    state.usageLedger.enqueue({
+      ...usage.input,
+      amount: usage.input.amount ?? 1,
+      unit: usage.input.unit ?? "attempt",
+      costCents: usage.input.costCents ?? 0,
+      inputTokens: usage.input.inputTokens ?? 0,
+      outputTokens: usage.input.outputTokens ?? 0,
+    }, { logAiUsage: true });
   }
+  return providerCostCents;
+}
+
+/** How a receipt-less vision result was priced on the route that served it; recorded on the usage event. */
+export function visionPricingSource(route: VisionServedRoute) {
+  if (!isBilledVisionRoute(route.billing)) return "non-billable-runtime";
+  return visionModelTokenPricing(route.model) ? "vision-catalog-list-price" : "configured-fallback";
 }
 
 export function buildFailedVisionAttemptUsage(args: {
@@ -1639,11 +1615,13 @@ export function buildFailedVisionAttemptUsage(args: {
   pageNumber: number;
   rasterArtifactUri: string;
   runtime: VisionRuntime;
+  /** Usage-ledger label of the route that failed (`VisionServedRoute.provider`). */
+  provider?: string;
   model: string;
   reason: string;
 }): UsageEvent {
   return {
-    provider: args.runtime === "remote-openai" ? "openai" : "vision-runtime",
+    provider: args.provider ?? (args.runtime === "remote-openai" ? "openai" : "vision-runtime"),
     model: args.model,
     metric: "page-analysis-attempt",
     amount: 1,

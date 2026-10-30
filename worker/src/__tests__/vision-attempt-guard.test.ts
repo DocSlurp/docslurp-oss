@@ -47,6 +47,8 @@ import {
   visionRequestPricing,
   visionRequestWeightCents,
   worstCaseVisionRequestCents,
+  attachVisionServedRoute,
+  configuredVisionModel,
 } from "../lib/vision-pricing.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { loadRunState } from "../pipeline/stage-execution.js";
@@ -110,8 +112,10 @@ describe("vision guard config", () => {
     }
     // gpt-4.1-mini is no longer worth 2,388 default-model requests: about 1,128 of its own.
     expect(Math.floor(4_000 / visionRequestWeightCents("gpt-4.1-mini", "remote-openai"))).toBeLessThan(1_200);
-    // An uncataloged hosted or private model weighs the costliest catalog model; local runtimes 2 cents.
-    expect(visionRequestWeightCents("someone/unknown-vl", "openai-compatible")).toBe(costliest);
+    // An uncataloged private or loopback model weighs the catalog-dominating prices, never less than the default
+    // model's worst case; local runtimes 2 cents.
+    expect(visionRequestWeightCents("someone/unknown-vl", "openai-compatible")).toBeGreaterThanOrEqual(worstCaseVisionRequestCents(configuredVisionModel())!);
+    expect(visionRequestWeightCents("someone/unknown-vl", "openai-compatible")).toBeLessThanOrEqual(costliest);
     expect(visionRequestWeightCents("microsoft/Florence-2-base-ft", "local-cli")).toBe(2);
     expect(defaultVisionRequestWeightCents({})).toBe(costliest);
   });
@@ -333,6 +337,7 @@ async function pageStage(args: {
       runtime: "openai-compatible", model: MODEL, prompt: "p", text: answer.text, raw: "", costCents: 0.5,
       latencyMs: 1, inputTokens: 2_000, outputTokens: 400, usageSource: "provider", baseUrl: "https://openrouter.ai/api/v1",
       fallbackUsed: false, fallbackReason: null, provider: "openrouter",
+        route: { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" },
     };
   });
   const stage = new VisionExtractStage({} as never, storage as never, CFG, rasters as never);
@@ -350,7 +355,7 @@ async function pageStage(args: {
 
 function rejection(message = "degenerate output after 2 attempts", costCents = 1.5) {
   const error = new VisionOutputRejectedError(message, [], 2_400, 640, costCents);
-  error.route = { model: MODEL, provider: "openrouter" };
+  attachVisionServedRoute(error, { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" });
   return error;
 }
 
@@ -675,6 +680,7 @@ describe.skipIf(!PDFTOPPM)("padded blank PDFs", () => {
         runtime: "openai-compatible", model: MODEL, prompt: "p", text: "drawn page text", raw: "", costCents: 0.5,
         latencyMs: 1, inputTokens: 2_000, outputTokens: 400, usageSource: "provider", baseUrl: "https://openrouter.ai/api/v1",
         fallbackUsed: false, fallbackReason: null, provider: "openrouter",
+        route: { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" },
       });
       const source = path.join(dir, `${name}.pdf`);
       await writeFile(source, pdf);

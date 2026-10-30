@@ -1,11 +1,17 @@
-import { resolveVisionRoute, visionListPriceCents, type VisionConfig } from "@docslurp/shared";
+import type { VisionConfig } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { UsageEvent } from "../models.js";
 import type { WorkerAiUsageInput } from "./ai-usage.js";
-import { rejectedVisionUsageInput, type VisionExecutionResult } from "../tools/vision-runtime.js";
+import {
+  configuredVisionServedRoute,
+  findVisionPrimaryFailure,
+  rejectedVisionUsageInput,
+  type VisionExecutionResult,
+  type VisionPrimaryFailure,
+} from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
-import { isBillableVisionRuntime } from "./vision-pricing.js";
+import { findVisionServedRoute, priceVisionServedUsage, type VisionServedRoute } from "./vision-pricing.js";
 import {
   findVisionGuardStop,
   withVisionCall,
@@ -17,17 +23,89 @@ import {
 
 type PricingConfig = Pick<Config, "openAiBaseUrl" | "costPer1kInputTokens" | "costPer1kOutputTokens">;
 
-/** Provider cost of vision usage on `vision`'s route: the provider charge, else list price, else configured rates. */
-export function priceVisionUsage(
+/** Provider cost of a successful vision result, on the route that served it. */
+export function priceVisionResult(
+  result: Pick<VisionExecutionResult, "route" | "inputTokens" | "outputTokens" | "costCents">,
+  cfg: PricingConfig,
+): number {
+  return priceVisionServedUsage(result.route, cfg, result);
+}
+
+/** A billed vision failure's usage, priced and labelled on the route that was billed. */
+export interface VisionFailureUsage {
+  kind: "rejected" | "billed";
+  route: VisionServedRoute;
+  input: WorkerAiUsageInput;
+}
+
+/**
+ * Usage of every billed request behind a failed vision call: its own route's rejected output or billed failure,
+ * and the primary route's when the call failed on its fallback. Each is priced on the route that was billed
+ * (`findVisionServedRoute`); `vision` is only the label for an error raised before any route was chosen.
+ */
+export function visionFailureUsages(
+  error: unknown,
   vision: VisionConfig,
   cfg: PricingConfig,
-  usage: { inputTokens: number; outputTokens: number; costCents?: number },
-): number {
-  if (usage.costCents !== undefined) return usage.costCents;
-  const route = resolveVisionRoute(vision);
-  if (!isBillableVisionRuntime(route, cfg)) return 0;
-  return visionListPriceCents(route.model, usage) ??
-    (usage.inputTokens / 1000) * cfg.costPer1kInputTokens + (usage.outputTokens / 1000) * cfg.costPer1kOutputTokens;
+  metadata: Record<string, unknown> = {},
+): VisionFailureUsage[] {
+  const own = billedFailureUsage(error, findVisionServedRoute(error) ?? configuredVisionServedRoute(vision, cfg), cfg, metadata);
+  const primary = findVisionPrimaryFailure(error);
+  return [...(primary ? primaryFailureUsages(primary, cfg, metadata) : []), ...(own ? [own] : [])];
+}
+
+/** The primary route's billed failure behind a result the fallback served (empty when there is none). */
+export function primaryFailureUsages(
+  primary: VisionPrimaryFailure | undefined,
+  cfg: PricingConfig,
+  metadata: Record<string, unknown> = {},
+): VisionFailureUsage[] {
+  if (!primary) return [];
+  const usage = billedFailureUsage(primary.error, primary.route, cfg, { ...metadata, fallbackPrimary: true });
+  return usage ? [usage] : [];
+}
+
+function billedFailureUsage(
+  error: unknown,
+  route: VisionServedRoute,
+  cfg: PricingConfig,
+  metadata: Record<string, unknown>,
+): VisionFailureUsage | null {
+  const rejected = findVisionOutputRejected(error);
+  if (rejected) {
+    const costCents = priceVisionServedUsage(route, cfg, {
+      inputTokens: rejected.inputTokens, outputTokens: rejected.outputTokens,
+      ...(rejected.costCents !== undefined ? { costCents: rejected.costCents } : {}),
+    });
+    const input = rejectedVisionUsageInput(rejected, costCents, route);
+    return { kind: "rejected", route, input: { ...input, metadata: { ...input.metadata, runtime: route.runtime, ...metadata } } };
+  }
+  const billed = findVisionBilledUsage(error);
+  if (!billed) return null;
+  const costCents = priceVisionServedUsage(route, cfg, billed);
+  return {
+    kind: "billed",
+    route,
+    input: {
+      provider: route.provider,
+      model: route.model,
+      metric: "page-analysis-attempt",
+      amount: 1,
+      unit: "attempt",
+      costCents,
+      inputTokens: billed.inputTokens,
+      outputTokens: billed.outputTokens,
+      metadata: {
+        runtime: route.runtime,
+        ...metadata,
+        outcome: "failure",
+        reason: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+        usageSource: billed.usageSource ?? (billed.costCents !== undefined ? "provider" : "estimated"),
+        providerCostCents: costCents,
+        billable: false,
+      },
+    },
+  };
 }
 
 export type GuardedVisionOutcome<T = VisionExecutionResult> =
@@ -54,6 +132,9 @@ export async function guardedVisionCall<T = VisionExecutionResult>(args: {
   onResult?: (result: T, gate: VisionCallGate) => void;
 }): Promise<GuardedVisionOutcome<T>> {
   const page = { documentId: args.target.documentId, pageNumber: args.target.pageNumber };
+  const record = (usages: VisionFailureUsage[]) => {
+    for (const usage of usages) args.record({ ...usage.input, metadata: { ...usage.input.metadata, ...args.metadata, ...page } });
+  };
   return await withVisionCall(args.host, args.target, async (gate) => {
     let result: T;
     try {
@@ -61,51 +142,13 @@ export async function guardedVisionCall<T = VisionExecutionResult>(args: {
     } catch (error) {
       const stop = findVisionGuardStop(error);
       // A request refused after earlier ones were sent still records what those were billed.
-      if (!stop || findVisionBilledUsage(error)) recordFailure({ ...args, page }, error);
+      record(visionFailureUsages(error, args.vision, args.cfg));
       if (stop) return { admitted: false as const, stop };
       throw error;
     }
+    // A fallback-served result: the primary route's billed failure is ours too.
+    record(primaryFailureUsages((result as { primaryFailure?: VisionPrimaryFailure }).primaryFailure, args.cfg));
     args.onResult?.(result, gate);
     return { admitted: true as const, result };
-  });
-}
-
-function recordFailure(
-  args: { vision: VisionConfig; cfg: PricingConfig; page: { documentId: string; pageNumber: number };
-    record: (input: WorkerAiUsageInput) => UsageEvent | null; metadata?: Record<string, unknown> },
-  error: unknown,
-): void {
-  const route = resolveVisionRoute(args.vision);
-  const rejected = findVisionOutputRejected(error);
-  if (rejected) {
-    const costCents = priceVisionUsage(args.vision, args.cfg, {
-      inputTokens: rejected.inputTokens, outputTokens: rejected.outputTokens,
-      ...(rejected.costCents !== undefined ? { costCents: rejected.costCents } : {}),
-    });
-    const input = rejectedVisionUsageInput(rejected, costCents, route.model);
-    args.record({ ...input, metadata: { ...input.metadata, ...args.metadata, ...args.page } });
-    return;
-  }
-  const billed = findVisionBilledUsage(error);
-  if (!billed) return;
-  const costCents = priceVisionUsage(args.vision, args.cfg, billed);
-  args.record({
-    provider: route.runtime === "remote-openai" ? "openai" : "vision-runtime",
-    model: route.model,
-    metric: "page-analysis-attempt",
-    amount: 1,
-    unit: "attempt",
-    costCents,
-    inputTokens: billed.inputTokens,
-    outputTokens: billed.outputTokens,
-    metadata: {
-      ...args.metadata,
-      ...args.page,
-      outcome: "failure",
-      reason: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
-      usageSource: billed.usageSource ?? (billed.costCents !== undefined ? "provider" : "estimated"),
-      providerCostCents: costCents,
-      billable: false,
-    },
   });
 }

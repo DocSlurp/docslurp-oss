@@ -99,7 +99,7 @@
       "max_price": {
         "prompt": 0.15,
         "completion": 0.5,
-        "image": 0.012877350000000001,
+        "image": 0.0004995,
         "request": 0
       }
     }
@@ -136,7 +136,7 @@
       "max_price": {
         "prompt": 0.15,
         "completion": 0.5,
-        "image": 0.012877350000000001,
+        "image": 0.0004995,
         "request": 0
       }
     }
@@ -179,7 +179,7 @@
       "max_price": {
         "prompt": 0.3,
         "completion": 1.2,
-        "image": 0.025754700000000002,
+        "image": 0.0003072,
         "request": 0
       }
     }
@@ -222,7 +222,7 @@
       "max_price": {
         "prompt": 0.3,
         "completion": 1.2,
-        "image": 0.025754700000000002,
+        "image": 0.0003072,
         "request": 0
       }
     }
@@ -264,7 +264,7 @@
       "max_price": {
         "prompt": 0.14,
         "completion": 0.28,
-        "image": 0.012018860000000001,
+        "image": 0.0011471600000000002,
         "request": 0
       }
     }
@@ -306,7 +306,7 @@
       "max_price": {
         "prompt": 0.14,
         "completion": 0.28,
-        "image": 0.012018860000000001,
+        "image": 0.0011471600000000002,
         "request": 0
       }
     }

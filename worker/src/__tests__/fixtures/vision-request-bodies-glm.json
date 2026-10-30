@@ -37,7 +37,7 @@
       "max_price": {
         "prompt": 0.15,
         "completion": 0.5,
-        "image": 0.012877350000000001,
+        "image": 0.0012002999999999998,
         "request": 0
       }
     },

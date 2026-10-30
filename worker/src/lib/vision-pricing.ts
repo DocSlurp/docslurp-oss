@@ -21,7 +21,7 @@ export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 /**
  * Who bills a vision route, decided from the request's effective destination (an OpenAI-compatible route with
- * no base URL goes to api.openai.com):
+ * no base URL goes to the configured OpenAI base URL, `effectiveVisionBaseUrl`):
  *
  * - `local`: in-process (`local-cli`); `loopback`: a server on a loopback host; `private`: an operator-registry
  *   route, priced by the registry. None of these is billed per token by a provider.
@@ -37,16 +37,78 @@ export function visionRouteBilling(
 ): VisionRouteBilling {
   if (route.runtime === "local-cli") return "local";
   if (route.provider === PRIVATE_MODEL_PROVIDER) return "private";
-  const destination = effectiveVisionBaseUrl(route.baseUrl);
+  const destination = effectiveVisionBaseUrl(route.baseUrl, cfg);
   if (isLoopbackModelBaseUrl(destination)) return "loopback";
   if (isOpenRouterBaseUrl(destination)) return "openrouter";
-  if (sameBaseUrl(destination, cfg.openAiBaseUrl || DEFAULT_OPENAI_BASE_URL)) return "openai";
+  if (sameBaseUrl(destination, configuredOpenAiBaseUrl(cfg))) return "openai";
   return "unknown-hosted";
 }
 
-/** The base URL a hosted vision request is sent to. */
-export function effectiveVisionBaseUrl(baseUrl: string | null): string {
-  return baseUrl?.trim() || DEFAULT_OPENAI_BASE_URL;
+/** `OPENAI_BASE_URL`, else api.openai.com. */
+export function configuredOpenAiBaseUrl(cfg: Pick<Config, "openAiBaseUrl">): string {
+  return cfg.openAiBaseUrl?.trim() || DEFAULT_OPENAI_BASE_URL;
+}
+
+/**
+ * The base URL an OpenAI-compatible vision request is sent to: its own, else the configured OpenAI base URL. The
+ * runtime sends to exactly this URL, so the billing decision and the key always follow the real destination.
+ */
+export function effectiveVisionBaseUrl(baseUrl: string | null, cfg: Pick<Config, "openAiBaseUrl">): string {
+  return baseUrl?.trim() || configuredOpenAiBaseUrl(cfg);
+}
+
+/**
+ * The route a vision call was actually served on: the primary or the fallback, at its effective destination
+ * (`baseUrl` null only for the in-process runtime). Every result, billed failure and rejection carries it, and its
+ * usage is priced and labelled from it, never from the workspace's configured primary route.
+ */
+export interface VisionServedRoute {
+  runtime: string;
+  baseUrl: string | null;
+  /** Usage-ledger provider label (`openai`, `openrouter`, `private`, `vision-runtime`). */
+  provider: string;
+  /** Usage-ledger model id (the registry's usage model for private routes). */
+  model: string;
+  billing: VisionRouteBilling;
+}
+
+/** Usage-ledger provider label for a route's billing. */
+export function visionLedgerProvider(billing: VisionRouteBilling): string {
+  if (billing === "openai") return "openai";
+  if (billing === "openrouter") return "openrouter";
+  if (billing === "private") return PRIVATE_MODEL_PROVIDER;
+  return "vision-runtime";
+}
+
+const servedRoutes = new WeakMap<object, VisionServedRoute>();
+
+/** Marks `error` as raised on `route` (the innermost route wins: a later attach is ignored). */
+export function attachVisionServedRoute(error: unknown, route: VisionServedRoute): void {
+  if (error && typeof error === "object" && !servedRoutes.has(error)) servedRoutes.set(error, route);
+}
+
+/** The route the failed vision call behind `error` (possibly wrapped as a `cause`) was sent on, or null. */
+export function findVisionServedRoute(error: unknown): VisionServedRoute | null {
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (typeof cur === "object" && servedRoutes.has(cur)) return servedRoutes.get(cur)!;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/**
+ * Provider cost of vision usage served on `route`: the provider's charge, else 0 on an unbilled route (local,
+ * loopback, private), else the model's catalog list price, else the configured per-1k rates.
+ */
+export function priceVisionServedUsage(
+  route: Pick<VisionServedRoute, "billing" | "model">,
+  cfg: Pick<Config, "costPer1kInputTokens" | "costPer1kOutputTokens">,
+  usage: { inputTokens: number; outputTokens: number; costCents?: number },
+): number {
+  if (usage.costCents !== undefined) return usage.costCents;
+  if (!isBilledVisionRoute(route.billing)) return 0;
+  return visionListPriceCents(route.model, usage) ??
+    (usage.inputTokens / 1000) * cfg.costPer1kInputTokens + (usage.outputTokens / 1000) * cfg.costPer1kOutputTokens;
 }
 
 /** True only for an `openrouter.ai` URL (hostname equality, never a substring match). */
@@ -69,14 +131,6 @@ export function sameBaseUrl(a: string, b: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** Whether a provider bills this vision route per token: every route but local, loopback and private ones. */
-export function isBillableVisionRuntime(
-  route: { runtime: string; baseUrl: string | null; provider?: string },
-  cfg: Pick<Config, "openAiBaseUrl">,
-): boolean {
-  return isBilledVisionRoute(visionRouteBilling(route, cfg));
 }
 
 export function isBilledVisionRoute(billing: VisionRouteBilling): boolean {

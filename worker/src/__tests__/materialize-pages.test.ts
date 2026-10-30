@@ -13,6 +13,7 @@ import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
+import { attachVisionServedRoute } from "../lib/vision-pricing.js";
 
 let db: PGlite;
 let server: PGLiteSocketServer;
@@ -217,7 +218,7 @@ describe("materializePageRange", () => {
 
   it("records the summed spend of a page rejected on every attempt in the usage ledger", async () => {
     const rejected = new VisionOutputRejectedError("rejected after 2 attempts", [], 2400, 640, 1.5);
-    rejected.route = { model: "vision-x", provider: "openrouter" };
+    attachVisionServedRoute(rejected, { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: "vision-x", billing: "openrouter" });
     const h = harness({ 1: LONG, 2: "" }, { async ocrPage() { throw rejected; } });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const result = await materializePageRange(h.deps, input(h, [1, 2]));

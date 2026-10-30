@@ -45,6 +45,7 @@ import { groupAssignmentsByTarget } from "../routing/runtime.js";
 import { BIG_BUDGET, makePage, testCatalog } from "../routing/testing.js";
 import type { Config } from "../config.js";
 import type { Document, WorkspaceRun } from "../models.js";
+import { attachVisionServedRoute } from "../lib/vision-pricing.js";
 
 const MODEL = "google/gemini-3.1-flash-lite";
 const VISION = { target: "remote", modelUri: `llm://openrouter/${MODEL}`, maxPagesPerDocument: 1_000 } as const;
@@ -78,7 +79,7 @@ async function routedPlan() {
 
 function rejection(costCents = 2) {
   const error = new VisionOutputRejectedError("degenerate output after 2 attempts", [], 2_400, 640, costCents);
-  error.route = { model: MODEL, provider: "openrouter" };
+  attachVisionServedRoute(error, { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" });
   return error;
 }
 
@@ -112,6 +113,7 @@ describe("routed extraction under the vision guard", () => {
         runtime: "openai-compatible", model: MODEL, prompt: "p", text: "page three read by vision", raw: "", costCents: 0.5,
         latencyMs: 1, inputTokens: 2_000, outputTokens: 400, usageSource: "provider", baseUrl: "https://openrouter.ai/api/v1",
         fallbackUsed: false, fallbackReason: null, provider: "openrouter",
+        route: { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" },
       };
     });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
