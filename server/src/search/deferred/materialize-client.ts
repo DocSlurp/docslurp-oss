@@ -252,6 +252,8 @@ export async function materializeForQuery(
       if (state.state === "indexed") {
         waiting.delete(key);
         materialized++;
+        // cost_credits is the customer charge the page's billing decision committed (worker billLockedMaterializedPages):
+        // 0 for a page an earlier read already paid for and for full-index pages; never provider or embedding cost.
         credits += Math.max(0, state.costCredits - (initialCost.get(key) ?? 0));
         ready.set(c.documentId, [...(ready.get(c.documentId) ?? []), c.page]);
       } else if (TERMINAL_FAILED.has(state.state)) {

@@ -3335,6 +3335,16 @@ export class Store {
           where run_id = ${row.run_id}
         `;
       }
+      if (await this.tableExists("document_page_states")) {
+        // A kept model read (read_text) is page content too: a later query must not republish it. The billing
+        // decision (read_billed_run) stays, so the page is never charged again.
+        await this.sql`
+          update document_page_states s
+          set read_text = null
+          from documents d
+          where d.id = s.document_id and d.run_id = ${row.run_id} and s.read_text is not null
+        `;
+      }
       if (await this.tableExists("vector_indexes")) {
         // The documents stay, but their LanceDB rows must go too: hand the
         // vector targets to the cleanup sweep before the index rows vanish.

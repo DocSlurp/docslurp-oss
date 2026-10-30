@@ -530,8 +530,12 @@ export class DocumentMapStage implements Stage {
           update document_page_states set state = 'blocked-pii', failure_reason = 'pii-policy', updated_at = now()
           where document_id = ${document.id} and page_number = any(${blockedPages}::int[]) and state in ('unseen', 'failed', 'parsed')
         `;
-        // A coarse row written before the policy tightened must not survive.
+        // A coarse row written before the policy tightened must not survive, nor a kept model read of the page.
         await q`delete from document_pages where document_id = ${document.id} and page_number = any(${blockedPages}::int[])`;
+        await q`
+          update document_page_states set read_text = null
+          where document_id = ${document.id} and page_number = any(${blockedPages}::int[]) and read_text is not null
+        `;
       }
 
       if (built.title) {

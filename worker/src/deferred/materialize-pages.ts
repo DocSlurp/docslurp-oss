@@ -195,7 +195,6 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
 interface PreparedPage {
   page: number;
   text: string;
-  ocrCostCents: number;
 }
 
 /**
@@ -325,18 +324,22 @@ export async function materializePageRange(
   const modelReads = new Map<number, number>();
   /** Customer credits of each page's read (Rich charges buffered in the ledger). */
   const readCents = new Map<number, number>();
-  /** Read text (after PII redaction) of pages this call read, kept on the page row if the page then fails. */
+  /** Read text of pages this call read with no PII match, kept on the page row if the page then fails. */
   const keptReads = new Map<number, string>();
   let spentCents = 0;
   /** This publication's id generation: its chunk and vector ids are never written by another call. */
   const generation = randomBytes(6).toString("hex");
 
   // 0. Pages an earlier run read (one Rich charge, committed) and then failed after the read: index the kept read,
-  // with no model call and no new charge (billLockedMaterializedPages stamps them without one).
+  // with no model call and no new charge (billLockedMaterializedPages stamps them without one). Retention purge,
+  // a PII block and a human correction clear read_text; a purged run's documents never reuse one either way.
   const storedReads = new Map((await deps.sql<{ page_number: number; read_text: string }[]>`
-    select page_number, read_text from document_page_states
-    where document_id = ${documentId} and page_number = any(${pages}::int[])
-      and read_billed_run is not null and read_text is not null
+    select s.page_number, s.read_text from document_page_states s
+    join documents d on d.id = s.document_id
+    join workspace_runs r on r.id = d.run_id
+    where s.document_id = ${documentId} and s.page_number = any(${pages}::int[])
+      and s.read_billed_run is not null and s.read_text is not null and s.state <> 'blocked-pii'
+      and r.artifacts_purged_at is null
   `).map((row) => [row.page_number, row.read_text]));
 
   // 1. Text layer per contiguous range, then OCR only pages without one.
@@ -361,14 +364,14 @@ export async function materializePageRange(
   for (const page of pages) {
     const stored = storedReads.get(page);
     if (stored !== undefined) {
-      prepared.set(page, { page, text: stored, ocrCostCents: 0 });
+      prepared.set(page, { page, text: stored });
       continue;
     }
     const text = texts.get(page) ?? "";
     const hasTextLayer = text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS;
-    // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee as they turn indexed).
+    // Text-layer pages bill as Fast pages (charged by billLockedMaterializedPages as they turn indexed).
     if (readsEveryPage) ocrPages.push(page);
-    else if (hasTextLayer) prepared.set(page, { page, text, ocrCostCents: pageCredits("fast", 1) });
+    else if (hasTextLayer) prepared.set(page, { page, text });
     else if (readsPages) ocrPages.push(page);
     else keptUnread.push(page);
   }
@@ -401,7 +404,7 @@ export async function materializePageRange(
       readCents.set(page, cost);
       if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
       else {
-        prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
+        prepared.set(page, { page, text: ocr.text });
         modelReads.set(page, richPages);
       }
     } catch (error) {
@@ -430,10 +433,13 @@ export async function materializePageRange(
     ? createPiiTextScanner(policy.patterns, policy.allowlistPatterns)
     : null;
   const blocked: number[] = [];
+  /** Pages with any PII match: their read is never kept, so a retry re-reads under the policy in force then. */
+  const piiMatched = new Set<number>();
   if (scan) {
     for (const entry of [...prepared.values()]) {
       const scanned = scan(entry.text, entry.page);
       if (scanned.matches.length === 0) continue;
+      piiMatched.add(entry.page);
       if (policy.action === "block_indexing") {
         prepared.delete(entry.page);
         blocked.push(entry.page);
@@ -463,15 +469,14 @@ export async function materializePageRange(
     if (i === 0) {
       prepared.delete(entry.page);
       failed.set(entry.page, "empty-page");
-    } else if (modelReads.has(entry.page)) {
+    } else if (modelReads.has(entry.page) && !piiMatched.has(entry.page)) {
+      // A redacted read is not kept: a later block_indexing policy could not find the PII it removed.
       keptReads.set(entry.page, entry.text);
     }
   }
 
   // 4. Embed (batched). Nothing is published yet: pages, chunks and vectors are written in step 5, only for pages
   // this run still holds.
-  let embeddingCents = 0;
-  const costByPage = new Map<number, number>();
   const profile = resolveEmbeddingModel(deps.config, pipeline);
   let dims = profile.dimensions;
   const vectors: number[][] = [];
@@ -490,32 +495,28 @@ export async function materializePageRange(
               provider: profile.provider, model: profile.model, metric: "embedding-tokens", inputTokens,
               ...(costCents !== undefined ? { costCents, metadata: costMetadata } : {}),
             }, { fallback: { costPer1kInputTokens: deps.config.costPer1kInputTokens, costPer1kOutputTokens: 0 } });
-            const event = deps.usage.record({
+            deps.usage.record({
               provider: profile.provider, model: profile.model, metric: "embedding-tokens",
               amount: inputTokens, unit: "token", inputTokens, costCents: priced.costCents,
               metadata: { ...priced.metadata, documentId, runtime: "remote", dimensions: profile.dimensions, chunks: n,
                 tokenSource: "api", materializedBy: input.reason, sessionId: input.sessionId },
             });
-            embeddingCents += event?.costCents ?? priced.costCents;
           },
         });
         if (embedded.vectors.length !== batch.length) throw new Error("embedding provider returned a different number of vectors");
         vectors.push(...embedded.vectors);
         if (!recordedRemote) {
           const tokens = embedded.totalTokens ?? batch.reduce((sum, c) => sum + estimateTokens(c.text), 0);
-          const event = deps.usage.record({
+          deps.usage.record({
             provider: profile.provider, model: profile.model, metric: "embedding-tokens",
             amount: tokens, unit: "token", inputTokens: tokens,
             costCents: profile.runtime === "remote" ? undefined : 0,
             metadata: { documentId, runtime: profile.runtime, dimensions: profile.dimensions, chunks: batch.length,
               tokenSource: embedded.totalTokens !== undefined ? "api" : "estimate", materializedBy: input.reason, sessionId: input.sessionId },
           });
-          embeddingCents += event?.costCents ?? 0;
         }
       }
       dims = vectors[0]?.length ?? dims;
-      const perChunkCents = embeddingCents / chunks.length;
-      for (const c of chunks) costByPage.set(c.page, (costByPage.get(c.page) ?? 0) + perChunkCents);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       for (const page of [...prepared.keys()]) failed.set(page, reason);
@@ -546,6 +547,8 @@ export async function materializePageRange(
   const billsHere = input.reason !== "full-index";
   const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
   let written: string[] = [];
+  /** Customer credits of this call's committed billing decisions (billLockedMaterializedPages `credits`). */
+  let chargedCredits = 0;
   let discard: string[] = [];
   let staleIds: string[] = [];
   let held = new Set<number>();
@@ -605,16 +608,11 @@ export async function materializePageRange(
         if (staleIds.length > 0) await client`delete from document_chunks where document_id = ${documentId} and id = any(${staleIds}::text[])`;
       }
 
-      // Ledger transitions, each fenced to pages this run still holds.
-      const indexedByCost = new Map<number, number[]>();
-      for (const entry of publishedPages) {
-        const credits = Math.round(((entry.ocrCostCents + (costByPage.get(entry.page) ?? 0))) * 10_000) / 10_000;
-        indexedByCost.set(credits, [...(indexedByCost.get(credits) ?? []), entry.page]);
-      }
-      const moved: number[] = [];
-      for (const [credits, group] of indexedByCost) {
-        moved.push(...await markPages(client, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model, claimedBy }));
-      }
+      // Ledger transitions, each fenced to pages this run still holds. A page's cost_credits is the customer charge
+      // its billing decision committed (set below by billLockedMaterializedPages); 0 until then, and for full-index
+      // pages, which the run completion fee bills.
+      const moved = await markPages(client, documentId, publishedPages.map((p) => p.page), "indexed",
+        { costCredits: 0, embeddingModel: profile.model, claimedBy });
       const ownedBlocked = blocked.filter((page) => held.has(page));
       if (ownedBlocked.length > 0) await markPages(client, documentId, ownedBlocked, "blocked-pii", { failureReason: "pii-policy", claimedBy });
       const byReason = new Map<string, number[]>();
@@ -626,11 +624,7 @@ export async function materializePageRange(
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
-      // A kept read is spent once its page is indexed.
-      if (owned.length > 0) {
-        await client`update document_page_states set read_text = null
-          where document_id = ${documentId} and page_number = any(${owned}::int[]) and read_text is not null`;
-      }
+      // markPages cleared the kept reads of pages it indexed or blocked.
 
       const lost = rangePages.filter((page) => !held.has(page));
       if (billsHere) {
@@ -647,7 +641,7 @@ export async function materializePageRange(
           `;
         }
         // Held pages this call read (a pending Rich charge) that did not index: the read is the page's one charge.
-        // PII-blocked pages keep no text.
+        // Pages with any PII match (blocked or redacted) keep no text.
         const movedSet = new Set(moved);
         const failedReads = new Map([...held]
           .filter((page) => readCents.has(page) && !movedSet.has(page) && !released.includes(page))
@@ -657,6 +651,7 @@ export async function materializePageRange(
           ledger: deps.usage, modelReads: new Map(lostReads.map((page) => [page, modelReads.get(page)!])), failedReads,
         });
         if (outcome.richBatch) batches.push(outcome.richBatch);
+        chargedCredits = outcome.credits;
       }
       // Reads of pages this run lost (failed, empty or published elsewhere) stay provider usage: their pending Rich
       // charges are dropped, never persisted as a customer charge. Owned pages keep theirs (a read page that then
@@ -680,17 +675,21 @@ export async function materializePageRange(
       console.warn(`[materialize] commit outcome unknown for ${documentId} (${error instanceof Error ? error.message : String(error)}); kept ${written.length} vectors of generation ${generation}`);
     }
     if (rollback.length > 0) {
-      await ops.deleteVectors(location.uri, location.table, rollback).catch((cleanup: unknown) => {
+      await ops.deleteVectors(location.uri, location.table, rollback).catch(async (cleanup: unknown) => {
         console.warn(`[materialize] vector rollback failed for ${documentId}: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`);
+        await queueOrphanVectors(deps.sql, run, documentId, { model: profile.model, dimensions: dims }, rollback);
       });
     }
+    // Vectors kept because COMMIT's outcome is unknown: the sweep deletes those no committed chunk row names.
+    if (bodyDone && written.length > 0) await queueOrphanVectors(deps.sql, run, documentId, { model: profile.model, dimensions: dims }, written);
     throw error;
   }
   for (const batch of batches) batch.commit();
   const unpublished = [...staleIds.filter(() => Boolean(run.orgId && run.workspaceId)), ...discard];
   if (unpublished.length > 0) {
-    await ops.deleteVectors(location.uri, location.table, unpublished).catch((error: unknown) => {
+    await ops.deleteVectors(location.uri, location.table, unpublished).catch(async (error: unknown) => {
       console.warn(`[materialize] stale vector cleanup failed for ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
+      await queueOrphanVectors(deps.sql, run, documentId, { model: profile.model, dimensions: dims }, unpublished);
     });
   }
 
@@ -704,11 +703,39 @@ export async function materializePageRange(
   for (const [page, reason] of [...failed].sort((a, b) => a[0] - b[0])) {
     if (held.has(page)) result.failed.push({ page, reason });
   }
-  // Customer credits of the call: every OCR-read page it still owned (Rich, including pages that then failed) and
-  // every text-layer page that indexed (Fast). Embedding batches are provider cost (0 credits).
-  const ocrSet = new Set(ocrPages);
-  const ownedReadCents = [...held].reduce((sum, page) => sum + (readCents.get(page) ?? 0), 0);
-  const fastIndexed = result.indexed.filter((page) => !ocrSet.has(page) && !storedReads.has(page)).length;
-  result.costCredits = Math.round((ownedReadCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
+  // Customer credits of the call: only the charges its billing decisions committed. A page an earlier read already
+  // paid for (read_billed_run), reads dropped to provider usage and embedding batches (provider cost) add nothing.
+  // Full-index pages are billed by the run completion fee.
+  result.costCredits = Math.round(chargedCredits * 10_000) / 10_000;
   return result;
+}
+
+/** Delay before the sweep checks queued vector ids, so an in-flight COMMIT has settled. */
+const ORPHAN_VECTOR_GRACE_MINUTES = 15;
+
+/**
+ * Hands vector ids whose delete failed (or whose commit outcome is unknown) to storage_cleanup_queue
+ * (`vector_rows`). The sweep deletes, in the workspace's own LanceDB database, only the ids no document_chunks
+ * row names (superseded-purge.ts drainStorageCleanupQueue), so a live publication's vectors are never removed.
+ * Best effort: a failure is logged; such vectors stay unsearchable (no chunk row hydrates them).
+ */
+export async function queueOrphanVectors(
+  sql: Sql,
+  scope: { orgId?: string | null; workspaceId?: string | null },
+  documentId: string,
+  space: { model: string; dimensions: number },
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0 || !scope.orgId || !scope.workspaceId) return;
+  const target = `${documentId}#${randomBytes(8).toString("hex")}`;
+  const payload = { workspaceId: scope.workspaceId, documentId, embeddingModel: space.model, dimension: space.dimensions, ids };
+  try {
+    await sql`
+      insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+      values ('vector_rows', ${scope.orgId}, ${target}, ${sql.json(payload as never)}, 'materialize-orphan-vectors',
+        now() + (${ORPHAN_VECTOR_GRACE_MINUTES} * interval '1 minute'))
+    `;
+  } catch (error) {
+    console.warn(`[materialize] could not queue ${ids.length} orphan vectors of ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

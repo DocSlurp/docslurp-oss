@@ -71,6 +71,8 @@ interface Harness {
 
 function harness(pageTexts: Record<number, string>, overrides: Partial<PageMaterializerOps> = {}): Harness {
   const usage = new PipelineUsageEventLedger();
+  // As WorkflowState sets it: Rich page charges need the run id.
+  usage.runId = "run-1";
   const h = {
     ocrCalls: [] as number[],
     embedCalls: [] as string[][],
@@ -121,8 +123,11 @@ const input = (h: Harness, pages: number[], pipeline = defaultPipelineFeatures) 
   document, pipeline, run: h.run as never,
 });
 
+const orphanQueue = async () => (await db.query<{ ids: string[] }>(
+  `select array(select jsonb_array_elements_text(payload -> 'ids') order by 1) as ids from storage_cleanup_queue where kind = 'vector_rows' order by id`)).rows.map((r) => r.ids);
+
 beforeEach(async () => {
-  await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states;`);
+  await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states; delete from usage_events; delete from storage_cleanup_queue;`);
   await ensurePageRows(sql, "d1", 6);
 });
 
@@ -330,6 +335,8 @@ describe("materializePageRange", () => {
       expect(h.lanceDeletes).toEqual([]);
       const state = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number = 1`);
       expect(state.rows[0]!.state).toBe("indexed");
+      // The kept ids go to the orphan sweep, which deletes only those no committed chunk row names (round 8 L3).
+      expect(await orphanQueue()).toEqual([live]);
     });
 
     it("materializer vector records carry no LanceDB hydration, so search serves them only through a committed chunk row", async () => {
@@ -360,6 +367,21 @@ describe("materializePageRange", () => {
     expect(after).toEqual([expect.stringMatching(/^d1:p1:g[0-9a-f]{12}:c0$/)]);
     // Every chunk of the earlier generation is stale.
     expect(h2.lanceDeletes.sort()).toEqual(before);
+    expect(await orphanQueue()).toEqual([]);
+  });
+
+  it("queues stale vectors whose delete fails for the orphan sweep (round 8 L3)", async () => {
+    const many = Array.from({ length: 3 }, (_, i) => `# Part ${i}\n\n${LONG} ${i}`).join("\n\n");
+    const h = harness({ 1: many });
+    await claimAndMaterialize(h.deps, input(h, [1]));
+    const before = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
+    const h2 = harness({ 1: LONG }, { async deleteVectors() { throw new Error("lance unavailable"); } });
+    await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number = 1`);
+    expect((await claimAndMaterialize(h2.deps, input(h2, [1]))).indexed).toEqual([1]);
+    expect(await orphanQueue()).toEqual([before]);
+    const [row] = (await db.query<{ org_id: string; payload: Record<string, unknown>; due: boolean }>(
+      `select org_id, payload, not_before > now() as due from storage_cleanup_queue where kind = 'vector_rows'`)).rows;
+    expect(row).toMatchObject({ org_id: "o1", due: true, payload: { workspaceId: "w", documentId: "d1", dimension: 3 } });
   });
 
   it("reports total spend including failed pages and completed batches", async () => {
@@ -428,6 +450,7 @@ describe("materializePageRange respects processing quality", () => {
     const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], good), reason });
     expect(h.ocrCalls.sort()).toEqual([1, 2]);
     expect(result.indexed).toEqual([1, 2]);
-    expect(result.costCredits).toBeCloseTo(0.5, 6);
+    // Query: two committed Rich charges. Full index: the run completion fee bills the pages, so the call reports none.
+    expect(result.costCredits).toBeCloseTo(reason === "query" ? 0.5 : 0, 6);
   });
 });

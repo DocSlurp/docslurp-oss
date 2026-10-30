@@ -56,9 +56,19 @@ ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "model_read_pages" i
 -- A page this run owned, read with a model (one Rich charge, committed with this
 -- stamp) and then failed after the read (embedding, vector write, PII). The page's
 -- one customer charge for this document version is made: a later run that indexes
--- it stamps it with no new charge. `read_text` keeps the read (after PII redaction;
--- never for a PII-blocked page) so a retry indexes it without calling the model
--- again; it is cleared when the page turns indexed.
+-- it stamps it with no new charge. `read_text` keeps the read (only when the PII
+-- scan found nothing, so a retry re-reads under the policy then in force) so a
+-- retry indexes it without calling the model again. It is page content: cleared
+-- when the page turns indexed or PII-blocked, by artifact retention and by a
+-- human-correction reindex (`read_billed_run` stays).
 ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "read_billed_run" text;
 --> statement-breakpoint
 ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "read_text" text;
+--> statement-breakpoint
+-- storage_cleanup_queue kind 'vector_rows': deferred-materialization vector ids
+-- whose delete failed, or whose publication's COMMIT outcome was unknown. The
+-- worker sweep deletes only the ids no document_chunks row names.
+ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queue_kind_check;
+--> statement-breakpoint
+ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
+  CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows'));

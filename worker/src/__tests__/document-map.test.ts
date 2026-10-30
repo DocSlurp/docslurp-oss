@@ -205,12 +205,13 @@ describe("DocumentMapStage", () => {
 
 describe("DocumentMapStage coarse text layer PII", () => {
   const SSN = "123-45-6789";
-  const run = async (action: "block_indexing" | "redact_artifacts" | "flag_for_review") => {
+  const run = async (action: "block_indexing" | "redact_artifacts" | "flag_for_review", before?: () => Promise<void>) => {
     const texts = bodyPages(30, () => null);
     texts[1] = `${texts[1]} SSN ${SSN}`;
     const t = await setup({ pages: texts, outline: [{ title: "Middle", page: 10 }, { title: "Next", page: 12 }] }, texts, {
       pipeline: { piiPolicy: { enabled: true, patterns: ["ssn"], action, allowlistPatterns: [] } },
     });
+    await before?.();
     await t.stage.mapDocument(t.state, document(30));
   };
 
@@ -221,6 +222,20 @@ describe("DocumentMapStage coarse text layer PII", () => {
     expect(pages.rows).toHaveLength(8);
     const [state] = (await db.query<{ state: string }>(`select state from document_page_states where document_id='d1' and page_number=2`)).rows;
     expect(state!.state).toBe("blocked-pii");
+  });
+
+  it("drops a kept model read of a page it blocks (round 8 M1), keeping its billing decision", async () => {
+    await run("block_indexing", async () => {
+      await db.exec(`insert into document_page_states (document_id, page_number, state, read_billed_run, read_text)
+        values ('d1', 2, 'failed', 'm0', 'kept read SSN ${SSN}'), ('d1', 3, 'failed', 'm0', 'kept read page 3')`);
+    });
+    const rows = (await db.query<{ page_number: number; state: string; read_billed_run: string | null; read_text: string | null }>(
+      `select page_number, state, read_billed_run, read_text from document_page_states where document_id='d1' and page_number in (2, 3) order by page_number`)).rows;
+    expect(rows).toEqual([
+      { page_number: 2, state: "blocked-pii", read_billed_run: "m0", read_text: null },
+      // An unblocked page keeps its kept read.
+      { page_number: 3, state: expect.any(String), read_billed_run: "m0", read_text: "kept read page 3" },
+    ]);
   });
 
   it("writes redacted text under redact_artifacts", async () => {

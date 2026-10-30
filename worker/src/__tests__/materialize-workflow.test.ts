@@ -4,7 +4,7 @@ import type { Sql } from "postgres";
 import { defaultPipelineFeatures, pageCredits } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
+import { billLockedMaterializedPages, lockPageRows, recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
 import { Store } from "../db/store.js";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
 import { claimPages, ensurePageRows, markPages } from "../deferred/page-ledger.js";
@@ -906,6 +906,102 @@ describe("runMaterializeRange activity", () => {
             delete process.env.DOCSLURP_DEFERRED_PROFILES;
             await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
           }
+        });
+
+        describe("round 8: a kept read never outlives retention, a PII policy or its charge", () => {
+          const costOf = async () => Number((await db.query<{ c: string | null }>(
+            `select cost_credits::float8 as c from document_page_states where document_id = 'd1' and page_number = 3`)).rows[0]!.c ?? 0);
+
+          it("retention purge clears the kept read: a later query publishes none of it and charges nothing again (M1)", async () => {
+            const t = tracked();
+            await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
+            expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: true });
+            await db.exec(`update workspaces set artifact_retention_days = 1 where id = 'w';
+              update workspace_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
+            try {
+              await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
+              expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
+              // Belt and braces: a kept read of a purged run is never reused even if one survived.
+              await db.exec(`update document_page_states set read_text = 'PURGED ${VISION}' where document_id = 'd1' and page_number = 3`);
+              const later = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
+              expect(later.indexed).toEqual([3]);
+              expect((await page3()).chunks.length).toBeGreaterThan(0);
+              expect((await page3()).chunks.some((c) => c.text.includes(VISION))).toBe(false);
+              expect(await charges()).toEqual(m1Rich);
+              // m2 charged nothing (m1's read paid the page): it reports no credits for it.
+              expect(later.costCredits).toBe(0);
+              expect(await costOf()).toBe(0);
+            } finally {
+              await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
+                update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
+            }
+          });
+
+          it("a redacted read is not kept, so a later block_indexing policy blocks the page instead of indexing it (M2)", async () => {
+            const t = tracked();
+            const ssn = (page: number) => ({ text: `${LONG} SSN 123-45-6789 ${VISION} page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 });
+            await db.exec(`update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"redact_artifacts","allowlistPatterns":[]}}' where id = 'm1';
+              update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
+            const first = await runMaterializeRange(withOps("m1", t, { ...embedDown, async ocrPage(_d, page) { return ssn(page); } }), input("m1", [3]));
+            expect(first.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
+            // The read is the page's one charge, but its redacted text is not kept.
+            expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
+            let reads = 0;
+            const second = await runMaterializeRange(withOps("m2", t, { async ocrPage(_d, page) { reads += 1; return ssn(page); } }), input("m2", [3]));
+            // m2 re-read the page under the policy in force and blocked it.
+            expect(reads).toBe(1);
+            expect(second.blocked).toEqual([3]);
+            expect(second.indexed).toEqual([]);
+            expect((await page3()).chunks).toEqual([]);
+            expect(await readState()).toMatchObject({ state: "blocked-pii", kept: false });
+            expect(await charges()).toEqual(m1Rich);
+          });
+
+          it("a clean read is kept and reused; a page whose stored read now matches the PII policy is blocked and its read cleared (M2)", async () => {
+            const t = tracked();
+            await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
+            expect(await readState()).toMatchObject({ kept: true });
+            await db.exec(`update document_page_states set read_text = read_text || ' SSN 123-45-6789' where document_id = 'd1' and page_number = 3;
+              update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
+            const blocked = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
+            expect(blocked.blocked).toEqual([3]);
+            expect(await readState()).toMatchObject({ state: "blocked-pii", read_billed_run: "m1", kept: false });
+          });
+
+          it("a failed read with no Rich charge behind it is not recorded as the page's charge (L1)", async () => {
+            const t = tracked();
+            // A failed read whose Rich charge the ledger never buffered (or already dropped): no pending event, none committed.
+            await sql.begin(async (tx) => {
+              await lockPageRows(tx as never, "d1", [3]);
+              const outcome = await billLockedMaterializedPages(tx as never, {
+                runId: "m1", documentId: "d1", requested: [], moved: new Set(), ledger: new PipelineUsageEventLedger(),
+                failedReads: new Map([[3, "unbacked read"]]),
+              });
+              expect(outcome).toMatchObject({ inserted: 0, credits: 0 });
+            });
+            expect(await readState()).toMatchObject({ read_billed_run: null, kept: false });
+            // The page stays undecided: the run that indexes it bills it (Fast here), so it is never left unpaid.
+            expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
+            expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-fast", page: 3, amount: 1 }]);
+          });
+
+          it("reports credits from committed decisions: the read is 0.25 once, the prepaid retry 0 (L2)", async () => {
+            const t = tracked();
+            const first = await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
+            expect(first.costCredits).toBeCloseTo(pageCredits("rich", 1), 9);
+            const retry = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
+            expect(retry.indexed).toEqual([3]);
+            expect(retry.costCredits).toBe(0);
+            // The server sums page cost_credits deltas into creditsSpent: the prepaid page adds none.
+            expect(await costOf()).toBe(0);
+            // A page this run decides Fast reports exactly the Fast charge, not its embedding cost.
+            await db.exec(`update workspace_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
+            const fast = await runMaterializeRange(t.depsFor("m2"), input("m2", [5]));
+            expect(fast.costCredits).toBeCloseTo(pageCredits("fast", 1), 9);
+            expect(Number((await db.query<{ c: number }>(`select cost_credits::float8 as c from document_page_states where document_id = 'd1' and page_number = 5`)).rows[0]!.c))
+              .toBeCloseTo(pageCredits("fast", 1), 9);
+          });
         });
       });
     });

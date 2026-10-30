@@ -105,6 +105,8 @@ export async function markPages(
         embedding_model = case when ${state} = 'indexed' then coalesce(${extra.embeddingModel ?? null}, embedding_model) else embedding_model end,
         claimed_by_run = case when ${releases} then null else claimed_by_run end,
         claim_expires_at = case when ${releases} then null else claim_expires_at end,
+        -- A kept read (read_text) is spent once the page indexes, and a PII-blocked page keeps no text.
+        read_text = case when ${state === "indexed" || state === "blocked-pii"} then null else read_text end,
         updated_at = now()
     where document_id = ${documentId} and page_number = any(${pages}::int[])
       ${extra.claimedBy === undefined ? sql`` : sql`and claimed_by_run = ${extra.claimedBy}`}

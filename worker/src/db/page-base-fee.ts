@@ -11,7 +11,7 @@ import {
   type PipelineRunStage,
 } from "@docslurp/shared";
 import type { WorkflowState } from "../pipeline/pipeline.js";
-import type { PipelineUsageBatch, PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { billableCents, type PipelineUsageBatch, type PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { pipelineTransaction } from "./transaction-pipeline.js";
 import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements } from "./usage-event-store.js";
@@ -261,7 +261,7 @@ export async function billLockedMaterializedPages(
     /** Pages this run holds that failed after a charged model read, with the read text to keep (null: none). */
     failedReads?: Map<number, string | null>;
   },
-): Promise<{ inserted: number; richBatch?: PipelineUsageBatch }> {
+): Promise<{ inserted: number; credits: number; richBatch?: PipelineUsageBatch }> {
   const { runId, documentId, requested, moved } = args;
   const rateCents = pageCredits("fast", 1);
   await client`select id from workspace_runs where id = ${runId} for update`;
@@ -290,20 +290,6 @@ export async function billLockedMaterializedPages(
   `;
   const readBilledBy = new Map(readBilled.filter((r) => r.read_billed_run !== null).map((r) => [r.page_number, r.read_billed_run!]));
   const billedElsewhere = new Set([...readBilledBy].filter(([, run]) => run !== runId).map(([page]) => page));
-  // A failed read becomes the page's one charge only when the page has no decision yet.
-  const feeRunByPage = new Map(readBilled.map((r) => [r.page_number, r.fee_billed_run]));
-  const chargeFailedRead = [...failedReads.keys()].filter((page) => !readBilledBy.has(page) && feeRunByPage.get(page) == null)
-    .sort((a, b) => a - b);
-  if (chargeFailedRead.length > 0) {
-    await client`
-      update document_page_states s
-      set read_billed_run = ${runId}, read_text = r.text
-      from unnest(${chargeFailedRead}::int[], ${chargeFailedRead.map((page) => failedReads.get(page) ?? null)}::text[]) as r(page, text)
-      where s.document_id = ${documentId} and s.page_number = r.page and s.read_billed_run is null
-    `;
-  }
-  const chargeableSet = new Set([...owned, ...chargeFailedRead, ...[...readBilledBy].filter(([, run]) => run === runId).map(([page]) => page)]
-    .filter((page) => !billedElsewhere.has(page)));
   // Pages this run does not own: the claim moved on (not transitioned), another run's stamp stands, or a page it
   // read but never held at publication.
   const foreignSet = new Set([
@@ -319,6 +305,31 @@ export async function billLockedMaterializedPages(
   // and page). Reads of pages another run owns are dropped from the ledger and never charged: the owner bills them.
   const richBatch = args.ledger?.takeRichPageCharges(documentId, (page) => ownedSet.has(page) || foreignSet.has(page) || failedReads.has(page));
   const richEvents = richBatch?.events ?? [];
+  // A failed read becomes the page's one charge only when the page has no decision yet, and only when a Rich charge
+  // backs it: a chargeable Rich event in this batch, or one this run already committed for the page. A read whose
+  // charge the ledger never buffered (or already dropped) leaves the page undecided, so a later run bills it.
+  const feeRunByPage = new Map(readBilled.map((r) => [r.page_number, r.fee_billed_run]));
+  const undecidedFailedReads = [...failedReads.keys()].filter((page) => !readBilledBy.has(page) && feeRunByPage.get(page) == null);
+  const pendingRichPages = new Set(richEvents.filter((event) => billableCents(event) > 0).map((event) => Number(event.metadata?.pageNumber)));
+  const needCommitted = undecidedFailedReads.filter((page) => !pendingRichPages.has(page));
+  const committedRichPages = new Set(needCommitted.length === 0 ? [] : (await client<{ page: number }[]>`
+    select distinct (au.metadata ->> 'pageNumber')::int as page from usage_attribution au
+    where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.cost_cents > 0
+      and au.metadata ->> 'documentId' = ${documentId}
+      and au.metadata ->> 'pageNumber' = any(${needCommitted.map(String)}::text[])
+  `).map((r) => Number(r.page)));
+  const chargeFailedRead = undecidedFailedReads.filter((page) => pendingRichPages.has(page) || committedRichPages.has(page))
+    .sort((a, b) => a - b);
+  if (chargeFailedRead.length > 0) {
+    await client`
+      update document_page_states s
+      set read_billed_run = ${runId}, read_text = r.text
+      from unnest(${chargeFailedRead}::int[], ${chargeFailedRead.map((page) => failedReads.get(page) ?? null)}::text[]) as r(page, text)
+      where s.document_id = ${documentId} and s.page_number = r.page and s.read_billed_run is null
+    `;
+  }
+  const chargeableSet = new Set([...owned, ...chargeFailedRead, ...[...readBilledBy].filter(([, run]) => run === runId).map(([page]) => page)]
+    .filter((page) => !billedElsewhere.has(page)));
   const chargeable = richEvents.filter((event) => chargeableSet.has(Number(event.metadata?.pageNumber)));
   const dropped = richEvents.filter((event) => !chargeableSet.has(Number(event.metadata?.pageNumber)));
   if (dropped.length > 0) {
@@ -392,7 +403,27 @@ export async function billLockedMaterializedPages(
   const inserted = richInserted + decidedInserted + upgradeInserted;
   // The usage_events trigger adds `inserted` to the run's spent_cents (0056_run_spent_cents).
   if (inserted > 0) await debitRunUsageCredits({ client, state, costCents: inserted });
-  return { inserted, richBatch };
+  // Customer credit reporting comes from committed decisions only: each page this decision stamped (or whose failed
+  // read it charged) reports this run's committed Fast or Rich charge for it. A page an earlier read already paid for
+  // (read_billed_run before this decision) reports 0, and provider usage (embeddings, dropped reads) is never included.
+  const reported = [...new Set([...owned, ...chargeFailedRead])].filter((page) => !readBilledBy.has(page));
+  const charges = new Map(reported.length === 0 ? [] : (await client<{ page: number; credits: number | string }[]>`
+    select (coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page'))::int as page, sum(au.cost_cents) as credits
+    from usage_attribution au
+    where au.run_id = ${runId} and au.metric in (${BILLABLE_UNIT_METRICS.fastPage}, ${BILLABLE_UNIT_METRICS.richPage})
+      and au.metadata ->> 'documentId' = ${documentId} and au.id not like 'rich-upgrade:%'
+      and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = any(${reported.map(String)}::text[])
+    group by 1
+  `).map((r) => [Number(r.page), Number(r.credits) || 0] as const));
+  if (owned.length > 0) {
+    await client`
+      update document_page_states s set cost_credits = r.credits
+      from unnest(${owned}::int[], ${owned.map((page) => charges.get(page) ?? 0)}::numeric[]) as r(page, credits)
+      where s.document_id = ${documentId} and s.page_number = r.page
+    `;
+  }
+  const credits = [...charges.values()].reduce((sum, value) => sum + value, 0) + upgradeInserted;
+  return { inserted, credits, richBatch };
 }
 
 /** Runs whose stamps can no longer be backed by a charge: finished, or a worker whose lease expired. */
