@@ -918,6 +918,9 @@ export class VisionExtractStage implements Stage {
               state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache,
             ));
           } catch (error) {
+            // Infrastructure, cancellation and quarantine errors retain their
+            // identity so checkpoint retry/isolation handling remains intact.
+            if (!(error instanceof DocumentStageError)) throw error;
             // The inner single-page attempt cannot see earlier successes. Keep
             // those results in the partial manifest when a later page fails.
             if (storageKey) await this.storage.putJson(storageKey, {

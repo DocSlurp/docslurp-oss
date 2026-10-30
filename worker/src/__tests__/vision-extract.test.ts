@@ -346,4 +346,8 @@ it("keeps earlier capped-page results in the partial manifest when a later page 
   expect(putJson).toHaveBeenLastCalledWith("manifest.json", expect.objectContaining({
     partial: true, processedPages: 1, pagesDetail: [expect.objectContaining({ pageNumber: 1, text: "retained result" })],
   }));
+  const unavailable = Object.assign(new Error("storage unavailable"), { code: "STORAGE_READ_FAILED" });
+  vi.spyOn(rasters, "renderSelectedPages").mockRejectedValue(unavailable);
+  await expect(internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2, 3]))
+    .rejects.toBe(unavailable);
 });
