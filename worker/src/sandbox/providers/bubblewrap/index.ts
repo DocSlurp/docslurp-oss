@@ -132,6 +132,8 @@ export const bubblewrapProvider: ParserSandboxProvider<BubblewrapConfig> = {
                 DOCSLURP_PARSER_SANDBOX_SECCOMP: seccomp,
               },
               containment: "pid-namespace",
+              // parser-sandbox.sh runs bwrap behind stdio-relay.pl (it refuses to run without it).
+              stdioRelayed: true,
             }),
           cleanup,
         );

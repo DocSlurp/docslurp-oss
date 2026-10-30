@@ -57,6 +57,15 @@ if ! command -v bwrap >/dev/null 2>&1; then
   echo "[parser-sandbox] bubblewrap unavailable; refusing to run parser without isolation" >&2
   exit 70
 fi
+# The sandbox never gets the worker's stdio: stdio-relay.pl runs bwrap on pipes of its own and
+# copies the output, so a descriptor the parser parks somewhere (an SCM_RIGHTS garbage cycle the
+# kernel frees seconds later) holds only the relay's pipe, and the worker's pipes close when the
+# relay exits after bwrap. Without perl or the relay, refuse to run.
+STDIO_RELAY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/stdio-relay.pl"
+if ! command -v perl >/dev/null 2>&1 || [[ ! -f "${STDIO_RELAY}" ]]; then
+  echo "[parser-sandbox] stdio relay unavailable (perl or ${STDIO_RELAY}); refusing to run parser" >&2
+  exit 70
+fi
 
 bwrap_args=(
   --die-with-parent
@@ -123,11 +132,11 @@ for raw_path in "${writable_paths[@]}"; do
   bwrap_args+=(--bind "${writable_path}" "${writable_path}")
 done
 
-# bwrap runs in the background so a TERM or INT to this launcher reaches it at once: bash defers
-# traps while a foreground child runs, which left the parser running after the worker signalled us.
-# bwrap exits on TERM; --die-with-parent and the PID namespace then take the whole parser tree with
-# it. Async jobs ignore SIGINT in a non-interactive shell, so both signals forward as TERM. The EXIT
-# trap still removes the instance directory, after bwrap has exited.
+# The relay (with bwrap under it) runs in the background so a TERM or INT to this launcher reaches
+# bwrap at once: bash defers traps while a foreground child runs, which left the parser running
+# after the worker signalled us. bwrap exits on TERM; --die-with-parent and the PID namespace then
+# take the whole parser tree with it. Async jobs ignore SIGINT in a non-interactive shell, so both
+# signals forward as TERM. The EXIT trap still removes the instance directory, after bwrap exited.
 # A seccomp filter the worker wrote (sandbox/seccomp.ts: io_uring denied, and for socketless tools
 # socket/socketpair(AF_UNIX) too). The worker's bubblewrap provider passes one for every command. It
 # is opened here, outside the sandbox, and bwrap installs it for the parser.
@@ -144,23 +153,25 @@ if [[ -n "${SECCOMP_FILE}" ]]; then
   bwrap_args+=(--seccomp 9)
 fi
 
-bwrap "${bwrap_args[@]}" -- "$@" &
-bwrap_pid=$!
+# The relay forwards TERM (and INT, HUP) to bwrap and exits with bwrap's status.
+perl -- "${STDIO_RELAY}" bwrap "${bwrap_args[@]}" -- "$@" &
+relay_pid=$!
 # bwrap has read the filter (or will from its own copy of fd 9); the launcher needs no copy.
 if [[ -n "${SECCOMP_FILE}" ]]; then exec 9<&-; fi
 forward_term() {
-  kill -TERM "${bwrap_pid}" 2>/dev/null || true
+  kill -TERM "${relay_pid}" 2>/dev/null || true
 }
 trap forward_term INT TERM
 status=0
-# wait returns early (status > 128) when a trapped signal arrives; keep waiting until bwrap is gone.
-# Stop on 127 (bwrap was already reaped; keep the status we had) and on any status <= 128, which is
-# bwrap's own exit status: kill -0 alone could spin if its pid were reused.
+# wait returns early (status > 128) when a trapped signal arrives; keep waiting until the relay
+# (and so bwrap) is gone. Stop on 127 (the relay was already reaped; keep the status we had) and on
+# any status <= 128, which is the relay's own exit status (bwrap's): kill -0 alone could spin if
+# its pid were reused.
 while :; do
-  wait "${bwrap_pid}" && waited=0 || waited=$?
+  wait "${relay_pid}" && waited=0 || waited=$?
   if (( waited == 127 )); then break; fi
   status=${waited}
   if (( waited <= 128 )); then break; fi
-  kill -0 "${bwrap_pid}" 2>/dev/null || break
+  kill -0 "${relay_pid}" 2>/dev/null || break
 done
 exit "${status}"

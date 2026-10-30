@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { readSandboxConfig } from "../../config-schema.js";
 import { spawnOwned, startSandboxScratchSweeper } from "../../scratch-sweep.js";
-import { probePidNamespace, spawnContained } from "../../teardown.js";
+import { probePidNamespace, spawnContained, stdioRelay } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
   SandboxCommand,
@@ -175,6 +175,12 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
     if (result.status === 0) {
       // Without a PID namespace a parser's descendants could outlive it: fail closed.
       if (!isolation.processes) return { ok: false, isolation, detail: `${probePidNamespace().detail} (kernel ${kernel})` };
+      // Every command runs behind the stdio relay; without perl or the script, refuse to start.
+      try {
+        stdioRelay();
+      } catch (error) {
+        return { ok: false, isolation, detail: (error as Error).message };
+      }
       return { ok: true, isolation, detail: `landrun available (kernel ${kernel})` };
     }
     const reason =
@@ -200,17 +206,20 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
           env: { ...command.env, ...scratch.env },
           writablePaths: [...command.writablePaths, scratch.dir],
         };
-        // A minimal init is the namespace's PID 1, so the parser landrun execs gets default
-        // SIGTERM and SIGPIPE handling. Scratch is removed only once every process of the command
-        // is gone; a poisoned command keeps it for the sweep.
+        // The stdio relay is the namespace's PID 1 (outside the Landlock domain, which cannot
+        // ptrace out of it): it forwards TERM, reaps orphans, gives landrun pipes of its own, and on
+        // exit kills what the command left before closing ours. The parser landrun execs keeps
+        // default SIGTERM and SIGPIPE handling. Scratch is removed only once every process of the
+        // command is gone; a poisoned command keeps it for the sweep.
+        const [relay, ...relayArgs] = stdioRelay();
         return spawnOwned(
           scratch.dir,
           () =>
-            spawnContained(config.binary, landrunArgs(sandboxed), {
+            spawnContained(relay!, [...relayArgs, config.binary, ...landrunArgs(sandboxed)], {
               env: sandboxed.env,
               cwd: scratch.cwd,
               containment: "pid-namespace",
-              init: true,
+              stdioRelayed: true,
             }),
           cleanup,
         );

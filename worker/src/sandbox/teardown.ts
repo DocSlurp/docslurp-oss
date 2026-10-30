@@ -1,6 +1,9 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import type { Readable } from "node:stream";
+
+import { resolveScriptsDir } from "../tools/scripts-dir.js";
 
 import { sandboxScopeStorage, type SandboxSessionScope } from "./session-context.js";
 
@@ -40,6 +43,8 @@ const PROBE_TIMEOUT_MS = 10_000;
 
 interface ContainedState {
   containment: Containment;
+  /** The command runs behind stdio-relay.pl: it never held our pipes, only the relay's. */
+  stdioRelayed: boolean;
   afterTeardown: Array<() => void>;
 }
 
@@ -82,6 +87,25 @@ const INIT_SCRIPT =
   'trap \'kill -TERM "$child" 2>/dev/null\' TERM INT HUP; "$@" & child=$!; ' +
   'while :; do wait "$child"; status=$?; kill -0 "$child" 2>/dev/null || exit "$status"; done';
 
+const PERL_CANDIDATES = ["/usr/bin/perl", "/bin/perl"];
+
+/**
+ * `perl stdio-relay.pl` (worker/scripts): runs a command on pipes of its own and copies its output
+ * to ours, so a sandboxed process never holds the worker's stdio. Once the command's direct child
+ * has exited (and, as a namespace init, after killing what it left), the relay reads what is
+ * buffered until a read would block and exits; a descriptor the sandbox parked somewhere (an
+ * SCM_RIGHTS garbage cycle the kernel frees seconds later) then holds only the relay's pipe.
+ * Throws when perl or the script is missing: a sandboxed command never runs without it.
+ */
+export function stdioRelay(): string[] {
+  const perl = PERL_CANDIDATES.find((candidate) => existsSync(candidate));
+  const script = path.join(resolveScriptsDir(), "stdio-relay.pl");
+  if (!perl || !existsSync(script)) {
+    throw new Error(`stdio relay unavailable (${perl ? script : "perl is not installed"}); refusing to run a sandboxed command without it`);
+  }
+  return [perl, "--", script];
+}
+
 export function namespaceInit(): string[] {
   const tini = TINI_CANDIDATES.find((candidate) => existsSync(candidate));
   return tini ? [tini, "--"] : ["/bin/sh", "-c", INIT_SCRIPT, "docslurp-init"];
@@ -97,7 +121,7 @@ export function namespaceInit(): string[] {
 export function spawnContained(
   binary: string,
   args: string[],
-  options: { env: NodeJS.ProcessEnv; cwd?: string; containment: Containment; init?: boolean },
+  options: { env: NodeJS.ProcessEnv; cwd?: string; containment: Containment; init?: boolean; stdioRelayed?: boolean },
 ): ChildProcess {
   let file = binary;
   let argv = args;
@@ -113,7 +137,7 @@ export function spawnContained(
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
-  containedChildren.set(child, { containment: options.containment, afterTeardown: [] });
+  containedChildren.set(child, { containment: options.containment, stdioRelayed: options.stdioRelayed ?? false, afterTeardown: [] });
   return child;
 }
 
@@ -484,9 +508,13 @@ export function superviseChild(
       true,
     );
 
-  const stdioHolder = namespaced
-    ? "a process outside the namespace (for example one a host service started for the command) holds it"
-    : "a descendant left the process group";
+  // Behind the relay the command never had our pipes: only the relay (ours) or a process a host
+  // service started outside the namespace can hold them, so the command is not to blame.
+  const stdioHolder = state.stdioRelayed
+    ? "the stdio relay or a process outside the namespace holds it; the command never had these pipes"
+    : namespaced
+      ? "a process outside the namespace (for example one a host service started for the command) holds it"
+      : "a descendant left the process group";
   const stdioStreams = () => [child.stdout, child.stderr].filter((stream): stream is Readable => !!stream && !stream.destroyed);
   const bytesRead = () => stdioStreams().reduce((sum, stream) => sum + ((stream as { bytesRead?: number }).bytesRead ?? 0), 0);
   /** Our side waits on the writer: nothing buffered and not paused (by backpressure or otherwise). */
@@ -529,12 +557,13 @@ export function superviseChild(
         if (stdioClosed || settled) return;
         if (!capped && (bytesRead() !== lastBytes || !waitingOnWriter())) return;
         // Every process of the command is confirmed gone (verifyAfterExit), and our side is waiting:
-        // a descriptor the command handed out holds its stdio. That is the command's doing.
+        // a descriptor the command handed out holds its stdio. That is the command's doing, unless
+        // the command ran behind the relay and never had these pipes.
         unverified(
           capped
             ? `stdio kept us waiting ${capMs} ms after the command's processes exited (${stdioHolder}, still writing)`
             : `stdio is still held open after the command's processes exited (${stdioHolder})`,
-          true,
+          !state.stdioRelayed,
         );
       });
     }, STDIO_TICK_MS);
