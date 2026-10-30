@@ -38,6 +38,21 @@ class ReportTests(unittest.TestCase):
                 inventory['selectedFamilies']=families.copy();inventory['policyHash']='other-policy'
                 with self.assertRaisesRegex(RuntimeError,'heldout-policy-binding'):validated_heldout(root,root)
 
+    def test_split_report_compares_layout_work_and_separates_spatial_capture(self):
+        from optimize import split_report
+        chunk=dict(bytes=110,splitSeconds=.2,extractSeconds=2,accountingSeconds=.1,nativeTokensEqual=True)
+        case=dict(pdfBytes=100,nativeSeconds=10,nativeLayoutSeconds=1,nativeBboxSeconds=9,
+                  splits={'1':dict(chunk),'4':dict(chunk)})
+        report=split_report([case])['1']
+        self.assertEqual(report['originalExtractSeconds'],1)
+        self.assertGreater(report['extractSeconds'],report['originalExtractSeconds'])
+        self.assertEqual(report['originalSpatialCaptureSeconds'],9)
+        self.assertEqual(report['timingBasis'],'pdftotext-layout-only')
+        self.assertEqual(report['accountingSeconds'],.1)
+        del case['nativeLayoutSeconds']
+        with self.assertRaisesRegex(RuntimeError,'missing-layout-only-timing'):
+            split_report([case])
+
     def test_paired_timing_and_modified_sample_rejection(self):
         with tempfile.TemporaryDirectory(prefix='mixed-report-test-',dir=os.environ.get('TMPDIR','/home/dan/tmp/agents')) as tmp:
             root=Path(tmp);schedule=[]

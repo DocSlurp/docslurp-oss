@@ -1,0 +1,8 @@
+Pillow==13.0.0
+PyMuPDF==1.27.1
+fonttools==4.67.0
+jsonschema==4.26.0
+matplotlib==3.11.2
+numpy==2.5.4
+pikepdf==10.17.0
+reportlab==5.1.0

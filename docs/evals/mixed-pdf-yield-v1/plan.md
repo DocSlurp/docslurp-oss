@@ -17,7 +17,16 @@ Limitations: synthetic English templates, no handwriting or multilingual evidenc
 
 Native: Poppler `pdftotext -layout`. Cheap: Tesseract English at 150 DPI/PSM 6. Stronger local comparator: Tesseract at 300 DPI/PSM 3; this is a configuration name, not a claim that it always wins. Both OCR settings record confidence, raw text, wall time, rasterization time and cache reuse. No hosted model calls or uploads are planned in this local phase; hosted dollar savings cannot be inferred as measured outcomes.
 
-`mixed-page-preservation@v2` measures visible token precision/recall, minimum section recall, atomic and ordered numeric recall, authored numeric-statement preservation and contextual value/operator/grouping recall, complete ordered table-row recall and hidden-text leakage. The minimum content dimension is the main diagnostic score. Acceptance: precision/recall at least .95, every section at least .90, numeric/contextual-value/row recall at least .95, global token-order similarity at least .90, no excluded hidden text. Non-applicable numeric/table dimensions are null and excluded from gates. Exact references plus deletion, cell-swap, padding, whitespace and hidden-text mutations validate the deterministic scorer before tuning. The local Mastra scorer executes this same scoring function.
+`mixed-page-text-preservation@v4` measures visible token precision/recall, minimum section recall, atomic and ordered numeric recall, authored numeric-statement preservation and contextual value/operator/grouping recall, complete ordered table-row recall and hidden-text leakage. The minimum content dimension is the main diagnostic score. Acceptance: precision/recall at least .95, every section at least .90, numeric/contextual-value/row recall at least .95, global token-order similarity at least .90, no excluded hidden text. Non-applicable numeric/table dimensions are null and excluded from gates. Exact references plus deletion, cell-swap, padding, whitespace and hidden-text mutations validate the deterministic scorer before tuning. The local Mastra scorer executes this same scoring function.
+
+V4 references additionally retain literal printed formulas separately from their
+typed semantics and LaTeX diagnostics. Every printed formula and its required
+occurrence count must survive normalized token matching; a local operator/grouping
+error cannot be diluted by a long page. This is literal preservation for the local
+plain-text extractors. Mathematical equivalence across arbitrary rewritten notation
+remains a separate preservation diagnostic. A v4 format adapter preserves ordered
+visible text, merged-cell origins, typed cells/formulas and authored exclusions;
+projection never substitutes for independent corpus acceptance.
 
 Latest located reusable preservation scorers: `tolerant-markdown@v1`, `tolerant-table@v3`, and `markdown-math-preservation@v2`, recovered from the archived repository and snapshotted with hashes externally. Table structure, wrapping and math diagnostics remain separate; this corpus currently has no typeset-math applicability labels. No LLM judge substitutes for authored source content.
 
@@ -68,3 +77,65 @@ An accepted local improvement additionally requires heldout mean quality ≥ .95
 - [QPDF page splitting](https://qpdf.readthedocs.io/en/stable/cli.html): split outputs differ in document-level data and shared-resource allocation.
 - [QPDF JSON object map](https://qpdf.readthedocs.io/en/11.8/json.html): page resources, stream dictionaries and indirect-object identities can support accounting, but do not imply readable text quantity.
 - [Mastra scorers](https://mastra.ai/reference/evals/create-scorer): local function-based scoring through the installed Mastra package.
+
+
+Formula-bearing pages currently produce textual diagnostics only. Unique string
+alignment cannot establish that a relation remains in its operative source region
+rather than a quotation. `acceptanceEvidenceComplete=false` and
+`blockingEvidence=["formula-region-grounding"]` make these pages unaccepted; the
+optimizer refuses panels with incomplete evidence. Missing grounding is not a
+zero labeled-value score: `quality` and `textualAcceptable` retain the diagnostic
+result. Region-grounded extraction evidence is a required next capability before
+these pages can support accepted thresholds or savings. Earlier v3 textual scores
+do not establish formula ownership and are not promotion evidence.
+
+Coordinate preparation now retains raw Poppler XHTML and Tesseract TSV alongside
+word boxes, PDF rotation/crop/media/display metadata and source hashes. Native
+capture costs a second Poppler invocation, included in native and paired timing
+work. OCR already requests TSV; parsing is included. Raw coordinates are retained;
+a bounded zero-origin MediaBox/CropBox contract projects supported native and
+raster coordinates into display fractions. All projections remain unverified:
+independent controls exposed differing Poppler page-size and word-coordinate
+conventions on rotated pages. Final reference formula regions
+come from transformed visible glyph geometry. These fields prepare a grounded
+scorer; they do not yet make formula acceptance evidence complete.
+
+An exploratory diagnostic compares literal, case-sensitive expression tokens only
+within the declared final region. A word must have its center inside and at least
+half its area overlapping that region. Display-clipped words and words intersecting
+competing regions remain uncredited. Independent original
+controls cover intact/corrupt expressions with a correct quotation elsewhere,
+four native rotations and local OCR. These controls do not certify visibility,
+complete reference declarations or coordinate provenance. Diagnostic matches do
+not change acceptance or permit policy optimization.
+
+## Artifact quality before expansion
+
+The user's quality correction requires a document-centered review before expanding
+the E corpus. Each family needs a clear purpose and audience, coherent development
+across pages, varied original prose, plausible quantities and units, meaningful
+variable definitions, and formulas actually used in the analysis. Tables, figures
+and discussed screenshot insets must support the claims. Sentence-pool substitution
+and semantically empty technical decoration are substantive build misses even when
+geometry and schema checks pass. Arbitrary identifier controls remain regression
+evidence and are excluded from candidate-quality demonstrations.
+
+Within the existing four-round cap, the next fresh Builder must first provide a
+small representative native document preview for editorial and visual inspection.
+This stage consumes formal build work; it does not create unlimited free preview
+rounds, weaken the final full-document checks, or authorize corpus expansion.
+
+## Render real tables
+
+The user's later presentation instruction supersedes inherited printed pipe
+separators. Newly generated corpus pages must use real tabular layout: native
+editable Writer cells/spans and ReportLab table cells, consistent padding,
+aligned numeric columns, meaningful unit-bearing headers and restrained vector
+rules. Markdown pipes and separator rows belong only in reference serialization;
+they must never be appended to visible cell text or treated as expected ink.
+
+Freeze revised physical cell literals, geometry and glyph inventories before
+export. Keep logical Markdown/reference formatting separate from physical content
+counts. Record intentional presentation changes explicitly. Historical fidelity
+acceptance does not establish compliance with this newer requirement; regenerated
+baseline and enriched variants need their actual revised table renders reviewed.

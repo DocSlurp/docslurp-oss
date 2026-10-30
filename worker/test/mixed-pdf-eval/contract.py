@@ -56,6 +56,7 @@ def evaluation_identity(root,scorers,measure_path,ocr_binary_hash,ocr_language_h
         versions[command]=(r.stdout+r.stderr).decode().splitlines()[0]
     return {'datasetHash':file_hash(root/'manifest.json'),'datasetCanonicalHash':identity_hash(json.loads((root/'manifest.json').read_text())),'measureHash':file_hash(measure_path),
             'contractHash':file_hash(Path(__file__)),
+            'spatialCaptureHash':file_hash(Path(measure_path).with_name('spatial_evidence.py')),
             'scorerHashes':{p.name:file_hash(p) for p in sorted(Path(scorers).glob('*.py'))},
             'ocrBinaryHash':ocr_binary_hash,'ocrLanguageHash':ocr_language_hash,'pymupdf':render_version,
             'python':sys.version,'toolVersions':versions,'toolHashes':{tool:file_hash(shutil.which(tool)) for tool in versions},

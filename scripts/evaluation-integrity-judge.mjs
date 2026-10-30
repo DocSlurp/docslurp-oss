@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { judgeIntegrityV2 } from './evaluation-integrity-v2.mjs';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const within = (root, path) => { const rel = relative(root, path); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); };
@@ -50,7 +51,13 @@ function executableCallOffsets(file, text) {
   return offsets;
 }
 
-export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
+export function judgeIntegrity(options) {
+  if (options.version === 'v2') return judgeIntegrityV2(options);
+  if (options.version !== undefined && options.version !== 'v1') return { schema: 'docslurp-evaluation-integrity@unsupported', passed: false, findings: [{ rule: 'unsupported-judge-version' }] };
+  return judgeIntegrityV1(options);
+}
+
+function judgeIntegrityV1({ dataset, repo = process.cwd(), base = 'HEAD' }) {
   const findings = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
   const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, productionHash: null, gitHead: null, base, scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings };
@@ -197,7 +204,7 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
 export function main(argv = process.argv.slice(2)) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
-    if (!['--dataset', '--repo', '--base', '--output'].includes(argv[i]) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>]');
+    if (!['--dataset', '--repo', '--base', '--output', '--version'].includes(argv[i]) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>] [--version v1|v2]');
     options[argv[i].slice(2)] = argv[i + 1];
   }
   if (!options.dataset) throw new Error('--dataset is required');

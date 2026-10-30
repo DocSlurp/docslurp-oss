@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Local immutable handoff copies remain in external dataset storage.
+clean-inputs/

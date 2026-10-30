@@ -13,15 +13,15 @@ class ScorerTests(unittest.TestCase):
         self.text=self.ref["expectedMarkdown"]
     def score(self,text): return content_score(self.ref,text,tolerant_markdown)
     def test_exact_and_whitespace(self):
-        self.assertTrue(self.score(self.text)["acceptable"])
-        self.assertTrue(self.score(self.text.replace("\n","  "))["acceptable"])
+        self.assertTrue(self.score(self.text)["textualAcceptable"])
+        self.assertTrue(self.score(self.text.replace("\n","  "))["textualAcceptable"])
     def test_omitted_inset(self):
-        self.assertFalse(self.score(self.text.replace(self.ref["sections"][3],""))["acceptable"])
+        self.assertFalse(self.score(self.text.replace(self.ref["sections"][3],""))["textualAcceptable"])
     def test_nonapplicable_dimensions(self):
         for text in ['Only prose without numbers.', '']:
             ref={'expectedMarkdown':text,'sections':[text],'paragraphs':[text],'tables':[],'formulas':[],'excludedText':[]}
             result=content_score(ref,text,tolerant_markdown)
-            self.assertTrue(result['acceptable']);self.assertEqual(result['quality'],1)
+            self.assertTrue(result['textualAcceptable']);self.assertEqual(result['quality'],1)
             self.assertIsNone(result['tableRowRecall']);self.assertIsNone(result['numericRecall'])
     def test_numeric_error_affects_primary_quality(self):
         text='alpha '*100+'123'
@@ -31,7 +31,7 @@ class ScorerTests(unittest.TestCase):
         for expected,actual in [('alpha '*100+'dose 12 interval 34','alpha '*100+'dose 34 interval 12'),('Result: a + b = c.','Result: a - b = c.')]:
             ref={'expectedMarkdown':expected,'sections':[expected],'paragraphs':[expected],'tables':[],'formulas':[],'excludedText':[]}
             score=content_score(ref,actual,tolerant_markdown)
-            self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
+            self.assertFalse(score['textualAcceptable']);self.assertLess(score['quality'],.95)
     def test_repeated_field_context_and_formula_grouping(self):
         prefix='padding '*300
         text=prefix+'Account Alpha has a reported balance of 12 dollars at close. Account Beta has a reported balance of 34 dollars at close.'
@@ -39,25 +39,218 @@ class ScorerTests(unittest.TestCase):
         for expected,extracted in [(text,actual),('Result: (a + b) * c = d.','Result: a + b * c = d.')]:
             ref={'expectedMarkdown':expected,'sections':[expected],'paragraphs':[expected],'tables':[],'formulas':[],'excludedText':[]}
             score=content_score(ref,extracted,tolerant_markdown)
-            self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
+            self.assertFalse(score['textualAcceptable']);self.assertLess(score['quality'],.95)
     def test_empty(self):
         self.assertEqual(self.score("")["quality"],0)
+    def test_formula_extensions_and_overlapping_occurrences(self):
+        prefix='The valve has a pressure of 12 units. '*60
+        short='q = a / b';long=short+' + c'
+        ref={'expectedMarkdown':prefix+short,'sections':[prefix+short],
+             'paragraphs':[prefix+short],'tables':[],'formulas':[],
+             'printedFormulas':[short],'excludedText':[]}
+        for changed in [long, 'x + '+short]:
+            self.assertFalse(content_score(ref,prefix+changed,tolerant_markdown)['textualAcceptable'])
+        ref['expectedMarkdown']=prefix+short+'\n'+long;ref['printedFormulas']=[short,long]
+        self.assertFalse(content_score(ref,prefix+long,tolerant_markdown)['textualAcceptable'])
+    def test_prose_mentions_cannot_repair_corrupt_declared_formula(self):
+        formula='q = a / b'
+        prose='padding '*300+'The implementation evaluates q = a / b + c as an alternative.'
+        text=prose+'\n\n'+formula
+        ref=dict(expectedMarkdown=text,sections=[prose,formula],paragraphs=[prose,formula],
+                 tables=[],formulas=[],printedFormulas=[formula],excludedText=[],
+                 printedFormulaOccurrences=[dict(start=len(prose)+2,end=len(text),text=formula)])
+        self.assertTrue(content_score(ref,text,tolerant_markdown)['textualAcceptable'])
+        bad=content_score(ref,prose+'\n\nq = A / b',tolerant_markdown)
+        self.assertFalse(bad['textualAcceptable']);self.assertEqual(bad['printedFormulaRecall'],.5)
+
+    def test_repeated_prose_copy_cannot_repair_deleted_formula_block(self):
+        from v4_reference import page_reference
+        pad='The valve has a pressure of 12 units. '*60
+        formula='q = a / b';following='End of rule. Continue discussion.'
+        prose=formula+'\n\n'+following+' This is an explanatory repetition.'
+        sections=[pad,formula,following,prose]
+        blocks=[dict(id=str(i),visible=True,displayText=text,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,text in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(4)],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['textualAcceptable'])
+        bad=content_score(ref,'\n\n'.join([pad,prose]),tolerant_markdown)
+        self.assertFalse(bad['textualAcceptable']);self.assertEqual(bad['printedFormulaRecall'],.5)
+        self.assertFalse(content_score(ref,ref['expectedMarkdown'].replace(formula,'q = A / b'),tolerant_markdown)['textualAcceptable'])
+
+    def test_compensating_duplicates_do_not_repair_deleted_formula(self):
+        from v4_reference import page_reference
+        pad='The valve has a pressure of 12 units. '*60
+        formula='q = a / b';following='End of rule. Continue discussion.'
+        prose=formula+'\n\n'+following+' This is an explanatory repetition.'
+        sections=[pad,formula,following,prose]
+        blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,value in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(4)],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        for tail in [formula,'An alternative is '+formula+' + c.']:
+            score=content_score(ref,'\n\n'.join([pad,prose,tail]),tolerant_markdown)
+            self.assertFalse(score['textualAcceptable']);self.assertLess(score['printedFormulaRecall'],1)
+        for text in [ref['expectedMarkdown'],ref['expectedMarkdown'].replace(following,'### '+following,1)]:
+            self.assertTrue(content_score(ref,text,tolerant_markdown)['textualAcceptable'])
+
+    def test_text_diagnostics_do_not_authorize_formula_ownership_claims(self):
+        from v4_reference import page_reference
+        from optimize import require_quality_evidence
+        formula='q = a / b'
+        sections=['Ordinary narrative padding. '*100,'For this rule '+formula+' End of rule.']
+        blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,value in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=['0','1'],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        attack=sections[0]+'\n\nFOR THIS RULE Q = a / b End of rule. A note quotes: For this rule '+formula+' End of rule.'
+        for output in [ref['expectedMarkdown'],attack]:
+            result=content_score(ref,output,tolerant_markdown)
+            self.assertFalse(result['acceptable'])
+            self.assertFalse(result['acceptanceEvidenceComplete'])
+            self.assertEqual(result['blockingEvidence'],['formula-region-grounding'])
+            with self.assertRaisesRegex(RuntimeError,'incomplete-quality-evidence'):
+                require_quality_evidence(dict(pages=[dict(candidates=dict(native=dict(score=result)))]))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['textualAcceptable'])
+
+    def test_heading_offsets_come_from_complete_source_mapping(self):
+        formula='q = a / b';text='### Heading # '+formula+' tail'
+        start=text.index(formula)
+        ref=dict(expectedMarkdown=text,sections=[text],paragraphs=[text],tables=[],formulas=[],
+                 printedFormulas=[formula],excludedText=[],
+                 printedFormulaOccurrences=[dict(start=start,end=start+len(formula),text=formula)])
+        result=content_score(ref,text,tolerant_markdown)
+        self.assertEqual(result['printedFormulaRecall'],1)
+        self.assertTrue(result['textualAcceptable'])
+
+    def test_forced_alignment_matches_exhaustive_tiny_controls(self):
+        from functools import lru_cache
+        from itertools import product
+        from measure import forced_token_matches
+        sequences=[list(p) for length in range(4) for p in product('ab',repeat=length)]
+        for gold in sequences:
+            for actual in sequences:
+                @lru_cache(None)
+                def align(i,j):
+                    if i==len(gold) or j==len(actual):return frozenset([()])
+                    paths=set(align(i+1,j))|set(align(i,j+1))
+                    if gold[i]==actual[j]:paths.update(((i,j),)+tail for tail in align(i+1,j+1))
+                    best=max(map(len,paths))
+                    return frozenset(p for p in paths if len(p)==best)
+                paths=align(0,0)
+                common=set.intersection(*(set(p) for p in paths))
+                expected={i:j for i,j in common}
+                self.assertEqual(forced_token_matches(gold,actual,set(range(len(gold)))),expected)
+
+    def test_insertion_location_and_fabricated_context_cannot_repair_formula(self):
+        from v4_reference import page_reference
+        formula='q = a / b';pad='Harmless prose with no mathematical meaning. '*100
+        sections=[pad,'For this rule '+formula+' End of rule.',
+                  'A separate note. For this rule End of rule. Continue here.',
+                  'A prose repetition says '+formula+' for comparison.']
+        blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,value in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(4)],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['textualAcceptable'])
+        bad=list(sections);bad[1]=bad[1].replace(formula,'q = A / b')
+        bad[2]=bad[2].replace('For this rule End','For this rule '+formula+' End')
+        self.assertFalse(content_score(ref,'\n\n'.join(bad),tolerant_markdown)['textualAcceptable'])
+        bad=list(sections);bad[1]=bad[1].replace(formula,'q = A / b')
+        bad.append('An unrelated alternative quotes For this rule '+formula+' End of rule, but is not the operative relation.')
+        self.assertFalse(content_score(ref,'\n\n'.join(bad),tolerant_markdown)['textualAcceptable'])
+        header_sections=[pad,'Heading',formula,'Following prose.']
+        header_blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                           formula=dict(display=formula,latex='q=a/b') if i==2 else None)
+                       for i,value in enumerate(header_sections)]
+        header_ref=page_reference(dict(id='heading-control',sizePt=[612,792],blocks=header_blocks,
+            readingOrder=[str(i) for i in range(4)],sections=header_sections,paragraphs=header_sections,
+            expectedMarkdown='\n\n'.join(header_sections)))
+        for heading in ['### Heading','### Heading ###']:
+            output=header_ref['expectedMarkdown'].replace('Heading',heading)
+            self.assertTrue(content_score(header_ref,output,tolerant_markdown)['textualAcceptable'])
+
+    def test_recased_prose_cannot_mask_corrupt_formula_occurrence(self):
+        from v4_reference import page_reference
+        formula='q = a / b'
+        sections=['padding '*300,'For this Rule',formula,'End. Common detail belongs here.',
+                  'FOR THIS RULE q = a / b END. COMMON DETAIL BELONGS HERE.']
+        blocks=[dict(id=str(i),visible=True,displayText=text,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==2 else None)
+                for i,text in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(len(blocks))],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['textualAcceptable'])
+        bad='\n\n'.join([sections[0],'FOR THIS RULE','q = A / b',
+                         sections[3].upper(),'For this Rule q = a / b End. Common detail belongs here.'])
+        score=content_score(ref,bad,tolerant_markdown)
+        self.assertFalse(score['textualAcceptable']);self.assertLess(score['printedFormulaRecall'],1)
+        self.assertFalse(content_score(ref,bad+'\n\n'+formula,tolerant_markdown)['textualAcceptable'])
+
+    def test_case_sensitive_formulas_cannot_swap_identical_contexts(self):
+        first='q = a / b';second='q = A / b'
+        text='padding '*300+'Rule '+first+' end. Rule '+second+' end.'
+        ref=dict(expectedMarkdown=text,sections=[text],paragraphs=[text],tables=[],formulas=[],
+                 printedFormulas=[first,second],excludedText=[],printedFormulaOccurrences=[])
+        for literal in [first,second]:
+            start=text.index(literal)
+            ref['printedFormulaOccurrences'].append(dict(start=start,end=start+len(literal),text=literal))
+        self.assertTrue(content_score(ref,text,tolerant_markdown)['textualAcceptable'])
+        bad=text.replace(first,'TEMP').replace(second,first).replace('TEMP',second)
+        self.assertFalse(content_score(ref,bad,tolerant_markdown)['textualAcceptable'])
+
+    def test_math_case_and_line_leading_operators_survive_normalization(self):
+        for expected,wrong in [('q = a / b','q = A / b'),
+                               ('Rule: a\n* b = c','Rule: a\nb = c'),
+                               ('Rule: a\n- b = c','Rule: a\nb = c'),
+                               ('q = a ― b','q = a b'),('q = a²','q = a2'),
+                               ('q = a_1','q = a1')]:
+            prefix='padding '*400
+            ref={'expectedMarkdown':prefix+expected,'sections':[prefix+expected],
+                 'paragraphs':[prefix+expected],'tables':[],'formulas':[],
+                 'printedFormulas':[expected],'excludedText':[]}
+            good=content_score(ref,prefix+expected,tolerant_markdown)
+            self.assertTrue(good['textualAcceptable'])
+            bad=content_score(ref,prefix+wrong,tolerant_markdown)
+            self.assertFalse(bad['textualAcceptable']);self.assertEqual(bad['printedFormulaRecall'],0)
+    def test_formula_error_cannot_hide_in_long_prose(self):
+        formula='Result: (a + b) * c = d.'
+        text='padding '*400+formula
+        ref={'expectedMarkdown':text,'sections':[text],'paragraphs':[text],
+             'tables':[],'formulas':[],'printedFormulas':[formula],'excludedText':[]}
+        for changed in [formula.replace('+','-'),formula.replace('(','').replace(')','')]:
+            score=content_score(ref,text.replace(formula,changed),tolerant_markdown)
+            self.assertFalse(score['textualAcceptable']);self.assertEqual(score['quality'],0)
+        self.assertTrue(content_score(ref,text.replace(' * ','\n*\n'),tolerant_markdown)['textualAcceptable'])
+        ref['expectedMarkdown']=text+' '+formula;ref['printedFormulas'].append(formula)
+        score=content_score(ref,text,tolerant_markdown)
+        self.assertEqual(score['printedFormulaRecall'],.5)
+        self.assertFalse(score['textualAcceptable'])
     def test_swapped_table_cells(self):
         row=self.ref["tables"][0]["rows"][1]
         altered=self.text.replace(" | ".join(row)," | ".join([row[0],row[2],row[1],row[3]]))
-        self.assertFalse(self.score(altered)["acceptable"])
+        self.assertFalse(self.score(altered)["textualAcceptable"])
     def test_hidden_text_leak(self):
-        self.assertFalse(self.score(self.text+"\n"+self.ref["excludedText"][0])["acceptable"])
+        self.assertFalse(self.score(self.text+"\n"+self.ref["excludedText"][0])["textualAcceptable"])
         for decoy in [self.ref['excludedText'][0].lower(), self.ref['excludedText'][0].replace('-','-\n')]:
-            self.assertFalse(self.score(self.text+'\n'+decoy)['acceptable'])
+            self.assertFalse(self.score(self.text+'\n'+decoy)['textualAcceptable'])
     def test_reversed_prose_and_rows(self):
-        self.assertFalse(self.score(' '.join(reversed(self.text.split())))['acceptable'])
+        self.assertFalse(self.score(' '.join(reversed(self.text.split())))['textualAcceptable'])
         rows=self.ref['tables'][0]['rows']
         before='\n'.join(' | '.join(r) for r in rows)
         after='\n'.join(' | '.join(r) for r in [rows[0]]+list(reversed(rows[1:])))
-        self.assertFalse(self.score(self.text.replace(before,after))['acceptable'])
+        self.assertFalse(self.score(self.text.replace(before,after))['textualAcceptable'])
     def test_padding_does_not_repair_omission(self):
         text=self.text.replace(self.ref["sections"][3],"")+"\n"+self.ref["sections"][1]*4
-        self.assertFalse(self.score(text)["acceptable"])
+        self.assertFalse(self.score(text)["textualAcceptable"])
 
 if __name__ == "__main__": unittest.main()

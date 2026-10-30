@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from difflib import SequenceMatcher
 import hashlib
 import json
+import math
 import os
 import socket
 import uuid
@@ -24,11 +25,13 @@ import time
 import unicodedata
 
 import fitz
+from spatial_evidence import parse_poppler_bbox,parse_tesseract_tsv,normalize_word_evidence,formula_region_diagnostics
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
-VERSION = "mixed-page-preservation@v2"
+VERSION = "mixed-page-text-preservation@v4"
 MEASURE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+SPATIAL_HASH = hashlib.sha256(Path(__file__).with_name('spatial_evidence.py').read_bytes()).hexdigest()
 OCR_BINARY_HASH = hashlib.sha256(Path(shutil.which("tesseract")).read_bytes()).hexdigest()
 OCR_LANGUAGE_HASH = hashlib.sha256(Path(os.environ.get("TESSDATA_PREFIX","/usr/share/tessdata"),"eng.traineddata").read_bytes()).hexdigest()
 
@@ -39,7 +42,7 @@ def tokens(text):
     # Markdown table separators and list markers are envelopes, not printed operators.
     text='\n'.join(line for line in text.splitlines()
                    if not ('-' in line and set(line.strip())<=set('|:- \t') and line.count('-')>=3))
-    text=re.sub(r'(?m)^\s*[-*]\s+','',text)
+    text=re.sub(r'(?m)^[ \t]*[-*][ \t]+(?=\S)','',text)
     return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]", unicodedata.normalize("NFKC", text).casefold())
 
 def value_contexts(text):
@@ -48,7 +51,138 @@ def value_contexts(text):
     return Counter(tuple(sequence[max(0,i-2):i+3]) for i,t in enumerate(sequence)
                    if re.fullmatch(r'[-+]?\d+(?:\.\d+)?|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]',t))
 
+def formula_tokens(text):
+    """Keep mathematical case, subscripts and operators; never strip list syntax.
+
+    NFC preserves superscript/subscript distinctions that compatibility folding
+    would erase. Common minus glyph variants share an operator token.
+    """
+    text=unicodedata.normalize('NFC',text).translate(str.maketrans({'−':'-','–':'-','—':'-','―':'-'}))
+    return re.findall(r'\d+(?:\.\d+)?|[^\W\d_]+|[^\w\s]|_',text)
+
+def formula_page_tokens(text, patterns, with_mapping=False):
+    """Ignore heading envelopes outside matching printed expressions only.
+
+    List markers remain untouched: a line-leading minus or multiplication sign
+    may belong to the printed mathematics. Candidate expressions protect their
+    own tokens even when they resemble a heading.
+    """
+    raw=formula_tokens(text);protected=set()
+    for pattern in patterns:
+        n=len(pattern)
+        for i in range(len(raw)-n+1):
+            if tuple(raw[i:i+n])==pattern:protected.update(range(i,i+n))
+    ignored=set()
+    for match in re.finditer(r'(?m)^[ \t]{0,3}(#{1,6})[ \t]+([^\n]*)',text):
+        ranges=[(match.start(1),len(match.group(1)))]
+        closing=re.search(r'[ \t]+(#+)[ \t]*$',match.group(2))
+        if closing:ranges.append((match.start(2)+closing.start(1),len(closing.group(1))))
+        for position,length in ranges:
+            start=len(formula_tokens(text[:position]))
+            ignored.update(i for i in range(start,start+length) if i not in protected)
+    kept=[i for i in range(len(raw)) if i not in ignored]
+    values=[raw[i] for i in kept]
+    return (values,{raw_index:i for i,raw_index in enumerate(kept)}) if with_mapping else values
+
+
+def forced_token_matches(gold, actual, protected):
+    """Certify matches present in every maximum-length token alignment.
+
+    A chosen greedy alignment cannot certify ownership. Keep forward rows only
+    for protected gold tokens, then combine them with streaming reverse rows to
+    detect any optimal deletion or competing output position for each token.
+    """
+    from array import array
+    if gold==actual:return {i:i for i in protected}
+    width=len(actual);previous=array('I',[0])*(width+1);rows={}
+    for i,token in enumerate(gold):
+        if i in protected:rows[i]=previous
+        row=array('I',[0])*(width+1)
+        for j,other in enumerate(actual):
+            row[j+1]=previous[j]+1 if token==other else max(previous[j+1],row[j])
+        previous=row
+    optimum=previous[-1];after=array('I',[0])*(width+1);forced={}
+    for i in range(len(gold)-1,-1,-1):
+        if i in protected:
+            before=rows[i]
+            deletable=any(before[j]+after[j]==optimum for j in range(width+1))
+            candidates=[j for j in range(width) if gold[i]==actual[j]
+                        and before[j]+1+after[j+1]==optimum]
+            if not deletable and len(candidates)==1:forced[i]=candidates[0]
+        row=array('I',[0])*(width+1)
+        for j in range(width-1,-1,-1):
+            row[j]=after[j+1]+1 if gold[i]==actual[j] else max(after[j],row[j+1])
+        after=row
+    return forced
+
+
+def printed_formula_recall(reference,text):
+    """Measure textual formula mentions with reference-derived contexts.
+
+    Counts, order and forced token alignments are diagnostics only. A unique
+    alignment can still select a quotation after operative text changes; this
+    function does not establish semantic ownership or spatial preservation.
+    Formula-bearing pages need independent region grounding for acceptance.
+    """
+    expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
+    if not expected:return None
+    source=reference['expectedMarkdown']
+    gold,gold_mapping=formula_page_tokens(source,expected,with_mapping=True);actual=formula_page_tokens(text,expected)
+    def mentions(sequence):
+        return sorted((i,i+len(pattern),pattern) for pattern in expected
+                      for i in range(len(sequence)-len(pattern)+1)
+                      if tuple(sequence[i:i+len(pattern)])==pattern)
+    wanted=mentions(gold);received=mentions(actual)
+    declared=reference.get('printedFormulaOccurrences');spans=[]
+    if declared is not None:
+        seen=Counter()
+        for row in declared:
+            start,end=row['start'],row['end'];literal=row['text']
+            if type(start) is not int or type(end) is not int or not 0<=start<end<=len(source) or source[start:end]!=literal:
+                raise ValueError('invalid-printed-formula-occurrence')
+            pattern=tuple(formula_tokens(literal));raw_start=len(formula_tokens(source[:start]));i=gold_mapping.get(raw_start)
+            if i is None:raise ValueError('invalid-printed-formula-occurrence')
+            j=i+len(pattern)
+            if tuple(gold[i:j])!=pattern or any(i<v and u<j for u,v in spans):
+                raise ValueError('overlapping-or-invalid-formula-occurrence')
+            spans.append((i,j));seen[pattern]+=1
+        if seen!=expected:raise ValueError('incomplete-printed-formula-occurrences')
+    else:
+        for pattern,required in sorted(expected.items(),key=lambda item:-len(item[0])):
+            candidates=[(i,j) for i,j,p in wanted if p==pattern and not any(i<v and u<j for u,v in spans)]
+            if len(candidates)!=required:return 0.0
+            spans.extend(candidates)
+    counts=Counter(p for i,j,p in wanted);actual_counts=Counter(p for i,j,p in received)
+    if any(not counts[p] for p in expected):raise ValueError('missing-reference-formula')
+    if counts!=actual_counts:
+        return min(min(counts[p],actual_counts[p])/max(counts[p],actual_counts[p]) for p in expected)
+    if [p for i,j,p in wanted]!=[p for i,j,p in received]:return 0.0
+    def context(sequence,i,j,width):
+        return (tuple(sequence[max(0,i-width):i]),tuple(sequence[j:j+width]),i<width,j+width>len(sequence))
+    protected=set()
+    for i,j,_ in wanted:protected.update(range(max(0,i-3),min(len(gold),j+3)))
+    forced=forced_token_matches(gold,actual,protected)
+    matched=0
+    for (i,j,pattern),(x,y,_) in zip(wanted,received):
+        width=3
+        while True:
+            signature=context(gold,i,j,width)
+            competitors=[(u,v) for u,v,p in wanted if p==pattern and context(gold,u,v,width)==signature]
+            if len(competitors)==1:break
+            if width>=len(gold):raise ValueError('ambiguous-reference-formula-context')
+            width=min(len(gold),width*2)
+        candidates=[(u,v) for u,v,p in received if p==pattern and context(actual,u,v,width)==signature]
+        start=max(0,i-3);end=min(len(gold),j+3);mapped=forced.get(start)
+        certified=mapped is not None and all(forced.get(k)==mapped+k-start for k in range(start,end))
+        if candidates==[(x,y)] and certified:matched+=1
+    return matched/len(wanted)
+
 def content_score(reference, text, legacy):
+    """Text diagnostics; formula ownership needs independent region evidence.
+
+    Correct text remains visible in quality/textualAcceptable, while incomplete
+    ownership evidence cannot authorize accepted routing measurements.
+    """
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
     matched = sum((expected & actual).values())
     recall = matched/sum(expected.values()) if expected else 1.0
@@ -73,6 +207,9 @@ def content_score(reference, text, legacy):
                 for s in re.split(r'(?<=[.!?])\s+',paragraph) if numeric_sequence(s)]
     actual_stream=' '+' '.join(tokens(text))+' '
     statement_recall=sum((' '+' '.join(s)+' ') in actual_stream for s in statements)/len(statements) if statements else None
+    # Formula errors must not disappear into a long page's token average. These
+    # are literal printed references, separate from LaTeX diagnostic references.
+    formula_recall=printed_formula_recall(reference,text)
     wanted_contexts=value_contexts(reference['expectedMarkdown']);actual_contexts=value_contexts(text)
     contextual=sum((wanted_contexts&actual_contexts).values())/sum(wanted_contexts.values()) if wanted_contexts else None
     compact=lambda s:re.sub(r'[^\w]','',unicodedata.normalize('NFKC',s).casefold())
@@ -87,16 +224,23 @@ def content_score(reference, text, legacy):
         if found>=0:row_matches+=1;cursor=found+len(wanted)-1
     table_row_recall=row_matches/len(table_rows) if table_rows else None
     minimum_section=min(sections,default=1.0)
-    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,numeric_order,contextual,statement_recall] if v is not None]
+    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,numeric_order,contextual,statement_recall,formula_recall] if v is not None]
     ref = {"prose":reference["expectedMarkdown"], "paragraphs":reference["paragraphs"],
            "tables":reference["tables"], "formulas":reference["formulas"], "groundTruth":{"prosePresent":True,"kind":"authored"}}
     modern = legacy.compact(legacy.score(ref,text))
+    textual_acceptable=recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and (formula_recall is None or formula_recall==1) and ordered>=.9 and not excluded
+    evidence_complete=not bool(reference.get('printedFormulas') or reference.get('formulas'))
     return {"version":VERSION, "recall":recall,"precision":precision,
             "f1":2*recall*precision/max(1e-9,recall+precision),"sectionRecall":sections,
             "minimumSectionRecall":minimum_section,"numericRecall":numeric,"numericOrderRecall":numeric_order,"numericStatementRecall":statement_recall,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
             "tableRowRecall":table_row_recall,"orderedSimilarity":ordered,
+            "printedFormulaRecall":formula_recall,
             "quality": min(applicable),
-            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and ordered>=.9 and not excluded,
+            "qualityScope":"textual-preservation",
+            "textualAcceptable":textual_acceptable,
+            "acceptanceEvidenceComplete":evidence_complete,
+            "blockingEvidence":[] if evidence_complete else ["formula-region-grounding"],
+            "acceptable":textual_acceptable and evidence_complete,
             "modern":modern}
 
 def invoke(argv):
@@ -108,25 +252,100 @@ def invoke(argv):
         raise RuntimeError(f"command-failed:{argv[0]}:{completed.returncode}:{completed.stderr[-500:]!r}")
     return completed.stdout,elapsed
 
+def validate_ocr_record(record, identity):
+    """Reparse retained raw output before trusting derived cached evidence.
+
+    Hashes bind artifacts to the local frozen cache identity; they do not prove
+    visibility, or that TXT and TSV describe the same candidate expression.
+    """
+    if record.get('ocrIdentity')!=identity or record.get('imageHash')!=identity['imageHash']:
+        raise RuntimeError('ocr-cache-identity-mismatch')
+    for value,hash_field in [('text','textHash'),('rawWordTsv','rawWordTsvHash')]:
+        if not isinstance(record.get(value),str) or sha(record[value].encode())!=record.get(hash_field):
+            raise RuntimeError('ocr-cache-raw-hash-mismatch')
+    evidence=parse_tesseract_tsv(record['rawWordTsv'])
+    if evidence!=record.get('wordEvidence'):raise RuntimeError('ocr-cache-derived-words-mismatch')
+    words=evidence['words'];weight=sum(len(word['text']) for word in words)
+    confidence=sum(word['confidence']*len(word['text']) for word in words)/max(1,weight)
+    low_share=sum(word['confidence']<60 for word in words)/max(1,len(words))
+    if record.get('confidence')!=confidence or record.get('lowConfidenceWordShare')!=low_share:
+        raise RuntimeError('ocr-cache-derived-confidence-mismatch')
+    for field in ['seconds','evidenceParseSeconds']:
+        value=record.get(field)
+        if type(value) not in [int,float] or not math.isfinite(value) or value<0:
+            raise RuntimeError('ocr-cache-invalid-duration')
+    if record['evidenceParseSeconds']>record['seconds']:raise RuntimeError('ocr-cache-inconsistent-duration')
+    execution=record.get('execution')
+    if (not isinstance(execution,dict) or set(execution)!={'capturedAt','host','workers','attempt'}
+            or not isinstance(execution['host'],str) or not execution['host'].strip()
+            or (execution['workers'] is not None and (not isinstance(execution['workers'],str)
+                or not re.fullmatch(r'[1-9][0-9]*',execution['workers'])))
+            or (execution['attempt'] is not None and (not isinstance(execution['attempt'],str) or not execution['attempt'].strip()))):
+        raise RuntimeError('ocr-cache-invalid-execution')
+    try:
+        stamp=datetime.fromisoformat(execution['capturedAt'])
+        if stamp.utcoffset() is None:raise ValueError('missing-time-zone')
+    except (TypeError,ValueError):raise RuntimeError('ocr-cache-invalid-execution-time')
+
+
 def ocr(image, cache, dpi, psm, use_cache=True):
-    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-txt-tsv-v2".encode())
+    identity=dict(schema='mixed-ocr-raw-record@1',imageHash=sha(image),binaryHash=OCR_BINARY_HASH,
+                  languageHash=OCR_LANGUAGE_HASH,language='eng',measureHash=MEASURE_HASH,
+                  spatialHash=SPATIAL_HASH,dpi=dpi,psm=psm,formats=['txt','tsv'])
+    key=identity_hash(identity)
     output=cache/f"{key}.json"
     if use_cache and output.exists():
-        return {**json.loads(output.read_text()), "cacheHit":True}
+        started=time.perf_counter();record=json.loads(output.read_text())
+        validate_ocr_record(record,identity)
+        return {**record,"cacheHit":True,"cacheValidationSeconds":time.perf_counter()-started}
     # Atomic replace supports concurrent identical pages without corrupting the cache.
     with tempfile.TemporaryDirectory(prefix="mixed-ocr-",dir=os.environ["TMPDIR"]) as tmp:
         path=Path(tmp)/"page.png"; path.write_bytes(image)
         base=Path(tmp)/"output"
         _,elapsed=invoke(["tesseract",str(path),str(base),"-l","eng","--psm",str(psm),"--dpi",str(dpi),"txt","tsv"])
-        words=[r for r in csv.DictReader(base.with_suffix(".tsv").read_text().splitlines(),delimiter="\t") if float(r['conf'])>=0 and r['text'].strip()]
+        parse_started=time.perf_counter()
+        raw_tsv=base.with_suffix('.tsv').read_bytes().decode('utf-8')
+        evidence=parse_tesseract_tsv(raw_tsv)
+        words=evidence['words'];text=base.with_suffix('.txt').read_bytes().decode('utf-8')
         weight=sum(len(r['text']) for r in words)
-        confidence=sum(float(r['conf'])*len(r['text']) for r in words)/max(1,weight)
-        result={"text":base.with_suffix(".txt").read_text(),"seconds":elapsed,"confidence":confidence,
-                "lowConfidenceWordShare":sum(float(r['conf'])<60 for r in words)/max(1,len(words)),
+        confidence=sum(r['confidence']*len(r['text']) for r in words)/max(1,weight)
+        parse_seconds=time.perf_counter()-parse_started
+        result={"text":text,"textHash":sha(text.encode()),"ocrIdentity":identity,"seconds":elapsed+parse_seconds,"confidence":confidence,
+                "wordEvidence":evidence,"rawWordTsv":raw_tsv,"rawWordTsvHash":sha(raw_tsv.encode()),"evidenceParseSeconds":parse_seconds,
+                "lowConfidenceWordShare":sum(r['confidence']<60 for r in words)/max(1,len(words)),
                 "cacheHit":False,"imageHash":sha(image),"execution":{"capturedAt":datetime.now(timezone.utc).isoformat(),"host":socket.gethostname(),"workers":os.environ.get("MIXED_EVAL_WORKERS"),"attempt":os.environ.get("MIXED_EVAL_ATTEMPT")}}
         temp=cache/f"{key}.{os.getpid()}.new"
         temp.write_text(json.dumps(result)); temp.replace(output)
         return result
+
+def page_geometry(page):
+    return dict(rotationDegrees=page.rotation,displaySizePt=[page.rect.width,page.rect.height],
+                cropBoxPt=list(page.cropbox),mediaBoxPt=list(page.mediabox))
+
+
+def native_word_pages(doc,raw):
+    pages=parse_poppler_bbox(raw)
+    if len(pages)!=len(doc):raise RuntimeError('native-word-page-alignment-mismatch')
+    for index,page in enumerate(doc):
+        pages[index]['pdfGeometry']=page_geometry(page)
+        pages[index]['pageBox']='media'
+        pages[index]=normalize_word_evidence(pages[index])
+    return pages
+
+
+def ocr_page(page,cache,dpi,psm,use_cache=True):
+    render_started=time.perf_counter();pixmap=page.get_pixmap(dpi=dpi,alpha=False)
+    image=pixmap.tobytes('png');render_seconds=time.perf_counter()-render_started
+    result=ocr(image,cache,dpi,psm,use_cache=use_cache)
+    normalization_started=time.perf_counter()
+    result['wordEvidence']['pdfGeometry']=page_geometry(page)
+    result['wordEvidence']['renderSizePixels']=[pixmap.width,pixmap.height]
+    result['wordEvidence']['renderDpi']=dpi
+    result['wordEvidence']=normalize_word_evidence(result['wordEvidence'])
+    result['seconds']+=time.perf_counter()-normalization_started
+    result['renderSeconds']=render_seconds
+    return result
+
 
 def stream_bytes(doc, refs, raw):
     total=0
@@ -201,21 +420,22 @@ def measure_case(args):
     # Capture real per-document Poppler work too, including its startup cost.
     listing,list_seconds=invoke(["pdfimages","-list",str(source)])
     native,native_seconds=invoke(["pdftotext","-layout",str(source),"-"])
+    native_layout_seconds=native_seconds
     native_pages=native.decode().split("\f")
     if len(native_pages)==len(doc)+1 and not native_pages[-1].strip(): native_pages.pop()
     if len(native_pages)!=len(doc): raise RuntimeError("poppler-page-alignment-mismatch")
+    native_bbox,native_bbox_seconds=invoke(['pdftotext','-bbox-layout',str(source),'-'])
+    bbox_parse_started=time.perf_counter();native_evidence=native_word_pages(doc,native_bbox)
+    native_bbox_seconds+=time.perf_counter()-bbox_parse_started
+    if len(native_evidence)!=len(doc):raise RuntimeError('native-word-page-alignment-mismatch')
+    native_seconds+=native_bbox_seconds
     for index,page in enumerate(doc):
         started=time.perf_counter()
         feat=features(doc,page,native_pages[index])
         probe_seconds=time.perf_counter()-started
-        candidates={"native":{"text":native_pages[index],"seconds":native_seconds/len(doc),"cacheHit":False}}
+        candidates={"native":{"text":native_pages[index],"seconds":native_seconds/len(doc),"cacheHit":False,"wordEvidence":native_evidence[index]}}
         for name,dpi,psm in [("ocr-fast",150,6),("ocr-strong",300,3)]:
-            start=time.perf_counter()
-            image=page.get_pixmap(dpi=dpi,alpha=False).tobytes("png")
-            render_seconds=time.perf_counter()-start
-            result=ocr(image,out/"cache",dpi,psm)
-            result["renderSeconds"]=render_seconds
-            candidates[name]=result
+            candidates[name]=ocr_page(page,out/'cache',dpi,psm)
         outputs.append({"page":index+1,"features":feat,"probeSeconds":probe_seconds,"candidates":candidates})
     # Splitting experiments use exact object lengths and preserve shared-resource identities
     # within each output; no file-size/character conversion is assumed.
@@ -250,11 +470,14 @@ def measure_case(args):
     for page,reference in zip(outputs,labels["pages"]):
         for result in page["candidates"].values():
             result["score"]=content_score(reference,result["text"],tolerant_markdown)
+            if reference.get('formulaRegions') is not None:
+                result['formulaRegionDiagnostic']=formula_region_diagnostics(reference['formulaRegions'],result['wordEvidence'])
     result={"id":case["id"],"family":case["family"],"split":case["split"],"hardPercent":case["hardPercent"],
+            **{k:case[k] for k in ['classId','layout','producerPath'] if k in case},
             "measureHash":MEASURE_HASH,"caseIdentity":case_identity,
             "baseRegionRasterShare":case["baseRegionRasterShare"],"sourceHash":case["sha256"],
-            "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"imageListSeconds":list_seconds,
-            "pdfimages":listing.decode(),"splits":splits,"pages":outputs}
+            "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"nativeLayoutSeconds":native_layout_seconds,"nativeBboxSeconds":native_bbox_seconds,"imageListSeconds":list_seconds,
+            "pdfimages":listing.decode(),"nativeBboxXml":native_bbox.decode(),"nativeBboxHash":sha(native_bbox),"splits":splits,"pages":outputs}
     destination.write_text(json.dumps(result))
     return {"id":case["id"],"pages":len(outputs)}
 
