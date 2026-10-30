@@ -322,6 +322,9 @@ export const usageEvents = pgTable(
 export const documents = pgTable(
   "documents",
   {
+
+    materializationGeneration: integer("materialization_generation").default(0).notNull(),
+    sourceMaterializationBlocked: boolean("source_materialization_blocked").default(false).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     workspaceId: text("workspace_id").notNull(),

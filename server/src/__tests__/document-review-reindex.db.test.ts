@@ -40,6 +40,8 @@ describe("human-correction reindex", () => {
     expect(result).toMatchObject({ documentId: "d" });
     const rows = await sql<{ page_number: number; read_billed_run: string | null; read_text: string | null }[]>`
       select page_number, read_billed_run, read_text from document_page_states where document_id = 'd' order by page_number`;
+    const [document] = await sql`select materialization_generation, source_materialization_blocked from documents where id = 'd'`;
+    expect(document).toEqual({ materialization_generation: 1, source_materialization_blocked: true });
     expect(rows).toEqual([
       { page_number: 1, read_billed_run: "m1", read_text: null },
       { page_number: 2, read_billed_run: "m1", read_text: null },

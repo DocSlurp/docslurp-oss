@@ -316,6 +316,15 @@ export async function materializePageRange(
   const result: MaterializePagesResult = { indexed: [], blocked: [], failed: [], costCredits: 0 };
   const pages = normalizePageNumbers(input.pages, document.pageCount);
   if (pages.length === 0) return result;
+  const [sourceVersion] = await deps.sql<{ materialization_generation: number; source_materialization_blocked: boolean }[]>`
+    select materialization_generation, source_materialization_blocked from documents where id = ${documentId}
+  `;
+  if (!sourceVersion) throw new DocumentNotFoundError(documentId);
+  if (sourceVersion.source_materialization_blocked) {
+    await markPages(deps.sql, documentId, pages, "failed", { claimedBy: input.runId, failureReason: "source-content-invalidated" });
+    result.failed = pages.map(page => ({ page, reason: "source-content-invalidated" }));
+    return result;
+  }
 
   const failed = new Map<number, string>();
   const released: number[] = [];
@@ -561,10 +570,20 @@ export async function materializePageRange(
       const client = tx as unknown as Sql;
       // A document deleted meanwhile took its ledger rows with it: stop the range (the activity reports it), never
       // mistake the missing rows for a lost claim.
-      const [exists] = await client`select 1 as one from documents where id = ${documentId} for share`;
+      const [exists] = await client`select materialization_generation, source_materialization_blocked from documents where id = ${documentId} for share`;
       if (!exists) throw new DocumentNotFoundError(documentId);
       const locked = await lockPageRows(client as unknown as Sql<Record<string, unknown>>, documentId, rangePages);
       held = new Set(locked.filter((row) => row.claimed_by_run === claimedBy).map((row) => row.page_number));
+      if (exists.source_materialization_blocked || exists.materialization_generation !== sourceVersion.materialization_generation) {
+        // Hold the document lock through refusal: invalidation writers take the
+        // same lock before touching page content. No fresh or reused read may
+        // publish, retain text, or bill after its source generation is revoked.
+        await markPages(client, documentId, rangePages, "failed", { claimedBy, failureReason: "source-content-invalidated" });
+        for (const page of rangePages) failed.set(page, "source-content-invalidated");
+        batches.push(deps.usage.takeRichPageCharges(documentId, page => rangePages.includes(page)));
+        bodyDone = true;
+        return;
+      }
       // A retained read can be cleared during extraction/embedding. Revalidate
       // it under the same page lock used by invalidation, before any vectors or
       // searchable rows are written. Never resurrect the copied old content.

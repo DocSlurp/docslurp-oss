@@ -3285,6 +3285,10 @@ export class Store {
     );
 
     for (const row of rows) {
+      // Revoke source reads before external deletion. A failed purge retries
+      // cleanup, but cannot make content eligible for materialization again.
+      await this.sql`update documents set materialization_generation = materialization_generation + 1,
+        source_materialization_blocked = true where run_id = ${row.run_id}`;
       const keys = new Set<string>();
 
       for (const sourceKey of row.source_keys ?? []) {

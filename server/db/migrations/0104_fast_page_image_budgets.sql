@@ -72,3 +72,9 @@ ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queu
 --> statement-breakpoint
 ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
   CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows', 'upload_original'));
+
+--> statement-breakpoint
+-- Fence every in-flight source read when retention or human correction replaces content.
+ALTER TABLE documents ADD COLUMN materialization_generation integer NOT NULL DEFAULT 0;
+--> statement-breakpoint
+ALTER TABLE documents ADD COLUMN source_materialization_blocked boolean NOT NULL DEFAULT false;

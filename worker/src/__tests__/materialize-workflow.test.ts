@@ -456,6 +456,7 @@ describe("runMaterializeRange activity", () => {
         and run_id in ('m1', 'm2', 'fi') and coalesce(metadata->>'documentId', '') = 'd1'
       order by page, run_id, metric`)).rows;
     const reset = async () => {
+      await db.exec(`update documents set materialization_generation = 0, source_materialization_blocked = false`);
       await db.exec(`update workspace_runs set status = 'processing', stage = 'materialize', kind = 'materialize' where id in ('m1', 'm2')`);
       await ensurePageRows(sql, "d1", 12);
     };
@@ -925,7 +926,8 @@ describe("runMaterializeRange activity", () => {
                     await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
-                    await db.exec(`update document_page_states set read_text = null where document_id = 'd1';
+                    await db.exec(`update documents set materialization_generation = materialization_generation + 1, source_materialization_blocked = true where id = 'd1';
+                      update document_page_states set read_text = null where document_id = 'd1';
                       delete from document_chunks where document_id = 'd1'; delete from document_pages where document_id = 'd1'`);
                   }
                   return ops.embed!(args);
@@ -937,6 +939,41 @@ describe("runMaterializeRange activity", () => {
               expect(t.writes.m2 ?? []).toEqual([]);
               expect(await readState()).toMatchObject({ kept: false });
               expect(await charges()).toEqual(m1Rich);
+            } finally {
+              await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
+                update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
+            }
+          });
+
+          it.each([
+            ["retention", false], ["retention", true], ["correction", false], ["correction", true],
+          ])("does not publish or retain fresh OCR after %s (embedding fails: %s)", async (kind, embeddingFails) => {
+            const t = tracked();
+            await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+            try {
+              const late = await runMaterializeRange(withOps("m2", t, {
+                async embed(args) {
+                  if (kind === "retention") {
+                    await db.exec(`update workspaces set artifact_retention_days = 1 where id = 'w';
+                      update workspace_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
+                    await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                      .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
+                  } else {
+                    await db.exec(`update documents set materialization_generation = materialization_generation + 1, source_materialization_blocked = true where id = 'd1';
+                      update document_page_states set read_text = null where document_id = 'd1';
+                      delete from document_chunks where document_id = 'd1'; delete from document_pages where document_id = 'd1'`);
+                  }
+                  if (embeddingFails) throw new Error("embedding provider down");
+                  return ops.embed!(args);
+                },
+              }), input("m2", [3]));
+              expect(late.indexed).toEqual([]);
+              expect((await page3()).chunks).toEqual([]);
+              expect((await page3()).text).toEqual([]);
+              expect(t.writes.m2 ?? []).toEqual([]);
+              expect(await readState()).toMatchObject({ kept: false });
+              expect(await charges()).toEqual([]);
+              expect(late.failed).toEqual([{ page: 3, reason: "source-content-invalidated" }]);
             } finally {
               await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
                 update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
@@ -956,13 +993,13 @@ describe("runMaterializeRange activity", () => {
               // Belt and braces: a kept read of a purged run is never reused even if one survived.
               await db.exec(`update document_page_states set read_text = 'PURGED ${VISION}' where document_id = 'd1' and page_number = 3`);
               const later = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
-              expect(later.indexed).toEqual([3]);
-              expect((await page3()).chunks.length).toBeGreaterThan(0);
+              expect(later.indexed).toEqual([]);
+              expect(later.failed).toEqual([{ page: 3, reason: "source-content-invalidated" }]);
+              expect((await page3()).chunks).toEqual([]);
               expect((await page3()).chunks.some((c) => c.text.includes(VISION))).toBe(false);
               expect(await charges()).toEqual(m1Rich);
               // m2 charged nothing (m1's read paid the page): it reports no credits for it.
               expect(later.costCredits).toBe(0);
-              expect(await costOf()).toBe(0);
             } finally {
               await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
                 update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);

@@ -923,6 +923,10 @@ export async function reindexDocumentCorrection(args: {
       where document_id = ${args.docId}
     `;
 
+    // Human-corrected content supersedes source-derived materialization. Fence
+    // every in-flight reader under the document lock before replacing rows.
+    await transaction`update documents set materialization_generation = materialization_generation + 1,
+      source_materialization_blocked = true where id = ${args.docId}`;
     // The corrected pages replace the document's content: a kept model read must not republish the old text.
     await transaction`update document_page_states set read_text = null where document_id = ${args.docId} and read_text is not null`;
 
