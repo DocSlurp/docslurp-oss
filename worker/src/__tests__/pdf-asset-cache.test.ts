@@ -297,7 +297,8 @@ describe("PdfRasterCache", () => {
     await expect(cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 10 }, runId: "run-1", pageNumbers: [1, 2, 3, 4, 5, 6] }))
       .rejects.toThrow("pdftoppm crashed");
     expect(running).toBe(0);
-    expect(started).toEqual([1, 2]);
+    // Only the first two pages started (one per lane); under load either lane can start first.
+    expect([...started].sort((a, b) => a - b)).toEqual([1, 2]);
     await sourceCache.clear();
   });
 
