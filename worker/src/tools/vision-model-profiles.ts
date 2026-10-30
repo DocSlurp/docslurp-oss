@@ -8,6 +8,7 @@ import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/s
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
 import { insertMissingTableDelimiters } from "./vision-table-delimiter.js";
+import { normalizeVisionWhitespace } from "./vision-whitespace.js";
 
 /** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
 export const MARKDOWN_LATEX_VISION_PROMPT =
@@ -176,9 +177,13 @@ export function visionOutputCapForModel(model: string | undefined, shared: { val
   return shared.configured ? shared.value : profile.maxOutputTokens;
 }
 
-/** Post-process a hosted page transcription with the model's profile repair; other models are returned unchanged. */
+/**
+ * Post-process a page transcription from any vision/OCR model: the model's profile repair (if any), then the
+ * shared padding-whitespace collapse. Runs after the repair so a whole-page fence is unwrapped before the
+ * collapse skips fenced code.
+ */
 export function postProcessVisionText(model: string | undefined, text: string): string {
-  return visionModelProfile(model)?.postProcess?.(text) ?? text;
+  return normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text);
 }
 
 /** Request-body fragment with the reasoning control for `model`: the profile's, else the shared verified floor. */

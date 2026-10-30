@@ -620,7 +620,7 @@ export async function runVisionRequest(args: {
           runtime: args.runtime,
           model: args.model,
           prompt: args.prompt,
-          text: payload.text?.trim() || "",
+          text: postProcessVisionText(args.model, payload.text?.trim() || ""),
           raw: payload.raw ?? payload,
           latencyMs: payload.latencyMs ?? 0,
           inputTokens:
