@@ -1069,12 +1069,9 @@ export async function drainStorageCleanupQueue(
               row.target.endsWith("/") || row.target.includes("..")) {
             throw new Error("Refusing invalid original-upload cleanup target");
           }
-          // Resolve ownership from the sealed source, not from the cleanup payload's claim.
-          const [owner] = await client`select 1 from upload_session_files f
-            join upload_sessions s on s.id = f.session_id
-            where f.source_key = ${sealed} and s.org_id = ${row.org_id}
-            union all select 1 from documents where source_key = ${sealed} and org_id = ${row.org_id}
-            limit 1`;
+          // Independent durable ownership cannot be changed by a malformed cleanup queue row.
+          const [owner] = await client`select 1 from upload_cleanup_owners
+            where original_key = ${row.target} and sealed_key = ${sealed} and org_id = ${row.org_id}`;
           if (!row.org_id || !owner) throw new Error("Original upload ownership cannot be verified");
           // Never delete a source still referenced by a document or an unfinished finalization.
           const [reference] = await client`select 1 from documents where source_key = ${row.target}

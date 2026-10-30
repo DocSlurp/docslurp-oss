@@ -414,11 +414,18 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   if (sourceKey !== file.source_key) {
     // Publish the sealed key and durable cleanup together: a crash must not lose the old key.
     // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
-    await sql`with queued as (
+    await sql`with ownership as (
+      insert into upload_cleanup_owners (original_key, sealed_key, org_id)
+      select ${file.source_key}, ${sourceKey}, s.org_id from upload_sessions s where s.id = ${file.session_id}
+      on conflict (original_key) do update set original_key = excluded.original_key
+      where upload_cleanup_owners.sealed_key = excluded.sealed_key
+        and upload_cleanup_owners.org_id is not distinct from excluded.org_id
+      returning org_id
+    ), queued as (
       insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
-      select 'upload_original', s.org_id, ${file.source_key},
+      select 'upload_original', ownership.org_id, ${file.source_key},
         jsonb_build_object('sealedKey', ${sourceKey}::text), 'sealed_upload', now() + interval '1 day'
-      from upload_sessions s where s.id = ${file.session_id}
+      from ownership
       on conflict (kind, target) do update set not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)
       returning id
     ) update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now()

@@ -48,6 +48,7 @@ beforeEach(async () => {
   await sql`delete from workspaces`;
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
+  await sql`delete from upload_cleanup_owners`;
   await sql`delete from vector_index_outbox`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('keep', 'o1', 'u1', 'Keep')`;
 });
@@ -124,6 +125,8 @@ describe("delete triggers enqueue external cleanup", () => {
     await sql`insert into upload_sessions (id, user_id, org_id, status) values ('sealed-session', 'u1', 'o1', 'confirmed')`;
     await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
       values ('sealed-file', 'sealed-session', 'source.pdf', 'application/pdf', ${sealed}, 'single')`;
+    await sql`insert into upload_cleanup_owners (original_key, sealed_key, org_id) values (${original}, ${sealed}, 'o1')`;
+    await sql`delete from upload_sessions where id = 'sealed-session'`;
     const stores = fakeExternalStores([sealed, other], {});
     await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
       values ('upload_original', 'o1', ${original}, ${sql.json({sealedKey: sealed})}, 'sealed_upload', now() + interval '1 day')`;

@@ -77,6 +77,7 @@ export const WORKER_TABLES = Object.freeze({
   remote_capacity_watchdog: { privileges: DML, evidence: "worker/src/media/capacity/store.ts" },
   remote_media_jobs: { privileges: DML, evidence: "worker/src/media/journal.ts, reconcile.ts" },
   search_index_staleness: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts DERIVED_TABLES" },
+  upload_cleanup_owners: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts original-upload ownership verification" },
   storage_cleanup_queue: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts drainStorageCleanupQueue; workspace_runs trigger" },
   upload_session_files: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts retained source keys" },
   upload_sessions: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts" },
