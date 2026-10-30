@@ -1,3 +1,5 @@
+- Preserve requested born-digital embedded images as lossless WebP in the existing Doppler VM, with bounded framed transport, page/mask manifests, shard deduplication, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/doppler-images.md; deployment remains manual.
+
 ## HTML table chunk preservation (2026-10-30)
 
 - Preserve bounded table/cell context in fallback and canonical embedding chunks; scan nested repository integrity without inheriting parent documentation exclusions. See [evidence and limits](docs/evals/html-table-chunks.md).

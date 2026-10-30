@@ -1,3 +1,4 @@
+import { decodeImageBundle, encodeImageBundle } from "./doppler-images.js";
 import { constants, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, open, writeFile, rm } from "node:fs/promises";
@@ -15,6 +16,10 @@ class DopplerVmFailure extends Error {}
 /** `range` asks the guest for one parallel shard; it must start on the guest's 32-page chunk grid. */
 export type DopplerVmJob = {
   operation: "doppler-markdown"; input: string; output: string;
+  /** Request bounded embedded raster assets beside Markdown, in the same VM. */
+  embeddedImages?: boolean;
+  imageMinWidth?: number;
+  imageMinHeight?: number;
   range?: { first: number; last: number; final: boolean };
   /** Per-shard output cap, at most MAX_OUTPUT_BYTES: parallel shards share one host's memory. */
   outputLimit?: number;
@@ -28,11 +33,11 @@ export const PAGE_COUNT_MISMATCH_MESSAGE = "Document VM page count disagrees wit
 let warnedProtocol: string | undefined;
 export function declaredGuestProtocol(env: NodeJS.ProcessEnv = process.env): number {
   const value = env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() ?? "";
-  if (/^[2-4]$/.test(value)) return Number(value);
+  if (/^[2-5]$/.test(value)) return Number(value);
   // A typo must be loud: an unrecognised value disables shards and the hardening requirement.
   if (value && warnedProtocol !== value) {
     warnedProtocol = value;
-    console.warn(`[document-vm] ignoring invalid DOCSLURP_DOPPLER_VM_PROTOCOL=${JSON.stringify(value.slice(0, 16))}; expected 2, 3 or 4`);
+    console.warn(`[document-vm] ignoring invalid DOCSLURP_DOPPLER_VM_PROTOCOL=${JSON.stringify(value.slice(0, 16))}; expected 2, 3, 4 or 5`);
   }
   return 0;
 }
@@ -101,9 +106,10 @@ export function validEnvelope(
   range: DopplerVmJob["range"],
   declared = declaredGuestProtocol(),
 ): boolean {
+  if (declared >= 5 && diagnostics.protocol !== "doppler-vm@5") return false;
   // An image declared hardened must prove it on every result: an older or unconfined guest fails closed.
-  if (declared >= 4 && (diagnostics.protocol !== "doppler-vm@4" || !validHardening(diagnostics.hardening))) return false;
-  if (diagnostics.protocol === "doppler-vm@4" && !validHardening(diagnostics.hardening)) return false;
+  if (declared >= 4 && (!(["doppler-vm@4", "doppler-vm@5"].includes(String(diagnostics.protocol))) || !validHardening(diagnostics.hardening))) return false;
+  if (["doppler-vm@4", "doppler-vm@5"].includes(String(diagnostics.protocol)) && !validHardening(diagnostics.hardening)) return false;
   const conversion = diagnostics.conversion ?? {};
   const pages = conversion.pages;
   if (diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length || !Number.isSafeInteger(pages) || (pages as number) < 1) return false;
@@ -111,7 +117,7 @@ export function validEnvelope(
   let separators = 0;
   for (const byte of output) if (byte === 0x0c) separators++;
   if (diagnostics.protocol === "doppler-vm@2") return !range;
-  if (diagnostics.protocol !== "doppler-vm@3" && diagnostics.protocol !== "doppler-vm@4") return false;
+  if (diagnostics.protocol !== "doppler-vm@3" && diagnostics.protocol !== "doppler-vm@4" && diagnostics.protocol !== "doppler-vm@5") return false;
   const documentPages = conversion.documentPages;
   if (separators !== (pages as number) - 1 || !Number.isSafeInteger(documentPages)) return false;
   const first = range?.first ?? 1;
@@ -124,7 +130,7 @@ export function validEnvelope(
 function hardenedEnvelope(stderr: Buffer): boolean {
   try {
     const parsed = JSON.parse(stderr.toString("utf8")) as { protocol?: unknown; hardening?: unknown };
-    return parsed.protocol === "doppler-vm@4" && validHardening(parsed.hardening);
+    return ["doppler-vm@4", "doppler-vm@5"].includes(String(parsed.protocol)) && validHardening(parsed.hardening);
   } catch { return false; }
 }
 
@@ -160,6 +166,9 @@ export async function executeDopplerVm(
 ) {
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
   if (!validShardRange(job.range)) throw new SandboxRunError("Document VM invalid shard range");
+  if (job.embeddedImages && [job.imageMinWidth ?? 1, job.imageMinHeight ?? 1].some(n => !Number.isSafeInteger(n) || n < 1 || n > 4096)) {
+    throw new SandboxRunError("Document VM invalid image dimensions");
+  }
   const outputLimit = Math.min(MAX_OUTPUT_BYTES, job.outputLimit ?? MAX_OUTPUT_BYTES);
   if (!(outputLimit > 0)) throw new SandboxRunError("Document VM invalid output limit");
   const image = resolveModalImage(process.env.DOCSLURP_DOPPLER_VM_IMAGE ?? "", undefined);
@@ -197,6 +206,9 @@ export async function executeDopplerVm(
   let terminating: Promise<void> | undefined;
   let creationRequested = false;
   let stagedOutput: string | undefined;
+  let stagedImages: string | undefined;
+  let publishedImages = false;
+  let publishedOutput = false;
   let inputDirectory: string | undefined;
   let succeeded = false;
   let allocationUsage: UsageEvent | undefined;
@@ -301,7 +313,7 @@ export async function executeDopplerVm(
         await control(() => vm!.filesystem.writeBytes(Buffer.from(JSON.stringify({ first, last, final })), "/job/shard.json"));
       }
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
-      const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py"];
+      const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py", ...(job.embeddedImages ? ["--images", "--min-image-width", String(job.imageMinWidth ?? 1), "--min-image-height", String(job.imageMinHeight ?? 1)] : [])];
       const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 155_000, mode: "binary" }));
       const [out, err, exit] = await control(() => Promise.allSettled([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
       // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
@@ -314,12 +326,30 @@ export async function executeDopplerVm(
       if (out.status === "rejected") throw out.reason;
       if (err.status === "rejected") throw err.reason;
       if (exit.status === "rejected") throw exit.reason;
-      const [output, stderr, code] = [out.value, err.value, exit.value];
+      let output = out.value;
+      const [stderr, code] = [err.value, exit.value];
       if (code === 3) throw new DopplerVmFailure(CONFINEMENT_UNAVAILABLE_MESSAGE);
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
       const diagnostics = JSON.parse(stderr.toString("utf8"));
+      let images: ReturnType<typeof decodeImageBundle>["images"] | undefined;
+      if (job.embeddedImages) {
+        if (diagnostics.protocol !== "doppler-vm@5" || diagnostics.embeddedImages !== true || diagnostics.wireBytes !== output.length || !validHardening(diagnostics.hardening)) {
+          throw new DopplerVmFailure("Document VM image extraction unsupported or invalid");
+        }
+        try {
+          const decoded = decodeImageBundle(output);
+          images = decoded.images;
+          output = decoded.markdown;
+          if ((images.minWidth ?? 1) !== (job.imageMinWidth ?? 1) || (images.minHeight ?? 1) !== (job.imageMinHeight ?? 1) || images.pageCount !== diagnostics.conversion?.documentPages || images.first !== diagnostics.conversion?.first || images.last !== diagnostics.conversion?.last) {
+            throw new Error("range mismatch");
+          }
+        } catch { throw new DopplerVmFailure("Document VM invalid image bundle"); }
+      } else if (diagnostics.protocol === "doppler-vm@5" && diagnostics.embeddedImages === true) {
+        throw new DopplerVmFailure("Document VM returned unrequested images");
+      }
+
       if (job.range && diagnostics.protocol === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
       if (job.expectedDocumentPages !== undefined && diagnostics.conversion?.documentPages !== job.expectedDocumentPages) {
         throw new DopplerVmFailure(PAGE_COUNT_MISMATCH_MESSAGE);
@@ -330,6 +360,11 @@ export async function executeDopplerVm(
       // Bounded local write is awaited so cancellation cannot race its cleanup.
       await writeFile(stagedOutput, output, { flag: "wx", mode: 0o600 });
       checkActive();
+      if (images) {
+        stagedImages = `${job.output}.images.${randomUUID()}.partial`;
+        await writeFile(stagedImages, encodeImageBundle(images), { flag: "wx", mode: 0o600 });
+        checkActive();
+      }
       succeeded = true;
       return { stdout: JSON.stringify(diagnostics), stderr: "", exitCode: 0,
         usage: (allocationUsage = usage()) };
@@ -364,7 +399,10 @@ export async function executeDopplerVm(
           throw new SandboxRunError("Document VM cancelled before output commit", usage());
         }
         // No await between final cancellation check and atomic publication.
-        try { renameSync(stagedOutput, job.output); }
+        try {
+          if (stagedImages) { renameSync(stagedImages, `${job.output}.images`); publishedImages = true; }
+          renameSync(stagedOutput, job.output); publishedOutput = true;
+        }
         catch { throw new SandboxRunError("Document VM output publication failed", usage()); }
       }
     } finally {
@@ -373,6 +411,8 @@ export async function executeDopplerVm(
       clientClosed = true;
       // Cleanup never replaces the result or a usage-bearing error.
       try { client?.close(); } catch { /* control client already unusable */ }
+      if (stagedImages) await rm(stagedImages, { force: true }).catch(() => {});
+      if (publishedImages && !publishedOutput) await rm(`${job.output}.images`, { force: true }).catch(() => {});
       if (stagedOutput) await rm(stagedOutput, { force: true }).catch(() => {});
       if (inputDirectory) await rm(inputDirectory, { recursive: true, force: true }).catch(() => {});
     }

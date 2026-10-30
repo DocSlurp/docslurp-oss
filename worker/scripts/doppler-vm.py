@@ -6,6 +6,7 @@ and, for a parallel shard, an optional page range; all page counting, range
 validation, parsing and merging happen behind the VM boundary.
 """
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-DOPPLER_GUEST_PROTOCOL = "doppler-vm@4"
+DOPPLER_GUEST_PROTOCOL = "doppler-vm@5"
 MAX_SHARD_REQUEST = 256
 MAX_INPUT = 500 * 1024 * 1024
 MAX_RAW = 256 * 1024 * 1024
@@ -278,7 +279,165 @@ def append_chunk(output, chunk_path, expected_pages, first, total_bytes):
     return total_bytes
 
 
+# Image extraction is an explicit option in the same Markdown VM. Page previews and vector
+# drawings are not embedded raster assets. Masks stay attached to their source occurrence.
+MAX_IMAGE_OCCURRENCES = 512
+MAX_IMAGE_PIXELS = 16_000_000
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_TOTAL_BYTES = 24 * 1024 * 1024
+
+
+def image_inventory(listing, pages, first=1, last=None):
+    last = pages if last is None else last
+    rows = []
+    pixels = 0
+    for line in listing.splitlines():
+        fields = line.split()
+        if not fields or not fields[0].isdigit():
+            continue
+        if len(fields) < 14:
+            raise ValueError('invalid image inventory')
+        page, number, kind, width, height = int(fields[0]), int(fields[1]), fields[2], int(fields[3]), int(fields[4])
+        if not first <= page <= last or number != len(rows) or kind not in ('image', 'mask', 'smask', 'stencil') or width < 1 or height < 1:
+            raise ValueError('invalid image inventory')
+        pixels += width * height
+        if pixels > MAX_IMAGE_PIXELS or len(rows) >= MAX_IMAGE_OCCURRENCES:
+            raise ValueError('image geometry exceeds limit')
+        row = {'pageNumber': page, 'occurrence': number, 'role': kind, 'width': width, 'height': height}
+        if kind in ('mask', 'smask'):
+            if not rows or rows[-1]['role'] != 'image' or rows[-1]['pageNumber'] != page:
+                raise ValueError('unassociated image mask')
+            row['maskOf'] = rows[-1]['occurrence']
+        rows.append(row)
+    return rows
+
+
+def webp_dimensions(data):
+    # The fixed encoder emits simple lossless WebP. Reject other containers, not a full decoder.
+    if (len(data) < 25 or data[:4] != b'RIFF' or data[8:16] != b'WEBPVP8L'
+            or struct.unpack('<I', data[4:8])[0] + 8 != len(data)
+            or 20 + ((struct.unpack('<I', data[16:20])[0] + 1) & ~1) != len(data)
+            or data[20] != 0x2f or data[24] & 0xe0):
+        raise ValueError('unsupported WebP container')
+    bits = struct.unpack('<I', data[21:25])[0]
+    return (bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1
+
+
+def selected_image_occurrences(rows, min_width, min_height):
+    if any(type(value) is not int or not 1 <= value <= 4096 for value in (min_width, min_height)):
+        raise ValueError('invalid image dimensions')
+    keep = {row['occurrence'] for row in rows if row['role'] in ('image', 'stencil') and row['width'] >= min_width and row['height'] >= min_height}
+    keep.update(row['occurrence'] for row in rows if row.get('maskOf') in keep)
+    return keep
+
+
+def extract_image_bundle(run, pages, job=Path('/job'), binary='/opt/doppler/bin/pdfimages', first=1, last=None, encoder='/usr/bin/cwebp', min_width=1, min_height=1):
+    last = pages if last is None else last
+    if not 1 <= first <= last <= pages or last - first + 1 > MAX_PAGES:
+        raise ValueError('image extraction page limit exceeded')
+    with (job / 'image-list').open('xb') as listing, (job / 'image-log').open('xb') as log:
+        run([binary, '-list', '-f', str(first), '-l', str(last), str(job / 'input')], listing, log)
+    with (job / 'image-list').open('rb') as listing:
+        data = listing.read(128 * 1024 + 1)
+    if len(data) > 128 * 1024:
+        raise ValueError('image inventory exceeds limit')
+    rows = image_inventory(data.decode('ascii'), pages, first, last)
+    keep = selected_image_occurrences(rows, min_width, min_height)
+    if not keep:
+        rows = []
+    if rows:
+        with (job / 'image-log').open('wb') as log:
+            run([binary, '-png', '-p', '-f', str(first), '-l', str(last), str(job / 'input'), str(job / 'embedded')], log, log)
+    assets = {}
+    total = 0
+    encoded = {}
+    for row in rows:
+        name = f"embedded-{row['pageNumber']:03d}-{row['occurrence']:03d}.png"
+        path = job / name
+        if row['occurrence'] not in keep:
+            path.unlink()
+            continue
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not 24 <= info.st_size <= MAX_IMAGE_BYTES:
+                raise ValueError('invalid extracted image')
+            chunks = []
+            size = 0
+            while chunk := os.read(fd, min(65536, MAX_IMAGE_BYTES + 1 - size)):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > MAX_IMAGE_BYTES:
+                    raise ValueError('image exceeds limit')
+            data = b''.join(chunks)
+        finally:
+            os.close(fd)
+        total += len(data)
+        if total > MAX_IMAGE_TOTAL_BYTES:
+            raise ValueError('image bytes exceed limit')
+        if data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR' or struct.unpack('>II', data[16:24]) != (row['width'], row['height']):
+            raise ValueError('image dimensions do not match inventory')
+        png_hash = hashlib.sha256(data).digest()
+        if png_hash in encoded:
+            data = encoded[png_hash]
+        else:
+            # Lossless encoding preserves the decoded pixels, including unused RGB under alpha.
+            webp_path = path.with_suffix('.webp')
+            with (job / 'image-log').open('wb') as log:
+                run([encoder, '-quiet', '-lossless', '-exact', str(path), '-o', str(webp_path)], log, log)
+            fd = os.open(webp_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or not 25 <= info.st_size <= MAX_IMAGE_BYTES:
+                    raise ValueError('invalid WebP output')
+                data = os.read(fd, MAX_IMAGE_BYTES + 1)
+            finally:
+                os.close(fd)
+            if len(data) != info.st_size or webp_dimensions(data) != (row['width'], row['height']):
+                raise ValueError('WebP dimensions do not match inventory')
+            webp_path.unlink()
+            encoded[png_hash] = data
+        digest = hashlib.sha256(data).hexdigest()
+        assets.setdefault(digest, {'sha256': digest, 'width': row['width'], 'height': row['height'],
+                                   'mediaType': 'image/webp', 'bytes': data})
+        row['sha256'] = digest
+        path.unlink()
+    # No parser-chosen filenames are transferred. Unexpected files mean extraction and inventory disagree.
+    if any(job.glob('embedded-*')):
+        raise ValueError('unexpected extracted image')
+    return {'pageCount': pages, 'first': first, 'last': last, 'minWidth': min_width, 'minHeight': min_height,
+            'assets': list(assets.values()), 'placements': [row for row in rows if row['occurrence'] in keep]}
+
+
+def image_frame_header(bundle, markdown_bytes):
+    header = json.dumps({'version': 'doppler-images@1', 'pageCount': bundle['pageCount'],
+                         'first': bundle['first'], 'last': bundle['last'], 'markdownBytes': markdown_bytes,
+                         'minWidth': bundle['minWidth'], 'minHeight': bundle['minHeight'],
+                         'assets': [{**{k: v for k, v in a.items() if k != 'bytes'}, 'length': len(a['bytes'])}
+                                    for a in bundle['assets']], 'placements': bundle['placements']}, separators=(',', ':')).encode()
+    wire_bytes = 12 + len(header) + markdown_bytes + sum(len(a['bytes']) for a in bundle['assets'])
+    if len(header) > 256 * 1024 or wire_bytes > MAX_OUTPUT:
+        raise ValueError('image frame exceeds limit')
+    return b'DOPIMG1\n' + struct.pack('>I', len(header)) + header, wire_bytes
+
+
+def image_options(args):
+    if args == []:
+        return False, 1, 1
+    if args == ['--images']:
+        return True, 1, 1
+    if len(args) != 5 or args[0] != '--images' or args[1] != '--min-image-width' or args[3] != '--min-image-height':
+        raise ValueError('invalid operation')
+    values = []
+    for value in (args[2], args[4]):
+        if not re.fullmatch(r'[1-9][0-9]{0,3}', value) or not 1 <= int(value) <= 4096:
+            raise ValueError('invalid image dimensions')
+        values.append(int(value))
+    return True, values[0], values[1]
+
+
 def main():
+    images_requested, min_width, min_height = image_options(sys.argv[1:])
     resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024,) * 2)
     resource.setrlimit(resource.RLIMIT_CPU, (JOB_SECONDS, JOB_SECONDS))
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RAW,) * 2)
@@ -336,7 +495,16 @@ def main():
             # Reuse bounded files; never accumulate intermediates per chunk.
             for name in ('raw.xhtml', 'chunk.md', 'converter-report.json'):
                 Path('/job', name).unlink()
+    image_bundle = None
+    frame_header = b''
+    wire_bytes = total_bytes
+    if images_requested:
+        # Same input, confinement and absolute deadline; no second VM/upload. Limit each decoded file.
+        resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_IMAGE_BYTES,) * 2)
+        image_bundle = extract_image_bundle(run, pages, first=shard_first, last=shard_last, min_width=min_width, min_height=min_height)
+        frame_header, wire_bytes = image_frame_header(image_bundle, total_bytes)
     print(json.dumps({'protocol': DOPPLER_GUEST_PROTOCOL, 'engine': 'doppler', 'hardening': hardening,
+                      'embeddedImages': images_requested, 'wireBytes': wire_bytes,
                       'elapsedMs': round((time.monotonic() - started) * 1000), 'outputBytes': total_bytes,
                       'conversion': {'pages': shard_last - shard_first + 1, 'first': shard_first, 'last': shard_last,
                                      'documentPages': pages, 'chunks': len(ranges), 'chunkPages': CHUNK_PAGES,
@@ -346,6 +514,7 @@ def main():
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size != total_bytes:
             raise ValueError('invalid Markdown output')
+        sys.stdout.buffer.write(frame_header)
         remaining = MAX_OUTPUT + 1
         while remaining:
             chunk = os.read(fd, min(65536, remaining))
@@ -353,6 +522,9 @@ def main():
                 break
             sys.stdout.buffer.write(chunk)
             remaining -= len(chunk)
+        if image_bundle:
+            for asset in image_bundle['assets']:
+                sys.stdout.buffer.write(asset['bytes'])
     finally:
         os.close(fd)
 

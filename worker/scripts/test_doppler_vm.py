@@ -246,4 +246,37 @@ print(json.dumps(results))"""
         self.assertEqual(out.returncode, 3, out.stderr)
         self.assertIn('confinement unavailable', out.stderr)
 
+class ImageInventoryTest(unittest.TestCase):
+    def row(self, page=1, number=0, role='image', width=2, height=3):
+        return f"{page} {number} {role} {width} {height} rgb 3 8 image no 1 0 72 72 18B 100%"
+
+    def test_fixed_numeric_image_options(self):
+        self.assertEqual(guest.image_options([]), (False,1,1))
+        self.assertEqual(guest.image_options(['--images']), (True,1,1))
+        self.assertEqual(guest.image_options(['--images','--min-image-width','100','--min-image-height','200']), (True,100,200))
+        for value in ('0','4097','-f','1.2','01','/path'):
+            with self.assertRaises(ValueError): guest.image_options(['--images','--min-image-width',value,'--min-image-height','1'])
+        with self.assertRaises(ValueError): guest.image_options(['--images','--output','/elsewhere'])
+
+    def test_mask_association_and_stencil_are_distinct(self):
+        rows = guest.image_inventory('\n'.join([self.row(), self.row(number=1,role='smask'), self.row(page=2,number=2,role='stencil')]),3)
+        self.assertEqual(rows[1]['maskOf'],0)
+        self.assertNotIn('maskOf',rows[2])
+        self.assertEqual(rows[2]['pageNumber'],2)
+
+    def test_refuses_unassociated_masks_and_bad_ranges(self):
+        for listing in (self.row(role='smask'), self.row(page=4), self.row(number=2), self.row(width=0), self.row(width=guest.MAX_IMAGE_PIXELS,height=2)):
+            with self.assertRaises(ValueError): guest.image_inventory(listing,3)
+        with self.assertRaises(ValueError): guest.image_inventory(self.row(page=1),33,33,33)
+
+    def test_dimension_filter_keeps_masks_with_their_base_and_drops_them_together(self):
+        rows = guest.image_inventory('\n'.join([self.row(width=20,height=30), self.row(number=1,role='smask',width=1,height=1), self.row(number=2,width=2,height=3)]),1)
+        self.assertEqual(guest.selected_image_occurrences(rows,10,10),{0,1})
+        self.assertEqual(guest.selected_image_occurrences(rows,21,10),set())
+        with self.assertRaises(ValueError): guest.selected_image_occurrences(rows,True,10)
+
+    def test_counts_repeated_images_against_pixel_and_occurrence_limits(self):
+        listing='\n'.join(self.row(number=i) for i in range(guest.MAX_IMAGE_OCCURRENCES+1))
+        with self.assertRaises(ValueError): guest.image_inventory(listing,1)
+
 if __name__ == "__main__": unittest.main()
