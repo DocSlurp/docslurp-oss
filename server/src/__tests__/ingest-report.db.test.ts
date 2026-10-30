@@ -173,7 +173,8 @@ describe("ingest report on a migrated database", () => {
     await expect(report.applyIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "made-up" }))
       .rejects.toMatchObject({ status: 409 });
     const applied = await report.applyIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "vision-all-pages" });
-    expect(applied.pipeline.vision).toMatchObject({ forceAllPages: true, maxPagesPerDocument: 4 });
+    expect(applied.pipeline.vision).toMatchObject({ forceAllPages: true });
+    expect(applied.pipeline.vision).not.toHaveProperty("maxPagesPerDocument");
     expect(applied.pipeline.summarize).toBe(true);
     // The rule no longer fires the same way once vision covers every page; the scans still need reprocessing.
     const after = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true });

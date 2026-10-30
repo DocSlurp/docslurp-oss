@@ -440,7 +440,7 @@ describe("vision page loop under the guard", () => {
     const outputs = await harness.run(state, { inkCheckPages: new Set(), fallbackTextPages: new Set([2]) }, skips);
     expect(outputs.map((page) => page.pageNumber)).toEqual([1]);
     const facts = buildVisionPageFacts({
-      documentId: "doc", runId: "run-1", pageCount: 3, selected: [1, 2, 3], processed: outputs, cap: 3, outcomes: skips,
+      documentId: "doc", runId: "run-1", pageCount: 3, selected: [1, 2, 3], processed: outputs, outcomes: skips,
     });
     const statuses = facts.map((fact) => fact.visionStatus);
     expect(statuses.filter((status) => status === "extracted")).toHaveLength(1);
@@ -664,7 +664,7 @@ describe.skipIf(!PDFTOPPM)("padded blank PDFs", () => {
     expect(outputs).toEqual([]);
     expect(visionRuntime.execute).not.toHaveBeenCalled();
     expect(skips.get(1)?.outcome).toBe("blank-render");
-    expect(buildVisionPageFacts({ documentId: "doc", runId: "run-1", pageCount: 1, selected: [1], processed: [], cap: 1, outcomes: skips })[0]!
+    expect(buildVisionPageFacts({ documentId: "doc", runId: "run-1", pageCount: 1, selected: [1], processed: [], outcomes: skips })[0]!
       .visionStatus).toBe("not-selected");
   });
 

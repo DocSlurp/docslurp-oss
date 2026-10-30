@@ -8,7 +8,7 @@ const {
   INGEST_RECOMMENDATION_CATALOG,
   applyRecommendationPatch,
   buildIngestReport,
-  effectiveVisionPageCap,
+  playbookAllowsVision,
   patchHolds,
   summarizeIngestReport,
 } = await import("./ingest-report.js");
@@ -97,11 +97,11 @@ describe("ingest report: observed content", () => {
     expect(report.searchability.byReason).toEqual([{ reason: "scanned-no-vision", pages: 3 }]);
     const rec = report.recommendations[0]!;
     expect(rec).toMatchObject({ id: "turn-on-vision", severity: "high", affectedPages: 3, affectedDocuments: 1, reprocessDocumentIds: ["scan"] });
-    expect(rec.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 4 } });
+    expect(rec.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true } });
     // Default vision model's catalog price per page.
     const perPage = visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].estimatedCostPerPageCents;
     expect(rec.cost.centsPer100Pages).toBeCloseTo(perPage * 100, 2);
-    // Observed 2¢ / 3 pages for the re-run plus 3 vision pages at the catalog price.
+    // Observed 2¢ / 3 pages for the re-run plus 3 vision pages at the catalog price (every page; no cap).
     expect(rec.cost.reprocessCents).toBeCloseTo(2 + 3 * perPage, 2);
     expect(report.config.find((item) => item.key === "visionFallback")?.value).toBe("Off");
   });
@@ -131,39 +131,43 @@ describe("ingest report: observed content", () => {
     expect(ids).toContain("reindex-pages-with-text");
     const vision = report.recommendations.find((rec) => rec.id === "vision-all-pages")!;
     expect(vision.reason).toMatch(/2 pages of 6 measured have images and almost no text layer/);
-    expect(vision.reason).toMatch(/"balanced" playbook reads at most 4 vision pages/);
-    expect(vision.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 6 } });
+    expect(vision.reason).toMatch(/Page triage did not send them to vision\./);
+    expect(vision.reason).not.toMatch(/at most \d+ vision pages/);
+    expect(vision.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true } });
     expect(report.focus).toEqual([expect.objectContaining({ pageNumber: 4, searchable: false, reason: "scanned-no-vision", imageCount: 1 })]);
     expect(summarizeIngestReport(report)).toMatch(/Page 4 of mixed\.pdf: not searchable \(looks scanned and was not read with vision\)/);
   });
 
-  it("vision page limit: selected pages past the cap are reported, cap capped at 32", () => {
+  it("historical over-cap pages (former per-file limit) are still reported and fixed by reading every page", () => {
     const specs: PageSpec[] = Array.from({ length: 40 }, (_, index) => ({ text: 0, images: 1, vision: index < 4 ? "extracted" : "over-cap", chunks: index < 4 ? 1 : 0 }));
     const report = build({ documents: [doc("long", { pageCount: 40 })], pages: pages("long", specs) });
     expect(report.extraction).toMatchObject({ visionPages: 4, visionOverCapPages: 36 });
     expect(report.searchability.byReason).toEqual([{ reason: "vision-page-limit", pages: 36 }]);
     const rec = report.recommendations[0]!;
     expect(rec.id).toBe("vision-all-pages");
-    expect(rec.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 32 } });
-    expect(rec.effect).toMatch(/first 32 pages only/);
+    expect(rec.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true } });
+    // These pages also look scanned, so the evidence names them as scans; nothing mentions a page limit.
+    expect(rec.reason).not.toMatch(/at most \d+ vision pages|Vision stops after/);
+    expect(rec.effect).not.toMatch(/first \d+ pages only/);
+    // The reprocess estimate covers all 40 pages, not a 32-page maximum.
+    expect(rec.cost.reprocessCents).toBeGreaterThan(0);
   });
 
   it("offers only a reprocess when vision already reads every page", () => {
     const report = build({
-      pipeline: pipeline({ vision: { forceAllPages: true, maxPagesPerDocument: 32 } }),
+      pipeline: pipeline({ vision: { forceAllPages: true } }),
       documents: [doc("old-scan", { pageCount: 2 })],
       pages: pages("old-scan", [{ text: 0, images: 1, vision: "not-selected" }, { text: 0, images: 1, vision: "not-selected" }]),
       stages: [{ documentId: "old-scan", stage: "vision-extract", status: "completed", skipped: false, reason: null, selectedPages: 0, pages: 0, costCents: 0.4, tablePages: null, durationSeconds: null }],
     });
     const rec = report.recommendations[0]!;
     expect(rec).toMatchObject({ id: "reprocess-with-vision", patch: null, reprocessDocumentIds: ["old-scan"] });
-    // A higher existing limit is never lowered by the patch.
     const higher = build({
       pipeline: pipeline({ visionFallback: false }),
       documents: [doc("scan", { pageCount: 2 })],
       pages: pages("scan", [{ text: 0, images: 1 }, { text: 0, images: 1 }]),
     });
-    expect(higher.recommendations[0]!.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 4 } });
+    expect(higher.recommendations[0]!.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true } });
   });
 
   it("never proposes reprocessing a superseded version", () => {
@@ -393,7 +397,7 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
       pages: pages("mixed", [{ text: 1800, images: 0, vision: "not-selected", chunks: 2 }, { text: 0, images: 1, vision: "not-selected" }, { text: 2000, images: 0, vision: "not-selected" }, { text: 0, images: 0, vision: "not-selected" }]),
     }),
     build({
-      pipeline: pipeline({ vision: { forceAllPages: true, maxPagesPerDocument: 32 } }),
+      pipeline: pipeline({ vision: { forceAllPages: true } }),
       documents: [doc("old", { pageCount: 1 })], pages: pages("old", [{ text: 0, images: 1, vision: "not-selected" }]),
     }),
     build({
@@ -436,9 +440,9 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
     const { workspaceSettingsProposalInputSchema } = await import("./workspace-settings-proposal-input.js");
     const parse = (vision: unknown) => workspaceSettingsProposalInputSchema.safeParse({ changes: { pipeline: { vision } } }).success;
     expect(parse({ forceAllPages: true })).toBe(true);
-    expect(parse({ forceAllPages: true, maxPagesPerDocument: 32 })).toBe(true);
-    expect(parse({ maxPagesPerDocument: 33 })).toBe(false);
-    expect(parse({ maxPagesPerDocument: 0 })).toBe(false);
+    expect(parse({ forceAllPages: false })).toBe(true);
+    // The per-file vision page limit no longer exists, so it is not a proposable setting.
+    expect(parse({ forceAllPages: true, maxPagesPerDocument: 32 })).toBe(false);
     expect(parse({})).toBe(false);
     expect(parse({ modelUri: "llm://anything" })).toBe(false);
   });
@@ -447,17 +451,17 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
 const INDEX_1K_TO_4K = 4;
 
 describe("ingest report: helpers", () => {
-  it("uses the playbook vision cap unless every page is forced", () => {
-    expect(effectiveVisionPageCap(pipeline())).toBe(4);
-    expect(effectiveVisionPageCap(pipeline({ parserPlaybook: "fast" }))).toBe(0);
-    expect(effectiveVisionPageCap(pipeline({ vision: { forceAllPages: true, maxPagesPerDocument: 20 } }))).toBe(20);
+  it("reports whether the playbook allows vision; there is no per-file page count", () => {
+    expect(playbookAllowsVision(pipeline())).toBe(true);
+    expect(playbookAllowsVision(pipeline({ parserPlaybook: "fast" }))).toBe(false);
+    expect(playbookAllowsVision(pipeline({ parserPlaybook: "fast", vision: { forceAllPages: true } }))).toBe(true);
   });
 
   it("merges a patch onto the stored pipeline without resetting other settings", () => {
-    const base = pipeline({ summarize: true, vision: { maxPagesPerDocument: 8 } });
-    const next = applyRecommendationPatch(base, { visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 12 } });
+    const base = pipeline({ summarize: true, vision: { benchmarkProfile: "ocr-heavy" } });
+    const next = applyRecommendationPatch(base, { visionFallback: true, vision: { forceAllPages: true } });
     expect(next.summarize).toBe(true);
-    expect(next.vision).toMatchObject({ forceAllPages: true, maxPagesPerDocument: 12, profile: base.vision.profile });
+    expect(next.vision).toMatchObject({ forceAllPages: true, benchmarkProfile: "ocr-heavy", profile: base.vision.profile });
     expect(patchHolds(next, { vision: { forceAllPages: true } })).toBe(true);
     expect(patchHolds(base, { vision: { forceAllPages: true } })).toBe(false);
   });

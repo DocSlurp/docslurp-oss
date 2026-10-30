@@ -11,7 +11,7 @@ describe("distributed vision checkpoints", () => {
       ["doc:2", {pageNumber:2, text:"second"}], ["doc:1", {pageNumber:1,text:"first"}], ["doc:3", null],
     ]), usageLedger: new PipelineUsageEventLedger() } as unknown as WorkflowState;
     const extract = (stage as any).extractVisionPagesFromCache.bind(stage);
-    expect(await extract(state, {id:"doc"}, {maxPagesPerDocument:20}, [2,3,1])).toEqual([
+    expect(await extract(state, {id:"doc"}, {}, [2,3,1])).toEqual([
       {pageNumber:1,text:"first"}, {pageNumber:2,text:"second"},
     ]);
     expect(renderSelectedPages).not.toHaveBeenCalled();

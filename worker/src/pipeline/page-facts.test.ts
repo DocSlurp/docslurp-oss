@@ -59,25 +59,23 @@ describe("page facts", () => {
   it("labels vision outcomes per page", () => {
     const rows = buildVisionPageFacts({
       documentId: "doc", runId: "run", pageCount: 6,
-      selected: [2, 3, 5, 6], processed: [{ pageNumber: 2, text: "scanned words" }], cap: 3,
+      selected: [2, 3, 5, 6], processed: [{ pageNumber: 2, text: "scanned words" }],
     });
     expect(rows.map((row) => row.visionStatus)).toEqual([
-      "not-selected", "extracted", "failed", "not-selected", "failed", "over-cap",
+      "not-selected", "extracted", "failed", "not-selected", "failed", "failed",
     ]);
     expect(rows[1]!.visionTextBytes).toBe(13);
-    expect(buildVisionPageFacts({ documentId: "d", runId: "r", pageCount: 2, selected: [], processed: [], cap: 0, costCapped: true })
+    expect(buildVisionPageFacts({ documentId: "d", runId: "r", pageCount: 2, selected: [], processed: [], costCapped: true })
       .map((row) => row.visionStatus)).toEqual(["cost-cap", "cost-cap"]);
   });
 
-  it("marks the pages beyond the cap of a priority-ordered selection as over-cap", () => {
-    // Vision puts raster-only pages (5, 6) ahead of a text page it also selected (1); cap 2 keeps 5 and 6.
+  it("never marks a selected page over-cap: there is no per-document vision page cap", () => {
+    const selected = Array.from({ length: 40 }, (_, index) => index + 1);
     const rows = buildVisionPageFacts({
-      documentId: "doc", runId: "run", pageCount: 6,
-      selected: [5, 6, 1], processed: [{ pageNumber: 5, text: "a" }, { pageNumber: 6, text: "b" }], cap: 2,
+      documentId: "doc", runId: "run", pageCount: 40,
+      selected, processed: selected.map((pageNumber) => ({ pageNumber, text: "t" })),
     });
-    expect(rows.map((row) => row.visionStatus)).toEqual([
-      "over-cap", "not-selected", "not-selected", "not-selected", "extracted", "extracted",
-    ]);
+    expect(rows.every((row) => row.visionStatus === "extracted")).toBe(true);
   });
 
   it("never throws when the write fails", async () => {

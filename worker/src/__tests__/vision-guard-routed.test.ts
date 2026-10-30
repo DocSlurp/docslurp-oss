@@ -27,7 +27,7 @@ vi.mock("../routing/executors/deps.js", async (importOriginal) => {
       ocr: async () => { throw new Error("tesseract unavailable"); },
       label: async () => { throw new Error("labeler unavailable"); },
       vlm: async (args: { target: RoutingTarget; role: Assignment["role"]; raster: { path: string; mimeType: string }; pageNumber: number; signal?: AbortSignal }) =>
-        await input.callVision(visionConfigForModel(input.selection, args.target.ref.modelUri!, 1, args.role),
+        await input.callVision(visionConfigForModel(input.selection, args.target.ref.modelUri!, args.role),
           { imagePath: args.raster.path, mimeType: args.raster.mimeType, pageNumber: args.pageNumber }, args.signal),
       pageHeightPt: () => null,
       dispose: async () => undefined,
@@ -169,7 +169,7 @@ describe("routed extraction under the vision guard", () => {
     expect(Object.fromEntries([...skips].map(([page, skip]) => [page, skip.outcome])))
       .toEqual({ 1: "rejected", 2: "rejected", 4: "rejection-breaker" });
     const facts = buildVisionPageFacts({
-      documentId: "doc", runId: "run-1", pageCount: 4, selected: [1, 2, 3, 4], processed: result.outputs, cap: 4, outcomes: skips,
+      documentId: "doc", runId: "run-1", pageCount: 4, selected: [1, 2, 3, 4], processed: result.outputs, outcomes: skips,
     });
     // Without usable text a rejected page is a failure; the page task's guard stop stays a guard stop.
     expect(facts.map((fact) => fact.visionStatus)).toEqual(["failed", "failed", "extracted", "guarded"]);
@@ -189,7 +189,7 @@ describe("routed extraction under the vision guard", () => {
     expect(Object.fromEntries([...skips].map(([page, skip]) => [page, skip.outcome])))
       .toEqual({ 1: "unscoped-run", 2: "unscoped-run", 3: "unscoped-run", 4: "unscoped-run" });
     const facts = buildVisionPageFacts({
-      documentId: "doc", runId: "run-1", pageCount: 4, selected: [1, 2, 3, 4], processed: [], cap: 4, outcomes: skips,
+      documentId: "doc", runId: "run-1", pageCount: 4, selected: [1, 2, 3, 4], processed: [], outcomes: skips,
     });
     expect(facts.map((fact) => fact.visionStatus)).toEqual(["guarded", "guarded", "guarded", "guarded"]);
     expect(state.usageLedger.snapshot().filter((event) => event.metric.startsWith("page-analysis"))).toEqual([]);

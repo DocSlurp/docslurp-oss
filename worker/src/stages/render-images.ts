@@ -12,7 +12,7 @@ import type { Config } from "../config.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
 import { prioritizePagesWithoutNativeText } from "./classify-route.js";
-import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
+import { visionAllowedForDocument } from "../lib/vision-page-budget.js";
 import { pageInRanges, type DocumentPageRanges } from "../pipeline/page-ranges.js";
 
 export class RenderImagesStage implements Stage {
@@ -111,10 +111,11 @@ export class RenderImagesStage implements Stage {
       : wantsRasters && (isPdf || isImage)
         ? selectRasterPagesFromClassification(
             request,
-            // With vision on, pre-render only what vision can use; vision renders any
-            // further page it needs on demand, and previews render on demand.
-            state.run.pipeline.visionFallback
-              ? { maxPages: resolveVisionPageBudget(state.run.pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook")) }
+            // With vision on but disallowed for this document (playbook), pre-render nothing; vision renders
+            // any further page it needs on demand, and previews render on demand.
+            state.run.pipeline.visionFallback &&
+              !visionAllowedForDocument(state.run.pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook"))
+              ? { maxPages: 0 }
               : {},
           )
         : [];

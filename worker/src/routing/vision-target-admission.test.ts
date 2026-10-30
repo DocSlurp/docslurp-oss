@@ -183,7 +183,7 @@ describe("a built-in plan through the real vision runtime", () => {
       await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
       for (const leg of vlmLegs) {
         const target = byId.get(leg.targetId)!;
-        const vision = visionConfigForModel(defaultVisionConfig, target.ref.modelUri!, 1, leg.role);
+        const vision = visionConfigForModel(defaultVisionConfig, target.ref.modelUri!, leg.role);
         const before = sends.length;
         const result = await executeVisionRuntime({
           imagePath, outputPath: `${imagePath}.json`, vision, cfg, runner: new CommandRunner(), privacyMode: "standard", gate: null,

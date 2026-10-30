@@ -121,7 +121,7 @@ const mcpAdapterRoutes = new Hono()
       const settings = await getWorkspaceSearchSettings(workspace.id, actor.userId);
       return c.json({ workspaceId: workspace.id,
         pipeline: Object.fromEntries(Object.keys(workspaceSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: workspace.pipeline.mediaVideo?.enabled !== false }
-          : key === "vision" ? { forceAllPages: workspace.pipeline.vision.forceAllPages, maxPagesPerDocument: workspace.pipeline.vision.maxPagesPerDocument }
+          : key === "vision" ? { forceAllPages: workspace.pipeline.vision.forceAllPages }
           : workspace.pipeline[key as keyof typeof workspace.pipeline]])),
         chat: settings.chat, retrieval: settings.retrievalDefaults });
     }
