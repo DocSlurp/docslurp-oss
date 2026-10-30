@@ -172,7 +172,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `VISION_BREAKER_MIN_FAILURES` | `20` | integer 1..10000 (clamped) | Failed or rejected requests before the rejection breaker can stop vision for the run. |
 | `VISION_BREAKER_FAILURE_RATE` | `0.25` | 0.01..1 (clamped) | Failed share of the run's requests that trips the breaker. |
 | `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its own prompt, image and route's worst case). |
-| `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529) one vision call may hand back before the wait goes to Temporal. |
+| `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529; not a 503 routing exclusion) one vision call may hand back before the wait goes to Temporal. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -292,28 +292,47 @@ critique and second reads stay counted. The count is keyed by org only, with no 
 or workspaces, so deleting either cannot reset it; it holds across runs, reprocessing and
 extraction, and another org is never affected.
 
+Hosted vision is limited to the priced catalog. A vision route is `openai` or `openrouter` (a
+catalog model with a token price and an image-token bound), `private` (operator registry) or local
+(`local-cli`, or `ollama`/`vllm`/`lmstudio` on a loopback host). Any other provider, an uncataloged
+hosted model (OpenRouter included), a Pro/Ultra id or a model at or above $50/M output tokens is
+refused at config validation (`visionModelUriProblem`, `packages/shared/src/embedding.ts`) and again
+before admission, for the model and its fallback alike, so nothing is sent or counted. Whether a
+route is billed follows its effective destination (a route with no base URL goes to
+api.openai.com): only local, loopback and private routes are unbilled, and an unknown hosted
+destination is refused. The OpenAI key goes only to the configured OpenAI base URL and the
+OpenRouter key only to the official OpenRouter endpoint; loopback servers get no key.
+
 Weights: each request weighs what it can cost at most, priced when it is sent: its actual prompt
-(UTF-8 bytes, an upper bound on tokens for any tokenizer), its image at the header's pixel size (one
-token per 700 pixels, at least 2,200; a 16 MP raster, about 23,000 tokens, when the size is
-unreadable), a fixed overhead for the chat template and system message, and the model's full output
-cap (enforced as `max_tokens`), at catalog list price. Workspace schema labels in the
+(UTF-8 bytes, an upper bound on tokens for any tokenizer), its image at the header's pixel size
+(the model's catalog image-token bound, a 4,096 px square when the size is unreadable), a fixed
+overhead for the chat template and system message, and the model's full output cap (enforced as
+`max_tokens`), at catalog list price. The image bounds come from each provider's own formula:
+OpenAI's 32-px patches times the model multiplier (1.62 for `gpt-4.1-mini`, no credit for
+downscaling), Gemini 3's largest per-image count (2,240), Gemini 2.x's 258-token tiles counted per
+256 px, and, for open-weights models with no published formula, one token per 14-px ViT patch (4x
+the 28-px merged patches of the Qwen2.5-VL family). Workspace schema labels in the
 `schema-form-fields` prompt are capped (100 labels, 80 characters each, 4 KB in total) and a prompt
-over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`
-(USD per million prompt and completion tokens) equal to the prices the weight assumes, on the
-alternate-route retry too, so no upstream provider or fallback can bill above the weight; OpenRouter
-refuses the request when no provider qualifies. A model without a list price is priced at per-million
-prices above every catalog model on OpenRouter (and capped there), refused on a direct billed route
-such as OpenAI (`UnpricedVisionRouteError`, never sent), and weighed at those prices on a self-hosted
-or private route; the in-process local runtime weighs 2 cents. So the most an org can cost us per day
-in uncharged requests is the $40 bound, whichever models its workspaces route to: at the largest
-raster, 2,388 requests on the default `deepseek/deepseek-v4.1-flash-1017` (23,058 x $0.30/M + 8,192
-x $1.20/M = 1.675 cents), 1,128 on `gpt-4.1-mini` (3.544 cents), and any mix in one org shares the
-same bound.
+over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`:
+`prompt` and `completion` (USD per million tokens) equal to the prices the weight assumes, `image`
+(USD per image) at the image's token bound times the input price, and `request: 0`, on the
+alternate-route retry too, so no upstream provider or fallback can bill above the weight. The
+weight adds the image cap once, in case an upstream bills a per-image fee on top of prompt tokens.
+OpenRouter refuses a request no provider qualifies for; it documents 503 ("no available model
+provider that meets your routing requirements") for that, and such a 503 (or a body naming no
+matching endpoints or `max_price`) is a counted failure, not a throttle (`isRoutingExclusion`,
+`worker/src/lib/provider-retry.ts`; an assumption, not verified with a paid call). The in-process
+local runtime weighs 2 cents. So the most an org can cost us per day in uncharged requests is the
+$40 bound, whichever models its workspaces route to: at an unreadable size, 651 requests on the
+default `deepseek/deepseek-v4.1-flash-1017` (6.14 cents), 1,083 on `gpt-4.1-mini` (3.69 cents),
+1,553 on `google/gemini-3.1-flash-lite` (2.58 cents); a 1700x2200 page weighs 2.15 cents on the
+default model (1,864 a day). Any mix in one org shares the same bound.
 
 The worker refuses to start (`assertSchema`, `worker/src/db/vision-attempt-store.ts`) when the
 ledger is missing or comes from an earlier draft of migration 0101 (no
 `vision_org_attempts.weight_cents`, or a leftover `vision_run_charged_pages`): that database needs a
-reset, since 0101 was replaced in place before reaching main.
+reset, since 0101 was replaced in place before reaching main. A connection failure during that check
+is retried with backoff and then exits as a retryable startup failure; only a schema mismatch is fatal.
 
 **Refusals.** A refused request is never sent; requests sent before it in the same call record their
 billed usage once. A refusal is sticky for the activity only when a count limit is reached: the

@@ -502,7 +502,7 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       const text = await response.text();
       if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
         // Refused before acceptance: no page admission, no breaker failure, no org count.
-        await args.gate?.unbilled("unsupported");
+        await args.gate?.unbilled("unsupported", { provider: args.providerLabel, status: response.status });
         throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`, response.status);
       }
       args.gate?.failed();

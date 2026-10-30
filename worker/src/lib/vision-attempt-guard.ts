@@ -156,7 +156,13 @@ export interface VisionRequestGate {
    * Returns false once the call's throttle allowance is spent (`unsupported` and `cancelled` are not
    * limited).
    */
-  unbilled(kind: VisionUnbilledKind): Promise<boolean>;
+  unbilled(kind: VisionUnbilledKind, detail?: VisionUnbilledDetail): Promise<boolean>;
+}
+
+/** The provider and HTTP status of a hand-back, for its `[vision-throttle-handback]` log line. */
+export interface VisionUnbilledDetail {
+  provider: string;
+  status: number;
 }
 
 export const DEFAULT_VISION_PAGE_ATTEMPTS = 2;
@@ -432,11 +438,12 @@ export class VisionRunGuard {
   }
 
   /** @internal Hand back a request refused before acceptance; a failure leaves it counted (stricter). */
-  async releaseRequest(target: VisionAttemptTarget, ticketId: string, kind: VisionUnbilledKind): Promise<void> {
+  async releaseRequest(target: VisionAttemptTarget, ticketId: string, kind: VisionUnbilledKind, detail?: VisionUnbilledDetail): Promise<void> {
     // Hand-backs rest on "the provider did not bill this" (provider-retry.ts isUnbilledThrottleStatus):
-    // logged per org so provider spend without matching counted requests can be traced.
+    // logged per org, provider and status so provider spend without matching counted requests can be traced.
     console.warn(
       `[vision-throttle-handback] org=${this.run.orgId ?? "none"} run=${this.run.id} kind=${kind} ` +
+        `provider=${detail?.provider ?? "none"} status=${detail?.status ?? "none"} ` +
         `document=${target.documentId} page=${target.pageNumber} purpose=${target.purpose}`,
     );
     try {
@@ -481,12 +488,12 @@ export class VisionCallGate implements VisionRequestGate {
     if (last && !last.released) last.failed = true;
   }
 
-  async unbilled(kind: VisionUnbilledKind): Promise<boolean> {
+  async unbilled(kind: VisionUnbilledKind, detail?: VisionUnbilledDetail): Promise<boolean> {
     const last = this.tickets.at(-1);
     if (kind === "throttle") this.throttles += 1;
     if (last && !last.released && !last.failed) {
       last.released = true;
-      await this.guard.releaseRequest(this.target, last.id, kind);
+      await this.guard.releaseRequest(this.target, last.id, kind, detail);
     }
     return kind !== "throttle" || this.throttles <= this.guard.throttleAllowance;
   }

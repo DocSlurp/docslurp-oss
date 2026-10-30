@@ -293,7 +293,41 @@ describe("admission happens right before fetch, inside the limiter", () => {
   it("logs each unbilled throttle hand-back with its org", async () => {
     stubFetch([() => new Response("slow down", { status: 429 }), plain]);
     await read();
-    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback] org=org-1 run=run-1 kind=throttle document=doc page=1"))).toBe(true);
+    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback] org=org-1 run=run-1 kind=throttle provider=openrouter status=429 document=doc page=1"))).toBe(true);
+  });
+
+  it("logs an overload 503 hand-back with its provider and status", async () => {
+    stubFetch([() => new Response("overloaded", { status: 503 }), plain]);
+    await read();
+    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback] org=org-1 run=run-1 kind=throttle provider=openrouter status=503 document=doc page=1"))).toBe(true);
+  });
+
+  it.each([
+    "There is no available model provider that meets your routing requirements",
+    '{"error":{"code":404,"message":"No endpoints found matching your max_price"}}',
+  ])("treats a 503 routing exclusion (%s) as a counted failure, never a throttle to retry", async (message) => {
+    const fetch = vi.fn(async () => new Response(message, { status: 503 }));
+    const gate = gateOf();
+    const response = await fetchWithProviderRetry("https://openrouter.ai/api/v1/chat/completions", { method: "POST" }, {
+      provider: "openrouter", label: "vision request", fetchImpl: fetch, gate,
+    });
+    // Returned to the caller at once (no inline retry, no ProviderRetryableError for Temporal to loop on).
+    expect(response.status).toBe(503);
+    expect(await response.text()).toBe(message);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(gate.requests).toBe(1);
+    await gate.finish();
+    expect(backend.inspect("run-1", "org-1")).toMatchObject({ runAttempts: 1, runFailures: 1 });
+    expect(vi.mocked(console.warn).mock.calls.some(([line]) => String(line).startsWith("[vision-throttle-handback]"))).toBe(false);
+  });
+
+  it("fails a page whose max_price excludes every provider without retrying it", async () => {
+    const fetch = stubFetch([() => new Response("There is no available model provider that meets your routing requirements", { status: 503 })]);
+    const result = await read().catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect(result).not.toBeInstanceOf(ProviderRetryableError);
+    expect(String((result as Error).message)).toMatch(/503/);
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(2);
   });
 
   it("a fleet rate limiter refusal sends nothing and consumes nothing", async () => {

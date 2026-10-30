@@ -104,7 +104,7 @@ export function providerFromBaseUrl(baseUrl: string | null | undefined): string 
   if (!baseUrl) return "openai";
   try {
     const host = new URL(baseUrl).hostname;
-    if (host.endsWith("openrouter.ai")) return "openrouter";
+    if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) return "openrouter";
     if (host.endsWith("openai.com")) return "openai";
     if (host.endsWith("anthropic.com")) return "anthropic";
     return host;
@@ -228,7 +228,7 @@ export interface ProviderRetryOptions {
 export interface ProviderRequestGate {
   admit(): Promise<void>;
   failed(): void;
-  unbilled(kind: "throttle" | "cancelled"): Promise<boolean>;
+  unbilled(kind: "throttle" | "cancelled", detail?: { provider: string; status: number }): Promise<boolean>;
 }
 
 /**
@@ -242,6 +242,18 @@ export interface ProviderRequestGate {
  */
 export function isUnbilledThrottleStatus(status: number): boolean {
   return status === 429 || status === 503 || status === 529;
+}
+
+/**
+ * A 503 that says no provider can serve the request's routing constraints rather than that one is overloaded.
+ * OpenRouter documents 503 as "There is no available model provider that meets your routing requirements"
+ * (errors-and-debugging docs); its provider-selection docs say `max_price` "will prevent your request from
+ * running" without naming a status. Assumption, not verified with a paid call: a `max_price` exclusion is that
+ * 503, or a body naming no matching endpoints or the max price. Such a response is a failure, not a throttle.
+ */
+export function isRoutingExclusion(status: number, body: string): boolean {
+  if (status !== 503 && status !== 404) return false;
+  return /routing requirements|no endpoints found|max[_ ]price/i.test(body);
 }
 
 /**
@@ -289,14 +301,22 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
         return response;
       }
       status = response.status;
+      const body = await response.text().catch(() => "");
+      if (isRoutingExclusion(status, body)) {
+        // No provider meets the request's routing constraints (max_price included): retrying cannot help, and
+        // handing it back as a throttle would loop in Temporal. Counted as a failure and returned to the caller.
+        options.gate?.failed();
+        if (lease) options.rateLimit?.onLease?.(lease);
+        return new Response(body, { status, headers: response.headers });
+      }
       // A rate limit or overload is refused before acceptance: it leaves the guard's counts.
-      if (isUnbilledThrottleStatus(status) && options.gate) allowanceSpent = !(await options.gate.unbilled("throttle"));
-      else options.gate?.failed();
+      if (isUnbilledThrottleStatus(status) && options.gate) {
+        allowanceSpent = !(await options.gate.unbilled("throttle", { provider: options.provider, status }));
+      } else options.gate?.failed();
       retryAfterMs = parseRetryAfterMs(response.headers);
       if (status === 429 && rateLimiter) {
         await rateLimiter.reportThrottle({ provider: options.provider, model: options.rateLimit!.model, retryAfterMs });
       }
-      const body = await response.text().catch(() => "");
       if (status === 429 && isQuotaExhaustedBody(body)) {
         // Quota exhaustion is a configuration problem; let the caller's fail-open policy decide.
         return new Response(body, { status, headers: response.headers });

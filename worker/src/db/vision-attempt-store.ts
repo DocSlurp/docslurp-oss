@@ -25,6 +25,41 @@ const ORG_ROW_RETENTION_HOURS = VISION_ORG_WINDOW_HOURS + 1;
  * charged request's row is removed by the checkpoint that persists its Rich charge
  * (usage-event-store.ts), and a request handed back before acceptance is removed by `release`.
  */
+/** The database's vision ledger does not match the code (missing or stale migration 0101): never retried. */
+export class VisionLedgerSchemaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "VisionLedgerSchemaError";
+  }
+}
+
+/**
+ * Startup schema check with retries: a schema mismatch (`VisionLedgerSchemaError`) is returned as fatal at once;
+ * any other failure (the database not reachable yet, a dropped connection) is retried with backoff, and the last
+ * one is thrown as it is, so the worker's classifier treats it as a retryable startup failure.
+ */
+export async function assertVisionLedgerSchemaWithRetry(
+  check: () => Promise<void>,
+  options: { attempts?: number; baseDelayMs?: number; sleep?: (ms: number) => Promise<void>; log?: (line: string) => void } = {},
+): Promise<void> {
+  const attempts = options.attempts ?? 6;
+  const baseDelayMs = options.baseDelayMs ?? 1_000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await check();
+      return;
+    } catch (error) {
+      if (error instanceof VisionLedgerSchemaError || attempt >= attempts) throw error;
+      const delayMs = Math.min(30_000, baseDelayMs * 2 ** (attempt - 1));
+      (options.log ?? console.warn)(
+        `[vision-guard] ledger schema check failed (attempt ${attempt}/${attempts}), retrying in ${delayMs} ms: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await sleep(delayMs);
+    }
+  }
+}
+
 export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
   constructor(private readonly sql: Client) {}
 
@@ -44,10 +79,10 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         ) as weight,
         to_regclass('vision_run_charged_pages') is not null as stale`;
     if (!row?.org_table) {
-      throw new Error("vision attempt ledger missing (migration 0101_vision_attempt_ledger not applied); run pnpm db:migrate");
+      throw new VisionLedgerSchemaError("vision attempt ledger missing (migration 0101_vision_attempt_ledger not applied); run pnpm db:migrate");
     }
     if (!row.weight || row.stale) {
-      throw new Error(
+      throw new VisionLedgerSchemaError(
         "vision attempt ledger is from an earlier draft of migration 0101 " +
           `(${[!row.weight ? "vision_org_attempts.weight_cents missing" : null, row.stale ? "stale vision_run_charged_pages present" : null].filter(Boolean).join(", ")}); ` +
           "database reset required: 0101 was replaced in place and cannot be upgraded by pnpm db:migrate",
