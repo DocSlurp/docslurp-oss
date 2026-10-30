@@ -7,7 +7,7 @@ import { visionConfigSchema, visionListPriceCents, type VisionConfig } from "@do
 
 import type { Config } from "../config.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
-import { MemoryVisionAttemptBackend, type VisionGuardStop } from "../lib/vision-attempt-guard.js";
+import { MemoryVisionAttemptBackend, resetVisionPendingOverrunsForTest, type VisionGuardStop } from "../lib/vision-attempt-guard.js";
 import { visionImageTokenBound, visionInputTokenBound, visionRequestPricing } from "../lib/vision-pricing.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, type VisionExecutionResult } from "../tools/vision-runtime.js";
@@ -16,7 +16,8 @@ import { resetStreamingSupportForTest } from "../tools/vision-stream.js";
 /**
  * The org bound holds on what providers bill, not only on what was admitted: a response whose provider usage (or
  * reported cost) prices above its request's admitted weight is logged, topped up on the org's uncharged count and
- * counted against its route; after `VISION_ROUTE_OVERRUN_LIMIT` (default 3) overruns the route is refused.
+ * counted against its route for the org; after `VISION_ROUTE_OVERRUN_LIMIT` (default 3) overruns the route is refused
+ * for that org only. Every other org keeps the route, at a weight raised by the route's billed/bound correction.
  */
 const cfg = {
   openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1",
@@ -41,10 +42,16 @@ const visionPrompt = () => promptForWeight;
 
 let sends: string[];
 let warnings: string[];
+let errors: string[];
 
 beforeEach(() => {
   sends = [];
   warnings = [];
+  errors = [];
+  resetVisionPendingOverrunsForTest();
+  vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+    errors.push(String(line));
+  });
   resetStreamingSupportForTest();
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation((line: unknown) => {
@@ -65,13 +72,13 @@ function stubFetch(handler: (host: string) => Response) {
   }));
 }
 
-async function guardedRead(backend: MemoryVisionAttemptBackend, vision: VisionConfig, pageNumber = 1) {
+async function guardedRead(backend: MemoryVisionAttemptBackend, vision: VisionConfig, pageNumber = 1, orgId = "org-1") {
   const dir = await mkdtemp(join(tmpdir(), "vision-overrun-"));
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   let prompt = "";
   const outcome = await guardedVisionCall({
-    host: { run: { id: "run-1", orgId: "org-1" }, visionAttempts: backend },
+    host: { run: { id: `run-${orgId}`, orgId }, visionAttempts: backend },
     vision, cfg, target: { documentId: "doc", pageNumber, purpose: "region" },
     record: () => null,
     call: async (gate) => {
@@ -105,7 +112,7 @@ describe("billed usage above the admitted weight", () => {
     expect(line).toContain(`billed=${billed.toFixed(4)} bound=${bound.toFixed(4)}`);
     // The request's own weight plus the top-up: the org count now equals the billed cost.
     expect(backend.orgCents("org-1")).toBeCloseTo(billed, 3);
-    expect(backend.inspect("run-1", "org-1")).toMatchObject({ orgAttempts: 2, orgSettledAttempts: 2 });
+    expect(backend.inspect("run-org-1", "org-1")).toMatchObject({ orgAttempts: 2, orgSettledAttempts: 2 });
   });
 
   it("does nothing for usage within the bound", async () => {
@@ -126,7 +133,7 @@ describe("billed usage above the admitted weight", () => {
     expect(backend.orgCents("org-1")).toBeCloseTo(100, 3);
   });
 
-  it("refuses the route after three overruns in 24 hours, before sending; the fallback route still serves", async () => {
+  it("refuses the route for the overrunning org after three overruns in 24 hours, before sending; the fallback route still serves", async () => {
     const backend = new MemoryVisionAttemptBackend();
     stubFetch((host) => answer(host === "openrouter.ai" ? { prompt_tokens: 400_000, completion_tokens: 300 } : { prompt_tokens: 1_200, completion_tokens: 300 }));
     for (let page = 1; page <= 3; page += 1) {
@@ -145,5 +152,44 @@ describe("billed usage above the admitted weight", () => {
     const result = (served.outcome as { result: VisionExecutionResult }).result;
     expect(result).toMatchObject({ fallbackUsed: true, route: { provider: "openai", model: "gpt-4.1-mini" } });
     expect(sends).toEqual(["openrouter.ai", "openrouter.ai", "openrouter.ai", "api.openai.com"]);
+  });
+
+  it("one org's overruns never refuse another org: the route's weight correction raises its weight, and it still runs", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const overrun = { prompt_tokens: 1_000_000, completion_tokens: 300 };
+    stubFetch(() => answer(overrun));
+    for (let page = 1; page <= 3; page += 1) await guardedRead(backend, vision(OPENROUTER), page, "org-a");
+    expect((await guardedRead(backend, vision(OPENROUTER), 4, "org-a")).outcome).toMatchObject({ admitted: false, stop: { reason: "route-overrun" } });
+
+    // The ratio is far above the cap: logged at error level, once, when it first raised the correction.
+    const corrections = errors.filter((line) => line.startsWith("[vision-weight] correction"));
+    expect(corrections).toHaveLength(1);
+    expect(corrections[0]).toContain("provider=openrouter model=google/gemini-3.1-flash-lite");
+    expect(corrections[0]).toContain("factor=4.000 cap=4 capped=true org=org-a");
+
+    // Org B on the same route: admitted (and sent), at four times the catalog bound.
+    sends = [];
+    stubFetch(() => answer({ prompt_tokens: 1_200, completion_tokens: 300 }));
+    const { outcome, prompt } = await guardedRead(backend, vision(OPENROUTER), 1, "org-b");
+    expect(outcome.admitted).toBe(true);
+    expect(sends).toEqual(["openrouter.ai"]);
+    promptForWeight = prompt;
+    expect(backend.orgCents("org-b")).toBeCloseTo(4 * weightOf("google/gemini-3.1-flash-lite", "openrouter"), 3);
+    expect(warnings.some((line) => line.includes("refused=") && line.includes("org=org-b"))).toBe(false);
+  });
+
+  it("a correction below the cap weighs the route at its highest billed/bound ratio", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    // Within the tokens, reported at 2.5 times the bound.
+    stubFetch(() => answer({ prompt_tokens: 1_200, completion_tokens: 300 }));
+    const { prompt } = await guardedRead(backend, vision(OPENROUTER), 1, "org-probe");
+    promptForWeight = prompt;
+    const bound = weightOf("google/gemini-3.1-flash-lite", "openrouter");
+    stubFetch(() => answer({ prompt_tokens: 1_200, completion_tokens: 300, cost: (2.5 * bound) / 100 }));
+    await guardedRead(backend, vision(OPENROUTER), 1, "org-a");
+    expect(errors.find((line) => line.startsWith("[vision-weight] correction"))).toContain("ratio=2.500 previous=1.000 factor=2.500 cap=4 capped=false");
+    stubFetch(() => answer({ prompt_tokens: 1_200, completion_tokens: 300 }));
+    await guardedRead(backend, vision(OPENROUTER), 1, "org-b");
+    expect(backend.orgCents("org-b")).toBeCloseTo(2.5 * bound, 3);
   });
 });

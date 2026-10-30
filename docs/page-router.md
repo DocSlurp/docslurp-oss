@@ -173,7 +173,8 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `VISION_BREAKER_FAILURE_RATE` | `0.25` | 0.01..1 (clamped) | Failed share of the run's requests that trips the breaker. |
 | `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its own prompt, image and route's worst case). |
 | `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529; not a 503 routing exclusion) one vision call may hand back before the wait goes to Temporal. |
-| `VISION_ROUTE_OVERRUN_LIMIT` | `3` | integer 1..1000 (clamped) | Responses on one billed route (provider and model) billed above their admitted weight in 24 h, across orgs, before the route is refused. |
+| `VISION_ROUTE_OVERRUN_LIMIT` | `3` | integer 1..1000 (clamped) | Responses of one org on one billed route (provider and model) billed above the route's catalog bound in 24 h before the route is refused for that org. |
+| `VISION_ROUTE_WEIGHT_CORRECTION_MAX` | `4` | 1..100 (clamped) | Cap on the route weight correction: every org's admissions on a route weigh its catalog bound times the route's highest billed/bound ratio in 24 h, across orgs. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -281,20 +282,74 @@ process.
 | `VISION_BREAKER_MIN_FAILURES` | 20 (1-10000) | at least this many of the run's requests failed or were rejected... |
 | `VISION_BREAKER_FAILURE_RATE` | 0.25 (0.01-1) | ...and they are at least this share of the run's requests (sticky for the run) |
 | `VISION_ORG_UNCHARGED_LIMIT_CENTS` | 4000 (1-1000000) | the org's uncharged requests in the last 24 hours, by worst-case weight, plus this one would pass it |
-| `VISION_ROUTE_OVERRUN_LIMIT` | 3 (1-1000) | the request's billed route (provider and model) billed above its admitted weight this many times in the last 24 hours, across orgs (`route-overrun`; not sticky, and a configured fallback on another route is still tried) |
+| `VISION_ROUTE_OVERRUN_LIMIT` | 3 (1-1000) | this org's requests on the request's billed route (provider and model) billed above the route's catalog bound this many times in the last 24 hours (`route-overrun`; that org only, not sticky, and a configured fallback on another route is still tried) |
+| `VISION_ROUTE_WEIGHT_CORRECTION_MAX` | 4 (1-100) | never refuses: caps the factor every org's admissions on a route are weighed at (below) |
+| (none) | | an overrun of the org could not be written after retries (`overrun-unreconciled`; sticky for the run, and every admission of the org in that worker process is refused until a retry persists it) |
 
 **Billed overruns.** A weight is a bound computed from the catalog (the image's token bound, the
-prompt's bytes, the full output cap), not what the provider bills. After each response (or a stream
-cut off after its usage chunk) on a billed route, the runtime prices the provider's `prompt_tokens`
+prompt's bytes, the full output cap), not what the provider bills. After each response on a billed
+route (or a stream cut off after its usage chunk), the runtime prices the provider's `prompt_tokens`
 and `completion_tokens` at the model's list price, takes the reported cost instead when it is higher,
-and compares it with the weight the request was admitted at. An overrun logs
-`[vision-weight] overrun model=… provider=… upstream=… billed=… bound=…`, adds the difference to the
-org's count as a settled row of its own (in the same transaction and under the same run and org locks
-as admission, with the org taken from the run row; no Rich charge checkpoint removes it), and records
-a `vision_route_overruns` row. The org bound therefore holds on billed cost even when a provider
-counts more image tokens than the catalog bound, overshooting by at most one request. The route count
-is global on purpose: an overrun shows the catalog bound itself is wrong for that route, so every org
-stops using it until the overruns age out of the 24 hour window.
+and compares it with the route's catalog bound for the request. An OpenRouter stream that ends
+without a usage chunk (an abort for degenerate output, an endpoint that ignores `include_usage`, a
+stream cut off before its usage chunk) has its charge looked up by generation id
+(`resolveOpenRouterUsage`, OpenRouter's `/generation` receipt) and is reconciled and recorded with
+it; without a receipt it is recorded from estimates, labelled `usage_source=estimated`
+(`[vision-stream] ... no usage and no receipt`).
+
+An overrun logs `[vision-weight] overrun model=… provider=… upstream=… billed=… bound=…` and is
+reconciled against the request's admission ticket (`vision_admission_tickets`): a durable row,
+written at admission with the org the request was admitted under, its admitted weight and its catalog
+bound, that outlives the run, its workspace and the request's org-count row. In one transaction under
+the org's advisory lock it adds billed minus admitted weight to that org's count as a settled row of
+its own (`overrun:<ticket>`; no Rich charge checkpoint removes it) and inserts a
+`vision_route_overruns` row keyed by the ticket. Reconciliation is idempotent per ticket: a retried
+write whose first commit was not acknowledged changes nothing. A write that fails is retried; if it
+still fails the run stops (`overrun-unreconciled`, sticky) and every later admission of the org in
+that worker process retries it first and is refused while it fails. The org bound therefore holds on
+billed cost even when a provider counts more image tokens than the catalog bound.
+
+Overruns refuse a route per org: after `VISION_ROUTE_OVERRUN_LIMIT` of one org's overruns on a route
+in 24 hours the route is refused for that org only. No org's overruns refuse the route for another
+org. Instead every org pays the route's **weight correction**: later admissions on the route weigh
+its catalog bound times the route's highest billed/bound ratio of the last 24 hours across orgs,
+capped at `VISION_ROUTE_WEIGHT_CORRECTION_MAX`. One tenant cannot switch the default route off for
+everyone; at worst it makes the route weigh up to 4x more against every org's own bound. An overrun
+that raises the correction logs at error level, for alerting:
+`[vision-weight] correction provider=… model=… ratio=… previous=… factor=… cap=… capped=… org=… run=…`
+(`capped=true`: the ratio exceeds the cap, so the correction does not cover it and the catalog bound
+must be fixed).
+
+Two limits on the bound:
+
+- **Concurrency.** Admission sees only reconciled overruns, so the requests in flight on a route whose
+  bound is wrong can push an org past its bound by about (requests in flight) x (billed - bound)
+  before their top-ups land; each top-up then lands and later admissions see it. The correction, once
+  raised, closes the gap for later admissions.
+- **DeepSeek V4.1 Flash 1017 (the default).** Its 1,024-token image bound is the published
+  processor's `vision_max_n_token`; it holds only while every pinned provider (Together, Fireworks,
+  Parasail) serves that limit. A provider serving a larger limit bills above the bound; the weight
+  correction (and the per-org refusal for the org whose pages trigger it) is the safety net, and a
+  `[vision-weight] correction` line on this route means the bound must be revisited.
+
+MiMo V2.6 Flash and Nemotron 3.5 Super VL are refused (`refusedReason` in the catalog): their
+processor maxima are not proven serving maxima, so no weight can bound them. Config validation, the
+page router's target filter and the runtime all reject them until serving-level evidence exists.
+
+**Reset runbook.** The overrun rows age out after 24 hours. To lift a refusal or a correction sooner
+(after fixing the catalog bound, or for a false positive), delete the route's rows on the primary
+database, scoped as narrowly as the case allows, and record why:
+
+```sql
+-- One org's refusal of one route:
+delete from vision_route_overruns
+where org_id = '<org>' and provider = '<provider>' and model = '<model>';
+-- The route's correction for every org (every org's overruns on it):
+delete from vision_route_overruns where provider = '<provider>' and model = '<model>';
+```
+
+Deleting overrun rows does not lower any org's uncharged count: the `overrun:<ticket>` top-ups in
+`vision_org_attempts` stay until they age out, so the org bound keeps counting what was billed.
 
 **Org bound.** A request counts as uncharged from the moment it is admitted. It leaves the count
 only in the checkpoint transaction that persists the customer Rich page charge its read created: the
@@ -340,8 +395,8 @@ OpenAI's 32-px patches times the model multiplier (1.62 for `gpt-4.1-mini`, no c
 downscaling), Gemini 3's largest per-image count (2,240), Gemini 2.x's 258-token tiles counted per
 256 px, and, for open-weights models, the most tokens their published Hugging Face image processor
 gives one image at any size, after minimum-size upscaling, resizing, tiling and patch merging, plus
-framing tokens (Nemotron 3.5 Super VL 3,330; DeepSeek V4.1 Flash 1,024; MiMo V2.6 Flash 8,194; GLM
-5.3 Flash 8,002; see `visionModelImageTokenBound` in `packages/shared/src/embedding.ts`). Workspace schema labels in the
+framing tokens (DeepSeek V4.1 Flash 1,024; GLM 5.3 Flash 8,002; MiMo V2.6 Flash and Nemotron 3.5
+Super VL have no bound and are refused, above; see `visionModelImageTokenBound` in `packages/shared/src/embedding.ts`). Workspace schema labels in the
 `schema-form-fields` prompt are capped (100 labels, 80 characters each, 4 KB in total) and a prompt
 over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`:
 `prompt` and `completion` (USD per million tokens) equal to the prices the weight assumes, `image`

@@ -17,7 +17,7 @@ let server: PGLiteSocketServer;
 let store: Store;
 
 const config: VisionGuardConfig = {
-  pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 10, throttleAllowance: 5, routeOverrunLimit: 3,
+  pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 10, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
 };
 
 async function insertRuns(rows: Array<[runId: string, orgId: string | null, workspaceId: string]>): Promise<void> {
@@ -174,7 +174,7 @@ describe("PostgresVisionAttemptBackend", () => {
     expect(await orgCount("o7")).toBe(4);
   }, 60_000);
 
-  it("tops up the run row's org by a billed overrun and refuses the route across orgs after the limit", async () => {
+  it("tops up the ticket's org by a billed overrun and refuses the route for that org only; other orgs pay the correction", async () => {
     await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o12', 'Twelve', 'twelve', 'u1'), ('o13', 'Thirteen', 'thirteen', 'u1');
       insert into workspaces(id, org_id, user_id, name) values ('w12', 'o12', 'u1', 'W12'), ('w13', 'o13', 'u1', 'W13');`);
     await insertRuns([["overrun-run", "o12", "w12"], ["other-org-run", "o13", "w13"]]);
@@ -189,21 +189,53 @@ describe("PostgresVisionAttemptBackend", () => {
         await gate.finish();
       }
     };
-    // The caller claims o13; the run row says o12: the top-up lands on o12, settled, beside the request itself.
+    // The caller claims o13; the run row (and so the ticket) says o12: the top-up lands on o12, settled, beside the
+    // request itself.
     await overrun("overrun-run", "o13", 1);
     expect(await orgCents("o12")).toBe(3.5);
     expect(await orgCents("o13")).toBe(0);
     expect(await count(`select count(*)::int as n from vision_org_attempts where org_id = 'o12' and settled`)).toBe(2);
     expect(await count(`select count(*)::int as n from vision_route_overruns where model = 'acme/overrun-vl' and org_id = 'o12'`)).toBe(1);
-    // A second overrun, from another org, reaches the route's limit: the route is refused for every org, before
-    // anything is admitted, and other routes stay open.
-    await overrun("other-org-run", null, 1);
-    for (const runId of ["overrun-run", "other-org-run"]) {
-      const gate = guardOf(runId, null, limits).call({ documentId: "d1", pageNumber: 9, purpose: "page" });
-      await expect(gate.admit({ weightCents: 1, route })).rejects.toMatchObject({ stop: { reason: "route-overrun", sticky: false, routeOverruns: 2 } });
-      await gate.admit({ weightCents: 1, route: { provider: "openrouter", model: "acme/other-vl" } });
-      await gate.finish();
-    }
+    // A second overrun of o12 reaches the limit. It was admitted at the route's correction (3.5x), so billing 3.5
+    // tops up nothing more.
+    await overrun("overrun-run", null, 2);
+    expect(await orgCents("o12")).toBe(3.5 + 3.5);
+    const refused = guardOf("overrun-run", null, limits).call({ documentId: "d1", pageNumber: 9, purpose: "page" });
+    await expect(refused.admit({ weightCents: 1, route })).rejects.toMatchObject({ stop: { reason: "route-overrun", sticky: false, routeOverruns: 2 } });
+    await refused.admit({ weightCents: 1, route: { provider: "openrouter", model: "acme/other-vl" } });
+    await refused.finish();
+    // o13 never overran: the route stays open for it, weighed at the route's highest billed/bound ratio.
+    const other = guardOf("other-org-run", null, limits).call({ documentId: "d1", pageNumber: 1, purpose: "page" });
+    await other.admit({ weightCents: 1, route });
+    await other.finish();
+    expect(await orgCents("o13")).toBe(3.5);
+    expect(await count(`select count(*)::int as n from vision_route_overruns where org_id = 'o13'`)).toBe(0);
+  }, 60_000);
+
+  it("reconciles an overrun against its durable ticket after the run is deleted, once per ticket", async () => {
+    await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o14', 'Fourteen', 'fourteen', 'u1');
+      insert into workspaces(id, org_id, user_id, name) values ('w14', 'o14', 'u1', 'W14');`);
+    await insertRuns([["doomed-overrun", "o14", "w14"]]);
+    const route = { provider: "openrouter", model: "acme/deleted-vl" };
+    const guard = guardOf("doomed-overrun", null, { orgLimitCents: 1_000 });
+    const gate = guard.call({ documentId: "d1", pageNumber: 1, purpose: "page" });
+    await gate.admit({ weightCents: 1, route });
+    const [ticket] = (await db.query<{ id: string }>(`select id from vision_admission_tickets where org_id = 'o14'`)).rows;
+    // The run (and its workspace) are deleted while the request is in flight; the 100-cent response lands afterwards.
+    await db.exec(`delete from workspace_runs where id = 'doomed-overrun'; delete from workspaces where id = 'w14';`);
+    await gate.overrun({ route, billedCents: 100, boundCents: 1 });
+    await gate.finish();
+    // Admitted at 1 and billed 100: the org counts all of it (before this fix the run lookup found no org: 99 lost).
+    expect(await orgCents("o14")).toBe(100);
+    expect(await count(`select count(*)::int as n from vision_route_overruns where org_id = 'o14' and ticket_id = '${ticket!.id}'`)).toBe(1);
+    // The same ticket again (a retried write whose first commit was not acknowledged): nothing changes.
+    await expect(store.visionAttempts.recordOverrun({ runId: "doomed-overrun", ticketId: ticket!.id, route, billedCents: 100, boundCents: 1 }))
+      .resolves.toMatchObject({ recorded: false, orgId: "o14", toppedUpCents: 0 });
+    expect(await orgCents("o14")).toBe(100);
+    expect(await count(`select count(*)::int as n from vision_route_overruns where org_id = 'o14'`)).toBe(1);
+    // An unknown ticket is an error (the guard keeps it pending and fails closed), never a guess at the org.
+    await expect(store.visionAttempts.recordOverrun({ runId: "doomed-overrun", ticketId: "no-such-ticket", route, billedCents: 5, boundCents: 1 }))
+      .rejects.toThrow(/ticket no-such-ticket not found/);
   }, 60_000);
 
   it("un-counts only the first charge of a page per run; regions, critique and second reads stay uncharged", async () => {
@@ -432,9 +464,15 @@ describe("startup schema check", () => {
     }
     await db.exec(`alter table vision_route_overruns rename to vision_route_overruns_old;`);
     try {
-      await expect(store.visionAttempts.assertSchema()).rejects.toThrow(/vision_route_overruns missing.*database reset required/);
+      await expect(store.visionAttempts.assertSchema()).rejects.toThrow(/vision_route_overruns \(keyed by ticket_id\) missing.*database reset required/);
     } finally {
       await db.exec(`alter table vision_route_overruns_old rename to vision_route_overruns;`);
+    }
+    await db.exec(`alter table vision_admission_tickets rename to vision_admission_tickets_old;`);
+    try {
+      await expect(store.visionAttempts.assertSchema()).rejects.toThrow(/vision_admission_tickets missing.*database reset required/);
+    } finally {
+      await db.exec(`alter table vision_admission_tickets_old rename to vision_admission_tickets;`);
     }
     await expect(store.visionAttempts.assertSchema()).resolves.toBeUndefined();
   }, 60_000);

@@ -11,7 +11,7 @@ import {
   visionModelTokenPricing,
   visionModelUriProblem,
   type VisionConfig,
-  VISION_RASTER_CEILING_IMAGE_TOKENS,
+  visionModelRefusal,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -43,7 +43,7 @@ import { visionMaxPrice } from "../test/vision-max-price.js";
  * output cap) and OpenRouter is told not to bill above it.
  */
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
-const config: VisionGuardConfig = { pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3 };
+const config: VisionGuardConfig = { pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4 };
 const MODEL = "google/gemini-3.1-flash-lite";
 
 const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: "Name: x" }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2 } }),
@@ -188,7 +188,7 @@ describe("max_price on OpenRouter bodies", () => {
   it("caps a separate per-request fee at 0 and a per-image fee at the image's token bound", () => {
     // A route that bills $0.01 per request or a per-image fee above the catalog bound is excluded by OpenRouter.
     for (const spec of visionModelCatalog) {
-      if (!spec.tokenPricing || !spec.uri.startsWith("llm://openrouter/")) continue;
+      if (!spec.tokenPricing || !spec.uri.startsWith("llm://openrouter/") || visionModelRefusal(spec.id)) continue;
       const cap = visionMaxPrice(spec.id);
       expect(cap.request).toBe(0);
       expect(cap.image).toBeGreaterThan(0);
@@ -222,14 +222,9 @@ describe("image-token bounds from each provider's own formula", () => {
     expect(visionImageTokenBound({ widthPx: 2_048, heightPx: 2_048 }, "google/gemini-2.5-flash-lite")).toBeGreaterThanOrEqual(tiles * 258);
   });
 
-  it("open-weights models: their processor's per-image maximum (or the raster ceiling) at every size, tiny images included", () => {
-    // Re-derived from each processor in packages/shared/src/__tests__/vision-image-token-bounds.test.ts. MiMo and
-    // Nemotron have no verified serving configuration, so they take the conservative raster ceiling (293 x 293 + 2).
-    expect(VISION_RASTER_CEILING_IMAGE_TOKENS).toBe(85_851);
-    const maxima = {
-      "nvidia/nemotron-3.5-super-vl": VISION_RASTER_CEILING_IMAGE_TOKENS, "deepseek/deepseek-v4.1-flash-1017": 1_024,
-      "xiaomi/mimo-v2.6-flash": VISION_RASTER_CEILING_IMAGE_TOKENS, "z-ai/glm-5.3-flash": 8_002,
-    };
+  it("open-weights models: their processor's per-image maximum at every size, tiny images included", () => {
+    // Re-derived from each processor in packages/shared/src/__tests__/vision-image-token-bounds.test.ts.
+    const maxima = { "deepseek/deepseek-v4.1-flash-1017": 1_024, "z-ai/glm-5.3-flash": 8_002 };
     for (const [model, max] of Object.entries(maxima)) {
       for (const size of [{ widthPx: 14, heightPx: 14 }, { widthPx: 1, heightPx: 4_000 }, { widthPx: 2_048, heightPx: 2_048 }, null]) {
         expect(visionImageTokenBound(size, model), model).toBe(max);
@@ -237,9 +232,19 @@ describe("image-token bounds from each provider's own formula", () => {
     }
   });
 
-  it("every priced catalog model has a bound, and an unknown size takes the largest raster", () => {
+  it("MiMo and Nemotron are refused: no proven serving maximum, so no bound, no weight and no request", () => {
+    for (const model of ["xiaomi/mimo-v2.6-flash", "nvidia/nemotron-3.5-super-vl"]) {
+      expect(visionModelRefusal(model), model).toMatch(/not proven at the serving level/);
+      expect(visionImageTokens(model, null), model).toBeNull();
+      expect(visionModelUriProblem(`llm://openrouter/${model}`), model).toMatch(/is not admitted/);
+      expect(() => visionRequestPricing({ model, runtime: "openai-compatible", billing: "openrouter", inputTokens: 2_000 }), model)
+        .toThrow(/is not admitted/);
+    }
+  });
+
+  it("every admitted priced catalog model has a bound, and an unknown size takes the largest raster", () => {
     for (const spec of visionModelCatalog) {
-      if (!spec.tokenPricing) continue;
+      if (!spec.tokenPricing || visionModelRefusal(spec.id)) continue;
       const unknown = visionImageTokens(spec.id, null);
       expect(unknown, spec.id).not.toBeNull();
       expect(unknown!).toBeGreaterThanOrEqual(visionImageTokens(spec.id, { widthPx: 4_000, heightPx: 4_000 })!);
@@ -271,8 +276,15 @@ describe("hosted vision is limited to the priced catalog", () => {
     expect(visionConfigSchema.safeParse({ modelUri: "llm://local-cli/microsoft/Florence-2-base-ft", remoteFallbackModelUri: uri }).success).toBe(false);
   });
 
-  it("accepts every priced catalog model, local servers and private routes", () => {
-    for (const spec of visionModelCatalog) expect(visionConfigSchema.safeParse({ modelUri: spec.uri }).success, spec.uri).toBe(true);
+  it("accepts every admitted priced catalog model, local servers and private routes; refuses MiMo and Nemotron", () => {
+    for (const spec of visionModelCatalog) {
+      expect(visionConfigSchema.safeParse({ modelUri: spec.uri }).success, spec.uri).toBe(!visionModelRefusal(spec.id));
+    }
+    for (const uri of ["llm://openrouter/xiaomi/mimo-v2.6-flash", "llm://openrouter/nvidia/nemotron-3.5-super-vl"]) {
+      const parsed = visionConfigSchema.safeParse({ modelUri: uri });
+      expect(parsed.success, uri).toBe(false);
+      expect(JSON.stringify(parsed.error?.issues), uri).toContain("is not admitted");
+    }
     expect(visionConfigSchema.safeParse({ modelUri: "llm://vllm/acme/plain-vl" }).success).toBe(true);
     expect(visionConfigSchema.safeParse({ modelUri: "llm://ollama/llava?baseUrl=http://127.0.0.1:11434/v1" }).success).toBe(true);
     expect(visionConfigSchema.safeParse({ modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8" }).success).toBe(true);
@@ -281,6 +293,8 @@ describe("hosted vision is limited to the priced catalog", () => {
   it.each([
     "llm://acme/o3-pro", "llm://anthropic/gpt-5-pro", "llm://huggingface/Qwen/Qwen2.5-VL-7B-Instruct", "llm://openrouter/someone/unlisted-vl",
     "llm://openai/gpt-unlisted-vision", "llm://vllm/acme/plain-vl?baseUrl=https://gpu.example/v1", "llm://openai/gpt-4.1-mini?baseUrl=https://evil.example/v1",
+    // Cataloged but refused: no serving-level image-token evidence.
+    "llm://openrouter/xiaomi/mimo-v2.6-flash", "llm://openrouter/nvidia/nemotron-3.5-super-vl",
   ])(
     "refuses an unvalidated %s config at run time: zero sends, zero weight",
     async (uri) => {

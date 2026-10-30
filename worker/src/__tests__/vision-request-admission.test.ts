@@ -17,7 +17,7 @@ import { findVisionBilledUsage, resetStreamingSupportForTest } from "../tools/vi
  * fetchWithProviderRetry) with only `fetch` stubbed: every request a provider can see is admitted.
  */
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
-const config: VisionGuardConfig = { pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 1_000, throttleAllowance: 5, routeOverrunLimit: 3 };
+const config: VisionGuardConfig = { pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 1_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4 };
 
 let backend: MemoryVisionAttemptBackend;
 let guard: VisionRunGuard;
