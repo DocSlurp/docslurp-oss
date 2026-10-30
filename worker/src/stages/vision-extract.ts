@@ -165,7 +165,7 @@ export class VisionExtractStage implements Stage {
 
     await runDocuments(
       healthyDocuments(state),
-      state.docConcurrency,
+      (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency,
       async (document) => {
         if (isCostCapExceeded(state)) {
           console.log(
@@ -442,6 +442,7 @@ export class VisionExtractStage implements Stage {
             await recordPageFacts(state.store, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
               selected: needsVision.selectedPages, processed: outputs,
+              costCapped: isCostCapExceeded(state),
             }));
 
             const reconciliation = await this.reconcileExtractionArtifacts(
@@ -903,6 +904,22 @@ export class VisionExtractStage implements Stage {
       return output ? [output] : [];
     });
     if (!missing.length) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+    // Capped runs admit one page at a time, including raster work. The ledger
+    // records the completed page's charge before the next admission. A single
+    // admitted page can cross the cap; the rest of a long scan cannot follow it.
+    // run() also serializes documents, and planPageTasks disables page fanout.
+    if ((state.run.pipeline.maxCostCents ?? 0) > 0) {
+      if (isCostCapExceeded(state)) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      if (missing.length > 1) {
+        for (const pageNumber of missing) {
+          if (isCostCapExceeded(state)) break;
+          completed.push(...await this.extractVisionPagesFromCache(
+            state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache,
+          ));
+        }
+        return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      }
+    }
     const rasterPages = await this.rasters.renderSelectedPages({
       document,
       runId: state.run.id,
