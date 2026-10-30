@@ -107,6 +107,15 @@ describe("buildCanonicalChunksFromDocument", () => {
     expect(chunks.some((chunk) => chunk.overlapIndex === 1)).toBe(true);
   });
 
+  it("preserves image references and captions surrounding an oversized table", () => {
+    const text = '![Before caption](before.png)\n\n<table><tr><td>' + 'value '.repeat(100) + '</td></tr></table>\n\n![After caption](after.png)';
+    const doc = buildCanonicalDocumentFromMarkdown({documentId: "images", text, pageCount: 1, extractor: "test"});
+    const chunks = buildCanonicalChunksFromDocument(doc, text, {maxChars: 180});
+    const output = chunks.map(c => c.text).join("\n");
+    expect(output).toContain('![Before caption](before.png)');
+    expect(output).toContain('![After caption](after.png)');
+  });
+
   it("preserves canonical HTML tables, bounded cell values, page provenance and overlap boundaries", () => {
     const table = '<table>\n<tr><td rowspan="2">shared</td><td>' + 'word '.repeat(100) + '</td></tr>\n<tr><td>last</td></tr>\n</table>';
     const document = buildCanonicalDocumentFromMarkdown({ documentId: "html-example", text: '# Parent\nIntro\n' + table + '\n# After\nend', pageCount: 1, extractor: "test" });
@@ -115,7 +124,7 @@ describe("buildCanonicalChunksFromDocument", () => {
     const tables = chunks.filter(c => c.blockTypes.includes("table"));
     expect(tables.length).toBeGreaterThan(1);
     expect(tables.every(c => c.text.length <= 180 && c.overlapIndex === 0 && c.pageNumber === 1 && c.blockIds.length === 1)).toBe(true);
-    const records = tables.flatMap(c => c.text.split("\n\n")).map(r => { const i = r.indexOf("\n"); return { context: r.slice(0, i), value: JSON.parse(r.slice(i + 1)) }; });
+    const records = tables.flatMap(c => c.text.replace(/^\[Table \d+ v2:[^\n]*\n/, "").split("\n\n")).map(r => { const i = r.indexOf("\n"); return { context: r.slice(0, i), value: JSON.parse(r.slice(i + 1)) }; });
     expect(records.filter(r => r.context.includes("row 1 column 2")).map(r => r.value).join("")).toBe('word '.repeat(100));
     expect(records.filter(r => r.context.includes("row 2 column 2")).map(r => r.value)).toEqual(["last"]);
   });
@@ -125,7 +134,7 @@ describe("buildCanonicalChunksFromDocument", () => {
     const document = buildCanonicalDocumentFromMarkdown({ documentId: "cdata", text: source, pageCount: 1, extractor: "test" });
     const chunks = buildCanonicalChunksFromDocument(document, "fallback", { maxChars: 128 });
     expect(chunks.every(c => c.text.length <= 128 && c.text.includes("unparsed source"))).toBe(true);
-    expect(chunks.flatMap(c => c.text.split("\n\n")).map(r => JSON.parse(r.slice(r.indexOf("\n") + 1))).join("")).toBe(source);
+    expect(chunks.flatMap(c => c.text.replace(/^\[Table \d+ v2:[^\n]*\n/, "").split("\n\n")).map(r => JSON.parse(r.slice(r.indexOf("\n") + 1))).join("")).toBe(source);
   });
 
   it("emits table, row, and cell chunks with schema-aware metadata", () => {
