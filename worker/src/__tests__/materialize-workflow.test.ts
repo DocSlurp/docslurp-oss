@@ -995,6 +995,20 @@ describe("runMaterializeRange activity", () => {
             expect(retry.costCredits).toBe(0);
             // The server sums page cost_credits deltas into creditsSpent: the prepaid page adds none.
             expect(await costOf()).toBe(0);
+            // An empty read pays the page and keeps no text, so a Good retry reads it again with the model: that read is
+            // provider usage, and the retry (and the page) report no credits for it.
+            await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states;
+              delete from usage_events where run_id in ('m1', 'm2'); update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+            await reset();
+            const empty = await runMaterializeRange(withOps("m1", t, {
+              async ocrPage() { return { text: "  ", model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 1, costCents: 1 }; },
+            }), input("m1", [3]));
+            expect(empty.costCredits).toBeCloseTo(pageCredits("rich", 1), 9);
+            const reread = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
+            expect(reread.indexed).toEqual([3]);
+            expect(reread.costCredits).toBe(0);
+            expect(await costOf()).toBe(0);
+            expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
             // A page this run decides Fast reports exactly the Fast charge, not its embedding cost.
             await db.exec(`update workspace_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
             const fast = await runMaterializeRange(t.depsFor("m2"), input("m2", [5]));
