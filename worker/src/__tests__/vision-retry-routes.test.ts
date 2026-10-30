@@ -103,7 +103,7 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("StreamLake"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Together", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
-    const only = ["streamlake", "deepseek", "together", "fireworks", "parasail"];
+    const only = ["together", "fireworks", "parasail"];
     expect(bodies[0]!.provider).toEqual({ only, sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(DEEPSEEK) });
     expect(bodies[1]!.provider).toEqual({ only, sort: "price", allow_fallbacks: true, ignore: ["StreamLake"], max_price: visionMaxPrice(DEEPSEEK) });
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });

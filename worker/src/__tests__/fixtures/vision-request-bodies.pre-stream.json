@@ -97,8 +97,6 @@
     },
     "provider": {
       "only": [
-        "streamlake",
-        "deepseek",
         "together",
         "fireworks",
         "parasail"
@@ -143,8 +141,6 @@
     },
     "provider": {
       "only": [
-        "streamlake",
-        "deepseek",
         "together",
         "fireworks",
         "parasail"

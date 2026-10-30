@@ -642,7 +642,7 @@ export const visionModelCatalog = [
     tags: ["hosted", "cost", "open-weights"],
     runtime: "openai-compatible",
     description:
-      "Open-weights (MIT) DeepSeek multimodal snapshot via the cheapest measured host (China-based StreamLake or DeepSeek unless turned off; else US-hosted); Markdown/LaTeX page transcription.",
+      "Open-weights (MIT) DeepSeek multimodal snapshot via the cheapest allowed US host (Together, Fireworks or Parasail); Markdown/LaTeX page transcription.",
     // Measured 0.103 cents per page on the US route (2026-10-22 select split, docs/model-configuration.md). The token
     // prices are the route's most expensive allowed host ($0.30/$1.20 per 1M: Together, Fireworks, Parasail, and
     // DeepSeek's own endpoint at weekday peak; StreamLake lists $0.15/$0.60; docs/evals/vision-route-prices-2026-10-29.json),

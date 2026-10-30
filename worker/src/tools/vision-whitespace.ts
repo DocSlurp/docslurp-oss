@@ -21,7 +21,7 @@ const ZERO_WIDTH = "\u200B-\u200D\uFEFF";
 const SPECIAL = new RegExp(`[${WIDE_SPACE}${ZERO_WIDTH}]`);
 const SPACE_RUN = new RegExp(`[ ${WIDE_SPACE}]{2,}`, "g");
 const WIDE_IN_RUN = new RegExp(`[${WIDE_SPACE}]`);
-const ZERO_WIDTH_DROP = /[\u200B\uFEFF]|(?<![\p{L}\p{M}])[\u200C\u200D]|[\u200C\u200D](?![\p{L}\p{M}])/gu;
+const ZERO_WIDTH_DROP = /[\u200B\uFEFF]|(?<![\p{L}\p{M}\p{Extended_Pictographic}\p{Emoji_Modifier}])[\u200C\u200D]|[\u200C\u200D](?![\p{L}\p{M}\p{Extended_Pictographic}\p{Emoji_Modifier}])/gu;
 const TRAILING = new RegExp(`[ \\t\\r${WIDE_SPACE}${ZERO_WIDTH}]+$`);
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 

@@ -388,7 +388,7 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
       (select o.funded_at is not null from organizations o where o.id = c.org_id) as org_funded,
       -- China-based providers only when the org and the run's workspace both allow them; no org is restricted.
       coalesce((select o.allow_china_providers from organizations o where o.id = c.org_id), false)
-        and coalesce((select w.allow_china_providers from workspaces w where w.id = r.workspace_id), true) as allow_china_providers
+        and coalesce((select w.allow_china_providers from workspaces w where w.id = r.workspace_id), false) as allow_china_providers
     from workspace_runs r
     cross join lateral (
       select coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id

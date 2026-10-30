@@ -34,6 +34,10 @@ describe("normalizeVisionWhitespace", () => {
     expect(normalize(`| Item${NBSP.repeat(8)}| Price${NBSP.repeat(4)} |${NBSP.repeat(3)}`)).toBe("| Item | Price |");
   });
 
+  it("preserves emoji joiner sequences", () => {
+    expect(normalize("👩‍🔬 👩🏽‍💻 👨‍👩‍👧‍👦 🏳️‍🌈")).toBe("👩‍🔬 👩🏽‍💻 👨‍👩‍👧‍👦 🏳️‍🌈");
+  });
+
   it("removes zero-width padding but keeps joiners inside words", () => {
     expect(normalize("\uFEFFHello\u200B world\u200B")).toBe("Hello world");
     expect(normalize("a,\u200D b \u200C")).toBe("a, b");

@@ -2,7 +2,7 @@ import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { MastraVoice } from "@mastra/core/voice";
 import { z } from "zod";
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterRoutingFetch, isPrivateModelUri, lookupPrivateModelRoute, privacyModeAllowsHosted, readProviderCharge, type PrivacyMode } from "@docslurp/shared";
+import { ProviderRegionRefusedError, assertProviderAllowed, authorizePrivateModelCall, createOpenRouterRoutingFetch, isPrivateModelUri, lookupPrivateModelRoute, privacyModeAllowsHosted, readProviderCharge, type PrivacyMode } from "@docslurp/shared";
 import { CHAT_VOICE_MODEL, CHAT_VOICE_MAX_BYTES } from "@docslurp/shared/chat-voice";
 import { recordUsageEvent, type UsageScope } from "./ai-usage.js";
 import { resolveOpenRouterApiKey } from "./ai.js";
@@ -153,6 +153,9 @@ export class WorkspaceChatVoice extends MastraVoice {
       span.end(response.ok ? undefined : new Error("SpeechProviderError"));
     } catch (cause) {
       span.end(cause);
+      if (cause instanceof ProviderRegionRefusedError) {
+        throw new ChatVoiceError("Voice input is unavailable under your provider-region policy. Type your message instead.", 403, { cause });
+      }
       throw new ChatVoiceError("Transcription could not connect. Try again or type your message.", 502, { cause });
     }
     if (!response.ok) {
@@ -218,6 +221,9 @@ export class WorkspaceChatVoice extends MastraVoice {
     try {
       response = await call.fetch(`${call.baseUrl}/audio/transcriptions`, { method: "POST", body: form, signal: AbortSignal.timeout(60_000) });
     } catch (cause) {
+      if (cause instanceof ProviderRegionRefusedError) {
+        throw new ChatVoiceError("Voice input is unavailable under your provider-region policy. Type your message instead.", 403, { cause });
+      }
       throw new ChatVoiceError("Transcription could not connect. Try again or type your message.", 502, { cause });
     }
     if (!response.ok) {
