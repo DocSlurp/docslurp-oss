@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CommandRunner } from "../../tools/runner.js";
@@ -8,6 +7,7 @@ import {
   setDefaultParserSandbox,
   type InitializedParserSandbox,
 } from "../startup.js";
+import { probePidNamespace, spawnContained } from "../teardown.js";
 import { SandboxPolicyError } from "../types.js";
 
 describe("initializeParserSandbox", () => {
@@ -29,7 +29,7 @@ describe("initializeParserSandbox", () => {
     expect(result.provider.id).toBe("none");
     expect(warn).toHaveBeenCalledWith("[parser-sandbox] status=unisolated");
     expect(log).toHaveBeenCalledWith(
-      "[parser-sandbox] provider=none filesystem=false network=none processes=false location=local",
+      `[parser-sandbox] provider=none filesystem=false network=none processes=${probePidNamespace().ok} location=local`,
     );
   });
 
@@ -59,7 +59,7 @@ describe("process default parser sandbox", () => {
     const probe = vi.fn();
     const sandbox: InitializedParserSandbox = {
       config: {},
-      isolation: { filesystem: false, network: "none", processes: false, location: "local" },
+      isolation: { filesystem: false, network: "none", processes: true, location: "local" },
       provider: {
         id: "registered",
         name: "Registered",
@@ -72,7 +72,11 @@ describe("process default parser sandbox", () => {
           return {
             providerId: "registered",
             isolation: sandbox.isolation,
-            spawn: () => spawn(process.execPath, ["-e", "process.stdout.write('registered')"], { stdio: ["ignore", "pipe", "pipe"] }),
+            spawn: () =>
+              spawnContained(process.execPath, ["-e", "process.stdout.write('registered')"], {
+                env: process.env,
+                containment: "pid-namespace",
+              }),
             close: async () => {},
           };
         },
@@ -81,7 +85,7 @@ describe("process default parser sandbox", () => {
     return { sandbox, probe, opened };
   }
 
-  it("runs a runner without its own opener through the registered sandbox, without probing", async () => {
+  it.skipIf(process.platform !== "linux" || !probePidNamespace().ok)("runs a runner without its own opener through the registered sandbox, without probing", async () => {
     // A provider the environment selects but that could never initialize here.
     vi.stubEnv("DOCSLURP_PARSER_SANDBOX", "bubblewrap");
     vi.stubEnv("DOCSLURP_WORKER_SCRIPTS_DIR", "/nonexistent-parser-scripts");

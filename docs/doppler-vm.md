@@ -12,7 +12,8 @@ Unavailable images, credentials or VM capacity fail visibly. There is no Doppler
 - One regular, no-follow input, at most 500 MiB (shared with API admission); one bounded Markdown output, at most 64 MiB. Sources above 8 MiB use a private bounded disk snapshot and streaming upload, avoiding a document-sized host buffer.
 - Half a physical CPU core reserved, burst limit one core, 1 GiB VM memory; parser address space 768 MiB. Absolute control deadline 180 seconds and bounded cleanup. Late-created VMs are terminated and uncertain allocation is conservatively recorded as a full-lifetime estimate.
 - Output is staged locally and atomically published only after VM teardown succeeds. SDK errors and parser-controlled error text are not exposed.
-- The guest counts pages and extracts consecutive ranges of at most 32 pages (at most 10,000 pages/document), reuses a 256 MiB-bounded XML intermediate, and merges Markdown with form-feed page slots, including blanks. A failed chunk fails the whole document; no partial output is published. The guest has a 150-second total wall budget and 45-second per-command ceiling. Layout uses each chunk’s body-font context. Repeated furniture must meet the full document’s repetition threshold; this conservatively retains some headers rather than dropping section labels in short tail chunks. Long-document output can therefore differ from whole-document reconstruction.
+- The guest counts pages and extracts consecutive ranges of at most 32 pages (at most 10,000 pages per VM; documents up to 100,000 pages only as host-planned shards), reuses a 256 MiB-bounded XML intermediate, and merges Markdown with form-feed page slots, including blanks. A failed chunk fails the whole document; no partial output is published. The guest has a 150-second total wall budget and 45-second per-command ceiling. Layout uses each chunk’s body-font context. Repeated furniture must meet the full document’s repetition threshold; this conservatively retains some headers rather than dropping section labels in short tail chunks. Long-document output can therefore differ from whole-document reconstruction.
+- Inside the VM (defense in depth; the VM is the boundary), guest protocol `doppler-vm@4` sets `no_new_privs`, applies Landlock (ABI 4 or newer: read/execute only on system and Doppler paths, read/write only under `/job`, no TCP bind or connect, and abstract-socket and signal scoping on ABI 6+) and a seccomp filter that refuses ptrace, mount and namespace calls, bpf, perf, io_uring, keyrings, kernel modules, sockets and similar. These apply to the guest and every parser child. If any layer cannot be applied the guest refuses the job. It reports the result in its envelope (`hardening: {noNewPrivs, landlockAbi, seccompDenied}`). With `DOCSLURP_DOPPLER_VM_PROTOCOL=4` the host rejects any result without a valid report, so an older or unconfined image fails closed. Modal VMs ran kernel 7.2.9 with Landlock ABI 10 when this was added (2026-10-29). The guest first drops every Linux capability (it runs as root), checks it is single-threaded, sets `no_new_privs` and becomes non-dumpable; `/proc` is not readable after confinement. Policy `doppler-guest-hardening@2` also refuses `clone3` (ENOSYS; glibc falls back to `clone`, whose namespace flags are refused), chmod/chown/xattr/timestamp calls, `memfd_create`, `execveat`, SysV IPC and pidfd calls; every listed call is mandatory. A guest that cannot confine itself exits 3 and the host reports `Document VM guest confinement unavailable`; an image that does not report the declared confinement fails with its own error. Neither runs a whole-document fallback. Landlock here does not handle UDP or pathname UNIX sockets: network containment is the seccomp socket refusal plus the VM's blocked network.
 - The guest receives no user-defined command, environment, URL or flag. `-compact-layout` rounds word coordinates to 0.001 point, retaining text and metadata; tables and rules remain enabled.
 
 This isolates **the Doppler extraction command**, not the entire existing ingestion pipeline. Existing page-facts probing, rasterization and other opt-in stages retain the known host-isolation gap tracked in `TODO.md`. Doppler results skip implicit native shadow extraction and native parser enrichment, avoiding redundant host parsing. Do not claim whole-pipeline VM isolation.
@@ -32,8 +33,27 @@ in every shard VM; the host refuses those results, turns sharding off for 30 min
 whole-document VM. Worst case for that document: about (shards + 1) × the VM cost of one run.
 
 Rollout order: deploy workers with this host code first, then switch `DOCSLURP_DOPPLER_VM_IMAGE` to the @3 image and
-set the protocol variable. An older worker refuses every @3 result. Documents above 10,000 pages, and plans the
-process VM budget cannot hold, run as one whole-document VM. The host plans from the pipeline's page count and the
+set the protocol variable. An older worker refuses every @3 result.
+
+Optional sharding (documents of at most 10,000 pages) runs whole when it would not pay, when fewer than two process
+VM slots are free, or after an image refused ranges. A document over 10,000 pages must split whenever the image takes
+ranges, with or without `DOCSLURP_DOPPLER_SHARDS`: it queues for VM slots and runs its shards in waves, never falls
+back to one VM, and is refused on the host (no VM) when no split fits the shard, transfer or time limits. Documents
+over 100,000 pages are refused. Every shard VM holds one process slot while it runs, so
+`DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL` is a hard ceiling per worker process (not across the fleet or per org).
+The slot ceiling counts shard VMs only; whole-document runs and fallbacks take no slot.
+
+Practical ceiling: every shard VM receives the full file, so a forced split needs `file size × shards ≤
+DOCSLURP_DOPPLER_SHARD_TRANSFER_MB`. Forced shards are capped at 60 s of predicted work (about 4,600 pages), so
+100,000 pages needs about 22 shards and fits the default 512 MiB only for files under about 23 MiB; the merged
+Markdown must also fit 64 MiB (about 670 B/page at 100,000 pages). The final shard runs first and every shard checks
+the host's page count, so a mismatch fails before most VMs are paid for. Splitting the file once inside a VM so each
+shard receives only its own pages would remove the transfer ceiling (not implemented).
+
+Each decision logs one line, `[document-vm] document=<id> outcome=<merged|whole|failed|refused> shards=<n> pages=<n>
+reason=<slug> wallMs=<n>`, followed by plan fields (`shardPages`, `parallel`, `vms`, `predictedWallMs`,
+`unshardedWallMs`, `outputBytes`) or refusal fields (`needShards`, `maxShards`, `fileMiB`, `transferCapMiB`). Values
+contain no spaces. The host plans from the pipeline's page count and the
 file size only. Each guest re-counts pages and refuses a range that is off the 32-page chunk grid, outside the
 document or (for the final shard) short of the last page. Shards are merged in page order under the same output cap,
 and the result is byte-identical to one whole-document VM.
@@ -45,7 +65,7 @@ and the result is byte-identical to one whole-document VM.
 | `DOCSLURP_DOPPLER_VM_PROTOCOL` | unset | Must be `3` (the image's guest protocol) for shards. |
 | `DOCSLURP_DOPPLER_VM_GLOBAL_PARALLEL` | 16 | Shard VMs one worker process holds across documents. |
 | `DOCSLURP_DOPPLER_SHARD_COST_OVERHEAD` | 0.5 | Most extra VM cost over one VM (0.5 = at most 1.5×). |
-| `DOCSLURP_DOPPLER_SHARD_TRANSFER_MB` | 512 | Cap on file bytes × (shards + 1 fallback): every VM receives the full PDF. |
+| `DOCSLURP_DOPPLER_SHARD_TRANSFER_MB` | 512 | Cap on file bytes × VMs: every shard VM receives the full PDF, plus one fallback upload for documents of at most 10,000 pages. |
 | `DOCSLURP_DOPPLER_MAX_SHARDS` | 32 | Hard shard cap. |
 
 Each extra VM adds about 1.9 s of billed boot. At 0.5 core / 1 GiB (Modal list prices, 2026-10-28) a 477-page PDF

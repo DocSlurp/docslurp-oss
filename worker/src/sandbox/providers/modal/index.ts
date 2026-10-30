@@ -29,6 +29,12 @@ export interface ModalConfig {
   sessionTimeoutSeconds: number;
 }
 
+/**
+ * `processes` here means nothing a command starts runs on the worker host, not that remote
+ * descendants die with the command: one that starts its own session can keep running inside this
+ * activity's Modal sandbox (and writing its remote directories) until the session closes or
+ * `sessionTimeoutSeconds` ends it. See docs/self-host/sandbox-providers.md, "Process teardown".
+ */
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
 
 const configSchema: SandboxConfigSchema = {
@@ -334,6 +340,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       /**
        * Kill a command's remote process group, then wait (bounded) for its exec to end. Best
        * effort: a sandbox that is already gone has nothing left to kill.
+       *
+       * The caller settles (and releases its local slot) after this, even if a remote descendant
+       * that started its own session survived the group kill. That is safe for the worker host:
+       * the survivor runs only inside this activity's Modal sandbox, cannot reach local scratch,
+       * and ends when the session closes or sessionTimeoutSeconds expires. What it can still do is
+       * burn remote CPU and write into this session's remote working directories.
        */
       async function kill(control: string, settled: Promise<unknown>): Promise<void> {
         try {

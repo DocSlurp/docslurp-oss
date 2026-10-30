@@ -1,9 +1,11 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { release } from "node:os";
 import path from "node:path";
 
 import { readSandboxConfig } from "../../config-schema.js";
+import { spawnOwned, startSandboxScratchSweeper } from "../../scratch-sweep.js";
+import { probePidNamespace, spawnContained, stdioRelay } from "../../teardown.js";
 import type {
   ParserSandboxProvider,
   SandboxCommand,
@@ -64,8 +66,19 @@ export function networkForKernel(kernelRelease: string): SandboxNetworkIsolation
   return major > 6 || (major === 6 && minor >= 8) ? "tcp-only" : "none";
 }
 
+/**
+ * Landlock confines files and TCP but not processes; each command also runs in its own PID namespace.
+ * UNIX sockets: landrun v0.1.17 (which needs Landlock ABI v9) scopes every command by default. A
+ * connect() to an abstract socket created outside the command's own domain fails with EPERM (the
+ * host's, another command's), and a connect() to a pathname socket fails with EACCES unless it is
+ * granted with `--unix` (granted only to clamdscan, for clamd's socket). So two commands cannot
+ * meet on a socket, and a parser cannot reach a host service (a session bus, a systemd user
+ * manager). These are LSM checks on connect and sendmsg, so io_uring's socket operations meet them
+ * too. Proven against the real binary in sandbox/__tests__/contract-landlock.test.ts; an older
+ * landrun is not trusted to do it (MIN_SCOPED_LANDRUN).
+ */
 function isolationFor(kernelRelease: string): SandboxIsolation {
-  return { filesystem: true, network: networkForKernel(kernelRelease), processes: false, location: "local" };
+  return { filesystem: true, network: networkForKernel(kernelRelease), processes: probePidNamespace().ok, location: "local" };
 }
 
 /** Grantable paths that exist. landrun splits a grant list on commas, so a comma in a path fails closed. */
@@ -119,6 +132,28 @@ export function createCommandScratch(scratchRoot: string): { dir: string; cwd: s
   return { dir, cwd, env };
 }
 
+/** The first landrun release that scopes pathname UNIX-socket connects (Landlock ABI v9). */
+export const MIN_SCOPED_LANDRUN = [0, 1, 17] as const;
+
+/** Whether `landrun --version` output names a release that scopes UNIX sockets. */
+export function landrunScopesUnixSockets(versionOutput: string): boolean {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(versionOutput);
+  if (!match) return false;
+  const version = match.slice(1, 4).map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (version[index]! !== MIN_SCOPED_LANDRUN[index]) return version[index]! > MIN_SCOPED_LANDRUN[index]!;
+  }
+  return true;
+}
+
+function isSocket(candidate: string): boolean {
+  try {
+    return statSync(candidate).isSocket();
+  } catch {
+    return false;
+  }
+}
+
 export function landrunArgs(
   command: Pick<SandboxCommand, "binary" | "args" | "env" | "readablePaths" | "writablePaths">,
 ): string[] {
@@ -128,11 +163,14 @@ export function landrunArgs(
   const envFlags = Object.entries(command.env)
     .filter(([, value]) => value !== undefined)
     .flatMap(([key]) => ["--env", key]);
+  // Only clamdscan may connect to a pathname socket: clamd's, which paths.ts makes readable for it.
+  const sockets = path.basename(command.binary) === "clamdscan" ? existing(command.readablePaths).filter(isSocket) : [];
   return [
     ...envFlags,
     ...pathFlags("--rox", existing([...RUNTIME_PATHS, ...executable])),
-    ...pathFlags("--ro", existing([...READ_ONLY_RUNTIME_PATHS, ...command.readablePaths])),
+    ...pathFlags("--ro", existing([...READ_ONLY_RUNTIME_PATHS, ...command.readablePaths]).filter((candidate) => !sockets.includes(candidate))),
     ...pathFlags("--rw", existing(command.writablePaths)),
+    ...sockets.flatMap((socket) => ["--unix", socket]),
     "--",
     command.binary,
     ...command.args,
@@ -164,6 +202,14 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
       { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8", timeout: PROBE_TIMEOUT_MS },
     );
     if (result.status === 0) {
+      // Without a PID namespace a parser's descendants could outlive it: fail closed.
+      if (!isolation.processes) return { ok: false, isolation, detail: `${probePidNamespace().detail} (kernel ${kernel})` };
+      // Every command runs behind the stdio relay; without perl or the script, refuse to start.
+      try {
+        stdioRelay();
+      } catch (error) {
+        return { ok: false, isolation, detail: (error as Error).message };
+      }
       return { ok: true, isolation, detail: `landrun available (kernel ${kernel})` };
     }
     const reason =
@@ -172,31 +218,43 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
   },
   async openSession(config) {
     const isolation = isolationFor(release());
+    startSandboxScratchSweeper(config.scratchRoot);
+    // Socket scoping (see isolationFor) only from a landrun that does it; otherwise the runner refuses
+    // commands that ask for the filter (tools/runner.ts assertUnixSocketFilter).
+    const version = spawnSync(config.binary, ["--version"], { encoding: "utf8", timeout: PROBE_TIMEOUT_MS, env: { PATH: process.env.PATH ?? "" } });
+    const filtersUnixSockets = version.status === 0 && landrunScopesUnixSockets(version.stdout);
     return {
       providerId: "landlock",
       isolation,
-      spawn: (command, signal) => {
+      filtersUnixSockets,
+      spawn: (command) => {
         const scratch = createCommandScratch(config.scratchRoot);
-        const cleanup = () => rmSync(scratch.dir, { recursive: true, force: true });
-        try {
-          const sandboxed = {
-            ...command,
-            env: { ...command.env, ...scratch.env },
-            writablePaths: [...command.writablePaths, scratch.dir],
-          };
-          const child = spawn(config.binary, landrunArgs(sandboxed), {
-            env: sandboxed.env,
-            cwd: scratch.cwd,
-            stdio: ["ignore", "pipe", "pipe"],
-            signal,
-          });
-          // 'close' follows a normal exit, a kill or abort, and a failed spawn alike.
-          child.once("close", cleanup);
-          return child;
-        } catch (error) {
-          cleanup();
-          throw error;
-        }
+        const cleanup = () => {
+          rmSync(scratch.dir, { recursive: true, force: true });
+          rmSync(`${scratch.dir}.owner`, { force: true });
+        };
+        const sandboxed = {
+          ...command,
+          env: { ...command.env, ...scratch.env },
+          writablePaths: [...command.writablePaths, scratch.dir],
+        };
+        // The stdio relay is the namespace's PID 1 (outside the Landlock domain, which cannot
+        // ptrace out of it): it forwards TERM, reaps orphans, gives landrun pipes of its own, and on
+        // exit kills what the command left before closing ours. The parser landrun execs keeps
+        // default SIGTERM and SIGPIPE handling. Scratch is removed only once every process of the
+        // command is gone; a poisoned command keeps it for the sweep.
+        const [relay, ...relayArgs] = stdioRelay();
+        return spawnOwned(
+          scratch.dir,
+          () =>
+            spawnContained(relay!, [...relayArgs, config.binary, ...landrunArgs(sandboxed)], {
+              env: sandboxed.env,
+              cwd: scratch.cwd,
+              containment: "pid-namespace",
+              stdioRelayed: true,
+            }),
+          cleanup,
+        );
       },
       close: async () => {},
     };

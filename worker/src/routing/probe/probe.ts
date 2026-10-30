@@ -39,7 +39,26 @@ export interface NativeProbeOptions {
   signal?: AbortSignal;
   /** OCR for the layer check; must run sandboxed (`sandboxedTesseract`). Absent: the layer stays unverified. */
   recognise?: Recogniser;
+  /**
+   * Render each page's 72 DPI image on a second handle of the same document while this handle reads the page's
+   * text, image and vector features (default false). The binding renders off the JS thread, so the render no longer
+   * sits behind the synchronous feature work; rows are unchanged. One handle per concurrent render, as `renderPagesNative` does.
+   * Opt-in: the second handle parses the untrusted file again inside the worker process, which holds secrets.
+   */
+  overlapRender?: boolean;
+  /** Open the second render handle only for documents of at most this many pages (default `PROBE_OVERLAP_MAX_PAGES`). */
+  overlapRenderMaxPages?: number;
 }
+
+/** Page-count ceiling for the probe's second render handle (`PROBE_OVERLAP_MAX_PAGES`). */
+export const PROBE_OVERLAP_MAX_PAGES = 1000;
+
+/**
+ * Object ceiling for the second handle, on top of `PROBE_LIMITS`: its memory follows the indirect-object count
+ * (~3 KB each, object streams included), not pages or file size. 10,000 objects measured +29-32 MB peak RSS;
+ * a 474 KB, 250-page object-stream PDF with 51,000 objects measured +150 MB. Larger documents probe on one handle.
+ */
+export const PROBE_OVERLAP_MAX_OBJECTS = 10_000;
 
 /** Without a sandboxed recogniser the OCR layer stays unverified, as when tesseract is not installed. */
 const noRecogniser: Recogniser = async () => null;
@@ -67,6 +86,8 @@ function addPadded(mask: Mask, [x0, y0, x1, y1]: [number, number, number, number
 }
 
 const DRAWING_COMMAND_CAP = 131_072;
+
+const PROBE_RENDER = { dpi: PROBE_DPI, gray: true, format: "png" } as const;
 
 type LiveSpan = { x0: number; y0: number; x1: number; y1: number; chars: string[]; vertical: boolean };
 
@@ -121,9 +142,32 @@ export async function probePage(
   pageCount: number,
   docFeatures: Set<string>,
   producer: string,
-  options: Pick<NativeProbeOptions, "thumbDir" | "thumbPx"> & { stem?: string } = {},
-): Promise<{ row: NativeProbeRow; page: ProbeBindingPage; size: { widthPt: number; heightPt: number; rotation: number } }> {
+  options: Pick<NativeProbeOptions, "thumbDir" | "thumbPx"> & { stem?: string; renderDoc?: ProbeBindingDoc } = {},
+): Promise<ProbedPage> {
   const t0 = performance.now();
+  // With a second handle the render starts now and runs while the features are read on `doc`.
+  const earlyRender = options.renderDoc ? options.renderDoc.page(pageIndex).renderAsync(PROBE_RENDER) : null;
+  try {
+    return await readPage(doc, pageIndex, pageCount, docFeatures, producer, options, earlyRender, t0);
+  } finally {
+    // One task per handle: the render settles before this page fails or returns, so the next page's render and
+    // `close()` never start while it is in flight. A feature error fails the page; the render's outcome is then moot.
+    if (earlyRender) await earlyRender.then(() => undefined, () => undefined);
+  }
+}
+
+type ProbedPage = { row: NativeProbeRow; page: ProbeBindingPage; size: { widthPt: number; heightPt: number; rotation: number } };
+
+async function readPage(
+  doc: ProbeBindingDoc,
+  pageIndex: number,
+  pageCount: number,
+  docFeatures: Set<string>,
+  producer: string,
+  options: Pick<NativeProbeOptions, "thumbDir" | "thumbPx"> & { stem?: string },
+  earlyRender: Promise<Buffer> | null,
+  t0: number,
+): Promise<ProbedPage> {
   const page = doc.page(pageIndex);
   const size = page.size();
   const pw = size.widthPt;
@@ -216,7 +260,7 @@ export async function probePage(
   const uncovered = Math.min(dr.vectorArea / area, 1) * (1 - covered / textMask.a.length);
 
   // ---- 72 DPI grayscale render ----
-  const png = await page.renderAsync({ dpi: PROBE_DPI, gray: true, format: "png" });
+  const png = await (earlyRender ?? page.renderAsync(PROBE_RENDER));
   const raw = await sharp(png).toColourspace("b-w").raw().toBuffer({ resolveWithObject: true });
   const gray = new Uint8Array(raw.data.buffer, raw.data.byteOffset, raw.info.width * raw.info.height * raw.info.channels);
   const px = raw.info.channels === 1 ? gray : gray.filter((_, i) => i % raw.info.channels === 0);
@@ -364,18 +408,29 @@ export async function* probeNativePdf(binding: ProbeBinding, options: NativeProb
     }
     throw new NativeProbeOpenError(code, error instanceof Error ? error.message : String(error), { cause: error });
   }
+  let renderDoc: ProbeBindingDoc | undefined;
   try {
     const stem = path.basename(options.pdfPath, path.extname(options.pdfPath));
     const meta = doc.metadata();
     const producer = `${meta.producer ?? ""} ${meta.creator ?? ""}`;
     const count = doc.pageCount();
     const docFeatures = documentFeatures(doc, meta.encrypted);
+    // The first handle opened, so a second normally does too; without one the probe renders on the first, as before.
+    // Large documents skip the second handle: it holds its own parsed xref and object cache. Past the object
+    // ceiling its open fails with PDF_LIMIT and the probe renders on the first handle.
+    if ((options.overlapRender ?? false) && count <= (options.overlapRenderMaxPages ?? PROBE_OVERLAP_MAX_PAGES)) {
+      try {
+        renderDoc = binding.openPath(options.pdfPath, { limits: { ...PROBE_LIMITS, maxObjects: PROBE_OVERLAP_MAX_OBJECTS } });
+      } catch {
+        renderDoc = undefined;
+      }
+    }
     for (const pno of parsePages(options.pages, count)) {
       options.signal?.throwIfAborted();
       await new Promise<void>((resolve) => setImmediate(resolve));
       let row: NativeProbeRow;
       try {
-        const probed = await probePage(doc, pno - 1, count, docFeatures, producer, { thumbDir: options.thumbDir, thumbPx: options.thumbPx, stem });
+        const probed = await probePage(doc, pno - 1, count, docFeatures, producer, { thumbDir: options.thumbDir, thumbPx: options.thumbPx, stem, renderDoc });
         row = probed.row;
         if (options.verifyOcrLayer && row.textLayerStatus === "ocr-layer") {
           applyOcrCheck(row, await ocrLayerAgreement(probed.page, probed.size, options.recognise ?? noRecogniser, options.signal));
@@ -388,6 +443,7 @@ export async function* probeNativePdf(binding: ProbeBinding, options: NativeProb
       yield row;
     }
   } finally {
+    renderDoc?.close();
     doc.close();
   }
 }

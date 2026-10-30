@@ -38,6 +38,8 @@ import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
+import { latchedTeardownError } from "../sandbox/session-context.js";
+import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
 import {
   buildRunCompletedEvent,
   buildRunProgressEvent,
@@ -118,7 +120,7 @@ export interface StageRuntime {
   onStageFailure?(failure: { classification: StageFailureClass; ordinaryFailures: number | undefined }): void;
 }
 
-export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "ordinary";
+export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "teardown" | "ordinary";
 
 export type LoadRunOptions = {
   /** Fixed, or derived from the loaded run (e.g. its pipeline's stage count). */
@@ -626,8 +628,12 @@ export function createStageExecution(deps: {
         ...(completion?.preloaded ? { preloaded: completion.preloaded } : {}),
       };
     } catch (caught) {
-      // A stall abort surfaces as whatever the stage threw on abort; report the hang itself.
-      const error: unknown = stallController.signal.aborted && !runtime.signal.aborted ? stallController.signal.reason : caught;
+      // A stall abort surfaces as whatever the stage threw on abort; report the hang itself. A
+      // command teardown failure (thrown, or latched on this activity and swallowed by the stage)
+      // wins over both: it must end the activity as a non-retryable teardown, never a retry.
+      const teardown = findCommandTeardownError(caught) ?? latchedTeardownError();
+      const error: unknown = teardown
+        ?? (stallController.signal.aborted && !runtime.signal.aborted ? stallController.signal.reason : caught);
       initializeWorkerErrorReporting();
       reportException(error, { runId, stage: stageName });
       const message = error instanceof Error ? error.message : String(error);
