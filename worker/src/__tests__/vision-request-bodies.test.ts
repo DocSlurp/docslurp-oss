@@ -9,11 +9,10 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
 
+// MiMo and Nemotron are refused (no serving-level image-token evidence): their bodies left the goldens with them.
 const MODELS = [
   "google/gemini-3.1-flash-lite",
-  "nvidia/nemotron-3.5-super-vl",
   "deepseek/deepseek-v4.1-flash-1017",
-  "xiaomi/mimo-v2.6-flash",
 ];
 
 afterEach(() => {
@@ -67,9 +66,7 @@ describe("vision request bodies", () => {
     }
   });
 
-  it("keeps effort none on the vision requests for both tuned models", async () => {
-    for (const model of ["xiaomi/mimo-v2.6-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
-      expect((await requestBody(model)).reasoning).toEqual({ effort: "none" });
-    }
+  it("keeps effort none on the tuned DeepSeek vision request", async () => {
+    expect((await requestBody("deepseek/deepseek-v4.1-flash-1017")).reasoning).toEqual({ effort: "none" });
   });
 });

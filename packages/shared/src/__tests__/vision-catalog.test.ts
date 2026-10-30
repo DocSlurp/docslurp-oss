@@ -20,6 +20,7 @@ import {
   visionModelTokenPricing,
   visionModelImageTokenBound,
   visionModelUriProblem,
+  visionModelRefusal,
   isProhibitedPremiumModelId,
   VISION_MAX_OUTPUT_USD_PER_MILLION,
 } from "../index.js";
@@ -63,8 +64,11 @@ describe("hosted vision catalog", () => {
         checked: "checked" in expected ? expected.checked : "2026-10-25",
         ...(route ? { basis: "pinned-route", providers: route } : {}),
       });
-      expect(visionConfigSchema.parse({ modelUri: uri }).modelUri).toBe(uri);
+      // MiMo stays cataloged (price, profile) but is refused until its image-token bound has serving evidence.
+      if (visionModelRefusal(id)) expect(visionConfigSchema.safeParse({ modelUri: uri }).success, id).toBe(false);
+      else expect(visionConfigSchema.parse({ modelUri: uri }).modelUri).toBe(uri);
     }
+    expect(visionModelRefusal("xiaomi/mimo-v2.6-flash")).not.toBeNull();
     // GLM: ~3,000 input + 560 output tokens at list price, rounded up.
     expect(visionListPriceCents("z-ai/glm-5.3-flash", { inputTokens: 3_000, outputTokens: 560 })).toBeCloseTo(0.073, 4);
     for (const entry of visionModelCatalog) expect(entry.id, entry.id).not.toMatch(/-pro|-ultra|:free/i);
@@ -87,7 +91,7 @@ describe("hosted vision catalog", () => {
 
     it("lets an explicit workspace model, profile or privacy mode win", () => {
       const env = { DOCSLURP_VISION_MODEL_URI: luna };
-      const explicitModel = pipeline(visionConfigSchema.parse({ modelUri: NEMOTRON_URI }));
+      const explicitModel = pipeline(visionConfigSchema.parse({ modelUri: "llm://openrouter/z-ai/glm-5.3-flash" }));
       const explicitProfile = pipeline(visionConfigSchema.parse({ profile: "cheapest-hosted" }));
       const local = pipeline(visionConfigSchema.parse({ profile: "cheapest-local" }));
       for (const input of [explicitModel, explicitProfile, local]) expect(applyDefaultVisionOverride(input, env)).toBe(input);
@@ -117,26 +121,30 @@ describe("hosted vision catalog", () => {
     });
   });
 
-  it("resolves the opt-in profile and an explicit model URI to the OpenRouter route", () => {
-    for (const config of [
-      visionConfigSchema.parse({ profile: "open-weights-hosted" }),
-      visionConfigSchema.parse({ modelUri: NEMOTRON_URI }),
-    ]) {
-      expect(config).toMatchObject({ modelUri: NEMOTRON_URI, target: "hosted" });
-      expect(resolveVisionRoute(config)).toMatchObject({
-        provider: "openrouter",
-        runtime: "openai-compatible",
-        model: NEMOTRON_SUPER_VL_VISION_MODEL,
-        baseUrl: OPENROUTER_BASE_URL,
-      });
-    }
+  it("resolves the open-weights profile to the admitted open-weights default, and refuses Nemotron", () => {
+    const defaultUri = `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`;
+    const config = visionConfigSchema.parse({ profile: "open-weights-hosted" });
+    expect(config).toMatchObject({ modelUri: defaultUri, target: "hosted" });
+    expect(resolveVisionRoute(config)).toMatchObject({
+      provider: "openrouter",
+      runtime: "openai-compatible",
+      model: DEFAULT_OPENROUTER_VISION_MODEL,
+      baseUrl: OPENROUTER_BASE_URL,
+    });
+    const refused = visionConfigSchema.safeParse({ modelUri: NEMOTRON_URI });
+    expect(refused.success).toBe(false);
+    expect(JSON.stringify(refused.error?.issues)).toContain("is not admitted");
+    expect(visionModelUriProblem(NEMOTRON_URI)).toMatch(/not proven at the serving level/);
   });
 
-  it("accepts a per-run pipeline override and stored catalog model ids", () => {
-    expect(normalizePipelineFeatures({ vision: { modelUri: NEMOTRON_URI } }).vision.modelUri).toBe(NEMOTRON_URI);
-    expect(normalizePipelineFeatures({ vision: { profile: "open-weights-hosted" } }).vision.modelUri).toBe(NEMOTRON_URI);
-    const stored = { vision: { model: NEMOTRON_SUPER_VL_VISION_MODEL, runtime: "openai-compatible", baseUrl: OPENROUTER_BASE_URL } };
-    expect(normalizePipelineFeatures(stored as unknown as Parameters<typeof normalizePipelineFeatures>[0]).vision.modelUri).toBe(NEMOTRON_URI);
+  it("accepts a per-run pipeline override and stored catalog model ids; a stored refused model fails loudly", () => {
+    const glm = "llm://openrouter/z-ai/glm-5.3-flash";
+    expect(normalizePipelineFeatures({ vision: { modelUri: glm } }).vision.modelUri).toBe(glm);
+    expect(normalizePipelineFeatures({ vision: { profile: "open-weights-hosted" } }).vision.modelUri).toBe(`llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`);
+    const stored = { vision: { model: "z-ai/glm-5.3-flash", runtime: "openai-compatible", baseUrl: OPENROUTER_BASE_URL } };
+    expect(normalizePipelineFeatures(stored as unknown as Parameters<typeof normalizePipelineFeatures>[0]).vision.modelUri).toBe(glm);
+    const storedNemotron = { vision: { model: NEMOTRON_SUPER_VL_VISION_MODEL, runtime: "openai-compatible", baseUrl: OPENROUTER_BASE_URL } };
+    expect(() => normalizePipelineFeatures(storedNemotron as unknown as Parameters<typeof normalizePipelineFeatures>[0])).toThrow(/is not admitted/);
   });
 
   it("carries list token prices for every hosted entry and none for local ones", () => {
@@ -163,6 +171,11 @@ describe("hosted vision catalog limits", () => {
     for (const spec of visionModelCatalog) {
       expect(isProhibitedPremiumModelId(spec.id), spec.id).toBe(false);
       if (!spec.tokenPricing) continue;
+      if (visionModelRefusal(spec.id)) {
+        expect(visionModelImageTokenBound(spec.id), spec.id).toBeNull();
+        expect(visionModelUriProblem(spec.uri), spec.uri).toMatch(/is not admitted/);
+        continue;
+      }
       expect(visionModelImageTokenBound(spec.id), spec.id).not.toBeNull();
       expect(spec.tokenPricing.outputUsdPerMillion, spec.id).toBeLessThan(VISION_MAX_OUTPUT_USD_PER_MILLION);
       expect(visionModelUriProblem(spec.uri), spec.uri).toBeNull();

@@ -9,6 +9,7 @@ import {
   resolveVisionRoute,
   visionListPriceCents,
   visionModelCatalog,
+  visionModelRefusal,
   visionModelTokenPricing,
   type VisionTokenPricing,
 } from "@docslurp/shared";
@@ -300,6 +301,8 @@ export function visionRequestPricing(route: {
   if (isBilledVisionRoute(route.billing)) {
     if (route.billing === "unknown-hosted") throw new UnpricedVisionRouteError(route.model, "goes to a destination that is not OpenAI or OpenRouter");
     if (isProhibitedPremiumModelId(route.model)) throw new UnpricedVisionRouteError(route.model, "is a Pro/Ultra tier");
+    const refusal = visionModelRefusal(route.model);
+    if (refusal) throw new UnpricedVisionRouteError(route.model, `is not admitted: ${refusal}`);
     const maxImageTokens = visionImageTokens(route.model, null);
     if (!priced || !(priced.inputUsdPerMillion > 0 || priced.outputUsdPerMillion > 0) || maxImageTokens === null) {
       throw new UnpricedVisionRouteError(route.model);

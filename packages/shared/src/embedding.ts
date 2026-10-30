@@ -528,11 +528,11 @@ export type VisionBenchmarkProfile = z.infer<
 >;
 
 /**
- * Conservative image-token ceiling for a model without verified serving evidence (`raster-ceiling` basis): the
- * largest raster the worker sends (4,096 px square) at one token per 14-px patch with no merge, plus two framing
- * tokens: 293 x 293 + 2 = 85,851. It bounds any ViT processor with 14-px or larger patches at any resize.
+ * Why a cataloged hosted vision model is not admitted (`refusedReason` on its entry): no request is admitted, priced or
+ * sent on it, and config validation rejects it, until serving-level evidence of its per-image token maximum exists.
  */
-export const VISION_RASTER_CEILING_IMAGE_TOKENS = Math.ceil(4_096 / 14) ** 2 + 2;
+const UNPROVEN_IMAGE_TOKEN_BOUND =
+  "its per-image token maximum is not proven at the serving level (providers can raise the processor limits), so no request can be weighed; refused until serving evidence exists";
 
 export const visionModelCatalog = [
   {
@@ -626,10 +626,11 @@ export const visionModelCatalog = [
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
-    // Serving-config evidence gap: 3,330 is the published processor's maximum (processor-max:nemotron-h-omni), but
-    // the image framing and the providers' serving configuration could not be verified, so the bound is the
-    // conservative raster ceiling instead.
-    imageTokens: { kind: "fixed", tokens: VISION_RASTER_CEILING_IMAGE_TOKENS, basis: "raster-ceiling" },
+    // Refused (council round 8, M3): 3,330 is the published processor's maximum (processor-max:nemotron-h-omni), but
+    // neither the image framing nor any provider's serving configuration could be verified, and a raster ceiling is
+    // not a proven serving maximum either. No image-token bound, so the guard cannot weigh it: not admitted.
+    imageTokens: null,
+    refusedReason: UNPROVEN_IMAGE_TOKEN_BOUND,
   },
   // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
   // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
@@ -668,10 +669,11 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
     estimatedCostPerPageCents: 0.056,
     tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-25" },
-    // Serving-config evidence gap: 8,194 is the published processor's maximum (processor-max:qwen2-vl), but no
-    // provider's serving configuration (`max_pixels` can be raised at serve time) could be verified, so the bound is
-    // the conservative raster ceiling instead.
-    imageTokens: { kind: "fixed", tokens: VISION_RASTER_CEILING_IMAGE_TOKENS, basis: "raster-ceiling" },
+    // Refused (council round 8, M3): 8,194 is the published processor's maximum (processor-max:qwen2-vl), but no
+    // provider's serving configuration (`max_pixels` can be raised at serve time) could be verified, and a raster
+    // ceiling is not a proven serving maximum either. No image-token bound, so the guard cannot weigh it: not admitted.
+    imageTokens: null,
+    refusedReason: UNPROVEN_IMAGE_TOKEN_BOUND,
   },
   {
     id: "openai/gpt-6-luna",
@@ -781,6 +783,9 @@ export function visionListPriceCents(
  *   own downscaling, so it bounds any resize.
  * - `fixed`: a constant per image, the family's largest documented per-image count.
  *
+ * A hosted entry with `refusedReason` (MiMo V2.6 Flash: processor maximum 8,194, `qwen2-vl`; Nemotron 3.5 Super VL:
+ * 3,330, `nemotron-h-omni`) has no bound: its processor maximum is not a proven serving maximum, so it is refused.
+ *
  * Bases (checked 2026-10-29):
  * - `openai-patch`: OpenAI's patch formula (32-px patches, model multiplier; gpt-4.1-mini 1.62), images-vision guide.
  * - `openai-patch-max-multiplier`: the same formula at the largest multiplier OpenAI lists (2.46, gpt-4.1-nano),
@@ -788,28 +793,27 @@ export function visionListPriceCents(
  * - `gemini-media-resolution`: Gemini 3's largest per-image count (`ultra_high`, 2,240; the default is 1,120).
  * - `gemini-tiles`: Gemini 2.x's 258 tokens per tile, counted per 256-px square rather than its documented 768-px
  *   tile (9x), which covers its crop-unit rescaling.
- * - `raster-ceiling`: `VISION_RASTER_CEILING_IMAGE_TOKENS`, for an open-weights model whose processor maximum could not
- *   be tied to its providers' serving configuration: the largest raster the worker sends (4,096 px square), one
- *   token per 14-px patch with no merge, plus two framing tokens. Used for MiMo V2.6 Flash and Nemotron 3.5 Super VL.
  * - `processor-max:<processor>`: the most tokens the model's published Hugging Face image processor can give one
  *   image at any size, after its minimum-size upscaling, resizing, tiling and patch merging, plus the image's
  *   framing tokens (start/end markers, row separators). Open-weights models only; read from the model repository's
  *   `preprocessor_config.json` / `processor_config.json` and processor code (checked 2026-10-29):
- *   - `nemotron-h-omni` (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B): one dynamic-resolution tile of at most
- *     `max_num_patches` 13,312 16-px patches (upscaled to at least `min_num_patches` 1,024, which stays far below the
- *     maximum), 0.5 pixel-shuffle downsample: 13,312 / 4 = 3,328 tokens, plus `<img>` and `</img>`: 3,330.
  *   - `deepseek-v4.1` (deepseek-ai/DeepSeek-V4.1-Flash-1017, `inference/image_processor.py`): the resize plan keeps
  *     the full image span (start, rows with their new-line tokens, end) at or below `vision_max_n_token` 1,024,
- *     after `vision_min_pixels` upscaling.
- *   - `qwen2-vl` (XiaomiMiMo/MiMo-V2.6-Flash, `Qwen2VLImageProcessor`): `smart_resize` to at most `max_pixels`
- *     8,388,608 on a 32-px grid (16-px patches, 2x2 merge), one token per 1,024 px: 8,192, plus
- *     `<|vision_start|>` and `<|vision_end|>`: 8,194.
+ *     after `vision_min_pixels` upscaling. The bound holds only while every pinned provider serves the published
+ *     `vision_max_n_token`; a provider that raises it bills above the bound, which the vision guard's per-route
+ *     weight correction absorbs (worker/src/lib/vision-attempt-guard.ts).
  *   - `glm5-next` (zai-org/GLM-5.3-Flash, `Glm5NextImageProcessor`): `smart_resize` to at most `max_image_tokens`
  *     8,000 merged 28-px tokens, plus the image start and end tokens: 8,002.
  */
 export type VisionImageTokenBound =
   | { kind: "patch"; patchPx: number; tokensPerPatch: number; basis: string }
   | { kind: "fixed"; tokens: number; basis: string };
+
+/** Why a cataloged vision model is refused (no request is admitted on it), or null. */
+export function visionModelRefusal(idOrUri: string): string | null {
+  const entry = visionModelCatalogByUri[idOrUri] ?? visionModelCatalog.find((spec) => spec.id === idOrUri);
+  return entry && "refusedReason" in entry ? entry.refusedReason : null;
+}
 
 /** Largest raster edge the worker renders (lib/raster-bounds.ts caps it at 4,095 px): the bound for an unknown size. */
 export const VISION_MAX_IMAGE_EDGE_PX = 4_096;
@@ -871,10 +875,12 @@ export function visionModelUriProblem(uri: string): string | null {
     return `Vision provider ${provider} is not supported: use openai, openrouter, private or a local provider (${LOCAL_VISION_PROVIDERS.join(", ")})`;
   }
   const entry = visionModelCatalogByUri[uri];
+  const refusal = visionModelRefusal(uri);
+  if (refusal) return `Hosted vision model ${model} is not admitted: ${refusal}`;
   const pricing = entry?.tokenPricing ?? null;
   if (!entry || !pricing || !visionModelImageTokenBound(uri)) {
     return `Hosted vision model ${model} is not in the priced vision catalog: use one of ${
-      visionModelCatalog.filter((spec) => spec.tokenPricing).map((spec) => spec.uri).join(", ")
+      visionModelCatalog.filter((spec) => spec.tokenPricing && !("refusedReason" in spec)).map((spec) => spec.uri).join(", ")
     }`;
   }
   if (pricing.outputUsdPerMillion >= VISION_MAX_OUTPUT_USD_PER_MILLION) {
@@ -950,12 +956,13 @@ export const visionProfileCatalog = {
   },
   "open-weights-hosted": {
     label: "Open-weights hosted",
-    description: "Opt-in NVIDIA Nemotron 3.5 Super VL route through OpenRouter; lower list price than the default.",
+    // Was Nemotron 3.5 Super VL, refused until its image-token bound has serving evidence (`refusedReason`).
+    description: `Open-weights (MIT) hosted route (${visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].label}) through OpenRouter's US providers.`,
     tags: ["cost", "hosted", "open-weights"],
     config: {
       profile: "open-weights-hosted",
       target: "hosted",
-      modelUri: `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}`,
+      modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
     },
   },
 } as const satisfies Record<VisionProfileKey, {

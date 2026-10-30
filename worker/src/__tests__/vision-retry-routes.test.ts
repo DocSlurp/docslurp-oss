@@ -20,6 +20,7 @@ afterEach(() => {
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
 const DEEPSEEK = "deepseek/deepseek-v4.1-flash-1017";
 const MIMO = "xiaomi/mimo-v2.6-flash";
+const GLM = "z-ai/glm-5.3-flash";
 const LUNA = "openai/gpt-6-luna";
 
 describe("alternateRouteBody", () => {
@@ -102,12 +103,8 @@ describe("per-model provider preferences survive the generic retry", () => {
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });
   });
 
-  it("MiMo keeps its order and fallbacks and adds the failing provider to ignore", async () => {
-    const { bodies } = await run(MIMO, [
-      filtered("Relace"),
-      sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
-    ]);
-    expect(bodies[1]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: ["Relace"], max_price: visionMaxPrice(MIMO) });
+  it("MiMo is refused before anything is sent (no serving-level image-token evidence)", async () => {
+    await expect(run(MIMO, [])).rejects.toThrow(/is not admitted/);
   });
 
   it("Luna goes to its preferred retry route over SSE", async () => {
@@ -121,19 +118,19 @@ describe("per-model provider preferences survive the generic retry", () => {
 
 describe("org China-provider restriction", () => {
   it("keeps China-based providers out of a restricted org's vision requests, retries included", async () => {
-    const { bodies } = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, () => run(MIMO, [
-      filtered("Relace"),
-      sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+    const { bodies } = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, () => run(GLM, [
+      filtered("Wafer"),
+      sse([{ id: "g", model: GLM, provider: "Friendli", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]));
-    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(MIMO) });
-    expect(bodies[1]!.provider.ignore).toEqual([...CHINA_PROVIDER_SLUGS, "Relace"]);
+    expect(bodies[0]!.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(GLM) });
+    expect(bodies[1]!.provider.ignore).toEqual([...CHINA_PROVIDER_SLUGS, "Wafer"]);
   });
 
   it("leaves an unrestricted org's routing unchanged", async () => {
-    const { bodies } = await runWithProviderRateScope({ orgId: "org" }, () => run(MIMO, [
-      sse([{ id: "g", model: MIMO, provider: "Relace", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+    const { bodies } = await runWithProviderRateScope({ orgId: "org" }, () => run(GLM, [
+      sse([{ id: "g", model: GLM, provider: "Wafer", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]));
-    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, max_price: visionMaxPrice(MIMO) });
+    expect(bodies[0]!.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, max_price: visionMaxPrice(GLM) });
   });
 });
 

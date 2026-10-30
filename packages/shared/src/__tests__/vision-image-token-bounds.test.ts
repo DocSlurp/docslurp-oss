@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { visionImageTokens, visionModelCatalog } from "../embedding.js";
+import { visionImageTokens, visionModelCatalog, visionModelRefusal } from "../embedding.js";
 
 /**
  * The catalog image-token bound of every priced hosted vision model against the provider's own published rule,
@@ -137,10 +137,10 @@ function gemini2Tokens(width: number, height: number): number {
   return Math.ceil(width / 768) * Math.ceil(height / 768) * 258;
 }
 
+// Nemotron (`nemotronTokens`) and MiMo (`qwen2vlTokens`) are refused: their processor maxima are not proven at the
+// serving level, so they carry no bound; the rules stay for the evidence their re-admission needs.
 const RULES: Record<string, (width: number, height: number) => number | null> = {
-  "nvidia/nemotron-3.5-super-vl": nemotronTokens,
   "deepseek/deepseek-v4.1-flash-1017": deepseekTokens,
-  "xiaomi/mimo-v2.6-flash": qwen2vlTokens,
   "z-ai/glm-5.3-flash": glm5NextTokens,
   "gpt-4.1-mini": openAiTokens(1.62),
   // No multiplier published for GPT-6 Luna: the largest OpenAI lists (gpt-4.1-nano).
@@ -156,9 +156,13 @@ const SIZES: Array<[number, number]> = [
 ];
 
 describe("vision image-token bounds against each model's published image processor", () => {
-  it("has a rule for every priced catalog model", () => {
-    const priced = visionModelCatalog.filter((spec) => spec.tokenPricing).map((spec) => spec.id);
+  it("has a rule for every admitted priced catalog model, and refused models have no bound", () => {
+    const priced = visionModelCatalog.filter((spec) => spec.tokenPricing && !visionModelRefusal(spec.id)).map((spec) => spec.id);
     expect(Object.keys(RULES).sort()).toEqual([...priced].sort());
+    for (const model of ["nvidia/nemotron-3.5-super-vl", "xiaomi/mimo-v2.6-flash"]) {
+      expect(visionModelRefusal(model), model).not.toBeNull();
+      expect(visionImageTokens(model, null), model).toBeNull();
+    }
   });
 
   for (const [model, rule] of Object.entries(RULES)) {
@@ -178,7 +182,7 @@ describe("vision image-token bounds against each model's published image process
     expect(deepseekTokens(14, 14)).toBeGreaterThan(100);
     expect(glm5NextTokens(14, 14)).toBeGreaterThanOrEqual(16);
     expect(qwen2vlTokens(14, 14)).toBeGreaterThanOrEqual(8_192 / 1_024);
-    for (const model of ["nvidia/nemotron-3.5-super-vl", "deepseek/deepseek-v4.1-flash-1017", "xiaomi/mimo-v2.6-flash", "z-ai/glm-5.3-flash"]) {
+    for (const model of ["deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash"]) {
       expect(visionImageTokens(model, { widthPx: 14, heightPx: 14 })!).toBeGreaterThanOrEqual(RULES[model]!(14, 14)!);
     }
   });
