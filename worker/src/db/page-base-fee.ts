@@ -92,9 +92,10 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       with docs as (
         select d.id, coalesce(d.mime_type, '') like 'image/%' as image,
           greatest(0, d.page_count - case when ${state.run.kind === "full-index"} then (
-            select count(*) from document_page_states s where s.document_id = d.previous_version_id and s.fee_billed_run is not null
+            select count(*) from document_page_states s where s.document_id = d.previous_version_id
               -- A stale stamp (its run charged nothing and can no longer commit) paid nothing, so this run charges it.
-              and not ${staleStampSql(client)}
+              -- A page whose read was charged and then failed (read_billed_run) paid its one charge.
+              and ((s.fee_billed_run is not null and not ${staleStampSql(client)}) or s.read_billed_run is not null)
               and not exists (select 1 from usage_attribution au
                 where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
                   and au.metadata ->> 'documentId' = d.id and au.metadata ->> 'pageNumber' = s.page_number::text)
@@ -236,6 +237,13 @@ export async function lockPageRows(client: Sql<Record<string, unknown>>, documen
  *   (`rich-upgrade:<document>:<page>`, once per page). If the owner already charged Rich, nothing is added.
  * - This run's pending Rich charges for pages it does not own (lost claim, or another run's stamp stands) are dropped
  *   from the ledger: they stay provider usage (the read's AI usage event), never a customer charge.
+ * - `failedReads`: pages this run holds, read with a model (a pending Rich charge) and then failed after the read
+ *   (embedding, vector write, PII). The Rich charge is persisted here and the page row records it (`read_billed_run`,
+ *   plus `read_text` for a retry to reuse), unless the page already carries a decision (`read_billed_run` or another
+ *   run's `fee_billed_run`), in which case the read stays provider usage.
+ * - A page whose `read_billed_run` is set already paid its one charge for this document version: the run that indexes
+ *   it stamps it with no new charge (no Fast, no `model_read_run` Rich, no upgrade), and its own pending Rich read of
+ *   the page is dropped (provider usage).
  *
  * A stale stamp (staleStampSql: its run recorded no Fast or Rich charge for the page and can no longer commit one) is
  * taken over: it is re-stamped to this run and charged here, so no page stays unbilled. An active stamping run keeps
@@ -250,6 +258,8 @@ export async function billLockedMaterializedPages(
     moved: Set<number> | null;
     ledger?: Pick<PipelineUsageEventLedger, "takeRichPageCharges">;
     modelReads?: Map<number, number>;
+    /** Pages this run holds that failed after a charged model read, with the read text to keep (null: none). */
+    failedReads?: Map<number, string | null>;
   },
 ): Promise<{ inserted: number; richBatch?: PipelineUsageBatch }> {
   const { runId, documentId, requested, moved } = args;
@@ -270,6 +280,30 @@ export async function billLockedMaterializedPages(
   `).map((r) => r.page_number);
   const ownedSet = new Set(owned);
   const modelReads = args.modelReads ?? new Map<number, number>();
+  const failedReads = args.failedReads ?? new Map<number, string | null>();
+  // Pages whose one charge an earlier read already made (it failed after the read). This run's own earlier attempt
+  // (same run id) persisted that charge under the same deterministic id, so a repeat is a no-op.
+  const decidedPages = [...new Set([...requested, ...failedReads.keys()])];
+  const readBilled = decidedPages.length === 0 ? [] : await client<{ page_number: number; read_billed_run: string | null; fee_billed_run: string | null }[]>`
+    select page_number, read_billed_run, fee_billed_run from document_page_states
+    where document_id = ${documentId} and page_number = any(${decidedPages}::int[])
+  `;
+  const readBilledBy = new Map(readBilled.filter((r) => r.read_billed_run !== null).map((r) => [r.page_number, r.read_billed_run!]));
+  const billedElsewhere = new Set([...readBilledBy].filter(([, run]) => run !== runId).map(([page]) => page));
+  // A failed read becomes the page's one charge only when the page has no decision yet.
+  const feeRunByPage = new Map(readBilled.map((r) => [r.page_number, r.fee_billed_run]));
+  const chargeFailedRead = [...failedReads.keys()].filter((page) => !readBilledBy.has(page) && feeRunByPage.get(page) == null)
+    .sort((a, b) => a - b);
+  if (chargeFailedRead.length > 0) {
+    await client`
+      update document_page_states s
+      set read_billed_run = ${runId}, read_text = r.text
+      from unnest(${chargeFailedRead}::int[], ${chargeFailedRead.map((page) => failedReads.get(page) ?? null)}::text[]) as r(page, text)
+      where s.document_id = ${documentId} and s.page_number = r.page and s.read_billed_run is null
+    `;
+  }
+  const chargeableSet = new Set([...owned, ...chargeFailedRead, ...[...readBilledBy].filter(([, run]) => run === runId).map(([page]) => page)]
+    .filter((page) => !billedElsewhere.has(page)));
   // Pages this run does not own: the claim moved on (not transitioned), another run's stamp stands, or a page it
   // read but never held at publication.
   const foreignSet = new Set([
@@ -283,10 +317,10 @@ export async function billLockedMaterializedPages(
   ]);
   // The Rich charges for reads this attempt made land with the stamps they back (ids are deterministic per run
   // and page). Reads of pages another run owns are dropped from the ledger and never charged: the owner bills them.
-  const richBatch = args.ledger?.takeRichPageCharges(documentId, (page) => ownedSet.has(page) || foreignSet.has(page));
+  const richBatch = args.ledger?.takeRichPageCharges(documentId, (page) => ownedSet.has(page) || foreignSet.has(page) || failedReads.has(page));
   const richEvents = richBatch?.events ?? [];
-  const chargeable = richEvents.filter((event) => ownedSet.has(Number(event.metadata?.pageNumber)));
-  const dropped = richEvents.filter((event) => !ownedSet.has(Number(event.metadata?.pageNumber)));
+  const chargeable = richEvents.filter((event) => chargeableSet.has(Number(event.metadata?.pageNumber)));
+  const dropped = richEvents.filter((event) => !chargeableSet.has(Number(event.metadata?.pageNumber)));
   if (dropped.length > 0) {
     console.warn(`[page-fee] run=${runId} document=${documentId} dropped Rich charges for pages it does not own: ${dropped.map((event) => event.metadata?.pageNumber).join(",")}`);
   }
@@ -298,7 +332,8 @@ export async function billLockedMaterializedPages(
       and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
   `;
   const rich = new Set(readRows.map((r) => Number(r.page)));
-  const undecided = owned.filter((page) => !rich.has(page)).sort((x, y) => x - y);
+  // A page an earlier failed read already charged gets this run's stamp and nothing else.
+  const undecided = owned.filter((page) => !rich.has(page) && !readBilledBy.has(page)).sort((x, y) => x - y);
   // Another run's genuine read of a page this run indexes from its text layer: the page bills Rich, once, here.
   const readElsewhere = undecided.length === 0 ? [] : await client<{ page_number: number; model_read_run: string; model_read_pages: number | null }[]>`
     select page_number, model_read_run, model_read_pages from document_page_states
@@ -369,10 +404,11 @@ const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled"];
  * cancelled) or its worker's lease expired. Stamps and charges commit together (recordMaterializedPageFee), so
  * such a stamp is a failed fee write, a cancelled run, or a stamp from before that rule; recovery may take the
  * page over (billUnbilled, recordMaterializedPageFee) and a full index charges it (recordPageBaseFee). A live
- * stamping run keeps its page, so a page it read is never charged Fast by another run as well.
+ * stamping run keeps its page, so a page it read is never charged Fast by another run as well. A page with
+ * `read_billed_run` is never stale: its one charge is that earlier read's, committed with the `read_billed_run` stamp.
  */
 export function staleStampSql(client: Sql<Record<string, unknown>>) {
-  return client`(s.fee_billed_run is not null and not exists (
+  return client`(s.fee_billed_run is not null and s.read_billed_run is null and not exists (
     select 1 from usage_attribution au
     where au.run_id = s.fee_billed_run
       and au.metric in (${BILLABLE_UNIT_METRICS.fastPage}, ${BILLABLE_UNIT_METRICS.richPage})

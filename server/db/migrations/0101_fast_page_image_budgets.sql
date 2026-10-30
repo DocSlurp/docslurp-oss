@@ -52,3 +52,13 @@ CREATE TRIGGER "run_fast_page_image_grants_owned"
 ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "model_read_run" text;
 --> statement-breakpoint
 ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "model_read_pages" integer CHECK ("model_read_pages" IS NULL OR "model_read_pages" >= 1);
+--> statement-breakpoint
+-- A page this run owned, read with a model (one Rich charge, committed with this
+-- stamp) and then failed after the read (embedding, vector write, PII). The page's
+-- one customer charge for this document version is made: a later run that indexes
+-- it stamps it with no new charge. `read_text` keeps the read (after PII redaction;
+-- never for a PII-blocked page) so a retry indexes it without calling the model
+-- again; it is cleared when the page turns indexed.
+ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "read_billed_run" text;
+--> statement-breakpoint
+ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "read_text" text;

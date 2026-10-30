@@ -3492,6 +3492,8 @@ export const documentPageStates = pgTable(
     feeBilledAt: timestamp("fee_billed_at", { withTimezone: true, mode: "string" }),
     modelReadRun: text("model_read_run"),
     modelReadPages: integer("model_read_pages"),
+    readBilledRun: text("read_billed_run"),
+    readText: text("read_text"),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   },
   (table) => [

@@ -803,6 +803,111 @@ describe("runMaterializeRange activity", () => {
         expect((await page3()).chunks).toEqual([]);
         expect((await page3()).state).toMatchObject({ state: "claimed", claimed_by_run: "m1" });
       });
+
+      describe("a page that failed after a charged read keeps its one charge (round 7 L1)", () => {
+        const withOps = (runId: string, t: ReturnType<typeof tracked>, extra: Partial<PageMaterializerOps>, onOcr?: () => Promise<void>) => {
+          const d = t.depsFor(runId, onOcr) as { materializer: { ops: Partial<PageMaterializerOps> } };
+          d.materializer.ops = { ...d.materializer.ops, ...extra };
+          return d as never;
+        };
+        const embedDown: Partial<PageMaterializerOps> = { async embed() { throw new Error("embedding provider down"); } };
+        const readState = async () => (await db.query<{ state: string; fee_billed_run: string | null; read_billed_run: string | null; kept: boolean }>(
+          `select state, fee_billed_run, read_billed_run, read_text is not null as kept from document_page_states where document_id = 'd1' and page_number = 3`)).rows[0];
+        const m1Rich = [{ run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 }];
+
+        it("Good m1 reads, embedding fails: one Rich charge; Auto m2 indexes the kept read with no Fast charge", async () => {
+          const t = tracked();
+          const first = await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
+          expect(first.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
+          expect(await charges()).toEqual(m1Rich);
+          expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: true });
+          expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
+          // m2 published m1's read (no text-layer re-extraction of a page already read) and charged nothing.
+          expect((await page3()).chunks.every((c) => c.text.includes(VISION))).toBe(true);
+          expect(await charges()).toEqual(m1Rich);
+          expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+          expect(await readState()).toMatchObject({ state: "indexed", fee_billed_run: "m2", read_billed_run: "m1", kept: false });
+        });
+
+        it("a Good retry (the same run, or another) reuses the kept read: no model call, no second Rich", async () => {
+          const t = tracked();
+          await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
+          let reads = 0;
+          const failedAgain = await runMaterializeRange(withOps("m1", t, embedDown, async () => { reads += 1; }), input("m1", [3]));
+          expect(failedAgain.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
+          await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          expect((await runMaterializeRange(t.depsFor("m2", async () => { reads += 1; }), input("m2", [3]))).indexed).toEqual([3]);
+          expect(reads).toBe(0);
+          expect(await charges()).toEqual(m1Rich);
+          expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+        });
+
+        it("an empty read is the page's one charge; a later read that indexes it adds none", async () => {
+          const t = tracked();
+          const empty = await runMaterializeRange(withOps("m1", t, {
+            async ocrPage() { return { text: "  ", model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 1, costCents: 1 }; },
+          }), input("m1", [3]));
+          expect(empty.failed).toEqual([{ page: 3, reason: "empty-page" }]);
+          expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
+          await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
+          expect((await page3()).chunks.every((c) => c.text.includes(VISION))).toBe(true);
+          // m2's own Rich read of the page stays provider usage.
+          expect(await charges()).toEqual(m1Rich);
+          expect(await readState()).toMatchObject({ state: "indexed", fee_billed_run: "m2" });
+        });
+
+        it("a lost read (model_read_run) plus an owner whose read then failed bill one Rich, not two", async () => {
+          const t = tracked();
+          await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          let peer = false;
+          // m1 stalls in OCR; m2 takes the page, reads it and fails on embedding. m1 resumes having lost the page.
+          const late = await runMaterializeRange(t.depsFor("m1", async () => {
+            if (peer) return;
+            peer = true;
+            await expire();
+            expect((await runMaterializeRange(withOps("m2", t, embedDown), input("m2", [3]))).failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
+          }), input("m1", [3]));
+          expect(late).toMatchObject({ indexed: [], failed: [] });
+          const recorded = (await db.query<{ model_read_run: string | null; read_billed_run: string | null }>(
+            `select model_read_run, read_billed_run from document_page_states where document_id = 'd1' and page_number = 3`)).rows[0];
+          expect(recorded).toEqual({ model_read_run: "m1", read_billed_run: "m2" });
+          // m1 retries and publishes: m2's read already paid the page, so neither m1's read nor model_read_run adds a charge.
+          expect((await runMaterializeRange(t.depsFor("m1"), input("m1", [3]))).indexed).toEqual([3]);
+          expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-rich", page: 3, amount: 1 }]);
+          expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+          // A recovery pass on the stamped page finds nothing to take over.
+          await db.exec(`update workspace_runs set status = 'completed' where id = 'm1'`);
+          expect(await recordMaterializedPageFee(sql, "m2", "d1", [3])).toBe(0);
+          await db.exec(`update workspace_runs set status = 'processing' where id = 'm1'`);
+        });
+
+        it("a PII-blocked read keeps no text, and a later full index does not charge the page again", async () => {
+          process.env.DOCSLURP_DEFERRED_PROFILES = "1";
+          const t = tracked();
+          await db.exec(`
+            update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm1';
+            delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
+            insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+              values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+            insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+              values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
+          try {
+            const blocked = await runMaterializeRange(withOps("m1", t, {
+              async ocrPage(_d, page) { return { text: `${LONG} SSN 123-45-6789 page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 }; },
+            }), input("m1", [3]));
+            expect(blocked.blocked).toEqual([3]);
+            expect(await readState()).toMatchObject({ state: "blocked-pii", read_billed_run: "m1", kept: false });
+            expect(await charges()).toEqual(m1Rich);
+            const full = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
+            // 12 pages - page 3 (paid by m1's read) = 11 Fast.
+            expect(full).toMatchObject({ fastPages: 11, richPages: 0 });
+          } finally {
+            delete process.env.DOCSLURP_DEFERRED_PROFILES;
+            await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+          }
+        });
+      });
     });
 
     it("two queries racing for the same scanned page charge it once", async () => {

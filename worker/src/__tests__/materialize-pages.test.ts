@@ -1,8 +1,13 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import type { PGlite } from "@electric-sql/pglite";
+import { connect } from "@lancedb/lancedb";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
 import { defaultPipelineFeatures } from "@docslurp/shared";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
 import { claimPages, ensurePageRows } from "../deferred/page-ledger.js";
@@ -10,6 +15,7 @@ import { materializePageRange, type PageMaterializerDeps, type PageMaterializerO
 import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -34,7 +40,8 @@ beforeAll(async () => {
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
-      values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
+      values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1),
+             ('run-2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 6);
   `);
@@ -168,7 +175,7 @@ describe("materializePageRange", () => {
     expect(h.embedCalls.flat().join(" ")).not.toContain("123-45-6789");
   });
 
-  it("is idempotent: re-running a range writes identical chunk ids without duplicates", async () => {
+  it("re-running a range republishes the pages under a new id generation, without duplicates", async () => {
     const h = harness({ 3: LONG, 4: LONG + " more" });
     await claimAndMaterialize(h.deps, input(h, [3, 4]));
     const first = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
@@ -176,9 +183,12 @@ describe("materializePageRange", () => {
     await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number in (3, 4)`);
     await claimAndMaterialize(h.deps, input(h, [3, 4]));
     const second = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
-    expect(second).toEqual(first);
-    expect(first[0]).toMatch(/^d1:p3:c0$/);
-    expect(h.lanceWrites[1]!.map((r) => r.id)).toEqual(h.lanceWrites[0]!.map((r) => r.id));
+    expect(second).toHaveLength(first.length);
+    expect(first[0]).toMatch(/^d1:p3:g[0-9a-f]{12}:c0$/);
+    expect(second.some((id) => first.includes(id))).toBe(false);
+    expect(h.lanceWrites[1]!.map((r) => r.id).sort()).toEqual(second);
+    // The first generation's vectors are stale once the second commits.
+    expect(h.lanceDeletes.sort()).toEqual(first);
     const pages = await db.query(`select 1 from document_pages where document_id = 'd1'`);
     expect(pages.rows).toHaveLength(2);
   });
@@ -249,9 +259,92 @@ describe("materializePageRange", () => {
     expect(result.failed).toEqual([{ page: 1, reason: "lance unavailable" }, { page: 2, reason: "lance unavailable" }]);
     expect((await db.query(`select 1 from document_chunks where document_id = 'd1'`)).rows).toHaveLength(0);
     expect((await db.query(`select 1 from document_pages where document_id = 'd1'`)).rows).toHaveLength(0);
-    expect(h.lanceDeletes.sort()).toEqual(["d1:p1:c0", "d1:p2:c0"]);
+    expect(h.lanceDeletes).toHaveLength(2);
+    expect(h.lanceDeletes.sort()).toEqual([expect.stringMatching(/^d1:p1:g[0-9a-f]{12}:c0$/), expect.stringMatching(/^d1:p2:g[0-9a-f]{12}:c0$/)]);
     const states = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number in (1, 2)`);
     expect(states.rows.map((r) => r.state)).toEqual(["failed", "failed"]);
+  });
+
+  describe("vector ids are generation-specific (round 7 M1, L3, L2)", () => {
+    let root: string;
+    beforeEach(async () => { root = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "materialize-generation-")); });
+    afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+    const onLance = (h: Harness, overrides: Partial<PageMaterializerOps>) => {
+      h.deps = { ...h.deps, config: { ...h.deps.config, lancedb: { ...h.deps.config.lancedb, root } } as Config, ops: { ...h.deps.ops, ...overrides } };
+      return h;
+    };
+    const lanceIds = async (uri: string, table: string) => {
+      const db = await connect(uri);
+      const t = await db.openTable(table);
+      try {
+        return new Set((await t.query().select(["id"]).toArray() as Array<{ id: string }>).map((row) => row.id));
+      } finally {
+        t.close();
+        db.close();
+      }
+    };
+    const page1Chunks = async () => (await db.query<{ id: string }>(`select id from document_chunks where document_id = 'd1' and page_number = 1 order by id`)).rows.map((r) => r.id);
+
+    it("a failed write's late cleanup never deletes the vectors a retry republished (real LanceDB)", async () => {
+      let target: { uri: string; table: string } | null = null;
+      const winner = onLance(harness({ 1: LONG }), {
+        async writeVectors(uri, table, records) { target = { uri, table }; await writeLanceDbRecords(uri, table, records); },
+        async deleteVectors(uri, table, ids) { await deleteLanceDbRecords(uri, table, ids); },
+      });
+      const loser = onLance(harness({ 1: LONG }), {
+        // The write landed but its acknowledgement did not: the page commits as failed and releases the lock.
+        async writeVectors(uri, table, records) { await writeLanceDbRecords(uri, table, records); throw new Error("lance commit lost"); },
+        async deleteVectors(uri, table, ids) {
+          // The cleanup runs late: run-2 has claimed and republished the page in between.
+          const retried = await claimAndMaterialize(winner.deps, { ...input(winner, [1]), runId: "run-2" });
+          expect(retried.indexed).toEqual([1]);
+          await deleteLanceDbRecords(uri, table, ids);
+        },
+      });
+      const failed = await claimAndMaterialize(loser.deps, input(loser, [1]));
+      expect(failed.failed).toEqual([{ page: 1, reason: "lance commit lost" }]);
+      const live = await page1Chunks();
+      expect(live.length).toBeGreaterThan(0);
+      const stored = await lanceIds(target!.uri, target!.table);
+      expect(live.every((id) => stored.has(id))).toBe(true);
+      const state = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number = 1`);
+      expect(state.rows[0]!.state).toBe("indexed");
+    });
+
+    it("an unknown COMMIT outcome (connection lost after COMMIT) keeps the published vectors", async () => {
+      const h = harness({ 1: LONG });
+      const real = h.deps.sql;
+      h.deps = { ...h.deps, sql: new Proxy(real, {
+        get(target, key, receiver) {
+          if (key !== "begin") return Reflect.get(target, key, receiver);
+          return async (...args: unknown[]) => {
+            await (target.begin as (...a: unknown[]) => Promise<unknown>)(...args);
+            throw new Error("write CONNECTION_CLOSED");
+          };
+        },
+      }) };
+      await expect(claimAndMaterialize(h.deps, input(h, [1]))).rejects.toThrow(/CONNECTION_CLOSED/);
+      const live = await page1Chunks();
+      expect(live.length).toBeGreaterThan(0);
+      expect(h.lanceWrites.flat().map((r) => r.id).sort()).toEqual(live);
+      expect(h.lanceDeletes).toEqual([]);
+      const state = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number = 1`);
+      expect(state.rows[0]!.state).toBe("indexed");
+    });
+
+    it("materializer vector records carry no LanceDB hydration, so search serves them only through a committed chunk row", async () => {
+      const records: Array<Record<string, unknown>> = [];
+      const h = harness({ 1: LONG, 2: LONG + " second" }, {
+        async writeVectors(_uri, _table, written) { records.push(...(written as unknown as Array<Record<string, unknown>>)); },
+      });
+      await claimAndMaterialize(h.deps, input(h, [1, 2]));
+      expect(records.length).toBeGreaterThan(0);
+      for (const record of records) {
+        expect(record).not.toHaveProperty("hydration");
+        expect(record).not.toHaveProperty("runId");
+        expect(record).not.toHaveProperty("pageNumber");
+      }
+    });
   });
 
   it("removes stale chunk rows when a page re-chunks to fewer chunks", async () => {
@@ -264,8 +357,9 @@ describe("materializePageRange", () => {
     await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number = 1`);
     await claimAndMaterialize(h2.deps, input(h2, [1]));
     const after = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
-    expect(after).toEqual(["d1:p1:c0"]);
-    expect(h2.lanceDeletes.sort()).toEqual(before.filter((id) => id !== "d1:p1:c0").sort());
+    expect(after).toEqual([expect.stringMatching(/^d1:p1:g[0-9a-f]{12}:c0$/)]);
+    // Every chunk of the earlier generation is stale.
+    expect(h2.lanceDeletes.sort()).toEqual(before);
   });
 
   it("reports total spend including failed pages and completed batches", async () => {
@@ -303,7 +397,7 @@ describe("materializePageRange", () => {
       on conflict (document_id) do update set nodes = excluded.nodes`);
     const h = harness({ 3: LONG });
     await claimAndMaterialize(h.deps, input(h, [3]));
-    const row = await db.query<{ heading_path: string[] }>(`select heading_path from document_chunks where id = 'd1:p3:c0'`);
+    const row = await db.query<{ heading_path: string[] }>(`select heading_path from document_chunks where document_id = 'd1' and page_number = 3 order by chunk_index limit 1`);
     expect(row.rows[0]!.heading_path).toEqual(["Part I", "Chapter 2"]);
     await db.exec(`delete from document_maps`);
   });

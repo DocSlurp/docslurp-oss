@@ -84,8 +84,8 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
       select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline
       from (select 1) one
-      left join documents d on d.id = ${args.documentId}
-      left join workspace_runs r on r.id = d.run_id
+      left join documents d on d.id = ${args.documentId} and d.workspace_id = ${args.workspaceId}
+      left join workspace_runs r on r.id = d.run_id and r.workspace_id = ${args.workspaceId}
       left join workspaces w on w.id = ${args.workspaceId}
     `;
     const pipeline = sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`);

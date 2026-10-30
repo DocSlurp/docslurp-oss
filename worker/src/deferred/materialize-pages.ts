@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -304,7 +305,8 @@ async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<v
 /**
  * Parse -> PII-check -> chunk -> embed -> index the requested pages of one document.
  * The caller owns the claim (`claimPages`); this marks each page `indexed`, `blocked-pii`
- * or `failed`. Chunk ids are `${documentId}:p${page}:c${i}`, so a replay upserts the same rows.
+ * or `failed`. Chunk ids, which are also the LanceDB row ids, are generation-specific:
+ * `${documentId}:p${page}:g${generation}:c${i}`, with a fresh generation per call (see step 5).
  */
 export async function materializePageRange(
   deps: PageMaterializerDeps,
@@ -323,7 +325,19 @@ export async function materializePageRange(
   const modelReads = new Map<number, number>();
   /** Customer credits of each page's read (Rich charges buffered in the ledger). */
   const readCents = new Map<number, number>();
+  /** Read text (after PII redaction) of pages this call read, kept on the page row if the page then fails. */
+  const keptReads = new Map<number, string>();
   let spentCents = 0;
+  /** This publication's id generation: its chunk and vector ids are never written by another call. */
+  const generation = randomBytes(6).toString("hex");
+
+  // 0. Pages an earlier run read (one Rich charge, committed) and then failed after the read: index the kept read,
+  // with no model call and no new charge (billLockedMaterializedPages stamps them without one).
+  const storedReads = new Map((await deps.sql<{ page_number: number; read_text: string }[]>`
+    select page_number, read_text from document_page_states
+    where document_id = ${documentId} and page_number = any(${pages}::int[])
+      and read_billed_run is not null and read_text is not null
+  `).map((row) => [row.page_number, row.read_text]));
 
   // 1. Text layer per contiguous range, then OCR only pages without one.
   const texts = new Map<number, string>();
@@ -345,6 +359,11 @@ export async function materializePageRange(
   const ocrPages: number[] = [];
   const keptUnread: number[] = [];
   for (const page of pages) {
+    const stored = storedReads.get(page);
+    if (stored !== undefined) {
+      prepared.set(page, { page, text: stored, ocrCostCents: 0 });
+      continue;
+    }
     const text = texts.get(page) ?? "";
     const hasTextLayer = text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS;
     // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee as they turn indexed).
@@ -433,7 +452,7 @@ export async function materializePageRange(
     let i = 0;
     for (const meta of chunkTextWithMeta(entry.text, CHUNK_MAX_CHARS)) {
       chunks.push({
-        id: `${documentId}:p${entry.page}:c${i}`,
+        id: `${documentId}:p${entry.page}:g${generation}:c${i}`,
         page: entry.page,
         index: (entry.page - 1) * 1000 + i,
         text: meta.text,
@@ -444,6 +463,8 @@ export async function materializePageRange(
     if (i === 0) {
       prepared.delete(entry.page);
       failed.set(entry.page, "empty-page");
+    } else if (modelReads.has(entry.page)) {
+      keptReads.set(entry.page, entry.text);
     }
   }
 
@@ -509,11 +530,16 @@ export async function materializePageRange(
   // bill these pages while the rows are locked.
   //
   // Vector ordering: LanceDB is outside Postgres. Vectors are upserted under the row locks, after the claim check and
-  // before the commit, so a run that lost its claim never writes a vector id another run published (ids are
-  // `${documentId}:p${page}:c${i}`, shared by every run). Search only returns a vector whose id has a committed
-  // document_chunks row (server vectorSearch hydrates by id), so vectors of an attempt that then rolls back are never
-  // visible; they are deleted best effort, and the page stays this run's claim for the retry, which upserts the same
-  // ids. Stale vectors (chunks this publication replaced) are deleted after the commit; their chunk rows are gone
+  // before the commit. Their ids are this call's generation (`${documentId}:p${page}:g${generation}:c${i}`), written
+  // by no other run or attempt, so deleting them can never remove another publication's vectors: not when a failed
+  // write's cleanup runs after the page lock is released and a retry has republished the page, and not when a stale
+  // cleanup runs late. The committed document_chunks rows name the live generation.
+  //
+  // Visibility: a vector is searchable only through a committed document_chunks row with its id. These records carry
+  // no LanceDB hydration columns (the native backfill skips deferred chunks too), so both the Postgres and the native
+  // (SEARCH_LANCEDB_NATIVE) vector paths hydrate them from document_chunks by id; vectors of an attempt that rolled
+  // back are never served. They are deleted best effort, only when the transaction certainly rolled back (see the
+  // catch below). Stale vectors (chunks this publication replaced) are deleted after the commit; their chunk rows went
   // with it, so they are already unsearchable.
   const rangePages = [...new Set([...pages])].sort((a, b) => a - b);
   const claimedBy = input.runId;
@@ -525,6 +551,8 @@ export async function materializePageRange(
   let held = new Set<number>();
   let owned: number[] = [];
   const batches: Array<{ commit(): void }> = [];
+  /** The transaction body finished: an error after this is from COMMIT, whose outcome is unknown. */
+  let bodyDone = false;
   try {
     await deps.sql.begin(async (tx) => {
       const client = tx as unknown as Sql;
@@ -560,7 +588,7 @@ export async function materializePageRange(
       await insertChunkRows(client, publishChunks.map((c) => ({
         id: c.id, documentId, runId: document.runId, userId: document.userId, chunkIndex: c.index,
         text: c.text, headingPath: c.headingPath, pageNumber: c.page, tokenEstimate: estimateTokens(c.text),
-        metadata: { pageNumber: c.page, materializedBy: input.reason, deferred: true },
+        metadata: { pageNumber: c.page, materializedBy: input.reason, deferred: true, generation },
       })));
       if (publishChunks.length > 0) await linkChunksToPageRows(client, documentId, document.runId);
 
@@ -568,7 +596,8 @@ export async function materializePageRange(
       const cleanPages = [...new Set([...publishedPages.map((p) => p.page), ...blocked])].filter((page) => held.has(page));
       if (cleanPages.length > 0) {
         const keep = new Set(publishChunks.map((c) => c.id));
-        const patterns = cleanPages.map((p) => `${documentId}:p${p}:c%`);
+        // Every earlier generation of the page (and the pre-generation `:p<page>:c<i>` ids).
+        const patterns = cleanPages.map((p) => `${documentId}:p${p}:%`);
         const existing = await client<{ id: string }[]>`
           select id from document_chunks where document_id = ${documentId} and id like any(${patterns}::text[])
         `;
@@ -597,6 +626,11 @@ export async function materializePageRange(
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
+      // A kept read is spent once its page is indexed.
+      if (owned.length > 0) {
+        await client`update document_page_states set read_text = null
+          where document_id = ${documentId} and page_number = any(${owned}::int[]) and read_text is not null`;
+      }
 
       const lost = rangePages.filter((page) => !held.has(page));
       if (billsHere) {
@@ -612,9 +646,15 @@ export async function materializePageRange(
             where s.document_id = ${documentId} and s.page_number = r.page
           `;
         }
+        // Held pages this call read (a pending Rich charge) that did not index: the read is the page's one charge.
+        // PII-blocked pages keep no text.
+        const movedSet = new Set(moved);
+        const failedReads = new Map([...held]
+          .filter((page) => readCents.has(page) && !movedSet.has(page) && !released.includes(page))
+          .map((page) => [page, blocked.includes(page) ? null : keptReads.get(page) ?? null]));
         const outcome = await billLockedMaterializedPages(client as unknown as Sql<Record<string, unknown>>, {
-          runId: claimedBy, documentId, requested: publishedPages.map((p) => p.page).sort((a, b) => a - b), moved: new Set(moved),
-          ledger: deps.usage, modelReads: new Map(lostReads.map((page) => [page, modelReads.get(page)!])),
+          runId: claimedBy, documentId, requested: publishedPages.map((p) => p.page).sort((a, b) => a - b), moved: movedSet,
+          ledger: deps.usage, modelReads: new Map(lostReads.map((page) => [page, modelReads.get(page)!])), failedReads,
         });
         if (outcome.richBatch) batches.push(outcome.richBatch);
       }
@@ -629,12 +669,18 @@ export async function materializePageRange(
         }
         batches.push(dropped);
       }
+      bodyDone = true;
     });
   } catch (error) {
-    written = [...written, ...discard];
-    if (written.length > 0) {
-      // The transaction rolled back: these ids have no committed chunk row, so they are unsearchable; drop them.
-      await ops.deleteVectors(location.uri, location.table, written).catch((cleanup: unknown) => {
+    // A failed write's ids never got a chunk row. The ids written in full are this generation's own; delete them only
+    // when the transaction certainly rolled back (the body threw). An error from COMMIT itself (a dropped connection)
+    // may follow a commit that landed, whose chunk rows name these ids: they stay, unsearchable if it did roll back.
+    const rollback = bodyDone ? discard : [...written, ...discard];
+    if (bodyDone && written.length > 0) {
+      console.warn(`[materialize] commit outcome unknown for ${documentId} (${error instanceof Error ? error.message : String(error)}); kept ${written.length} vectors of generation ${generation}`);
+    }
+    if (rollback.length > 0) {
+      await ops.deleteVectors(location.uri, location.table, rollback).catch((cleanup: unknown) => {
         console.warn(`[materialize] vector rollback failed for ${documentId}: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`);
       });
     }
@@ -662,7 +708,7 @@ export async function materializePageRange(
   // every text-layer page that indexed (Fast). Embedding batches are provider cost (0 credits).
   const ocrSet = new Set(ocrPages);
   const ownedReadCents = [...held].reduce((sum, page) => sum + (readCents.get(page) ?? 0), 0);
-  const fastIndexed = result.indexed.filter((page) => !ocrSet.has(page)).length;
+  const fastIndexed = result.indexed.filter((page) => !ocrSet.has(page) && !storedReads.has(page)).length;
   result.costCredits = Math.round((ownedReadCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
   return result;
 }
