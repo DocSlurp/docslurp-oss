@@ -238,3 +238,31 @@ test('nested production code cannot inherit a parent documentation exclusion', (
   assert.equal(report.scannedProductionFiles, 2);
   assert.ok(report.findings.some(x => x.rule === 'labeled-answer' && x.file === 'docs/engine/engine.ts'));
 });
+
+test('directory aliases scan ignored and untracked targets, classify aliases and hash deterministically', (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.repo, 'docs'));
+  writeFileSync(join(f.repo, '.gitignore'), 'docs/hidden.ts\n');
+  writeFileSync(join(f.repo, 'docs', 'hidden.ts'), 'export const safe = 1;');
+  symlinkSync('docs', join(f.repo, 'runtime'));
+  f.git('add', '.');
+  const first = f.run();
+  assert.equal(first.passed, true);
+  assert.equal(first.productionHash, f.run().productionHash);
+  assert.ok(first.repositories[0].directoryAliases.length);
+  writeFileSync(join(f.repo, 'docs', 'hidden.ts'), 'export const safe = 2;');
+  assert.notEqual(first.productionHash, f.run().productionHash);
+  writeFileSync(join(f.repo, 'docs', 'hidden.ts'), '"Distinctive Example Supplier"');
+  assert.ok(f.run().findings.some(x => x.file === 'runtime/hidden.ts' && x.rule === 'labeled-answer'));
+  writeFileSync(join(f.repo, 'docs', 'other.ts'), '"Distinctive Example Supplier"');
+  assert.ok(f.run().findings.some(x => x.file === 'runtime/other.ts'));
+});
+
+test('directory aliases fail closed on cycles, escapes and broken links', (t) => {
+  for (const target of ['.', '../dataset', 'missing']) {
+    const f = fixture(t);
+    symlinkSync(target, join(f.repo, 'alias'));
+    f.git('add', '.');
+    assert.equal(f.run().passed, false, target);
+  }
+});

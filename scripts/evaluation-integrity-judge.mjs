@@ -9,7 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -166,6 +166,32 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       }
     };
     visit(repo, '', base);
+    // Expand aliases explicitly: classify each leaf by its reachable alias path.
+    // Walk even ignored targets; never treat Git's inventory as proof of coverage.
+    const expanded = [];
+    const expand = (item, ancestors = new Set()) => {
+      let actual;
+      try { actual = realpathSync(item.path); }
+      catch (error) {
+        if (!existsSync(item.path) && !lstatSync(item.path, { throwIfNoEntry: false })) {
+          expanded.push(item); return; // Ordinary tracked deletion.
+        }
+        throw error;
+      }
+      if (!within(item.root, actual)) throw new Error('repository-symlink-escape');
+      if (!statSync(actual).isDirectory()) { expanded.push(item); return; }
+      if (ancestors.has(actual)) throw new Error('repository-directory-symlink-cycle');
+      const next = new Set(ancestors).add(actual);
+      const children = readdirSync(actual).sort();
+      productionDigest.update(JSON.stringify({ alias: item.file, target: relative(item.root, actual), children })).update('\0');
+      (item.coverage.directoryAliases ??= []).push({ path: item.file, target: relative(item.root, actual), entries: children.length });
+      for (const child of children) {
+        if (child === '.git') throw new Error('repository-directory-alias-uncovered-git');
+        expand({ ...item, path: resolve(actual, child), file: item.file + '/' + child, name: item.name + '/' + child, changed: false }, next);
+      }
+    };
+    for (const item of files) expand(item);
+    files.splice(0, files.length, ...expanded);
     const terms = [...identifiers].map((value) => ({ rule: 'fixture-identifier', value }));
     for (const value of sourceHashes) terms.push({ rule: 'source-recognition-hash', value });
     for (const value of expected) terms.push({ rule: 'labeled-answer', value });
