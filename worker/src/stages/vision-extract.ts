@@ -3,6 +3,9 @@ import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
   parserPlaybookCatalog,
+  parserPlaybookForQuality,
+  qualityAllowsPageReading,
+  qualityReadsEveryPage,
   resolveVisionRoute,
   visionListPriceCents,
   visionModelTokenPricing,
@@ -57,10 +60,6 @@ import {
 import type { PlanValidation, RoutePlan } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts } from "../pipeline/page-facts.js";
 
-type PipelineWithPlaybook = WorkflowState["run"]["pipeline"] & {
-  parserPlaybook?: ParserPlaybookKey;
-};
-
 export interface VisionPageOutput {
   pageNumber: number;
   runtime: string;
@@ -97,6 +96,8 @@ export class VisionExtractStage implements Stage {
     const tasks: import("../temporal/shared.js").VisionPageTask[] = [];
     // Budget-capped runs retain sequential admission, rather than oversubscribing a cap.
     if (!state.run.pipeline.visionFallback || (state.run.pipeline.maxCostCents ?? 0) > 0) return tasks;
+    // Fast never reads a page; pages without a text layer were kept as page images (render-images).
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return tasks;
     if (!(await this.visionAllowed(state))) return tasks;
     for (const document of healthyDocuments(state)) {
       if (document.mimeType.startsWith("text/") || state.documentStages.get(document.id)?.get(this.name)?.status === "completed") continue;
@@ -157,6 +158,10 @@ export class VisionExtractStage implements Stage {
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     if (!state.run.pipeline.visionFallback) {
+      return;
+    }
+    // Fast never reads a page; pages without a text layer were kept as page images (render-images).
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
       return;
     }
     if (!(await this.visionAllowed(state))) {
@@ -542,10 +547,10 @@ export class VisionExtractStage implements Stage {
       }
     }
 
-    if (state.run.pipeline.vision.forceAllPages) {
+    if (qualityReadsEveryPage(state.run.pipeline.quality)) {
       needed = true;
       selectedPages = Array.from({ length: pageCount }, (_, index) => index + 1);
-      reason = "workspace-force-all-pages";
+      reason = "quality-good-all-pages";
     } else if (needed && !this.visionAllowed_(state, document.id)) {
       needed = false;
       reason = "playbook-disallows-vision";
@@ -634,7 +639,7 @@ export class VisionExtractStage implements Stage {
 
   private visionAllowed_(state: WorkflowState, documentId: string): boolean {
     return visionAllowedForDocument(
-      state.run.pipeline as PipelineWithPlaybook,
+      state.run.pipeline,
       state.artifactLedger.readDocument(documentId, "parser-playbook"),
     );
   }
@@ -651,13 +656,7 @@ export class VisionExtractStage implements Stage {
       return artifactPlaybook as ParserPlaybookKey;
     }
 
-    const pipelinePlaybook = (state.run.pipeline as PipelineWithPlaybook)
-      .parserPlaybook;
-    if (pipelinePlaybook && pipelinePlaybook in parserPlaybookCatalog) {
-      return pipelinePlaybook;
-    }
-
-    return "balanced";
+    return parserPlaybookForQuality(state.run.pipeline.quality);
   }
 
   private scoreTextDensity(text: string, pageCount: number): number {
@@ -685,8 +684,8 @@ export class VisionExtractStage implements Stage {
     state: WorkflowState,
     document: import("../models.js").Document,
   ): Promise<{ plan: RoutePlan; execution: RoutedExecution; catalog: ReturnType<typeof buildRuntimeCatalog>["allTargets"] } | null> {
-    // A workspace pin (force all pages) bypasses the router.
-    if (state.run.pipeline.vision?.forceAllPages) return null;
+    // Good (vision on every page) bypasses the router; fast reads no page at all.
+    if (qualityReadsEveryPage(state.run.pipeline.quality) || !qualityAllowsPageReading(state.run.pipeline.quality)) return null;
     const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg);
     if (!plan) return null;
     const catalog = buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).allTargets;
@@ -1240,7 +1239,7 @@ export class VisionExtractStage implements Stage {
     const reconciled = reconcileCanonicalArtifacts({
       canonicalDocument,
       extractionContract: contract,
-      minimumConfidence: state.run.pipeline.vision.forceAllPages ? 0 : undefined,
+      minimumConfidence: qualityReadsEveryPage(state.run.pipeline.quality) ? 0 : undefined,
       replacements: outputs.map((output) => {
         const pageEvidence = routingByPage.get(output.pageNumber);
         return {

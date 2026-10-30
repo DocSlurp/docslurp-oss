@@ -27,7 +27,7 @@ export const workspaceTemplateKeySchema = z.enum([
 export type WorkspaceTemplateKey = z.infer<typeof workspaceTemplateKeySchema>;
 
 export const workspaceTemplateLockedSettingSchema = z.enum([
-  "parserPlaybook",
+  "quality",
   "visionFallback",
   "vision.benchmarkProfile",
   "preserveTables",
@@ -877,7 +877,7 @@ const workspaceTemplateLockedSettingPaths: Record<
   WorkspaceTemplateLockedSetting,
   string[]
 > = {
-  parserPlaybook: ["parserPlaybook"],
+  quality: ["quality"],
   visionFallback: ["visionFallback"],
   "vision.benchmarkProfile": ["vision", "benchmarkProfile"],
   preserveTables: ["preserveTables"],
@@ -998,7 +998,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["party", "agreement", "clause", "obligation", "date", "amount", "jurisdiction"] },
-      parserPlaybook: "review-grade",
+      quality: "auto",
       preserveTables: true,
       preserveCode: true,
       pageIndex: true,
@@ -1018,7 +1018,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "preserveTables",
       "preserveCode",
       "pageIndex",
@@ -1037,7 +1037,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["patient", "clinician", "condition", "medication", "procedure", "facility", "date"] },
-      parserPlaybook: "review-grade",
+      quality: "auto",
       visionFallback: true,
       // strict-privacy forbids hosted models: local Florence OCR for vision,
       // and summaries/propositions (hosted text models only) stay off.
@@ -1059,10 +1059,10 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "visionFallback",
       "vision.benchmarkProfile",
-          "preserveTables",
+      "preserveTables",
       "pageIndex",
       "summarize",
       "propositionIndex",
@@ -1080,7 +1080,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["company", "metric", "segment", "period", "amount", "person", "risk"] },
-      parserPlaybook: "layout-aware",
+      quality: "auto",
       preserveTables: true,
       preserveImages: true,
       pageIndex: true,
@@ -1091,7 +1091,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "preserveTables",
       "preserveImages",
       "pageIndex",
@@ -1108,7 +1108,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["component", "service", "api", "configuration", "team", "requirement", "version"] },
-      parserPlaybook: "layout-aware",
+      quality: "auto",
       preserveCode: true,
       preserveImages: true,
       chunkOverlap: true,
@@ -1118,7 +1118,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "preserveCode",
       "preserveImages",
       "chunkOverlap",
@@ -1134,14 +1134,14 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["person", "team", "decision", "action_item", "project", "date"] },
-      parserPlaybook: "fast",
+      quality: "fast",
       visionFallback: false,
       summarize: true,
       propositionIndex: true,
       inferenceLane: "realtime",
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "visionFallback",
       "summarize",
       "propositionIndex",

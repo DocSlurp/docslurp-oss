@@ -9,7 +9,10 @@
 import type { CommandRunner } from "../tools/runner.js";
 
 // "over-cap" is no longer produced (the per-document vision page cap was removed on 2026-10-29); older rows keep it.
-export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap";
+// "kept-as-image": quality fast kept a page without a text layer as its page image (no OCR, no vision).
+// "not-read": quality fast left a page without extracted text unread and unrendered (render cap, blank page).
+// Both are report-only: Fast billing reads the usage ledger, never page facts (db/page-base-fee.ts).
+export type PageVisionStatus = "extracted" | "failed" | "not-selected" | "over-cap" | "cost-cap" | "kept-as-image" | "not-read";
 
 export interface PageFactUpsert {
   documentId: string;

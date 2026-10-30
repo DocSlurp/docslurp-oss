@@ -179,7 +179,23 @@ export class PipelineUsageEventLedger {
    * dropped until `commit()`, so a failed write retries the same ids.
    */
   checkpoint(): PipelineUsageBatch {
-    const events = this.pending.slice();
+    return this.take(() => true);
+  }
+
+  /**
+   * Take the buffered Rich page charges of one document, so a caller can
+   * persist them in the same transaction as the page billing decision they
+   * back (db/page-base-fee.ts recordMaterializedPageFee). Like `checkpoint`,
+   * nothing is dropped until `commit()`.
+   */
+  takeRichPageCharges(documentId: string, includePage: (pageNumber: number) => boolean = () => true): PipelineUsageBatch {
+    return this.take((event) => event.metric === BILLABLE_UNIT_METRICS.richPage
+      && isUnitChargeEvent(event) && event.metadata?.documentId === documentId
+      && includePage(Number(event.metadata?.pageNumber)));
+  }
+
+  private take(include: (event: UsageEvent) => boolean): PipelineUsageBatch {
+    const events = this.pending.filter(include);
     let committed = false;
     return {
       events,

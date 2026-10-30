@@ -121,7 +121,7 @@ describe("shouldFailOpenVisionError", () => {
         "doc-1:classification": "s3://bucket/classification.json",
       }),
       pendingPerformance: [],
-      run: { pipeline: { vision: { forceAllPages: false } } },
+      run: { pipeline: { quality: "auto", vision: {} } },
     } as unknown as WorkflowState;
     const document = {
       id: "doc-1",
@@ -146,7 +146,7 @@ describe("shouldFailOpenVisionError", () => {
     });
   });
 
-  it("can force every page through vision despite calibrated routing", async () => {
+  it("good quality sends every page through vision despite calibrated routing", async () => {
     const routing = buildAdaptiveRoutingDecisionSurface({
       documentId: "doc-1",
       filename: "form.jpg",
@@ -169,7 +169,7 @@ describe("shouldFailOpenVisionError", () => {
         "doc-1:classification": "s3://bucket/classification.json",
       }),
       pendingPerformance: [],
-      run: { pipeline: { vision: { forceAllPages: true } } },
+      run: { pipeline: { quality: "good", vision: {} } },
     } as unknown as WorkflowState;
 
     const result = await (
@@ -185,7 +185,7 @@ describe("shouldFailOpenVisionError", () => {
     expect(result).toMatchObject({
       needed: true,
       selectedPages: [1, 2],
-      reason: "workspace-force-all-pages",
+      reason: "quality-good-all-pages",
     });
   });
 

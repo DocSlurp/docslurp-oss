@@ -1,12 +1,16 @@
 import {
-  applyDefaultVisionOverride,
   defaultPipelineFeatures,
+  estimateIngest,
   parserPlaybookCatalog,
+  parserPlaybookForQuality,
+  QUALITY_MODE_ORDER,
+  QUALITY_MODES,
+  qualityModeSchema,
   runProcessingPreviewRequestSchema,
   runProcessingPreviewSchema,
-  visionModelCatalogByUri,
-  type ParserPlaybookKey,
+  type PageMix,
   type PipelineFeatures,
+  type QualityMode,
   type RunProcessingPreview,
   type RunProcessingPreviewRequest,
   type RunProcessingPreviewScenario,
@@ -23,7 +27,7 @@ type PreviewSourceDescriptor = {
 };
 
 export type RunPreviewHistoryRow = {
-  parser_playbook: string | null;
+  quality: string | null;
   completed_runs: number;
   sampled_documents: number;
   avg_plausibility_score: number | null;
@@ -224,9 +228,9 @@ type PreviewHistorySummary = {
   sampledDocuments: number;
   averagePlausibilityScore: number | null;
   averageLatencyMinutes: number | null;
-  byPlaybook: Partial<
+  byQuality: Partial<
     Record<
-      ParserPlaybookKey,
+      QualityMode,
       {
         sampledDocuments: number;
         averagePlausibilityScore: number | null;
@@ -239,7 +243,7 @@ type PreviewHistorySummary = {
 function summarizePreviewHistory(
   rows: RunPreviewHistoryRow[],
 ): PreviewHistorySummary {
-  const byPlaybook: PreviewHistorySummary["byPlaybook"] = {};
+  const byQuality: PreviewHistorySummary["byQuality"] = {};
   let completedRuns = 0;
   let sampledDocuments = 0;
   let weightedPlausibilityTotal = 0;
@@ -248,11 +252,11 @@ function summarizePreviewHistory(
   let weightedLatencyDocs = 0;
 
   for (const row of rows) {
-    const playbook = (row.parser_playbook ?? "balanced") as ParserPlaybookKey;
+    const quality = qualityModeSchema.safeParse(row.quality ?? "auto");
     completedRuns += row.completed_runs;
     sampledDocuments += row.sampled_documents;
-    if (playbook in parserPlaybookCatalog) {
-      byPlaybook[playbook] = {
+    if (quality.success) {
+      byQuality[quality.data] = {
         sampledDocuments: row.sampled_documents,
         averagePlausibilityScore: row.avg_plausibility_score,
         averageSecondsPerPage: row.avg_seconds_per_page,
@@ -281,81 +285,48 @@ function summarizePreviewHistory(
       weightedLatencyDocs > 0
         ? weightedSecondsPerPage / weightedLatencyDocs / 60
         : null,
-    byPlaybook,
+    byQuality,
   };
 }
 
+const BASE_QUALITY: Record<QualityMode, number> = { fast: 0.57, auto: 0.76, good: 0.9 };
+
+/** Page mix the file signals suggest, for the high end of a price range. */
+function signalPageMix(signals: ReturnType<typeof estimateComplexitySignals>): PageMix {
+  if (signals.scanHeavy) return { text: 0.3, complex: 0.1, scanned: 0.6 };
+  if (signals.tableHeavy) return { text: 0.6, complex: 0.35, scanned: 0.05 };
+  return { text: 0.85, complex: 0.1, scanned: 0.05 };
+}
+
 function estimateScenario(args: {
-  parserPlaybook: ParserPlaybookKey;
+  quality: QualityMode;
   pipeline: PipelineFeatures;
   estimatedPages: number;
   documentCount: number;
   signals: ReturnType<typeof estimateComplexitySignals>;
   history: PreviewHistorySummary;
 }): RunProcessingPreviewScenario {
-  const pagesPerDollar = (costCentsPer100Pages: number) =>
-    Math.round(10000 / costCentsPer100Pages);
-  const playbook = parserPlaybookCatalog[args.parserPlaybook];
-  const modelCostPerPage =
-    visionModelCatalogByUri[args.pipeline.vision.modelUri]
-      ?.estimatedCostPerPageCents ?? 0.3;
-  const fallbackCostPerPage = args.pipeline.vision.remoteFallbackModelUri
-    ? (visionModelCatalogByUri[args.pipeline.vision.remoteFallbackModelUri]
-        ?.estimatedCostPerPageCents ?? modelCostPerPage)
-    : modelCostPerPage;
-  const historyForPlaybook = args.history.byPlaybook[args.parserPlaybook];
-  const extractionCost =
-    (playbook.est.costCentsPer100Pages / 100) * args.estimatedPages;
-  const embeddingCost = args.pipeline.embed ? args.estimatedPages * 0.002 : 0;
-  const overheadCost = args.documentCount * 0.01;
-  const visionShare = {
-    fast: 0.03,
-    balanced: 0.1,
-    "layout-aware": 0.16,
-    agentic: 0.24,
-    "review-grade": 0.32,
-  }[args.parserPlaybook];
-  const expectedVisionCost = args.pipeline.visionFallback
-    ? args.estimatedPages *
-      visionShare *
-      Math.max(modelCostPerPage, fallbackCostPerPage)
-    : 0;
+  const mode = QUALITY_MODES[args.quality];
+  const playbook = parserPlaybookCatalog[parserPlaybookForQuality(args.quality)];
+  const historyForQuality = args.history.byQuality[args.quality];
+  // Customer price in credits (= cents) from PRICE_CARD: a text-only corpus at the low end, the signal mix at the high end.
+  const priced = (mix: Partial<PageMix>) =>
+    estimateIngest({ pages: args.estimatedPages, documents: args.documentCount, mix, profile: args.quality }).credits.totalCredits;
+  const minCents = priced({ text: 1 });
+  const maxCents = Math.max(minCents, priced(signalPageMix(args.signals)));
 
-  const baseQuality = {
-    fast: 0.57,
-    balanced: 0.72,
-    "layout-aware": 0.82,
-    agentic: 0.86,
-    "review-grade": 0.9,
-  }[args.parserPlaybook];
-  let quality = baseQuality;
-
-  if (args.signals.tableHeavy) {
-    quality +=
-      args.parserPlaybook === "layout-aware" ||
-      args.parserPlaybook === "review-grade"
-        ? 0.05
-        : -0.08;
-  }
-  if (args.signals.scanHeavy) {
-    quality +=
-      args.parserPlaybook === "fast"
-        ? -0.16
-        : args.parserPlaybook === "balanced"
-          ? -0.08
-          : 0.02;
-  }
-  if (args.signals.mediaHeavy) {
-    quality += args.parserPlaybook === "review-grade" ? 0.03 : -0.05;
-  }
+  let quality = BASE_QUALITY[args.quality];
+  if (args.signals.tableHeavy) quality += args.quality === "fast" ? -0.08 : args.quality === "good" ? 0.05 : 0.02;
+  if (args.signals.scanHeavy) quality += args.quality === "fast" ? -0.2 : args.quality === "good" ? 0.04 : 0;
+  if (args.signals.mediaHeavy) quality += args.quality === "good" ? 0.03 : -0.05;
   quality = clamp(quality, 0.3, 0.97);
 
   const baseLatencyMinutes =
     ((playbook.est.latencySecPer100Pages / 100) * args.estimatedPages) / 60;
   let estimatedLatencyMinutes = baseLatencyMinutes;
-  if (typeof historyForPlaybook?.averageSecondsPerPage === "number") {
+  if (typeof historyForQuality?.averageSecondsPerPage === "number") {
     const historicalLatencyMinutes =
-      (historyForPlaybook.averageSecondsPerPage * args.estimatedPages) / 60;
+      (historyForQuality.averageSecondsPerPage * args.estimatedPages) / 60;
     estimatedLatencyMinutes =
       baseLatencyMinutes * 0.55 + historicalLatencyMinutes * 0.45;
   }
@@ -369,29 +340,19 @@ function estimateScenario(args: {
   );
 
   const reasoning = [
-    `${playbook.label} targets about ${playbook.est.latencySecPer100Pages}s per 100 pages and roughly $1 = ${pagesPerDollar(playbook.est.costCentsPer100Pages).toLocaleString()} pages.`,
+    mode.description,
     ...args.signals.topSignals.slice(0, 2),
-    historyForPlaybook?.sampledDocuments
-      ? `Workspace history has ${historyForPlaybook.sampledDocuments} sampled docs for this profile.`
+    historyForQuality?.sampledDocuments
+      ? `Workspace history has ${historyForQuality.sampledDocuments} sampled docs at this quality.`
       : "No matching workspace history yet, so this recommendation leans on file metadata.",
   ].filter(Boolean);
 
   return {
-    parserPlaybook: args.parserPlaybook,
-    label: playbook.label,
+    quality: args.quality,
+    label: mode.label,
     estimatedCost: {
-      minCents:
-        Math.round(
-          (extractionCost * 0.85 + embeddingCost + overheadCost) * 100,
-        ) / 100,
-      maxCents:
-        Math.round(
-          (extractionCost * 1.15 +
-            embeddingCost +
-            overheadCost +
-            expectedVisionCost) *
-            100,
-        ) / 100,
+      minCents: Math.round(minCents * 100) / 100,
+      maxCents: Math.round(maxCents * 100) / 100,
     },
     estimatedLatencyMinutes: Math.round(estimatedLatencyMinutes * 100) / 100,
     estimatedQualityScore: Math.round(quality * 100) / 100,
@@ -419,45 +380,24 @@ export function buildRunProcessingPreview(args: {
     (total, source) => total + source.sizeBytes,
     0,
   );
-  // Same run-time override the worker applies, so the preview prices the model the worker will call.
-  const pipeline = applyDefaultVisionOverride(request.pipeline ?? defaultPipelineFeatures);
+  const pipeline = request.pipeline ?? defaultPipelineFeatures;
   const history = summarizePreviewHistory(args.historyRows ?? []);
   const signals = estimateComplexitySignals(sources);
 
-  const candidatePlaybooks = new Set<ParserPlaybookKey>([
-    "fast",
-    "balanced",
-    "layout-aware",
-    "review-grade",
-    pipeline.parserPlaybook,
-  ]);
-  if (signals.mediaHeavy) {
-    candidatePlaybooks.add("agentic");
-  }
-
-  const options = [...candidatePlaybooks]
-    .map((parserPlaybook) =>
-      estimateScenario({
-        parserPlaybook,
-        pipeline: {
-          ...pipeline,
-          parserPlaybook,
-        },
-        estimatedPages,
-        documentCount: sources.length,
-        signals,
-        history,
-      }),
-    )
-    .sort(
-      (left, right) =>
-        left.estimatedCost.maxCents - right.estimatedCost.maxCents,
-    );
+  const options = QUALITY_MODE_ORDER.map((quality) =>
+    estimateScenario({
+      quality,
+      pipeline,
+      estimatedPages,
+      documentCount: sources.length,
+      signals,
+      history,
+    }),
+  );
 
   const current =
-    options.find(
-      (option) => option.parserPlaybook === pipeline.parserPlaybook,
-    ) ?? options[0]!;
+    options.find((option) => option.quality === pipeline.quality) ??
+    options[0]!;
   const recommendedBase =
     options.find(
       (option) => option.estimatedQualityScore >= signals.targetQuality,
@@ -496,7 +436,7 @@ export function buildRunProcessingPreview(args: {
     recommended,
     options: options.map((option) => ({
       ...option,
-      recommended: option.parserPlaybook === recommended.parserPlaybook,
+      recommended: option.quality === recommended.quality,
     })),
   });
 }
@@ -514,7 +454,15 @@ export async function getRunProcessingPreview(
 
   const historyRows = await sql<RunPreviewHistoryRow[]>`
     select
-      coalesce(runs.pipeline->>'parserPlaybook', 'balanced') as parser_playbook,
+      -- Runs stored before pipeline.quality carry the retired parserPlaybook / vision.forceAllPages keys.
+      coalesce(
+        runs.pipeline->>'quality',
+        case
+          when runs.pipeline->'vision'->>'forceAllPages' = 'true' or runs.pipeline->>'parserPlaybook' = 'review-grade' then 'good'
+          when runs.pipeline->>'parserPlaybook' = 'fast' then 'fast'
+          else 'auto'
+        end
+      ) as quality,
       count(distinct runs.id)::int as completed_runs,
       count(distinct d.id)::int as sampled_documents,
       avg(nullif(drss.stats->>'plausibilityScore', '')::numeric)::float8 as avg_plausibility_score,
@@ -533,7 +481,7 @@ export async function getRunProcessingPreview(
       and runs.status = 'completed'
       and d.status = 'completed'
       and runs.created_at > now() - interval '90 days'
-    group by coalesce(runs.pipeline->>'parserPlaybook', 'balanced')
+    group by 1
   `;
 
   return buildRunProcessingPreview({

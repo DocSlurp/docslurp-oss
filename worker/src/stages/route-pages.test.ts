@@ -59,10 +59,11 @@ function makeStorage() {
   } as unknown as ArtifactStore & { putJson: ReturnType<typeof vi.fn> };
 }
 
-function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRouterConfig>; privacyMode?: string; maxCostCents?: number | null } = {}) {
+function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRouterConfig>; privacyMode?: string; maxCostCents?: number | null; quality?: "fast" | "auto" } = {}) {
   const state = WorkflowState.create({
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
+      quality: options.quality ?? "auto",
       privacyMode: options.privacyMode ?? "standard",
       maxCostCents: options.maxCostCents ?? null,
       pageRouter: { ...defaultPageRouterConfig, router: "decision-model", triageFormat: "text-state", ...options.pageRouter, mode: options.mode },
@@ -174,6 +175,20 @@ describe("RoutePagesStage", () => {
     expect(storage.putJson).toHaveBeenCalledTimes(1);
     expect(state.pendingPerformance.some((e) => e.metric === "page-route-error")).toBe(false);
     expect(state.pendingPerformance.some((e) => e.metric === "page-route-table-gate")).toBe(false);
+  });
+
+  it("does nothing under Fast quality: no probe re-OCR, no decision-model call, no plan", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const storage = makeStorage();
+    const state = makeState({ mode: "active", pageRouter: { ...fitted, marginFloor: 0 }, quality: "fast" });
+    const client = fakeClient();
+    await new RoutePagesStage(storage, envCfg("active"), sources, undefined, {
+      probe, catalog, health: health(), decisionClient: () => client,
+    }).run(state);
+    expect(probe).not.toHaveBeenCalled();
+    expect(client.ask).not.toHaveBeenCalled();
+    expect(storage.putJson).not.toHaveBeenCalled();
+    expect(state.usageLedger.snapshot()).toEqual([]);
   });
 
   it("shadow writes the plan artifact, per-page decision rows and one chunk estimate, and records decision usage", async () => {

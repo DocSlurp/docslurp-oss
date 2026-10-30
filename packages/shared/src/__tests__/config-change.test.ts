@@ -93,9 +93,9 @@ describe("analyzePipelineChange", () => {
     expect(off.kind).toBe("reindex-recommended");
     expect(off.stages).toEqual(["document-summary"]);
   });
-  it("parserPlaybook: upgrade is recommended, downgrade is new-uploads", () => {
-    expect(analyzePipelineChange(base, withF({ parserPlaybook: "agentic" }), ctx).kind).toBe("reindex-recommended");
-    expect(analyzePipelineChange(base, withF({ parserPlaybook: "fast" }), ctx).kind).toBe("new-uploads");
+  it("quality: upgrade is recommended, downgrade is new-uploads", () => {
+    expect(analyzePipelineChange(base, withF({ quality: "good" }), ctx).kind).toBe("reindex-recommended");
+    expect(analyzePipelineChange(base, withF({ quality: "fast" }), ctx).kind).toBe("new-uploads");
   });
   it("stricter privacyMode is required, looser is new-uploads", () => {
     // Strict privacy requires a local embedding profile; hold the embedding fixed so only the privacy mode differs.

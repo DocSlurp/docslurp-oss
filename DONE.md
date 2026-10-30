@@ -1,3 +1,7 @@
+## Processing quality: Fast / Auto / Good (2026-10-29)
+
+- Replace the five public parser playbooks and `vision.forceAllPages` with `pipeline.quality` (`fast` | `auto` | `good`, default `auto`), and the estimator's Fast/Standard/Deep profiles with the same ids. `QUALITY_MODES` prices each mode from `PRICE_CARD`: fast $0.05, auto $0.05 to $2.50, good $2.50 per 1,000 pages. `fast` never OCRs or calls a vision model: a page without a text layer keeps its rendered page image, its Markdown references `images/page-NNNN.png`, it adds no chunks, bills Fast and appears in the ingest report as `kept-as-image` with a recommendation to switch to Auto or Good. `good` reads every page with vision. Stored pipelines and requests with the retired keys still parse and map. SDK `quality`, CLI `--quality`, MCP `upload`/`extract` `quality`, run previews per quality.
+
 ## Vision reads every page routing selects (2026-10-29)
 
 - Remove the per-document vision page cap (`vision.maxPagesPerDocument`, playbook `visionMaxPagesPerDocument`: 4 by default, 12 escalated, 32 with `forceAllPages`). A long scanned file got vision on its first few pages and Tesseract text on the rest, so quality depended on file length. Vision now reads every page the routing selects, each billed as a Rich page; run spend stays bounded by `maxCostCents`. The `fast` playbook still allows no vision (`visionAllowed: false`). Stored pipelines that carry the old key still parse (it is dropped); `over-cap` page facts are no longer produced; the autoscaler counts a vision run's real page demand.

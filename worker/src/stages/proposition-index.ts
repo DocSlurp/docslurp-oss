@@ -66,6 +66,7 @@ export class PropositionIndexStage implements Stage {
               this.storage,
               state.artifactLedger.readDocument(document.id, "markdown"),
               signal,
+              state.artifactLedger.readDocument(document.id, "canonical-document"),
             );
             const paragraphs = extracted.text
               .split(/\n\n+/)

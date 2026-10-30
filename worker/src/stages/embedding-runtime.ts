@@ -8,7 +8,7 @@ import path from "node:path";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
-import { embedPerplexity } from "@docslurp/shared";
+import { blankPages, embedPerplexity, pageImageReferencePages } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
@@ -141,9 +141,13 @@ export async function extractTextForEmbedding(
   document: Document,
   runner: CommandRunner,
   storage: ArtifactStore,
-  markdownArtifactUri?: string,
-  signal?: AbortSignal,
-  canonicalArtifactUri?: string,
+  markdownArtifactUri: string | undefined,
+  signal: AbortSignal | undefined,
+  /**
+   * Required (pass undefined only when there is none): Fast page-image references are recognized from the canonical
+   * blocks, so a caller without it would index the raw reference Markdown as page text.
+   */
+  canonicalArtifactUri: string | undefined,
 ): Promise<{
   text: string;
   extractor: string;
@@ -153,13 +157,19 @@ export async function extractTextForEmbedding(
   const canonicalDocument = canonicalArtifactUri
     ? await readCanonicalDocumentArtifact(storage, canonicalArtifactUri)
     : undefined;
-  const artifactText = markdownArtifactUri
+  // Fast page-image references carry no document text; keep them out of chunk context and embeddings.
+  const markdownText = markdownArtifactUri
     ? await readExtractedMarkdown(storage, markdownArtifactUri)
     : null;
+  // References are known structurally (the canonical blocks the worker wrote), never by matching their text.
+  const referencePages = canonicalDocument ? pageImageReferencePages(canonicalDocument.blocks) : new Set<number>();
+  const artifactText = markdownText ? blankPages(markdownText, referencePages) : null;
   const canonicalText = canonicalDocument
     ? canonicalDocumentToText(canonicalDocument)
     : null;
-  if (artifactText) {
+  if (artifactText !== null && (artifactText.trim() || artifactText !== markdownText)) {
+    // A Markdown artifact made only of Fast page-image references is a valid, empty-text document: no
+    // re-extraction (that would read the pages Fast chose not to read).
     return {
       text: artifactText,
       extractor: "extract-markdown-artifact",

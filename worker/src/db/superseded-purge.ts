@@ -15,6 +15,7 @@ import { lockWorkspaceGraph, refreshGraphElements } from "../graph/graph-store.j
 import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
+import { deleteLanceDbRecords } from "../stages/lancedb-writer.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
@@ -100,6 +101,8 @@ export interface SupersededPurgeOptions {
   lancedbRoot: string;
   deleteVectorRows?: DeleteVectorRows;
   dropVectorTable?: DropVectorTable;
+  /** Deletes LanceDB rows by id (`vector_rows` queue entries). Defaults to deleteLanceDbRecords. */
+  deleteVectorIds?: (args: { uri: string; table: string; ids: string[] }) => Promise<void>;
   /** Cleanup-queue rows claimed per batch; vector and storage work is grouped per batch. */
   cleanupBatchSize?: number;
 }
@@ -1017,12 +1020,40 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "upload_original";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original";
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
   artifact_uris: string[];
 };
+
+/** A deferred-materialization vector id of one document: `${documentId}:p<page>:g<generation>:c<index>`. */
+const DEFERRED_VECTOR_ID = /^([A-Za-z0-9_-]+):p[0-9]{1,9}(?::g[0-9a-f]{1,32})?:c[0-9]{1,9}$/;
+
+/**
+ * `vector_rows` (materialize-pages.ts queueOrphanVectors): vector ids of one document whose delete failed or whose
+ * publication's COMMIT outcome was unknown. Deletes, in the queuing workspace's own LanceDB table, only well-formed
+ * deferred ids of that document that no document_chunks row names: a commit that landed keeps its vectors.
+ */
+async function deleteOrphanVectorRows(client: Sql<Record<string, unknown>>, options: SupersededPurgeOptions, row: StorageCleanupRow) {
+  const payload = row.payload as { documentId?: unknown; embeddingModel?: unknown; dimension?: unknown; ids?: unknown };
+  const documentId = typeof payload.documentId === "string" ? payload.documentId : "";
+  const ids = Array.isArray(payload.ids) ? payload.ids : [];
+  if (!SAFE_DOCUMENT_ID.test(documentId) || typeof payload.embeddingModel !== "string" || typeof payload.dimension !== "number"
+    || ids.some((id) => typeof id !== "string" || DEFERRED_VECTOR_ID.exec(id)?.[1] !== documentId)) {
+    throw new Error(`Refusing malformed vector_rows entry: ${row.target}`);
+  }
+  const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), {
+    backend: "lancedb", embeddingModel: payload.embeddingModel, dimension: payload.dimension,
+  } as VectorTarget);
+  if (!location) throw new Error(`Unresolvable vector table: ${row.target}`);
+  const live = new Set((await client<{ id: string }[]>`
+    select id from document_chunks where document_id = ${documentId} and id = any(${ids as string[]}::text[])
+  `).map((r) => r.id));
+  const orphans = (ids as string[]).filter((id) => !live.has(id));
+  const deleteIds = options.deleteVectorIds ?? (({ uri, table, ids: rows }) => deleteLanceDbRecords(uri, table, rows));
+  if (orphans.length > 0) await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
+}
 
 /** `<userId>/<runId>/`: two safe segments, never a bucket root or a whole user. */
 const SAFE_RUN_PREFIX = /^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_-]+\/$/;
@@ -1118,6 +1149,8 @@ export async function drainStorageCleanupQueue(
           }
         } else if (row.kind === "vector_prefix") {
           await purgeWorkspaceVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload));
+        } else if (row.kind === "vector_rows") {
+          await deleteOrphanVectorRows(client, options, row);
         } else {
           // Queued before workspaces had their own databases (migration 0082 marks them):
           // a deleted org's org-level tables, dropped with their legacy names.

@@ -128,7 +128,7 @@ export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSu
     computeEstimated: cost?.computeEstimated ?? false,
     billedCostCents: cost?.billedCostCents ?? 0,
     // Historical snapshots may predate the schema; never fail a run list on one row.
-    pipeline: parseStoredPipelineFeatures(typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline ?? defaultPipelineFeatures),
+    pipeline: parseStoredPipelineFeatures(typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
     error: publicDocumentError(row.error),

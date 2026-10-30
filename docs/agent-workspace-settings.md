@@ -59,12 +59,17 @@ by credits, budgets or policy; saving settings does not imply the job finished.
 
 Supported pipeline toggles are video frames, chunk overlap, summaries, embeddings, vector
 indexing, table/code/image preservation, PDF region extraction and vision
-fallback, plus vision page selection: `vision.forceAllPages` (read every page with
-vision; there is no per-file page limit). Vision page selection is
-what the [ingest report](api-sdk.md#ingest-report) recommends for scanned pages
-that page triage skipped, so its `patch` can be proposed as
-`{"changes":{"pipeline":{"visionFallback":true,"vision":{"forceAllPages":true}}}}`.
-Its impact is `reindex-recommended`: it adds per-page vision cost and applies to
+fallback, plus processing quality: `quality` (`fast` reads the text layer only and
+keeps scanned pages as page images, $0.05 per 1,000 pages; `auto`, the default, reads
+each page the cheapest faithful way, $0.05 to $2.50; `good` reads every page with
+vision, $2.50; there is no per-file page limit). Quality is what the
+[ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page
+triage skipped or that Fast kept as images, so its `patch` can be proposed as
+`{"changes":{"pipeline":{"visionFallback":true,"quality":"good"}}}`. A retired
+`vision.forceAllPages: true` patch is accepted and proposed as `quality: "good"`;
+`vision.forceAllPages: false` is proposed as `quality: "auto"` on a Good workspace
+and changes nothing on any other.
+Raising quality is `reindex-recommended`: it adds per-page cost and applies to
 new uploads, existing files keep their text until you reprocess them (optional,
 with the usual cost estimate and a separate consent), and reprocessing is never
 required. Chat supports enabled state, context mode, answer style, citations and
