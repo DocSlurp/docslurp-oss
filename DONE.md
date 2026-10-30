@@ -1,3 +1,6 @@
+## HTML table chunk preservation (2026-10-30)
+
+- Preserve bounded table/cell context in fallback and canonical embedding chunks; scan nested repository integrity without inheriting parent documentation exclusions. See [evidence and limits](docs/evals/html-table-chunks.md).
 ## Processing quality: Fast / Auto / Good (2026-10-29)
 
 - Replace the five public parser playbooks and `vision.forceAllPages` with `pipeline.quality` (`fast` | `auto` | `good`, default `auto`), and the estimator's Fast/Standard/Deep profiles with the same ids. `QUALITY_MODES` prices each mode from `PRICE_CARD`: fast $0.05, auto $0.05 to $2.50, good $2.50 per 1,000 pages. `fast` never OCRs or calls a vision model: a page without a text layer keeps its rendered page image, its Markdown references `images/page-NNNN.png`, it adds no chunks, bills Fast and appears in the ingest report as `kept-as-image` with a recommendation to switch to Auto or Good. `good` reads every page with vision. Stored pipelines and requests with the retired keys still parse and map. SDK `quality`, CLI `--quality`, MCP `upload`/`extract` `quality`, run previews per quality.

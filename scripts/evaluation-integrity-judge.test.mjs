@@ -191,3 +191,78 @@ test('original case IDs are recognized when source-derived cases receive namespa
   writeFileSync(join(f.repo, 'worker.ts'), 'const known = "sample-01";');
   assert.ok(rules(f.run()).includes('fixture-identifier'));
 });
+
+function nestedFixture(t, name = 'core') {
+  const f = fixture(t), nested = join(f.repo, name);
+  mkdirSync(nested, { recursive: true });
+  const git = (...args) => execFileSync('git', ['-C', nested, ...args], { stdio: 'pipe' });
+  git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+  writeFileSync(join(nested, 'engine.ts'), 'export const generic = true;');
+  git('add', '.'); git('commit', '-qm', 'nested baseline');
+  f.git('add', name); f.git('commit', '-qm', 'pin nested repository');
+  return { ...f, nested, nestedGit: git };
+}
+test('scans pinned nested repositories and hashes dirty production content', (t) => {
+  const f = nestedFixture(t), initial = f.run();
+  assert.equal(initial.passed, true);
+  assert.equal(initial.repositories.length, 2);
+  assert.equal(initial.scannedProductionFiles, 2);
+  writeFileSync(join(f.nested, 'engine.ts'), 'const leaked = "Distinctive Example Supplier";');
+  const dirty = f.run();
+  assert.ok(dirty.findings.some(x => x.rule === 'labeled-answer' && x.file === 'core/engine.ts'));
+  assert.notEqual(dirty.productionHash, initial.productionHash);
+  assert.equal(dirty.repositories[1].dirty, true);
+  assert.equal(f.run().productionHash, dirty.productionHash);
+  f.nestedGit('add', '.'); f.nestedGit('commit', '-qm', 'changed nested head');
+  const mismatch = f.run();
+  assert.ok(rules(mismatch).includes('nested-repository-head-mismatch'));
+  assert.ok(rules(mismatch).includes('labeled-answer'));
+});
+test('fails closed for absent, uninitialized and escaping nested repositories', (t) => {
+  for (const state of ['missing', 'uninitialized', 'escape']) {
+    const f = nestedFixture(t);
+    rmSync(f.nested, { recursive: true });
+    if (state === 'uninitialized') mkdirSync(f.nested);
+    if (state === 'escape') symlinkSync(f.dataset, f.nested);
+    const report = f.run();
+    assert.equal(report.passed, false);
+    assert.ok(rules(report).includes(state === 'escape' ? 'repository-symlink-escape' : `nested-repository-${state}`));
+  }
+});
+
+test('nested production code cannot inherit a parent documentation exclusion', (t) => {
+  const f = nestedFixture(t, 'docs/engine');
+  writeFileSync(join(f.nested, 'engine.ts'), 'const answer = "Distinctive Example Supplier";');
+  const report = f.run();
+  assert.equal(report.passed, false);
+  assert.equal(report.scannedProductionFiles, 2);
+  assert.ok(report.findings.some(x => x.rule === 'labeled-answer' && x.file === 'docs/engine/engine.ts'));
+});
+
+test('directory aliases scan ignored and untracked targets, classify aliases and hash deterministically', (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.repo, 'docs'));
+  writeFileSync(join(f.repo, '.gitignore'), 'docs/hidden.ts\n');
+  writeFileSync(join(f.repo, 'docs', 'hidden.ts'), 'export const safe = 1;');
+  symlinkSync('docs', join(f.repo, 'runtime'));
+  f.git('add', '.');
+  const first = f.run();
+  assert.equal(first.passed, true);
+  assert.equal(first.productionHash, f.run().productionHash);
+  assert.ok(first.repositories[0].directoryAliases.length);
+  writeFileSync(join(f.repo, 'docs', 'hidden.ts'), 'export const safe = 2;');
+  assert.notEqual(first.productionHash, f.run().productionHash);
+  writeFileSync(join(f.repo, 'docs', 'hidden.ts'), '"Distinctive Example Supplier"');
+  assert.ok(f.run().findings.some(x => x.file === 'runtime/hidden.ts' && x.rule === 'labeled-answer'));
+  writeFileSync(join(f.repo, 'docs', 'other.ts'), '"Distinctive Example Supplier"');
+  assert.ok(f.run().findings.some(x => x.file === 'runtime/other.ts'));
+});
+
+test('directory aliases fail closed on cycles, escapes and broken links', (t) => {
+  for (const target of ['.', '../dataset', 'missing']) {
+    const f = fixture(t);
+    symlinkSync(target, join(f.repo, 'alias'));
+    f.git('add', '.');
+    assert.equal(f.run().passed, false, target);
+  }
+});
