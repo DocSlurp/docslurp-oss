@@ -414,7 +414,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   if (sourceKey !== file.source_key) {
     // Publish the sealed key and durable cleanup together: a crash must not lose the old key.
     // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
-    await sql`with ownership as (
+    const published = await sql<{ id: string; source_key: string }[]>`with ownership as (
       insert into upload_cleanup_owners (original_key, sealed_key, org_id)
       select ${file.source_key}, ${sourceKey}, s.org_id from upload_sessions s where s.id = ${file.session_id}
       on conflict (original_key) do update set original_key = excluded.original_key
@@ -429,7 +429,11 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
       on conflict (kind, target) do update set not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)
       returning id
     ) update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now()
-      where id = ${file.id} and exists (select 1 from queued)`;
+      where id = ${file.id} and exists (select 1 from queued)
+      returning id, source_key`;
+    if (published.length !== 1 || published[0]?.id !== file.id || published[0]?.source_key !== sourceKey) {
+      throw new WorkspaceIntakeError("Upload ownership changed during finalization", 409);
+    }
     // The original stays writable until its URL expires; nothing reads it again. Best effort.
     await deleteUploadedObject(file.source_key).catch(() =>
       console.error(`[direct-upload] status=unsealed-delete-failed file=${file.id}`));

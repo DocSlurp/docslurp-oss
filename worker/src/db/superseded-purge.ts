@@ -1146,9 +1146,13 @@ export async function drainStorageCleanupQueue(
         await sql`
           update storage_cleanup_queue
           set attempts = attempts + 1, last_error = ${message.slice(0, 2000)},
-            not_before = case when kind = 'upload_original' then now() + interval '1 hour' else not_before end
+            not_before = case when kind = 'upload_original' and ${message === 'Original upload ownership cannot be verified'} then 'infinity'::timestamptz
+              when kind = 'upload_original' then now() + interval '1 hour' else not_before end
           where id = ${row.id}
         `.catch(() => {});
+      }
+      if (row?.kind === "upload_original" && message === "Original upload ownership cannot be verified") {
+        console.error(`[storage-cleanup] status=ownership-quarantined id=${row.id} org=${row.org_id} action=manual-reconciliation-required`);
       }
       console.warn(`[storage-cleanup] failed target=${row?.target ?? "?"} error=${message}`);
     }

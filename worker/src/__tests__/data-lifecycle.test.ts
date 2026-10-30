@@ -152,6 +152,7 @@ describe("delete triggers enqueue external cleanup", () => {
     await sql`update storage_cleanup_queue set org_id = 'wrong-org', not_before = now()`;
     expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(1);
     expect(stores.objects.has(original)).toBe(true);
+    expect((await sql`select not_before = 'infinity'::timestamptz as quarantined from storage_cleanup_queue`)[0]?.quarantined).toBe(true);
   });
 
   it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {

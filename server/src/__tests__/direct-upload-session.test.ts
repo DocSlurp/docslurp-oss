@@ -123,7 +123,7 @@ describe("Direct Upload Session Module", () => {
     fixture.files[0].status = "pending";
     for (const actualSize of [null, 41, 42]) {
       sqlMock.mockReset();
-      sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce(fixture.files).mockResolvedValue([]);
+      sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce(fixture.files).mockResolvedValue([{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0]) }]);
       getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
       const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
       if (actualSize === 42) {
@@ -140,7 +140,7 @@ describe("Direct Upload Session Module", () => {
   // (and later hashed) must not be the bytes a second PUT can replace.
   it("seals a completed single-part upload: ingests a server-owned copy of exactly the verified version", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
-    sqlMock.mockReset().mockResolvedValue([]);
+    sqlMock.mockReset().mockResolvedValue([{ id: file.id, source_key: sealedSourceKey(file) }]);
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "\"verified\"" });
     copyUploadedObject.mockClear();
     deleteUploadedObject.mockClear();
@@ -161,6 +161,16 @@ describe("Direct Upload Session Module", () => {
     // Intake reads the sealed key, never the presigned one.
     const loaded = { session: directUploadSessionFixture().session, files: [{ ...file, status: "completed", source_key: sealed }] } as unknown as LoadedDirectUploadSession;
     expect(directUploadIntakeItems(loaded)[0]!.content).toEqual({ storedKey: sealed, verifiedSizeBytes: file.size_bytes });
+  });
+
+  it("preserves the original when ownership registration or session publication fails", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
+    sqlMock.mockReset().mockResolvedValue([]);
+    getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "verified" });
+    copyUploadedObject.mockReset().mockResolvedValue({ etag: "sealed" });
+    deleteUploadedObject.mockClear();
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({statusCode: 409});
+    expect(deleteUploadedObject).not.toHaveBeenCalled();
   });
 
   it("refuses to complete when the object changed between verification and the sealing copy", async () => {
