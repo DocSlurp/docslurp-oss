@@ -208,10 +208,23 @@ describe("password recovery with native Email OTP", () => {
     await requestReset(browser, other.email);
     const late = lastCodeFor(other.email);
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 11 * 60_000);
+    vi.setSystemTime(Date.now() + 12 * 60 * 60_000 + 60_000);
     expect((await browser.json("/email-otp/reset-password", { email: other.email, otp: late, password: NEW_PASSWORD })).status).toBe(400);
     vi.useRealTimers();
     expect((await new Browser().json("/sign-in/email", { email: other.email, password: PASSWORD })).status).toBe(200);
+  });
+
+  it("keeps a code usable for hours and resends the same one, so a late email still works", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    await requestReset(browser, user.email);
+    await requestReset(browser, user.email);
+    const codes = sentEmails.filter((sent) => sent.to === user.email).map((sent) => sent.code);
+    expect(codes).toHaveLength(2);
+    expect(codes[1]).toBe(codes[0]);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60 * 60_000);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: codes[0], password: NEW_PASSWORD })).status).toBe(200);
   });
 
   it("answers an unknown address like a known one and sends nothing", async () => {
