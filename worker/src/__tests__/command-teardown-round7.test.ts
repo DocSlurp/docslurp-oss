@@ -44,6 +44,7 @@ import {
   superviseChild,
   unverifiedTeardownCount,
 } from "../sandbox/teardown.js";
+import { SandboxPolicyError, type SandboxSession } from "../sandbox/types.js";
 import { CommandRunner, resolveScriptsDir } from "../tools/runner.js";
 
 // Reproduces the #234 round-7 council findings. Real processes and real bwrap where they matter.
@@ -649,7 +650,7 @@ describe("M1: every sandboxed command is denied namespaces and kernel attack sur
         );
         strays.push(child.pid!);
         let stderr = "";
-        child.stderr.on("data", (chunk) => (stderr += chunk));
+        child.stderr?.on("data", (chunk) => (stderr += chunk));
         const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
         expect([profile, code, stderr.slice(0, 400)]).toEqual([profile, 0, expect.any(String)]);
         expect(readdirSync(work)).toContain(`note-${profile}.pdf`);
@@ -657,4 +658,28 @@ describe("M1: every sandboxed command is denied namespaces and kernel attack sur
     },
     120_000,
   );
+});
+
+describe("L2: only a remote session may run commands without local containment", () => {
+  const runOnly = (location: "local" | "remote"): SandboxSession => ({
+    providerId: `run-only-${location}`,
+    isolation: { filesystem: true, network: "full", processes: true, location },
+    run: vi.fn(async () => ({ exitCode: 0, stdout: "remote\n", stderr: "" })),
+    close: async () => {},
+  });
+
+  it("refuses a local session that offers run() without spawn()", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const session = runOnly("local");
+    const runner = new CommandRunner({ openSession: async () => session });
+    await expect(runner.run({ binary: "/usr/bin/pdftotext", args: ["-v"], available: true })).rejects.toBeInstanceOf(SandboxPolicyError);
+    expect(session.run).not.toHaveBeenCalled();
+  });
+
+  it("a remote session still runs its commands", async () => {
+    const session = runOnly("remote");
+    const runner = new CommandRunner({ openSession: async () => session });
+    expect((await runner.run({ binary: "/usr/bin/pdftotext", args: ["-v"], available: true })).stdout).toBe("remote\n");
+    expect(session.run).toHaveBeenCalledTimes(1);
+  });
 });

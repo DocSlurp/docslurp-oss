@@ -1386,7 +1386,16 @@ export class CommandRunner {
         }
         return { child, supervised: superviseCommand(plan, child, signal), release };
       }
-      if (session.run) return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
+      if (session.run) {
+        // Only a remote session (its own VM, terminated with the activity) may skip process
+        // containment and the socket filter; a local provider offering `run` would run unchecked.
+        if (session.isolation.location !== "remote") {
+          throw new SandboxPolicyError(
+            `parser sandbox provider '${session.providerId}' offers run() but is not remote; refusing to run a command it does not contain`,
+          );
+        }
+        return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
+      }
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {
       await release();

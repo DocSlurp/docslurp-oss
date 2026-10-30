@@ -80,7 +80,9 @@ export interface SandboxSession {
   readonly providerId: string;
   readonly isolation: SandboxIsolation;
   /**
-   * The session enforces `SandboxCommand.denyUnixSockets` (bubblewrap's seccomp filter). Without it
+   * The session keeps a command from meeting another (or a host service) on a UNIX socket:
+   * bubblewrap with its seccomp filter (`SandboxCommand.denyUnixSockets`), landlock with landrun's
+   * scoping (abstract and pathname connects outside the command's domain are refused). Without it
    * the runner refuses those commands unless DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS opts in
    * (development only).
    */

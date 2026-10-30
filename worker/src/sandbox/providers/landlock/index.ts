@@ -68,10 +68,14 @@ export function networkForKernel(kernelRelease: string): SandboxNetworkIsolation
 
 /**
  * Landlock confines files and TCP but not processes; each command also runs in its own PID namespace.
- * landrun v0.1.17 offers no way to restrict UNIX-socket connects, so a parser can ask a host service
- * listening on one (a session bus, a systemd user manager) to start processes outside its namespace.
- * Such a command ends in an unverified teardown and a poisoned slot (sandbox/teardown.ts), never in a
- * reused one; run workers where no such service listens, as the worker images do.
+ * UNIX sockets: landrun v0.1.17 (which needs Landlock ABI v9) scopes every command by default. A
+ * connect() to an abstract socket created outside the command's own domain fails with EPERM (the
+ * host's, another command's), and a connect() to a pathname socket fails with EACCES unless it is
+ * granted with `--unix` (granted only to clamdscan, for clamd's socket). So two commands cannot
+ * meet on a socket, and a parser cannot reach a host service (a session bus, a systemd user
+ * manager). These are LSM checks on connect and sendmsg, so io_uring's socket operations meet them
+ * too. Proven against the real binary in sandbox/__tests__/contract-landlock.test.ts; an older
+ * landrun is not trusted to do it (MIN_SCOPED_LANDRUN).
  */
 function isolationFor(kernelRelease: string): SandboxIsolation {
   return { filesystem: true, network: networkForKernel(kernelRelease), processes: probePidNamespace().ok, location: "local" };
@@ -128,6 +132,28 @@ export function createCommandScratch(scratchRoot: string): { dir: string; cwd: s
   return { dir, cwd, env };
 }
 
+/** The first landrun release that scopes pathname UNIX-socket connects (Landlock ABI v9). */
+export const MIN_SCOPED_LANDRUN = [0, 1, 17] as const;
+
+/** Whether `landrun --version` output names a release that scopes UNIX sockets. */
+export function landrunScopesUnixSockets(versionOutput: string): boolean {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(versionOutput);
+  if (!match) return false;
+  const version = match.slice(1, 4).map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (version[index]! !== MIN_SCOPED_LANDRUN[index]) return version[index]! > MIN_SCOPED_LANDRUN[index]!;
+  }
+  return true;
+}
+
+function isSocket(candidate: string): boolean {
+  try {
+    return statSync(candidate).isSocket();
+  } catch {
+    return false;
+  }
+}
+
 export function landrunArgs(
   command: Pick<SandboxCommand, "binary" | "args" | "env" | "readablePaths" | "writablePaths">,
 ): string[] {
@@ -137,11 +163,14 @@ export function landrunArgs(
   const envFlags = Object.entries(command.env)
     .filter(([, value]) => value !== undefined)
     .flatMap(([key]) => ["--env", key]);
+  // Only clamdscan may connect to a pathname socket: clamd's, which paths.ts makes readable for it.
+  const sockets = path.basename(command.binary) === "clamdscan" ? existing(command.readablePaths).filter(isSocket) : [];
   return [
     ...envFlags,
     ...pathFlags("--rox", existing([...RUNTIME_PATHS, ...executable])),
-    ...pathFlags("--ro", existing([...READ_ONLY_RUNTIME_PATHS, ...command.readablePaths])),
+    ...pathFlags("--ro", existing([...READ_ONLY_RUNTIME_PATHS, ...command.readablePaths]).filter((candidate) => !sockets.includes(candidate))),
     ...pathFlags("--rw", existing(command.writablePaths)),
+    ...sockets.flatMap((socket) => ["--unix", socket]),
     "--",
     command.binary,
     ...command.args,
@@ -190,12 +219,15 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
   async openSession(config) {
     const isolation = isolationFor(release());
     startSandboxScratchSweeper(config.scratchRoot);
+    // Socket scoping (see isolationFor) only from a landrun that does it; otherwise the runner refuses
+    // commands that ask for the filter (tools/runner.ts assertUnixSocketFilter).
+    const version = spawnSync(config.binary, ["--version"], { encoding: "utf8", timeout: PROBE_TIMEOUT_MS, env: { PATH: process.env.PATH ?? "" } });
+    const filtersUnixSockets = version.status === 0 && landrunScopesUnixSockets(version.stdout);
     return {
       providerId: "landlock",
       isolation,
+      filtersUnixSockets,
       spawn: (command) => {
-        // landrun cannot filter UNIX sockets: the runner refuses commands that ask for it
-        // (tools/runner.ts assertUnixSocketFilter); this session does not set filtersUnixSockets.
         const scratch = createCommandScratch(config.scratchRoot);
         const cleanup = () => {
           rmSync(scratch.dir, { recursive: true, force: true });
