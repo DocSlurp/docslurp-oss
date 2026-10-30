@@ -36,18 +36,39 @@ CREATE TABLE IF NOT EXISTS vision_org_attempts (
 );
 CREATE INDEX IF NOT EXISTS vision_org_attempts_org_idx ON vision_org_attempts (org_id, created_at);
 
--- One row per vision response a provider billed above the weight its request was admitted at (a provider
--- counting more image tokens than the catalog's processor bound). The worker tops the org's count up by
--- the difference in vision_org_attempts and refuses the route (provider and model, across orgs) once it
--- has VISION_ROUTE_OVERRUN_LIMIT rows in 24 hours. org_id and run_id are diagnostics only.
-CREATE TABLE IF NOT EXISTS vision_route_overruns (
+-- One row per admitted request, kept for the 24 hour window whatever happens to the run, its workspace or its
+-- vision_org_attempts row (a Rich charge checkpoint removes that one): the durable owner of the request. A billed
+-- overrun is reconciled against this ticket, never against the run row, so deleting the run cannot lose it.
+-- weight_cents is what the request was admitted at (the route's catalog bound times the route's weight
+-- correction); bound_cents is the catalog bound alone. provider and model are null on unbilled routes.
+CREATE TABLE IF NOT EXISTS vision_admission_tickets (
   id text PRIMARY KEY,
-  provider text NOT NULL,
-  model text NOT NULL,
-  org_id text,
-  run_id text,
-  billed_cents numeric(12, 4) NOT NULL,
-  bound_cents numeric(12, 4) NOT NULL,
+  org_id text NOT NULL,
+  provider text,
+  model text,
+  weight_cents numeric(12, 4) NOT NULL CHECK (weight_cents > 0),
+  bound_cents numeric(12, 4) NOT NULL CHECK (bound_cents > 0),
   created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS vision_admission_tickets_created_idx ON vision_admission_tickets (created_at);
+
+-- One row per admission ticket whose response a provider billed above the route's catalog bound (a provider
+-- counting more image tokens than the catalog's processor bound). The ticket id is the key, so reconciling the
+-- same response twice (a retried write whose first commit was not acknowledged) changes nothing. The worker
+-- tops the ticket's org up by billed minus admitted weight in vision_org_attempts (row id overrun:<ticket>),
+-- refuses the route for that org once the org has VISION_ROUTE_OVERRUN_LIMIT rows on it in 24 hours, and
+-- multiplies every org's later admission weight on the route by its highest billed/bound ratio in 24 hours
+-- (capped at VISION_ROUTE_WEIGHT_CORRECTION_MAX). org_id comes from the ticket; run_id is diagnostics only.
+-- Reset runbook: docs/page-router.md.
+CREATE TABLE IF NOT EXISTS vision_route_overruns (
+  ticket_id text PRIMARY KEY,
+  provider text NOT NULL,
+  model text NOT NULL,
+  org_id text NOT NULL,
+  run_id text,
+  billed_cents numeric(12, 4) NOT NULL,
+  bound_cents numeric(12, 4) NOT NULL CHECK (bound_cents > 0),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS vision_route_overruns_org_route_idx ON vision_route_overruns (org_id, provider, model, created_at);
 CREATE INDEX IF NOT EXISTS vision_route_overruns_route_idx ON vision_route_overruns (provider, model, created_at);

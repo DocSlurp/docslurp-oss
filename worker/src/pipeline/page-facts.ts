@@ -26,6 +26,7 @@ export interface VisionPageOutcome {
     | "unscoped-run"
     | "no-attempt-ledger"
     | "route-overrun"
+    | "overrun-unreconciled"
     | "blank-render"
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
     | "unverified-render";
@@ -43,6 +44,7 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
     case "unscoped-run":
     case "no-attempt-ledger":
     case "route-overrun":
+    case "overrun-unreconciled":
       return "guarded";
     case "blank-render":
     case "unverified-render":

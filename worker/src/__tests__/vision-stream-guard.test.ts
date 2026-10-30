@@ -25,7 +25,7 @@ async function run(config: Config = cfg) {
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   return executeVisionRuntime({
-    imagePath, outputPath: `${imagePath}.json`, vision: visionConfigSchema.parse({ profile: "open-weights-hosted" }), gate: null,
+    imagePath, outputPath: `${imagePath}.json`, vision: visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" }), gate: null,
     cfg: config, runner: new CommandRunner(), privacyMode: "standard",
   });
 }

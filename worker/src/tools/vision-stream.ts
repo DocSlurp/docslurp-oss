@@ -8,7 +8,7 @@
  * `[ai-usage]` line) and summed into the returned totals, so a discarded attempt
  * is still billed honestly; the caller logs the single `[ai-usage]` total.
  */
-import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readProviderCharge } from "@docslurp/shared";
+import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
@@ -542,10 +542,15 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       args.gate?.failed();
       // The provider accepted the request: it may bill the input even though no usage came back.
       if (error && typeof error === "object") acceptedAttemptErrors.add(error);
-      // A stream cut off after its usage chunk still reports what it billed.
-      await observeUsage(args, error && typeof error === "object" ? partialAttempts.get(error) ?? null : null);
+      const partial = error && typeof error === "object" ? partialAttempts.get(error) ?? null : null;
+      // A stream cut off before its usage chunk: its charge by generation id, when OpenRouter has one.
+      if (partial) await attachGenerationReceipt(args, partial);
+      // A stream cut off after its usage chunk (or with a receipt) reports what it billed.
+      await observeUsage(args, partial);
       throw error;
     }
+    // A stream without a usage chunk (a degenerate-output abort included): its charge by generation id.
+    await attachGenerationReceipt(args, attempt);
     await observeUsage(args, attempt);
     return attempt;
   } finally {
@@ -555,6 +560,32 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       ? (attempt.usage.prompt_tokens ?? 0) + (attempt.usage.completion_tokens ?? 0)
       : attempt ? args.inputTokenEstimate + estimateTokens(attempt.text) : null;
     (lease as ProviderRateLease | null)?.settle(used);
+  }
+}
+
+/**
+ * An OpenRouter attempt that ended without usage (a stream aborted for degenerate output or cut off before its usage
+ * chunk): look its charge up by generation id (`resolveOpenRouterUsage`, OpenRouter's /generation receipt) and attach
+ * it as the attempt's provider usage, so it is reconciled against the request's weight and recorded as billed. Only
+ * a provider receipt is attached; without one the attempt keeps no usage and is recorded from estimates, labelled
+ * `usage_source=estimated`. Never throws.
+ */
+async function attachGenerationReceipt(args: GuardedCompletionArgs, attempt: VisionAttempt): Promise<void> {
+  if (attempt.usage || !args.openRouter || !attempt.id) return;
+  const apiKey = (args.headers.Authorization ?? args.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  if (!apiKey) return;
+  try {
+    const receipt = await resolveOpenRouterUsage({
+      apiKey, model: args.model, generationId: attempt.id,
+      usage: { inputTokens: args.inputTokenEstimate, outputTokens: estimateTokens(attempt.text) },
+    });
+    if (receipt.metadata?.costSource !== "provider" || receipt.costCents === undefined) {
+      console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} no usage and no receipt; recording estimated usage`);
+      return;
+    }
+    attempt.usage = { prompt_tokens: receipt.inputTokens, completion_tokens: receipt.outputTokens, cost: receipt.costCents / 100, generation_receipt: true };
+  } catch (error) {
+    console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} receipt lookup failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

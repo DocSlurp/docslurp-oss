@@ -247,7 +247,7 @@ describe("vision usage priced on the served route", () => {
       pendingPerformance: [],
     } as unknown as WorkflowState;
     const guard = new VisionRunGuard({ id: "run-1", orgId: "org-1" }, {
-      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3,
+      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
     }, new MemoryVisionAttemptBackend());
     const gate = guard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
     const error = await runVisionCall(state, { id: "doc" }, vision(OPENROUTER, OPENAI), { imagePath, outputPath: `${imagePath}.json` },

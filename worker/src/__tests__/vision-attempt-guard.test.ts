@@ -81,7 +81,7 @@ describe("vision guard config", () => {
 
   it("defaults, overrides and clamped ranges", () => {
     expect(resolveVisionGuardConfig({})).toEqual({
-      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 20, breakerFailureRate: 0.25, orgLimitCents: 4_000, throttleAllowance: 5, routeOverrunLimit: 3,
+      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 20, breakerFailureRate: 0.25, orgLimitCents: 4_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
     });
     expect(DEFAULT_VISION_ORG_LIMIT_CENTS).toBe(4_000);
     expect(resolveVisionGuardConfig({ VISION_ORG_UNCHARGED_LIMIT_CENTS: "800", VISION_REGION_ATTEMPTS_PER_PAGE: "4", VISION_THROTTLE_ALLOWANCE: "2" }))
@@ -91,13 +91,14 @@ describe("vision guard config", () => {
     expect(resolveVisionGuardConfig({
       VISION_PAGE_ATTEMPTS: "off", VISION_REGION_ATTEMPTS_PER_PAGE: "1000", VISION_BREAKER_MIN_FAILURES: "0",
       VISION_BREAKER_FAILURE_RATE: "2", VISION_ORG_UNCHARGED_LIMIT_CENTS: "-5", VISION_THROTTLE_ALLOWANCE: "99",
-    })).toEqual({ pageAttempts: 2, regionAttempts: 64, breakerMinFailures: 1, breakerFailureRate: 1, orgLimitCents: 1, throttleAllowance: 20, routeOverrunLimit: 3 });
+    })).toEqual({ pageAttempts: 2, regionAttempts: 64, breakerMinFailures: 1, breakerFailureRate: 1, orgLimitCents: 1, throttleAllowance: 20, routeOverrunLimit: 3, routeWeightCorrectionMax: 4 });
     expect(warn).toHaveBeenCalledTimes(6);
     warn.mockRestore();
   });
 
   it("weighs each request by its own route's worst case, so no model buys more than the $40 bound", () => {
-    const hosted = visionModelCatalog.filter((model) => model.target === "hosted" && model.tokenPricing);
+    // Refused models (MiMo, Nemotron: `refusedReason`) are never weighed or sent.
+    const hosted = visionModelCatalog.filter((model) => model.target === "hosted" && model.tokenPricing && !("refusedReason" in model));
     expect(hosted.length).toBeGreaterThan(2);
     const costliest = maxCatalogWorstCaseVisionRequestCents();
     for (const model of hosted) {
@@ -123,7 +124,7 @@ describe("vision guard config", () => {
 
 describe("VisionRunGuard", () => {
   const config: VisionGuardConfig = {
-    pageAttempts: 2, regionAttempts: 3, breakerMinFailures: 4, breakerFailureRate: 0.5, orgLimitCents: 1_000, throttleAllowance: 5, routeOverrunLimit: 3,
+    pageAttempts: 2, regionAttempts: 3, breakerMinFailures: 4, breakerFailureRate: 0.5, orgLimitCents: 1_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
   };
   const guardOf = (backend: MemoryVisionAttemptBackend, run = "run-1", org: string | null = "org-1", overrides: Partial<VisionGuardConfig> = {}) =>
     new VisionRunGuard({ id: run, orgId: org }, { ...config, ...overrides }, backend);
@@ -527,7 +528,7 @@ describe("vision page loop under the guard", () => {
 
   it("fails open on a guard stop", () => {
     const stop: VisionGuardStop = { reason: "rejection-breaker", sticky: true, pageAttempts: 0, pageLimit: 2, runAttempts: 40,
-      runFailures: 20, orgCents: 20, orgSettledCents: 20, orgLimitCents: 2_000, requestCents: 1, routeOverruns: 0 };
+      runFailures: 20, orgCents: 20, orgSettledCents: 20, orgLimitCents: 2_000, requestCents: 1, routeOverruns: 0, routeCorrection: 1 };
     expect(shouldFailOpenVisionError(new VisionGuardStopError(stop))).toBe(true);
     expect(shouldFailOpenVisionError(new Error("routed", { cause: new VisionGuardStopError(stop) }))).toBe(true);
   });

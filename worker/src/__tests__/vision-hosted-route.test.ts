@@ -22,7 +22,11 @@ async function pageImage() {
 }
 
 describe("hosted OpenRouter vision request shape", () => {
-  it("sends the opt-in Nemotron route one image part with reasoning off and keeps the router charge", async () => {
+  it("refuses the Nemotron route (no serving-level image-token evidence); the open-weights profile sends DeepSeek", async () => {
+    const refused = visionConfigSchema.safeParse({ modelUri: `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}` });
+    expect(refused.success).toBe(false);
+    expect(JSON.stringify(refused.error?.issues)).toContain("is not admitted");
+
     const bodies: Array<Record<string, any>> = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe(`${OPENROUTER_BASE_URL}/chat/completions`);
@@ -44,15 +48,11 @@ describe("hosted OpenRouter vision request shape", () => {
     });
 
     const body = bodies[0]!;
-    expect(body.model).toBe(NEMOTRON_SUPER_VL_VISION_MODEL);
-    expect(body.reasoning).toEqual({ enabled: false });
-    expect(body.temperature).toBe(0);
-    expect(body.max_tokens).toBe(16_384);
-    expect(body.response_format).toBeUndefined();
+    expect(body.model).toBe(DEFAULT_OPENROUTER_VISION_MODEL);
     const parts = body.messages[1].content as Array<Record<string, any>>;
     expect(parts.map((part) => part.type)).toEqual(["text", "image_url"]);
     expect(parts[1]!.image_url.url).toMatch(/^data:image\/png;base64,/);
-    expect(result).toMatchObject({ model: NEMOTRON_SUPER_VL_VISION_MODEL, inputTokens: 1800, outputTokens: 400, usageSource: "provider" });
+    expect(result).toMatchObject({ model: DEFAULT_OPENROUTER_VISION_MODEL, inputTokens: 1800, outputTokens: 400, usageSource: "provider" });
     expect(result.costCents).toBeCloseTo(0.047, 10);
   });
 
