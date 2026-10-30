@@ -5,26 +5,21 @@ type BudgetPipeline = Pick<PipelineFeatures, "vision"> & { parserPlaybook?: stri
 const isPlaybook = (value: unknown): value is ParserPlaybookKey =>
   typeof value === "string" && value in parserPlaybookCatalog;
 
-/**
- * Pages per document that vision may process.
- *
- * `forceAllPages` uses the workspace's `vision.maxPagesPerDocument`. Otherwise the run's
- * parser playbook (workspace choice, `balanced` by default) sets the budget. classify-route
- * may suggest another playbook per document. The suggestion can lower the budget (a simple
- * text document needs no vision) or raise it for degraded or scanned documents, up to
- * VISION_ESCALATION_MAX_PAGES. A workspace whose playbook allows no vision (budget 0, e.g.
- * `fast`) is never escalated.
- */
-export const VISION_ESCALATION_MAX_PAGES = 12;
+const playbookAllowsVision = (playbook: ParserPlaybookKey): boolean =>
+  parserPlaybookCatalog[playbook]?.guidance?.visionAllowed !== false;
 
-export function resolveVisionPageBudget(pipeline: BudgetPipeline, suggestedPlaybook?: string | null): number {
-  if (pipeline.vision.forceAllPages) return Math.max(0, pipeline.vision.maxPagesPerDocument);
-  const configuredPlaybook = isPlaybook(pipeline.parserPlaybook) ? pipeline.parserPlaybook : "balanced";
-  const configured =
-    parserPlaybookCatalog[configuredPlaybook]?.guidance?.visionMaxPagesPerDocument ?? pipeline.vision.maxPagesPerDocument;
-  if (!isPlaybook(suggestedPlaybook) || suggestedPlaybook === configuredPlaybook) return Math.max(0, configured);
-  const suggested = parserPlaybookCatalog[suggestedPlaybook]?.guidance?.visionMaxPagesPerDocument ?? configured;
-  if (suggested <= configured) return Math.max(0, suggested);
-  if (configured <= 0) return 0;
-  return Math.min(suggested, Math.max(configured, VISION_ESCALATION_MAX_PAGES));
+/**
+ * Whether vision may read this document's pages at all.
+ *
+ * There is no per-document page count: vision reads every page the routing selects (all of them with
+ * `forceAllPages`), each billed as a Rich page, and run spend is bounded by `pipeline.maxCostCents`.
+ * A playbook that disallows vision (`fast`) keeps it off, and so does a classify-route suggestion of such
+ * a playbook for a document it judged plain text; a suggestion never turns vision on for a workspace whose
+ * playbook disallows it.
+ */
+export function visionAllowedForDocument(pipeline: BudgetPipeline, suggestedPlaybook?: string | null): boolean {
+  if (pipeline.vision.forceAllPages) return true;
+  const configured = isPlaybook(pipeline.parserPlaybook) ? pipeline.parserPlaybook : "balanced";
+  if (!playbookAllowsVision(configured)) return false;
+  return !isPlaybook(suggestedPlaybook) || playbookAllowsVision(suggestedPlaybook);
 }

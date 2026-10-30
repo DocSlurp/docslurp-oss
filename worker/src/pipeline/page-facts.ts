@@ -197,7 +197,7 @@ export async function probePdfPageFacts(args: {
 
 /**
  * Vision outcome per page for one document. `selected` pages the triage chose (in priority order),
- * `processed` pages that returned text, `cap` the per-document page limit.
+ * `processed` pages that returned text.
  */
 export function buildVisionPageFacts(args: {
   documentId: string;
@@ -205,32 +205,25 @@ export function buildVisionPageFacts(args: {
   pageCount: number;
   selected: number[];
   processed: Array<{ pageNumber: number; text?: string | null }>;
-  cap: number;
   costCapped?: boolean;
   /** Why attempted pages without output have none; absent pages read as `failed`. */
   outcomes?: ReadonlyMap<number, VisionPageOutcome>;
 }): PageFactUpsert[] {
   const pageCount = Math.min(Math.max(0, Math.trunc(args.pageCount)), PAGE_FACTS_MAX_PAGES);
   const processed = new Map(args.processed.map((page) => [page.pageNumber, page.text ?? ""]));
-  // `selected` is in vision's priority order (pages without native text first); the
-  // per-document cap keeps a prefix of it, so do not re-sort before slicing.
-  const selected = [...new Set(args.selected)].filter((page) => page >= 1 && page <= pageCount);
-  const attempted = new Set(selected.slice(0, Math.max(0, args.cap)));
-  const selectedSet = new Set(selected);
+  const selectedSet = new Set(args.selected.filter((page) => page >= 1 && page <= pageCount));
   return Array.from({ length: pageCount }, (_, index) => {
     const pageNumber = index + 1;
     const text = processed.get(pageNumber);
-    const visionStatus: PageVisionStatus = args.costCapped
-      ? "cost-cap"
-      : text !== undefined
-        ? "extracted"
+    const visionStatus: PageVisionStatus = text !== undefined
+      ? "extracted"
+      : args.costCapped && (selectedSet.has(pageNumber) || args.selected.length === 0)
+        ? "cost-cap"
         : !selectedSet.has(pageNumber)
           ? "not-selected"
-          : !attempted.has(pageNumber)
-            ? "over-cap"
-            : args.outcomes?.has(pageNumber)
-              ? visionStatusForOutcome(args.outcomes.get(pageNumber)!)
-              : "failed";
+          : args.outcomes?.has(pageNumber)
+            ? visionStatusForOutcome(args.outcomes.get(pageNumber)!)
+            : "failed";
     return {
       documentId: args.documentId,
       runId: args.runId,

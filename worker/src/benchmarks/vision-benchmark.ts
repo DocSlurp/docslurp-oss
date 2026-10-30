@@ -102,7 +102,7 @@ export async function runVisionBenchmarks(args: VisionBenchmarkArgs): Promise<{
           cfg: args.cfg,
           runner,
           manifestPath,
-          maxPagesPerFixture: args.maxPagesPerFixture ?? selectedPrimary.maxPagesPerDocument
+          maxPagesPerFixture: args.maxPagesPerFixture ?? 4
         }));
       }
     }

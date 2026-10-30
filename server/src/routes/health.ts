@@ -130,7 +130,7 @@ async function buildPrometheusPayload(): Promise<string> {
                 case when coalesce((r.pipeline->>'visionFallback')::boolean,false)
                   and coalesce((r.pipeline->>'maxCostCents')::numeric,0)=0
                   and not exists(select 1 from workspace_run_stage_states s where s.run_id=r.id and s.stage_name='vision-extract' and s.status='completed')
-                then least(r.pages_total, coalesce((r.pipeline->'vision'->>'maxPagesPerDocument')::int,4)) else 0 end
+                then r.pages_total else 0 end
               ) as page_demand
             from workspace_runs r
             left join organizations o on o.id = r.org_id

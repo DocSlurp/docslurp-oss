@@ -1,3 +1,8 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildVisionPageFacts } from "../pipeline/page-facts.js";
+import { defaultPipelineFeatures } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENROUTER_VISION_MODEL, visionListPriceCents, visionModelCatalog } from "@docslurp/shared";
 
@@ -13,7 +18,7 @@ import { buildSchemaAwareVisionPrompt } from "../tools/vision-runtime.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
-import type { WorkflowState } from "../pipeline/pipeline.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -285,4 +290,64 @@ describe("buildSchemaAwareVisionPrompt", () => {
       properties: { private_label: { type: "string" } },
     })).not.toContain("private_label");
   });
+});
+
+
+describe("legacy vision page cost admission", () => {
+  it.each([[0, 0.5, 2], [0.25, 0.5, 1], [0.5, 0.5, 0], [0, 0.1, 1], [0, null, 40]])("admits pages for spent=%s cap=%s expected=%s", async (spentCents, maxCostCents, expected) => {
+    const rendered: number[] = [];
+    const document = { id: "budget-doc", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "scan.pdf" } as Document;
+    const state = WorkflowState.create({ id: "budget-run", spentCents, pipeline: { ...defaultPipelineFeatures, maxCostCents } } as never, [document]);
+    const rasters = { renderSelectedPages: async ({ pageNumbers }: { pageNumbers: number[] }) => {
+      rendered.push(...pageNumbers);
+      return pageNumbers.map(pageNumber => ({ pageNumber, artifactKey: `p${pageNumber}`, artifactUri: `s3://bucket/p${pageNumber}`, mimeType: "image/png" }));
+    } };
+    const storage = { downloadToTempFile: async () => join(await mkdtemp(join(tmpdir(), "vision-budget-")), "page.png") };
+    const stage = new VisionExtractStage({} as CommandRunner, storage as unknown as ArtifactStore, {} as Config, rasters as never);
+    const internals = stage as unknown as { callVisionOnImage: (...args: any[]) => Promise<any>; extractVisionPagesFromCache: (...args: any[]) => Promise<any[]> };
+    const calls = vi.spyOn(internals, "callVisionOnImage").mockImplementation(async (_state, _doc, _vision, image) => {
+      state.usageLedger.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis", inputTokens: 100, outputTokens: 50,
+        metadata: { documentId: document.id, pageNumber: image.pageNumber, outcome: "completed" } });
+      return { pageNumber: image.pageNumber, inputTokens: 100, outputTokens: 50, latencyMs: 1, text: "read" };
+    });
+    const outputs = await internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, Array.from({ length: 40 }, (_, i) => i + 1));
+    expect(calls).toHaveBeenCalledTimes(expected);
+    expect(rendered).toHaveLength(expected);
+    expect(outputs).toHaveLength(expected);
+    expect(Number(spentCents) + state.usageLedger.pendingBillableCents).toBe(Number(spentCents) + Number(expected) * 0.25);
+  });
+});
+
+
+it("preserves completed and nonselected facts when later selected pages hit the cap", () => {
+  expect(buildVisionPageFacts({ documentId: "d", runId: "r", pageCount: 4,
+    selected: [1, 2, 3], processed: [{ pageNumber: 1, text: "read" }, { pageNumber: 2, text: "read" }], costCapped: true,
+  }).map(p => p.visionStatus)).toEqual(["extracted", "extracted", "cost-cap", "not-selected"]);
+});
+
+
+it("keeps earlier capped-page results in the partial manifest when a later page fails", async () => {
+  const document = { id: "partial-doc", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "scan.pdf" } as Document;
+  const state = WorkflowState.create({ id: "partial-run", spentCents: 0, pipeline: { ...defaultPipelineFeatures, maxCostCents: 10 } } as never, [document]);
+  const putJson = vi.fn(async () => {});
+  const storage = { putJson, uri: (key: string) => `s3://bucket/${key}`,
+    downloadToTempFile: async () => join(await mkdtemp(join(tmpdir(), "vision-partial-")), "page.png") };
+  const rasters = { renderSelectedPages: async ({ pageNumbers }: { pageNumbers: number[] }) => pageNumbers.map(pageNumber => ({
+    pageNumber, artifactKey: `p${pageNumber}`, artifactUri: `s3://bucket/p${pageNumber}`, mimeType: "image/png",
+  })) };
+  const stage = new VisionExtractStage({} as CommandRunner, storage as unknown as ArtifactStore, {} as Config, rasters as never);
+  const internals = stage as unknown as { callVisionOnImage: (...args: any[]) => Promise<any>; extractVisionPagesFromCache: (...args: any[]) => Promise<any[]> };
+  vi.spyOn(internals, "callVisionOnImage").mockImplementation(async (_state, _doc, _vision, image) => {
+    if (image.pageNumber === 2) throw new Error("fatal renderer fault");
+    return { pageNumber: image.pageNumber, inputTokens: 100, outputTokens: 50, latencyMs: 1, text: "retained result" };
+  });
+  await expect(internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2, 3], undefined, "manifest.json"))
+    .rejects.toMatchObject({ stats: { partial: true, processedPages: 1 } });
+  expect(putJson).toHaveBeenLastCalledWith("manifest.json", expect.objectContaining({
+    partial: true, processedPages: 1, pagesDetail: [expect.objectContaining({ pageNumber: 1, text: "retained result" })],
+  }));
+  const unavailable = Object.assign(new Error("storage unavailable"), { code: "STORAGE_READ_FAILED" });
+  vi.spyOn(rasters, "renderSelectedPages").mockRejectedValue(unavailable);
+  await expect(internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2, 3]))
+    .rejects.toBe(unavailable);
 });

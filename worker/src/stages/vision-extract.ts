@@ -53,7 +53,7 @@ import {
 } from "../lib/vision-attempt-guard.js";
 import { findVisionServedRoute, isBilledVisionRoute, type VisionServedRoute } from "../lib/vision-pricing.js";
 import { VISION_ROUTING_VERSION_SLOT, resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
-import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
+import { visionAllowedForDocument } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
 import { PLAN_QUALITY_METHOD } from "../routing/quality.js";
 import { runRoutedVision, visionConfigForModel, type RoutedVisionArgs, type RoutedVisionResult } from "../routing/routed-vision.js";
@@ -155,7 +155,7 @@ export class VisionExtractStage implements Stage {
     if (!(await this.visionAllowed(state))) return tasks;
     for (const document of healthyDocuments(state)) {
       if (document.mimeType.startsWith("text/") || state.documentStages.get(document.id)?.get(this.name)?.status === "completed") continue;
-      const vision = { ...state.run.pipeline.vision, maxPagesPerDocument: this.visionPageBudget(state, document.id) };
+      const vision = state.run.pipeline.vision;
       // Active page router: one task per page served by exactly one VLM group, on that group's model
       // (a task's output is cached by page, so a page two groups both serve stays sequential, as do
       // executor-only pages, which are local and cheap). Orchestration is unchanged for the workflow:
@@ -177,14 +177,14 @@ export class VisionExtractStage implements Stage {
             documentId: document.id,
             pageNumber,
             pageCount: fanOut.length,
-            vision: visionConfigForModel(vision, group!.modelUri, 1),
+            vision: visionConfigForModel(vision, group!.modelUri),
           });
         }
         continue;
       }
       const routing = await this.checkNeedsVision(document, maxInt(1, document.pageCount), state, signal);
       if (!routing.needed) continue;
-      const pages = routing.selectedPages.slice(0, this.resolveMaxVisionPages(vision)).sort((a, b) => a - b);
+      const pages = [...routing.selectedPages].sort((a, b) => a - b);
       for (const pageNumber of pages) {
         tasks.push({
           runId: state.run.id, documentId: document.id, pageNumber, pageCount: pages.length, vision,
@@ -233,7 +233,7 @@ export class VisionExtractStage implements Stage {
 
     await runDocuments(
       healthyDocuments(state),
-      state.docConcurrency,
+      (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency,
       async (document) => {
         if (isCostCapExceeded(state)) {
           console.log(
@@ -254,7 +254,7 @@ export class VisionExtractStage implements Stage {
           });
           await recordPageFacts(state.store, buildVisionPageFacts({
             documentId: document.id, runId: state.run.id, pageCount: maxInt(1, document.pageCount),
-            selected: [], processed: [], cap: 0, costCapped: true,
+            selected: [], processed: [], costCapped: true,
           }));
           return;
         }
@@ -263,16 +263,13 @@ export class VisionExtractStage implements Stage {
         const pages = maxInt(1, document.pageCount);
         const artifactSlot = `${document.id}:vision`;
         const playbook = this.resolveParserPlaybook(state, document.id);
-        const selection: VisionConfig = {
-          ...state.run.pipeline.vision,
-          maxPagesPerDocument: this.visionPageBudget(state, document.id),
-        };
+        const selection: VisionConfig = state.run.pipeline.vision;
         const route = resolveVisionRoute(selection);
         const routingV2 = resolveRunRoutingV2(state);
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
-            `playbook=${playbook} pages=${pages} maxPages=${selection.maxPagesPerDocument} ` +
+            `playbook=${playbook} pages=${pages} visionAllowed=${this.visionAllowed_(state, document.id)} ` +
             `model=${route.model} runtime=${route.runtime}`,
         );
 
@@ -334,7 +331,7 @@ export class VisionExtractStage implements Stage {
 
               await recordPageFacts(state.store, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
-                selected: [], processed: [], cap: selection.maxPagesPerDocument,
+                selected: [], processed: [],
               }));
               return {
                 artifactUri: this.storage.uri(key),
@@ -413,7 +410,7 @@ export class VisionExtractStage implements Stage {
 
               await recordPageFacts(state.store, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
-                selected: needsVision.selectedPages, processed: [], cap: routed ? pages : selection.maxPagesPerDocument,
+                selected: needsVision.selectedPages, processed: [],
               }));
               return {
                 artifactUri: this.storage.uri(key),
@@ -531,7 +528,8 @@ export class VisionExtractStage implements Stage {
 
             await recordPageFacts(state.store, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
-              selected: needsVision.selectedPages, processed: outputs, cap: routed ? pages : selection.maxPagesPerDocument,
+              selected: needsVision.selectedPages, processed: outputs,
+              costCapped: isCostCapExceeded(state),
               outcomes: skips,
             }));
 
@@ -641,6 +639,9 @@ export class VisionExtractStage implements Stage {
       needed = true;
       selectedPages = Array.from({ length: pageCount }, (_, index) => index + 1);
       reason = "workspace-force-all-pages";
+    } else if (needed && !this.visionAllowed_(state, document.id)) {
+      needed = false;
+      reason = "playbook-disallows-vision";
     }
 
     if (!needed) {
@@ -726,8 +727,8 @@ export class VisionExtractStage implements Stage {
     }
   }
 
-  private visionPageBudget(state: WorkflowState, documentId: string): number {
-    return resolveVisionPageBudget(
+  private visionAllowed_(state: WorkflowState, documentId: string): boolean {
+    return visionAllowedForDocument(
       state.run.pipeline as PipelineWithPlaybook,
       state.artifactLedger.readDocument(documentId, "parser-playbook"),
     );
@@ -1028,9 +1029,8 @@ export class VisionExtractStage implements Stage {
       pageOptions.skips?.set(pageNumber, entry);
       return entry;
     };
-    const maxPages = this.resolveMaxVisionPages(vision);
-    const requestedPages = selectedPageNumbers.slice(0, maxPages).sort((a, b) => a - b);
-    if (maxPages === 0 || requestedPages.length === 0) {
+    const requestedPages = [...new Set(selectedPageNumbers)].sort((a, b) => a - b);
+    if (requestedPages.length === 0) {
       return [];
     }
 
@@ -1052,6 +1052,39 @@ export class VisionExtractStage implements Stage {
     if (stopped) {
       for (const page of missing) skip(page, stopped.reason);
       return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+    }
+    // Capped runs admit one page at a time, including raster work. The ledger
+    // records the completed page's charge before the next admission. A single
+    // admitted page can cross the cap; the rest of a long scan cannot follow it.
+    // run() also serializes documents, and planPageTasks disables page fanout.
+    if ((state.run.pipeline.maxCostCents ?? 0) > 0) {
+      if (isCostCapExceeded(state)) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      if (missing.length > 1) {
+        for (const pageNumber of missing) {
+          if (isCostCapExceeded(state)) break;
+          try {
+            completed.push(...await this.extractVisionPagesFromCache(
+              state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache, pageOptions,
+            ));
+          } catch (error) {
+            // Infrastructure, cancellation and quarantine errors retain their
+            // identity so checkpoint retry/isolation handling remains intact.
+            if (!(error instanceof DocumentStageError)) throw error;
+            // The inner single-page attempt cannot see earlier successes. Keep
+            // those results in the partial manifest when a later page fails.
+            if (storageKey) await this.storage.putJson(storageKey, {
+              documentId: document.id, partial: completed.length > 0,
+              reason: toError(error).message, processedPages: completed.length,
+              pagesDetail: completed,
+            });
+            throw new DocumentStageError(toError(error).message, {
+              artifactUri: storageKey ? this.storage.uri(storageKey) : undefined,
+              stats: { partial: completed.length > 0, processedPages: completed.length, error: toError(error).message },
+            });
+          }
+        }
+        return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      }
     }
     const rasterPages = await this.rasters.renderSelectedPages({
       document,
@@ -1423,10 +1456,6 @@ export class VisionExtractStage implements Stage {
         metadata: { orgId, ...guardStop, routingVersion: routingVersion(routingV2) },
       });
     }
-  }
-
-  private resolveMaxVisionPages(vision: VisionConfig): number {
-    return Math.max(0, vision.maxPagesPerDocument);
   }
 
   private async loadAdaptiveRouting(

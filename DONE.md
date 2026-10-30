@@ -1,3 +1,7 @@
+## Vision reads every page routing selects (2026-10-29)
+
+- Remove the per-document vision page cap (`vision.maxPagesPerDocument`, playbook `visionMaxPagesPerDocument`: 4 by default, 12 escalated, 32 with `forceAllPages`). A long scanned file got vision on its first few pages and Tesseract text on the rest, so quality depended on file length. Vision now reads every page the routing selects, each billed as a Rich page; run spend stays bounded by `maxCostCents`. The `fast` playbook still allows no vision (`visionAllowed: false`). Stored pipelines that carry the old key still parse (it is dropped); `over-cap` page facts are no longer produced; the autoscaler counts a vision run's real page demand.
+
 ## Error recovery audit (2026-10-28)
 
 - [#228](https://github.com/DocSlurp/docslurp-oss/issues/228) (2026-10-29): Add native Better Auth magic-link sign-in with hashed five-minute single-use tokens, scanner-safe confirmation, trusted-origin and shared database rate guards, preserving MFA/SSO and separate sensitive grants.

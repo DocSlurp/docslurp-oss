@@ -220,10 +220,9 @@ it("proposes the vision page-selection change the ingest report recommends, with
   const f = await fixture();
   await seedIndexedDocument(f);
   const before = await saved(f.id);
-  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } });
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { visionFallback: true, vision: { forceAllPages: true } } } });
   expect(proposal.changes).toEqual(expect.arrayContaining([
     { key: 'pipeline.vision.forceAllPages', label: 'Read every page with vision', before: false, after: true },
-    { key: 'pipeline.vision.maxPagesPerDocument', label: 'Vision pages per file', before: before.vision.maxPagesPerDocument, after: 8 },
   ]));
   expect(proposal.impact.kind).toBe('reindex-recommended');
   expect(proposal.impact.reasons.find(r => r.field === 'vision')?.effect).toMatch(/New uploads.*reprocess/);
@@ -233,8 +232,9 @@ it("proposes the vision page-selection change the ingest report recommends, with
   expect(proposal.estimate?.pages).toBeGreaterThan(0);
   // Optional reprocessing: saving without consent changes settings only, and keeps every other vision setting.
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
-  expect(await saved(f.id)).toMatchObject({ vision: { ...before.vision, forceAllPages: true, maxPagesPerDocument: 8 }, preserveCode: false, parserPlaybook: 'fast' });
-  await expect(service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { vision: { maxPagesPerDocument: 33 } } } })).rejects.toBeDefined();
+  expect(await saved(f.id)).toMatchObject({ vision: { ...before.vision, forceAllPages: true }, preserveCode: false, parserPlaybook: 'fast' });
+  // The per-file vision page limit was removed; proposing it is rejected rather than silently ignored.
+  await expect(service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } })).rejects.toBeDefined();
 });
 
 it("words the impact of answer and retrieval changes differently from pipeline changes", async () => {
