@@ -1,4 +1,4 @@
-import { pageCredits } from "@docslurp/shared";
+import { pageCredits, sanitizeStoredPipeline } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -79,16 +79,21 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     // sweepers (which only chase `queued` rows with no confirmed start) must never run it as an upload.
     // It also gets a lease (3x the activity's 5 min startToClose, so ranges queued for worker slots do not trip stale alerts) that the worker renews on every heartbeat,
     // so the stale-lease alerts and health counts flag a materialize run only when its worker really died.
+    // The stored source pipeline may predate the strict extractor schemas: drop what they reject (a Dolphin
+    // repoPath, an unknown extractor id) before it is copied into the new run, as every other run path does.
+    const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
+      select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline
+      from (select 1) one
+      left join documents d on d.id = ${args.documentId} and d.workspace_id = ${args.workspaceId}
+      left join workspace_runs r on r.id = d.run_id and r.workspace_id = ${args.workspaceId}
+      left join workspaces w on w.id = ${args.workspaceId}
+    `;
+    const pipeline = sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`);
     await sql`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)
-      select ${id}, ${args.orgId}, ${args.userId}, ${args.workspaceId}, 'materialize', 'processing', 'materialize',
-             ${args.documents}, ${args.pages},
-             coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb), now(),
-             now() + interval '15 minutes', now(), null
-      from (select 1) one
-      left join documents d on d.id = ${args.documentId}
-      left join workspace_runs r on r.id = d.run_id
-      left join workspaces w on w.id = ${args.workspaceId}
+      values (${id}, ${args.orgId}, ${args.userId}, ${args.workspaceId}, 'materialize', 'processing', 'materialize',
+             ${args.documents}, ${args.pages}, ${sql.json(pipeline as never)}, now(),
+             now() + interval '15 minutes', now(), null)
     `;
     return id;
   },
@@ -247,6 +252,8 @@ export async function materializeForQuery(
       if (state.state === "indexed") {
         waiting.delete(key);
         materialized++;
+        // cost_credits is the customer charge the page's billing decision committed (worker billLockedMaterializedPages):
+        // 0 for a page an earlier read already paid for and for full-index pages; never provider or embedding cost.
         credits += Math.max(0, state.costCredits - (initialCost.get(key) ?? 0));
         ready.set(c.documentId, [...(ready.get(c.documentId) ?? []), c.page]);
       } else if (TERMINAL_FAILED.has(state.state)) {

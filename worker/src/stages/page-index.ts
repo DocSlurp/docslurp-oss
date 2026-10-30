@@ -50,7 +50,8 @@ export class PageIndexStage implements Stage {
             this.runner,
             this.storage,
             state.artifactLedger.readDocument(document.id, "markdown"),
-            signal
+            signal,
+            state.artifactLedger.readDocument(document.id, "canonical-document"),
           );
           const pageTexts = splitByPages(extracted.text, document.pageCount);
 
@@ -129,7 +130,7 @@ export async function markPagesIngested(sql: Sql<Record<string, unknown>>, docum
   await sql`
     update document_page_states
     set state = 'indexed', materialized_by = ${materializedBy},
-        claimed_by_run = null, claim_expires_at = null, failure_reason = null, updated_at = now()
+        claimed_by_run = null, claim_expires_at = null, failure_reason = null, read_text = null, updated_at = now()
     where document_id = ${documentId} and page_number <= ${pageCount}
       and (state in ('unseen', 'failed', 'parsed')
            or (state in ('claimed', 'pii-checked') and (claim_expires_at is null or claim_expires_at <= now())))

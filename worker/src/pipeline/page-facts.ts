@@ -13,7 +13,7 @@ import type { CommandRunner } from "../tools/runner.js";
  * kept usable native or OCR text; a rejected page without usable text is `failed`. `guarded`: the
  * run's vision attempt guard (page bound, rejection breaker, org attempt bound) refused the page.
  */
-export type PageVisionStatus = "extracted" | "failed" | "rejected" | "guarded" | "not-selected" | "over-cap" | "cost-cap";
+export type PageVisionStatus = "extracted" | "failed" | "rejected" | "guarded" | "not-selected" | "over-cap" | "cost-cap" | "kept-as-image" | "not-read";
 
 /** Why a selected page has no vision output (vision-extract `VisionPageSkip`). */
 export interface VisionPageOutcome {

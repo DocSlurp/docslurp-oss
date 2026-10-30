@@ -228,6 +228,18 @@ describe("Run creation starts or defers every Run", () => {
   });
 });
 
+describe("Run creation with a pipeline start refuses (round 6 L2)", () => {
+  it("fails the request as invalid input (400 invalid_pipeline), not as a deferred start", async () => {
+    const { RunPipelineInvalidError } = await import("../services/run-lifecycle.js");
+    const { IndexingModeError } = await import("../services/workspace-indexing-mode.js");
+    start.mockRejectedValueOnce(new RunPipelineInvalidError("r", new Error("raw zod detail")));
+    const error = await runCreation.create(input).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(IndexingModeError);
+    expect(error).toMatchObject({ status: 400, code: "invalid_pipeline" });
+    expect((error as Error).message).not.toContain("raw zod detail");
+  });
+});
+
 describe("Run creation versions Documents by lineage", () => {
   it("bases a new version on the latest in the canonical lineage, whichever version was selected", async () => {
     const original = await sourceRun();

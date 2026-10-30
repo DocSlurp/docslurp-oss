@@ -132,6 +132,17 @@ describe("mode switching", () => {
     await expect(ws.updateWorkspace("t-priv", "u1", {}, { indexingMode: "visual" })).rejects.toMatchObject({ code: "visual_mode_privacy" });
   });
 
+  it("rejects Fast quality with visual mode, whichever setting changes", async () => {
+    await seedWorkspace("t-fast-visual", "gold", "map", { quality: "fast" });
+    await expect(ws.updateWorkspace("t-fast-visual", "u1", {}, { indexingMode: "visual" })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
+    await seedWorkspace("t-visual-fast", "gold", "visual");
+    await expect(ws.updateWorkspace("t-visual-fast", "u1", { pipeline: { quality: "fast" } as never })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
+    await expect(ws.createWorkspace({ userId: "u1", orgId: "gold", name: "FV", pipeline: { ...defaultPipelineFeatures, quality: "fast", indexingMode: "visual" } }))
+      .rejects.toMatchObject({ code: "visual_mode_quality" });
+    // Auto with visual stays allowed.
+    expect((await ws.updateWorkspace("t-visual-fast", "u1", { pipeline: { quality: "auto" } as never }))?.indexingMode).toBe("visual");
+  });
+
   it("lets any organization switch to full; credits are checked when the indexing work is admitted", async () => {
     await seedWorkspace("t-free", "free", "map");
     expect((await ws.updateWorkspace("t-free", "u1", {}, { indexingMode: "full" }))?.indexingMode).toBe("full");
@@ -307,6 +318,70 @@ describe("upload indexingMode", () => {
     expect((await run()).pipeline.indexingMode).toBe("visual");
     process.env.DOCSLURP_DEFERRED_PROFILES = "0";
     expect((await run()).pipeline.indexingMode).toBe("full");
+  });
+
+  it("refuses per-upload Fast with visual mode from either override, before any run exists (M3)", async () => {
+    const { createWorkspaceIntakeFakes, fakeWorkspace } = await import("./helpers/workspace-intake-fakes.js");
+    const item = { filename: "a.pdf", mimeType: "application/pdf", content: { bytes: Buffer.from("x") } };
+    // A workspace already in visual mode, with a per-upload quality: "fast".
+    const visual = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ pipeline: { ...defaultPipelineFeatures, indexingMode: "visual" } })] });
+    await expect(intake.intakeIntoWorkspace({
+      userId: "u1", workspace: "ws-existing", kind: "bulk-upload", pipeline: { quality: "fast" } as never, items: [item],
+    }, visual.ports)).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
+    expect(visual.runs).toHaveLength(0);
+    expect(visual.objects.size).toBe(0);
+    // A Fast workspace with a per-upload indexingMode: "visual".
+    const fast = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ pipeline: { ...defaultPipelineFeatures, quality: "fast" } })] });
+    await expect(intake.intakeIntoWorkspace({
+      userId: "u1", workspace: "ws-existing", kind: "bulk-upload", indexingMode: "visual", items: [item],
+    }, fast.ports)).rejects.toMatchObject({ code: "visual_mode_quality" });
+    // Both on one request, into a new workspace: refused, and the workspace made for it is discarded.
+    const fresh = createWorkspaceIntakeFakes();
+    await expect(intake.intakeIntoWorkspace({
+      userId: "u1", workspace: null, newWorkspace: true, kind: "bulk-upload", indexingMode: "visual", pipeline: { quality: "fast" } as never, items: [item],
+    }, fresh.ports)).rejects.toMatchObject({ code: "visual_mode_quality" });
+    expect(fresh.runs).toHaveLength(0);
+    expect(fast.runs).toHaveLength(0);
+    // Auto with visual stays allowed.
+    await intake.intakeIntoWorkspace({ userId: "u1", workspace: "ws-existing", kind: "bulk-upload", pipeline: { quality: "auto" } as never, items: [item] }, visual.ports);
+    expect(visual.runs.at(-1)!.pipeline).toMatchObject({ quality: "auto", indexingMode: "visual" });
+  });
+
+  it("run creation refuses a Fast + visual pipeline for every caller, and reprocess of a stored one (M3)", async () => {
+    await seedWorkspace("t-fv-run", "gold", "full");
+    const before = (await sql<{ n: number }[]>`select count(*)::int as n from workspace_runs where workspace_id = 't-fv-run'`)[0]!.n;
+    await expect(creation.runCreation.create({
+      userId: "u1", workspaceId: "t-fv-run", kind: "bulk-upload",
+      pipeline: { ...defaultPipelineFeatures, quality: "fast", indexingMode: "visual" },
+      sources: { kind: "files", files: [{ filename: "a.pdf", mimeType: "application/pdf", sourceKey: "raw/a.pdf", fileSize: 1 }] },
+    })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
+    expect((await sql<{ n: number }[]>`select count(*)::int as n from workspace_runs where workspace_id = 't-fv-run'`)[0]!.n).toBe(before);
+    // A run row stored before this check (per-upload Fast on a visual workspace) is not run again.
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      values ('t-fv-old', 'gold', 'u1', 't-fv-run', 'bulk-upload', 'completed', 'completed', ${sql.json({ ...defaultPipelineFeatures, quality: "fast", indexingMode: "visual" } as never)}, 1)`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+      values ('t-fv-doc', 'gold', 'u1', 't-fv-run', 't-fv-old', 'a.pdf', 'application/pdf', 'raw/fv.pdf', 'completed', 2, 'visual')`;
+    const runs = await import("../services/runs.js");
+    await expect(runs.reprocessRun("t-fv-old", "u1")).rejects.toMatchObject({ code: "visual_mode_quality" });
+    const docs = await import("../services/documents.js");
+    await expect(docs.bulkReprocessDocuments(["t-fv-doc"], "u1")).rejects.toMatchObject({ code: "visual_mode_quality" });
+    expect((await sql<{ n: number }[]>`select count(*)::int as n from workspace_runs where workspace_id = 't-fv-run'`)[0]!.n).toBe(before + 1);
+  });
+
+  it("upload, extract and MCP routes answer the refusal with 400 visual_mode_quality (M3)", async () => {
+    const { Hono } = await import("hono");
+    const { workspaceIntakeErrorResponse } = await import("../routes/uploads.js");
+    const app = new Hono().post("/", (c) => {
+      try {
+        svc.assertVisualModeAllowed({ ...defaultPipelineFeatures, quality: "fast" });
+      } catch (error) {
+        return workspaceIntakeErrorResponse(c, error) ?? c.text("unmapped", 500);
+      }
+      return c.text("ok");
+    });
+    const response = await app.request("/", { method: "POST" });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(await response.json())).toContain("visual_mode_quality");
   });
 
   it("writes documents.indexing_mode from the run pipeline", async () => {

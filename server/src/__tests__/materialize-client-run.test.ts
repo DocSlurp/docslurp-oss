@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ calls: [] as Array<{ text: string; values: unknown[] }> }));
+const mocks = vi.hoisted(() => ({ calls: [] as Array<{ text: string; values: unknown[] }>, sourcePipeline: null as Record<string, unknown> | null }));
 vi.mock("../db.js", () => ({
   sql: Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       mocks.calls.push({ text: strings.join("?"), values });
-      return [];
+      return /as pipeline/.test(strings.join("?")) ? [{ pipeline: mocks.sourcePipeline ?? {} }] : [];
     },
     { array: (v: unknown[]) => v, json: (v: unknown) => v },
   ),
@@ -36,10 +36,26 @@ describe("materialize run rows", () => {
     expect(values).toContain("d1");
   });
 
+  it("drop stored extractor settings the strict schemas reject before copying the source pipeline (round 6 L1)", async () => {
+    mocks.calls.length = 0;
+    mocks.sourcePipeline = { quality: "good", documentExtraction: { options: { dolphin: { mode: "page", repoPath: "/tmp/attacker" }, liteparse: {} } } };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
+    } finally {
+      mocks.sourcePipeline = null;
+      errors.mockRestore();
+    }
+    const insert = mocks.calls.find((call) => call.text.includes("insert into workspace_runs"))!;
+    const stored = insert.values.find((value) => typeof value === "object" && value !== null && "quality" in (value as object));
+    expect(stored).toEqual({ quality: "good", documentExtraction: { options: { dolphin: { mode: "page" } } } });
+    expect(JSON.stringify(insert.values)).not.toContain("/tmp/attacker");
+  });
+
   it("start `processing` with a confirmed workflow start so recovery and sweepers never pick them up", async () => {
     mocks.calls.length = 0;
     await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
-    const { text } = mocks.calls[0]!;
+    const { text } = mocks.calls.find((call) => call.text.includes("insert into workspace_runs"))!;
     expect(text).toContain("'processing'");
     expect(text).toContain("workflow_started_at");
     expect(text).not.toContain("'queued'");
@@ -48,8 +64,9 @@ describe("materialize run rows", () => {
   it("start with a lease so stale-lease alerts only fire when the worker stops renewing it", async () => {
     mocks.calls.length = 0;
     await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
-    expect(mocks.calls[0]!.text).toMatch(/lease_expires_at[\s\S]*now\(\) \+ interval '15 minutes'/);
-    expect(mocks.calls[0]!.text).not.toMatch(/interval '[1-5] minutes?'/);
+    const insert = mocks.calls.find((call) => call.text.includes("insert into workspace_runs"))!;
+    expect(insert.text).toMatch(/lease_expires_at[\s\S]*now\(\) \+ interval '15 minutes'/);
+    expect(insert.text).not.toMatch(/interval '[1-5] minutes?'/);
   });
 
   it("can still be closed or failed after being created processing", async () => {

@@ -1,4 +1,4 @@
-import { cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, type MediaSummary } from "@docslurp/shared";
+import { cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 import path from "node:path";
 
 import {
@@ -1526,6 +1526,8 @@ export async function bulkReprocessDocuments(
 
   const groups = new Map<string, Array<DocumentRow & { pipeline: PipelineFeatures | null }>>();
   for (const row of rows) {
+    // Stored snapshots may hold extractor settings the strict schemas now reject; drop them before grouping.
+    row.pipeline = sanitizeStoredPipeline(row.pipeline, options.useWorkspacePipeline === true ? `workspace ${row.workspace_id}` : `run ${row.run_id}`);
     // A document's own indexing_mode wins over its run's pipeline (a backfill keeps the source's old run).
     if (row.indexing_mode && row.pipeline && row.pipeline.indexingMode !== row.indexing_mode) {
       row.pipeline = { ...row.pipeline, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) };

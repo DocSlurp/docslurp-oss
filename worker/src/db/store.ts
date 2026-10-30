@@ -7,14 +7,14 @@ import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
+import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
-import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
@@ -2505,6 +2505,12 @@ export class Store {
     return this.visionAttemptBackend;
   }
 
+  /** Reserves a document's share of the run's Fast page-image render budget, shared by every worker (fast-page-image-budget.ts). */
+  async reserveFastPageImageRenders(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number> {
+    return await reserveFastPageImageRenders(this.sql, args);
+
+  }
+
   /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
@@ -3300,6 +3306,10 @@ export class Store {
     );
 
     for (const row of rows) {
+      // Revoke source reads before external deletion. A failed purge retries
+      // cleanup, but cannot make content eligible for materialization again.
+      await this.sql`update documents set materialization_generation = materialization_generation + 1,
+        source_materialization_blocked = true where run_id = ${row.run_id}`;
       const keys = new Set<string>();
 
       for (const sourceKey of row.source_keys ?? []) {
@@ -3325,6 +3335,17 @@ export class Store {
         await this.sql`delete from embedding_reuse_refs where artifact_uri = any(${this.sql.array(artifactUris)}::text[])`;
       }
       await storage.deleteKeys([...keys]);
+
+      if (await this.tableExists("document_page_states")) {
+        // A kept model read (read_text) is page content too: a later query must not republish it. The billing
+        // decision (read_billed_run) stays, so the page is never charged again.
+        await this.sql`
+          update document_page_states s
+          set read_text = null
+          from documents d
+          where d.id = s.document_id and d.run_id = ${row.run_id} and s.read_text is not null
+        `;
+      }
 
       if (await this.tableExists("document_propositions")) {
         await this.sql`
@@ -3858,7 +3879,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
-    pipeline: applyDefaultVisionOverride(mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures)),
+    pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`)),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},
@@ -3942,9 +3963,7 @@ export function buildStorageIntegrityReport(args: {
       continue;
     }
 
-    const pipeline = mergePipelineFeatures(
-      run.pipeline ?? defaultPipelineFeatures,
-    );
+    const pipeline = normalizeStoredPipelineFeatures(run.pipeline ?? defaultPipelineFeatures, `run ${run.runId}`);
     if ((pipeline.embed || pipeline.indexVectors) && run.chunkCount === 0) {
       findings.push({
         kind: "missing-index-rows",

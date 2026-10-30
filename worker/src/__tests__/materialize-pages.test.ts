@@ -1,19 +1,25 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import type { PGlite } from "@electric-sql/pglite";
+import { connect } from "@lancedb/lancedb";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
 import { defaultPipelineFeatures } from "@docslurp/shared";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
-import { ensurePageRows } from "../deferred/page-ledger.js";
+import { claimPages, ensurePageRows } from "../deferred/page-ledger.js";
 import { materializePageRange, type PageMaterializerDeps, type PageMaterializerOps } from "../deferred/materialize-pages.js";
 import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { attachVisionServedRoute } from "../lib/vision-pricing.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
-import { attachVisionServedRoute } from "../lib/vision-pricing.js";
 
 let db: PGlite;
 let server: PGLiteSocketServer;
@@ -35,7 +41,8 @@ beforeAll(async () => {
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
-      values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
+      values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1),
+             ('run-2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 6);
   `);
@@ -65,6 +72,8 @@ interface Harness {
 
 function harness(pageTexts: Record<number, string>, overrides: Partial<PageMaterializerOps> = {}): Harness {
   const usage = new PipelineUsageEventLedger();
+  // As WorkflowState sets it: Rich page charges need the run id.
+  usage.runId = "run-1";
   const h = {
     ocrCalls: [] as number[],
     embedCalls: [] as string[][],
@@ -78,7 +87,6 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
       return Array.from({ length: range.last - range.first + 1 }, (_, i) => pageTexts[range.first + i] ?? "");
     },
     async ocrPage(_doc, page, ctx) {
-      // One vision request, admitted like the real runtime does before sending it.
       await ctx.gate.admit();
       h.ocrCalls.push(page);
       return { text: `${LONG} scanned page ${page}`, model: "vision-x", provider: "test", inputTokens: 1000, outputTokens: 200, costCents: 2 };
@@ -105,20 +113,30 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
   return h;
 }
 
+// The materializer only indexes pages its run holds, so each call claims them first, as runMaterializeRange does.
+async function claimAndMaterialize(...args: Parameters<typeof materializePageRange>): ReturnType<typeof materializePageRange> {
+  const [, range] = args;
+  await claimPages(sql, { documentId: range.documentId, pages: range.pages, runId: range.runId, ttlSeconds: 300, reason: range.reason });
+  return await materializePageRange(...args);
+}
+
 const input = (h: Harness, pages: number[], pipeline = defaultPipelineFeatures) => ({
   runId: "run-1", documentId: "d1", pages, reason: "query" as const, sessionId: null, maxCredits: 100,
   document, pipeline, run: h.run as never,
 });
 
+const orphanQueue = async () => (await db.query<{ ids: string[] }>(
+  `select array(select jsonb_array_elements_text(payload -> 'ids') order by 1) as ids from storage_cleanup_queue where kind = 'vector_rows' order by id`)).rows.map((r) => r.ids);
+
 beforeEach(async () => {
-  await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states;`);
+  await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states; delete from usage_events; delete from storage_cleanup_queue; delete from vision_run_attempts; delete from vision_org_attempts; delete from vision_admission_tickets; delete from vision_route_overruns;`);
   await ensurePageRows(sql, "d1", 6);
 });
 
 describe("materializePageRange", () => {
   it("uses the text layer and skips OCR for text pages", async () => {
     const h = harness({ 1: LONG, 2: LONG + " second" });
-    const result = await materializePageRange(h.deps, input(h, [1, 2]));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
     expect(result.indexed).toEqual([1, 2]);
     expect(h.ocrCalls).toEqual([]);
     const states = await db.query<{ state: string }>(`select state from document_page_states where page_number in (1,2)`);
@@ -127,7 +145,7 @@ describe("materializePageRange", () => {
 
   it("OCRs a low-text page exactly once and records page-analysis usage", async () => {
     const h = harness({ 1: LONG, 2: "  x \n" });
-    const result = await materializePageRange(h.deps, input(h, [1, 2]));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
     expect(h.ocrCalls).toEqual([2]);
     expect(result.indexed).toEqual([1, 2]);
     const ledger = (h.usage as unknown as { pending: Array<{ metric: string; unit: string }> }).pending;
@@ -142,7 +160,7 @@ describe("materializePageRange", () => {
       ...defaultPipelineFeatures,
       piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn"], action: "block_indexing" as const, allowlistPatterns: [] },
     };
-    const result = await materializePageRange(h.deps, input(h, [1, 2], pipeline));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
     expect(result.blocked).toEqual([2]);
     expect(result.indexed).toEqual([1]);
     const chunks = await db.query<{ page_number: number }>(`select page_number from document_chunks`);
@@ -159,20 +177,25 @@ describe("materializePageRange", () => {
       ...defaultPipelineFeatures,
       piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn"], action: "redact_artifacts" as const, allowlistPatterns: [] },
     };
-    const result = await materializePageRange(h.deps, input(h, [1], pipeline));
+    const result = await claimAndMaterialize(h.deps, input(h, [1], pipeline));
     expect(result.indexed).toEqual([1]);
     expect(h.embedCalls.flat().join(" ")).not.toContain("123-45-6789");
   });
 
-  it("is idempotent: re-running a range writes identical chunk ids without duplicates", async () => {
+  it("re-running a range republishes the pages under a new id generation, without duplicates", async () => {
     const h = harness({ 3: LONG, 4: LONG + " more" });
-    await materializePageRange(h.deps, input(h, [3, 4]));
+    await claimAndMaterialize(h.deps, input(h, [3, 4]));
     const first = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
-    await materializePageRange(h.deps, input(h, [3, 4]));
+    // Only a run holding the pages publishes: hand them back to the ledger so the replay re-claims them.
+    await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number in (3, 4)`);
+    await claimAndMaterialize(h.deps, input(h, [3, 4]));
     const second = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
-    expect(second).toEqual(first);
-    expect(first[0]).toMatch(/^d1:p3:c0$/);
-    expect(h.lanceWrites[1]!.map((r) => r.id)).toEqual(h.lanceWrites[0]!.map((r) => r.id));
+    expect(second).toHaveLength(first.length);
+    expect(first[0]).toMatch(/^d1:p3:g[0-9a-f]{12}:c0$/);
+    expect(second.some((id) => first.includes(id))).toBe(false);
+    expect(h.lanceWrites[1]!.map((r) => r.id).sort()).toEqual(second);
+    // The first generation's vectors are stale once the second commits.
+    expect(h.lanceDeletes.sort()).toEqual(first);
     const pages = await db.query(`select 1 from document_pages where document_id = 'd1'`);
     expect(pages.rows).toHaveLength(2);
   });
@@ -182,14 +205,14 @@ describe("materializePageRange", () => {
     const [d] = (await db.query<{ run_id: string; user_id: string }>(`select run_id, user_id from documents where id = 'd1'`)).rows;
     await db.exec(`insert into document_pages (id, document_id, run_id, user_id, page_number, text, token_estimate)
       values ('d1-page-0002', 'd1', '${d!.run_id}', '${d!.user_id}', 2, 'coarse raw text', 3)`);
-    await materializePageRange(h.deps, input(h, [2]));
+    await claimAndMaterialize(h.deps, input(h, [2]));
     const pages = await db.query<{ id: string; text: string }>(`select id, text from document_pages where document_id = 'd1' and page_number = 2`);
     expect(pages.rows).toEqual([{ id: "d1-page-0002", text: LONG }]);
   });
 
   it("records one embedding usage event per batch with actual tokens", async () => {
     const h = harness({ 1: LONG, 2: LONG, 3: LONG });
-    await materializePageRange(h.deps, input(h, [1, 2, 3]));
+    await claimAndMaterialize(h.deps, input(h, [1, 2, 3]));
     expect(h.embedCalls).toHaveLength(1);
     const events = (h.usage as unknown as { pending: Array<{ metric: string; inputTokens?: number }> }).pending
       .filter((e) => e.metric === "embedding-tokens");
@@ -200,7 +223,7 @@ describe("materializePageRange", () => {
   it("splits embedding into batches of at most 256 chunks", async () => {
     const big = Array.from({ length: 300 }, (_, i) => `# Section ${i}\n\n${LONG} ${i}`).join("\n\n");
     const h = harness({ 1: big });
-    await materializePageRange(h.deps, input(h, [1]));
+    await claimAndMaterialize(h.deps, input(h, [1]));
     expect(h.embedCalls.length).toBeGreaterThan(1);
     expect(Math.max(...h.embedCalls.map((c) => c.length))).toBeLessThanOrEqual(256);
   });
@@ -209,7 +232,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: LONG, 2: "" }, {
       async ocrPage() { throw new Error("vision down"); },
     });
-    const result = await materializePageRange(h.deps, input(h, [1, 2]));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
     expect(result.indexed).toEqual([1]);
     expect(result.failed).toEqual([{ page: 2, reason: "vision down" }]);
     const state = await db.query<{ state: string; failure_reason: string }>(`select state, failure_reason from document_page_states where page_number = 2`);
@@ -221,7 +244,7 @@ describe("materializePageRange", () => {
     attachVisionServedRoute(rejected, { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: "vision-x", billing: "openrouter" });
     const h = harness({ 1: LONG, 2: "" }, { async ocrPage() { throw rejected; } });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const result = await materializePageRange(h.deps, input(h, [1, 2]));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
     expect(result.failed).toEqual([{ page: 2, reason: "rejected after 2 attempts" }]);
     expect(result.costCredits).toBeLessThan(1.5); // the rejected page adds no customer charge; its provider spend stays in metadata
     const events = (h.usage as unknown as { pending: Array<{ metric: string; model: string; inputTokens: number; outputTokens: number; costCents: number; metadata: Record<string, unknown> }> }).pending;
@@ -240,7 +263,7 @@ describe("materializePageRange", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const h = harness({ 1: LONG, 2: "" });
-      const result = await materializePageRange(h.deps, input(h, [1, 2]));
+      const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
       expect(h.ocrCalls).toEqual([]);
       expect(result.indexed).toEqual([1]);
       expect(result.failed).toEqual([{ page: 2, reason: "vision-stopped:org-attempt-limit" }]);
@@ -251,17 +274,134 @@ describe("materializePageRange", () => {
     }
   });
 
+  it("a failed vector write fails the pages, publishes no chunk and deletes any partial vector write", async () => {
+    const h = harness({ 1: LONG, 2: LONG + " second" }, {
+      async writeVectors() { throw new Error("lance unavailable"); },
+      async deleteVectors(_uri, _table, ids) { h.lanceDeletes.push(...ids); },
+    });
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
+    expect(result.indexed).toEqual([]);
+    expect(result.failed).toEqual([{ page: 1, reason: "lance unavailable" }, { page: 2, reason: "lance unavailable" }]);
+    expect((await db.query(`select 1 from document_chunks where document_id = 'd1'`)).rows).toHaveLength(0);
+    expect((await db.query(`select 1 from document_pages where document_id = 'd1'`)).rows).toHaveLength(0);
+    expect(h.lanceDeletes).toHaveLength(2);
+    expect(h.lanceDeletes.sort()).toEqual([expect.stringMatching(/^d1:p1:g[0-9a-f]{12}:c0$/), expect.stringMatching(/^d1:p2:g[0-9a-f]{12}:c0$/)]);
+    const states = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number in (1, 2)`);
+    expect(states.rows.map((r) => r.state)).toEqual(["failed", "failed"]);
+  });
+
+  describe("vector ids are generation-specific (round 7 M1, L3, L2)", () => {
+    let root: string;
+    beforeEach(async () => { root = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "materialize-generation-")); });
+    afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+    const onLance = (h: Harness, overrides: Partial<PageMaterializerOps>) => {
+      h.deps = { ...h.deps, config: { ...h.deps.config, lancedb: { ...h.deps.config.lancedb, root } } as Config, ops: { ...h.deps.ops, ...overrides } };
+      return h;
+    };
+    const lanceIds = async (uri: string, table: string) => {
+      const db = await connect(uri);
+      const t = await db.openTable(table);
+      try {
+        return new Set((await t.query().select(["id"]).toArray() as Array<{ id: string }>).map((row) => row.id));
+      } finally {
+        t.close();
+        db.close();
+      }
+    };
+    const page1Chunks = async () => (await db.query<{ id: string }>(`select id from document_chunks where document_id = 'd1' and page_number = 1 order by id`)).rows.map((r) => r.id);
+
+    it("a failed write's late cleanup never deletes the vectors a retry republished (real LanceDB)", async () => {
+      let target: { uri: string; table: string } | null = null;
+      const winner = onLance(harness({ 1: LONG }), {
+        async writeVectors(uri, table, records) { target = { uri, table }; await writeLanceDbRecords(uri, table, records); },
+        async deleteVectors(uri, table, ids) { await deleteLanceDbRecords(uri, table, ids); },
+      });
+      const loser = onLance(harness({ 1: LONG }), {
+        // The write landed but its acknowledgement did not: the page commits as failed and releases the lock.
+        async writeVectors(uri, table, records) { await writeLanceDbRecords(uri, table, records); throw new Error("lance commit lost"); },
+        async deleteVectors(uri, table, ids) {
+          // The cleanup runs late: run-2 has claimed and republished the page in between.
+          const retried = await claimAndMaterialize(winner.deps, { ...input(winner, [1]), runId: "run-2" });
+          expect(retried.indexed).toEqual([1]);
+          await deleteLanceDbRecords(uri, table, ids);
+        },
+      });
+      const failed = await claimAndMaterialize(loser.deps, input(loser, [1]));
+      expect(failed.failed).toEqual([{ page: 1, reason: "lance commit lost" }]);
+      const live = await page1Chunks();
+      expect(live.length).toBeGreaterThan(0);
+      const stored = await lanceIds(target!.uri, target!.table);
+      expect(live.every((id) => stored.has(id))).toBe(true);
+      const state = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number = 1`);
+      expect(state.rows[0]!.state).toBe("indexed");
+    });
+
+    it("an unknown COMMIT outcome (connection lost after COMMIT) keeps the published vectors", async () => {
+      const h = harness({ 1: LONG });
+      const real = h.deps.sql;
+      h.deps = { ...h.deps, sql: new Proxy(real, {
+        get(target, key, receiver) {
+          if (key !== "begin") return Reflect.get(target, key, receiver);
+          return async (...args: unknown[]) => {
+            await (target.begin as (...a: unknown[]) => Promise<unknown>)(...args);
+            throw new Error("write CONNECTION_CLOSED");
+          };
+        },
+      }) };
+      await expect(claimAndMaterialize(h.deps, input(h, [1]))).rejects.toThrow(/CONNECTION_CLOSED/);
+      const live = await page1Chunks();
+      expect(live.length).toBeGreaterThan(0);
+      expect(h.lanceWrites.flat().map((r) => r.id).sort()).toEqual(live);
+      expect(h.lanceDeletes).toEqual([]);
+      const state = await db.query<{ state: string }>(`select state from document_page_states where document_id = 'd1' and page_number = 1`);
+      expect(state.rows[0]!.state).toBe("indexed");
+      // The kept ids go to the orphan sweep, which deletes only those no committed chunk row names (round 8 L3).
+      expect(await orphanQueue()).toEqual([live]);
+    });
+
+    it("materializer vector records carry no LanceDB hydration, so search serves them only through a committed chunk row", async () => {
+      const records: Array<Record<string, unknown>> = [];
+      const h = harness({ 1: LONG, 2: LONG + " second" }, {
+        async writeVectors(_uri, _table, written) { records.push(...(written as unknown as Array<Record<string, unknown>>)); },
+      });
+      await claimAndMaterialize(h.deps, input(h, [1, 2]));
+      expect(records.length).toBeGreaterThan(0);
+      for (const record of records) {
+        expect(record).not.toHaveProperty("hydration");
+        expect(record).not.toHaveProperty("runId");
+        expect(record).not.toHaveProperty("pageNumber");
+      }
+    });
+  });
+
   it("removes stale chunk rows when a page re-chunks to fewer chunks", async () => {
     const many = Array.from({ length: 4 }, (_, i) => `# Part ${i}\n\n${LONG} ${i}`).join("\n\n");
     const h = harness({ 1: many });
-    await materializePageRange(h.deps, input(h, [1]));
+    await claimAndMaterialize(h.deps, input(h, [1]));
     const before = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
     expect(before.length).toBeGreaterThan(1);
     const h2 = harness({ 1: LONG });
-    await materializePageRange(h2.deps, input(h2, [1]));
+    await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number = 1`);
+    await claimAndMaterialize(h2.deps, input(h2, [1]));
     const after = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
-    expect(after).toEqual(["d1:p1:c0"]);
-    expect(h2.lanceDeletes.sort()).toEqual(before.filter((id) => id !== "d1:p1:c0").sort());
+    expect(after).toEqual([expect.stringMatching(/^d1:p1:g[0-9a-f]{12}:c0$/)]);
+    // Every chunk of the earlier generation is stale.
+    expect(h2.lanceDeletes.sort()).toEqual(before);
+    expect(await orphanQueue()).toEqual([]);
+  });
+
+  it("queues stale vectors whose delete fails for the orphan sweep (round 8 L3)", async () => {
+    const many = Array.from({ length: 3 }, (_, i) => `# Part ${i}\n\n${LONG} ${i}`).join("\n\n");
+    const h = harness({ 1: many });
+    await claimAndMaterialize(h.deps, input(h, [1]));
+    const before = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
+    const h2 = harness({ 1: LONG }, { async deleteVectors() { throw new Error("lance unavailable"); } });
+    await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number = 1`);
+    expect((await claimAndMaterialize(h2.deps, input(h2, [1]))).indexed).toEqual([1]);
+    expect(await orphanQueue()).toEqual([before]);
+    const [row] = (await db.query<{ org_id: string; payload: Record<string, unknown>; due: boolean }>(
+      `select org_id, payload, not_before > now() as due from storage_cleanup_queue where kind = 'vector_rows'`)).rows;
+    expect(row).toMatchObject({ org_id: "o1", due: true, payload: { workspaceId: "w", documentId: "d1", dimension: 3 } });
   });
 
   it("reports total spend including failed pages and completed batches", async () => {
@@ -279,7 +419,7 @@ describe("materializePageRange", () => {
         return { vectors: args.chunks.map(() => [0.1]), totalTokens: 50 };
       },
     });
-    const result = await materializePageRange(h.deps, input(h, [1, 2, 3]));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2, 3]));
     // page 2 OCR (empty -> failed) + two embedding batches; page 3 threw before indexing.
     const recorded = (h.usage as unknown as { pending: Array<{ metric: string; costCents: number }> }).pending;
     expect(recorded.filter((e) => e.metric === "embedding-tokens")).toHaveLength(2);
@@ -298,9 +438,39 @@ describe("materializePageRange", () => {
         {"id":"c","title":"Front","level":1,"parentId":null,"physicalStart":null,"physicalEnd":null}]'::jsonb, to_tsvector('x'))
       on conflict (document_id) do update set nodes = excluded.nodes`);
     const h = harness({ 3: LONG });
-    await materializePageRange(h.deps, input(h, [3]));
-    const row = await db.query<{ heading_path: string[] }>(`select heading_path from document_chunks where id = 'd1:p3:c0'`);
+    await claimAndMaterialize(h.deps, input(h, [3]));
+    const row = await db.query<{ heading_path: string[] }>(`select heading_path from document_chunks where document_id = 'd1' and page_number = 3 order by chunk_index limit 1`);
     expect(row.rows[0]!.heading_path).toEqual(["Part I", "Chapter 2"]);
     await db.exec(`delete from document_maps`);
+  });
+});
+
+describe("materializePageRange respects processing quality", () => {
+  const fast = { ...defaultPipelineFeatures, quality: "fast" as const };
+  const good = { ...defaultPipelineFeatures, quality: "good" as const };
+  const reasons = ["query", "full-index"] as const;
+
+  it.each(reasons)("fast (%s) indexes only the text layer and keeps textless pages unread", async (reason) => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], fast), reason });
+    expect(h.ocrCalls).toEqual([]);
+    expect(result.indexed).toEqual([1]);
+    expect(result.failed).toEqual([{ page: 2, reason: "kept-as-image" }]);
+    const ledger = (h.usage as unknown as { pending: Array<{ metric: string }> }).pending;
+    expect(ledger.filter((e) => e.metric === "page-analysis")).toEqual([]);
+    // No Rich read: only the text-layer page's Fast credit (plus embedding provider cost, 0 credits here).
+    expect(result.costCredits).toBeLessThan(0.25);
+    const state = await db.query<{ state: string; failure_reason: string | null }>(
+      `select state, failure_reason from document_page_states where document_id = 'd1' and page_number = 2`);
+    expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "kept-as-image" });
+  });
+
+  it.each(reasons)("good (%s) reads every page with vision, text layer or not", async (reason) => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], good), reason });
+    expect(h.ocrCalls.sort()).toEqual([1, 2]);
+    expect(result.indexed).toEqual([1, 2]);
+    // Query: two committed Rich charges. Full index: the run completion fee bills the pages, so the call reports none.
+    expect(result.costCredits).toBeCloseTo(reason === "query" ? 0.5 : 0, 6);
   });
 });
