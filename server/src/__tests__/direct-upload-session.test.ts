@@ -9,8 +9,9 @@ const signSingleUploadPut = vi.hoisted(() => vi.fn(async ({ key }: { key: string
 const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
+const copyUploadedObject = vi.hoisted(() => vi.fn(async () => ({ etag: "sealed-etag" })));
 vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({ connection: lockMock, release: lockMock.release }) }));
-vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
+vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
 
 import {
@@ -24,6 +25,7 @@ import {
   assertDirectUploadSessionReadyForIntake,
   directUploadIntakeItems,
   loadDirectUploadSession,
+  sealedSourceKey,
   toDirectUploadPartCount,
   type LoadedDirectUploadSession,
 } from "../services/direct-upload-session.js";
@@ -132,6 +134,56 @@ describe("Direct Upload Session Module", () => {
         expect(sqlMock).toHaveBeenCalledTimes(2);
       }
     }
+  });
+
+  // #234 round 7 (H2): a single-part PUT URL stays valid for 900 s, so the bytes that were verified
+  // (and later hashed) must not be the bytes a second PUT can replace.
+  it("seals a completed single-part upload: ingests a server-owned copy of exactly the verified version", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
+    sqlMock.mockReset().mockResolvedValue([]);
+    getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "\"verified\"" });
+    copyUploadedObject.mockClear();
+    deleteUploadedObject.mockClear();
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
+    const sealed = sealedSourceKey(file);
+    expect(sealed).not.toBe(file.source_key);
+    expect(sealed.startsWith(file.source_key.slice(0, file.source_key.lastIndexOf("/") + 1))).toBe(true);
+    // The copy is conditional on the verified ETag, and the copy itself is size-checked.
+    expect(copyUploadedObject).toHaveBeenCalledWith({ fromKey: file.source_key, toKey: sealed, ifMatch: "\"verified\"" });
+    expect(getUploadedObjectMetadata).toHaveBeenLastCalledWith(sealed);
+    const completed = sqlMock.mock.calls.find(([strings]) => strings.join("?").includes("set status = 'completed'"));
+    expect(completed).toContain(sealed);
+    // The URL's key is dropped; a later PUT to it (the URL is still valid) is never read.
+    expect(deleteUploadedObject).toHaveBeenCalledWith(file.source_key);
+    // Intake reads the sealed key, never the presigned one.
+    const loaded = { session: directUploadSessionFixture().session, files: [{ ...file, status: "completed", source_key: sealed }] } as unknown as LoadedDirectUploadSession;
+    expect(directUploadIntakeItems(loaded)[0]!.content).toEqual({ storedKey: sealed, verifiedSizeBytes: file.size_bytes });
+  });
+
+  it("refuses to complete when the object changed between verification and the sealing copy", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
+    sqlMock.mockReset().mockResolvedValue([]);
+    getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "\"verified\"" });
+    copyUploadedObject.mockReset().mockRejectedValueOnce(Object.assign(new Error("At least one of the pre-conditions you specified did not hold"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } }));
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining("changed while its upload was being completed") });
+    expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(false);
+    // Without an ETag there is no version to pin: refuse rather than copy whatever is there.
+    getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: null });
+    copyUploadedObject.mockClear();
+    await expect(finalizeDirectUploadFile(file)).rejects.toThrow(/Unable to verify the uploaded version/);
+    expect(copyUploadedObject).not.toHaveBeenCalled();
+    copyUploadedObject.mockReset().mockResolvedValue({ etag: "sealed-etag" });
+  });
+
+  it("does not copy a multipart upload: completion closed its part URLs and it has no PUT URL", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u1", part_size: 8, size_bytes: 20 };
+    sqlMock.mockReset().mockResolvedValue([]);
+    getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: 20, etag: "e" });
+    copyUploadedObject.mockClear();
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
+    expect(copyUploadedObject).not.toHaveBeenCalled();
+    const completed = sqlMock.mock.calls.find(([strings]) => strings.join("?").includes("set status = 'completed'"));
+    expect(completed).toContain(file.source_key);
   });
 
   it("rejects missing or incorrectly sized authoritative parts without assembling", async () => {

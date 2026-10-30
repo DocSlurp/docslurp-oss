@@ -9,6 +9,8 @@ import { normalizeUploadPath } from "../lib/canonical-id.js";
 import {
   abortMultipartUpload,
   completeMultipartUpload,
+  copyUploadedObject,
+  deleteUploadedObject,
   createMultipartUpload,
   getUploadedObjectMetadata,
   listMultipartUploadParts,
@@ -391,8 +393,9 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
     // Persist EOS before provider completion so recovery can verify an already assembled object.
     await sql`update upload_session_files set size_bytes = ${finalSize}, unknown_size = false where id = ${file.id}`;
   }
+  let verified: { etag: string | null };
   try {
-    await verifyCompletedDirectUpload(file);
+    verified = await verifyCompletedDirectUpload(file);
   } catch (error) {
     if (!isStorageNotFound(error) && !(error instanceof WorkspaceIntakeError && error.message.startsWith("No object found"))) throw error;
     if (file.upload_mode !== "multipart" || !file.upload_id) return false;
@@ -400,11 +403,44 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
     if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return false;
     try { await completeMultipartUpload({ key: file.source_key, uploadId: file.upload_id, parts }); }
     catch (error) { throw multipartCompletionError(error, file.filename); }
-    await verifyCompletedDirectUpload(file);
+    verified = await verifyCompletedDirectUpload(file);
     await sql`update upload_session_files set completed_parts = ${sql.json(parts)} where id = ${file.id}`;
   }
-  await sql`update upload_session_files set status = 'completed', updated_at = now() where id = ${file.id}`;
+  // A single-part file's presigned PUT stays valid for its whole TTL, so the client could replace
+  // the bytes after this check (and after the server hashed them). Seal it: copy exactly the
+  // verified version to a key no URL names, and ingest that. A completed multipart upload needs no
+  // copy: its part URLs are bound to an upload ID that completion closed, and no PUT URL exists.
+  const sourceKey = file.upload_mode === "single" ? await sealSingleUpload(file, verified.etag) : file.source_key;
+  await sql`update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now() where id = ${file.id}`;
+  if (sourceKey !== file.source_key) {
+    // The original stays writable until its URL expires; nothing reads it again. Best effort.
+    await deleteUploadedObject(file.source_key).catch(() =>
+      console.error(`[direct-upload] status=unsealed-delete-failed file=${file.id}`));
+  }
   return true;
+}
+
+/** Where a single-part upload is sealed: beside the original, named by the (server-chosen) file id. */
+export function sealedSourceKey(file: Pick<UploadSessionFileRow, "id" | "source_key">): string {
+  const slash = file.source_key.lastIndexOf("/");
+  const name = file.source_key.slice(slash + 1).replace(/^[0-9a-f-]{36}-/i, "");
+  return `${file.source_key.slice(0, slash)}/sealed-${file.id}-${name}`;
+}
+
+async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null): Promise<string> {
+  if (!etag) throw new WorkspaceIntakeError(`Unable to verify the uploaded version of ${file.filename}`, 400);
+  const sealed = sealedSourceKey(file);
+  try {
+    await copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag });
+  } catch (error) {
+    if (storageErrorName(error) === "PreconditionFailed" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412) {
+      throw new WorkspaceIntakeError(`${file.filename} changed while its upload was being completed; upload it again`, 409);
+    }
+    throw error;
+  }
+  // The sealed copy is what is hashed and ingested: check it is the verified size too.
+  await verifyCompletedDirectUpload({ ...file, source_key: sealed });
+  return sealed;
 }
 
 export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
