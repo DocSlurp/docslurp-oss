@@ -104,7 +104,7 @@ export function providerFromBaseUrl(baseUrl: string | null | undefined): string 
   if (!baseUrl) return "openai";
   try {
     const host = new URL(baseUrl).hostname;
-    if (host.endsWith("openrouter.ai")) return "openrouter";
+    if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) return "openrouter";
     if (host.endsWith("openai.com")) return "openai";
     if (host.endsWith("anthropic.com")) return "anthropic";
     return host;
@@ -134,6 +134,8 @@ export class ProviderConcurrencyLimiter {
   }
 
   private async acquire(provider: string, signal?: AbortSignal): Promise<void> {
+    // An aborted caller never takes a slot, free or not.
+    if (signal?.aborted) throw abortReason(signal);
     const limit = Math.max(1, this.limitFor(provider));
     if ((this.active.get(provider) ?? 0) < limit) {
       this.active.set(provider, (this.active.get(provider) ?? 0) + 1);
@@ -144,7 +146,7 @@ export class ProviderConcurrencyLimiter {
       const onAbort = () => {
         const index = queue.indexOf(grant);
         if (index >= 0) queue.splice(index, 1);
-        reject(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+        reject(abortReason(signal));
       };
       const grant = () => {
         signal?.removeEventListener("abort", onAbort);
@@ -168,6 +170,10 @@ export class ProviderConcurrencyLimiter {
   }
 }
 
+function abortReason(signal: AbortSignal | undefined): Error {
+  return signal?.reason instanceof Error ? signal.reason : new Error("aborted");
+}
+
 export const providerLimiter = new ProviderConcurrencyLimiter((provider) =>
   readIntEnv(`AI_PROVIDER_MAX_CONCURRENCY_${providerKey(provider)}`, readIntEnv("AI_PROVIDER_MAX_CONCURRENCY", 16)) || 16,
 );
@@ -175,7 +181,7 @@ export const providerLimiter = new ProviderConcurrencyLimiter((provider) =>
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+      reject(abortReason(signal));
       return;
     }
     const timer = setTimeout(() => {
@@ -184,7 +190,7 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+      reject(abortReason(signal));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
@@ -205,6 +211,49 @@ export interface ProviderRetryOptions {
   onRetry?: (info: { attempt: number; status: number | null; delayMs: number }) => void;
   /** Fleet-wide TPM/RPM limiting for this provider+model; `onLease` receives the successful attempt's lease. */
   rateLimit?: { model: string; tokens: number; limiter?: ProviderRateLimiter; onLease?: (lease: ProviderRateLease) => void };
+  /**
+   * Admission for every HTTP request, inline retries included (the vision attempt guard). `admit` runs
+   * inside the concurrency limiter's task, immediately before `fetch`, and its refusal propagates as is;
+   * nothing that ends before the request is sent (limiter waits, timeouts and aborts, a fleet limiter
+   * refusal) is admitted or counted. `failed` marks a sent request that may have been accepted and
+   * billed (5xx other than overload, a network error or timeout after sending). `unbilled` hands back a
+   * request the provider refused before accepting it (429, 503/529 overload): it returns false once the
+   * call's throttle allowance is spent, and the wait then goes to Temporal. A request cancelled after
+   * admission but before `fetch` is handed back with `unbilled("cancelled")`.
+   */
+  gate?: ProviderRequestGate;
+}
+
+/** See `ProviderRetryOptions.gate`. */
+export interface ProviderRequestGate {
+  admit(): Promise<void>;
+  failed(): void;
+  unbilled(kind: "throttle" | "cancelled", detail?: { provider: string; status: number }): Promise<boolean>;
+}
+
+/**
+ * Statuses a provider returns before accepting a request: rate limits and overload.
+ *
+ * Assumption, not verified against any provider's billing terms: 429 (rate limit) and 503/529
+ * (overload) are answered before a model runs, so nothing is billed. The vision guard hands these
+ * back (they leave its counts), bounded by `VISION_THROTTLE_ALLOWANCE` per call; each hand-back logs
+ * `[vision-throttle-handback]` with the org, so a provider that starts billing them shows up as
+ * provider spend with no matching admitted requests.
+ */
+export function isUnbilledThrottleStatus(status: number): boolean {
+  return status === 429 || status === 503 || status === 529;
+}
+
+/**
+ * A 503 that says no provider can serve the request's routing constraints rather than that one is overloaded.
+ * OpenRouter documents 503 as "There is no available model provider that meets your routing requirements"
+ * (errors-and-debugging docs); its provider-selection docs say `max_price` "will prevent your request from
+ * running" without naming a status. Assumption, not verified with a paid call: a `max_price` exclusion is that
+ * 503, or a body naming no matching endpoints or the max price. Such a response is a failure, not a throttle.
+ */
+export function isRoutingExclusion(status: number, body: string): boolean {
+  if (status !== 503 && status !== 404) return false;
+  return /routing requirements|no endpoints found|max[_ ]price/i.test(body);
 }
 
 /**
@@ -225,36 +274,73 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
     let retryAfterMs: number | null = null;
     let detail: string;
     const rateLimiter = options.rateLimit ? options.rateLimit.limiter ?? providerRateLimiter() : null;
+    // Set once the gate admitted this request and it is handed to fetch: anything before is free.
+    let sent = false;
+    let lease: ProviderRateLease | null = null;
+    let allowanceSpent = false;
     try {
-      const lease = rateLimiter
+      lease = rateLimiter
         ? await rateLimiter.acquire({ provider: options.provider, model: options.rateLimit!.model, tokens: options.rateLimit!.tokens, signal: options.signal })
         : null;
       // Each attempt is bounded (WORKER_AI_REQUEST_TIMEOUT_MS); a timeout is a network error and retries here.
-      const response = await limiter.run(options.provider, () => doFetch(url, { ...init, signal: withRequestTimeout(options.signal) }), options.signal);
+      const response = await limiter.run(options.provider, async () => {
+        // Admitted inside the limiter's task, right before sending: queue waits never consume admissions.
+        if (options.signal?.aborted) throw abortReason(options.signal);
+        await options.gate?.admit();
+        // Cancelled while the admission was pending (a database round trip): hand it back unsent.
+        if (options.signal?.aborted) {
+          await options.gate?.unbilled("cancelled");
+          throw abortReason(options.signal);
+        }
+        sent = true;
+        return await doFetch(url, { ...init, signal: withRequestTimeout(options.signal) });
+      }, options.signal);
       noteWorkProgress(`provider:${options.provider}`);
       if (response.ok || !isRetryableStatus(response.status)) {
         if (lease) options.rateLimit?.onLease?.(lease);
         return response;
       }
       status = response.status;
+      const body = await response.text().catch(() => "");
+      if (isRoutingExclusion(status, body)) {
+        // No provider meets the request's routing constraints (max_price included): retrying cannot help, and
+        // handing it back as a throttle would loop in Temporal. Counted as a failure and returned to the caller.
+        // Logged: on vision it means max_price (its image cap included) excluded every pinned provider.
+        console.warn(
+          `[provider-routing-exclusion] provider=${options.provider} label="${options.label}" status=${status} ` +
+            `detail=${JSON.stringify(body.slice(0, 200))}`,
+        );
+        options.gate?.failed();
+        if (lease) options.rateLimit?.onLease?.(lease);
+        return new Response(body, { status, headers: response.headers });
+      }
+      // A rate limit or overload is refused before acceptance: it leaves the guard's counts.
+      if (isUnbilledThrottleStatus(status) && options.gate) {
+        allowanceSpent = !(await options.gate.unbilled("throttle", { provider: options.provider, status }));
+      } else options.gate?.failed();
       retryAfterMs = parseRetryAfterMs(response.headers);
       if (status === 429 && rateLimiter) {
         await rateLimiter.reportThrottle({ provider: options.provider, model: options.rateLimit!.model, retryAfterMs });
       }
-      const body = await response.text().catch(() => "");
       if (status === 429 && isQuotaExhaustedBody(body)) {
         // Quota exhaustion is a configuration problem; let the caller's fail-open policy decide.
         return new Response(body, { status, headers: response.headers });
       }
       detail = `${status} ${body.slice(0, 300)}`;
     } catch (error) {
+      if (!sent) {
+        // Never sent (limiter wait or abort, fleet limiter refusal, guard refusal): nothing to count.
+        lease?.settle(0);
+        throw error;
+      }
+      options.gate?.failed();
       if (options.signal?.aborted) throw error;
       // The fleet limiter already waited its budget; hand the wait to Temporal.
       if (isProviderRetryableError(error)) throw error;
       detail = `network error: ${error instanceof Error ? error.message : String(error)}`;
     }
 
-    const exhausted = attempt >= maxRetries;
+    const exhausted = attempt >= maxRetries || allowanceSpent;
     const tooLong = retryAfterMs !== null && retryAfterMs > maxInlineWaitMs;
     if (exhausted || tooLong) {
       throw new ProviderRetryableError(

@@ -27,7 +27,7 @@ async function run(opts: { body: Record<string, unknown>; baseUrl?: string; swap
   return runVisionRequest({
     imagePath,
     mimeType: "image/png",
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     runner: new CommandRunner(),
     runtime: "openai-compatible",
     model: REQUESTED,

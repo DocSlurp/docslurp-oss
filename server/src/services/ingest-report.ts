@@ -235,6 +235,7 @@ function classifyPage(doc: IngestReportDocumentRow, row: IngestReportPageRow): P
     if (fastLeftUnread(row.visionStatus)) reason = "kept-as-image";
     else if (row.visionStatus === "over-cap") reason = "vision-page-limit";
     else if (row.visionStatus === "cost-cap") reason = "vision-cost-cap";
+    else if (row.visionStatus === "guarded") reason = "vision-stopped";
     else if (row.visionStatus === "failed") reason = "vision-failed";
     else if (scannedLooking) reason = "scanned-no-vision";
     else if (lowText) reason = "no-text";
@@ -339,7 +340,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
   const pendingPages = evaluated.filter((page) => page.searchable === null).length;
   const reasonCounts = new Map<IngestReportPageReason, number>();
   for (const page of unsearchable) if (page.reason) reasonCounts.set(page.reason, (reasonCounts.get(page.reason) ?? 0) + 1);
-  const reasonOrder: IngestReportPageReason[] = ["scanned-no-vision", "kept-as-image", "vision-page-limit", "vision-cost-cap", "vision-failed", "not-indexed", "no-text", "document-failed", "processing"];
+  const reasonOrder: IngestReportPageReason[] = ["scanned-no-vision", "kept-as-image", "vision-page-limit", "vision-cost-cap", "vision-stopped", "vision-failed", "not-indexed", "no-text", "document-failed", "processing"];
   const examples = [...unsearchable]
     .sort((a, b) => reasonOrder.indexOf(a.reason ?? "processing") - reasonOrder.indexOf(b.reason ?? "processing"))
     .slice(0, EXAMPLE_LIMIT)
@@ -466,6 +467,8 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
       visionOverCapPages: visionCount("over-cap"),
       visionFailedPages: visionCount("failed"),
       visionCostCapPages: visionCount("cost-cap"),
+      visionRejectedPages: visionCount("rejected"),
+      visionStoppedPages: visionCount("guarded"),
       nativeTextPages,
       visionCents: visionCentsKnown ? round(visionCents, 4) : null,
     },
@@ -675,6 +678,8 @@ export const INGEST_RECOMMENDATION_CATALOG = {
   "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
   "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
   "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
+  "vision-stopped": { proposal: "outside-allowlist", note: "The per-page vision attempt bound, rejection breaker and organization attempt limit are operator settings." },
+  "vision-rejected-pages": { proposal: "informational", note: "Pages kept their own text; nothing to change." },
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
   "turn-on-embeddings": { proposal: "pipeline-patch", note: "embed and indexVectors are proposable." },
   "turn-on-video": { proposal: "pipeline-patch", note: "mediaVideo.enabled is proposable." },
@@ -702,10 +707,12 @@ function fastLeftUnread(status: string | null | undefined): boolean {
 export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Observed): IngestReportRecommendation[] {
   const recs: Array<IngestReportRecommendation & { id: IngestRecommendationId }> = [];
   const vision = visionCentsPerPage(pipeline, observed);
-  // Pages fast kept as images on purpose get their own recommendation below.
+  // Fast's unread images have their own recommendation; rejected/guarded pages
+  // already attempted vision and are not missing a setting.
   const keptAsImage = observed.pageViews.filter((page) => fastLeftUnread(page.visionStatus) && page.searchable !== true);
   const missedScans = observed.scannedPages.filter((page) =>
-    page.visionStatus !== "extracted" && !fastLeftUnread(page.visionStatus) && page.searchable !== true);
+    page.visionStatus !== "extracted" && page.visionStatus !== "rejected" && page.visionStatus !== "guarded"
+    && !fastLeftUnread(page.visionStatus) && page.searchable !== true);
   const overCap = observed.pageViews.filter((page) => page.visionStatus === "over-cap" && page.searchable !== true);
   const affected = [...new Map([...missedScans, ...overCap].map((page) => [`${page.documentId}:${page.pageNumber}`, page])).values()];
   const affectedDocIds = [...new Set(affected.map((page) => page.documentId))];
@@ -783,6 +790,34 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       affectedPages: failedVision.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: ids,
+    });
+  }
+
+  const stopped = observed.pageViews.filter((page) => page.visionStatus === "guarded");
+  if (stopped.length > 0) {
+    const ids = [...new Set(stopped.map((page) => page.documentId))];
+    recs.push({
+      id: "vision-stopped", severity: "medium",
+      title: "Vision stopped for the run",
+      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, or too many vision requests in the run returned unusable output.`,
+      effect: "These pages keep only their own text. Reprocess the files once the cause is fixed; contact support if the limit is too low for your files.",
+      affectedPages: stopped.length, affectedDocuments: ids.length,
+      cost: { centsPer100Pages: null, reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
+      patch: null, reprocessDocumentIds: [],
+    });
+  }
+
+  const rejected = observed.pageViews.filter((page) => page.visionStatus === "rejected");
+  if (rejected.length > 0) {
+    const ids = [...new Set(rejected.map((page) => page.documentId))];
+    recs.push({
+      id: "vision-rejected-pages", severity: "info",
+      title: "Vision output rejected on some pages",
+      reason: `${plural(rejected.length, "page")} in ${plural(ids.length, "file")} returned unusable vision output (repeated, refused or cut off), so ${agree(rejected.length, "it keeps", "they keep")} ${agree(rejected.length, "its", "their")} own text layer or OCR text instead.`,
+      effect: "Search and answers use the page's own text, which may miss layout, tables or formulas vision would have kept.",
+      affectedPages: rejected.length, affectedDocuments: ids.length,
+      cost: { centsPer100Pages: null, reprocessCents: null, basis: "No charge: rejected vision pages are not billed." },
+      patch: null, reprocessDocumentIds: [],
     });
   }
 

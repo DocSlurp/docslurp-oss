@@ -16,6 +16,7 @@ import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { attachVisionServedRoute } from "../lib/vision-pricing.js";
 import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -85,7 +86,8 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
     async extractText(_doc, range) {
       return Array.from({ length: range.last - range.first + 1 }, (_, i) => pageTexts[range.first + i] ?? "");
     },
-    async ocrPage(_doc, page) {
+    async ocrPage(_doc, page, ctx) {
+      await ctx.gate.admit();
       h.ocrCalls.push(page);
       return { text: `${LONG} scanned page ${page}`, model: "vision-x", provider: "test", inputTokens: 1000, outputTokens: 200, costCents: 2 };
     },
@@ -127,7 +129,7 @@ const orphanQueue = async () => (await db.query<{ ids: string[] }>(
   `select array(select jsonb_array_elements_text(payload -> 'ids') order by 1) as ids from storage_cleanup_queue where kind = 'vector_rows' order by id`)).rows.map((r) => r.ids);
 
 beforeEach(async () => {
-  await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states; delete from usage_events; delete from storage_cleanup_queue;`);
+  await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states; delete from usage_events; delete from storage_cleanup_queue; delete from vision_run_attempts; delete from vision_org_attempts; delete from vision_admission_tickets; delete from vision_route_overruns;`);
   await ensurePageRows(sql, "d1", 6);
 });
 
@@ -239,7 +241,7 @@ describe("materializePageRange", () => {
 
   it("records the summed spend of a page rejected on every attempt in the usage ledger", async () => {
     const rejected = new VisionOutputRejectedError("rejected after 2 attempts", [], 2400, 640, 1.5);
-    rejected.route = { model: "vision-x", provider: "openrouter" };
+    attachVisionServedRoute(rejected, { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: "vision-x", billing: "openrouter" });
     const h = harness({ 1: LONG, 2: "" }, { async ocrPage() { throw rejected; } });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
@@ -252,6 +254,24 @@ describe("materializePageRange", () => {
     expect(event!.metadata?.providerCostCents).toBeGreaterThanOrEqual(1.5);
     expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]") && String(l).includes("model=vision-x"))).toHaveLength(1);
     log.mockRestore();
+  });
+
+  it("refuses OCR once the org's uncharged vision attempts reach the limit, releasing the page for later", async () => {
+    // Earlier runs of this org already left the limit's worth of uncharged vision requests.
+    vi.stubEnv("VISION_ORG_UNCHARGED_LIMIT_CENTS", "3");
+    await db.exec(`insert into vision_org_attempts (id, org_id, weight_cents, settled) values ('a1', 'o1', 1, true), ('a2', 'o1', 1, true), ('a3', 'o1', 1, true)`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({ 1: LONG, 2: "" });
+      const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
+      expect(h.ocrCalls).toEqual([]);
+      expect(result.indexed).toEqual([1]);
+      expect(result.failed).toEqual([{ page: 2, reason: "vision-stopped:org-attempt-limit" }]);
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllEnvs();
+      await db.exec(`delete from vision_org_attempts`);
+    }
   });
 
   it("a failed vector write fails the pages, publishes no chunk and deletes any partial vector write", async () => {

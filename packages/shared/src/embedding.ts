@@ -527,6 +527,13 @@ export type VisionBenchmarkProfile = z.infer<
   typeof visionBenchmarkProfileSchema
 >;
 
+/**
+ * Why a cataloged hosted vision model is not admitted (`refusedReason` on its entry): no request is admitted, priced or
+ * sent on it, and config validation rejects it, until serving-level evidence of its per-image token maximum exists.
+ */
+const UNPROVEN_IMAGE_TOKEN_BOUND =
+  "its per-image token maximum is not proven at the serving level (providers can raise the processor limits), so no request can be weighed; refused until serving evidence exists";
+
 export const visionModelCatalog = [
   {
     id: "microsoft/Florence-2-small-ft",
@@ -539,6 +546,7 @@ export const visionModelCatalog = [
       "Lowest-cost local OCR-style VLM for quick page rescue on CPU/GPU worker nodes.",
     estimatedCostPerPageCents: 0.2,
     tokenPricing: null,
+    imageTokens: null,
   },
   {
     id: DEFAULT_LOCAL_OCR_MODEL,
@@ -551,6 +559,7 @@ export const visionModelCatalog = [
       "Stronger local Florence baseline for OCR and caption extraction when quality matters.",
     estimatedCostPerPageCents: 0.35,
     tokenPricing: null,
+    imageTokens: null,
   },
   {
     id: "Qwen/Qwen2-VL-2B-Instruct",
@@ -563,6 +572,7 @@ export const visionModelCatalog = [
       "Compact local VLM suited to OpenAI-compatible runtimes such as vLLM or Ollama gateways.",
     estimatedCostPerPageCents: 0.45,
     tokenPricing: null,
+    imageTokens: null,
   },
   {
     id: "Qwen/Qwen2.5-VL-3B-Instruct",
@@ -575,6 +585,7 @@ export const visionModelCatalog = [
       "Slightly larger local VLM with better layout fidelity on complex pages.",
     estimatedCostPerPageCents: 0.6,
     tokenPricing: null,
+    imageTokens: null,
   },
   {
     id: "google/gemini-3.1-flash-lite",
@@ -587,6 +598,7 @@ export const visionModelCatalog = [
       "OpenRouter multimodal model for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
     tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-25" },
+    imageTokens: { kind: "fixed", tokens: 2_240, basis: "gemini-media-resolution" },
   },
   {
     id: "google/gemini-2.5-flash-lite",
@@ -599,6 +611,7 @@ export const visionModelCatalog = [
       "Ultra-low-cost OpenRouter multimodal option for lightweight page rescue.",
     estimatedCostPerPageCents: 0.25,
     tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-25" },
+    imageTokens: { kind: "patch", patchPx: 256, tokensPerPatch: 258, basis: "gemini-tiles" },
   },
   {
     id: NEMOTRON_SUPER_VL_VISION_MODEL,
@@ -613,6 +626,11 @@ export const visionModelCatalog = [
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    // Refused (council round 8, M3): 3,330 is the published processor's maximum (processor-max:nemotron-h-omni), but
+    // neither the image framing nor any provider's serving configuration could be verified, and a raster ceiling is
+    // not a proven serving maximum either. No image-token bound, so the guard cannot weigh it: not admitted.
+    imageTokens: null,
+    refusedReason: UNPROVEN_IMAGE_TOKEN_BOUND,
   },
   // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
   // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
@@ -638,6 +656,7 @@ export const visionModelCatalog = [
       basis: "pinned-route",
       providers: ["together", "fireworks", "parasail"],
     },
+    imageTokens: { kind: "fixed", tokens: 1_024, basis: "processor-max:deepseek-v4.1" },
   },
   {
     id: "xiaomi/mimo-v2.6-flash",
@@ -650,6 +669,11 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
     estimatedCostPerPageCents: 0.056,
     tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-25" },
+    // Refused (council round 8, M3): 8,194 is the published processor's maximum (processor-max:qwen2-vl), but no
+    // provider's serving configuration (`max_pixels` can be raised at serve time) could be verified, and a raster
+    // ceiling is not a proven serving maximum either. No image-token bound, so the guard cannot weigh it: not admitted.
+    imageTokens: null,
+    refusedReason: UNPROVEN_IMAGE_TOKEN_BOUND,
   },
   {
     id: "openai/gpt-6-luna",
@@ -662,6 +686,7 @@ export const visionModelCatalog = [
       "OpenAI GPT-6 Luna on OpenRouter; opt-in low-cost page extraction with high-detail images and a content-filter retry route.",
     estimatedCostPerPageCents: 0.061,
     tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 2.46, basis: "openai-patch-max-multiplier" },
   },
   {
     id: "z-ai/glm-5.3-flash",
@@ -675,6 +700,7 @@ export const visionModelCatalog = [
     // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
     estimatedCostPerPageCents: 0.073,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    imageTokens: { kind: "fixed", tokens: 8_002, basis: "processor-max:glm5-next" },
   },
   {
     id: "gpt-4.1-mini",
@@ -687,6 +713,7 @@ export const visionModelCatalog = [
       "Hosted remote fallback for difficult pages when local models miss the quality bar.",
     estimatedCostPerPageCents: 3,
     tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-25" },
+    imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 1.62, basis: "openai-patch" },
   },
 ] as const;
 
@@ -746,6 +773,120 @@ export function visionListPriceCents(
   const pricing = visionModelTokenPricing(idOrUri);
   if (!pricing) return null;
   return (usage.inputTokens * pricing.inputUsdPerMillion + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
+}
+
+/**
+ * Upper bound on the input tokens one image costs on a hosted vision model (`imageTokens` in the catalog). Every
+ * priced catalog model must carry one: the vision guard weighs requests with it and refuses a model without it.
+ *
+ * - `patch`: ceil(width / patchPx) × ceil(height / patchPx) × tokensPerPatch, with no credit for the provider's
+ *   own downscaling, so it bounds any resize.
+ * - `fixed`: a constant per image, the family's largest documented per-image count.
+ *
+ * A hosted entry with `refusedReason` (MiMo V2.6 Flash: processor maximum 8,194, `qwen2-vl`; Nemotron 3.5 Super VL:
+ * 3,330, `nemotron-h-omni`) has no bound: its processor maximum is not a proven serving maximum, so it is refused.
+ *
+ * Bases (checked 2026-10-29):
+ * - `openai-patch`: OpenAI's patch formula (32-px patches, model multiplier; gpt-4.1-mini 1.62), images-vision guide.
+ * - `openai-patch-max-multiplier`: the same formula at the largest multiplier OpenAI lists (2.46, gpt-4.1-nano),
+ *   for an OpenAI model with no listed multiplier.
+ * - `gemini-media-resolution`: Gemini 3's largest per-image count (`ultra_high`, 2,240; the default is 1,120).
+ * - `gemini-tiles`: Gemini 2.x's 258 tokens per tile, counted per 256-px square rather than its documented 768-px
+ *   tile (9x), which covers its crop-unit rescaling.
+ * - `processor-max:<processor>`: the most tokens the model's published Hugging Face image processor can give one
+ *   image at any size, after its minimum-size upscaling, resizing, tiling and patch merging, plus the image's
+ *   framing tokens (start/end markers, row separators). Open-weights models only; read from the model repository's
+ *   `preprocessor_config.json` / `processor_config.json` and processor code (checked 2026-10-29):
+ *   - `deepseek-v4.1` (deepseek-ai/DeepSeek-V4.1-Flash-1017, `inference/image_processor.py`): the resize plan keeps
+ *     the full image span (start, rows with their new-line tokens, end) at or below `vision_max_n_token` 1,024,
+ *     after `vision_min_pixels` upscaling. The bound holds only while every pinned provider serves the published
+ *     `vision_max_n_token`; a provider that raises it bills above the bound, which the vision guard's per-route
+ *     weight correction absorbs (worker/src/lib/vision-attempt-guard.ts).
+ *   - `glm5-next` (zai-org/GLM-5.3-Flash, `Glm5NextImageProcessor`): `smart_resize` to at most `max_image_tokens`
+ *     8,000 merged 28-px tokens, plus the image start and end tokens: 8,002.
+ */
+export type VisionImageTokenBound =
+  | { kind: "patch"; patchPx: number; tokensPerPatch: number; basis: string }
+  | { kind: "fixed"; tokens: number; basis: string };
+
+/** Why a cataloged vision model is refused (no request is admitted on it), or null. */
+export function visionModelRefusal(idOrUri: string): string | null {
+  const entry = visionModelCatalogByUri[idOrUri] ?? visionModelCatalog.find((spec) => spec.id === idOrUri);
+  return entry && "refusedReason" in entry ? entry.refusedReason : null;
+}
+
+/** Largest raster edge the worker renders (lib/raster-bounds.ts caps it at 4,095 px): the bound for an unknown size. */
+export const VISION_MAX_IMAGE_EDGE_PX = 4_096;
+
+/** The catalog image-token bound of a vision model (by id or `llm://` URI); null for local or unknown models. */
+export function visionModelImageTokenBound(idOrUri: string): VisionImageTokenBound | null {
+  const entry = visionModelCatalogByUri[idOrUri] ?? visionModelCatalog.find((spec) => spec.id === idOrUri);
+  return (entry?.imageTokens as VisionImageTokenBound | null | undefined) ?? null;
+}
+
+/**
+ * Upper bound on one image's input tokens on `idOrUri`, at its pixel size (unknown: the largest raster).
+ * Null when the model has no catalog bound.
+ */
+export function visionImageTokens(idOrUri: string, image: { widthPx: number | null; heightPx: number | null } | null): number | null {
+  const bound = visionModelImageTokenBound(idOrUri);
+  if (!bound) return null;
+  if (bound.kind === "fixed") return bound.tokens;
+  const known = Boolean(image?.widthPx && image.heightPx && image.widthPx > 0 && image.heightPx > 0);
+  const width = known ? image!.widthPx! : VISION_MAX_IMAGE_EDGE_PX;
+  const height = known ? image!.heightPx! : VISION_MAX_IMAGE_EDGE_PX;
+  return Math.ceil(Math.ceil(width / bound.patchPx) * Math.ceil(height / bound.patchPx) * bound.tokensPerPatch);
+}
+
+/** Output price at or above which a model is never offered or called (repository model-cost rule). */
+export const VISION_MAX_OUTPUT_USD_PER_MILLION = 50;
+
+/** Hosted providers a vision route may use: both bill per token and are priced from the catalog. */
+export const HOSTED_VISION_PROVIDERS = ["openai", "openrouter"] as const;
+/** Local providers a vision route may use: in-process, or a loopback OpenAI-compatible server. */
+export const LOCAL_VISION_PROVIDERS = ["local-cli", "ollama", "vllm", "lmstudio"] as const;
+/** Local providers whose server address a `baseUrl` parameter may set (loopback hosts only). */
+export const LOCAL_BASE_URL_PROVIDERS = ["ollama", "vllm", "lmstudio"] as const;
+
+/** OpenAI "Pro" / "Ultra" tiers (`o3-pro`, `gpt-5-pro-2025-10-06`, `…-ultra`): never offered or called. */
+export function isProhibitedPremiumModelId(model: string): boolean {
+  return /-(pro|ultra)(?=$|[-_.:/@])/i.test(model);
+}
+
+/**
+ * Why `uri` cannot be a vision route, or null. Hosted vision is limited to the priced catalog: an `openai` or
+ * `openrouter` route must be a catalog entry with a token price and an image-token bound, so every hosted request
+ * is priced, capped and billed. Other providers are `private` (operator registry) or local (`LOCAL_VISION_PROVIDERS`);
+ * any other provider would resolve to an OpenAI-compatible route with no base URL, which is api.openai.com.
+ * Pro/Ultra ids and models at or above `VISION_MAX_OUTPUT_USD_PER_MILLION` output are refused on every provider.
+ */
+export function visionModelUriProblem(uri: string): string | null {
+  const { provider, model, params } = parseLlmModelUri(uri);
+  if (isProhibitedPremiumModelId(model)) return `Vision model ${model} is a Pro/Ultra tier, which is never used`;
+  // A baseUrl moves the request's destination (and so its billing and key): only a local server on a loopback host.
+  const baseUrl = params.get("baseUrl");
+  if (baseUrl !== null) {
+    if (!(LOCAL_BASE_URL_PROVIDERS as readonly string[]).includes(provider)) return "baseUrl overrides are only supported for local model providers";
+    if (!isLoopbackModelBaseUrl(baseUrl)) return "Local model baseUrl must use a loopback host";
+  }
+  if (provider === PRIVATE_MODEL_PROVIDER) return null;
+  if ((LOCAL_VISION_PROVIDERS as readonly string[]).includes(provider)) return null;
+  if (!(HOSTED_VISION_PROVIDERS as readonly string[]).includes(provider)) {
+    return `Vision provider ${provider} is not supported: use openai, openrouter, private or a local provider (${LOCAL_VISION_PROVIDERS.join(", ")})`;
+  }
+  const entry = visionModelCatalogByUri[uri];
+  const refusal = visionModelRefusal(uri);
+  if (refusal) return `Hosted vision model ${model} is not admitted: ${refusal}`;
+  const pricing = entry?.tokenPricing ?? null;
+  if (!entry || !pricing || !visionModelImageTokenBound(uri)) {
+    return `Hosted vision model ${model} is not in the priced vision catalog: use one of ${
+      visionModelCatalog.filter((spec) => spec.tokenPricing && !("refusedReason" in spec)).map((spec) => spec.uri).join(", ")
+    }`;
+  }
+  if (pricing.outputUsdPerMillion >= VISION_MAX_OUTPUT_USD_PER_MILLION) {
+    return `Vision model ${model} costs $${pricing.outputUsdPerMillion}/M output tokens, at or above the $${VISION_MAX_OUTPUT_USD_PER_MILLION}/M limit`;
+  }
+  return null;
 }
 
 /** The profile a workspace gets when it picks no vision model or profile. */
@@ -815,12 +956,13 @@ export const visionProfileCatalog = {
   },
   "open-weights-hosted": {
     label: "Open-weights hosted",
-    description: "Opt-in NVIDIA Nemotron 3.5 Super VL route through OpenRouter; lower list price than the default.",
+    // Was Nemotron 3.5 Super VL, refused until its image-token bound has serving evidence (`refusedReason`).
+    description: `Open-weights (MIT) hosted route (${visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].label}) through OpenRouter's US providers.`,
     tags: ["cost", "hosted", "open-weights"],
     config: {
       profile: "open-weights-hosted",
       target: "hosted",
-      modelUri: `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}`,
+      modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
     },
   },
 } as const satisfies Record<VisionProfileKey, {
@@ -1175,22 +1317,9 @@ const visionConfigObjectSchema = z
       ["remoteFallbackModelUri", value.remoteFallbackModelUri],
     ] as const) {
       if (!uri) continue;
-      const { provider, params } = parseLlmModelUri(uri);
-      const baseUrl = params.get("baseUrl");
-      if (baseUrl && !["ollama", "vllm", "lmstudio"].includes(provider)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [path],
-          message: "baseUrl overrides are only supported for local model providers",
-        });
-      }
-      if (baseUrl && !isLoopbackModelBaseUrl(baseUrl)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [path],
-          message: "Local model baseUrl must use a loopback host",
-        });
-      }
+      if (!llmModelUriSchema.safeParse(uri).success) continue;
+      const problem = visionModelUriProblem(uri);
+      if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message: problem });
     }
   })
   .transform((value) => {
@@ -1320,10 +1449,11 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
   };
 }
 
-function isLoopbackModelBaseUrl(value: string): boolean {
+/** True when `value` is a URL on a loopback host (`localhost`, `127.0.0.1`, `[::1]`). */
+export function isLoopbackModelBaseUrl(value: string): boolean {
   try {
     const host = new URL(value).hostname.toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
   } catch {
     return false;
   }

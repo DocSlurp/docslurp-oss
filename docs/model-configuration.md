@@ -53,13 +53,13 @@ page than the previous default, `google/gemini-3.1-flash-lite`, which stays in t
 catalog. The default is one constant,
 `DEFAULT_OPENROUTER_VISION_MODEL` in `packages/shared/src/embedding.ts`; the
 profile label, description and default config are derived from its catalog entry.
-NVIDIA Nemotron 3.5 Super VL is an opt-in hosted
-route: set `pipeline.vision.modelUri` to
-`llm://openrouter/nvidia/nemotron-3.5-super-vl` or `pipeline.vision.profile` to
-`open-weights-hosted`. Its OpenRouter list price, verified on 2026-10-20, is
-$0.15 per million input tokens and $0.50 per million output tokens (individual
-OpenRouter providers range from $0.10 to $0.25 input and $0.40 to $1.25 output).
-Page transcription sends it `reasoning: { enabled: false }`. The provider-reported
+NVIDIA Nemotron 3.5 Super VL (`llm://openrouter/nvidia/nemotron-3.5-super-vl`) and MiMo V2.6 Flash are
+in the catalog but refused: their per-image token maximum is a processor maximum, not a proven serving
+maximum, so the vision guard cannot weigh their requests. Config validation and the runtime reject both
+until serving-level evidence exists (`refusedReason` in `packages/shared/src/embedding.ts`). The
+`open-weights-hosted` profile, formerly Nemotron, now sends the open-weights (MIT) default,
+DeepSeek V4.1 Flash 1017.
+The provider-reported
 charge is recorded when present. Otherwise cataloged hosted vision models fall back
 to their own list price instead of the generic `COST_PER_1K_*` rates.
 
@@ -74,7 +74,7 @@ Per-model prompt, output cap, routing and reasoning settings live in
 | Model URI | List $/M in / out | Est. cost/page | Profile behaviour |
 | --- | --- | --- | --- |
 | `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Together, Fireworks, Parasail (US), no other fallbacks, for every organization (DeepSeek's own China-hosted endpoint is cheaper but is not used: where page images go never depends on the account's balance) |
-| `llm://openrouter/xiaomi/mimo-v2.6-flash` | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
+| `llm://openrouter/xiaomi/mimo-v2.6-flash` (refused, see above) | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
 | `llm://openrouter/openai/gpt-6-luna` | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
 | `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Markdown transcription prompt, output cap ceiling 8,192, reasoning `minimal`, routed to Wafer, Friendli then InferenceNet with no other fallbacks, missing table delimiter rows repaired |
 

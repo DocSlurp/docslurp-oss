@@ -16,6 +16,7 @@ import {
   visionPromptKeyForModel,
 } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 
 const MIMO_VISION_MODEL = "xiaomi/mimo-v2.6-flash";
 
@@ -34,7 +35,7 @@ async function sentBody(vision: Record<string, unknown>) {
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await executeVisionRuntime({
     imagePath,
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse(vision),
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
@@ -66,14 +67,10 @@ describe("MiMo vision profile", () => {
     expect(openRouterProviderParams(undefined)).toEqual({});
   });
 
-  it("sends MiMo the transcription prompt, provider preference and reasoning floor", async () => {
-    const body = await sentBody({ modelUri: `llm://openrouter/${MIMO_VISION_MODEL}` });
-    expect(body.model).toBe(MIMO_VISION_MODEL);
-    expect(body.messages[1].content[0].text).toBe(MARKDOWN_TRANSCRIPTION_VISION_PROMPT);
-    expect(body.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
-    expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.temperature).toBe(0);
-    expect(body.max_tokens).toBe(8_192);
+  it("is refused at validation while its image-token bound lacks serving evidence (its profile is kept for re-admission)", () => {
+    const parsed = visionConfigSchema.safeParse({ modelUri: `llm://openrouter/${MIMO_VISION_MODEL}` });
+    expect(parsed.success).toBe(false);
+    expect(JSON.stringify(parsed.error?.issues)).toContain("is not admitted");
   });
 
   it("caps MiMo output at 8k without raising a lower shared cap or touching other models", () => {
@@ -87,12 +84,10 @@ describe("MiMo vision profile", () => {
     expect(cap("deepseek/deepseek-v4.1-flash-1017", 32_768, true)).toBe(32_768);
   });
 
-  it("keeps an explicit template for MiMo and leaves other models unchanged", async () => {
-    const explicit = await sentBody({ modelUri: `llm://openrouter/${MIMO_VISION_MODEL}`, prompt: "layout" });
-    expect(explicit.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
+  it("leaves other models' prompts unchanged", async () => {
     const other = await sentBody({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" });
     expect(other.messages[1].content[0].text).toBe(visionPromptTemplates["<OCR>"]);
-    expect(other.provider).toBeUndefined();
+    expect(other.provider).toEqual({ max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
   });
 });
 

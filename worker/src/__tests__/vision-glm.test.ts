@@ -10,6 +10,7 @@ import { CommandRunner } from "../tools/runner.js";
 import { insertMissingTableDelimiters } from "../tools/vision-table-delimiter.js";
 import { openRouterProviderParams, postProcessVisionText, visionModelProfile, visionOutputCapForModel, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 
 const GLM = "z-ai/glm-5.3-flash";
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
@@ -29,7 +30,7 @@ async function requestBody(model: string, prompt?: string) {
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await executeVisionRuntime({
     imagePath,
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg,
     runner: new CommandRunner(),
@@ -93,7 +94,7 @@ describe("GLM 5.3 Flash vision profile", () => {
   it("keeps an explicitly chosen template but still sends the profile routing, reasoning and cap", async () => {
     const body = await requestBody(GLM, "layout");
     expect(body.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
-    expect(body.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false });
+    expect(body.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, max_price: visionMaxPrice(GLM) });
     expect(body.reasoning).toEqual({ effort: "minimal" });
     expect(body.max_tokens).toBe(8_192);
   });

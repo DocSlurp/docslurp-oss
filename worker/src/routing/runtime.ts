@@ -11,9 +11,11 @@ import { fileURLToPath } from "node:url";
 import {
   buildDecisionModelCatalog,
   buildRoutingTargetCatalog,
+  llmModelUriSchema,
   resolvePageRouterMode,
   routePlanSchema,
   visionModelCatalog,
+  visionModelUriProblem,
   type ActualOutcome,
   type Assignment,
   type DecisionModel,
@@ -116,11 +118,41 @@ function envPresence(env: NodeJS.ProcessEnv): Record<string, boolean> {
   return out;
 }
 
+/** Targets already reported as filtered, so the log line appears once per process and target. */
+const reportedFilteredTargets = new Set<string>();
+
+/**
+ * Whether the vision runtime will send to `target` (tools/vision-runtime.ts re-checks `visionModelUriProblem` before
+ * anything is admitted). A VLM target it would refuse (a hosted model outside the priced vision catalog) is dropped
+ * here, so the planner picks the next-best admitted target instead of planning a page the runtime refuses.
+ */
+export function vlmTargetProblem(target: RoutingTarget): string | null {
+  if (target.kind !== "hosted-vlm" && target.kind !== "private-vlm") return null;
+  if (!target.ref.modelUri) return null;
+  // A URI the route grammar rejects (a private seed without its registry alias) would throw at execution.
+  const parsed = llmModelUriSchema.safeParse(target.ref.modelUri);
+  if (!parsed.success) return `invalid model URI: ${parsed.error.issues[0]?.message ?? "unparseable"}`;
+  return visionModelUriProblem(target.ref.modelUri);
+}
+
+function admitVisionTargets(targets: RoutingTarget[]): RoutingTarget[] {
+  return targets.filter((target) => {
+    const problem = vlmTargetProblem(target);
+    if (!problem) return true;
+    if (!reportedFilteredTargets.has(target.id)) {
+      reportedFilteredTargets.add(target.id);
+      console.warn(`[page-router] target=${target.id} filtered from the routing catalog: ${problem}`);
+    }
+    return false;
+  });
+}
+
 /**
  * Builds the live catalogs from the environment. Non-standard privacy modes drop
  * hosted targets and hosted decision models (the call sites also fail closed).
  * DISABLE_NON_FREE_SOFTWARE drops non-free-licensed targets and decision models at admission (a stored plan that
- * names one resolves to no target and falls back to the workspace vision model).
+ * names one resolves to no target and falls back to the workspace vision model). VLM targets the vision runtime
+ * refuses (`vlmTargetProblem`: hosted models outside the priced vision catalog) are dropped the same way.
  */
 export function buildRuntimeCatalog(
   options: { env?: NodeJS.ProcessEnv; privacyMode?: string | null; disableNonFree?: boolean } = {},
@@ -130,13 +162,13 @@ export function buildRuntimeCatalog(
   const disableNonFree = options.disableNonFree ?? readRoutingFlags(envSource).disableNonFreeSoftware;
   const prices = loadRuntimePrices();
   const checkedAt = prices?.asOf;
-  const all = buildRoutingTargetCatalog({
+  const all = admitVisionTargets(buildRoutingTargetCatalog({
     visionCatalog: visionModelCatalog as unknown as readonly RoutingVisionCatalogEntry[],
     ...(prices ? { prices } : {}),
     env,
     disableNonFree,
     ...(checkedAt ? { checkedAt } : {}),
-  }).targets;
+  }).targets);
   const decisionAll = buildDecisionModelCatalog({ env, disableNonFree }).models;
   const hostedAllowed = options.privacyMode === undefined || options.privacyMode === null || options.privacyMode === "standard";
   return {

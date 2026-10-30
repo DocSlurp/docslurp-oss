@@ -108,6 +108,12 @@ export class WorkflowState {
   totalStages: number;
   docConcurrency = 1;
   distributedVisionPages = new Map<string, unknown>();
+  /**
+   * The shared vision attempt ledger (page bound, rejection breaker and org uncharged bound,
+   * lib/vision-attempt-guard.ts). Set by loadRunState from the store, null when that store has none
+   * (vision then refuses every request); absent only in store-less runs, which count per process.
+   */
+  visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend | null;
   /** Page-level progress for granular percent-complete computation */
   pageProgress: Map<string, PageProgress> = new Map();
   /** Last time updateProgress was called (throttle granular flushes) */

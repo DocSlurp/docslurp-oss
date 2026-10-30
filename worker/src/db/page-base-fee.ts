@@ -267,7 +267,8 @@ export async function billLockedMaterializedPages(
   await client`select id from workspace_runs where id = ${runId} for update`;
   const candidates = moved ? requested.filter((page) => moved.has(page)) : requested;
   const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
-    select id, org_id, user_id, workspace_id, stats from workspace_runs where id = ${runId}
+    select r.id, coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id,
+      r.user_id, r.workspace_id, r.stats from workspace_runs r where r.id = ${runId}
   `;
   if (!row) throw new Error(`run not found: ${runId}`);
   const state = { run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} } } as unknown as WorkflowState;

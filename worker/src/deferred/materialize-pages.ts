@@ -36,8 +36,9 @@ import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type Vector
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-runtime.js";
-import { findVisionOutputRejected } from "../tools/vision-stream.js";
+import { executeVisionRuntime, type VisionPrimaryFailure } from "../tools/vision-runtime.js";
+import { guardedVisionCall, priceVisionResult, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
+import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import { DocumentNotFoundError } from "../db/missing-document.js";
 import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
@@ -62,6 +63,8 @@ export interface OcrPageResult {
   outputTokens: number;
   costCents: number;
   metadata?: Record<string, unknown>;
+  /** The primary route's billed failure when the fallback read the page; the guarded call records it. */
+  primaryFailure?: VisionPrimaryFailure;
 }
 
 /** Side-effecting edges, injectable so tests need no poppler, vision model, embedder or LanceDB. */
@@ -69,7 +72,8 @@ export interface PageMaterializerOps {
   /** Text layer for pages first..last (inclusive), one string per page. */
   extractText(document: Document, range: { first: number; last: number }, signal?: AbortSignal): Promise<string[]>;
   /** Rasterize + vision-OCR one page. */
-  ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; signal?: AbortSignal }): Promise<OcrPageResult>;
+  /** `gate` admits every vision request the read sends (the run's vision attempt guard). */
+  ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; signal?: AbortSignal; gate: VisionRequestGate }): Promise<OcrPageResult>;
   embed(args: {
     chunks: string[];
     profile: EmbeddingProfile;
@@ -151,17 +155,15 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
           runner: deps.runner,
           privacyMode: ctx.pipeline.privacyMode,
           signal: ctx.signal,
+          gate: ctx.gate,
         });
-        const costCents = result.costCents ?? calculateAiUsageCostCents({
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          costPer1kInputTokens: deps.config.costPer1kInputTokens,
-          costPer1kOutputTokens: deps.config.costPer1kOutputTokens,
-        });
+        // Priced on the route that served it: 0 on a local, loopback or private route, list price on a billed one.
+        const costCents = priceVisionResult(result, deps.config);
         return {
           text: result.text,
-          model: result.model,
-          provider: result.provider ?? (result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
+          model: result.route.model,
+          provider: result.route.provider,
+          ...(result.primaryFailure ? { primaryFailure: result.primaryFailure } : {}),
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
           costCents,
@@ -386,53 +388,63 @@ export async function materializePageRange(
   }
   for (const page of keptUnread) failed.set(page, KEPT_AS_IMAGE_REASON);
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
+  // Every OCR request passes the run's vision attempt guard (page bound, rejection breaker, the org's
+  // rolling uncharged-attempt bound), beside this materialization's own credit budget.
+  const guardHost = { run, visionAttempts: deps.store?.visionAttempts ?? null };
   await mapLimit(ocrPages, OCR_CONCURRENCY, async (page) => {
     if (spentCents >= budgetCents) {
       released.push(page);
       failed.set(page, "credit-limit");
       return;
     }
+    let guarded: GuardedVisionOutcome<OcrPageResult>;
     try {
-      const ocr = await ops.ocrPage(document, page, { runId: input.runId, pipeline });
-      const event = deps.usage.record({
-        provider: ocr.provider ?? "vision-runtime",
-        model: ocr.model,
-        metric: "page-analysis",
-        amount: 1,
-        unit: "page",
-        costCents: ocr.costCents,
-        inputTokens: ocr.inputTokens,
-        outputTokens: ocr.outputTokens,
-        metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+      guarded = await guardedVisionCall({
+        host: guardHost,
+        vision: pipeline.vision,
+        cfg: deps.config,
+        target: { documentId, pageNumber: page, purpose: "page" },
+        record: (usage) => deps.usage.record(usage),
+        metadata: { materializedBy: input.reason, sessionId: input.sessionId },
+        call: (gate) => ops.ocrPage(document, page, { runId: input.runId, pipeline, gate }),
+        // Customer credits: an OCR-read page bills Rich (the usage ledger charges it, once per run and
+        // page); that request leaves the org's uncharged count. Provider cost is ours.
+        onResult: (ocr, gate) => {
+          recordVisionRead(deps.usage, gate, { documentId, pageNumber: page }, {
+            provider: ocr.provider ?? "vision-runtime",
+            model: ocr.model,
+            metric: "page-analysis",
+            amount: 1,
+            unit: "page",
+            costCents: ocr.costCents,
+            inputTokens: ocr.inputTokens,
+            outputTokens: ocr.outputTokens,
+            metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+          });
+        },
       });
-      // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
-      void event;
-      const richPages = richPagesForOutputTokens(ocr.outputTokens);
-      const cost = pageCredits("rich", richPages);
-      spentCents += cost;
-      readCents.set(page, cost);
-      if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
-      else {
-        prepared.set(page, { page, text: ocr.text });
-        modelReads.set(page, richPages);
-      }
+
     } catch (error) {
-      // A page rejected on every attempt was still billed: record the summed spend and count it against the budget.
-      const rejected = findVisionOutputRejected(error);
-      if (rejected) {
-        const usage = rejectedVisionUsageInput(rejected, rejected.costCents ?? calculateAiUsageCostCents({
-          inputTokens: rejected.inputTokens,
-          outputTokens: rejected.outputTokens,
-          costPer1kInputTokens: deps.config.costPer1kInputTokens,
-          costPer1kOutputTokens: deps.config.costPer1kOutputTokens,
-        }), "vision-runtime");
-        const event = deps.usage.record({
-          ...usage,
-          metadata: { ...usage.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
-        });
-        spentCents += event?.costCents ?? usage.costCents;
-      }
+      // A page rejected on every attempt (or failed after billing) was recorded with its provider
+      // spend by the guarded call (unbilled: no customer credits); the guard bounds that spend.
       failed.set(page, error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (!guarded.admitted) {
+      // Refused by the run's or org's attempt bound: the page stays claimable for later.
+      released.push(page);
+      failed.set(page, `vision-stopped:${guarded.stop.reason}`);
+      return;
+    }
+    const ocr = guarded.result;
+    const richPages = richPagesForOutputTokens(ocr.outputTokens);
+    const cost = pageCredits("rich", richPages);
+    spentCents += cost;
+    readCents.set(page, cost);
+    if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
+    else {
+      prepared.set(page, { page, text: ocr.text });
+      modelReads.set(page, richPages);
     }
   });
 

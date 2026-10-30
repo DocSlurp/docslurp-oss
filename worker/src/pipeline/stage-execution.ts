@@ -36,6 +36,7 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import { latchedTeardownError } from "../sandbox/session-context.js";
 import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
@@ -150,6 +151,8 @@ export async function loadRunState(
   store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState"> & {
     /** Reads the run's stage checkpoints so they travel beside the run and document reads. */
     readStageStates?(runId: string): Promise<unknown>;
+    /** The shared vision attempt ledger (page bound, rejection breaker, org bound). */
+    visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend;
   },
   runId: string,
   options: LoadRunOptions = {},
@@ -164,6 +167,8 @@ export async function loadRunState(
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
+  // A store-backed run never falls back to a per-process count: without the shared ledger, vision refuses.
+  state.visionAttempts = store.visionAttempts ?? null;
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
   if (options.totalStages !== undefined) {
     state.totalStages = typeof options.totalStages === "function" ? options.totalStages(state.run) : options.totalStages;
@@ -238,6 +243,10 @@ export function createStageExecution(deps: {
       : store.hydrateState(state));
     const { run, documents } = state;
 
+    // Legacy vision routing version: read from the environment once, here, and persisted with the
+    // run's artifacts by the progress write below, so every stage, shard and page task agrees.
+    const visionRoutingVersion = pinRunRoutingVersion(state);
+
     // Mark run as processing
     state.run.status = "processing";
     state.totalStages = input.totalStages;
@@ -259,7 +268,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion}`,
     );
     if (completedRunStages.length > 0) {
       console.log(

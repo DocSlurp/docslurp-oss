@@ -8,6 +8,7 @@ import { CHINA_PROVIDER_SLUGS, visionConfigSchema } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 import { alternateRouteBody } from "../tools/vision-stream.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 
@@ -19,6 +20,7 @@ afterEach(() => {
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
 const DEEPSEEK = "deepseek/deepseek-v4.1-flash-1017";
 const MIMO = "xiaomi/mimo-v2.6-flash";
+const GLM = "z-ai/glm-5.3-flash";
 const LUNA = "openai/gpt-6-luna";
 
 describe("alternateRouteBody", () => {
@@ -78,7 +80,7 @@ async function run(model: string, responses: Response[]) {
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   const result = await executeVisionRuntime({
-    imagePath, outputPath: `${imagePath}.json`,
+    imagePath, outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}` }),
     cfg, runner: new CommandRunner(), privacyMode: "standard",
   });
@@ -96,17 +98,13 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("Together"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Fireworks", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
-    expect(bodies[0]!.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
-    expect(bodies[1]!.provider).toEqual({ order: ["fireworks", "parasail"], allow_fallbacks: false, ignore: ["Together"] });
+    expect(bodies[0]!.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[1]!.provider).toEqual({ order: ["fireworks", "parasail"], allow_fallbacks: false, ignore: ["Together"], max_price: visionMaxPrice(DEEPSEEK) });
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });
   });
 
-  it("MiMo keeps its order and fallbacks and adds the failing provider to ignore", async () => {
-    const { bodies } = await run(MIMO, [
-      filtered("Relace"),
-      sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
-    ]);
-    expect(bodies[1]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: ["Relace"] });
+  it("MiMo is refused before anything is sent (no serving-level image-token evidence)", async () => {
+    await expect(run(MIMO, [])).rejects.toThrow(/is not admitted/);
   });
 
   it("Luna goes to its preferred retry route over SSE", async () => {
@@ -114,38 +112,38 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("OpenAI"),
       sse([{ id: "g", model: LUNA, provider: "Amazon Bedrock", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]);
-    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false });
+    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
   });
 });
 
 describe("org China-provider restriction", () => {
   it("keeps China-based providers out of a restricted org's vision requests, retries included", async () => {
-    const { bodies } = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, () => run(MIMO, [
-      filtered("Relace"),
-      sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+    const { bodies } = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, () => run(GLM, [
+      filtered("Wafer"),
+      sse([{ id: "g", model: GLM, provider: "Friendli", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]));
-    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS] });
-    expect(bodies[1]!.provider.ignore).toEqual([...CHINA_PROVIDER_SLUGS, "Relace"]);
+    expect(bodies[0]!.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(GLM) });
+    expect(bodies[1]!.provider.ignore).toEqual([...CHINA_PROVIDER_SLUGS, "Wafer"]);
   });
 
   it("leaves an unrestricted org's routing unchanged", async () => {
-    const { bodies } = await runWithProviderRateScope({ orgId: "org" }, () => run(MIMO, [
-      sse([{ id: "g", model: MIMO, provider: "Relace", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+    const { bodies } = await runWithProviderRateScope({ orgId: "org" }, () => run(GLM, [
+      sse([{ id: "g", model: GLM, provider: "Wafer", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]));
-    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
+    expect(bodies[0]!.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, max_price: visionMaxPrice(GLM) });
   });
 });
 
 describe("served model and provider from a streamed result", () => {
   it("reads model from chunks and provider from the final usage chunk (string or {name})", async () => {
     for (const provider of ["DeepSeek", { name: "DeepSeek" }]) {
-      const { result } = await run("deepseek/deepseek-v4.1-flash", [sse([
+      const { result } = await run("deepseek/deepseek-v4.1-flash-1017", [sse([
         { id: "g", model: "deepseek/deepseek-v4.1-flash-0925", choices: [{ delta: { content: "hi" } }] },
         { id: "g", provider, choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } },
       ])]);
       expect(result.servedModel).toBe("deepseek/deepseek-v4.1-flash-0925");
       expect(result.servedProvider).toBe("DeepSeek");
-      expect(result.modelSwap).toMatchObject({ requested: "deepseek/deepseek-v4.1-flash", served: "deepseek/deepseek-v4.1-flash-0925", provider: "DeepSeek" });
+      expect(result.modelSwap).toMatchObject({ requested: "deepseek/deepseek-v4.1-flash-1017", served: "deepseek/deepseek-v4.1-flash-0925", provider: "DeepSeek" });
     }
   });
 });

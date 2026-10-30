@@ -8,6 +8,7 @@ import { visionConfigSchema, visionModelCatalog } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { MARKDOWN_LATEX_VISION_PROMPT, VISION_MODEL_PROFILES, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
+import { visionMaxPrice } from "../test/vision-max-price.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
 const SNAPSHOT = "deepseek/deepseek-v4.1-flash-1017";
@@ -30,7 +31,7 @@ async function send(model: string, prompt?: string) {
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await executeVisionRuntime({
     imagePath,
-    outputPath: `${imagePath}.json`,
+    outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
@@ -48,12 +49,12 @@ describe("per-model vision profiles", () => {
     expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
+    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(SNAPSHOT) });
   });
 
   it("routes every organization to the same US-hosted providers", async () => {
     const { body } = await send(SNAPSHOT);
-    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
+    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false, max_price: visionMaxPrice(SNAPSHOT) });
     expect(body.provider.order).not.toContain("deepseek");
   });
 
@@ -62,12 +63,8 @@ describe("per-model vision profiles", () => {
     expect(userText).toBe(visionPromptTemplates["form-fields"]);
   });
 
-  it("leaves the base DeepSeek alias on the generic defaults", async () => {
-    const { body, userText } = await send("deepseek/deepseek-v4.1-flash");
-    expect(userText).toBe(visionPromptTemplates["<OCR>"]);
-    expect(body.max_tokens).toBe(16_384);
-    expect(body.provider).toBeUndefined();
-    expect(body.reasoning).toEqual({ effort: "none" });
+  it("refuses the uncataloged base DeepSeek alias: hosted vision is limited to the priced catalog", async () => {
+    await expect(send("deepseek/deepseek-v4.1-flash")).rejects.toThrow(/not in the priced vision catalog/);
   });
 
   it("maps only an unset or <OCR> prompt to the profile default", () => {

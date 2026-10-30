@@ -220,7 +220,7 @@ describe("Stage Execution", () => {
     const output = await execution.startRun({ runId: "run-1", totalStages: 3 });
 
     expect(store.runStatus).toBe("processing");
-    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
+    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v1" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
     expect(store.events.map((event) => event.eventType)).toEqual(["run.started"]);
   });
 
