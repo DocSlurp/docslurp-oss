@@ -41,6 +41,9 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   "PostgresError",
   "NoSuchBucket",
   "CredentialsProviderError",
+  // The worker, not the Document: a command's teardown failed here, or this worker is quarantined.
+  "CommandTeardownError",
+  "WorkerQuarantinedError",
 ]);
 
 function causeChain(error: unknown): unknown[] {

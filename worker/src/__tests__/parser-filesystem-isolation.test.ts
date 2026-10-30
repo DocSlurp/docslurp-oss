@@ -1,11 +1,12 @@
 import { createServer } from "node:net";
 import { buildSandboxCommand } from "../tools/runner.js";
 import bubblewrap from "../sandbox/providers/bubblewrap/index.js";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it } from "vitest";
+import { superviseChild } from "../sandbox/teardown.js";
 import type { SandboxCommand } from "../sandbox/types.js";
 
 const sandboxInputs = {
@@ -20,11 +21,12 @@ async function runThroughBubblewrap(command: SandboxCommand) {
   const session = await bubblewrap.openSession(bubblewrap.readConfig({}), { activityId: "test" });
   try {
     const child = session.spawn!(command);
+    const supervised = superviseChild(child, { label: "isolation-test" });
     let stderr = "";
     child.stderr?.on("data", (chunk) => (stderr += chunk));
     child.stdout?.resume();
-    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    const status = await new Promise<number | null>((resolve) => child.once("close", resolve));
+    const timer = setTimeout(() => supervised.terminate(new Error("timeout"), { immediate: true }), 10_000);
+    const { code: status } = await supervised.done;
     clearTimeout(timer);
     return { status, stderr };
   } finally {
@@ -142,3 +144,50 @@ it.skipIf(process.platform !== "linux")("has no unisolated mode: the launcher ig
     rmSync(bin, { recursive: true, force: true });
   }
 });
+
+it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("stops a TERM-ignoring parser as soon as the launcher is signalled", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "docslurp-launcher-signal-"));
+  try {
+    const sandboxRoot = path.join(root, "instances");
+    const marker = path.join(root, "job", "started");
+    mkdirSync(path.join(root, "job"));
+    const launcher = spawn("bash", [path.resolve("scripts/parser-sandbox.sh"), "/bin/bash", "-c",
+      'trap "" TERM; printf started > "$1"; exec sleep 30', "probe", marker], {
+      stdio: "ignore",
+      env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_ROOT: sandboxRoot, DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir(), DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: path.join(root, "job") },
+    });
+    const exited = new Promise<{ code: number | null; at: number }>((resolve) => launcher.once("exit", (code) => resolve({ code, at: Date.now() })));
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(existsSync(marker)).toBe(true);
+    const sleeper = descendants(launcher.pid!).find((pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").startsWith("sleep\0"));
+    expect(sleeper).toBeDefined();
+    const signalledAt = Date.now();
+    launcher.kill("SIGTERM");
+    const { code, at } = await exited;
+    // The old launcher deferred its trap until the parser exited on its own (here, 30 s later).
+    expect(at - signalledAt).toBeLessThan(2_000);
+    expect(code).toBe(143);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(existsSync(`/proc/${sleeper}`)).toBe(false);
+    expect(readdirSync(sandboxRoot)).toEqual([]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 15_000);
+
+/** Every live descendant of `pid`, read from /proc. */
+function descendants(pid: number): number[] {
+  const children = new Map<number, number[]>();
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const ppid = Number(readFileSync(`/proc/${entry}/stat`, "utf8").split(") ")[1]!.split(" ")[1]);
+      children.set(ppid, [...(children.get(ppid) ?? []), Number(entry)]);
+    } catch {}
+  }
+  const found: number[] = [];
+  const queue = [pid];
+  while (queue.length > 0) for (const child of children.get(queue.shift()!) ?? []) found.push(child), queue.push(child);
+  return found;
+}

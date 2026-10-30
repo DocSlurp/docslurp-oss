@@ -8,6 +8,11 @@ import { PdfRasterCache, PdfSourceCache, readRasterEngine } from "../pipeline/pd
 import { imageDimensions, renderClipNative, renderPagesNative } from "./render.js";
 import type { NativePdfEngine, NativePdfRenderOptions } from "./types.js";
 
+/** pdfinfo -f/-l output: the "Pages:" line, then one numbered size line per page. */
+function pdfinfoSizes(first: number, last: number): string {
+  return [`Pages:           ${last}`, "Encrypted:       no", ...Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`)].join("\n");
+}
+
 function png(width: number, height: number): Buffer {
   const buf = Buffer.alloc(33);
   buf.write("\x89PNG\r\n\x1a\n", 0, "latin1");
@@ -106,13 +111,13 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     };
     let pdftoppmCalls = 0;
     const runner = {
-      async pdfPageSizes() { return { binary: "pdfinfo", args: [], available: true }; },
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
       async renderPdfPageRange(_s: string, prefix: string, first: number, last: number) {
         pdftoppmCalls += 1;
         return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
       },
       async run(plan: { binary?: string; args: string[] }) {
-        if (plan.binary === "pdfinfo") return { stdout: "Page 1 size: 612 x 792 pts", stderr: "" };
+        if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
         const [prefix, a, b] = plan.args;
         for (let p = Number(a); p <= Number(b); p += 1) await writeFile(`${prefix}-${p}.png`, png(1275, 1650));
         return { stdout: "", stderr: "" };

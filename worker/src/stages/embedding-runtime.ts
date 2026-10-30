@@ -21,6 +21,7 @@ import { generateOpenRouterText } from "../lib/ai.js";
 import { textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
+import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -175,13 +176,13 @@ export async function extractTextForEmbedding(
   }
 
   if (isCsvLike(document)) {
-    const data = await storage.getBytes(document.sourceKey);
+    const data = await readSourceBytes(storage, document);
     const text = delimitedTableMarkdown(data.toString("utf8"), document.filename);
     return { text, extractor: "csv-to-markdown-table", canonicalDocument };
   }
 
   if (isJsonLike(document)) {
-    const data = await storage.getBytes(document.sourceKey);
+    const data = await readSourceBytes(storage, document);
     if (isUtf8(data)) {
       const raw = data.toString("utf8");
       const result = parseJsonContent(raw, document);
@@ -190,7 +191,7 @@ export async function extractTextForEmbedding(
   }
 
   if (isTextLike(document)) {
-    const data = await storage.getBytes(document.sourceKey);
+    const data = await readSourceBytes(storage, document);
     if (isUtf8(data)) {
       return {
         text: data.toString("utf8"),
@@ -200,10 +201,7 @@ export async function extractTextForEmbedding(
     }
   }
 
-  const tempFile = await storage.downloadToTempFile(
-    document.sourceKey,
-    trustedTempDownloadPattern("docslurp-source-", document),
-  );
+  const tempFile = await stageSourceFile(storage, document, trustedTempDownloadPattern("docslurp-source-", document));
 
   try {
     const isPdf =
@@ -240,7 +238,7 @@ export async function extractTextForEmbedding(
       // Fall through to raw bytes.
     }
 
-    const bytes = await storage.getBytes(document.sourceKey);
+    const bytes = await readSourceBytes(storage, document);
     if (isUtf8(bytes)) {
       return {
         text: bytes.toString("utf8"),

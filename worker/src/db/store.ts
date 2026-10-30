@@ -107,6 +107,7 @@ type DocumentRow = {
   filename: string;
   mime_type: string;
   source_key: string;
+  source_sha256?: string | null;
   status: string;
   extraction_mode: string;
   page_count: number;
@@ -4086,6 +4087,7 @@ function mapDocument(row: DocumentRow): Document {
     filename: row.filename,
     mimeType: row.mime_type,
     sourceKey: row.source_key,
+    sourceSha256: row.source_sha256 ?? null,
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
