@@ -1,7 +1,7 @@
 {
   "name": "docslurp-oss",
   "private": true,
-  "packageManager": "pnpm@10.34.7+sha512.ba98abc585539933375b5971f4bc6d6c73a1b4b7edc4a879e7d102fe5423d1e02309d67c60a11f04955093a96e521ad9c3b138cdd654ca5be563f378b3ae48bd",
+  "packageManager": "pnpm@10.34.9+sha512.f49b5a8ea0fdedb44bb3c0c1d6575092a53c2950d95b7ad15df11f17974877a2de3a01c07e934e9b28ce716e51c09a94962c7306d09be2e1e4b18a8c8762fd32",
   "engines": {
     "node": ">=24"
   },
@@ -64,7 +64,8 @@
       "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
       "@earendil-works/pi-coding-agent>undici": "8.12.3",
       "express>body-parser": "^2.4.0",
-      "ajv>fast-uri": "^3.1.9"
+      "ajv>fast-uri": "^3.1.9",
+      "jose": "^6.2.14"
     },
     "onlyBuiltDependencies": [
       "@prisma/engines",
@@ -81,7 +82,7 @@
     }
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.1157.0",
+    "@aws-sdk/client-s3": "^3.1159.0",
     "dotenv": "^18.0.9",
     "drizzle-kit": "^0.31.11",
     "drizzle-orm": "^0.45.4",

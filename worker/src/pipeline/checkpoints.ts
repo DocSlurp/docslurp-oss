@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 
 import type { Document } from "../models.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
+import { latchedTeardownError } from "../sandbox/session-context.js";
+import { findQuarantinedSourceError } from "../sandbox/source-quarantine.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
@@ -281,12 +283,17 @@ export async function runDocumentStage(
       const result = await runWithPerfContext({
         runId: state.run.id,
         documentId: document.id,
+        orgId: state.run.orgId,
+        ...(state.run.workspaceId ? { workspaceId: state.run.workspaceId } : {}),
         pageCount: document.pageCount,
         scope: "document",
         stageName,
         pushPerformance: (event) => state.pendingPerformance.push(event),
         pushUsage: (event) => state.usageLedger.enqueue(event),
       }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders }, () => run(attempt.strategy)));
+      // A command teardown that failed in this activity ends it, even if the stage swallowed it.
+      const latched = latchedTeardownError();
+      if (latched) throw latched;
       const stats = result.stats ?? {};
 
       const plausibilityDecision = shouldEscalateForLowPlausibility(stats, attempt);
@@ -326,7 +333,10 @@ export async function runDocumentStage(
         );
       }
       return;
-    } catch (error) {
+    } catch (caught) {
+      // A teardown failure (thrown or latched) is the worker's, not the Document's: never retried
+      // with another strategy, never persisted as a Document failure, rethrown below.
+      const error = latchedTeardownError() ?? caught;
       initializeWorkerErrorReporting();
       reportException(error, { runId: state.run.id, documentId: document.id, stage: stageName });
       lastFailure = documentStageFailure(error);
@@ -342,7 +352,8 @@ export async function runDocumentStage(
       });
       recordRetryCount(state, document.id, attempt.attempt);
 
-      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal)) {
+      // A quarantined source fails the Document at once: another strategy would only try again.
+      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal) || findQuarantinedSourceError(error)) {
         break;
       }
     }

@@ -2,6 +2,7 @@ import { instrumentS3Client } from "@docslurp/shared/observability";
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
+  CopyObjectCommand,
   CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
@@ -276,6 +277,26 @@ export async function getUploadedObjectMetadata(key: string): Promise<{
     contentType: response.ContentType ?? null,
     etag: response.ETag ?? null
   };
+}
+
+/**
+ * Copy an uploaded object to a key no presigned URL names, but only while it is still the version
+ * that was verified (`ifMatch`, its ETag): a PUT that lands in between fails the copy with
+ * PreconditionFailed instead of being copied. Single-part sources only (CopyObject's 5 GiB limit
+ * matches a single PUT's).
+ */
+export async function copyUploadedObject(args: { fromKey: string; toKey: string; ifMatch: string }): Promise<{ etag: string | null }> {
+  await ensureBucketExists();
+  const response = await s3Client.send(
+    new CopyObjectCommand({
+      Bucket: env.s3Bucket,
+      Key: args.toKey,
+      CopySource: `${env.s3Bucket}/${args.fromKey.split("/").map(encodeURIComponent).join("/")}`,
+      CopySourceIfMatch: args.ifMatch,
+      MetadataDirective: "COPY"
+    })
+  );
+  return { etag: response.CopyObjectResult?.ETag ?? null };
 }
 
 export async function deleteUploadedObject(key: string): Promise<void> {

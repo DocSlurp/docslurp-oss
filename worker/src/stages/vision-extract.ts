@@ -1479,11 +1479,14 @@ export class VisionExtractStage implements Stage {
       return { changedPages: [], decisions: [] };
     }
 
-    const contract = extractionContractSchema.parse(await this.storage.getJson(contractKey));
-    const canonicalDocument = canonicalDocumentSchema.parse(
-      await this.storage.getJson(canonicalKey),
-    );
-    const routing = await this.loadAdaptiveRouting(state, document.id);
+    // Independent reads: fetch them together rather than one storage round trip after another.
+    const [contractJson, canonicalJson, routing] = await Promise.all([
+      this.storage.getJson(contractKey),
+      this.storage.getJson(canonicalKey),
+      this.loadAdaptiveRouting(state, document.id),
+    ]);
+    const contract = extractionContractSchema.parse(contractJson);
+    const canonicalDocument = canonicalDocumentSchema.parse(canonicalJson);
     const routingByPage = new Map(
       (routing?.pages ?? []).map((page) => [page.pageNumber, page]),
     );
@@ -1538,19 +1541,28 @@ export class VisionExtractStage implements Stage {
     const reconciledContractKey = `${runArtifactRoot(state.run, document.userId)}/extraction-reconciled/${document.id}.contract.json`;
     const reconciledMarkdownKey = `${runArtifactRoot(state.run, document.userId)}/markdown-reconciled/${document.id}.md`;
     const reconciliationKey = `${runArtifactRoot(state.run, document.userId)}/canonical-reconciliation/${document.id}.json`;
-    await this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument);
-    await this.storage.putJson(reconciledContractKey, reconciled.extractionContract);
-    await this.storage.putBytes(
-      reconciledMarkdownKey,
-      Buffer.from(reconciled.markdown, "utf8"),
-      "text/markdown; charset=utf-8",
-    );
-    await this.storage.putJson(reconciliationKey, {
-      documentId: document.id,
-      changedPages: reconciled.changedPages,
-      decisions: reconciled.decisions,
-      sourceCanonicalUri: canonicalUri,
-      sourceContractUri: contractUri,
+    // The four new keys are written together. Every write settles before a failure propagates, so none is left
+    // running; only then is the published summary evidence overwritten and the ledger pointed at the new keys.
+    await settleAll([
+      this.storage.putJson(reconciledCanonicalKey, reconciled.canonicalDocument),
+      this.storage.putJson(reconciledContractKey, reconciled.extractionContract),
+      this.storage.putBytes(
+        reconciledMarkdownKey,
+        Buffer.from(reconciled.markdown, "utf8"),
+        "text/markdown; charset=utf-8",
+      ),
+      this.storage.putJson(reconciliationKey, {
+        documentId: document.id,
+        changedPages: reconciled.changedPages,
+        decisions: reconciled.decisions,
+        sourceCanonicalUri: canonicalUri,
+        sourceContractUri: contractUri,
+      }),
+    ]);
+    // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
+    await refreshSummaryEvidence({
+      storage: this.storage, ledger: state.artifactLedger, document,
+      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
     });
 
     state.artifactLedger.recordDocument(
@@ -1568,11 +1580,6 @@ export class VisionExtractStage implements Stage {
       "markdown",
       this.storage.uri(reconciledMarkdownKey),
     );
-    // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
-    await refreshSummaryEvidence({
-      storage: this.storage, ledger: state.artifactLedger, document,
-      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
-    });
     state.artifactLedger.recordDocument(
       document.id,
       "canonical-reconciliation",
@@ -1693,4 +1700,11 @@ async function mapWithConcurrency<T, R>(
     }),
   );
   return results;
+}
+
+/** Awaits every promise, then rethrows the first rejection (in argument order); unlike `Promise.all`, none is left running. */
+async function settleAll(promises: Array<Promise<unknown>>): Promise<void> {
+  const results = await Promise.allSettled(promises);
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
 }

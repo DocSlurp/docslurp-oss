@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
@@ -10,6 +10,8 @@ import {
   loadRunState,
   type StageExecutionStore,
 } from "../pipeline/stage-execution.js";
+import { runWithSandboxScope, SandboxSessionScope } from "../sandbox/session-context.js";
+import { CommandTeardownError, recordUnverifiedTeardown, resetUnverifiedTeardownsForTests } from "../sandbox/teardown.js";
 
 const config = { workerDocConcurrency: 2, workerAdaptiveTuning: false } as Config;
 
@@ -369,6 +371,39 @@ describe("Stage Execution", () => {
     const beatsAtFailure = heartbeats.length;
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(heartbeats.length).toBe(beatsAtFailure);
+  });
+
+  // #234 round 5 (H1): the stall watchdog replaced the caught error with its own HungWork reason,
+  // which an activity then retried on another worker even though a command's teardown had failed.
+  it.each([
+    ["thrown by the stage", true],
+    ["swallowed by the stage, which then failed on the abort", false],
+  ])("a command teardown failure %s wins over the stall watchdog", async (_label, rethrow) => {
+    resetUnverifiedTeardownsForTests();
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new FakeStore();
+    const { runtime: rt } = runtime({ heartbeatIntervalMs: 10 });
+    const execution = createStageExecution({
+      store,
+      config,
+      stages: [stage("parse", (_state, signal) => new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          // The watchdog stops the parser, whose teardown cannot be verified.
+          const teardown = new CommandTeardownError("pdftoppm teardown could not be verified");
+          recordUnverifiedTeardown(teardown, "label=pdftoppm");
+          reject(rethrow ? teardown : new Error("socket aborted"));
+        }, { once: true });
+      }))],
+    });
+    const scope = new SandboxSessionScope(async () => { throw new Error("unused"); });
+    const error = await runWithSandboxScope(scope, () =>
+      execution.runStage(input("parse"), { ...rt, stallTimeoutMs: 60, progressFromProcessCpu: false }))
+      .catch((caught: unknown) => caught);
+    // Old behavior: the hung-work stall reason.
+    expect(error).toBeInstanceOf(CommandTeardownError);
+    expect(scope.teardownError).toBe(error);
+    quiet.mockRestore();
+    resetUnverifiedTeardownsForTests();
   });
 
   it("keeps heartbeating while the stage reports progress", async () => {

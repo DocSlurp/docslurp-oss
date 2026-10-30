@@ -7,6 +7,15 @@ export type SandboxNetworkIsolation = "none" | "tcp-only" | "full";
 export interface SandboxIsolation {
   filesystem: boolean;
   network: SandboxNetworkIsolation;
+  /**
+   * No process a command starts outlives it on the worker host, so teardown can be verified.
+   * Local providers get it from a PID namespace; it covers what the command forks, not processes a
+   * host service (a systemd user manager over the session bus) starts on its behalf outside the
+   * namespace. Teardown fails closed on those: stdio still held past the bound poisons the slot.
+   * Remote providers (modal) qualify because nothing runs on the host; a remote descendant can
+   * outlive its command inside that activity's remote sandbox until the session ends.
+   * Untrusted parser work refuses to run without it (see policy.ts and sandbox/teardown.ts).
+   */
   processes: boolean;
   location: "local" | "remote";
 }
@@ -39,6 +48,11 @@ export interface SandboxCommand {
   /** Directories the command may write. Remote providers create them and copy them back. */
   writablePaths: string[];
   limits: SandboxLimits;
+  /**
+   * Make creating a UNIX socket fail inside the sandbox (seccomp, sandbox/seccomp.ts). Only a session
+   * with `filtersUnixSockets` may run such a command; the runner refuses it on any other.
+   */
+  denyUnixSockets?: boolean;
 }
 
 export interface SandboxResult {
@@ -65,8 +79,19 @@ export class SandboxRunError extends Error {
 export interface SandboxSession {
   readonly providerId: string;
   readonly isolation: SandboxIsolation;
-  /** Local providers return a child process so the existing monitor keeps enforcing limits. */
-  spawn?(command: SandboxCommand, signal?: AbortSignal): ChildProcess;
+  /**
+   * The session keeps a command from meeting another (or a host service) on a UNIX socket:
+   * bubblewrap with its seccomp filter (`SandboxCommand.denyUnixSockets`), landlock with landrun's
+   * scoping (abstract and pathname connects outside the command's domain are refused). Without it
+   * the runner refuses those commands unless DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS opts in
+   * (development only).
+   */
+  readonly filtersUnixSockets?: boolean;
+  /**
+   * Local providers return a child started by `spawnContained` (sandbox/teardown.ts); the runner
+   * refuses any other. The caller owns abort, limits and teardown through `superviseChild`.
+   */
+  spawn?(command: SandboxCommand): ChildProcess;
   /** Remote providers run to completion and enforce limits provider-side. */
   run?(command: SandboxCommand, signal?: AbortSignal): Promise<SandboxResult>;
   close(): Promise<void>;

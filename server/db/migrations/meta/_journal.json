@@ -713,14 +713,35 @@
       "idx": 101,
       "version": "7",
       "when": 1793300000005,
-      "tag": "0101_vision_attempt_ledger",
+      "tag": "0101_quarantined_sources",
       "breakpoints": true
     },
     {
       "idx": 102,
       "version": "7",
       "when": 1793300000006,
-      "tag": "0102_workspace_china_providers",
+      "tag": "0102_upload_original_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793300000007,
+      "tag": "0103_upload_cleanup_owners",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1793300000008,
+      "tag": "0104_vision_attempt_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1793300000009,
+      "tag": "0105_workspace_china_providers",
       "breakpoints": true
     }
   ]

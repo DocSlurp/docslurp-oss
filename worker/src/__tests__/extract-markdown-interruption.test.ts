@@ -39,6 +39,11 @@ function stageWith(extract: (label: string) => Promise<never>) {
   const stage = new ExtractMarkdownStage({} as any, {} as any, {} as any);
   const internals = stage as any;
   internals.sources = { get: async () => ({ path: "/nonexistent/source.pdf", sha256: "sha-doc-1" }) };
+  // Extractors are faked below; keep their (fake) source instead of copying it per candidate.
+  internals.isolateConcurrentCandidates = async (args: { primary: unknown; secondary: unknown; sourcePath: string }) => ({
+    primary: { extractor: args.primary, source: args.sourcePath },
+    secondary: args.secondary ? { extractor: args.secondary, source: args.sourcePath } : null,
+  });
   internals.recordSourcePageFacts = async () => undefined;
   internals.tryResolveExtractorOrder = () => [...ORDER];
   internals.describeExtractorOrder = () => ORDER.join(">");

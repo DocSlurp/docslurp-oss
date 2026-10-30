@@ -38,28 +38,29 @@ export async function runLocalArtifactCommand(binary: string, args: string[], ma
       if (Buffer.byteLength(result.stdout) > maxBytes) throw new Error(`${binary} output exceeds ${maxBytes} bytes`);
       return Buffer.from(result.stdout);
     }
-    const { child } = launched;
+    const { child, supervised } = launched;
     return await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
       let size = 0;
       let stderr = "";
       let limitError: Error | null = null;
-      const timer = setTimeout(() => { limitError = new Error(`${binary} timed out`); child.kill("SIGKILL"); }, timeoutMs);
+      // Every stop goes through the supervisor so the command's whole process tree is gone before this settles.
+      const timer = setTimeout(() => { limitError = new Error(`${binary} timed out`); supervised.terminate(limitError, { immediate: true }); }, timeoutMs);
       child.stdout?.on("data", (chunk: Buffer) => {
         size += chunk.length;
-        if (size > maxBytes) { limitError = new Error(`${binary} output exceeds ${maxBytes} bytes`); child.kill("SIGKILL"); return; }
+        if (size > maxBytes) { limitError = new Error(`${binary} output exceeds ${maxBytes} bytes`); supervised.terminate(limitError, { immediate: true }); return; }
         chunks.push(chunk);
       });
       child.stderr?.on("data", (chunk: Buffer) => {
         if (stderr.length < 4096) stderr += chunk.toString().slice(0, 4096 - stderr.length);
       });
-      child.on("error", (error) => { clearTimeout(timer); reject(error); });
-      child.on("close", (code) => {
+      supervised.done.then(({ code, reason }) => {
         clearTimeout(timer);
         if (limitError) reject(limitError);
+        else if (reason) reject(reason);
         else if (code !== 0) reject(new Error(`${binary} exited ${code}: ${stderr.trim()}`));
         else resolve(Buffer.concat(chunks));
-      });
+      }, (error: Error) => { clearTimeout(timer); reject(error); });
     });
   } finally {
     await launched.release();
