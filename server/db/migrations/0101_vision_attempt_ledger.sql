@@ -2,7 +2,8 @@
 -- worker/src/db/vision-attempt-store.ts). Every HTTP request the worker's vision runtime sends to a
 -- vision provider is admitted here first, under the run's then the org's advisory lock, so every
 -- worker of a run and every run of an org count against the same rows. The guard counts requests,
--- weighted by their route's worst-case list price; it reads no reported cost.
+-- weighted by their route's worst-case list price; admission reads no reported cost, and a response billed
+-- above its weight only ever adds to the count (vision_route_overruns below).
 --
 -- These are guard counters, not spend: billing, budgets and reports still read usage_events through
 -- usage_attribution.
@@ -34,3 +35,19 @@ CREATE TABLE IF NOT EXISTS vision_org_attempts (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS vision_org_attempts_org_idx ON vision_org_attempts (org_id, created_at);
+
+-- One row per vision response a provider billed above the weight its request was admitted at (a provider
+-- counting more image tokens than the catalog's processor bound). The worker tops the org's count up by
+-- the difference in vision_org_attempts and refuses the route (provider and model, across orgs) once it
+-- has VISION_ROUTE_OVERRUN_LIMIT rows in 24 hours. org_id and run_id are diagnostics only.
+CREATE TABLE IF NOT EXISTS vision_route_overruns (
+  id text PRIMARY KEY,
+  provider text NOT NULL,
+  model text NOT NULL,
+  org_id text,
+  run_id text,
+  billed_cents numeric(12, 4) NOT NULL,
+  bound_cents numeric(12, 4) NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS vision_route_overruns_route_idx ON vision_route_overruns (provider, model, created_at);

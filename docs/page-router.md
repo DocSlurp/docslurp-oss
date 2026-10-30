@@ -173,6 +173,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `VISION_BREAKER_FAILURE_RATE` | `0.25` | 0.01..1 (clamped) | Failed share of the run's requests that trips the breaker. |
 | `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its own prompt, image and route's worst case). |
 | `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529; not a 503 routing exclusion) one vision call may hand back before the wait goes to Temporal. |
+| `VISION_ROUTE_OVERRUN_LIMIT` | `3` | integer 1..1000 (clamped) | Responses on one billed route (provider and model) billed above their admitted weight in 24 h, across orgs, before the route is refused. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -237,8 +238,9 @@ cap counts only those charges, but every request sent to a vision provider can c
 failed requests, inline 429/5xx retries, the alternate-route retry, the streaming-to-JSON fallback,
 self-critique and a second read of a page already charged create no new charge. Provider cost data
 cannot bound that (an interrupted stream or a failure before the first chunk reports estimated or no
-usage), so the guard counts requests, each weighted by the worst case its route can cost, and reads
-no reported cost (`worker/src/lib/vision-attempt-guard.ts`).
+usage), so the guard counts requests, each weighted by the worst case its route can cost, and admits
+without reading a reported cost (`worker/src/lib/vision-attempt-guard.ts`); billed usage only ever
+raises the count (billed overruns, below).
 
 Every HTTP request a vision call made through `executeVisionRuntime` sends is admitted before it is
 sent, at the lowest common request point: `fetchWithProviderRetry` (each try, inline retries
@@ -279,6 +281,20 @@ process.
 | `VISION_BREAKER_MIN_FAILURES` | 20 (1-10000) | at least this many of the run's requests failed or were rejected... |
 | `VISION_BREAKER_FAILURE_RATE` | 0.25 (0.01-1) | ...and they are at least this share of the run's requests (sticky for the run) |
 | `VISION_ORG_UNCHARGED_LIMIT_CENTS` | 4000 (1-1000000) | the org's uncharged requests in the last 24 hours, by worst-case weight, plus this one would pass it |
+| `VISION_ROUTE_OVERRUN_LIMIT` | 3 (1-1000) | the request's billed route (provider and model) billed above its admitted weight this many times in the last 24 hours, across orgs (`route-overrun`; not sticky, and a configured fallback on another route is still tried) |
+
+**Billed overruns.** A weight is a bound computed from the catalog (the image's token bound, the
+prompt's bytes, the full output cap), not what the provider bills. After each response (or a stream
+cut off after its usage chunk) on a billed route, the runtime prices the provider's `prompt_tokens`
+and `completion_tokens` at the model's list price, takes the reported cost instead when it is higher,
+and compares it with the weight the request was admitted at. An overrun logs
+`[vision-weight] overrun model=… provider=… upstream=… billed=… bound=…`, adds the difference to the
+org's count as a settled row of its own (in the same transaction and under the same run and org locks
+as admission, with the org taken from the run row; no Rich charge checkpoint removes it), and records
+a `vision_route_overruns` row. The org bound therefore holds on billed cost even when a provider
+counts more image tokens than the catalog bound, overshooting by at most one request. The route count
+is global on purpose: an overrun shows the catalog bound itself is wrong for that route, so every org
+stops using it until the overruns age out of the 24 hour window.
 
 **Org bound.** A request counts as uncharged from the moment it is admitted. It leaves the count
 only in the checkpoint transaction that persists the customer Rich page charge its read created: the

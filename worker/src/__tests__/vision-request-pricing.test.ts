@@ -11,6 +11,7 @@ import {
   visionModelTokenPricing,
   visionModelUriProblem,
   type VisionConfig,
+  VISION_RASTER_CEILING_IMAGE_TOKENS,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -42,7 +43,7 @@ import { visionMaxPrice } from "../test/vision-max-price.js";
  * output cap) and OpenRouter is told not to bill above it.
  */
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
-const config: VisionGuardConfig = { pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5 };
+const config: VisionGuardConfig = { pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3 };
 const MODEL = "google/gemini-3.1-flash-lite";
 
 const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: "Name: x" }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2 } }),
@@ -221,9 +222,14 @@ describe("image-token bounds from each provider's own formula", () => {
     expect(visionImageTokenBound({ widthPx: 2_048, heightPx: 2_048 }, "google/gemini-2.5-flash-lite")).toBeGreaterThanOrEqual(tiles * 258);
   });
 
-  it("open-weights models: their processor's per-image maximum at every size, tiny images included", () => {
-    // Re-derived from each processor in packages/shared/src/__tests__/vision-image-token-bounds.test.ts.
-    const maxima = { "nvidia/nemotron-3.5-super-vl": 3_330, "deepseek/deepseek-v4.1-flash-1017": 1_024, "xiaomi/mimo-v2.6-flash": 8_194, "z-ai/glm-5.3-flash": 8_002 };
+  it("open-weights models: their processor's per-image maximum (or the raster ceiling) at every size, tiny images included", () => {
+    // Re-derived from each processor in packages/shared/src/__tests__/vision-image-token-bounds.test.ts. MiMo and
+    // Nemotron have no verified serving configuration, so they take the conservative raster ceiling (293 x 293 + 2).
+    expect(VISION_RASTER_CEILING_IMAGE_TOKENS).toBe(85_851);
+    const maxima = {
+      "nvidia/nemotron-3.5-super-vl": VISION_RASTER_CEILING_IMAGE_TOKENS, "deepseek/deepseek-v4.1-flash-1017": 1_024,
+      "xiaomi/mimo-v2.6-flash": VISION_RASTER_CEILING_IMAGE_TOKENS, "z-ai/glm-5.3-flash": 8_002,
+    };
     for (const [model, max] of Object.entries(maxima)) {
       for (const size of [{ widthPx: 14, heightPx: 14 }, { widthPx: 1, heightPx: 4_000 }, { widthPx: 2_048, heightPx: 2_048 }, null]) {
         expect(visionImageTokenBound(size, model), model).toBe(max);

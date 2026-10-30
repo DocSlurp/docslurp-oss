@@ -10,7 +10,8 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * data cannot bound that (interrupted streams, inline retries and failures before the first chunk
  * report estimated or no usage), so the guard counts requests, each weighted by the most it can cost
  * (its actual prompt bytes and image size, the enforced output cap, the route's list price, which
- * OpenRouter is told as `max_price`; lib/vision-pricing.ts), and never reads a reported cost.
+ * OpenRouter is told as `max_price`; lib/vision-pricing.ts). Admission never reads a reported cost;
+ * provider usage only ever raises the count (route overrun, below).
  *
  * Every vision call made through `executeVisionRuntime` (vision-extract pages and routed regions,
  * document-map OCR, deferred materialization, self-critique) admits each HTTP request it sends, at
@@ -32,6 +33,14 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  *   wins; db/usage-event-store.ts). The count is kept per org with no foreign key to runs or
  *   workspaces, so deleting either cannot reset it. Sticky only when settled uncharged requests alone
  *   leave no room; requests still in flight or awaiting their checkpoint never make a refusal sticky.
+ *
+ * - **Route overrun**: the request's route (ledger provider and model) billed more than its admitted
+ *   weight `VISION_ROUTE_OVERRUN_LIMIT` (default 3) times in the last 24 hours, across every org. Each
+ *   response's provider usage (`prompt_tokens`, `completion_tokens`, and the reported cost when present)
+ *   is priced and compared with the weight it was admitted at; an overrun is logged
+ *   (`[vision-weight] overrun ...`), topped up on the org's uncharged count by the difference (a settled
+ *   row, so the bound holds on billed cost even when a provider counts more image tokens than the
+ *   catalog bound), and counted against the route. Not sticky: other routes stay open.
  *
  * Requests a provider refuses before accepting them (429, 503/529 overload, and on a streaming
  * request a 400/404/405/415/422/501 that only says streaming is unsupported) are handed back: they
@@ -57,6 +66,14 @@ export interface VisionGuardConfig {
   orgLimitCents: number;
   /** Unbilled throttles (429, 503/529) one call may hand back before the wait goes to Temporal. */
   throttleAllowance: number;
+  /** Overruns of one route (provider and model) in 24 hours, across orgs, before the route is refused. */
+  routeOverrunLimit: number;
+}
+
+/** A billed route as the overrun count keys it: usage-ledger provider label and model. */
+export interface VisionRouteKey {
+  provider: string;
+  model: string;
 }
 
 export type VisionGuardStopReason =
@@ -64,6 +81,8 @@ export type VisionGuardStopReason =
   | "rejection-breaker"
   | "org-attempt-limit"
   | "unscoped-run"
+  /** The route billed above its admitted weight `routeOverrunLimit` times in 24 hours: its bound is wrong. */
+  | "route-overrun"
   /** A store-backed run without the shared Postgres ledger: refused, never counted per process. */
   | "no-attempt-ledger";
 
@@ -82,6 +101,8 @@ export interface VisionGuardStop {
   orgLimitCents: number;
   /** Worst-case cents of the refused request. */
   requestCents: number;
+  /** Overruns of the request's route in the window (0 when the request named no route). */
+  routeOverruns: number;
 }
 
 /** Counts the backend read under its locks for one admission. */
@@ -92,6 +113,8 @@ export interface VisionAttemptSnapshot {
   runFailures: number;
   orgCents: number;
   orgSettledCents: number;
+  /** Overruns of the request's route in the window, across orgs. */
+  routeOverruns: number;
 }
 
 export interface VisionAdmitRequest {
@@ -102,6 +125,22 @@ export interface VisionAdmitRequest {
   config: VisionGuardConfig;
   /** Worst-case cents of this request on its route (vision-pricing.ts `visionRequestWeightCents`). */
   weightCents: number;
+  /** The billed route the request goes to; unset for unbilled routes, which have no overrun count. */
+  route?: VisionRouteKey | null;
+}
+
+/** A response billed above the weight its request was admitted at. */
+export interface VisionOverrunRequest {
+  runId: string;
+  /** Org of the run as the caller knows it; the Postgres backend reads it from the run row instead. */
+  orgId: string | null;
+  /** The overrunning request's ticket (diagnostics; the top-up is a row of its own). */
+  ticketId: string | null;
+  route: VisionRouteKey;
+  /** Provider-billed cents (the larger of its token usage at list price and its reported cost). */
+  billedCents: number;
+  /** The weight the request was admitted at. */
+  boundCents: number;
 }
 
 export type VisionBackendAdmission =
@@ -135,6 +174,12 @@ export interface VisionAttemptBackend {
   /** Hand back a request the provider refused before accepting it: it leaves every count. */
   release(request: VisionReleaseRequest): Promise<void>;
   settle(request: VisionSettleRequest): Promise<void>;
+  /**
+   * A response billed above its admitted weight: add the difference to the org's uncharged count (settled,
+   * so no checkpoint removes it) and count the overrun against its route, atomically, in the same org scope
+   * as admission.
+   */
+  recordOverrun(request: VisionOverrunRequest): Promise<void>;
 }
 
 /** Why a request leaves the counts: refused before acceptance, or cancelled before it was sent. */
@@ -146,7 +191,7 @@ export interface VisionRequestGate {
    * Admit the next request; throws `VisionGuardStopError` when refused, before anything is sent.
    * `weightCents` is the request's worst case on its route; unset weighs the costliest catalog model.
    */
-  admit(request?: { weightCents?: number }): Promise<void>;
+  admit(request?: { weightCents?: number; route?: VisionRouteKey | null }): Promise<void>;
   /** The latest admitted request failed or its output was rejected (it may have been billed). */
   failed(): void;
   /**
@@ -157,6 +202,23 @@ export interface VisionRequestGate {
    * limited).
    */
   unbilled(kind: VisionUnbilledKind, detail?: VisionUnbilledDetail): Promise<boolean>;
+  /**
+   * The provider's usage for the latest admitted request (a response, or a stream cut off after a usage
+   * chunk). The runtime's weighted gate prices it on the request's route and reports an overrun; never throws.
+   */
+  observed?(usage: VisionObservedUsage): Promise<void>;
+  /** The latest admitted request billed `billedCents`, above the `boundCents` it was admitted at. */
+  overrun?(overrun: { route: VisionRouteKey; billedCents: number; boundCents: number }): Promise<void>;
+}
+
+/** Provider-reported usage of one request. */
+export interface VisionObservedUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** The provider's reported charge, when it sent one (OpenRouter `usage.cost`). */
+  costCents?: number;
+  /** Upstream provider that served it (OpenRouter `provider`), for the log line. */
+  servedProvider?: string | null;
 }
 
 /** The provider and HTTP status of a hand-back, for its `[vision-throttle-handback]` log line. */
@@ -170,6 +232,7 @@ export const DEFAULT_VISION_REGION_ATTEMPTS_PER_PAGE = 12;
 export const DEFAULT_VISION_BREAKER_MIN_FAILURES = 20;
 export const DEFAULT_VISION_BREAKER_FAILURE_RATE = 0.25;
 export const DEFAULT_VISION_THROTTLE_ALLOWANCE = 5;
+export const DEFAULT_VISION_ROUTE_OVERRUN_LIMIT = 3;
 export const VISION_ORG_WINDOW_HOURS = 24;
 /** Worst-case uncharged provider spend per org per rolling day (`VISION_ORG_UNCHARGED_LIMIT_CENTS`). */
 export const DEFAULT_VISION_ORG_LIMIT_CENTS = 4_000;
@@ -181,6 +244,7 @@ const RANGES = {
   VISION_BREAKER_FAILURE_RATE: [0.01, 1],
   VISION_ORG_UNCHARGED_LIMIT_CENTS: [1, 1_000_000],
   VISION_THROTTLE_ALLOWANCE: [0, 20],
+  VISION_ROUTE_OVERRUN_LIMIT: [1, 1_000],
 } as const;
 
 const warned = new Set<string>();
@@ -219,6 +283,7 @@ export function resolveVisionGuardConfig(env: Record<string, string | undefined>
     breakerFailureRate: envNumber(env, "VISION_BREAKER_FAILURE_RATE", DEFAULT_VISION_BREAKER_FAILURE_RATE, false),
     orgLimitCents: envNumber(env, "VISION_ORG_UNCHARGED_LIMIT_CENTS", DEFAULT_VISION_ORG_LIMIT_CENTS),
     throttleAllowance: envNumber(env, "VISION_THROTTLE_ALLOWANCE", DEFAULT_VISION_THROTTLE_ALLOWANCE),
+    routeOverrunLimit: envNumber(env, "VISION_ROUTE_OVERRUN_LIMIT", DEFAULT_VISION_ROUTE_OVERRUN_LIMIT),
   };
 }
 
@@ -240,9 +305,12 @@ export function decideVisionAdmission(
     runAttempts: snapshot.runAttempts, runFailures: snapshot.runFailures,
     orgCents: roundCents(snapshot.orgCents), orgSettledCents: roundCents(snapshot.orgSettledCents),
     orgLimitCents: config.orgLimitCents, requestCents: roundCents(weightCents),
+    routeOverruns: snapshot.routeOverruns,
   });
   // A run with no org (and no workspace org) cannot be bounded per org: refuse, never skip the bound.
   if (!snapshot.scoped) return stop("unscoped-run", true);
+  // The route's weight is known to understate what it bills: refused for every org until overruns age out.
+  if (snapshot.routeOverruns >= config.routeOverrunLimit) return stop("route-overrun", false);
   if (snapshot.runFailures >= config.breakerMinFailures &&
     snapshot.runFailures / Math.max(1, snapshot.runAttempts) >= config.breakerFailureRate) {
     return stop("rejection-breaker", true);
@@ -270,6 +338,7 @@ export class MemoryVisionAttemptBackend implements VisionAttemptBackend {
   private readonly charged = new Set<string>();
   private readonly orgs = new Map<string, Map<string, { at: number; settled: boolean; weight: number }>>();
   private readonly tickets = new Map<string, string | null>();
+  private readonly overruns: Array<{ at: number; key: string }> = [];
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -285,6 +354,7 @@ export class MemoryVisionAttemptBackend implements VisionAttemptBackend {
       runFailures: runPages.reduce((sum, row) => sum + row.failures, 0),
       orgCents: org.reduce((sum, row) => sum + row.weight, 0),
       orgSettledCents: org.filter((row) => row.settled).reduce((sum, row) => sum + row.weight, 0),
+      routeOverruns: request.route ? this.routeOverruns(request.route, since) : 0,
     }, request.target, request.config, request.weightCents);
     if (stop) return { admitted: false, stop };
     const ticketId = randomUUID();
@@ -322,6 +392,20 @@ export class MemoryVisionAttemptBackend implements VisionAttemptBackend {
     }
   }
 
+  async recordOverrun(request: VisionOverrunRequest): Promise<void> {
+    this.overruns.push({ at: this.now(), key: routeKey(request.route) });
+    const extra = request.billedCents - request.boundCents;
+    if (!request.orgId || !(extra > 0)) return;
+    const rows = this.orgs.get(request.orgId) ?? new Map();
+    rows.set(randomUUID(), { at: this.now(), settled: true, weight: extra });
+    this.orgs.set(request.orgId, rows);
+  }
+
+  private routeOverruns(route: VisionRouteKey, since: number): number {
+    const key = routeKey(route);
+    return this.overruns.filter((row) => row.key === key && row.at > since).length;
+  }
+
   /** Counts of one run and org (tests and diagnostics). */
   inspect(runId: string, orgId: string): { runAttempts: number; runFailures: number; orgAttempts: number; orgSettledAttempts: number } {
     const runPages = [...this.pages.entries()].filter(([key]) => key.startsWith(`${runId}\u0000`)).map(([, row]) => row);
@@ -354,13 +438,19 @@ class MissingVisionAttemptBackend implements VisionAttemptBackend {
     return { admitted: false, stop: {
       reason: "no-attempt-ledger", sticky: true, pageAttempts: 0, pageLimit: pageAttemptLimit(request.config, request.target.purpose),
       runAttempts: 0, runFailures: 0, orgCents: 0, orgSettledCents: 0, orgLimitCents: request.config.orgLimitCents,
-      requestCents: roundCents(request.weightCents),
+      requestCents: roundCents(request.weightCents), routeOverruns: 0,
     } };
   }
 
   async release(): Promise<void> {}
 
   async settle(): Promise<void> {}
+
+  async recordOverrun(): Promise<void> {}
+}
+
+function routeKey(route: VisionRouteKey): string {
+  return `${route.provider}\u0000${route.model}`;
 }
 
 function pageKey(runId: string, target: VisionAttemptTarget): string {
@@ -423,18 +513,29 @@ export class VisionRunGuard {
   }
 
   /** @internal Admit one request; throws `VisionGuardStopError` when refused. */
-  async admitRequest(target: VisionAttemptTarget, weightCents: number): Promise<string> {
+  async admitRequest(target: VisionAttemptTarget, weightCents: number, route: VisionRouteKey | null = null): Promise<string> {
     if (this.stopped) throw new VisionGuardStopError(this.stopped);
-    const admission = await this.backend.admit({ runId: this.run.id, orgId: this.run.orgId, target, config: this.config, weightCents });
+    const admission = await this.backend.admit({ runId: this.run.id, orgId: this.run.orgId, target, config: this.config, weightCents, route });
     if (admission.admitted) return admission.ticketId;
     if (admission.stop.sticky) this.stopped = admission.stop;
     const { stop } = admission;
     console.warn(
       `[vision-guard] org=${this.run.orgId ?? "none"} run=${this.run.id} refused=${stop.reason} sticky=${stop.sticky} ` +
         `document=${target.documentId} page=${target.pageNumber} purpose=${target.purpose} pageAttempts=${stop.pageAttempts}/${stop.pageLimit} ` +
-        `runFailures=${stop.runFailures}/${stop.runAttempts} orgCents=${stop.orgCents}+${stop.requestCents}/${stop.orgLimitCents} orgSettledCents=${stop.orgSettledCents}`,
+        `runFailures=${stop.runFailures}/${stop.runAttempts} orgCents=${stop.orgCents}+${stop.requestCents}/${stop.orgLimitCents} orgSettledCents=${stop.orgSettledCents}` +
+        (route ? ` route=${route.provider}/${route.model} routeOverruns=${stop.routeOverruns}/${this.config.routeOverrunLimit}` : ""),
     );
     throw new VisionGuardStopError(stop);
+  }
+
+  /** @internal Top up the org count by an overrun and count it against its route; never throws. */
+  async recordOverrun(ticketId: string | null, overrun: { route: VisionRouteKey; billedCents: number; boundCents: number }): Promise<void> {
+    try {
+      await this.backend.recordOverrun({ runId: this.run.id, orgId: this.run.orgId, ticketId, ...overrun });
+    } catch (error) {
+      // Logged loudly: the org count is then short by this overrun.
+      console.error(`[vision-guard] run=${this.run.id} overrun top-up failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** @internal Hand back a request refused before acceptance; a failure leaves it counted (stricter). */
@@ -477,10 +578,14 @@ export class VisionCallGate implements VisionRequestGate {
 
   constructor(private readonly guard: VisionRunGuard, readonly target: VisionAttemptTarget) {}
 
-  async admit(request: { weightCents?: number } = {}): Promise<void> {
+  async admit(request: { weightCents?: number; route?: VisionRouteKey | null } = {}): Promise<void> {
     if (this.finished) throw new Error("vision call gate already finished");
     const weight = request.weightCents !== undefined && request.weightCents > 0 ? request.weightCents : defaultVisionRequestWeightCents();
-    this.tickets.push({ id: await this.guard.admitRequest(this.target, weight), failed: false, released: false });
+    this.tickets.push({ id: await this.guard.admitRequest(this.target, weight, request.route ?? null), failed: false, released: false });
+  }
+
+  async overrun(overrun: { route: VisionRouteKey; billedCents: number; boundCents: number }): Promise<void> {
+    await this.guard.recordOverrun(this.tickets.at(-1)?.id ?? null, overrun);
   }
 
   failed(): void {

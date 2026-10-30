@@ -13,7 +13,7 @@ import {
   visionReasoningParams,
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
-import { attachVisionBilledUsage, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
+import { attachVisionBilledUsage, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal, type TokenCounts } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import {
   attachVisionServedRoute,
@@ -21,6 +21,7 @@ import {
   DEFAULT_OPENAI_BASE_URL,
   effectiveVisionBaseUrl,
   findVisionServedRoute,
+  isBilledVisionRoute,
   isOpenRouterBaseUrl,
   UnpricedVisionRouteError,
   VISION_MAX_PROMPT_BYTES,
@@ -60,7 +61,6 @@ import { open, readFile } from "node:fs/promises";
 import {
   assertProviderAllowed,
   authorizePrivateModelCall,
-  calculateAiUsageCostCents,
   isProviderCallAllowed,
   PRIVATE_MODEL_PROVIDER,
   inferModelTarget,
@@ -70,6 +70,7 @@ import {
   type VisionConfig,
   type VisionExecutionConfig,
   type VisionRuntime,
+  visionListPriceCents,
   visionModelUriProblem,
 } from "@docslurp/shared";
 
@@ -123,7 +124,12 @@ export interface VisionExecutionResult {
   inputTokens: number;
   outputTokens: number;
   usageSource: "provider" | "model" | "estimated";
+  /**
+   * A reported charge (the provider's `usage.cost`, a private registry's price), never an estimate. It covers
+   * `chargedTokens` (every token when unset); `priceVisionServedUsage` prices the rest on `route`.
+   */
   costCents?: number;
+  chargedTokens?: TokenCounts;
   costMetadata?: Record<string, unknown>;
   baseUrl: string | null;
   fallbackUsed: boolean;
@@ -217,8 +223,10 @@ export async function executeVisionRuntime(args: {
   try {
     return await runRouteVisionRequest(selected, selected.prompt, args);
   } catch (error) {
-    // A refused request is not a route failure: the fallback route would be refused the same way.
-    if (findVisionGuardStop(error)) throw error;
+    // A refused request is not a route failure: the fallback route would be refused the same way. A route refused
+    // for billing above its bound is the exception: the fallback is a different route with its own count.
+    const stop = findVisionGuardStop(error);
+    if (stop && stop.reason !== "route-overrun") throw error;
     if (!selected.remoteFallbackModelUri || selected.runtime === "remote-openai") {
       throw error;
     }
@@ -241,15 +249,16 @@ export async function executeVisionRuntime(args: {
     const primaryFailure = servedPrimary && (findVisionOutputRejected(error) || findVisionBilledUsage(error))
       ? { route: servedPrimary, error }
       : undefined;
-    const fallbackConfig = normalizeVisionConfig({
-      ...args.vision,
-      target: inferModelTarget(selected.remoteFallbackModelUri),
-      modelUri: selected.remoteFallbackModelUri,
-      remoteFallbackModelUri: null,
-    }, args.cfg, args.outputSchema);
-    assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
     let fallback: VisionExecutionResult;
     try {
+      // Inside the try: a fallback refused at setup still carries the primary's billed failure to the caller.
+      const fallbackConfig = normalizeVisionConfig({
+        ...args.vision,
+        target: inferModelTarget(selected.remoteFallbackModelUri),
+        modelUri: selected.remoteFallbackModelUri,
+        remoteFallbackModelUri: null,
+      }, args.cfg, args.outputSchema);
+      assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
       fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, args);
     } catch (fallbackError) {
       if (primaryFailure && fallbackError && typeof fallbackError === "object") primaryFailures.set(fallbackError, primaryFailure);
@@ -294,12 +303,32 @@ function routeBaseUrl(route: Pick<VisionExecutionConfig, "runtime" | "baseUrl" |
   return effectiveVisionBaseUrl(route.baseUrl, cfg);
 }
 
-/** `gate` with every admission weighted `weightCents`. */
-function weightedGate(gate: VisionRequestGate, weightCents: number): VisionRequestGate {
+/**
+ * `gate` with every admission weighted `weightCents` on `route`. On a billed route each response's provider usage
+ * is priced (its tokens at the model's list price, or its reported cost when higher) and compared with that
+ * weight: an overrun is logged and topped up on the org's count, and counts against the route
+ * (lib/vision-attempt-guard.ts), so the org bound holds on what was billed, not only on what was admitted.
+ */
+function weightedGate(gate: VisionRequestGate, weightCents: number, route: VisionServedRoute): VisionRequestGate {
+  const billed = isBilledVisionRoute(route.billing);
+  const key = billed ? { provider: route.provider, model: route.model } : null;
   return {
-    admit: () => gate.admit({ weightCents }),
+    admit: () => gate.admit({ weightCents, route: key }),
     failed: () => gate.failed(),
     unbilled: (kind, detail) => gate.unbilled(kind, detail),
+    observed: async (usage) => {
+      if (!key) return;
+      const tokenCents = visionListPriceCents(route.model, usage) ?? 0;
+      const billedCents = Math.max(tokenCents, usage.costCents ?? 0);
+      // A hundredth of a millicent of slack for float rounding.
+      if (billedCents <= weightCents + 1e-5) return;
+      console.warn(
+        `[vision-weight] overrun model=${route.model} provider=${route.provider} upstream=${usage.servedProvider ?? "unknown"} ` +
+          `billed=${billedCents.toFixed(4)} bound=${weightCents.toFixed(4)} input_tokens=${usage.inputTokens} output_tokens=${usage.outputTokens}` +
+          (usage.costCents !== undefined ? ` reported=${usage.costCents.toFixed(4)}` : ""),
+      );
+      await gate.overrun?.({ route: key, billedCents, boundCents: weightCents });
+    },
   };
 }
 
@@ -364,19 +393,21 @@ async function sendRouteVisionRequest(
     outputPath: args.outputPath,
     runner: args.runner,
     signal: args.signal,
-    gate: args.gate ? weightedGate(args.gate, pricing.weightCents) : null,
+    gate: args.gate ? weightedGate(args.gate, pricing.weightCents, servedRoute(route, args.cfg, model)) : null,
     runtime: route.runtime,
     prompt,
   };
   if (!isPrivate) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, ...streamGuard(args.cfg) });
+    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, streaming: args.cfg.visionStreaming });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   onUsageModel(call.usageModel);
-  const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, ...streamGuard(args.cfg) });
+  const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, streaming: args.cfg.visionStreaming });
   const cost = call.cost({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, durationMs: result.latencyMs });
+  // The registry's price is an explicit charge for every token of the call.
+  const { chargedTokens: _chargedTokens, ...rest } = result;
   return {
-    ...result,
+    ...rest,
     provider: PRIVATE_MODEL_PROVIDER,
     model: call.usageModel,
     costCents: cost.costCents,
@@ -418,16 +449,6 @@ export function visionCall(route: Pick<VisionExecutionConfig, "provider" | "mode
     modelUri: route.modelUri,
     capability: "vision" as const,
     baseUrl: route.provider === PRIVATE_MODEL_PROVIDER ? route.baseUrl : undefined,
-  };
-}
-
-function streamGuard(cfg: Config) {
-  return {
-    streaming: cfg.visionStreaming,
-    estimateCostCents: ({ inputTokens, outputTokens }: { inputTokens: number; outputTokens: number }) =>
-      Number.isFinite(cfg.costPer1kInputTokens) && Number.isFinite(cfg.costPer1kOutputTokens)
-        ? calculateAiUsageCostCents({ inputTokens, outputTokens, costPer1kInputTokens: cfg.costPer1kInputTokens, costPer1kOutputTokens: cfg.costPer1kOutputTokens })
-        : undefined,
   };
 }
 
@@ -526,7 +547,6 @@ export async function runVisionRequest(args: {
   providerLabel?: string;
   swapPolicy?: VisionModelSwapPolicy;
   streaming?: boolean;
-  estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
   /** Admission for every request (see `executeVisionRuntime`). */
   gate: VisionRequestGate | null;
   /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
@@ -677,7 +697,6 @@ export async function runVisionRequest(args: {
         signal: args.signal,
         // Prompt plus a typical page image and transcription; each attempt settles with its actual usage.
         inputTokenEstimate: estimateTokens(args.prompt) + VISION_IMAGE_TOKEN_ESTIMATE,
-        estimateCostCents: args.estimateCostCents,
         // Profiles that measured a refusal-free route send refused or filtered pages there on the single retry.
         preferredRetryRoute: contentFilterRetryProvider(args.model),
         gate: args.gate,
@@ -702,7 +721,10 @@ export async function runVisionRequest(args: {
             1,
           );
           // The swapped call was served and billed even though its output is refused.
-          attachVisionBilledUsage(error, { inputTokens: result.inputTokens, outputTokens: result.outputTokens, ...(result.costCents !== undefined ? { costCents: result.costCents } : {}) });
+          attachVisionBilledUsage(error, {
+            inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+            ...(result.costCents !== undefined ? { costCents: result.costCents, ...(result.chargedTokens ? { chargedTokens: result.chargedTokens } : {}) } : {}),
+          });
           throw error;
         }
       }
@@ -717,6 +739,7 @@ export async function runVisionRequest(args: {
         ...(servedProvider ? { servedProvider } : {}),
         ...(modelSwap ? { modelSwap } : {}),
         costCents: result.costCents,
+        ...(result.chargedTokens ? { chargedTokens: result.chargedTokens } : {}),
         costMetadata: result.costMetadata,
         latencyMs: Date.now() - startedAt,
         inputTokens: result.inputTokens,

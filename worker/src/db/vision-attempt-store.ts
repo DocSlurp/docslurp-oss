@@ -8,6 +8,7 @@ import {
   type VisionAdmitRequest,
   type VisionAttemptBackend,
   type VisionBackendAdmission,
+  type VisionOverrunRequest,
   type VisionReleaseRequest,
   type VisionSettleRequest,
 } from "../lib/vision-attempt-guard.js";
@@ -70,9 +71,10 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
    * `vision_run_charged_pages`; migrating cannot fix that, and the guard would misbehave on it.
    */
   async assertSchema(): Promise<void> {
-    const [row] = await this.sql<{ org_table: boolean; weight: boolean; stale: boolean }[]>`
+    const [row] = await this.sql<{ org_table: boolean; weight: boolean; stale: boolean; overruns: boolean }[]>`
       select
         to_regclass('vision_org_attempts') is not null as org_table,
+        to_regclass('vision_route_overruns') is not null as overruns,
         exists (
           select 1 from information_schema.columns
           where table_schema = current_schema() and table_name = 'vision_org_attempts' and column_name = 'weight_cents'
@@ -81,10 +83,10 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
     if (!row?.org_table) {
       throw new VisionLedgerSchemaError("vision attempt ledger missing (migration 0101_vision_attempt_ledger not applied); run pnpm db:migrate");
     }
-    if (!row.weight || row.stale) {
+    if (!row.weight || row.stale || !row.overruns) {
       throw new VisionLedgerSchemaError(
         "vision attempt ledger is from an earlier draft of migration 0101 " +
-          `(${[!row.weight ? "vision_org_attempts.weight_cents missing" : null, row.stale ? "stale vision_run_charged_pages present" : null].filter(Boolean).join(", ")}); ` +
+          `(${[!row.weight ? "vision_org_attempts.weight_cents missing" : null, !row.overruns ? "vision_route_overruns missing" : null, row.stale ? "stale vision_run_charged_pages present" : null].filter(Boolean).join(", ")}); ` +
           "database reset required: 0101 was replaced in place and cannot be upgraded by pnpm db:migrate",
       );
     }
@@ -119,6 +121,14 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
           where org_id = ${orgId} and created_at > now() - make_interval(hours => ${VISION_ORG_WINDOW_HOURS})`;
         org = { cents: Number(counts?.cents ?? 0), settled: Number(counts?.settled ?? 0) };
       }
+      let routeOverruns = 0;
+      if (request.route) {
+        const [overruns] = await tx<{ count: number }[]>`
+          select count(*)::int as count from vision_route_overruns
+          where provider = ${request.route.provider} and model = ${request.route.model}
+            and created_at > now() - make_interval(hours => ${VISION_ORG_WINDOW_HOURS})`;
+        routeOverruns = overruns?.count ?? 0;
+      }
       const stop = decideVisionAdmission({
         scoped: orgId !== null,
         pageAttempts: page?.attempts ?? 0,
@@ -126,6 +136,7 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         runFailures: totals?.failures ?? 0,
         orgCents: org.cents,
         orgSettledCents: org.settled,
+        routeOverruns,
       }, target, config, weightCents);
       if (stop) return { admitted: false as const, stop };
       const ticketId = randomUUID();
@@ -164,6 +175,29 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
       // The charged request stays in flight (never sticky) until its charge's checkpoint removes it.
       const uncharged = request.tickets.filter((ticket) => ticket !== request.charged);
       if (uncharged.length > 0) await tx`update vision_org_attempts set settled = true where id = any(${tx.array(uncharged)}::text[])`;
+    });
+  }
+
+  async recordOverrun(request: VisionOverrunRequest): Promise<void> {
+    const { runId, route, billedCents, boundCents } = request;
+    const extra = billedCents - boundCents;
+    await this.sql.begin(async (tx) => {
+      // Same locks and org as admission: the run row decides the org, never the caller.
+      await lock(tx, `vision-run:${runId}`);
+      const [run] = await tx<{ org_id: string | null }[]>`
+        select coalesce(r.org_id, w.org_id) as org_id
+        from workspace_runs r left join workspaces w on w.id = r.workspace_id
+        where r.id = ${runId}`;
+      const orgId = run?.org_id ?? null;
+      if (orgId) await lock(tx, `vision-org:${orgId}`);
+      // Settled and under its own id: no Rich charge checkpoint removes it, so the org bound holds on billed cost.
+      if (orgId && extra > 0) {
+        await tx`insert into vision_org_attempts (id, org_id, weight_cents, settled) values (${randomUUID()}, ${orgId}, ${extra}, true)`;
+      }
+      await tx`delete from vision_route_overruns where created_at < now() - make_interval(hours => ${ORG_ROW_RETENTION_HOURS})`;
+      await tx`
+        insert into vision_route_overruns (id, provider, model, org_id, run_id, billed_cents, bound_cents)
+        values (${randomUUID()}, ${route.provider}, ${route.model}, ${orgId}, ${runId}, ${billedCents}, ${boundCents})`;
     });
   }
 }

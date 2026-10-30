@@ -86,6 +86,7 @@ export const WORKER_TABLES = Object.freeze({
   vector_indexes: { privileges: DML, evidence: "worker/src/db/store.ts vector index rows" },
   vision_org_attempts: { privileges: DML, evidence: "worker/src/db/vision-attempt-store.ts (vision attempt guard org count); usage-event-store.ts (charged request leaves at checkpoint)" },
   vision_run_attempts: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/vision-attempt-store.ts (vision attempt guard run counts)" },
+  vision_route_overruns: { privileges: ["select", "insert", "delete"], evidence: "worker/src/db/vision-attempt-store.ts (route overrun count and retention)" },
   webhook_outbox: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts enqueueWebhook (insert ... returning id)" },
   webhooks: { privileges: [], columns: { select: ["user_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhook subscription check (no url or signing secret)" },
   worker_capabilities: { privileges: DML, evidence: "worker/src/db/worker-capabilities.ts" },

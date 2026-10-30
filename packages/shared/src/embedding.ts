@@ -527,6 +527,13 @@ export type VisionBenchmarkProfile = z.infer<
   typeof visionBenchmarkProfileSchema
 >;
 
+/**
+ * Conservative image-token ceiling for a model without verified serving evidence (`raster-ceiling` basis): the
+ * largest raster the worker sends (4,096 px square) at one token per 14-px patch with no merge, plus two framing
+ * tokens: 293 x 293 + 2 = 85,851. It bounds any ViT processor with 14-px or larger patches at any resize.
+ */
+export const VISION_RASTER_CEILING_IMAGE_TOKENS = Math.ceil(4_096 / 14) ** 2 + 2;
+
 export const visionModelCatalog = [
   {
     id: "microsoft/Florence-2-small-ft",
@@ -619,7 +626,10 @@ export const visionModelCatalog = [
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
-    imageTokens: { kind: "fixed", tokens: 3_330, basis: "processor-max:nemotron-h-omni" },
+    // Serving-config evidence gap: 3,330 is the published processor's maximum (processor-max:nemotron-h-omni), but
+    // the image framing and the providers' serving configuration could not be verified, so the bound is the
+    // conservative raster ceiling instead.
+    imageTokens: { kind: "fixed", tokens: VISION_RASTER_CEILING_IMAGE_TOKENS, basis: "raster-ceiling" },
   },
   // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
   // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
@@ -658,7 +668,10 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
     estimatedCostPerPageCents: 0.056,
     tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-25" },
-    imageTokens: { kind: "fixed", tokens: 8_194, basis: "processor-max:qwen2-vl" },
+    // Serving-config evidence gap: 8,194 is the published processor's maximum (processor-max:qwen2-vl), but no
+    // provider's serving configuration (`max_pixels` can be raised at serve time) could be verified, so the bound is
+    // the conservative raster ceiling instead.
+    imageTokens: { kind: "fixed", tokens: VISION_RASTER_CEILING_IMAGE_TOKENS, basis: "raster-ceiling" },
   },
   {
     id: "openai/gpt-6-luna",
@@ -775,6 +788,9 @@ export function visionListPriceCents(
  * - `gemini-media-resolution`: Gemini 3's largest per-image count (`ultra_high`, 2,240; the default is 1,120).
  * - `gemini-tiles`: Gemini 2.x's 258 tokens per tile, counted per 256-px square rather than its documented 768-px
  *   tile (9x), which covers its crop-unit rescaling.
+ * - `raster-ceiling`: `VISION_RASTER_CEILING_IMAGE_TOKENS`, for an open-weights model whose processor maximum could not
+ *   be tied to its providers' serving configuration: the largest raster the worker sends (4,096 px square), one
+ *   token per 14-px patch with no merge, plus two framing tokens. Used for MiMo V2.6 Flash and Nemotron 3.5 Super VL.
  * - `processor-max:<processor>`: the most tokens the model's published Hugging Face image processor can give one
  *   image at any size, after its minimum-size upscaling, resizing, tiling and patch merging, plus the image's
  *   framing tokens (start/end markers, row separators). Open-weights models only; read from the model repository's

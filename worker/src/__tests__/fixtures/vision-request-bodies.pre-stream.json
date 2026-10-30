@@ -99,7 +99,7 @@
       "max_price": {
         "prompt": 0.15,
         "completion": 0.5,
-        "image": 0.0004995,
+        "image": 0.01287765,
         "request": 0
       }
     }
@@ -136,7 +136,7 @@
       "max_price": {
         "prompt": 0.15,
         "completion": 0.5,
-        "image": 0.0004995,
+        "image": 0.01287765,
         "request": 0
       }
     }
@@ -264,7 +264,7 @@
       "max_price": {
         "prompt": 0.14,
         "completion": 0.28,
-        "image": 0.0011471600000000002,
+        "image": 0.012019140000000001,
         "request": 0
       }
     }
@@ -306,7 +306,7 @@
       "max_price": {
         "prompt": 0.14,
         "completion": 0.28,
-        "image": 0.0011471600000000002,
+        "image": 0.012019140000000001,
         "request": 0
       }
     }
