@@ -236,6 +236,12 @@
       "dependency": "@types/node",
       "before": "^26.6.5",
       "after": "^26.6.6"
+    },
+    {
+      "package": "docslurp-oss",
+      "override": "jose",
+      "before": null,
+      "after": "^6.2.14"
     }
   ],
   "audits": {
@@ -265,7 +271,9 @@
   "securityChanges": [
     "Node 24.22.1 -> 24.22.2 (2026-10-27, non-security) plus Debian base refresh in server and worker images by refreshing node:24-bookworm-slim and node:24-trixie-slim digests",
     "pnpm 10.34.7 -> 10.34.9 (packageManager, sha512-pinned)",
-    "astral-sh/setup-uv v10.3.0 -> v10.3.3, pinned by commit SHA (fetches the uv version manifest from the Astral mirror; checksums still verified)"
+    "astral-sh/setup-uv v10.3.0 -> v10.3.3, pinned by commit SHA (fetches the uv version manifest from the Astral mirror; checksums still verified)",
+    "Override jose to ^6.2.14: the server bump alone left better-auth on 6.2.13, splitting @better-auth/core into two peer copies so @better-auth/passkey instanceof APIError checks failed and passkey 403s (PASSKEY_USER_VERIFICATION_REQUIRED, SSO_REQUIRED) became 500/400 (still refused). scripts/lockfile-singletons.test.mjs now fails on more than one copy of better-auth, @better-auth/core or better-call",
+    "ci.yml setup-uv now pins uv 0.13.0 like python-tooling and worker-supply-chain, so v10.3.3 manifest-mirror changes do not choose the uv version"
   ],
   "compatibilityHolds": {
     "typescript": "6.0.3: Astro check supports TypeScript 5/6, not 7",
@@ -273,7 +281,8 @@
     "opentelemetry": "2.12/0.223/API 1.9.1: 3.0/0.300 is a breaking family change; Langfuse 6 requires SDK 2. API 1.10.0 is the 3.0-line API and fails the 2.x SDK peer range, so the root override stays at 1.9.1. sdk-trace-base/sdk-trace-node 2.12.0 are deprecated upstream in favour of the 3.0 layout; they go with the family upgrade",
     "@simplewebauthn/server": "13.3.3: 14.x is a major passkey API change reached through @better-auth/passkey; needs its own change and council",
     "@lancedb/lancedb": "0.40.0: 0.41.0 is a 0.x minor (breaking by semver) released ~29h before this audit; revisit with the LanceDB legacy-table drop",
-    "filelock": "3.32.7 in dev-only ML locks: unstructured 0.27.36 (latest) still requires filelock<4"
+    "filelock": "3.32.7 in dev-only ML locks: unstructured 0.27.36 (latest) still requires filelock<4",
+    "@astrojs/react (app)": "7.1.0: patches/@astrojs__react@7.1.0.patch; 7.1.2 upstreams only the server identifierPrefix half, not the client onRecoverableError half"
   },
   "limitations": [
     "Worker images were not rebuilt or smoke-tested here; the digest refresh takes effect on the next worker-images run",
@@ -284,6 +293,40 @@
     "checkout": "standalone core worktree at OSS main 70df8187 plus this change",
     "typecheck": "passed",
     "build": "passed",
-    "suites": "CI on the pull request"
+    "focusedTests": {
+      "server auth-mfa.db.test.ts": "52 passed",
+      "worker Temporal (replay, interruptions, provider-retry, interceptor, shards)": "36 passed",
+      "scripts/lockfile-singletons.test.mjs": "3 passed; fails on the pre-override lock"
+    },
+    "suites": "CI on DocSlurp/docslurp-oss#238",
+    "appRepo": {
+      "typecheck": "passed",
+      "build": "passed",
+      "tests": "1103 passed"
+    }
+  },
+  "councilReview": {
+    "reviewers": [
+      "adversarial reviewer (Claude Opus subagent)",
+      "correctness reviewer (Claude Sonnet subagent)"
+    ],
+    "highSeverity": 0,
+    "resolved": [
+      "Medium: duplicate @better-auth/core after jose bump; jose override plus lockfile singleton test",
+      "Medium: app ai 7.0.154 / @ai-sdk/react 4.0.158 split from core 7.0.156; aligned",
+      "Low: ci.yml uv version unpinned; pinned 0.13.0",
+      "Low: @astrojs/react hold unrecorded; recorded above",
+      "Low: council missing from record; this entry"
+    ],
+    "verified": [
+      "node image digests match official 24.22.2 tags",
+      "pnpm 10.34.9 sha512 matches npm dist.integrity",
+      "setup-uv v10.3.3 tag resolves to 68559e99 (signed)",
+      "no new lockfile package names, no integrity changes at unchanged versions, no new install scripts, all new versions older than minimumReleaseAge"
+    ],
+    "followUps": [
+      "App core pin must move to the OSS squash SHA before app CI can validate",
+      "posthog-node 5.61.0 published after this audit"
+    ]
   }
 }

@@ -64,7 +64,8 @@
       "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
       "@earendil-works/pi-coding-agent>undici": "8.12.3",
       "express>body-parser": "^2.4.0",
-      "ajv>fast-uri": "^3.1.9"
+      "ajv>fast-uri": "^3.1.9",
+      "jose": "^6.2.14"
     },
     "onlyBuiltDependencies": [
       "@prisma/engines",
