@@ -159,3 +159,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Bound worker CI apt installation to two five-minute attempts, retrying once with signed official Ubuntu archive/security sources when the runner mirror stalls.
 
 - Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
+
+- Compact oversized supported table records with per-chunk schema, bounded JSON fast path, exact reconstruction checks and proxy-token measurements; retain legacy tiny-budget mode. See docs/evals/table-chunk-cost.md.
