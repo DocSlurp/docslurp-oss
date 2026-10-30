@@ -31,7 +31,9 @@
     "provider": {
       "max_price": {
         "prompt": 0.1,
-        "completion": 0.5
+        "completion": 0.5,
+        "image": 0.0040305,
+        "request": 0
       }
     }
   }

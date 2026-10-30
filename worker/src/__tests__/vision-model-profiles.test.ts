@@ -63,13 +63,8 @@ describe("per-model vision profiles", () => {
     expect(userText).toBe(visionPromptTemplates["form-fields"]);
   });
 
-  it("leaves the base DeepSeek alias on the generic defaults", async () => {
-    const { body, userText } = await send("deepseek/deepseek-v4.1-flash");
-    expect(userText).toBe(visionPromptTemplates["<OCR>"]);
-    expect(body.max_tokens).toBe(16_384);
-    // Uncataloged: capped at prices above every catalog model, as its guard weight assumes.
-    expect(body.provider).toEqual({ max_price: visionMaxPrice("deepseek/deepseek-v4.1-flash") });
-    expect(body.reasoning).toEqual({ effort: "none" });
+  it("refuses the uncataloged base DeepSeek alias: hosted vision is limited to the priced catalog", async () => {
+    await expect(send("deepseek/deepseek-v4.1-flash")).rejects.toThrow(/not in the priced vision catalog/);
   });
 
   it("maps only an unset or <OCR> prompt to the profile default", () => {

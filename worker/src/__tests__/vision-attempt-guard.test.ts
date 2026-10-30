@@ -41,7 +41,13 @@ import {
   type VisionGuardStop,
   type VisionRequestGate,
 } from "../lib/vision-attempt-guard.js";
-import { maxCatalogWorstCaseVisionRequestCents, visionRequestWeightCents, worstCaseVisionRequestCents } from "../lib/vision-pricing.js";
+import {
+  maxCatalogWorstCaseVisionRequestCents,
+  visionInputTokenBound,
+  visionRequestPricing,
+  visionRequestWeightCents,
+  worstCaseVisionRequestCents,
+} from "../lib/vision-pricing.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { loadRunState } from "../pipeline/stage-execution.js";
 import { PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
@@ -93,8 +99,11 @@ describe("vision guard config", () => {
     expect(hosted.length).toBeGreaterThan(2);
     const costliest = maxCatalogWorstCaseVisionRequestCents();
     for (const model of hosted) {
-      const weight = visionRequestWeightCents(model.id, "openai-compatible");
-      expect(weight).toBe(worstCaseVisionRequestCents(model.id));
+      // The billed weight at the largest raster and no prompt: on OpenRouter it includes the per-image fee cap.
+      const billing = model.uri.startsWith("llm://openrouter/") ? "openrouter" as const : "openai" as const;
+      const weight = visionRequestPricing({ model: model.id, runtime: model.runtime, billing, inputTokens: visionInputTokenBound(null, "", model.id) }).weightCents;
+      if (billing === "openrouter") expect(weight).toBeCloseTo(worstCaseVisionRequestCents(model.id)!, 10);
+      else expect(weight).toBeLessThanOrEqual(worstCaseVisionRequestCents(model.id)!);
       // Requests the default bound admits x their worst case never pass $40, whichever model the workspace picks.
       expect(Math.floor(4_000 / weight) * weight).toBeLessThanOrEqual(4_000);
       expect(weight).toBeLessThanOrEqual(costliest);

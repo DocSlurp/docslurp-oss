@@ -140,13 +140,13 @@ describe("org China-provider restriction", () => {
 describe("served model and provider from a streamed result", () => {
   it("reads model from chunks and provider from the final usage chunk (string or {name})", async () => {
     for (const provider of ["DeepSeek", { name: "DeepSeek" }]) {
-      const { result } = await run("deepseek/deepseek-v4.1-flash", [sse([
+      const { result } = await run("deepseek/deepseek-v4.1-flash-1017", [sse([
         { id: "g", model: "deepseek/deepseek-v4.1-flash-0925", choices: [{ delta: { content: "hi" } }] },
         { id: "g", provider, choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } },
       ])]);
       expect(result.servedModel).toBe("deepseek/deepseek-v4.1-flash-0925");
       expect(result.servedProvider).toBe("DeepSeek");
-      expect(result.modelSwap).toMatchObject({ requested: "deepseek/deepseek-v4.1-flash", served: "deepseek/deepseek-v4.1-flash-0925", provider: "DeepSeek" });
+      expect(result.modelSwap).toMatchObject({ requested: "deepseek/deepseek-v4.1-flash-1017", served: "deepseek/deepseek-v4.1-flash-0925", provider: "DeepSeek" });
     }
   });
 });

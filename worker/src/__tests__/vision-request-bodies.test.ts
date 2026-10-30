@@ -12,7 +12,6 @@ import { executeVisionRuntime } from "../tools/vision-runtime.js";
 const MODELS = [
   "google/gemini-3.1-flash-lite",
   "nvidia/nemotron-3.5-super-vl",
-  "deepseek/deepseek-v4.1-flash",
   "deepseek/deepseek-v4.1-flash-1017",
   "xiaomi/mimo-v2.6-flash",
 ];

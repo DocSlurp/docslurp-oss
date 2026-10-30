@@ -50,7 +50,7 @@ import {
   type VisionAttemptPurpose,
   type VisionGuardStop,
 } from "../lib/vision-attempt-guard.js";
-import { isBillableVisionRuntime } from "../lib/vision-pricing.js";
+import { isBillableVisionRuntime, isOpenRouterBaseUrl } from "../lib/vision-pricing.js";
 import { VISION_ROUTING_VERSION_SLOT, resolveRunRoutingV2, routingVersion } from "../lib/vision-routing-v2.js";
 import { resolveVisionPageBudget } from "../lib/vision-page-budget.js";
 import { createProductionExecutorDeps } from "../routing/executors/deps.js";
@@ -1256,7 +1256,7 @@ export class VisionExtractStage implements Stage {
       // A page read charges the customer one Rich page, once per run and page: the first read of the
       // page un-counts its request from the org's uncharged attempts; a second read does not.
       const usageEvent = recordVisionRead(state.usageLedger, gate, pageRef, {
-          provider: result.provider ?? (result.baseUrl?.includes("openrouter.ai") ? "openrouter" : result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
+          provider: result.provider ?? (isOpenRouterBaseUrl(result.baseUrl) ? "openrouter" : result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
           model: result.model,
           metric: "page-analysis",
           amount: 1,
@@ -1596,12 +1596,13 @@ export class VisionExtractStage implements Stage {
     };
   }
 
-  private isBillableVisionRuntime(result: { runtime: string; baseUrl: string | null }): boolean {
+  /** Same decision as the request's pricing (lib/vision-pricing.ts `visionRouteBilling`): its effective destination. */
+  private isBillableVisionRuntime(result: { runtime: string; baseUrl: string | null; provider?: string }): boolean {
     return isBillableVisionRuntime(result, this.cfg);
   }
 
   /** How a receipt-less vision call was priced; recorded on the usage event. */
-  private visionPricingSource(result: { model: string; runtime: string; baseUrl: string | null }) {
+  private visionPricingSource(result: { model: string; runtime: string; baseUrl: string | null; provider?: string }) {
     if (!this.isBillableVisionRuntime(result)) return "non-billable-runtime";
     return visionModelTokenPricing(result.model) ? "vision-catalog-list-price" : "configured-fallback";
   }
@@ -1611,6 +1612,7 @@ export class VisionExtractStage implements Stage {
     model: string;
     runtime: string;
     baseUrl: string | null;
+    provider?: string;
     inputTokens: number;
     outputTokens: number;
   }): number {

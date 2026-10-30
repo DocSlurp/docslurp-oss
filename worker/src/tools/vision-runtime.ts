@@ -15,7 +15,17 @@ import {
 } from "./vision-model-profiles.js";
 import { attachVisionBilledUsage, estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
-import { isBillableVisionRuntime, VISION_MAX_PROMPT_BYTES, visionInputTokenBound, visionRequestPricing, type VisionTokenPrice } from "../lib/vision-pricing.js";
+import {
+  isOpenRouterBaseUrl,
+  UnpricedVisionRouteError,
+  VISION_MAX_PROMPT_BYTES,
+  visionImageTokenBound,
+  visionInputTokenBound,
+  visionRequestPricing,
+  visionRouteBilling,
+  type VisionMaxPrice,
+  type VisionRouteBilling,
+} from "../lib/vision-pricing.js";
 import { imageDimensions } from "../native-pdf/render.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
@@ -53,6 +63,7 @@ import {
   type VisionConfig,
   type VisionExecutionConfig,
   type VisionRuntime,
+  visionModelUriProblem,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -210,7 +221,7 @@ function weightedGate(gate: VisionRequestGate, weightCents: number): VisionReque
   return {
     admit: () => gate.admit({ weightCents }),
     failed: () => gate.failed(),
-    unbilled: (kind) => gate.unbilled(kind),
+    unbilled: (kind, detail) => gate.unbilled(kind, detail),
   };
 }
 
@@ -225,19 +236,21 @@ async function runRouteVisionRequest(
   args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null },
 ): Promise<VisionExecutionResult> {
   // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
-  const promptBytes = Buffer.byteLength(prompt, "utf8");
-  if (promptBytes > VISION_MAX_PROMPT_BYTES) {
-    throw new Error(`vision prompt is ${promptBytes} bytes, over the ${VISION_MAX_PROMPT_BYTES}-byte limit; refusing to send`);
-  }
+  assertVisionPromptSize(prompt);
   const isPrivate = route.provider === PRIVATE_MODEL_PROVIDER;
-  // Each request weighs what it can cost at most against the org bound: this prompt, this image's size,
-  // the route's enforced output cap and its model's price (fails closed for an unpriced billed route).
+  // Billing follows the request's effective destination (no base URL = api.openai.com), never the provider name.
+  const billing = visionRouteBilling(route, args.cfg);
+  const model = isPrivate ? route.modelUri : route.model;
+  // Each request weighs what it can cost at most against the org bound: this prompt, this image's size on
+  // this model, the route's enforced output cap and its model's price. A billed route outside the priced
+  // catalog, or an unknown hosted destination, is refused here: nothing is admitted or sent.
+  const imageSize = route.runtime === "local-cli" ? null : await readImageSize(args.imagePath);
   const pricing = visionRequestPricing({
-    model: isPrivate ? route.modelUri : route.model,
+    model,
     runtime: route.runtime,
-    billable: !isPrivate && isBillableVisionRuntime(route, args.cfg),
-    openRouter: !isPrivate && Boolean(route.baseUrl?.includes("openrouter.ai")),
-    inputTokens: visionInputTokenBound(route.runtime === "local-cli" ? null : await readImageSize(args.imagePath), prompt),
+    billing,
+    inputTokens: visionInputTokenBound(imageSize, prompt, model),
+    imageTokens: visionImageTokenBound(imageSize, model),
   });
   const base = {
     imagePath: args.imagePath,
@@ -250,7 +263,7 @@ async function runRouteVisionRequest(
     prompt,
   };
   if (!isPrivate) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, ...streamGuard(args.cfg) });
+    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, ...streamGuard(args.cfg) });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, ...streamGuard(args.cfg) });
@@ -262,6 +275,17 @@ async function runRouteVisionRequest(
     costCents: cost.costCents,
     costMetadata: { ...cost.metadata, servedModel: call.model },
   };
+}
+
+/**
+ * Refuses a prompt over `VISION_MAX_PROMPT_BYTES` before admission. Built-in templates and the capped schema
+ * labels stay far below it; this is the backstop for any future prompt source.
+ */
+export function assertVisionPromptSize(prompt: string): void {
+  const promptBytes = Buffer.byteLength(prompt, "utf8");
+  if (promptBytes > VISION_MAX_PROMPT_BYTES) {
+    throw new Error(`vision prompt is ${promptBytes} bytes, over the ${VISION_MAX_PROMPT_BYTES}-byte limit; refusing to send`);
+  }
 }
 
 /** Pixel size from the image header (PNG IHDR, JPEG SOF); unknown sizes are priced at the largest raster. */
@@ -307,25 +331,16 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
-function resolveVisionApiKey(
-  runtime: VisionRuntime,
-  baseUrl: string | null,
-  cfg: Config,
-): string {
-  if (runtime === "local-cli") {
-    return "";
+/**
+ * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the OpenAI key
+ * only to the configured OpenAI base URL, and no key anywhere else (loopback servers, local runtimes).
+ */
+function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Config): string {
+  if (billing === "openrouter") {
+    return baseUrl?.replace(/\/+$/, "") === OPENROUTER_BASE_URL ? cfg.openRouterApiKey : "";
   }
-
-  const normalizedBaseUrl = baseUrl?.replace(/\/+$/, "") ?? "";
-  if (normalizedBaseUrl === OPENROUTER_BASE_URL) {
-    return cfg.openRouterApiKey;
-  }
-
-  if (runtime === "remote-openai") {
-    return cfg.openAiApiKey;
-  }
-
-  return cfg.openAiApiKey;
+  if (billing === "openai") return cfg.openAiApiKey;
+  return "";
 }
 
 function normalizeVisionConfig(
@@ -333,6 +348,13 @@ function normalizeVisionConfig(
   cfg: Config,
   outputSchema?: Record<string, unknown> | null,
 ): VisionExecutionConfig {
+  // Configs are validated (visionConfigSchema); a route built some other way is checked again before use.
+  const problem = visionModelUriProblem(vision.modelUri);
+  if (problem) throw new UnpricedVisionRouteError(vision.modelUri, `is refused: ${problem}`);
+  if (vision.remoteFallbackModelUri) {
+    const fallbackProblem = visionModelUriProblem(vision.remoteFallbackModelUri);
+    if (fallbackProblem) throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);
+  }
   const selected = resolveVisionRoute(vision);
   return {
     ...selected,
@@ -402,8 +424,8 @@ export async function runVisionRequest(args: {
   estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
   /** Admission for every request (see `executeVisionRuntime`). */
   gate: VisionRequestGate | null;
-  /** Prices the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
-  maxPrice?: VisionTokenPrice | null;
+  /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
+  maxPrice?: VisionMaxPrice | null;
 }): Promise<VisionExecutionResult> {
   args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -492,7 +514,7 @@ export async function runVisionRequest(args: {
       // 429/5xx back off honouring Retry-After; exhausted retries throw
       // ProviderRetryableError so the activity retries instead of skipping the page.
       // Streaming, degeneration abort and the single alternate-route retry live in vision-stream.ts.
-      const isOpenRouter = Boolean(args.baseUrl?.includes("openrouter.ai"));
+      const isOpenRouter = isOpenRouterBaseUrl(args.baseUrl);
       const body = {
         model: args.model,
         messages: [
@@ -644,9 +666,12 @@ export function rejectedVisionUsageInput(error: VisionOutputRejectedError, costC
   };
 }
 
-/** OpenRouter `provider.max_price`: USD per million prompt and completion tokens. */
-export function openRouterMaxPrice(price: VisionTokenPrice): { prompt: number; completion: number } {
-  return { prompt: price.inputUsdPerMillion, completion: price.outputUsdPerMillion };
+/**
+ * OpenRouter `provider.max_price` (provider-selection docs): `prompt` and `completion` in USD per million
+ * tokens, `image` in USD per image, `request` in USD per request.
+ */
+export function openRouterMaxPrice(price: VisionMaxPrice): { prompt: number; completion: number; image: number; request: number } {
+  return { prompt: price.inputUsdPerMillion, completion: price.outputUsdPerMillion, image: price.imageUsd, request: price.requestUsd };
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {

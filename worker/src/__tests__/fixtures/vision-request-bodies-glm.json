@@ -36,7 +36,9 @@
       "allow_fallbacks": false,
       "max_price": {
         "prompt": 0.15,
-        "completion": 0.5
+        "completion": 0.5,
+        "image": 0.012877350000000001,
+        "request": 0
       }
     },
     "stream": true,

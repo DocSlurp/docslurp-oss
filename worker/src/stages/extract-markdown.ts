@@ -42,7 +42,8 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import type { CanonicalDocument } from "@docslurp/shared";
+import { visionListPriceCents, type CanonicalDocument } from "@docslurp/shared";
+import { isBillableVisionRuntime } from "../lib/vision-pricing.js";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -1606,9 +1607,7 @@ export class ExtractMarkdownStage implements Stage {
             ),
           };
           const critiqueCost = (result: Awaited<ReturnType<typeof executeVisionRuntime>>) =>
-            result.provider === "private" && result.costCents !== undefined ? result.costCents : calculateCritiqueCost(
-              this.cfg, result.runtime, result.baseUrl, result.inputTokens, result.outputTokens,
-            );
+            result.costCents !== undefined ? result.costCents : calculateCritiqueCost(this.cfg, result);
           // The run's vision attempt guard admits every critique request like every other vision
           // request; critique never creates a customer charge, so its requests stay uncharged. A
           // rejected or failed call records its spend there.
@@ -2638,28 +2637,18 @@ function buildCritiquePrompt(
   return constraints.join("\n");
 }
 
+/**
+ * Provider cost of a critique call without a provider charge, by the same billed-route decision as the
+ * request's pricing (lib/vision-pricing.ts `isBillableVisionRuntime`: its effective destination): catalog
+ * list price, else the configured rates; 0 only on local, loopback and private routes.
+ */
 function calculateCritiqueCost(
   cfg: Config,
-  runtime: string,
-  baseUrl: string | null,
-  inputTokens: number,
-  outputTokens: number,
+  result: { model: string; runtime: string; baseUrl: string | null; provider?: string; inputTokens: number; outputTokens: number },
 ): number {
-  const normalizedBaseUrl = baseUrl?.replace(/\/+$/, "") ?? null;
-  const normalizedOpenAiBaseUrl = cfg.openAiBaseUrl.replace(/\/+$/, "");
-  const billableRuntime =
-    runtime === "remote-openai" ||
-    (runtime === "openai-compatible" &&
-      normalizedBaseUrl === normalizedOpenAiBaseUrl);
-
-  if (!billableRuntime) {
-    return 0;
-  }
-
-  return Math.ceil(
-    (inputTokens / 1000) * cfg.costPer1kInputTokens +
-      (outputTokens / 1000) * cfg.costPer1kOutputTokens,
-  );
+  if (!isBillableVisionRuntime(result, cfg)) return 0;
+  return visionListPriceCents(result.model, result) ??
+    (result.inputTokens / 1000) * cfg.costPer1kInputTokens + (result.outputTokens / 1000) * cfg.costPer1kOutputTokens;
 }
 
 class FanoutWritable extends Writable {

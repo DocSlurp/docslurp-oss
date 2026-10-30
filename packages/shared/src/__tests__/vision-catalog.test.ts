@@ -18,6 +18,10 @@ import {
   visionListPriceCents,
   visionModelCatalog,
   visionModelTokenPricing,
+  visionModelImageTokenBound,
+  visionModelUriProblem,
+  isProhibitedPremiumModelId,
+  VISION_MAX_OUTPUT_USD_PER_MILLION,
 } from "../index.js";
 
 const NEMOTRON_URI = `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}`;
@@ -151,5 +155,34 @@ describe("hosted vision catalog", () => {
   it("switches Nemotron reasoning off for page transcription", () => {
     expect(openRouterReasoningParams(NEMOTRON_SUPER_VL_VISION_MODEL)).toEqual({ reasoning: { enabled: false } });
     expect(openRouterReasoningParams(DEFAULT_OPENROUTER_VISION_MODEL)).toEqual({});
+  });
+});
+
+describe("hosted vision catalog limits", () => {
+  it("gives every priced model an image-token bound, an output price under the limit and a non-premium id", () => {
+    for (const spec of visionModelCatalog) {
+      expect(isProhibitedPremiumModelId(spec.id), spec.id).toBe(false);
+      if (!spec.tokenPricing) continue;
+      expect(visionModelImageTokenBound(spec.id), spec.id).not.toBeNull();
+      expect(spec.tokenPricing.outputUsdPerMillion, spec.id).toBeLessThan(VISION_MAX_OUTPUT_USD_PER_MILLION);
+      expect(visionModelUriProblem(spec.uri), spec.uri).toBeNull();
+    }
+  });
+
+  it("refuses unknown hosted providers, uncataloged hosted models and Pro/Ultra ids on every provider", () => {
+    expect(visionModelUriProblem("llm://acme/o3-pro")).toMatch(/Pro\/Ultra/);
+    expect(visionModelUriProblem("llm://acme/plain-vl")).toMatch(/not supported/);
+    expect(visionModelUriProblem("llm://anthropic/claude-haiku-5.5")).toMatch(/not supported/);
+    expect(visionModelUriProblem("llm://huggingface/Qwen/Qwen2.5-VL-7B-Instruct")).toMatch(/not supported/);
+    expect(visionModelUriProblem("llm://openrouter/anthropic/claude-haiku-5.5")).toMatch(/priced vision catalog/);
+    expect(visionModelUriProblem("llm://openai/gpt-x")).toMatch(/priced vision catalog/);
+    for (const uri of ["llm://openrouter/openai/o3-pro", "llm://openai/gpt-5-pro", "llm://vllm/x/model-ultra", "llm://private/gpu1/acme/vl-pro-2025"]) {
+      expect(visionModelUriProblem(uri), uri).toMatch(/Pro\/Ultra/);
+    }
+    // Not premium tiers: "pro" inside a word, or "-pro" not followed by a separator.
+    expect(isProhibitedPremiumModelId("acme/prompt-vl")).toBe(false);
+    expect(isProhibitedPremiumModelId("acme/vl-professional")).toBe(false);
+    expect(visionModelUriProblem("llm://vllm/acme/plain-vl")).toBeNull();
+    expect(visionModelUriProblem("llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8")).toBeNull();
   });
 });
