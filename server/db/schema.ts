@@ -3490,6 +3490,8 @@ export const documentPageStates = pgTable(
     attempts: integer().default(0).notNull(),
     feeBilledRun: text("fee_billed_run"),
     feeBilledAt: timestamp("fee_billed_at", { withTimezone: true, mode: "string" }),
+    modelReadRun: text("model_read_run"),
+    modelReadPages: integer("model_read_pages"),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   },
   (table) => [

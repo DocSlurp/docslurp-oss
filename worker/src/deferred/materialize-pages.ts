@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
-import type { Sql } from "postgres";
+import type { JSONValue, Sql } from "postgres";
 
 import {
   buildPricedAiUsageLedgerEvent,
@@ -37,8 +37,8 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-runtime.js";
 import { findVisionOutputRejected } from "../tools/vision-stream.js";
-import { isMissingDocumentError } from "../db/missing-document.js";
-import { recordMaterializedPageFee } from "../db/page-base-fee.js";
+import { DocumentNotFoundError } from "../db/missing-document.js";
+import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
@@ -241,6 +241,59 @@ export function headingPathsFromMap(nodes: unknown): (page: number) => string[] 
   };
 }
 
+type PageRow = { id: string; documentId: string; runId: string; userId: string; pageNumber: number; text: string; tokenEstimate: number };
+type ChunkRow = {
+  id: string; documentId: string; runId: string; userId: string; chunkIndex: number; text: string;
+  headingPath: string[]; pageNumber: number; tokenEstimate: number; metadata: Record<string, unknown>;
+};
+
+/** Store.insertPages on the publication transaction. */
+async function insertPageRows(client: Sql, pages: PageRow[]): Promise<void> {
+  if (pages.length === 0) return;
+  const rows = pages.map((page) => ({
+    id: page.id, document_id: page.documentId, run_id: page.runId, user_id: page.userId,
+    page_number: page.pageNumber, text: page.text, token_estimate: page.tokenEstimate,
+  }));
+  await client`
+    insert into document_pages ${client(rows, "id", "document_id", "run_id", "user_id", "page_number", "text", "token_estimate")}
+    on conflict (id) do update
+    set run_id = excluded.run_id, user_id = excluded.user_id, page_number = excluded.page_number,
+        text = excluded.text, token_estimate = excluded.token_estimate
+  `;
+}
+
+/** Store.insertChunks on the publication transaction. */
+async function insertChunkRows(client: Sql, chunks: ChunkRow[]): Promise<void> {
+  for (let from = 0; from < chunks.length; from += 1000) {
+    const rows = chunks.slice(from, from + 1000).map((chunk) => ({
+      id: chunk.id, document_id: chunk.documentId, run_id: chunk.runId, user_id: chunk.userId, chunk_index: chunk.chunkIndex,
+      text: chunk.text, heading_path: chunk.headingPath, page_number: chunk.pageNumber, token_estimate: chunk.tokenEstimate,
+      metadata: client.json(chunk.metadata as JSONValue), content_hash: null, pipeline_version: null,
+    }));
+    await client`
+      insert into document_chunks ${client(rows, "id", "document_id", "run_id", "user_id", "chunk_index", "text", "heading_path",
+        "page_number", "token_estimate", "metadata", "content_hash", "pipeline_version")}
+      on conflict (id) do update
+      set document_id = excluded.document_id, run_id = excluded.run_id, user_id = excluded.user_id,
+          chunk_index = excluded.chunk_index, text = excluded.text, heading_path = excluded.heading_path,
+          page_number = excluded.page_number, token_estimate = excluded.token_estimate, metadata = excluded.metadata,
+          content_hash = excluded.content_hash, pipeline_version = excluded.pipeline_version
+    `;
+  }
+}
+
+/** Store.linkChunksToPages on the publication transaction. */
+async function linkChunksToPageRows(client: Sql, documentId: string, runId: string): Promise<void> {
+  await client`
+    update document_chunks c
+    set parent_page_id = p.id
+    from document_pages p
+    where c.document_id = ${documentId} and c.run_id = ${runId}
+      and p.document_id = ${documentId} and p.run_id = ${runId}
+      and c.page_number = p.page_number and c.parent_page_id is null
+  `;
+}
+
 async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -266,6 +319,10 @@ export async function materializePageRange(
   const failed = new Map<number, string>();
   const released: number[] = [];
   const prepared = new Map<number, PreparedPage>();
+  /** Pages a model read with non-empty content, and the Rich pages each read is worth. */
+  const modelReads = new Map<number, number>();
+  /** Customer credits of each page's read (Rich charges buffered in the ledger). */
+  const readCents = new Map<number, number>();
   let spentCents = 0;
 
   // 1. Text layer per contiguous range, then OCR only pages without one.
@@ -319,10 +376,15 @@ export async function materializePageRange(
       });
       // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
       void event;
-      const cost = pageCredits("rich", richPagesForOutputTokens(ocr.outputTokens));
+      const richPages = richPagesForOutputTokens(ocr.outputTokens);
+      const cost = pageCredits("rich", richPages);
       spentCents += cost;
+      readCents.set(page, cost);
       if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
-      else prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
+      else {
+        prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
+        modelReads.set(page, richPages);
+      }
     } catch (error) {
       // A page rejected on every attempt was still billed: record the summed spend and count it against the budget.
       const rejected = findVisionOutputRejected(error);
@@ -385,14 +447,15 @@ export async function materializePageRange(
     }
   }
 
-  // 4. Embed (batched), persist, index.
+  // 4. Embed (batched). Nothing is published yet: pages, chunks and vectors are written in step 5, only for pages
+  // this run still holds.
   let embeddingCents = 0;
   const costByPage = new Map<number, number>();
   const profile = resolveEmbeddingModel(deps.config, pipeline);
   let dims = profile.dimensions;
+  const vectors: number[][] = [];
   if (chunks.length > 0) {
     try {
-      const vectors: number[][] = [];
       for (let from = 0; from < chunks.length; from += EMBED_BATCH_CHUNKS) {
         const batch = chunks.slice(from, from + EMBED_BATCH_CHUNKS);
         let recordedRemote = false;
@@ -430,111 +493,170 @@ export async function materializePageRange(
         }
       }
       dims = vectors[0]?.length ?? dims;
-
-      const dbChunks = chunks.map((c) => ({
-        id: c.id, documentId, runId: document.runId, userId: document.userId, chunkIndex: c.index,
-        text: c.text, headingPath: c.headingPath, pageNumber: c.page, tokenEstimate: estimateTokens(c.text),
-        metadata: { pageNumber: c.page, materializedBy: input.reason, deferred: true },
-      }));
-      await deps.store.insertPages([...prepared.values()].map((p) => ({
-        id: `${documentId}-page-${String(p.page).padStart(4, "0")}`, documentId, runId: document.runId, userId: document.userId,
-        pageNumber: p.page, text: p.text, tokenEstimate: estimateTokens(p.text),
-      })));
-      await deps.store.insertChunks(dbChunks);
-      await deps.store.linkChunksToPages(documentId, document.runId);
-
-      const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
-      await ops.writeVectors(location.uri, location.table, chunks.map((c, i) => ({
-        id: c.id, documentId, chunkIndex: c.index, text: c.text, vector: vectors[i]!,
-        metadata: { documentId, sourceKey: document.sourceKey, filename: document.filename, pageNumber: c.page },
-      })));
-
       const perChunkCents = embeddingCents / chunks.length;
       for (const c of chunks) costByPage.set(c.page, (costByPage.get(c.page) ?? 0) + perChunkCents);
     } catch (error) {
-      // A deleted document is not a page failure: let the activity stop the whole range cleanly.
-      if (isMissingDocumentError(error)) throw error;
       const reason = error instanceof Error ? error.message : String(error);
       for (const page of [...prepared.keys()]) failed.set(page, reason);
       prepared.clear();
     }
   }
 
-  // 4b. Drop stale chunks of re-chunked pages (and blocked pages that were indexed before).
-  const cleanPages = [...new Set([...prepared.keys(), ...blocked])];
-  if (cleanPages.length > 0) {
-    try {
-      const keep = new Set(prepared.size > 0 ? chunks.filter((c) => prepared.has(c.page)).map((c) => c.id) : []);
-      const patterns = cleanPages.map((p) => `${documentId}:p${p}:c%`);
-      const existing = await deps.sql<{ id: string }[]>`
-        select id from document_chunks where document_id = ${documentId} and id like any(${patterns}::text[])
-      `;
-      const stale = existing.map((r) => r.id).filter((id) => !keep.has(id));
-      if (stale.length > 0) {
-        if (run.orgId && run.workspaceId) {
-          const loc = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
-          await ops.deleteVectors(loc.uri, loc.table, stale);
-        }
-        await deps.sql`delete from document_chunks where document_id = ${documentId} and id = any(${stale}::text[])`;
-      }
-    } catch (error) {
-      console.warn(`[materialize] stale chunk cleanup failed for ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  // 5. Ledger: one statement per distinct outcome/cost.
-  const indexedByCost = new Map<number, number[]>();
-  for (const entry of prepared.values()) {
-    const credits = Math.round(((entry.ocrCostCents + (costByPage.get(entry.page) ?? 0))) * 10_000) / 10_000;
-    result.indexed.push(entry.page);
-    indexedByCost.set(credits, [...(indexedByCost.get(credits) ?? []), entry.page]);
-  }
-  result.indexed.sort((a, b) => a - b);
-  result.blocked = blocked.sort((a, b) => a - b);
-  for (const [page, reason] of [...failed].sort((a, b) => a[0] - b[0])) result.failed.push({ page, reason });
-  // Customer credits of the call: every OCR-read page (Rich, including pages that then failed) and
-  // every text-layer page that indexed (Fast). Embedding batches are provider cost (0 credits).
-  const fastIndexed = result.indexed.filter((page) => !ocrPages.includes(page)).length;
-  result.costCredits = Math.round((spentCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
-
-  // Every ledger write below is fenced to pages this run still holds (claimed_by_run): a run that stalled past
-  // its claim TTL, while another run re-claimed a page, neither indexes nor bills that page.
+  // 5. Publish and bill, fenced on the claim. One transaction locks the range's ledger rows (`for update`) and
+  // publishes only the pages this run still holds (`claimed_by_run = runId`): their LanceDB vectors, document_pages,
+  // document_chunks, stale-chunk cleanup, the state transition and (query/backfill) the billing decision. A page this
+  // run lost publishes nothing, cleans up nothing and is billed by its owner. Another run cannot claim, publish or
+  // bill these pages while the rows are locked.
+  //
+  // Vector ordering: LanceDB is outside Postgres. Vectors are upserted under the row locks, after the claim check and
+  // before the commit, so a run that lost its claim never writes a vector id another run published (ids are
+  // `${documentId}:p${page}:c${i}`, shared by every run). Search only returns a vector whose id has a committed
+  // document_chunks row (server vectorSearch hydrates by id), so vectors of an attempt that then rolls back are never
+  // visible; they are deleted best effort, and the page stays this run's claim for the retry, which upserts the same
+  // ids. Stale vectors (chunks this publication replaced) are deleted after the commit; their chunk rows are gone
+  // with it, so they are already unsearchable.
+  const rangePages = [...new Set([...pages])].sort((a, b) => a - b);
   const claimedBy = input.runId;
-  const markIndexed = async (client: Sql): Promise<number[]> => {
-    const owned: number[] = [];
-    for (const [credits, group] of indexedByCost) {
-      owned.push(...await markPages(client, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model, claimedBy }));
-    }
-    return owned.sort((a, b) => a - b);
-  };
+  const billsHere = input.reason !== "full-index";
+  const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
+  let written: string[] = [];
+  let staleIds: string[] = [];
+  let held = new Set<number>();
   let owned: number[] = [];
-  if (input.reason === "full-index") {
-    // Full-index pages are charged by the run's completion fee (recordPageBaseFee), not stamped here.
-    owned = await markIndexed(deps.sql);
-  } else if (result.indexed.length > 0) {
-    // The pages turn indexed in the transaction that persists their Rich charges (taken from the usage ledger),
-    // their Fast charges and their `fee_billed_run` stamp: a crash leaves them claimed and unbilled, never
-    // indexed without the billing decision (a retry would otherwise find its own stamp and no Rich charge).
-    // Only the pages the transition moved are stamped and charged.
-    await recordMaterializedPageFee(deps.sql as Sql<Record<string, unknown>>, input.runId, documentId, result.indexed, {
-      ledger: deps.usage,
-      transition: async (client) => { owned = await markIndexed(client as unknown as Sql); return owned; },
+  const batches: Array<{ commit(): void }> = [];
+  try {
+    await deps.sql.begin(async (tx) => {
+      const client = tx as unknown as Sql;
+      // A document deleted meanwhile took its ledger rows with it: stop the range (the activity reports it), never
+      // mistake the missing rows for a lost claim.
+      const [exists] = await client`select 1 as one from documents where id = ${documentId} for share`;
+      if (!exists) throw new DocumentNotFoundError(documentId);
+      const locked = await lockPageRows(client as unknown as Sql<Record<string, unknown>>, documentId, rangePages);
+      held = new Set(locked.filter((row) => row.claimed_by_run === claimedBy).map((row) => row.page_number));
+      const publish = [...prepared.keys()].filter((page) => held.has(page)).sort((a, b) => a - b);
+      let publishChunks = chunks.map((c, i) => ({ ...c, vector: vectors[i] })).filter((c) => held.has(c.page) && prepared.has(c.page));
+      if (publishChunks.length > 0) {
+        try {
+          written = publishChunks.map((c) => c.id);
+          await ops.writeVectors(location.uri, location.table, publishChunks.map((c) => ({
+            id: c.id, documentId, chunkIndex: c.index, text: c.text, vector: c.vector!,
+            metadata: { documentId, sourceKey: document.sourceKey, filename: document.filename, pageNumber: c.page },
+          })));
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          for (const page of publish) { failed.set(page, reason); prepared.delete(page); }
+          publishChunks = [];
+        }
+      }
+      const publishedPages = [...prepared.values()].filter((p) => held.has(p.page));
+      await insertPageRows(client, publishedPages.map((p) => ({
+        id: `${documentId}-page-${String(p.page).padStart(4, "0")}`, documentId, runId: document.runId, userId: document.userId,
+        pageNumber: p.page, text: p.text, tokenEstimate: estimateTokens(p.text),
+      })));
+      await insertChunkRows(client, publishChunks.map((c) => ({
+        id: c.id, documentId, runId: document.runId, userId: document.userId, chunkIndex: c.index,
+        text: c.text, headingPath: c.headingPath, pageNumber: c.page, tokenEstimate: estimateTokens(c.text),
+        metadata: { pageNumber: c.page, materializedBy: input.reason, deferred: true },
+      })));
+      if (publishChunks.length > 0) await linkChunksToPageRows(client, documentId, document.runId);
+
+      // Stale chunks of re-chunked pages (and blocked pages that were indexed before), on held pages only.
+      const cleanPages = [...new Set([...publishedPages.map((p) => p.page), ...blocked])].filter((page) => held.has(page));
+      if (cleanPages.length > 0) {
+        const keep = new Set(publishChunks.map((c) => c.id));
+        const patterns = cleanPages.map((p) => `${documentId}:p${p}:c%`);
+        const existing = await client<{ id: string }[]>`
+          select id from document_chunks where document_id = ${documentId} and id like any(${patterns}::text[])
+        `;
+        staleIds = existing.map((r) => r.id).filter((id) => !keep.has(id));
+        if (staleIds.length > 0) await client`delete from document_chunks where document_id = ${documentId} and id = any(${staleIds}::text[])`;
+      }
+
+      // Ledger transitions, each fenced to pages this run still holds.
+      const indexedByCost = new Map<number, number[]>();
+      for (const entry of publishedPages) {
+        const credits = Math.round(((entry.ocrCostCents + (costByPage.get(entry.page) ?? 0))) * 10_000) / 10_000;
+        indexedByCost.set(credits, [...(indexedByCost.get(credits) ?? []), entry.page]);
+      }
+      const moved: number[] = [];
+      for (const [credits, group] of indexedByCost) {
+        moved.push(...await markPages(client, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model, claimedBy }));
+      }
+      const ownedBlocked = blocked.filter((page) => held.has(page));
+      if (ownedBlocked.length > 0) await markPages(client, documentId, ownedBlocked, "blocked-pii", { failureReason: "pii-policy", claimedBy });
+      const byReason = new Map<string, number[]>();
+      for (const [page, reason] of failed) {
+        if (!held.has(page) || released.includes(page)) continue;
+        byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
+      }
+      for (const [reason, group] of byReason) await markPages(client, documentId, group, "failed", { failureReason: reason, claimedBy });
+      const ownedReleased = released.filter((page) => held.has(page));
+      if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
+      owned = moved.sort((a, b) => a - b);
+
+      const lost = rangePages.filter((page) => !held.has(page));
+      if (billsHere) {
+        // A genuine model read of a page this run lost is recorded on the page row: the page's one charge is Rich
+        // whichever run publishes it (billLockedMaterializedPages), and only through that run's decision.
+        const lostReads = lost.filter((page) => modelReads.has(page));
+        if (lostReads.length > 0) {
+          await client`
+            update document_page_states s
+            set model_read_run = coalesce(s.model_read_run, ${claimedBy}),
+                model_read_pages = coalesce(s.model_read_pages, r.pages)
+            from unnest(${lostReads}::int[], ${lostReads.map((page) => modelReads.get(page)!)}::int[]) as r(page, pages)
+            where s.document_id = ${documentId} and s.page_number = r.page
+          `;
+        }
+        const outcome = await billLockedMaterializedPages(client as unknown as Sql<Record<string, unknown>>, {
+          runId: claimedBy, documentId, requested: publishedPages.map((p) => p.page).sort((a, b) => a - b), moved: new Set(moved),
+          ledger: deps.usage, modelReads: new Map(lostReads.map((page) => [page, modelReads.get(page)!])),
+        });
+        if (outcome.richBatch) batches.push(outcome.richBatch);
+      }
+      // Reads of pages this run lost (failed, empty or published elsewhere) stay provider usage: their pending Rich
+      // charges are dropped, never persisted as a customer charge. Owned pages keep theirs (a read page that then
+      // failed still bills Rich).
+      if (lost.length > 0) {
+        const lostSet = new Set(lost);
+        const dropped = deps.usage.takeRichPageCharges(documentId, (page) => lostSet.has(page));
+        if (dropped.events.length > 0) {
+          console.warn(`[materialize] run=${claimedBy} document=${documentId} lost pages ${lost.join(",")}; dropped their pending Rich charges (provider usage only)`);
+        }
+        batches.push(dropped);
+      }
+    });
+  } catch (error) {
+    if (written.length > 0) {
+      // The transaction rolled back: these ids have no committed chunk row, so they are unsearchable; drop them.
+      await ops.deleteVectors(location.uri, location.table, written).catch((cleanup: unknown) => {
+        console.warn(`[materialize] vector rollback failed for ${documentId}: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`);
+      });
+    }
+    throw error;
+  }
+  for (const batch of batches) batch.commit();
+  if (staleIds.length > 0 && run.orgId && run.workspaceId) {
+    await ops.deleteVectors(location.uri, location.table, staleIds).catch((error: unknown) => {
+      console.warn(`[materialize] stale vector cleanup failed for ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
-  const lost = result.indexed.filter((page) => !owned.includes(page));
-  if (lost.length > 0) {
-    // Another run holds these pages now; it indexes and bills them.
-    console.warn(`[materialize] run=${input.runId} document=${documentId} lost its claim on pages ${lost.join(",")}; not indexed or billed by this run`);
-    result.indexed = result.indexed.filter((page) => owned.includes(page));
+
+  // 6. Result: only what this run published and owns.
+  const lostPages = rangePages.filter((page) => !held.has(page));
+  if (lostPages.length > 0) {
+    console.warn(`[materialize] run=${input.runId} document=${documentId} lost its claim on pages ${lostPages.join(",")}; published and billed nothing for them`);
   }
-  const writes: Promise<number[]>[] = [];
-  if (blocked.length > 0) writes.push(markPages(deps.sql, documentId, blocked, "blocked-pii", { failureReason: "pii-policy", claimedBy }));
-  const hardFailed = result.failed.filter((f) => !released.includes(f.page));
-  const byReason = new Map<string, number[]>();
-  for (const f of hardFailed) byReason.set(f.reason, [...(byReason.get(f.reason) ?? []), f.page]);
-  for (const [reason, group] of byReason) writes.push(markPages(deps.sql, documentId, group, "failed", { failureReason: reason, claimedBy }));
-  if (released.length > 0) writes.push(markPages(deps.sql, documentId, released, "unseen", { claimedBy }));
-  // A single postgres connection serializes these; awaiting together keeps code simple.
-  await Promise.all(writes);
+  result.indexed = owned;
+  result.blocked = blocked.filter((page) => held.has(page)).sort((a, b) => a - b);
+  for (const [page, reason] of [...failed].sort((a, b) => a[0] - b[0])) {
+    if (held.has(page)) result.failed.push({ page, reason });
+  }
+  // Customer credits of the call: every OCR-read page it still owned (Rich, including pages that then failed) and
+  // every text-layer page that indexed (Fast). Embedding batches are provider cost (0 credits).
+  const ocrSet = new Set(ocrPages);
+  const ownedReadCents = [...held].reduce((sum, page) => sum + (readCents.get(page) ?? 0), 0);
+  const fastIndexed = result.indexed.filter((page) => !ocrSet.has(page)).length;
+  result.costCredits = Math.round((ownedReadCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
   return result;
 }

@@ -163,29 +163,11 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
  * (run, document, page) with a deterministic id, so a retried activity or a
  * second query that re-claims a page never charges it twice.
  *
- * The `fee_billed_run` stamp is each page's billing decision, Fast or Rich.
- * Pages a model read were charged Rich by the usage ledger: the ledger's
- * pending Rich charges for the pages this run stamps (`ledger`) are persisted
- * in this transaction, together with the stamp, and every page this run
- * already has a Rich read recorded for (usage_attribution; a retry finds the
- * read an earlier attempt persisted) is stamped without a Fast charge. A later
- * query or full index sees the stamp and charges the page nothing.
- *
- * `transition` runs inside the same transaction, after the page rows are
- * locked, and returns the pages it moved: the materializer turns the pages it
- * still holds `indexed` there, so a page is never indexed without its Rich or
- * Fast charge and stamp (a crash in between rolls the transition back and the
- * page is materialized and charged again by the retry, once, by id). Only the
- * pages it moved are stamped and charged: a run that lost its claim bills
- * nothing for those pages.
- *
- * Pages this run no longer owns (it lost the claim, or another run stamped
- * them) drop this run's pending Rich charges for them: the owner bills the page.
- *
- * A stale stamp (staleStampSql: its run recorded no Fast or Rich charge for the
- * page and can no longer commit one) is taken over: it is re-stamped to this
- * run and charged here, so no page stays unbilled. An active stamping run keeps
- * its page.
+ * Opens a transaction, locks the pages' ledger rows, runs `transition` (which
+ * moves the pages this run still holds and returns them), then bills them with
+ * billLockedMaterializedPages. The materializer publishes and bills in its own
+ * transaction (materialize-pages.ts); this entry point serves recovery
+ * (`billUnbilled`) and tests.
  * Returns the newly billed credits.
  */
 export async function recordMaterializedPageFee(
@@ -200,12 +182,10 @@ export async function recordMaterializedPageFee(
   } = {},
 ): Promise<number> {
   const requested = [...new Set(pages)].filter((page) => Number.isInteger(page) && page >= 1).sort((a, b) => a - b);
-  const rateCents = pageCredits("fast", 1);
   if (requested.length === 0) return 0;
   let richBatch: PipelineUsageBatch | undefined;
   const billed = await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
-    await client`select id from workspace_runs where id = ${runId} for update`;
     // The ledger row is where a page's fee is stamped; create any that are missing (normally ensurePageRows did). A document deleted
     // meanwhile has no ledger to stamp, so its pages are not billed.
     await client`
@@ -214,68 +194,170 @@ export async function recordMaterializedPageFee(
       where exists (select 1 from documents where id = ${documentId})
       on conflict (document_id, page_number) do nothing
     `;
-    // Lock the pages' ledger rows in page order, then stamp the ones nobody has billed. The stamp is the
-    // billing decision: a concurrent run touching the same pages waits on these row locks and, after our commit,
-    // sees them stamped. A retry of this run re-owns its own stamps (fee events are idempotent by id).
-    await client`
-      select page_number from document_page_states
-      where document_id = ${documentId} and page_number = any(${requested}::int[])
-      order by page_number for update
-    `;
+    await lockPageRows(client, documentId, requested);
     const moved = options.transition ? new Set(await options.transition(client)) : null;
-    const candidates = moved ? requested.filter((page) => moved.has(page)) : requested;
-    const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
-      select id, org_id, user_id, workspace_id, stats from workspace_runs where id = ${runId}
-    `;
-    if (!row) throw new Error(`run not found: ${runId}`);
-    const state = { run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} } } as unknown as WorkflowState;
-    const owned = candidates.length === 0 ? [] : (await client<{ page_number: number }[]>`
-      update document_page_states s
-      set fee_billed_run = ${runId}, fee_billed_at = case when s.fee_billed_run = ${runId} then coalesce(s.fee_billed_at, now()) else now() end
-      where s.document_id = ${documentId} and s.page_number = any(${candidates}::int[])
-        and (s.fee_billed_run is null or s.fee_billed_run = ${runId} or ${staleStampSql(client)})
-      returning s.page_number
-    `).map((r) => r.page_number);
-    const ownedSet = new Set(owned);
-    // Pages this run does not own: the claim moved on (not transitioned), or another run's stamp stands.
-    const foreignSet = new Set([
-      ...(moved ? requested.filter((page) => !moved.has(page)) : []),
-      ...(await client<{ page_number: number }[]>`
-        select page_number from document_page_states
-        where document_id = ${documentId} and page_number = any(${requested}::int[])
-          and fee_billed_run is not null and fee_billed_run <> ${runId}
-      `).map((r) => r.page_number),
-    ]);
-    // The Rich charges for reads this attempt made land with the stamps they back (ids are deterministic per run
-    // and page). Reads of pages another run owns are dropped from the ledger and never charged: the owner bills them.
-    richBatch = options.ledger?.takeRichPageCharges(documentId, (page) => ownedSet.has(page) || foreignSet.has(page));
-    const richEvents = richBatch?.events ?? [];
-    const chargeable = richEvents.filter((event) => ownedSet.has(Number(event.metadata?.pageNumber)));
-    const dropped = richEvents.filter((event) => !ownedSet.has(Number(event.metadata?.pageNumber)));
-    if (dropped.length > 0) {
-      console.warn(`[page-fee] run=${runId} document=${documentId} dropped Rich charges for pages it does not own: ${dropped.map((event) => event.metadata?.pageNumber).join(",")}`);
-    }
-    const richInserted = await persistRunUsageEvents({ client, state, usageEvents: chargeable });
-    const readRows = await client<{ page: number }[]>`
-      select distinct (au.metadata ->> 'pageNumber')::int as page from usage_attribution au
-      where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
-        and au.metadata ->> 'documentId' = ${documentId}
-        and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
-    `;
-    const rich = new Set(readRows.map((r) => Number(r.page)));
-    const fastPages = owned.filter((page) => !rich.has(page)).sort((x, y) => x - y);
-    const fastInserted = await persistRunUsageEvents({ client, state, usageEvents: fastPages.map(page => ({
-      id: `${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
-      amount: 1, unit: "page", costCents: rateCents,
-      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, page, materialized: true }),
-    })) });
-    const inserted = richInserted + fastInserted;
-    // The usage_events trigger adds `inserted` to the run's spent_cents (0056_run_spent_cents).
-    if (inserted > 0) await debitRunUsageCredits({ client, state, costCents: inserted });
-    return inserted;
+    const outcome = await billLockedMaterializedPages(client, { runId, documentId, requested, moved, ledger: options.ledger });
+    richBatch = outcome.richBatch;
+    return outcome.inserted;
   });
   richBatch?.commit();
   return billed;
+}
+
+/**
+ * Locks the pages' ledger rows in page order. Lock order everywhere a materialization transaction bills: page rows
+ * first, then the run row (billLockedMaterializedPages), so publications and fee writes of different runs serialize
+ * on the pages they share and never deadlock on run rows.
+ */
+export async function lockPageRows(client: Sql<Record<string, unknown>>, documentId: string, pages: number[]) {
+  return await client<{ page_number: number; claimed_by_run: string | null; state: string }[]>`
+    select page_number, claimed_by_run, state from document_page_states
+    where document_id = ${documentId} and page_number = any(${pages}::int[])
+    order by page_number for update
+  `;
+}
+
+/**
+ * The billing decision for materialized pages, inside the caller's transaction, with the pages' ledger rows already
+ * locked (lockPageRows). The rule (one customer charge per indexed page):
+ *
+ * - The `fee_billed_run` stamp is each page's single billing decision, Fast or Rich. Only pages `moved` (the
+ *   transition this run committed in the same transaction) are stamped and charged; a run that lost its claim
+ *   bills nothing for those pages.
+ * - Rich when this run read the page with a model: the ledger's pending Rich charges for the pages it stamps are
+ *   persisted here, with the stamps, and a page with a Rich read already recorded for the run (a retry finds the
+ *   read an earlier attempt persisted) gets no Fast charge.
+ * - Rich, not Fast, when another run's genuine model read of this page of this document version is recorded on the
+ *   ledger row (`model_read_run`: a run that read the page, lost its claim and published nothing). The winner's
+ *   content came from the text layer, but the read was real and is billed once, through this decision.
+ * - Fast otherwise.
+ * - `modelReads`: pages this run read with a model (non-empty content) but does not own. If another run's committed
+ *   decision for such a page is Fast, this run upgrades it to Rich with one event carrying only the difference
+ *   (`rich-upgrade:<document>:<page>`, once per page). If the owner already charged Rich, nothing is added.
+ * - This run's pending Rich charges for pages it does not own (lost claim, or another run's stamp stands) are dropped
+ *   from the ledger: they stay provider usage (the read's AI usage event), never a customer charge.
+ *
+ * A stale stamp (staleStampSql: its run recorded no Fast or Rich charge for the page and can no longer commit one) is
+ * taken over: it is re-stamped to this run and charged here, so no page stays unbilled. An active stamping run keeps
+ * its page. Call `richBatch.commit()` after the transaction commits.
+ */
+export async function billLockedMaterializedPages(
+  client: Sql<Record<string, unknown>>,
+  args: {
+    runId: string;
+    documentId: string;
+    requested: number[];
+    moved: Set<number> | null;
+    ledger?: Pick<PipelineUsageEventLedger, "takeRichPageCharges">;
+    modelReads?: Map<number, number>;
+  },
+): Promise<{ inserted: number; richBatch?: PipelineUsageBatch }> {
+  const { runId, documentId, requested, moved } = args;
+  const rateCents = pageCredits("fast", 1);
+  await client`select id from workspace_runs where id = ${runId} for update`;
+  const candidates = moved ? requested.filter((page) => moved.has(page)) : requested;
+  const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
+    select id, org_id, user_id, workspace_id, stats from workspace_runs where id = ${runId}
+  `;
+  if (!row) throw new Error(`run not found: ${runId}`);
+  const state = { run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} } } as unknown as WorkflowState;
+  const owned = candidates.length === 0 ? [] : (await client<{ page_number: number }[]>`
+    update document_page_states s
+    set fee_billed_run = ${runId}, fee_billed_at = case when s.fee_billed_run = ${runId} then coalesce(s.fee_billed_at, now()) else now() end
+    where s.document_id = ${documentId} and s.page_number = any(${candidates}::int[])
+      and (s.fee_billed_run is null or s.fee_billed_run = ${runId} or ${staleStampSql(client)})
+    returning s.page_number
+  `).map((r) => r.page_number);
+  const ownedSet = new Set(owned);
+  const modelReads = args.modelReads ?? new Map<number, number>();
+  // Pages this run does not own: the claim moved on (not transitioned), another run's stamp stands, or a page it
+  // read but never held at publication.
+  const foreignSet = new Set([
+    ...(moved ? requested.filter((page) => !moved.has(page)) : []),
+    ...[...modelReads.keys()].filter((page) => !ownedSet.has(page)),
+    ...(await client<{ page_number: number }[]>`
+      select page_number from document_page_states
+      where document_id = ${documentId} and page_number = any(${requested}::int[])
+        and fee_billed_run is not null and fee_billed_run <> ${runId}
+    `).map((r) => r.page_number),
+  ]);
+  // The Rich charges for reads this attempt made land with the stamps they back (ids are deterministic per run
+  // and page). Reads of pages another run owns are dropped from the ledger and never charged: the owner bills them.
+  const richBatch = args.ledger?.takeRichPageCharges(documentId, (page) => ownedSet.has(page) || foreignSet.has(page));
+  const richEvents = richBatch?.events ?? [];
+  const chargeable = richEvents.filter((event) => ownedSet.has(Number(event.metadata?.pageNumber)));
+  const dropped = richEvents.filter((event) => !ownedSet.has(Number(event.metadata?.pageNumber)));
+  if (dropped.length > 0) {
+    console.warn(`[page-fee] run=${runId} document=${documentId} dropped Rich charges for pages it does not own: ${dropped.map((event) => event.metadata?.pageNumber).join(",")}`);
+  }
+  const richInserted = await persistRunUsageEvents({ client, state, usageEvents: chargeable });
+  const readRows = await client<{ page: number }[]>`
+    select distinct (au.metadata ->> 'pageNumber')::int as page from usage_attribution au
+    where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+      and au.metadata ->> 'documentId' = ${documentId}
+      and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
+  `;
+  const rich = new Set(readRows.map((r) => Number(r.page)));
+  const undecided = owned.filter((page) => !rich.has(page)).sort((x, y) => x - y);
+  // Another run's genuine read of a page this run indexes from its text layer: the page bills Rich, once, here.
+  const readElsewhere = undecided.length === 0 ? [] : await client<{ page_number: number; model_read_run: string; model_read_pages: number | null }[]>`
+    select page_number, model_read_run, model_read_pages from document_page_states
+    where document_id = ${documentId} and page_number = any(${undecided}::int[]) and model_read_run is not null
+  `;
+  const readElsewhereByPage = new Map(readElsewhere.map((r) => [r.page_number, r]));
+  const richDecisions = undecided.filter((page) => readElsewhereByPage.has(page)).map((page) => {
+    const read = readElsewhereByPage.get(page)!;
+    const pagesRead = Math.max(1, Number(read.model_read_pages) || 1);
+    return {
+      id: `rich:${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
+      amount: pagesRead, unit: "page", costCents: pageCredits("rich", pagesRead),
+      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, pageNumber: page, readBy: "model-read", readRun: read.model_read_run, materialized: true }),
+    };
+  });
+  const fastPages = undecided.filter((page) => !readElsewhereByPage.has(page));
+  const decidedInserted = await persistRunUsageEvents({ client, state, usageEvents: [
+    ...richDecisions,
+    ...fastPages.map(page => ({
+      id: `${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
+      amount: 1, unit: "page", costCents: rateCents,
+      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, page, materialized: true }),
+    })),
+  ] });
+  // This run read pages another run decided Fast: upgrade those decisions to Rich (the difference only, once).
+  const upgradeCandidates = [...modelReads.keys()].filter((page) => !ownedSet.has(page));
+  const upgrades = upgradeCandidates.length === 0 ? [] : await client<{ page_number: number; fee_billed_run: string; fast_id: string }[]>`
+    select s.page_number, s.fee_billed_run, fast.id as fast_id
+    from document_page_states s
+    join lateral (
+      select au.id from usage_attribution au
+      where au.run_id = s.fee_billed_run and au.metric = ${BILLABLE_UNIT_METRICS.fastPage}
+        and au.metadata ->> 'documentId' = s.document_id
+        and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = s.page_number::text
+      limit 1
+    ) fast on true
+    where s.document_id = ${documentId} and s.page_number = any(${upgradeCandidates}::int[])
+      and s.state = 'indexed' and s.fee_billed_run is not null and s.fee_billed_run <> ${runId}
+      and not exists (
+        select 1 from usage_attribution au
+        where au.run_id = s.fee_billed_run and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+          and au.metadata ->> 'documentId' = s.document_id
+          and au.metadata ->> 'pageNumber' = s.page_number::text
+      )
+  `;
+  const upgradeInserted = await persistRunUsageEvents({ client, state, usageEvents: upgrades.map((upgrade) => {
+    const pagesRead = Math.max(1, modelReads.get(upgrade.page_number) ?? 1);
+    return {
+      id: `rich-upgrade:${documentId}:${upgrade.page_number}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card",
+      metric: BILLABLE_UNIT_METRICS.richPage, amount: pagesRead, unit: "page",
+      costCents: Math.max(0, pageCredits("rich", pagesRead) - rateCents),
+      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, pageNumber: upgrade.page_number, readBy: "model-read",
+        upgradeOf: upgrade.fast_id, decidedBy: upgrade.fee_billed_run, materialized: true }),
+    };
+  }) });
+  const inserted = richInserted + decidedInserted + upgradeInserted;
+  // The usage_events trigger adds `inserted` to the run's spent_cents (0056_run_spent_cents).
+  if (inserted > 0) await debitRunUsageCredits({ client, state, costCents: inserted });
+  return { inserted, richBatch };
 }
 
 /** Runs whose stamps can no longer be backed by a charge: finished, or a worker whose lease expired. */

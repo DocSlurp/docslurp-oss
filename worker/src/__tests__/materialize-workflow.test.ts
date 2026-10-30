@@ -650,6 +650,161 @@ describe("runMaterializeRange activity", () => {
       });
     });
 
+    describe("publication is fenced on the claim (round 6 M1, M2)", () => {
+      // Every page has a text layer; Good (m1) still sends each page to vision, Auto (m2) indexes the text layer.
+      const VISION = "VISION-READ";
+      const tracked = () => {
+        const writes: Record<string, string[]> = {};
+        const deletes: Record<string, string[]> = {};
+        const opsFor = (runId: string, onOcr?: () => Promise<void>): Partial<PageMaterializerOps> => ({
+          ...ops,
+          async ocrPage(_d, page) {
+            await onOcr?.();
+            return { text: `${LONG} ${VISION} page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 };
+          },
+          async writeVectors(_uri, _table, records) { (writes[runId] ??= []).push(...records.map((r) => r.id)); },
+          async deleteVectors(_uri, _table, ids) { (deletes[runId] ??= []).push(...ids); },
+        });
+        const depsFor = (runId: string, onOcr?: () => Promise<void>) => {
+          const base = deps() as { materializer: Record<string, unknown> };
+          return { ...base, materializer: { ...base.materializer, ops: opsFor(runId, onOcr) } } as never;
+        };
+        return { writes, deletes, depsFor };
+      };
+      const page3 = async () => ({
+        text: (await db.query<{ text: string }>(`select text from document_pages where document_id = 'd1' and page_number = 3`)).rows.map((r) => r.text),
+        chunks: (await db.query<{ id: string; text: string }>(`select id, text from document_chunks where document_id = 'd1' and page_number = 3 order by id`)).rows,
+        state: (await db.query<{ state: string; fee_billed_run: string | null; claimed_by_run: string | null }>(
+          `select state, fee_billed_run, claimed_by_run from document_page_states where document_id = 'd1' and page_number = 3`)).rows[0],
+      });
+      const credits = async () => Number((await db.query<{ c: string }>(`select coalesce(sum(cost_cents), 0) as c from usage_events
+        where metric in ('ingest-page-fast', 'ingest-page-rich') and run_id in ('m1', 'm2') and metadata->>'documentId' = 'd1'`)).rows[0]!.c);
+      const expire = async () => {
+        await db.exec(`update document_page_states set claim_expires_at = now() - interval '1 second' where document_id = 'd1' and page_number = 3`);
+      };
+      beforeEach(async () => {
+        await reset();
+        await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm1';
+          update workspace_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
+      });
+      afterEach(async () => {
+        await db.exec(`update workspace_runs set pipeline = '{}' where id in ('m1', 'm2')`);
+      });
+
+      it("Good m1 stalls in OCR, Auto m2 indexes the text layer and bills Fast: m1 publishes nothing and upgrades the charge to Rich once", async () => {
+        const t = tracked();
+        let peer = false;
+        const late = await runMaterializeRange(t.depsFor("m1", async () => {
+          if (peer) return;
+          peer = true;
+          await expire();
+          expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
+        }), input("m1", [3]));
+        expect(late).toMatchObject({ indexed: [], failed: [] });
+        const after = await page3();
+        // The winner's content stands: page text, chunks and vectors are m2's text layer.
+        expect(after.text).toEqual([LONG]);
+        expect(after.chunks.length).toBeGreaterThan(0);
+        expect(after.chunks.every((c) => !c.text.includes(VISION))).toBe(true);
+        expect(after.state).toEqual({ state: "indexed", fee_billed_run: "m2", claimed_by_run: null });
+        expect(t.writes.m1 ?? []).toEqual([]);
+        expect(t.deletes.m1 ?? []).toEqual([]);
+        expect(t.writes.m2).toEqual(after.chunks.map((c) => c.id));
+        // One charge: m2's Fast decision plus m1's upgrade of the difference = one Rich page.
+        expect(await charges()).toEqual([
+          { run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 },
+          { run_id: "m2", metric: "ingest-page-fast", page: 3, amount: 1 },
+        ]);
+        expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+        // Replaying m1 changes nothing (the upgrade id is per page).
+        await runMaterializeRange(t.depsFor("m1"), input("m1", [3]));
+        expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+      });
+
+      it("when the winner commits after the lost read, the winner's one decision is Rich (no Fast, no upgrade)", async () => {
+        const t = tracked();
+        let peer = false;
+        await runMaterializeRange(t.depsFor("m1", async () => {
+          if (peer) return;
+          peer = true;
+          await expire();
+          // m2 claims page 3 and is still working when m1 finishes.
+          await claimPages(sql, { documentId: "d1", pages: [3], runId: "m2", ttlSeconds: 300, reason: "query" });
+        }), input("m1", [3]));
+        expect((await page3()).chunks).toEqual([]);
+        expect(await charges()).toEqual([]);
+        expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
+        expect((await page3()).chunks.every((c) => !c.text.includes(VISION))).toBe(true);
+        expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-rich", page: 3, amount: 1 }]);
+        expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+        expect(t.writes.m1 ?? []).toEqual([]);
+      });
+
+      it("the new holder fails the page and m1 resumes: m1 publishes nothing; when m1 re-claims and publishes, one Rich charge", async () => {
+        const t = tracked();
+        let peer = false;
+        const late = await runMaterializeRange(t.depsFor("m1", async () => {
+          if (peer) return;
+          peer = true;
+          await expire();
+          await claimPages(sql, { documentId: "d1", pages: [3], runId: "m2", ttlSeconds: 300, reason: "query" });
+          await markPages(sql, "d1", [3], "failed", { failureReason: "embedding failed", claimedBy: "m2" });
+        }), input("m1", [3]));
+        expect(late.indexed).toEqual([]);
+        const after = await page3();
+        expect(after.chunks).toEqual([]);
+        expect(after.text).toEqual([]);
+        expect(after.state).toMatchObject({ state: "failed", fee_billed_run: null });
+        expect(t.writes.m1 ?? []).toEqual([]);
+        expect(await charges()).toEqual([]);
+        // The m1 retry re-claims the failed page, reads it and publishes its own content: exactly one Rich charge.
+        expect((await runMaterializeRange(t.depsFor("m1"), input("m1", [3]))).indexed).toEqual([3]);
+        expect((await page3()).chunks.every((c) => c.text.includes(VISION))).toBe(true);
+        expect(await charges()).toEqual([{ run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 }]);
+        expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
+      });
+
+      it("a run that lost its page never deletes the winner's chunks (stale-chunk cleanup is fenced)", async () => {
+        const t = tracked();
+        // m2 publishes page 3 as two chunks first.
+        const twoParts = `# One\n\n${LONG}\n\n# Two\n\n${LONG} again`;
+        const m2Deps = t.depsFor("m2") as { materializer: { ops: Partial<PageMaterializerOps> } };
+        m2Deps.materializer.ops = { ...m2Deps.materializer.ops, async extractText(_d, range) { return Array.from({ length: range.last - range.first + 1 }, () => twoParts); } };
+        let peer = false;
+        await runMaterializeRange(t.depsFor("m1", async () => {
+          if (peer) return;
+          peer = true;
+          await expire();
+          await runMaterializeRange(m2Deps as never, input("m2", [3]));
+        }), input("m1", [3]));
+        const after = await page3();
+        expect(after.chunks.length).toBe(t.writes.m2!.length);
+        expect(after.chunks.map((c) => c.id)).toEqual(t.writes.m2);
+        expect(t.deletes.m1 ?? []).toEqual([]);
+      });
+
+      it("vectors written under the lock are deleted when the publication rolls back", async () => {
+        const t = tracked();
+        await db.exec(`
+          create or replace function test_fail_fees() returns trigger language plpgsql as $$
+          begin
+            if new.run_id = 'm1' and new.metric in ('ingest-page-fast', 'ingest-page-rich') then raise exception 'injected fee write failure'; end if;
+            return new;
+          end $$;
+          drop trigger if exists test_fail_fees on usage_events;
+          create trigger test_fail_fees before insert on usage_events for each row execute function test_fail_fees();`);
+        try {
+          await expect(runMaterializeRange(t.depsFor("m1"), input("m1", [3]))).rejects.toThrow(/injected fee write failure/);
+        } finally {
+          await db.exec(`drop trigger if exists test_fail_fees on usage_events`);
+        }
+        expect(t.writes.m1!.length).toBeGreaterThan(0);
+        expect(t.deletes.m1).toEqual(t.writes.m1);
+        expect((await page3()).chunks).toEqual([]);
+        expect((await page3()).state).toMatchObject({ state: "claimed", claimed_by_run: "m1" });
+      });
+    });
+
     it("two queries racing for the same scanned page charge it once", async () => {
       await reset();
       await Promise.all([runMaterializeRange(ocrDeps({ sleep: async () => {} }), input("m1", [3])), runMaterializeRange(ocrDeps({ sleep: async () => {} }), input("m2", [3]))]);

@@ -43,3 +43,12 @@ DROP TRIGGER IF EXISTS "run_fast_page_image_grants_owned" ON "run_fast_page_imag
 CREATE TRIGGER "run_fast_page_image_grants_owned"
 	BEFORE INSERT OR UPDATE OF "run_id", "document_id" ON "run_fast_page_image_grants"
 	FOR EACH ROW EXECUTE FUNCTION "run_fast_page_image_grant_owned"();
+--> statement-breakpoint
+-- A materialization run that read a page with a model records it here, under the
+-- page row lock, even when it lost its claim and published nothing. The page's
+-- single customer charge is Rich when such a read exists for this document
+-- version (worker/src/db/page-base-fee.ts), so a genuine read is never billed as
+-- Fast and never billed twice.
+ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "model_read_run" text;
+--> statement-breakpoint
+ALTER TABLE "document_page_states" ADD COLUMN IF NOT EXISTS "model_read_pages" integer CHECK ("model_read_pages" IS NULL OR "model_read_pages" >= 1);

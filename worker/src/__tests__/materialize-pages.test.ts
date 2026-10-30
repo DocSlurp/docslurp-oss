@@ -172,6 +172,8 @@ describe("materializePageRange", () => {
     const h = harness({ 3: LONG, 4: LONG + " more" });
     await claimAndMaterialize(h.deps, input(h, [3, 4]));
     const first = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
+    // Only a run holding the pages publishes: hand them back to the ledger so the replay re-claims them.
+    await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number in (3, 4)`);
     await claimAndMaterialize(h.deps, input(h, [3, 4]));
     const second = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
     expect(second).toEqual(first);
@@ -244,6 +246,7 @@ describe("materializePageRange", () => {
     const before = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
     expect(before.length).toBeGreaterThan(1);
     const h2 = harness({ 1: LONG });
+    await db.exec(`update document_page_states set state = 'unseen' where document_id = 'd1' and page_number = 1`);
     await claimAndMaterialize(h2.deps, input(h2, [1]));
     const after = (await db.query<{ id: string }>(`select id from document_chunks order by id`)).rows.map((r) => r.id);
     expect(after).toEqual(["d1:p1:c0"]);
