@@ -35,6 +35,7 @@ export class IndexingModeError extends Error {
       | "index_in_progress"
       | "visual_mode_privacy"
       | "visual_mode_quality"
+      | "invalid_pipeline"
       | "full_index_not_allowed"
       | "document_not_found"
       | "nothing_to_index"

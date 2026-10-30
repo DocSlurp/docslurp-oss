@@ -27,7 +27,7 @@ import {
 import { canContributeToWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
-import { runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
+import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
 import { mapDocument, mapWorkspaceRun, type DocumentRow, type WorkspaceRunRow } from "./run-records.js";
 import {
   AllSourcesUnreadableError,
@@ -35,7 +35,7 @@ import {
   UnreadableSourceError,
 } from "./source-metadata.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
-import { assertVisualModeAllowed } from "./workspace-indexing-mode.js";
+import { assertVisualModeAllowed, IndexingModeError } from "./workspace-indexing-mode.js";
 import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
@@ -991,6 +991,15 @@ export function createRunCreation(deps: RunCreationDeps) {
       const outcome = await start({ id: run.id, pipeline: run.pipeline });
       if (outcome.status === "deferred") deferredReason = outcome.reason;
     } catch (error) {
+      // A pipeline that does not compile never starts: start() already failed the Run (category invalid_pipeline),
+      // so the request fails as invalid input instead of promising a deferred start that will never come.
+      if (error instanceof RunPipelineInvalidError) {
+        throw new IndexingModeError(
+          "The run's pipeline settings are invalid, so it cannot start. Check the pipeline and try again.",
+          400,
+          "invalid_pipeline",
+        );
+      }
       console.error(`[run-creation] workflow start failed for run=${run.id}; deferring:`, error instanceof Error ? error.message : String(error));
       deferredReason = RUN_START_FAILED_DEFERRED_MESSAGE;
     }
