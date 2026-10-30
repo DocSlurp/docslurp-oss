@@ -270,7 +270,7 @@ describe("extractor options (M4: one strict schema per extractor id)", () => {
   });
 
   it("rejects options for extractor ids without an option schema", () => {
-    for (const id of ["pandoc", "native-pdf", "liteparse", "poppler-text", "doppler", "graph-local", "json", "unknown", "__proto__", "constructor", "toString"]) {
+    for (const id of ["pandoc", "native-pdf", "liteparse", "poppler-text", "graph-local", "json", "unknown", "__proto__", "constructor", "toString"]) {
       expect(() => documentExtractionConfigSchema.parse({ options: { [id]: {} } }), id).toThrow();
       expect(() => parseExtractorOptions(id, {}), id).toThrow(/takes no options/);
     }
@@ -422,4 +422,21 @@ describe("Fast page-image references", () => {
     expect([...pageImageReferencePages([reference, { pageNumber: 2, text: "real", metadata: {} }])]).toEqual([]);
     expect(blankPages(`Intro\f${text}\f${text}`, new Set([2]))).toBe(`Intro\f\f${text}`);
   });
+});
+
+it("keeps explicit image preservation in Fast while disabling OCR enrichment",()=>{
+  const config={...defaultDocumentExtractionConfig,enrich:["document/media-map","page/ocr-text"],
+    order:{pdf:["doppler"]},options:{doppler:{images:{enabled:true,minWidth:20,minHeight:30}}}};
+  const result=documentExtractionForQuality(config,"fast");
+  expect(result.config.enrich).toEqual(["document/media-map"]);
+  expect(result.config.options.doppler).toEqual(config.options.doppler);
+  expect(result.config.forceOcr).toBe(false);
+});
+
+it("accepts bounded Doppler image options and rejects executable or out-of-range settings",()=>{
+  expect(parseExtractorOptions("doppler",{images:{enabled:true}})).toEqual({images:{enabled:true,minWidth:100,minHeight:100}});
+  expect(parseExtractorOptions("doppler",{pdf:{extractImages:true}})).toEqual({pdf:{extractImages:true}});
+  for(const bad of [{binary:"custom"},{images:{enabled:true,minWidth:0}},{images:{minHeight:4097}},{pdf:{passwords:["secret"]}}]) {
+    expect(()=>parseExtractorOptions("doppler",bad)).toThrow();
+  }
 });

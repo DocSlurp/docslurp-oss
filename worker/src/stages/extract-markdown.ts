@@ -1,3 +1,4 @@
+import { dopplerImageGraph, resolveDopplerImages } from "../extractors/doppler-image-graph.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
@@ -216,6 +217,7 @@ export class ExtractMarkdownStage implements Stage {
           return;
         }
         const isPdf = format === "pdf";
+        const requestedImages = resolveDopplerImages(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -354,6 +356,12 @@ export class ExtractMarkdownStage implements Stage {
                   options: extractionConfig.options,
                   dirs: candidateDirs,
                 });
+                if (requestedImages) {
+                  for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
+                    if (prepared && !prepared.plan.dopplerVm) throw new Error("Embedded image extraction refuses a non-VM candidate");
+                    if (prepared?.plan.dopplerVm) Object.assign(prepared.plan.dopplerVm, { embeddedImages: true, imageMinWidth: requestedImages.minWidth, imageMinHeight: requestedImages.minHeight });
+                  }
+                }
                 const [resultA, resultB] = await this.collectCandidateResults({
                   primary: isolated.primary.extractor,
                   primaryKey: candidateAKey,
@@ -664,6 +672,10 @@ export class ExtractMarkdownStage implements Stage {
                           })),
                         )
                       : [];
+                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.dopplerVm?.embeddedImages);
+                  if (requestedImages && !imageCandidate) {
+                    throw new Error("Doppler images unavailable; refusing local image enrichment fallback");
+                  }
                   const graph = extractionConfig.enrich.length > 0
                     ? await this.enrichDocumentArtifacts({
                         document,
@@ -671,6 +683,7 @@ export class ExtractMarkdownStage implements Stage {
                         sourceHash: contentHash,
                         format,
                         targets: extractionConfig.enrich,
+                        dopplerImageBundle: imageCandidate ? `${imageCandidate.tempTextPath}.images` : undefined,
                         pageNumbers: allPages,
                         runId: state.run.id,
                         signal,
@@ -796,7 +809,13 @@ export class ExtractMarkdownStage implements Stage {
                   if (pageImageEvidenceUri) {
                     state.artifactLedger.recordDocument(document.id, "page-image-evidence", pageImageEvidenceUri);
                   }
-                  if (graph) state.artifactLedger.recordDocument(document.id, "artifact-graph", graph.manifestUri);
+                  if (graph) {
+                    state.artifactLedger.recordDocument(document.id, "artifact-graph", graph.manifestUri);
+                    // Exact child URIs are authorized and withheld by the existing artifact/PII guards.
+                    for (const [index, uri] of (graph.artifactUris ?? []).entries()) {
+                      state.artifactLedger.recordDocument(document.id, `embedded-image-artifact:${index}`, uri);
+                    }
+                  }
                   state.artifactLedger.recordDocument(document.id, "heatmap", this.storage.uri(heatmapKey));
                   state.artifactLedger.recordDocument(document.id, "canonical-document", canonicalUri);
                   state.artifactLedger.recordDocument(document.id, "extraction-contract", contractUri);
@@ -2423,14 +2442,19 @@ export class ExtractMarkdownStage implements Stage {
     runId: string;
     signal?: AbortSignal;
     graphRunner?: typeof runLocalPdfArtifactGraph;
-  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number }> {
+    dopplerImageBundle?: string;
+  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris?: string[] }> {
     const startedAt = Date.now();
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-artifact-graph-"));
     try {
       if (args.format !== "pdf") {
         throw new Error(`artifact enrichment is unavailable for ${args.format}`);
       }
-      const result = await (args.graphRunner ?? runLocalPdfArtifactGraph)({
+      const result = args.dopplerImageBundle
+        ? await dopplerImageGraph({ bundlePath: args.dopplerImageBundle, sourcePath: args.sourcePath,
+            sourceDocumentId: args.document.id, sourceHash: args.sourceHash, pageCount: args.pageNumbers.length,
+            targets: args.targets, scratchDir, signal: args.signal })
+        : await (args.graphRunner ?? runLocalPdfArtifactGraph)({
         sourcePath: args.sourcePath,
         sourceDocumentId: args.document.id,
         sha256: args.sourceHash,
@@ -2470,6 +2494,7 @@ export class ExtractMarkdownStage implements Stage {
         steps: [...result.steps],
         outputCount: persisted.length - 1,
         latencyMs: Date.now() - startedAt,
+        ...(args.dopplerImageBundle ? { artifactUris: persisted.slice(1).map(ref => ref.uri) } : {}),
       };
     } finally {
       await rm(scratchDir, { recursive: true, force: true });

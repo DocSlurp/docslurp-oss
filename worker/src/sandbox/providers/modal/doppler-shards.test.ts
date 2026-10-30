@@ -326,7 +326,8 @@ describe("doppler-vm@3 envelope", () => {
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, seccompDenied: 79 } }, 4)).toBe(false);
     expect(env4({ protocol: "doppler-vm@4", hardening: { ...hardened, landlockAbi: 4.5 } }, 4)).toBe(false);
     expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "04" })).toBe(0);
-    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "5" })).toBe(0);
+    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "5" })).toBe(5);
+    expect(declaredGuestProtocol({ DOCSLURP_DOPPLER_VM_PROTOCOL: "6" })).toBe(0);
     expect(env4({ protocol: "doppler-vm@4", hardening: hardened }, 3)).toBe(true);            // rolling forward
     expect(env4({ protocol: "doppler-vm@4" }, 3)).toBe(false);                                 // a @4 guest always reports
     expect(dopplerShardSettings({ DOCSLURP_DOPPLER_SHARDS: "on", DOCSLURP_DOPPLER_VM_PROTOCOL: "4" }).enabled).toBe(true);
@@ -338,4 +339,28 @@ describe("doppler-vm@3 envelope", () => {
     expect(validShardRange({ first: 33, last: 40, final: true })).toBe(true);
     expect(mergeVmUsage([undefined], 1)).toBeUndefined();
   });
+});
+
+
+it("merges requested image sidecars while preserving Markdown shards and their costs", async () => {
+  const { encodeImageBundle, decodeImageBundle } = await import("./doppler-images.js");
+  const vm = fakeVm(async j => {
+    expect(j.embeddedImages).toBe(true);
+    const first=j.range?.first ?? 1,last=j.range?.last ?? 477;
+    await writeFile(`${j.output}.images`,encodeImageBundle({pageCount:477,first,last,assets:[],placements:[]}));
+    return pagesText(first,last);
+  });
+  const result=await executeDopplerShards({...job,embeddedImages:true},477,undefined,on,{execute:vm.execute});
+  expect(await readFile(job.output,"utf8")).toBe(pagesText(1,477));
+  expect(decodeImageBundle(await readFile(`${job.output}.images`)).images).toMatchObject({pageCount:477,first:1,last:477,assets:[]});
+  expect(result.usage?.metadata?.vms).toBe(vm.calls.length);
+  expect((await readdir(dir)).filter(f=>f.includes("shard")||f.includes("partial"))).toEqual([]);
+});
+
+it("refuses missing image sidecars without paying for a whole-document fallback", async () => {
+  const vm=fakeVm();
+  await expect(executeDopplerShards({...job,embeddedImages:true},477,undefined,on,{execute:vm.execute})).rejects.toThrow();
+  expect(vm.calls.every(j=>j.range)).toBe(true);
+  await expect(readFile(job.output)).rejects.toThrow();
+  await expect(readFile(`${job.output}.images`)).rejects.toThrow();
 });
