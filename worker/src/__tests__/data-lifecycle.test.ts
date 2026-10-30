@@ -116,6 +116,27 @@ async function drainAll(stores: ReturnType<typeof fakeExternalStores>) {
 }
 
 describe("delete triggers enqueue external cleanup", () => {
+  it("cleans a replayed original after its delay without deleting the sealed source or other tenants", async () => {
+    await seedRun("live");
+    const original = "u1/upload/raw/original.pdf";
+    const sealed = "u1/upload/raw/sealed-file.pdf";
+    const other = "u2/upload/raw/original.pdf";
+    const stores = fakeExternalStores([sealed, other], {});
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+      values ('upload_original', 'o1', ${original}, ${sql.json({sealedKey: sealed})}, 'sealed_upload', now() + interval '1 day')`;
+    stores.objects.add(original); // A replayed PUT after immediate deletion.
+    await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect(stores.objects.has(original)).toBe(true);
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    const failing = {...stores.storage, deleteKeys: async () => { throw new Error("storage unavailable"); }};
+    expect((await drainStorageCleanupQueue(sql, failing, stores.options)).failed).toBe(1);
+    expect((await sql`select * from storage_cleanup_queue`).length).toBe(1);
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainStorageCleanupQueue(sql, stores.storage, stores.options);
+    expect([...stores.objects]).toEqual([sealed, other]);
+    expect((await sql`select * from storage_cleanup_queue`).length).toBe(0);
+  });
+
   it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {
     const source = "u1/upload/raw/source.pdf";
     await sql`insert into upload_sessions (id, user_id, org_id, status) values ('recover', 'u1', 'o1', 'ingesting')`;

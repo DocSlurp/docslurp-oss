@@ -48,3 +48,8 @@ CREATE TABLE IF NOT EXISTS org_teardown_failures (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS org_teardown_failures_org_created_idx ON org_teardown_failures (org_id, created_at);
+
+-- Exact original upload keys, independent of the live run and sealed source.
+ALTER TABLE storage_cleanup_queue DROP CONSTRAINT storage_cleanup_queue_kind_check;
+ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
+ CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'upload_original'));

@@ -411,11 +411,23 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   // verified version to a key no URL names, and ingest that. A completed multipart upload needs no
   // copy: its part URLs are bound to an upload ID that completion closed, and no PUT URL exists.
   const sourceKey = file.upload_mode === "single" ? await sealSingleUpload(file, verified.etag) : file.source_key;
-  await sql`update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now() where id = ${file.id}`;
   if (sourceKey !== file.source_key) {
+    // Publish the sealed key and durable cleanup together: a crash must not lose the old key.
+    // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
+    await sql`with queued as (
+      insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+      select 'upload_original', s.org_id, ${file.source_key},
+        jsonb_build_object('sealedKey', ${sourceKey}::text), 'sealed_upload', now() + interval '1 day'
+      from upload_sessions s where s.id = ${file.session_id}
+      on conflict (kind, target) do update set not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)
+      returning id
+    ) update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now()
+      where id = ${file.id} and exists (select 1 from queued)`;
     // The original stays writable until its URL expires; nothing reads it again. Best effort.
     await deleteUploadedObject(file.source_key).catch(() =>
       console.error(`[direct-upload] status=unsealed-delete-failed file=${file.id}`));
+  } else {
+    await sql`update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now() where id = ${file.id}`;
   }
   return true;
 }

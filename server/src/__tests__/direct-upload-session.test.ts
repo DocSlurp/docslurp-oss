@@ -153,6 +153,9 @@ describe("Direct Upload Session Module", () => {
     expect(getUploadedObjectMetadata).toHaveBeenLastCalledWith(sealed);
     const completed = sqlMock.mock.calls.find(([strings]) => strings.join("?").includes("set status = 'completed'"));
     expect(completed).toContain(sealed);
+    expect(completed?.[0].join("?")).toContain("insert into storage_cleanup_queue");
+    expect(completed?.[0].join("?")).toContain("interval '1 day'");
+    expect(completed).toContain(file.source_key);
     // The URL's key is dropped; a later PUT to it (the URL is still valid) is never read.
     expect(deleteUploadedObject).toHaveBeenCalledWith(file.source_key);
     // Intake reads the sealed key, never the presigned one.

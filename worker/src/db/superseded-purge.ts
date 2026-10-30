@@ -1017,7 +1017,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "upload_original";
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -1061,7 +1061,20 @@ export async function drainStorageCleanupQueue(
         `;
         if (!row) return;
         claimed = row;
-        if (row.kind === "storage_prefix") {
+        if (row.kind === "upload_original") {
+          const sealed = row.payload.sealedKey;
+          const directory = row.target.slice(0, row.target.lastIndexOf("/") + 1);
+          if (!directory.endsWith("/raw/") || typeof sealed !== "string" ||
+              !sealed.startsWith(`${directory}sealed-`) || sealed === row.target ||
+              row.target.endsWith("/") || row.target.includes("..")) {
+            throw new Error("Refusing invalid original-upload cleanup target");
+          }
+          // Never delete a source still referenced by a document or an unfinished finalization.
+          const [reference] = await client`select 1 from documents where source_key = ${row.target}
+            union all select 1 from upload_session_files where source_key = ${row.target} limit 1`;
+          if (reference) throw new Error("Original upload is still referenced");
+          await txStorage.deleteKeys([row.target]);
+        } else if (row.kind === "storage_prefix") {
           if (!SAFE_RUN_PREFIX.test(row.target)) throw new Error(`Refusing unsafe storage prefix: ${row.target}`);
           // Direct-upload recovery deliberately reuses the session ID as its
           // run ID. An old cleanup record must not remove the recovered run's
