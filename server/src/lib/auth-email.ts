@@ -2,10 +2,7 @@ import { instrumentFetch } from "@docslurp/shared/observability";
 import { isEmailAuthConfigured } from "@docslurp/shared/auth-security";
 import { emailOTP } from "better-auth/plugins";
 import { docslurpMagicLinkPlugin } from "./auth-magic-link.js";
-import { APIError, createAuthMiddleware } from "better-auth/api";
-import { defineRequestState } from "@better-auth/core/context";
-import type { BetterAuthPlugin } from "better-auth";
-import type { Pool } from "pg";
+import { APIError } from "better-auth/api";
 
 type DeliveryContext = { context?: { secret?: string } };
 type Delivery<T> = (data: T, ctx?: DeliveryContext) => Promise<void>;
@@ -17,59 +14,9 @@ export type DeliveryGuard = <T extends { email: string }>(send: (data: T) => Pro
  * proof) last 12 hours: mail can arrive hours late and we don't control the
  * delay. Guessing stays bounded regardless of lifetime: a code burns after
  * five wrong guesses, and each address gets ten code checks per 15 minutes.
+ * A resend issues a new code; only the newest one works.
  */
 export const EMAIL_CODE_SECONDS = 12 * 60 * 60;
-
-/** The emailed-code row Better Auth keeps for an address and purpose. */
-function codeIdentifier(type: string, email: string): string {
-  return `${type}-otp-${email.trim().toLowerCase()}`;
-}
-
-/** Endpoints that may send an emailed code, and the purpose each one sends. */
-function sentCodeType(path: string | undefined, body: { type?: unknown } | undefined): string | null {
-  if (path === "/email-otp/send-verification-otp") return typeof body?.type === "string" ? body.type : null;
-  if (path === "/email-otp/request-password-reset") return "forget-password";
-  if (path === "/send-verification-email" || path === "/sign-in/email" || path === "/sign-up/email") return "email-verification";
-  return null;
-}
-
-/**
- * A resend sends the same code (resendStrategy "reuse"), but Better Auth's
- * reuse also pushes its expiry 12 hours past the resend. This keeps the
- * expiry from the first send, so a code never outlives 12 hours; a code that
- * expired or burned is replaced, and the new one keeps its own expiry.
- */
-export function emailCodeExpiryPlugin(pool: Pick<Pool, "query">): BetterAuthPlugin {
-  const issued = defineRequestState<{ identifier: string | null; value: string | null; expiresAt: Date | null }>(() => ({ identifier: null, value: null, expiresAt: null }));
-  return {
-    id: "docslurp-email-code-expiry",
-    hooks: {
-      before: [{
-        matcher: (ctx) => sentCodeType(ctx.path, ctx.body) !== null,
-        handler: createAuthMiddleware(async (ctx) => {
-          const type = sentCodeType(ctx.path, ctx.body);
-          const email = typeof ctx.body?.email === "string" ? ctx.body.email : "";
-          if (!type || !email.trim()) return;
-          const identifier = codeIdentifier(type, email);
-          const { rows } = await pool.query<{ value: string; expires_at: Date }>(
-            `select value, "expiresAt" as expires_at from verification where identifier = $1 and "expiresAt" > now() order by "createdAt" desc limit 1`, [identifier]);
-          Object.assign(await issued.get(), { identifier, value: rows[0]?.value ?? null, expiresAt: rows[0]?.expires_at ?? null });
-        }),
-      }],
-      after: [{
-        matcher: (ctx) => sentCodeType(ctx.path, ctx.body) !== null,
-        handler: createAuthMiddleware(async () => {
-          const { identifier, value, expiresAt } = await issued.get();
-          if (!identifier || !value || !expiresAt) return;
-          // Same stored code (attempt count aside) means it was reused, not rotated.
-          await pool.query(
-            `update verification set "expiresAt" = least("expiresAt", $3)
-              where identifier = $1 and split_part(value, ':', 1) = split_part($2, ':', 1)`, [identifier, value, expiresAt]);
-        }),
-      }],
-    },
-  } as BetterAuthPlugin;
-}
 
 export function createAuthEmailOptions(env: NodeJS.ProcessEnv, guardDelivery: DeliveryGuard = (send) => (data) => send(data)) {
   const enabled = isEmailAuthConfigured(env);
@@ -96,10 +43,7 @@ export function createAuthEmailOptions(env: NodeJS.ProcessEnv, guardDelivery: De
       otpLength: 6,
       expiresIn: EMAIL_CODE_SECONDS,
       allowedAttempts: 5,
-      // Encrypted with the auth secret (not hashed) so a resend can send the same
-      // code: whichever email arrives first, late or not, still works.
-      storeOTP: "encrypted",
-      resendStrategy: "reuse",
+      storeOTP: "hashed",
       disableSignUp: true,
     }), docslurpMagicLinkPlugin(guardDelivery(sendAuthMagicLink))] : [],
   };

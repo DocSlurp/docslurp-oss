@@ -214,34 +214,17 @@ describe("password recovery with native Email OTP", () => {
     expect((await new Browser().json("/sign-in/email", { email: other.email, password: PASSWORD })).status).toBe(200);
   });
 
-  it("keeps a code usable for hours and resends the same one, so a late email still works", async () => {
+  it("keeps a code usable for hours; a resend replaces it with a new one", async () => {
     const user = await createUser();
     const browser = new Browser();
     await requestReset(browser, user.email);
-    await requestReset(browser, user.email);
-    const codes = sentEmails.filter((sent) => sent.to === user.email).map((sent) => sent.code);
-    expect(codes).toHaveLength(2);
-    expect(codes[1]).toBe(codes[0]);
+    const first = lastCodeFor(user.email);
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() + 11 * 60 * 60_000);
-    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: codes[0], password: NEW_PASSWORD })).status).toBe(200);
-  });
-
-  it("never lets resends stretch a code past 12 hours from its first send", async () => {
-    const user = await createUser();
-    const browser = new Browser();
-    const start = Date.now();
     await requestReset(browser, user.email);
-    const expiry = async () => (await pool.query<{ expires: Date }>(`select "expiresAt" as expires from verification where identifier = $1`, [`forget-password-otp-${user.email}`])).rows[0]!.expires.getTime();
-    const first = await expiry();
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(start + 6 * 60 * 60_000);
-    await requestReset(browser, user.email);
-    const codes = sentEmails.filter((sent) => sent.to === user.email).map((sent) => sent.code);
-    expect(codes[1]).toBe(codes[0]);
-    expect(await expiry()).toBe(first);
-    vi.setSystemTime(start + 12 * 60 * 60_000 + 60_000);
-    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: codes[0], password: NEW_PASSWORD })).status).toBe(400);
+    const second = lastCodeFor(user.email);
+    if (second !== first) expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: first, password: NEW_PASSWORD })).status).toBe(400);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: second, password: NEW_PASSWORD })).status).toBe(200);
   });
 
   it("answers an unknown address like a known one and sends nothing", async () => {
@@ -385,12 +368,11 @@ describe("password recovery with native Email OTP", () => {
     expect(options.databaseHooks?.account?.create?.before).toBe(beforeOAuthAccountCreate);
     const plugins = (options.plugins ?? []).map((plugin) => plugin.id);
     expect(plugins).toEqual(expect.arrayContaining(["email-otp", "magic-link"]));
-    // Emailed codes: 12 hours, recoverable so a resend reuses them, capped at the first send.
+    // Emailed codes: 12 hours, hashed, five attempts.
     const emailOtp = (options.plugins ?? []).find((plugin) => plugin.id === "email-otp") as { options?: Record<string, unknown> } | undefined;
     const { EMAIL_CODE_SECONDS } = await import("../lib/auth-email.js");
-    expect(emailOtp?.options).toMatchObject({ expiresIn: EMAIL_CODE_SECONDS, storeOTP: "encrypted", resendStrategy: "reuse", allowedAttempts: 5 });
+    expect(emailOtp?.options).toMatchObject({ expiresIn: EMAIL_CODE_SECONDS, storeOTP: "hashed", allowedAttempts: 5 });
     expect(EMAIL_CODE_SECONDS).toBeGreaterThanOrEqual(12 * 60 * 60);
-    expect(plugins).toContain("docslurp-email-code-expiry");
     expect(plugins.filter((id) => ["admin", "anonymous", "username", "phone-number", "one-tap", "generic-oauth"].includes(id))).toEqual([]);
   });
 

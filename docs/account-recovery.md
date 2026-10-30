@@ -7,7 +7,7 @@ Password recovery, breached-password rejection and the authentication rate limit
 Recovery uses the native Email OTP plugin's reset flow, which was already configured for verification codes:
 
 1. `POST /api/auth/email-otp/request-password-reset` with `{ email }`. The client is `authClient.emailOtp.requestPasswordReset`. The answer is `{ success: true }` whether or not the address has an account, and an unknown address gets no email.
-2. The email's subject leads with the code and says it is a password reset code. It lasts 12 hours, because email can arrive late and we don't control the delay. It burns after five wrong guesses and is stored encrypted with the auth secret. A resend sends the same code, so whichever email arrives first works, but never extends it: a code expires 12 hours after its first send (`emailCodeExpiryPlugin`). Once it expires or burns, a resend issues a new code.
+2. The email's subject leads with the code and says it is a password reset code. It lasts 12 hours, because email can arrive late and we don't control the delay. It burns after five wrong guesses and is stored hashed. A resend issues a new code, and only the newest one works.
 3. `POST /api/auth/email-otp/reset-password` with `{ email, otp, password }`. The client is `authClient.emailOtp.resetPassword`.
 
 A completed reset:
