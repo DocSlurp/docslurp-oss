@@ -11,7 +11,7 @@ import type { VisionPageTask } from "../temporal/shared.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-/** The Postgres vision attempt ledger (migration 0101) behind the vision guard. */
+/** The Postgres vision attempt ledger (migration 0104) behind the vision guard. */
 let db: PGlite;
 let server: PGLiteSocketServer;
 let store: Store;
@@ -448,7 +448,7 @@ async function readPage(state: WorkflowState, documentId: string, pageNumber: nu
 }
 
 describe("startup schema check", () => {
-  it("passes on the current 0101 and refuses an earlier draft loudly, asking for a reset", async () => {
+  it("passes on the current 0104 and refuses an earlier draft loudly, asking for a reset", async () => {
     await expect(store.visionAttempts.assertSchema()).resolves.toBeUndefined();
     await db.exec(`alter table vision_org_attempts rename column weight_cents to weight_cents_old;`);
     try {
