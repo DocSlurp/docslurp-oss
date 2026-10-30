@@ -170,7 +170,7 @@ export class VisionExtractStage implements Stage {
 
     await runDocuments(
       healthyDocuments(state),
-      state.docConcurrency,
+      (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency,
       async (document) => {
         if (isCostCapExceeded(state)) {
           console.log(
@@ -447,6 +447,7 @@ export class VisionExtractStage implements Stage {
             await recordPageFacts(state.store, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
               selected: needsVision.selectedPages, processed: outputs,
+              costCapped: isCostCapExceeded(state),
             }));
 
             const reconciliation = await this.reconcileExtractionArtifacts(
@@ -902,6 +903,39 @@ export class VisionExtractStage implements Stage {
       return output ? [output] : [];
     });
     if (!missing.length) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+    // Capped runs admit one page at a time, including raster work. The ledger
+    // records the completed page's charge before the next admission. A single
+    // admitted page can cross the cap; the rest of a long scan cannot follow it.
+    // run() also serializes documents, and planPageTasks disables page fanout.
+    if ((state.run.pipeline.maxCostCents ?? 0) > 0) {
+      if (isCostCapExceeded(state)) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      if (missing.length > 1) {
+        for (const pageNumber of missing) {
+          if (isCostCapExceeded(state)) break;
+          try {
+            completed.push(...await this.extractVisionPagesFromCache(
+              state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache,
+            ));
+          } catch (error) {
+            // Infrastructure, cancellation and quarantine errors retain their
+            // identity so checkpoint retry/isolation handling remains intact.
+            if (!(error instanceof DocumentStageError)) throw error;
+            // The inner single-page attempt cannot see earlier successes. Keep
+            // those results in the partial manifest when a later page fails.
+            if (storageKey) await this.storage.putJson(storageKey, {
+              documentId: document.id, partial: completed.length > 0,
+              reason: toError(error).message, processedPages: completed.length,
+              pagesDetail: completed,
+            });
+            throw new DocumentStageError(toError(error).message, {
+              artifactUri: storageKey ? this.storage.uri(storageKey) : undefined,
+              stats: { partial: completed.length > 0, processedPages: completed.length, error: toError(error).message },
+            });
+          }
+        }
+        return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      }
+    }
     const rasterPages = await this.rasters.renderSelectedPages({
       document,
       runId: state.run.id,
