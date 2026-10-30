@@ -124,11 +124,21 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): t
   return async (input, init) => {
     const policy = await currentOpenRouterProviderPolicy();
     const restricted = policy !== undefined && !policy.allowChinaProviders;
-    if (init?.body === undefined || init.body === null) return baseFetch(input, init);
+    // Request objects carry their body separately from init. Clone it so policy
+    // enforcement cannot be bypassed by the standard fetch(Request) form.
+    const request = input instanceof Request ? input : undefined;
+    const rawBody = init?.body ?? (request?.body ? await request.clone().text() : undefined);
+    if (rawBody === undefined || rawBody === null) return baseFetch(input, init);
+    const url = new URL(request?.url ?? String(input));
+    // These endpoints document provider routing. Audio transcription does not:
+    // refuse restricted uploads rather than assume an ignored field protects them.
+    if (restricted && !["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/embeddings", "/api/v1/responses"].includes(url.pathname)) {
+      throw new ProviderRegionRefusedError("Provider-region restrictions are not verified for this endpoint; use a supported text endpoint or a private transcription service");
+    }
     let body: Record<string, unknown> | undefined;
-    if (typeof init.body === "string") {
+    if (typeof rawBody === "string") {
       try {
-        const parsed = JSON.parse(init.body) as unknown;
+        const parsed = JSON.parse(rawBody) as unknown;
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
       } catch {
         body = undefined;

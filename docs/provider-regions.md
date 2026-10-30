@@ -9,19 +9,19 @@ region is decided, and what DocSlurp records.
 
 China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and workspaces).
 
-- **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, may be served by StreamLake,
-  DeepSeek, Together, Fireworks or Parasail. OpenRouter picks the cheapest of them at request time
+- **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, is served by Together,
+  Fireworks or Parasail. OpenRouter picks the cheapest of them at request time
   (`provider.only` plus `provider.sort: "price"`). Every request carries `provider.max_price`, so no host can
   bill above the route's price ceiling ($0.30 / $1.20 per million tokens).
 - **Text and chat:** GLM and DeepSeek models are sorted by price among hosts serving FP8 or better weights
   (`packages/shared/src/openrouter-routing.ts`). Other models use OpenRouter's default routing.
 
-**Evidence for the vision route** (2026-10-29, frozen `tune` and `select` splits, 95 pages, judge v3.6; holdout
+**Candidate-host evidence (not rollout approval)** (2026-10-29, frozen `tune` and `select` splits, 95 pages, judge v3.6; holdout
 not run):
 
 | Host | Region | Content F1 | Tables | Math | Fail rate | p50 / p95 s | USD per 1,000 pages | Pages per $1 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Together (production route until this change, select) | US | 0.962 | 0.648 | 0.947 | 0% | 2.2 / 5.3 | 1.03 | 972 |
+| Together (retained production host, select) | US | 0.962 | 0.648 | 0.947 | 0% | 2.2 / 5.3 | 1.03 | 972 |
 | StreamLake (select) | CN | 0.962 | 0.662 | 0.947 | 0% | 4.3 / 10.6 | 0.51 | 1,940 |
 | StreamLake (tune) | CN | 0.970 | 0.677 | 0.968 | 0% | 4.1 / 11.5 | 0.49 | 2,051 |
 | DeepSeek (tune, billed at weekday peak) | CN | 0.969 | 0.672 | 0.968 | 0% | 3.3 / 9.8 | 0.98 | 1,023 |
@@ -50,15 +50,16 @@ When the setting is off, every hosted model request made for that organization o
   or a model profile set that is not on the allowlist is dropped. A request with no allowed provider left is
   refused before it is sent. This applies to every attempt: first tries, inline retries, alternate routes after
   a refusal or degenerate output, streaming-to-JSON fallbacks, chat, search helpers, summaries and other
-  pipeline text, embeddings, voice transcription, output moderation and chat-instructions Improve.
+  pipeline text, embeddings, output moderation and chat-instructions Improve. Restricted voice transcription
+  is refused before sending audio; its endpoint does not have verified provider routing.
 - **Direct routes:** a page-router decision model is refused when its upstream (the endpoint's provider, or the
   model's lab behind OpenRouter's `/systemone`) is not on the allowlist, and the page router falls back as it
   does for any unavailable model.
 - **Unknown scope fails closed.** Worker calls outside a run's provider scope, API calls with no user,
   organization or workspace, and a missing organization or workspace are all treated as turned off.
 
-The vision route above then narrows to Together, Fireworks and Parasail. Turning the setting off can raise
-model costs (about 2× per vision page) and can make some models unavailable:
+The vision route retains the same three hosts with either setting. Turning the setting off can make
+some text models unavailable:
 
 - **`qwen/qwen3.5-flash-02-23` (the default pipeline text model) is served only by Alibaba.** With China-based
   providers off, text stages that use it (summaries, document maps, propositions, structured extraction) have no
@@ -105,3 +106,17 @@ Billing still uses the served host's reported charge (`usage.cost`); list prices
 
 Which hosts may process customer content is a subprocessor question. Changes to the privacy policy, DPA or
 subprocessor list are decided by the owner and legal@docslurp.io, not by this page.
+
+## Merge and deployment gate
+
+The default vision profile retains its existing Together, Fireworks and Parasail
+allowlist. StreamLake and DeepSeek are **not enabled** by this release. Adding
+those hosts requires a separately reviewed rollout after public disclosures,
+notice commitments and representative held-out quality evidence are complete.
+The default catalog pricing and runtime route use the same three retained hosts.
+
+Restricted audio transcription is refused before uploading any audio because
+provider-routing enforcement on that endpoint has not been verified. Use typed
+input or an explicitly configured private transcription service. Request-object
+bodies receive the same enforcement as fetch init bodies. Users without an
+organization membership fail closed.

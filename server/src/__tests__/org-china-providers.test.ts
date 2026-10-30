@@ -77,6 +77,7 @@ describe("workspace allowChinaProviders", () => {
   });
 
   it("fails closed on an unknown scope: no user, org or workspace, or a missing workspace or org", async () => {
+    expect(await policyFor("missing-user")).toEqual({ allowChinaProviders: false });
     expect(await policyFor(null)).toEqual({ allowChinaProviders: false });
     expect(await policyFor("u1", "missing-org")).toEqual({ allowChinaProviders: false });
     expect(await policyFor("u1", "open", ["missing-ws"])).toEqual({ allowChinaProviders: false });

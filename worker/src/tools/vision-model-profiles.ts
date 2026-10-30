@@ -102,11 +102,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // Cheapest measured host first. StreamLake bills $0.15/$0.60 per M (OpenRouter-reported $0.51 per 1,000
-    // pages on select, against $1.03 on Together); DeepSeek's own endpoint is $0.15/$0.60 off-peak and
-    // $0.30/$1.20 at weekday peak hours, the US hosts $0.30/$1.20. An org or workspace that turned off
-    // China-based providers gets the three US hosts only.
-    openRouterProvider: { only: ["streamlake", "deepseek", "together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true },
+    // Keep the established hosts until disclosure, notice and rollout gates pass.
+    openRouterProvider: { only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.

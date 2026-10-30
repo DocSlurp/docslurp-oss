@@ -655,7 +655,7 @@ export const visionModelCatalog = [
       outputUsdPerMillion: 1.2,
       checked: "2026-10-26",
       basis: "pinned-route",
-      providers: ["streamlake", "deepseek", "together", "fireworks", "parasail"],
+      providers: ["together", "fireworks", "parasail"],
     },
     // StreamLake and DeepSeek billed the same input tokens per page as Together on the 2026-10-29 tune/select
     // pages (difference -2 to 0, maximum 1,158), so they serve the same image limit.

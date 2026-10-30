@@ -50,13 +50,13 @@ describe("per-model vision profiles", () => {
     expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.provider).toEqual({ only: ["streamlake", "deepseek", "together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(SNAPSHOT) });
+    expect(body.provider).toEqual({ only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(SNAPSHOT) });
   });
 
   it("sends a default org to the cheapest measured host, China-based ones included, under the route's max_price", async () => {
     const { body } = await send(SNAPSHOT);
     expect(body.provider.sort).toBe("price");
-    expect(body.provider.only.slice(0, 2)).toEqual(["streamlake", "deepseek"]);
+    expect(body.provider.only).toEqual(["together", "fireworks", "parasail"]);
     expect(body.provider.ignore).toBeUndefined();
   });
 

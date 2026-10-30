@@ -83,4 +83,21 @@ describe("OpenRouter provider routing", () => {
     setOpenRouterProviderPolicyResolver(undefined);
     expect(await currentOpenRouterProviderPolicy()).toBeUndefined();
   });
+  it("enforces the policy on Request bodies and refuses restricted audio before sending", async () => {
+    const base = vi.fn<typeof fetch>(async () => new Response("{}"));
+    const routed = createOpenRouterRoutingFetch(base);
+    setOpenRouterProviderPolicyResolver(() => RESTRICTED);
+    await routed(new Request("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST", body: JSON.stringify({ model: "qwen/qwen3.5-flash-02-23" }),
+    }));
+    expect(JSON.parse(base.mock.calls[0]![1]!.body as string).provider.only).toEqual([...NON_CHINA_PROVIDER_SLUGS]);
+    await expect(routed(new Request("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST", body: "malformed",
+    }))).rejects.toThrow(ProviderRegionRefusedError);
+    await expect(routed("https://openrouter.ai/api/v1/audio/transcriptions", {
+      method: "POST", body: JSON.stringify({ model: "voice", input_audio: "customer audio" }),
+    })).rejects.toThrow(ProviderRegionRefusedError);
+    expect(base).toHaveBeenCalledTimes(1);
+  });
+
 });

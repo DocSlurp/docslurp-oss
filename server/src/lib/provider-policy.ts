@@ -70,7 +70,7 @@ export async function requestProviderPolicy(): Promise<OpenRouterProviderPolicy>
       select bool_and(o.allow_china_providers) as allow
       from org_memberships m join organizations o on o.id = m.org_id
       where m.user_id = ${userId}`;
-    return row?.allow !== false;
+    return row?.allow === true;
   }) };
 }
 
