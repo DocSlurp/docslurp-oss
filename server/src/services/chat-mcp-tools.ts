@@ -7,6 +7,9 @@ import { runInChatAgentContext } from "../lib/chat-agent-context.js";
 import { withSearchSignal } from "../search/query-bounds.js";
 import { raceAbort } from "./chat-turn-deadline.js";
 
+import { batchSearchInputSchema } from "../lib/search-input.js";
+import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
+
 import { ChatToolBlockedError } from "./chat-tool-error.js";
 import { ESTIMATE_TOOL_NAMES } from "./mcp-estimate-catalog.js";
 export { ChatToolBlockedError } from "./chat-tool-error.js";
@@ -199,7 +202,9 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  * made 24 of ~9,000 chat tool calls. proposeWorkspaceSettings already reports a
  * change's impact, and the app prices uploads and indexing itself.
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["openUploader", "upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+// The agent generates the answer itself. A nested chat starts another paid answer
+// generator under a short tool deadline and can block otherwise usable retrieval.
+const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
  * Workspace settings tools: offered to the chat agent only for the first-party
@@ -414,13 +419,7 @@ export function createChatMcpTools(args: {
     graphExpansion: defaults.enableGraphExpansion, communityExpansion: defaults.enableCommunityExpansion,
     graphHops: defaults.graphHops,
   } : {};
-  const chatDefaults = defaults ? {
-    resultCount: limit, useHyDE: defaults.useHyDE, useRerank: defaults.useRerank,
-    candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
-    useMmr: defaults.useMmr, mmrLambda: defaults.mmrLambda,
-    iterativeMultiHop: defaults.iterativeMultiHop, enableGraphExpansion: defaults.enableGraphExpansion,
-    enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
-  } : undefined;
+
 
   function collectEvidence(value: unknown, returned: SearchResult[]): void {
     if (!value || typeof value !== "object") return;
@@ -460,8 +459,12 @@ export function createChatMcpTools(args: {
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
     tools[name] = dynamicTool({
-      description: definition.description,
-      inputSchema: jsonSchema(definition.inputSchema),
+      description: definition.id === "search"
+        ? "Retrieve cited passages from the selected workspace. Send queries as an array of objects with q and optional filters, even for one query. Each query has its own options; only concurrency may accompany queries. Use the returned evidence to write your answer; this tool does not generate an answer."
+        : definition.description,
+      // One shape avoids the public MCP catalog's flat q/queries union, which
+      // models can satisfy while producing a mixed request the route rejects.
+      inputSchema: jsonSchema(definition.id === "search" ? toolInputJsonSchema(batchSearchInputSchema) : definition.inputSchema),
       execute: async (input, { toolCallId }) => {
         args.signal.throwIfAborted();
         throwIfBlocked();
@@ -537,9 +540,7 @@ export function createChatMcpTools(args: {
           ? Array.isArray(supplied.queries)
             ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withoutWorkspace(q), ...searchDefaults, workspace: args.workspaceId })) }
             : { ...modelSupplied, ...searchDefaults, workspace: args.workspaceId }
-          : definition.id === "chat" && chatDefaults
-            ? { ...modelSupplied, retrieval: chatDefaults, workspace: args.workspaceId }
-            : { ...modelSupplied, workspace: args.workspaceId };
+          : { ...modelSupplied, workspace: args.workspaceId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         let settingsProposal: WorkspaceSettingsProposal | undefined;
         let web = webActivityRequest(definition.id, supplied);
