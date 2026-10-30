@@ -29,9 +29,8 @@ not run):
 Costs are OpenRouter-reported charges. StreamLake against Together on `select`: no component differs
 significantly (95% paired bootstrap CIs include 0). StreamLake roughly doubles per-page latency. DeepSeek's own
 endpoint costs $0.15 / $0.60 per million tokens off-peak and $0.30 / $1.20 on weekdays 01:00–04:00 and
-06:00–10:00 UTC; the price sort follows that schedule. Raw runs:
-`/home/dan/data/docslurp-evals/runs/china-ds1017-20261029-{tune,select}` (maintainer machine). Endpoint prices:
-`docs/evals/vision-route-prices-2026-10-29.json`.
+06:00–10:00 UTC; the price sort follows that schedule. Raw runs are kept with the maintainers' evaluation
+records (`china-ds1017-20261029-{tune,select}`). Endpoint prices: `docs/evals/vision-route-prices-2026-10-29.json`.
 
 ## Turning China-based providers off
 
