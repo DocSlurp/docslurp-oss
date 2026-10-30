@@ -22,13 +22,13 @@ type Tx = TransactionSql<Record<string, unknown>>;
 const ORG_ROW_RETENTION_HOURS = VISION_ORG_WINDOW_HOURS + 1;
 
 /**
- * Postgres vision attempt ledger (migration 0104) behind `VisionRunGuard`. Admission takes the run's
+ * Postgres vision attempt ledger (migration 0105) behind `VisionRunGuard`. Admission takes the run's
  * advisory lock, then the org's, in that order, so every worker of a run and every run of an org read
  * the counts and add their request one at a time. Settlement only marks rows settled or failed; a
  * charged request's row is removed by the checkpoint that persists its Rich charge
  * (usage-event-store.ts), and a request handed back before acceptance is removed by `release`.
  */
-/** The database's vision ledger does not match the code (missing or stale migration 0104): never retried. */
+/** The database's vision ledger does not match the code (missing or stale migration 0105): never retried. */
 export class VisionLedgerSchemaError extends Error {
   constructor(message: string) {
     super(message);
@@ -67,8 +67,8 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
   constructor(private readonly sql: Client) {}
 
   /**
-   * Startup check (temporal/worker.ts): throws unless the database has the current migration 0104.
-   * 0104 was replaced in place before reaching main, so a database that applied the earlier version
+   * Startup check (temporal/worker.ts): throws unless the database has the current migration 0105.
+   * 0105 was replaced in place before reaching main, so a database that applied the earlier version
    * records it as applied but lacks `vision_org_attempts.weight_cents` and still has
    * `vision_run_charged_pages`; migrating cannot fix that, and the guard would misbehave on it.
    */
@@ -87,13 +87,13 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         ) as weight,
         to_regclass('vision_run_charged_pages') is not null as stale`;
     if (!row?.org_table) {
-      throw new VisionLedgerSchemaError("vision attempt ledger missing (migration 0104_vision_attempt_ledger not applied); run pnpm db:migrate");
+      throw new VisionLedgerSchemaError("vision attempt ledger missing (migration 0105_vision_attempt_ledger not applied); run pnpm db:migrate");
     }
     if (!row.weight || row.stale || !row.overruns || !row.tickets) {
       throw new VisionLedgerSchemaError(
-        "vision attempt ledger is from an earlier draft of migration 0104 " +
+        "vision attempt ledger is from an earlier draft of migration 0105 " +
           `(${[!row.weight ? "vision_org_attempts.weight_cents missing" : null, !row.overruns ? "vision_route_overruns (keyed by ticket_id) missing" : null, !row.tickets ? "vision_admission_tickets missing" : null, row.stale ? "stale vision_run_charged_pages present" : null].filter(Boolean).join(", ")}); ` +
-          "database reset required: 0104 was replaced in place and cannot be upgraded by pnpm db:migrate",
+          "database reset required: 0105 was replaced in place and cannot be upgraded by pnpm db:migrate",
       );
     }
   }

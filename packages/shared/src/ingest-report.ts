@@ -42,6 +42,8 @@ export type IngestReportHistogram = z.infer<typeof ingestReportHistogramSchema>;
 
 export const ingestReportPageReasonSchema = z.enum([
   "scanned-no-vision",
+  /** Quality fast kept a page without a text layer as its page image (never read). */
+  "kept-as-image",
   "no-text",
   "vision-failed",
   "vision-page-limit",

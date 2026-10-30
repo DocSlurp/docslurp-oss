@@ -6,6 +6,7 @@ import {
   calculateAiUsageCostCents,
   DEFAULT_SERVER_MATERIALIZATION_POLICY,
   narrowMaterializationPolicy,
+  qualityAllowsPageReading,
   resolvePipelineTextModel,
   type MaterializationPolicy,
 } from "@docslurp/shared";
@@ -346,6 +347,7 @@ export class DocumentMapStage implements Stage {
 
     // (7) coarse visual layer: scanned pages the map does not cover get page-image vectors (cost-capped).
     // Page-image embedding costs per page, so it runs only on explicit opt-in (`visualPages.coarseFallback`).
+    // Under Fast, embedPageImages refuses (stoppedBy "quality-fast"): nothing is rendered, embedded or charged.
     if (!bornDigital && coverage < COVERAGE_THRESHOLD && state.run.pipeline.visualPages?.coarseFallback === true) {
       const embedder = this.deps.pageEmbedder !== undefined
         ? this.deps.pageEmbedder
@@ -388,7 +390,8 @@ export class DocumentMapStage implements Stage {
     return await runSiphonLoop({
       pageCount, maxSiphonPages, seed: args.draft, initialObservations: args.initialObservations, shouldStop: () => isCostCapExceeded(state), signal: args.signal,
       readWindow: async (first, last) => {
-        if (args.bornDigital) {
+        // Fast never reads a page with a model: the siphon sees only the text layer, and scanned pages stay unread.
+        if (args.bornDigital || !qualityAllowsPageReading(state.run.pipeline.quality)) {
           const pageTexts = await ops.extractText(args.source, first, last, args.signal);
           pageTexts.forEach((t, i) => args.text.set(first + i, t));
           return { pageTexts };
@@ -421,6 +424,9 @@ export class DocumentMapStage implements Stage {
     const pageNumbers = Array.from({ length: args.last - args.first + 1 }, (_, i) => args.first + i);
     // Vision already stopped for the run: render nothing, call nothing.
     if (visionGuardFor(state).stop) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
+    // Fail closed: Fast never sends a page to a vision model, whoever asks.
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
+
     const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, signal: args.signal });
     const byPage = new Map(artifacts.map((a) => [a.pageNumber, a]));
     let costCents = 0;
@@ -553,8 +559,12 @@ export class DocumentMapStage implements Stage {
           update document_page_states set state = 'blocked-pii', failure_reason = 'pii-policy', updated_at = now()
           where document_id = ${document.id} and page_number = any(${blockedPages}::int[]) and state in ('unseen', 'failed', 'parsed')
         `;
-        // A coarse row written before the policy tightened must not survive.
+        // A coarse row written before the policy tightened must not survive, nor a kept model read of the page.
         await q`delete from document_pages where document_id = ${document.id} and page_number = any(${blockedPages}::int[])`;
+        await q`
+          update document_page_states set read_text = null
+          where document_id = ${document.id} and page_number = any(${blockedPages}::int[]) and read_text is not null
+        `;
       }
 
       if (built.title) {

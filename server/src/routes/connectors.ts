@@ -11,6 +11,7 @@ import {
   s3ConfigSchema, s3CredentialsSchema, googleDriveConfigSchema, googleDriveCredentialsSchema,
   notionConfigSchema, notionCredentialsSchema, confluenceConfigSchema, confluenceCredentialsSchema,
   defaultPipelineFeatures,
+  sanitizeStoredPipeline,
   updateConnectorSchema,
   type PipelineFeatures,
   type WorkspaceConnector,
@@ -197,7 +198,9 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
       userId: wsInfo.user_id,
       orgId: wsInfo.org_id,
       workspace: row.workspace_id,
-      pipeline: wsInfo.pipeline ?? defaultPipelineFeatures,
+      // The stored workspace pipeline is passed as the request override; drop extractor settings it may still
+      // carry that the strict schemas now reject, so a stale row cannot fail every sync.
+      pipeline: sanitizeStoredPipeline(wsInfo.pipeline ?? defaultPipelineFeatures, `workspace ${row.workspace_id}`),
       kind: "connector-sync",
       items: connectorItems(),
       mayBeEmpty: true,

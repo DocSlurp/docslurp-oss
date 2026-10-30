@@ -976,7 +976,9 @@ export const visionProfileCatalog = {
   config: { profile: VisionProfileKey; target: ModelTarget; modelUri: string };
 }>;
 
-// Parser playbooks: opinionated presets that describe extraction/vision tradeoffs.
+// Parser playbooks: internal presets that describe extraction/vision tradeoffs. Not a public setting: the worker
+// derives the playbook from `pipeline.quality` (parserPlaybookForQuality), and classify-route may suggest one per
+// document inside `auto`.
 export const parserPlaybookKeySchema = z.enum([
   "fast",
   "balanced",
@@ -1280,11 +1282,15 @@ export const defaultEmbeddingConfig: EmbeddingConfig = {
   lateChunkingWindow: 2,
 };
 
-// `maxPagesPerDocument` (a per-document vision page cap, default 4, max 32) was removed on 2026-10-29: stored
-// pipelines still carry it, so it is accepted and dropped instead of failing the strict schema.
+// Retired keys that stored pipelines still carry, accepted and dropped instead of failing the strict schema:
+// `maxPagesPerDocument` (a per-document vision page cap, removed 2026-10-29) and `forceAllPages` (vision on every
+// page, now `pipeline.quality: "good"`; the pipeline schema maps it before this runs).
+const LEGACY_VISION_KEYS = ["maxPagesPerDocument", "forceAllPages"] as const;
 const dropLegacyVisionKeys = (value: unknown) => {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !("maxPagesPerDocument" in value)) return value;
-  const { maxPagesPerDocument: _legacy, ...rest } = value as Record<string, unknown>;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  if (!LEGACY_VISION_KEYS.some((key) => key in value)) return value;
+  const rest = { ...(value as Record<string, unknown>) };
+  for (const key of LEGACY_VISION_KEYS) delete rest[key];
   return rest;
 };
 
@@ -1294,7 +1300,6 @@ const visionConfigObjectSchema = z
     target: modelTargetSchema.optional(),
     modelUri: llmModelUriSchema.optional(),
     prompt: z.string().trim().min(1).max(200).default("<OCR>"),
-    forceAllPages: z.boolean().default(false),
     remoteFallbackModelUri: llmModelUriSchema.nullable().default(null),
     benchmarkProfile: visionBenchmarkProfileSchema.default("difficult-pages"),
   })
@@ -1337,7 +1342,6 @@ export type VisionConfig = z.output<typeof visionConfigObjectSchema>;
 export const defaultVisionConfig: VisionConfig = {
   ...visionProfileCatalog[DEFAULT_VISION_PROFILE].config,
   prompt: "<OCR>",
-  forceAllPages: false,
   remoteFallbackModelUri: null,
   benchmarkProfile: "difficult-pages",
 };

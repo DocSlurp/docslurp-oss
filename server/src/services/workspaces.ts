@@ -12,6 +12,7 @@ import {
   isUntitledWorkspaceName,
   isWorkspaceUuid,
   normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   slugifyWorkspaceName,
   WORKSPACE_SLUG_MAX_LENGTH,
   type WorkspaceInputRef,
@@ -282,6 +283,7 @@ function parseWorkspaceTemplateKey(value: string | null): WorkspaceRecord["templ
 }
 
 function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
+  const pipeline = normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `workspace ${row.id}`);
   return workspaceSchema.parse({
     id: row.id,
     orgId: row.org_id,
@@ -289,9 +291,9 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     name: row.name,
     templateKey: parseWorkspaceTemplateKey(row.template_key),
     systemPrompt: row.system_prompt ?? null,
-    summaries: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures).summarize,
+    summaries: pipeline.summarize,
     pipeline: {
-      ...normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+      ...pipeline,
       indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
     },
     monthlyBudgetCents: row.monthly_budget_cents ?? null,
@@ -338,7 +340,7 @@ function mapWorkspaceRun(row: WorkspaceRunRow): WorkspaceRun {
     processedDocuments: row.processed_documents,
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
-    pipeline: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+    pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
     error: publicDocumentError(row.error),
@@ -997,7 +999,7 @@ export async function updateWorkspace(
     pipeline = await resolveUpdatedPipeline(workspaceId, current, parsed, options);
   }
   // With precomputed inputs the caller already validated the switch (this may run inside its transaction).
-  if (!options.precomputed && deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
+  if (!options.precomputed && deferredProfilesEnabled() && (pipeline.indexingMode !== current.pipeline.indexingMode || (pipeline.indexingMode === "visual" && pipeline.quality === "fast"))) {
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 

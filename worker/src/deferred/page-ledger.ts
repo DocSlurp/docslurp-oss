@@ -82,17 +82,22 @@ export async function claimPages(
   return result;
 }
 
-/** Moves pages to `state` in one statement; terminal states release the claim. */
+/**
+ * Moves pages to `state` in one statement; terminal states release the claim. Returns the pages it moved.
+ *
+ * `claimedBy` fences the write to pages that run still holds: a run that stalled past its claim TTL (another run
+ * re-claimed the page) moves nothing, so it can neither index nor bill a page it no longer owns.
+ */
 export async function markPages(
   sql: Sql,
   documentId: string,
   pages: number[],
   state: PageLedgerState,
-  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string } = {},
-): Promise<void> {
-  if (pages.length === 0) return;
+  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string; claimedBy?: string } = {},
+): Promise<number[]> {
+  if (pages.length === 0) return [];
   const releases = state === "indexed" || state === "failed" || state === "blocked-pii" || state === "unseen";
-  await sql`
+  const rows = await sql<{ page_number: number }[]>`
     update document_page_states
     set state = ${state},
         cost_credits = coalesce(${extra.costCredits ?? null}::numeric, cost_credits),
@@ -100,9 +105,14 @@ export async function markPages(
         embedding_model = case when ${state} = 'indexed' then coalesce(${extra.embeddingModel ?? null}, embedding_model) else embedding_model end,
         claimed_by_run = case when ${releases} then null else claimed_by_run end,
         claim_expires_at = case when ${releases} then null else claim_expires_at end,
+        -- A kept read (read_text) is spent once the page indexes, and a PII-blocked page keeps no text.
+        read_text = case when ${state === "indexed" || state === "blocked-pii"} then null else read_text end,
         updated_at = now()
     where document_id = ${documentId} and page_number = any(${pages}::int[])
+      ${extra.claimedBy === undefined ? sql`` : sql`and claimed_by_run = ${extra.claimedBy}`}
+    returning page_number
   `;
+  return rows.map((row) => row.page_number).sort((a, b) => a - b);
 }
 
 export interface PageStateCount {

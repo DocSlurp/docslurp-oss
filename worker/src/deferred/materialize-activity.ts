@@ -1,8 +1,8 @@
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, mergePipelineFeatures, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
-import { recordMaterializedPageFee } from "../db/page-base-fee.js";
+import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { Store } from "../db/store.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
@@ -60,7 +60,7 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
   if (!source?.pipeline) {
     throw new Error(`materialize run ${run.id} has no pipeline and document ${documentId} has no source pipeline; refusing to run on defaults`);
   }
-  return { ...run, pipeline: applyDefaultVisionOverride(mergePipelineFeatures(source.pipeline as never)) };
+  return { ...run, pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(source.pipeline as never, `document ${documentId} source pipeline`)) };
 }
 
 /**
@@ -129,8 +129,8 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
       result.blocked.push(...own.blocked);
       result.failed.push(...own.failed);
       result.costCredits += own.costCredits;
-      // Full-index runs pay page charges through the normal run path.
-      if (reason !== "full-index") await recordMaterializedPageFee(sql, input.runId, input.documentId, own.indexed, state.usageLedger.richPagesOf(input.documentId));
+      // materializePageRange billed the pages it indexed in the same transaction (Rich reads, Fast pages and
+      // stamps); full-index runs pay page charges through the normal run path.
     } finally {
       if (beat) clearInterval(beat);
       // Persists buffered AI usage even when materialization threw.
@@ -138,16 +138,22 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
     }
   };
 
-  /** Pages another run indexed (or a crashed attempt left unbilled): charge any that no run has billed yet. */
+  /**
+   * Pages another run indexed: charge any that carry no billing decision. A query page turns indexed in the
+   * same transaction that writes its charges and stamp (materialize-pages.ts), so this normally finds nothing.
+   * It covers unstamped pages and stale stamps: a stamping run with no Fast or Rich charge for the page that can
+   * no longer commit one (terminal, or its lease expired) loses the page to this run (staleStampSql). A retry of this
+   * run finishes its own (ids are idempotent, and a page with a recorded Rich read gets no Fast charge).
+   */
   const billUnbilled = async (pages: number[]): Promise<void> => {
     if (pages.length === 0) return;
     const rows = await sql<{ page_number: number }[]>`
       select s.page_number from document_page_states s
       where s.document_id = ${input.documentId} and s.page_number = any(${pages}::int[])
         and s.state = 'indexed' and s.materialized_by in ('query', 'backfill')
-        and s.fee_billed_run is null
+        and (s.fee_billed_run is null or s.fee_billed_run = ${input.runId} or ${staleStampSql(sql)})
     `;
-    await recordMaterializedPageFee(sql, input.runId, input.documentId, rows.map((r) => r.page_number));
+    await recordMaterializedPageFee(sql, input.runId, input.documentId, rows.map((r) => r.page_number), { ledger: state.usageLedger });
   };
 
   const claim = await claimPages(sql, {

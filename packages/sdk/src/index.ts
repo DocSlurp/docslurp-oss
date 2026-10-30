@@ -23,6 +23,13 @@ export type JsonObject = Record<string, unknown>;
 
 export type IndexingMode = "full" | "map" | "visual";
 
+/**
+ * Processing quality (`pipeline.quality`): `fast` reads the text layer only and keeps scanned pages as page
+ * images, never read ($0.05 per 1,000 pages); `auto` (default) reads each page the cheapest faithful way ($0.05 to
+ * $2.50 per 1,000 pages, depending on the mix); `good` reads every page with a vision model ($2.50 per 1,000 pages).
+ */
+export type QualityMode = "fast" | "auto" | "good";
+
 export type WorkspaceRecord = JsonObject & {
   id: string;
   name: string;
@@ -339,6 +346,8 @@ export type UploadOptions = RequestOptions & {
   /** Folder path for a single-file or streamed upload. Use UploadFileInput.path for several files. */
   path?: string;
   indexingMode?: IndexingMode;
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the workspace's (auto by default). */
+  quality?: QualityMode;
   /**
    * "auto" (default) uses presigned storage PUTs: single PUT for small files,
    * multipart for large files and unknown-size streams. The server starts
@@ -364,6 +373,8 @@ export type UploadInput = {
   idempotencyKey?: string;
   /** Stamp these documents with an indexing mode instead of the workspace's. */
   indexingMode?: IndexingMode;
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the workspace's (auto by default). */
+  quality?: QualityMode;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -428,6 +439,8 @@ export type UploadUrlsInput = {
   tags?: string[];
   idempotencyKey?: string;
   indexingMode?: IndexingMode;
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the workspace's (auto by default). */
+  quality?: QualityMode;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -1335,10 +1348,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     };
   }
 
+  /** Pipeline overrides an upload sends: only the processing quality today. */
+  function pipelineFields(metadata: { quality?: QualityMode }): { pipeline?: { quality: QualityMode } } {
+    return metadata.quality ? { pipeline: { quality: metadata.quality } } : {};
+  }
+
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
     assertClientCanonicalIds(canonicalIdsOf(input, undefined));
     const { idempotencyKey, urls, orgId, templateKey } = input;
-    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input), ...extractFields(input) };
+    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input), ...extractFields(input), ...pipelineFields(input) };
     return request(`${intakeBase(input)}/url`, {
       ...jsonRequest("POST", body),
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
@@ -1388,6 +1406,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
+    if (metadata.quality) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
     for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
@@ -1474,7 +1493,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       signal.throwIfAborted();
       const session = await request<UploadSession>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
         ...intakeTarget(metadata), ...extractFields(options), orgId: metadata.orgId, tags: metadata.tags,
-        templateKey: metadata.templateKey, indexingMode: metadata.indexingMode,
+        templateKey: metadata.templateKey, indexingMode: metadata.indexingMode, ...pipelineFields(metadata),
         files: [{ filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
           canonicalId: options.canonicalId, path: options.path }],
       }), transferOptions);
@@ -1586,6 +1605,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
       ...(metadata.indexingMode ? { indexingMode: metadata.indexingMode } : {}),
+      ...pipelineFields(metadata),
       ...(args.target.workspace ? { workspace: args.target.workspace } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),

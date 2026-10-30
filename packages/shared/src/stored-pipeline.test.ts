@@ -11,7 +11,7 @@ describe("parseStoredPipelineFeatures", () => {
     const parsed = parseStoredPipelineFeatures(stored);
     expect(parsed.vision).not.toHaveProperty("baseUrl");
     expect(Array.isArray(parsed.documentExtraction.pages) || parsed.documentExtraction.pages === undefined).toBe(true);
-    expect(parsed.parserPlaybook).toBe(defaultPipelineFeatures.parserPlaybook);
+    expect(parsed.quality).toBe(defaultPipelineFeatures.quality);
   });
 
   it("keeps valid settings and falls back to defaults for garbage", () => {

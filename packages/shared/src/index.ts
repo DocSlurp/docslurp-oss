@@ -7,6 +7,7 @@ export * from "./citation-locator.js";
 export * from "./media-summary.js";
 export * from "./anthropic-models.js";
 export * from "./billing.js";
+export * from "./quality.js";
 export * from "./credit-leases.js";
 export * from "./chat-reserve.js";
 export * from "./extract-pricing.js";

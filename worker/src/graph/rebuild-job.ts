@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import {
   calculateAiUsageCostCents,
   graphConfigSchema,
-  normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   resolvePipelineTextModel,
   type GraphConfig,
   type PipelineFeatures,
@@ -126,7 +126,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
     select name, pipeline from workspaces where id = ${job.workspace_id}
   `;
   if (!workspace) throw new Error("Workspace no longer exists");
-  const pipeline = normalizePipelineFeatures(workspace.pipeline as PipelineFeatures);
+  const pipeline = normalizeStoredPipelineFeatures(workspace.pipeline as PipelineFeatures, `workspace ${job.workspace_id}`);
   const graphConfig: GraphConfig = graphConfigSchema.parse(job.config);
   const scope = graphConfig.domain ?? `Workspace "${workspace.name}"`;
   const concurrency = Math.max(1, options.concurrency ?? 4);

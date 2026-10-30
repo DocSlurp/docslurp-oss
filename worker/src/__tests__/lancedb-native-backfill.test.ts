@@ -155,4 +155,16 @@ describe("lancedb native backfill", () => {
     expect(all.filter((result) => !result.skipped)).toHaveLength(2);
     expect(all.every((result) => !result.error)).toBe(true);
   }, 120_000);
+
+  it("leaves chunks of pages materialized on demand unhydrated (search serves them through a committed chunk row)", async () => {
+    const id = "w-doc0:p9:gabc123abc123:c0";
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
+      values (${id}, 'w-doc0', 'run-w', 'u', 8000, 'deferred page', ${[]}, 9, 3, ${sql.json({ pageNumber: 9, materializedBy: "query", deferred: true })})`;
+    await writeLanceDbRecords(location().uri, location().table, [{ id, documentId: "w-doc0", chunkIndex: 8000, text: "deferred page", vector: vector(7_777), metadata: { documentId: "w-doc0" } }]);
+    const [result] = await backfillWorkspaceLanceHydration({ sql, workspaceId: "w", batchDocs: 10, log: () => {} });
+    expect(result!.rowsWithoutHydration).toBe(1);
+    const { rows } = await readTable();
+    expect(rows.get(id)!.hydration ?? null).toBeNull();
+    expect(decodeLanceChunkHydration(rows.get("w-doc0-0")!.hydration)?.runId).toBe("run-w");
+  }, 120_000);
 });

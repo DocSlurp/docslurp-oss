@@ -734,14 +734,21 @@
       "idx": 104,
       "version": "7",
       "when": 1793300000008,
-      "tag": "0104_vision_attempt_ledger",
+      "tag": "0104_fast_page_image_budgets",
       "breakpoints": true
     },
     {
       "idx": 105,
       "version": "7",
       "when": 1793300000009,
-      "tag": "0105_workspace_china_providers",
+      "tag": "0105_vision_attempt_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1793300000010,
+      "tag": "0106_workspace_china_providers",
       "breakpoints": true
     }
   ]

@@ -1,6 +1,7 @@
 import {
   defaultWorkspaceSearchSettings,
   normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   privacyModeAllowsHosted,
   type PrivacyMode,
   type PipelineFeatures,
@@ -212,7 +213,7 @@ export async function loadSearchWorkspaceContext(workspaceId: string, userId: st
   }
   let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   try {
-    indexing = { pipeline: normalizePipelineFeatures(row.pipeline ?? null), indexConfigs: parseIndexConfigs(row.index_configs) };
+    indexing = { pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? null, `workspace ${row.workspace_id}`), indexConfigs: parseIndexConfigs(row.index_configs) };
   } catch {
     // Fail closed, as loadWorkspaceIndexing does.
     indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
@@ -444,7 +445,7 @@ export async function loadWorkspaceIndexing(
       where id = ${workspaceId}
       limit 1
     `;
-    return { pipeline: normalizePipelineFeatures(row?.pipeline ?? null), indexConfigs: parseIndexConfigs(row?.index_configs) };
+    return { pipeline: normalizeStoredPipelineFeatures(row?.pipeline ?? null, `workspace ${workspaceId}`), indexConfigs: parseIndexConfigs(row?.index_configs) };
   } catch {
     // Fail closed: an unreadable or invalid pipeline must not fall back to the
     // standard (hosted-allowed) default and leak a private workspace's queries.

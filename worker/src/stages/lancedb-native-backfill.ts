@@ -6,7 +6,8 @@
  *      (metadata only: no data files are rewritten);
  *   2. fill them for every chunk row from Postgres document_chunks, by partial merge-insert
  *      (only those three columns change; vectors and text keep their values; ids that are
- *      not in the table are skipped);
+ *      not in the table are skipped). Chunks of pages materialized on demand are left
+ *      unhydrated, so search hydrates them from Postgres;
  *   3. build the chunk-text FTS (BM25) index when it is missing;
  *   4. optimize the table: a merge-insert moves every updated row out of the vector (and FTS)
  *      index until the next optimize, so without it the workspace's searches, flag on or off,
@@ -61,7 +62,7 @@ export interface LanceNativeBackfillTableResult {
   /** The table has a chunk-text FTS index after the run (built now or before). */
   ftsPresent: boolean;
   optimized: boolean;
-  /** Rows of the table still without hydration (orphaned rows); null on a dry run. */
+  /** Rows of the table still without hydration (orphaned rows, and pages materialized on demand); null on a dry run. */
   rowsWithoutHydration: number | null;
 }
 
@@ -173,6 +174,9 @@ async function backfillTable(args: {
         const chunks = await sql<{ id: string; run_id: string; heading_path: string[] | null; page_number: number | null; token_estimate: number; metadata: Record<string, unknown> | null }[]>`
           select id, run_id, heading_path, page_number, token_estimate, metadata
           from document_chunks where document_id = any(${sql.array(ids)})
+            -- Pages materialized on demand stay unhydrated: their vectors are served only through a committed
+            -- chunk row (materialize-pages.ts), so a vector the materializer could not delete is never searchable.
+            and coalesce(metadata ->> 'deferred', '') <> 'true'
         `;
         const updates = chunks.map((chunk) => ({
           id: chunk.id,
@@ -218,7 +222,7 @@ async function backfillTable(args: {
       }
       if (!dryRun) {
         result.rowsWithoutHydration = await table.countRows("hydration IS NULL OR hydration = ''");
-        log(`[backfill] rows still without hydration (orphaned rows): ${result.rowsWithoutHydration}`);
+        log(`[backfill] rows still without hydration (orphaned rows, pages materialized on demand): ${result.rowsWithoutHydration}`);
       }
     } finally {
       table.close();

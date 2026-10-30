@@ -85,6 +85,8 @@ export async function adoptBackfillDocuments(
             when tmp.state = 'blocked-pii' and src.state in ('unseen', 'failed', 'parsed') then 'blocked-pii'
             when tmp.state = 'parsed' and src.state in ('unseen', 'failed') then 'parsed'
             else src.state end,
+          -- A PII block found on the temporary pass also drops a kept model read of the page.
+          read_text = case when tmp.state = 'blocked-pii' then null else src.read_text end,
           updated_at = now()
       from document_page_states tmp
       where src.document_id = ${source} and tmp.document_id = ${temp} and tmp.page_number = src.page_number

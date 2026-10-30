@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import sharp from "sharp";
-import { l2Normalize, packSignBits, pageCredits, quantizeInt8 } from "@docslurp/shared";
+import { l2Normalize, packSignBits, pageCredits, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
 import {
@@ -35,7 +35,7 @@ export interface PageEmbedDeps {
 export interface EmbedPageImagesResult {
   embeddedPages: number[];
   /** Set when the call stopped early; pages after the stop were not embedded. */
-  stoppedBy?: "cost-cap";
+  stoppedBy?: "cost-cap" | "quality-fast";
   inputTokens: number;
   costCents: number;
 }
@@ -68,7 +68,7 @@ export async function embedPageImages(
   args: {
     document: Document;
     pages: number[];
-    run: Pick<WorkspaceRun, "id" | "orgId" | "workspaceId">;
+    run: Pick<WorkspaceRun, "id" | "orgId" | "workspaceId"> & { pipeline?: Pick<WorkspaceRun["pipeline"], "quality"> };
     signal?: AbortSignal;
     windowSize?: number;
     onWindow?: (info: { embedded: number[]; windowIndex: number; windows: number }) => Promise<void> | void;
@@ -83,6 +83,13 @@ export async function embedPageImages(
   for (let i = 0; i < pages.length; i += size) windows.push(pages.slice(i, i + size));
   const result: EmbedPageImagesResult = { embeddedPages: [], inputTokens: 0, costCents: 0 };
   if (windows.length === 0) return result;
+  // Fast reads no page: embedding a page image is a model read that bills Rich. The server refuses Fast with visual
+  // indexing; this is the backstop, so nothing is rendered, embedded or charged.
+  if (!qualityAllowsPageReading(run.pipeline?.quality)) {
+    console.error(`[page-embed] refused under quality fast run=${run.id} document=${document.id} pages=${pages.length}`);
+    result.stoppedBy = "quality-fast";
+    return result;
+  }
   if (!run.workspaceId) throw new Error("page-embed requires a workspace-scoped run");
   const workspaceId = run.workspaceId;
   await ensurePageRows(deps.sql, document.id, document.pageCount);
@@ -199,6 +206,11 @@ export class PageEmbedStage implements Stage {
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const pipeline = state.run.pipeline;
+    // Fast reads no page (no Rich charge): skip visual embedding entirely; text indexing still runs.
+    if (!qualityAllowsPageReading(pipeline.quality)) {
+      console.error(`[page-embed] skipped: quality fast does not embed page images run=${state.run.id} documents=${state.documents.length}`);
+      return;
+    }
     const embedder =
       this.embedderOverride ??
       resolvePageImageEmbedder({ route: pipeline.visualPages?.route ?? "auto", privacyMode: pipeline.privacyMode });

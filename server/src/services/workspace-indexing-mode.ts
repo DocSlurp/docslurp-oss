@@ -8,6 +8,7 @@ import {
   isBillingEnforced,
   getPrivateModelEndpointRegistry,
   compilePipelinePlan,
+  sanitizeStoredPipeline,
   type CostEstimate,
   type IndexingMode,
   type MaterializationPolicy,
@@ -33,6 +34,8 @@ export class IndexingModeError extends Error {
       | "too_many_documents"
       | "index_in_progress"
       | "visual_mode_privacy"
+      | "visual_mode_quality"
+      | "invalid_pipeline"
       | "full_index_not_allowed"
       | "document_not_found"
       | "nothing_to_index"
@@ -62,7 +65,15 @@ export function hasPrivatePageEmbedder(): boolean {
 }
 
 /** Visual mode sends page images to an embedder: refuse when privacy or PII policy forbids it. */
-export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privacyMode" | "piiPolicy">): void {
+export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privacyMode" | "piiPolicy"> & Partial<Pick<PipelineFeatures, "quality">>): void {
+  // Visual mode embeds every page image, which bills Rich; Fast promises Fast pricing and no page reading.
+  if (pipeline.quality === "fast") {
+    throw new IndexingModeError(
+      "Visual mode embeds page images, which bill Rich; Fast quality reads no page. Choose Auto or Good quality, or another indexing mode.",
+      400,
+      "visual_mode_quality",
+    );
+  }
   const hostedForbidden = pipeline.privacyMode !== "standard" && !hasPrivatePageEmbedder();
   const piiBlocks = Boolean(pipeline.piiPolicy?.enabled && pipeline.piiPolicy.action === "block_indexing");
   if (hostedForbidden || piiBlocks) {
@@ -306,7 +317,8 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
   if (todo.length === 0) throw new IndexingModeError("A full index is already running for these documents.", 409, "index_in_progress");
   assertDocumentCap(todo.length);
   const docs = await liveDocs(args.workspaceId, todo.map((row) => row.id));
-  const pipeline = { ...(ws.pipeline as PipelineFeatures), indexingMode: "full" as const };
+  // Stored extractor settings the strict schemas now reject are dropped before the run row is written.
+  const pipeline = { ...sanitizeStoredPipeline(ws.pipeline as PipelineFeatures, `workspace ${args.workspaceId}`), indexingMode: "full" as const };
   const batches: RunBatch[] = [{ docs, pipeline, mode: "full", partial: false }];
   await validateBatches(batches);
   const unindexed = todo.reduce((sum, row) => sum + row.unindexed, 0);
@@ -333,7 +345,7 @@ export async function requestFullIndex(args: FullIndexArgs): Promise<{ runId: st
 export type ModeSwitchResult = { runIds: string[]; pipelines: Map<string, PipelineFeatures> };
 
 /**
- * Validates a requested mode before it is saved: visual needs privacy/PII clearance. Every mode is open to every
+ * Validates a requested mode before it is saved: visual needs privacy/PII clearance and a quality that reads pages. Every mode is open to every
  * organization; credits are checked when the indexing work is admitted, not here.
  * `current` is null when creating a workspace.
  */
@@ -341,7 +353,7 @@ export async function validateModeChoice(args: {
   orgId: string;
   workspaceId: string | null;
   currentMode: IndexingMode | null;
-  nextPipeline: Pick<PipelineFeatures, "indexingMode" | "privacyMode" | "piiPolicy">;
+  nextPipeline: Pick<PipelineFeatures, "indexingMode" | "privacyMode" | "piiPolicy"> & Partial<Pick<PipelineFeatures, "quality">>;
 }): Promise<void> {
   if (args.nextPipeline.indexingMode === "visual") assertVisualModeAllowed(args.nextPipeline);
 }
@@ -441,7 +453,7 @@ export async function estimateFullIndex(args: {
   const pending = (await unindexedPages(args.workspaceId, args.documentIds)).filter((row) => row.unindexed > 0);
   const busy = await inFlightSourceIds(sql as unknown as Client, args.workspaceId, pending.map((row) => row.id), null);
   const todo = pending.filter((row) => !busy.has(row.id));
-  const features = { ...ws.pipeline, indexingMode: "full" as const } as PipelineFeatures;
+  const features = { ...sanitizeStoredPipeline(ws.pipeline, `workspace ${args.workspaceId}`), indexingMode: "full" as const } as PipelineFeatures;
   return await estimateWork({
     features,
     stages: compilePipelinePlan(features).stageOrder,
