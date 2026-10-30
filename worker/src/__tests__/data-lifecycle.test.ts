@@ -153,6 +153,17 @@ describe("delete triggers enqueue external cleanup", () => {
     expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(1);
     expect(stores.objects.has(original)).toBe(true);
     expect((await sql`select not_before = 'infinity'::timestamptz as quarantined from storage_cleanup_queue`)[0]?.quarantined).toBe(true);
+    // A legacy row has lost its owner; merely making it due must not authorize deletion.
+    await sql`delete from upload_cleanup_owners where original_key = ${original}`;
+    await sql`update storage_cleanup_queue set org_id = 'o1', not_before = now()`;
+    expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(1);
+    expect(stores.objects.has(original)).toBe(true);
+    // Operator restores the tuple from independently verified historical evidence.
+    await sql`insert into upload_cleanup_owners (original_key, sealed_key, org_id) values (${original}, ${sealed}, 'o1')`;
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    expect((await drainStorageCleanupQueue(sql, stores.storage, stores.options)).failed).toBe(0);
+    expect([...stores.objects]).toEqual([sealed, other]);
+    expect((await sql`select last_error from storage_cleanup_queue`)[0]?.last_error).toBeNull();
   });
 
   it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {
