@@ -11,6 +11,7 @@ import { insertMissingTableDelimiters } from "../tools/vision-table-delimiter.js
 import { openRouterProviderParams, postProcessVisionText, visionModelProfile, visionOutputCapForModel, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
+import { inAllowingRun } from "../test/provider-scope.js";
 
 const GLM = "z-ai/glm-5.3-flash";
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
@@ -28,14 +29,14 @@ async function requestBody(model: string, prompt?: string) {
   const dir = await mkdtemp(join(tmpdir(), "vision-glm-"));
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-  await executeVisionRuntime({
+  await inAllowingRun(() => executeVisionRuntime({
     imagePath,
     outputPath: `${imagePath}.json`, gate: null,
     vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
     cfg,
     runner: new CommandRunner(),
     privacyMode: "standard",
-  });
+  }));
   const body = bodies[0]!;
   body.messages[1].content[1].image_url.url = "<image>";
   return body;

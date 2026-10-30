@@ -354,6 +354,7 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
+- **2026-10-29, non-breaking.** Workspaces gain `allowChinaProviders` (default `true`; `PATCH /v1/workspaces/:workspace`), which narrows the organization's setting. With either off, OpenRouter requests carry a `provider.only` allowlist of providers with a known non-China headquarters, unknown-region providers are excluded and unknown scope is restricted. See [provider regions](provider-regions.md).
 - **2026-10-21, breaking.** One `workspace` request field replaces `workspaceId` and `workspaceName` everywhere a request targets a workspace (bodies, query strings, multipart fields, MCP tool arguments; aggregate search takes `workspaces` instead of `workspaceIds`). It takes a UUID, slug, former slug or name, matched by slug. Uploads into a name that matches nothing create that workspace; other requests answer `404 workspace_not_found` naming the slug. The SDK option and inputs, embed and widget attribute (`workspace`), CLI `--workspace` (`--workspace-name` is removed) and the `DOCSLURP_WORKSPACE` environment variable follow. Responses still carry `workspaceId`. See [Workspaces](#workspaces).
 
 - **2026-10-20.** New workspaces default to `summaries: true`. Create/update bodies and workspace responses expose this document-summary option. It adds a one-time processing cost to improve document search and workspace overviews. See [document summaries, costs and limits](document-summaries.md).

@@ -16,6 +16,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { noteProviderPolicyWorkspace } from "./request-context.js";
 
 /**
  * API-side enforcement of workspace `privacyMode` (semantics in
@@ -88,6 +89,8 @@ export async function allowHostedCallForWorkspace(args: {
   workspaceId: string | null;
   call: ProviderCallDescriptor;
 }): Promise<boolean> {
+  // The workspace's China-provider setting applies to this request's hosted calls from here on.
+  noteProviderPolicyWorkspace(args.workspaceId);
   if (isProviderCallAllowed(args.privacyMode, args.call)) return true;
   console.warn(`${formatPrivacyBlockLog(args.privacyMode, args.call)} workspace=${args.workspaceId ?? "-"}`);
   if (privacyModeAuditsBlockedCalls(args.privacyMode)) {
@@ -125,6 +128,7 @@ export async function hostedApiKeyForWorkspaces(args: {
   call: ProviderCallDescriptor;
 }): Promise<{ apiKey: string | undefined; privacyMode: PrivacyMode }> {
   const ids = [...new Set(args.workspaceIds)];
+  for (const workspaceId of ids) noteProviderPolicyWorkspace(workspaceId);
   const modes = await Promise.all(ids.map((workspaceId) => loadWorkspacePrivacyMode(workspaceId)));
   const privacyMode = strictestPrivacyMode(modes);
   if (!args.apiKey) return { apiKey: undefined, privacyMode };

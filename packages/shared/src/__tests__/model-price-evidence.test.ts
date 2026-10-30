@@ -11,6 +11,10 @@ const evidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/model-p
   unavailable: string[];
   endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
 };
+/** Endpoints of hosts a vision route added after the 2026-10-26 snapshot (China-based hosts of the DeepSeek route). */
+const routeEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vision-route-prices-2026-10-29.json", import.meta.url), "utf8")) as {
+  endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
+};
 const registry = JSON.parse(readFileSync(new URL("../../../../scripts/lib/model-prices.json", import.meta.url), "utf8")) as {
   models: Record<string, { input: number; output: number; vision?: boolean; contextWindow?: number; unavailable?: string }>;
 };
@@ -51,7 +55,8 @@ describe("official model price evidence", () => {
         continue;
       }
       // A pinned route is priced at its most expensive pinned provider, from the retained endpoint response.
-      const pinned = (evidence.endpoints[id] ?? []).filter((endpoint) => pricing.providers!.some((provider) => endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`)));
+      const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? [])];
+      const pinned = endpoints.filter((endpoint) => pricing.providers!.some((provider) => endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`)));
       expect(pinned.length, id).toBeGreaterThanOrEqual(pricing.providers!.length);
       expect(pricing.inputUsdPerMillion, id).toBeCloseTo(Math.max(...pinned.map((endpoint) => Number(endpoint.pricing.prompt) * 1e6)), 10);
       expect(pricing.outputUsdPerMillion, id).toBeCloseTo(Math.max(...pinned.map((endpoint) => Number(endpoint.pricing.completion) * 1e6)), 10);

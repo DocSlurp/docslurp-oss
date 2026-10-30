@@ -1,4 +1,4 @@
-import type { PrivacyMode, WorkspaceChatResponse } from "@docslurp/shared";
+import { createOpenRouterRoutingFetch, type PrivacyMode, type WorkspaceChatResponse } from "@docslurp/shared";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
@@ -48,7 +48,8 @@ export const LLAMA_GUARD_PRICE = { input: 0.18, output: 0.18 } as const;
 
 /** Llama Guard 4 over OpenRouter's chat completions API. `fetch` is injectable for tests. */
 export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof fetch; baseUrl?: string; timeoutMs?: number }): OutputModerator {
-  const doFetch = args.fetch ?? fetch;
+  // Hosts follow the org/workspace China-provider policy, like every OpenRouter call (DeepInfra is US-based).
+  const doFetch = createOpenRouterRoutingFetch(args.fetch ?? fetch);
   return {
     name: "llama-guard-4",
     async moderate(input, signal) {

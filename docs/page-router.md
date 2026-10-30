@@ -331,8 +331,9 @@ Two limits on the bound:
   before their top-ups land; each top-up then lands and later admissions see it. The correction, once
   raised, closes the gap for later admissions.
 - **DeepSeek V4.1 Flash 1017 (the default).** Its 1,024-token image bound is the published
-  processor's `vision_max_n_token`; it holds only while every pinned provider (Together, Fireworks,
-  Parasail) serves that limit. A provider serving a larger limit bills above the bound; the weight
+  processor's `vision_max_n_token`; it holds only while every allowed provider (StreamLake, DeepSeek,
+  Together, Fireworks, Parasail) serves that limit. On the 2026-10-29 tune and select splits StreamLake and
+  DeepSeek billed the same input tokens per page as Together (per-page difference -2 to 0, maximum 1,158). A provider serving a larger limit bills above the bound; the weight
   correction (and the per-org refusal for the org whose pages trigger it) is the safety net, and a
   `[vision-weight] correction` line on this route means the bound must be revisited.
 

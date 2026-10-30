@@ -100,6 +100,11 @@ export const workspaceSchema = z.object({
   billingEnforced: z.boolean().optional(),
   /** Retained versions per document for this workspace; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /**
+   * China-based model providers may serve this workspace's requests. Narrows the organization's
+   * `allowChinaProviders`: requests use those providers only when both are true (docs/provider-regions.md).
+   */
+  allowChinaProviders: z.boolean().default(true),
   /** Skip the confirm dialog for re-index-queuing changes; recommended changes re-index when `apply` is omitted. */
   autoConfirmReindex: z.boolean().default(false),
   runCount: z.number().int().nonnegative().default(0),
@@ -853,6 +858,8 @@ export const updateWorkspaceSchema = z.object({
   autoConfirmReindex: z.boolean().optional(),
   /** Versions kept per document chain; null inherits the organization setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
+  /** False keeps China-based model providers out of this workspace's requests; true cannot widen an org opt-out. */
+  allowChinaProviders: z.boolean().optional(),
 });
 export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;
 

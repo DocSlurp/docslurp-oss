@@ -1,5 +1,6 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { markWorkspaceAutoNamed, refineWorkspaceNames } from "./workspace-naming.js";
+import { forgetWorkspaceProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -72,6 +73,7 @@ type WorkspaceRow = {
   artifact_retention_days?: number | null;
   run_retention_days?: number | null;
   retain_document_versions?: number | null;
+  allow_china_providers?: boolean | null;
   auto_confirm_reindex?: boolean | null;
   document_count: number;
   total_page_count: number;
@@ -298,6 +300,7 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     artifactRetentionDays: row.artifact_retention_days ?? null,
     runRetentionDays: row.run_retention_days ?? null,
     retainDocumentVersions: row.retain_document_versions ?? null,
+    allowChinaProviders: row.allow_china_providers !== false,
     autoConfirmReindex: row.auto_confirm_reindex ?? false,
     documentCount: row.document_count ?? 0,
     totalPageCount: row.total_page_count ?? 0,
@@ -632,6 +635,7 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
       w.artifact_retention_days,
       w.run_retention_days,
       w.retain_document_versions,
+      w.allow_china_providers,
       w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
@@ -740,6 +744,7 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
       w.artifact_retention_days,
       w.run_retention_days,
       w.retain_document_versions,
+      w.allow_china_providers,
       w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
@@ -1015,6 +1020,7 @@ export async function updateWorkspace(
   const nextRunRetention = retention(parsed.runRetentionDays, current.runRetentionDays);
   const nextRetainVersions = parsed.retainDocumentVersions === undefined ? current.retainDocumentVersions ?? null : parsed.retainDocumentVersions;
   const nextAutoConfirm = parsed.autoConfirmReindex ?? current.autoConfirmReindex ?? false;
+  const nextAllowChina = parsed.allowChinaProviders ?? current.allowChinaProviders ?? true;
   const client = options.client ?? sql;
 
   await client`
@@ -1035,6 +1041,7 @@ export async function updateWorkspace(
       run_retention_days = ${nextRunRetention},
       retain_document_versions = ${nextRetainVersions},
       auto_confirm_reindex = ${nextAutoConfirm},
+      allow_china_providers = ${nextAllowChina},
       budget_paused = case
         when ${nextBudget}::integer is null then false
         when (select spend_cents from current_month_spend) < ${nextBudget} then false
@@ -1050,6 +1057,7 @@ export async function updateWorkspace(
     throw error;
   });
 
+  if (parsed.allowChinaProviders !== undefined) forgetWorkspaceProviderPolicy(workspaceId);
   return options.client ? current : await getWorkspace(workspaceId, userId);
 }
 

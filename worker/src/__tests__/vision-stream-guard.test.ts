@@ -11,6 +11,7 @@ import { executeVisionRuntime } from "../tools/vision-runtime.js";
 import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { detectDegeneration, VisionOutputRejectedError, withIgnoredProvider } from "../tools/vision-stream.js";
+import { inAllowingRun } from "../test/provider-scope.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -24,10 +25,10 @@ async function run(config: Config = cfg) {
   const dir = await mkdtemp(join(tmpdir(), "vision-guard-"));
   const imagePath = join(dir, "page.png");
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-  return executeVisionRuntime({
+  return inAllowingRun(() => executeVisionRuntime({
     imagePath, outputPath: `${imagePath}.json`, vision: visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" }), gate: null,
     cfg: config, runner: new CommandRunner(), privacyMode: "standard",
-  });
+  }));
 }
 
 const enc = new TextEncoder();

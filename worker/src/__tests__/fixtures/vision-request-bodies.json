@@ -104,12 +104,13 @@
       "effort": "none"
     },
     "provider": {
-      "order": [
+      "only": [
         "together",
         "fireworks",
         "parasail"
       ],
-      "allow_fallbacks": false,
+      "sort": "price",
+      "allow_fallbacks": true,
       "max_price": {
         "prompt": 0.3,
         "completion": 1.2,
@@ -151,12 +152,13 @@
       "effort": "none"
     },
     "provider": {
-      "order": [
+      "only": [
         "together",
         "fireworks",
         "parasail"
       ],
-      "allow_fallbacks": false,
+      "sort": "price",
+      "allow_fallbacks": true,
       "max_price": {
         "prompt": 0.3,
         "completion": 1.2,

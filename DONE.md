@@ -21,6 +21,8 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
 # Completed
 
+- Default to Chinese-lab models on the cheapest qualifying host, with a fail-closed opt-out (2026-10-29): the DeepSeek-1017 vision route adds China-based StreamLake and DeepSeek and sorts by price (equal quality to Together on tune+select, $0.51 vs $1.03 per 1,000 pages); organizations and workspaces (workspace narrows org) can turn China-based providers off, enforced as a `provider.only` allowlist from a sourced provider-region table on every path and retry, with unknown regions and unknown scope restricted; served host and region on usage records; vision/OCR output collapses padded wide-space runs. See docs/provider-regions.md.
+
 - Prevent personal-organization slug collisions from failing first sign-in (2026-10-28): use the fresh organization UUID, retain owner-scoped membership creation, and cover shared user-ID prefixes, occupied slugs, repeat provisioning, deleted identities and hostile display names in migrated-database tests.
 
 - Fix large direct-upload finalization for S3-compatible terminal pagination markers (2026-10-27): honor IsTruncated, reject malformed or nonadvancing pages, retain the scoped object/upload identity, and bound listing by a shared deadline.

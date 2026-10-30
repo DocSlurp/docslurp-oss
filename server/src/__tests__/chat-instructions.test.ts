@@ -20,7 +20,7 @@ const {
   INGEST_INSTRUCTION_MAX_CHARS, neutralizeWorkspaceText, sanitizeWorkspaceInstructions, SCOPE_PLACEHOLDER,
 } = await import("../services/chat-instructions.js");
 const {
-  buildImprovePrompt, findCoreRuleConflicts, improveChatInstructions, isAllowedImproveModel, IMPROVE_WESTERN_PROVIDERS, parseImproveOutput, resolveImproveModel,
+  buildImprovePrompt, findCoreRuleConflicts, improveChatInstructions, isAllowedImproveModel, parseImproveOutput, resolveImproveModel,
 } = await import("../services/chat-instructions-improve.js");
 const { decideScopeDecline, resolveScopeDeclineThreshold, vectorScopeSignal } = await import("../search/scope-relevance.js");
 
@@ -174,13 +174,16 @@ describe("improveChatInstructions", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it("pins Western hosts, records usage with the org and workspace scope, charges credits and strips rule overrides", async () => {
+  it("restricts instruction improvement to approved hosts, records usage with the org and workspace scope, charges credits and strips rule overrides", async () => {
     const result = await improveChatInstructions({ ...base, generate });
-    const call = generate.mock.calls[0]![0] as { model: string; providerPreferences: { only: string[]; ignore: string[] }; privacyMode: string };
+    const call = generate.mock.calls[0]![0] as { model: string; providerPreferences?: unknown; privacyMode: string };
     expect(call.model).toBe("z-ai/glm-5.3-flash");
-    expect(call.providerPreferences.only).toEqual([...IMPROVE_WESTERN_PROVIDERS]);
-    expect(call.providerPreferences.ignore).toEqual(expect.arrayContaining([...CHINA_PROVIDER_SLUGS]));
-    expect(call.providerPreferences.only.some(slug => (CHINA_PROVIDER_SLUGS as readonly string[]).includes(slug))).toBe(false);
+    // This helper retains its reviewed host boundary even when the organization permits other providers.
+    expect(call.providerPreferences).toEqual({
+      only: ["baseten", "gmicloud", "near-ai", "fireworks", "together"],
+      ignore: [...CHINA_PROVIDER_SLUGS],
+      allow_fallbacks: true,
+    });
     expect(mocks.recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({
       userId: "user-1",
       scope: { orgId: "org-1", workspaceId: "ws-1" },

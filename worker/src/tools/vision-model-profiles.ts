@@ -8,6 +8,7 @@ import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/s
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
 import { insertMissingTableDelimiters } from "./vision-table-delimiter.js";
+import { normalizeVisionWhitespace } from "./vision-whitespace.js";
 
 /** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
 export const MARKDOWN_LATEX_VISION_PROMPT =
@@ -45,6 +46,15 @@ export interface OpenRouterProviderPreferences {
   allow_fallbacks: boolean;
 }
 
+/**
+ * First-attempt OpenRouter routing: a pinned `order`, or an `only` allowlist of measured hosts that OpenRouter
+ * sorts by current price. An org or workspace without China-based providers narrows either to its allowed hosts
+ * (openrouter-routing.ts `restrictToNonChinaProviders`, applied before every send).
+ */
+export type OpenRouterRoute =
+  | OpenRouterProviderPreferences
+  | { only: string[]; sort: "price"; allow_fallbacks: boolean };
+
 export interface VisionModelProfile {
   /** Prompt template key used in place of the generic `<OCR>` default. Explicit other keys are kept. */
   defaultPrompt?: VisionProfilePromptKey;
@@ -56,7 +66,7 @@ export interface VisionModelProfile {
    */
   maxOutputTokensMode?: "default" | "ceiling";
   /** OpenRouter routing for this model. */
-  openRouterProvider?: OpenRouterProviderPreferences;
+  openRouterProvider?: OpenRouterRoute;
   /**
    * Reasoning control for page transcription. Kept here, not in the shared chat floor table, so it
    * never changes how the same model reasons in chat. Models without one fall back to `openRouterReasoningParams`.
@@ -81,9 +91,10 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // 2026-10-21 tune split (68 pages): with `<OCR>` this snapshot writes plain-text math
   // (`softmax(QK^T / √d_k) V`); the Markdown/LaTeX prompt lifts math partial 0.44 -> 0.86.
   // BaseTen served runaway repetition loops ("| | | …" to the cap) and word substitutions;
-  // DeepSeek native and Together had none. Routing is restricted to US-hosted providers measured on the
-  // 2026-10-22 select split (Together p50 2.2 s, Fireworks 4.1 s, Parasail 3.6 s; equal quality, 0 failures);
-  // DeepSeek's own China-hosted endpoint is excluded for customer documents.
+  // DeepSeek native and Together had none. Routing is restricted to hosts measured to transcribe faithfully:
+  // US-hosted Together, Fireworks and Parasail (2026-10-22 select split: p50 2.2 / 4.1 / 3.6 s, equal quality,
+  // 0 failures), and China-based StreamLake and DeepSeek (2026-10-29 tune + select, 95 pages each: content,
+  // tables and math equal to Together within noise, 0 failures, p50 4.1-4.3 / 3.3-3.8 s).
   // Asking for text inside figures recovers formulas and labels printed in figures (+0.2 math on those pages).
   // The longest legitimate page was ~3k output tokens, so 8k bounds a runaway's cost.
   "deepseek/deepseek-v4.1-flash-1017": {
@@ -91,9 +102,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // US-hosted providers for every organization: page images never go to a different jurisdiction because of the
-    // account's balance. (DeepSeek's own China-hosted endpoint is about 62% cheaper per page; it is not used.)
-    openRouterProvider: { order: ["together", "fireworks", "parasail"], allow_fallbacks: false },
+    // Keep the established hosts until disclosure, notice and rollout gates pass.
+    openRouterProvider: { only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.
@@ -160,9 +170,12 @@ export function visionPromptKeyForModel(prompt: string | undefined, model: strin
 }
 
 /** Request-body fragment with the profile's OpenRouter routing, or nothing. */
-export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterProviderPreferences } {
+export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterRoute } {
   const provider = visionModelProfile(model)?.openRouterProvider;
-  return provider ? { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } } : {};
+  if (!provider) return {};
+  return "only" in provider
+    ? { provider: { only: [...provider.only], sort: provider.sort, allow_fallbacks: provider.allow_fallbacks } }
+    : { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } };
 }
 
 /**
@@ -176,9 +189,13 @@ export function visionOutputCapForModel(model: string | undefined, shared: { val
   return shared.configured ? shared.value : profile.maxOutputTokens;
 }
 
-/** Post-process a hosted page transcription with the model's profile repair; other models are returned unchanged. */
+/**
+ * Post-process a page transcription from any vision/OCR model: the model's profile repair (if any), then the
+ * shared padding-whitespace collapse. Runs after the repair so a whole-page fence is unwrapped before the
+ * collapse skips fenced code.
+ */
 export function postProcessVisionText(model: string | undefined, text: string): string {
-  return visionModelProfile(model)?.postProcess?.(text) ?? text;
+  return normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text);
 }
 
 /** Request-body fragment with the reasoning control for `model`: the profile's, else the shared verified floor. */
