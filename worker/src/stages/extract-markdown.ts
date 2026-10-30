@@ -1590,8 +1590,8 @@ export class ExtractMarkdownStage implements Stage {
         }),
       );
 
-      // The route the critique was served on (a fallback's when it served), for the usage label below.
-      let critiqueRoute: VisionServedRoute | undefined;
+      // The route each page's critique was served on (a fallback's when it served), for the usage records below.
+      const critiqueRoutes = new Map<number, VisionServedRoute>();
       const corrections = await Promise.all(
         critiquePages.map(async (pageNumber): Promise<SelfCritiqueCorrection> => {
         const imagePath = path.join(
@@ -1631,7 +1631,7 @@ export class ExtractMarkdownStage implements Stage {
           });
           if (!guarded.admitted) throw new Error(`vision-stopped: ${guarded.stop.reason}`);
           const result = guarded.result;
-          critiqueRoute ??= result.route;
+          critiqueRoutes.set(pageNumber, result.route);
           const normalizedText = normalizeCritiqueText(result.text);
           const originalPlausibilityScore = scoreExtractionPlausibility(
             originalText,
@@ -1701,29 +1701,13 @@ export class ExtractMarkdownStage implements Stage {
       const acceptedCorrections = corrections.filter(
         (correction) => correction.accepted,
       );
-      // Labelled with the route that served the critique (the first served one; a fallback's when it served).
-      const servedRoute = critiqueRoute ?? configuredVisionServedRoute(args.state.run.pipeline.vision, this.cfg);
-      args.state.usageLedger.record({
-          provider: servedRoute.provider,
-          model: servedRoute.model,
-          metric: "page-critique",
-          amount: corrections.length,
-          unit: "page",
-          costCents,
-          inputTokens,
-          outputTokens,
-          metadata: {
-            documentId: args.document.id,
-            artifact: this.storage.uri(critiqueArtifactKey),
-            reviewedPages: corrections.map((correction) => correction.pageNumber),
-            acceptedPages: acceptedCorrections.map(
-              (correction) => correction.pageNumber,
-            ),
-            maxCostCents,
-            budgetExceeded: costCents > maxCostCents,
-          },
-        },
-      );
+      recordCritiqueUsage({
+        ledger: args.state.usageLedger,
+        corrections,
+        routes: critiqueRoutes,
+        configuredRoute: configuredVisionServedRoute(args.state.run.pipeline.vision, this.cfg),
+        metadata: { documentId: args.document.id, artifact: this.storage.uri(critiqueArtifactKey), maxCostCents, budgetExceeded: costCents > maxCostCents },
+      });
 
       for (const correction of corrections) {
         args.state.pendingPerformance.push({
@@ -2599,6 +2583,48 @@ function shouldAcceptCritique(args: {
   // until a page-image-grounded scorer is calibrated by the eval harness.
   void args;
   return false;
+}
+
+/**
+ * Records a document's self-critique usage: one `page-critique` event per route that served critiques (a fallback's
+ * when it served), each with its own pages, tokens and cost, so no route's spend is labelled as another's. Pages
+ * whose critique failed (zero usage; their billed spend was recorded by the guarded call) are counted under the
+ * configured route.
+ */
+export function recordCritiqueUsage(args: {
+  ledger: Pick<import("../pipeline/usage-ledger.js").PipelineUsageEventLedger, "record">;
+  corrections: Array<Pick<SelfCritiqueCorrection, "pageNumber" | "accepted" | "inputTokens" | "outputTokens" | "costCents">>;
+  routes: ReadonlyMap<number, VisionServedRoute>;
+  configuredRoute: VisionServedRoute;
+  metadata: Record<string, unknown>;
+}): void {
+  const byRoute = new Map<string, { route: VisionServedRoute; corrections: typeof args.corrections }>();
+  for (const correction of args.corrections) {
+    const route = args.routes.get(correction.pageNumber) ?? args.configuredRoute;
+    const key = `${route.provider}\u0000${route.model}\u0000${route.runtime}\u0000${route.baseUrl ?? ""}`;
+    const group = byRoute.get(key) ?? { route, corrections: [] };
+    group.corrections.push(correction);
+    byRoute.set(key, group);
+  }
+  for (const { route, corrections } of byRoute.values()) {
+    args.ledger.record({
+      provider: route.provider,
+      model: route.model,
+      metric: "page-critique",
+      amount: corrections.length,
+      unit: "page",
+      costCents: corrections.reduce((sum, correction) => sum + correction.costCents, 0),
+      inputTokens: corrections.reduce((sum, correction) => sum + correction.inputTokens, 0),
+      outputTokens: corrections.reduce((sum, correction) => sum + correction.outputTokens, 0),
+      metadata: {
+        ...args.metadata,
+        reviewedPages: corrections.map((correction) => correction.pageNumber),
+        acceptedPages: corrections.filter((correction) => correction.accepted).map((correction) => correction.pageNumber),
+        runtime: route.runtime,
+        billing: route.billing,
+      },
+    });
+  }
 }
 
 function critiqueEnabled(): boolean {

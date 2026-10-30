@@ -8,7 +8,7 @@ import { visionConfigSchema, visionListPriceCents, type VisionConfig } from "@do
 import type { Config } from "../config.js";
 import type { WorkerAiUsageInput } from "../lib/ai-usage.js";
 import { guardedVisionCall, priceVisionResult } from "../lib/guarded-vision-call.js";
-import { MemoryVisionAttemptBackend } from "../lib/vision-attempt-guard.js";
+import { MemoryVisionAttemptBackend, VisionRunGuard, findVisionGuardStop } from "../lib/vision-attempt-guard.js";
 import { visionRouteBilling } from "../lib/vision-pricing.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -184,5 +184,85 @@ describe("vision usage priced on the served route", () => {
     const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
     expect(sends.map((send) => send.url)).toEqual(["https://api.openai.com/v1/chat/completions"]);
     expect(result.route.billing).toBe("openai");
+  });
+
+  describe("interrupted streams are priced on the route that served them", () => {
+    const streamingCfg = { ...baseCfg, visionStreaming: true } as Config;
+    const enc = new TextEncoder();
+    /** A 200 SSE stream that sends `chunks` and then breaks. */
+    const broken = (chunks: Array<Record<string, unknown>>) => {
+      let index = 0;
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (index < chunks.length) controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[index++])}\n\n`));
+          else controller.error(new Error("socket hang up"));
+        },
+      }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const delta = (content: string, extra: Record<string, unknown> = {}) => ({ id: "gen-1", provider: "ProvA", choices: [{ delta: { content } }], ...extra });
+    const text = "Readable streamed paragraph text. ".repeat(40);
+
+    it("a loopback stream cut off mid-response records 0 cents, never the configured rates", async () => {
+      stubFetch(() => broken([delta(text)]));
+      const { outcome, recorded } = await guardedRead(vision(LOOPBACK), streamingCfg);
+      expect(outcome).toBeInstanceOf(Error);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({ provider: "vision-runtime", costCents: 0, metadata: { outcome: "failure", usageSource: "estimated" } });
+      expect(recorded[0]!.outputTokens!).toBeGreaterThan(0);
+    });
+
+    it("a hosted stream cut off mid-response is priced at the served model's list price", async () => {
+      stubFetch(() => broken([delta(text)]));
+      const { recorded } = await guardedRead(vision(OPENAI), streamingCfg);
+      expect(recorded).toHaveLength(1);
+      const [event] = recorded;
+      expect(event).toMatchObject({ provider: "openai", model: "gpt-4.1-mini", metadata: { outcome: "failure" } });
+      const listPrice = visionListPriceCents("gpt-4.1-mini", { inputTokens: event!.inputTokens!, outputTokens: event!.outputTokens! })!;
+      const configuredRate = (event!.inputTokens! / 1000) * baseCfg.costPer1kInputTokens + (event!.outputTokens! / 1000) * baseCfg.costPer1kOutputTokens;
+      expect(listPrice).not.toBeCloseTo(configuredRate, 6);
+      expect(event!.costCents!).toBeCloseTo(listPrice, 10);
+    });
+
+    it("a stream cut off after a usage chunk with a reported cost records that cost", async () => {
+      stubFetch(() => broken([delta(text, { usage: { prompt_tokens: 1_500, completion_tokens: 400, cost: 0.0042 } })]));
+      const { recorded } = await guardedRead(vision(OPENROUTER), streamingCfg);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]).toMatchObject({ provider: "openrouter", inputTokens: 1_500, outputTokens: 400, metadata: { usageSource: "provider" } });
+      expect(recorded[0]!.costCents!).toBeCloseTo(0.42, 10);
+    });
+  });
+
+  it("vision-extract records a billed, rejected primary once when the guard refuses its fallback", async () => {
+    // Both OpenRouter attempts are rejected (truncated); the page's bound of two requests then refuses the fallback.
+    const rejected = () => new Response(JSON.stringify({ provider: "ProvA", choices: [{ message: { content: "Total: 42" }, finish_reason: "length" }], usage: { prompt_tokens: 1_200, completion_tokens: 300 } }),
+      { headers: { "content-type": "application/json" } });
+    stubFetch((route) => (route === "openrouter" ? rejected() : answer("stop")));
+    const imagePath = join(await mkdtemp(join(tmpdir(), "vision-served-")), "page.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const stage = new VisionExtractStage(new CommandRunner(), {} as ArtifactStore, baseCfg, {} as never);
+    const runVisionCall = (stage as unknown as { runVisionCall(...args: unknown[]): Promise<unknown> }).runVisionCall.bind(stage);
+    const state = {
+      run: { id: "run-1", orgId: "org-1", pipeline: { privacyMode: "standard", outputSchema: null } },
+      usageLedger: new PipelineUsageEventLedger(),
+      pendingPerformance: [],
+    } as unknown as WorkflowState;
+    const guard = new VisionRunGuard({ id: "run-1", orgId: "org-1" }, {
+      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3,
+    }, new MemoryVisionAttemptBackend());
+    const gate = guard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
+    const error = await runVisionCall(state, { id: "doc" }, vision(OPENROUTER, OPENAI), { imagePath, outputPath: `${imagePath}.json` },
+      { mimeType: "image/png", pageNumber: 1, artifactUri: "raster://1" }, gate).catch((caught: unknown) => caught);
+    await gate.finish();
+    expect(findVisionGuardStop(error)?.reason).toBe("page-attempt-limit");
+    expect(sends.map((send) => send.route)).toEqual(["openrouter", "openrouter"]);
+    const events = state.usageLedger.snapshot();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis-attempt", inputTokens: 2_400, outputTokens: 600,
+      metadata: { outcome: "rejected", fallbackPrimary: true, documentId: "doc", pageNumber: 1 },
+    });
+    // Not charged to the customer (billable false); our provider spend is kept as providerCostCents.
+    expect(events[0]!.metadata!.providerCostCents as number).toBeCloseTo(visionListPriceCents("google/gemini-3.1-flash-lite", { inputTokens: 2_400, outputTokens: 600 })!, 10);
+    expect(events[0]!.metadata!.providerCostCents as number).toBeGreaterThan(0);
   });
 });

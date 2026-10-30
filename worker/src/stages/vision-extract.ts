@@ -1230,8 +1230,14 @@ export class VisionExtractStage implements Stage {
         // Recorded here, once, for every caller (whole page, routed region and their fallbacks). A
         // request refused by the guard was never sent; requests before it are recorded if billed.
         const error = caught instanceof Object ? caught : toError(caught);
-        if (!findVisionGuardStop(error) || findVisionBilledUsage(error)) {
+        if (!findVisionGuardStop(error)) {
           this.recordFailedVisionAttempt(state, document, vision, page, toError(error).message, error);
+        } else {
+          // Refused before this request was sent: record only what was billed before it, once (the route's own
+          // earlier attempts, and a billed primary whose fallback was refused), with no zero-cost failure marker.
+          recordVisionFailureUsages(state, visionFailureUsages(error, vision, this.cfg, {
+            documentId: document.id, pageNumber: page.pageNumber, rasterArtifactUri: page.artifactUri,
+          }));
         }
         recordedVisionErrors.add(error);
         throw error;
