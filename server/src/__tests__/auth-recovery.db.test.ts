@@ -385,6 +385,12 @@ describe("password recovery with native Email OTP", () => {
     expect(options.databaseHooks?.account?.create?.before).toBe(beforeOAuthAccountCreate);
     const plugins = (options.plugins ?? []).map((plugin) => plugin.id);
     expect(plugins).toEqual(expect.arrayContaining(["email-otp", "magic-link"]));
+    // Emailed codes: 12 hours, recoverable so a resend reuses them, capped at the first send.
+    const emailOtp = (options.plugins ?? []).find((plugin) => plugin.id === "email-otp") as { options?: Record<string, unknown> } | undefined;
+    const { EMAIL_CODE_SECONDS } = await import("../lib/auth-email.js");
+    expect(emailOtp?.options).toMatchObject({ expiresIn: EMAIL_CODE_SECONDS, storeOTP: "encrypted", resendStrategy: "reuse", allowedAttempts: 5 });
+    expect(EMAIL_CODE_SECONDS).toBeGreaterThanOrEqual(12 * 60 * 60);
+    expect(plugins).toContain("docslurp-email-code-expiry");
     expect(plugins.filter((id) => ["admin", "anonymous", "username", "phone-number", "one-tap", "generic-oauth"].includes(id))).toEqual([]);
   });
 

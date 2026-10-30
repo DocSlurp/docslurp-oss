@@ -8,7 +8,7 @@ vi.mock("better-auth/api", () => ({
   sessionMiddleware: () => undefined,
 }));
 vi.mock("better-auth/crypto", () => ({ generateRandomString: () => "123456" }));
-vi.mock("../lib/auth-email.js", () => ({ sendAuthEmailCode: mocks.send }));
+vi.mock("../lib/auth-email.js", () => ({ sendAuthEmailCode: mocks.send, EMAIL_CODE_SECONDS: 12 * 60 * 60 }));
 vi.mock("../lib/auth-mfa.js", () => ({
   evaluateMfaPolicy: async () => ({ required: mocks.requireMfa }), ssoEnforcedForEmail: async () => mocks.sso,
 }));
