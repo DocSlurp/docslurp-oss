@@ -297,11 +297,23 @@ catalog model with a token price and an image-token bound), `private` (operator 
 (`local-cli`, or `ollama`/`vllm`/`lmstudio` on a loopback host). Any other provider, an uncataloged
 hosted model (OpenRouter included), a Pro/Ultra id or a model at or above $50/M output tokens is
 refused at config validation (`visionModelUriProblem`, `packages/shared/src/embedding.ts`) and again
-before admission, for the model and its fallback alike, so nothing is sent or counted. Whether a
-route is billed follows its effective destination (a route with no base URL goes to
-api.openai.com): only local, loopback and private routes are unbilled, and an unknown hosted
-destination is refused. The OpenAI key goes only to the configured OpenAI base URL and the
-OpenRouter key only to the official OpenRouter endpoint; loopback servers get no key.
+before admission, for the model and its fallback alike, so nothing is sent or counted. A `baseUrl`
+parameter is accepted only on a local provider and only for a loopback host, by the same check. Whether
+a route is billed follows its effective destination (a route with no base URL goes to
+`OPENAI_BASE_URL`, else api.openai.com, and is sent exactly there): only local, loopback and private
+routes are unbilled, and an unknown hosted destination is refused. The OpenAI key goes only to the
+configured OpenAI base URL and the OpenRouter key only to the official OpenRouter endpoint; loopback
+servers get no key. Usage is priced and labelled on the route that served or billed each request (a
+fallback's model and provider, the configured OpenAI base URL), never the workspace's configured
+primary.
+
+The page router plans only with targets the vision runtime accepts: `buildRuntimeCatalog` drops every
+VLM target that fails the same check (`vlmTargetProblem`, logged once per target as
+`[page-router] target=... filtered from the routing catalog`), so the planner picks the next-best
+admitted target, and a stored plan naming a dropped target falls back to the workspace vision model.
+Today that drops `anthropic/claude-haiku-5.5`, `anthropic/claude-sonnet-5.5` and
+`google/gemini-3.5-flash-lite` (not in the priced catalog) and the private seeds
+(`vlm:private/<id>`, whose URIs carry no registry alias).
 
 Weights: each request weighs what it can cost at most, priced when it is sent: its actual prompt
 (UTF-8 bytes, an upper bound on tokens for any tokenizer), its image at the header's pixel size

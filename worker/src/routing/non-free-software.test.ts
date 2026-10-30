@@ -16,26 +16,29 @@ const env = {
 };
 
 describe("DISABLE_NON_FREE_SOFTWARE in the runtime catalog", () => {
-  it("allows non-free targets and decision models by default", () => {
+  // The private VLM seeds (dots-ocr is non-free) carry no registry alias, so the vision runtime would refuse them and
+  // the catalog never admits them (runtime.ts vlmTargetProblem); the flag is observed on the decision models.
+  const dmIds = (catalog: ReturnType<typeof buildRuntimeCatalog>) => catalog.decisionModels.map((m) => m.id);
+
+  it("allows non-free decision models by default", () => {
     const catalog = buildRuntimeCatalog({ env });
-    expect(catalog.targets.map((t) => t.id)).toContain("vlm:private/dots-ocr");
-    expect(catalog.decisionModels.map((m) => m.id)).toContain("liquid/d1");
+    expect(dmIds(catalog)).toContain("liquid/d1:direct");
+    expect(dmIds(catalog)).toContain("liquid/d1");
+    expect(catalog.allTargets.map((t) => t.id)).not.toContain("vlm:private/dots-ocr");
   });
 
   it("drops them when the env flag is true (read through flags.ts)", () => {
     const catalog = buildRuntimeCatalog({ env: { ...env, DISABLE_NON_FREE_SOFTWARE: "true" } });
-    const ids = catalog.allTargets.map((t) => t.id);
-    expect(ids).not.toContain("vlm:private/dots-ocr");
-    expect(ids).toEqual(expect.arrayContaining(["vlm:private/olmocr-2", "vlm:private/lightonocr-3"]));
+    expect(dmIds(catalog)).not.toContain("liquid/d1:direct");
     // liquid/d1 via OpenRouter is a hosted API (proprietary-hosted), so the flag keeps it.
-    expect(catalog.decisionModels.map((m) => m.id)).toContain("liquid/d1");
-    expect(catalog.decisionModels.map((m) => m.id)).toContain("cloudflare/clef-flash");
+    expect(dmIds(catalog)).toContain("liquid/d1");
+    expect(dmIds(catalog)).toContain("cloudflare/clef-flash");
   });
 
   it("an explicit option overrides the environment", () => {
-    expect(buildRuntimeCatalog({ env, disableNonFree: true }).allTargets.map((t) => t.id)).not.toContain("vlm:private/dots-ocr");
+    expect(dmIds(buildRuntimeCatalog({ env, disableNonFree: true }))).not.toContain("liquid/d1:direct");
     const off = buildRuntimeCatalog({ env: { ...env, DISABLE_NON_FREE_SOFTWARE: "true" }, disableNonFree: false });
-    expect(off.allTargets.map((t) => t.id)).toContain("vlm:private/dots-ocr");
+    expect(dmIds(off)).toContain("liquid/d1:direct");
   });
 });
 
