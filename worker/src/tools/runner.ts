@@ -1922,7 +1922,9 @@ let warnedUnfilteredSockets = false;
  * session's own VM, terminated with the activity, and never hold a worker-side teardown.
  */
 export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId" | "filtersUnixSockets">, command: Pick<SandboxCommand, "binary" | "denyUnixSockets">): void {
-  if (!command.denyUnixSockets || session.filtersUnixSockets) return;
+  if (session.filtersUnixSockets) return;
+  // Landlock must scope even parsers that need sockets to their own domain.
+  if (session.providerId !== "landlock" && !command.denyUnixSockets) return;
   const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
   const production = process.env.NODE_ENV === "production";
   if (optIn && !production) {

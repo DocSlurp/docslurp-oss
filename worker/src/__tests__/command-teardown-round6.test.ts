@@ -217,10 +217,10 @@ describe("M1: a provider that cannot filter UNIX sockets refuses the commands th
     expect(() => assertUnixSocketFilter({ providerId: "landlock" }, command)).toThrow(SandboxPolicyError);
     vi.stubEnv("NODE_ENV", "development");
     expect(() => assertUnixSocketFilter({ providerId: "landlock" }, command)).not.toThrow();
-    // A filtering session, or a command that may use sockets, never needs the opt-in.
+    // A filtering session needs no opt-in; Landlock socket clients still require scoping.
     vi.stubEnv("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS", "");
     expect(() => assertUnixSocketFilter({ providerId: "bubblewrap", filtersUnixSockets: true }, command)).not.toThrow();
-    expect(() => assertUnixSocketFilter({ providerId: "landlock" }, { binary: "python3" })).not.toThrow();
+    expect(() => assertUnixSocketFilter({ providerId: "landlock" }, { binary: "python3" })).toThrow(SandboxPolicyError);
   });
 
   it.skipIf(!linux)("the runner refuses before spawning, and runs the command once opted in", async () => {
@@ -234,6 +234,10 @@ describe("M1: a provider that cannot filter UNIX sockets refuses the commands th
     const plan = { binary: "/bin/echo", args: ["ran"], available: true };
     await expect(runner.run(plan)).rejects.toBeInstanceOf(SandboxPolicyError);
     expect(spawned).not.toHaveBeenCalled();
+    vi.stubEnv("NODE_ENV", "production");
+    await expect(runner.run({ binary: "python3", args: ["-c", "pass"], available: true, denyUnixSockets: false })).rejects.toBeInstanceOf(SandboxPolicyError);
+    expect(spawned).not.toHaveBeenCalled();
+    vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS", "1");
     expect((await runner.run(plan)).stdout.trim()).toBe("ran");
   });
