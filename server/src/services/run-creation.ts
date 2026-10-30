@@ -953,7 +953,8 @@ export function createRunCreation(deps: RunCreationDeps) {
         urls: [],
       },
     }).current.estimatedCost;
-    costForecastFor(sources.kind === "files" ? sources.files.length : sourceDocuments.length);
+    // The preview schema needs at least one file; the count here only validates the pipeline.
+    costForecastFor(Math.max(1, sources.kind === "files" ? sources.files.length : sourceDocuments.length));
 
     const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
