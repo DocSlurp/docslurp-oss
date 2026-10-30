@@ -192,14 +192,14 @@ test('original case IDs are recognized when source-derived cases receive namespa
   assert.ok(rules(f.run()).includes('fixture-identifier'));
 });
 
-function nestedFixture(t) {
-  const f = fixture(t), nested = join(f.repo, 'core');
-  mkdirSync(nested);
+function nestedFixture(t, name = 'core') {
+  const f = fixture(t), nested = join(f.repo, name);
+  mkdirSync(nested, { recursive: true });
   const git = (...args) => execFileSync('git', ['-C', nested, ...args], { stdio: 'pipe' });
   git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
   writeFileSync(join(nested, 'engine.ts'), 'export const generic = true;');
   git('add', '.'); git('commit', '-qm', 'nested baseline');
-  f.git('add', 'core'); f.git('commit', '-qm', 'pin nested repository');
+  f.git('add', name); f.git('commit', '-qm', 'pin nested repository');
   return { ...f, nested, nestedGit: git };
 }
 test('scans pinned nested repositories and hashes dirty production content', (t) => {
@@ -228,4 +228,13 @@ test('fails closed for absent, uninitialized and escaping nested repositories', 
     assert.equal(report.passed, false);
     assert.ok(rules(report).includes(state === 'escape' ? 'repository-symlink-escape' : `nested-repository-${state}`));
   }
+});
+
+test('nested production code cannot inherit a parent documentation exclusion', (t) => {
+  const f = nestedFixture(t, 'docs/engine');
+  writeFileSync(join(f.nested, 'engine.ts'), 'const answer = "Distinctive Example Supplier";');
+  const report = f.run();
+  assert.equal(report.passed, false);
+  assert.equal(report.scannedProductionFiles, 2);
+  assert.ok(report.findings.some(x => x.rule === 'labeled-answer' && x.file === 'docs/engine/engine.ts'));
 });

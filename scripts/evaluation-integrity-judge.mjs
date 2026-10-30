@@ -213,7 +213,7 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       result.scannedFiles++;
       coverage.scannedFiles++;
       if (sourceHashes.has(hash(bytes))) add('copied-source-artifact', { file, evidenceHash: hash(bytes) });
-      if (!productFile(file)) continue;
+      if (!productFile(name)) continue; // Classify relative to the owning repository.
       result.scannedProductionFiles++;
       productionDigest.update(file).update('\0').update(hash(bytes)).update('\0');
       if (!bytes.includes(0)) match(file, bytes.toString('utf8'), 'working-tree');
