@@ -708,6 +708,27 @@
       "when": 1793300000004,
       "tag": "0100_session_credential_fingerprint",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1793300000005,
+      "tag": "0101_quarantined_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1793300000006,
+      "tag": "0102_upload_original_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793300000007,
+      "tag": "0103_upload_cleanup_owners",
+      "breakpoints": true
     }
   ]
 }

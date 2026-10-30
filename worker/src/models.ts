@@ -54,6 +54,8 @@ export interface Document {
   filename: string;
   mimeType: string;
   sourceKey: string;
+  /** sha256 the server computed over the source bytes; staged sources are checked against it (sandbox/source-integrity.ts). */
+  sourceSha256?: string | null;
   status: string;
   extractionMode: string;
   pageCount: number;

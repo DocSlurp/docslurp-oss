@@ -7,7 +7,9 @@
  * Engine flags of the native-pdf adapter are read by their owners: DOCSLURP_PDF_ENGINE and
  * DOCSLURP_NATIVE_PDF_EMPHASIS (native-pdf/mode.ts), DOCSLURP_NATIVE_PDF_POPPLER (native-pdf/engine.ts),
  * DOCSLURP_NATIVE_PDF_MODULE/_DIR and NATIVE_PDF_OCR_MODEL_DIR/_OCR_MAX_CONCURRENT/_FONTS_DIR (native-pdf/loader.ts),
- * PDF_RASTER_CONCURRENCY (native-pdf/render.ts), PDF_RASTER_ENGINE (pipeline/pdf-asset-cache.ts readRasterEngine).
+ * PDF_RASTER_CONCURRENCY (native-pdf/render.ts), PDF_RASTER_ENGINE, PDF_PDFTOPPM_CONCURRENCY and
+ * PDF_PDFTOPPM_PROCESS_CONCURRENCY (pipeline/pdf-asset-cache.ts), PROBE_OVERLAP_RENDER and PROBE_OVERLAP_MAX_PAGES
+ * (routing/page-input.ts readProbeOverlap).
  * Target availability comes from credential presence (OPENROUTER_API_KEY, *_ENDPOINT_URL; runtime.ts buildRuntimeCatalog).
  */
 

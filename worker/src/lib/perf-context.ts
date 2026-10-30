@@ -10,6 +10,9 @@ interface WorkerPerfContext {
   scope: string;
   stageName: string;
   documentId?: string;
+  /** Owner of the run, for attributing command incidents (teardown quarantine). */
+  orgId?: string | null;
+  workspaceId?: string;
   /** Pages of the document being processed: scales subprocess wall-clock budgets. */
   pageCount?: number;
   pushPerformance: PerformanceSink;

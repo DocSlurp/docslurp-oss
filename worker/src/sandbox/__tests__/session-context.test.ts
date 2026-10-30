@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PassThrough } from "node:stream";
@@ -8,9 +7,12 @@ import { ProgressTracker, runWithProgressTracker } from "../../lib/work-progress
 import type { UsageEvent } from "../../models.js";
 import { CommandRunner } from "../../tools/runner.js";
 import { runWithSandboxScope, SandboxSessionScope } from "../session-context.js";
+import { probePidNamespace, spawnContained } from "../teardown.js";
 import { SandboxRunError, type SandboxCommand, type SandboxIsolation, type SandboxResult, type SandboxSession } from "../types.js";
 
-const ISOLATION: SandboxIsolation = { filesystem: false, network: "none", processes: false, location: "local" };
+const ISOLATION: SandboxIsolation = { filesystem: false, network: "none", processes: true, location: "local" };
+// The runner runs parser work only in a PID namespace; these doubles start real ones.
+const pidNamespace = process.platform === "linux" && probePidNamespace().ok;
 
 function recordingSession(id: string, commands: SandboxCommand[]): SandboxSession {
   return {
@@ -18,8 +20,9 @@ function recordingSession(id: string, commands: SandboxCommand[]): SandboxSessio
     isolation: ISOLATION,
     spawn: (command) => {
       commands.push(command);
-      return spawn(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(id)})`], {
-        stdio: ["ignore", "pipe", "pipe"],
+      return spawnContained(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(id)})`], {
+        env: process.env,
+        containment: "pid-namespace",
       });
     },
     close: async () => {},
@@ -52,7 +55,7 @@ describe("SandboxSessionScope", () => {
 });
 
 describe("sandbox scope isolation between concurrent activities", () => {
-  it("runs each activity's commands only in its own session", async () => {
+  it.skipIf(!pidNamespace)("runs each activity's commands only in its own session", async () => {
     const commandsA: SandboxCommand[] = [];
     const commandsB: SandboxCommand[] = [];
     const scopeA = new SandboxSessionScope(async () => recordingSession("A", commandsA));
@@ -82,7 +85,7 @@ describe("sandbox scope isolation between concurrent activities", () => {
     expect(commandsB.flatMap((c) => c.args).filter((a) => a.startsWith("//")).sort()).toEqual(["//b1", "//b2"]);
   });
 
-  it("opens and closes a per-command session outside any scope", async () => {
+  it.skipIf(!pidNamespace)("opens and closes a per-command session outside any scope", async () => {
     const close = vi.fn(async () => {});
     const openSession = vi.fn(async () => ({ ...recordingSession("solo", []), close }));
     const runner = new CommandRunner({ openSession });
@@ -201,7 +204,7 @@ describe("remote commands in the runner", () => {
     expect(events.map((event) => event.provider)).toEqual(["modal"]);
   });
 
-  it("records no sandbox provider event for a local session", async () => {
+  it.skipIf(!pidNamespace)("records no sandbox provider event for a local session", async () => {
     const events: UsageEvent[] = [];
     const runner = new CommandRunner({ openSession: async () => recordingSession("local", []) });
     await inStage(events, () => runner.run({ binary: process.execPath, args: ["-e", ""], available: true }));
