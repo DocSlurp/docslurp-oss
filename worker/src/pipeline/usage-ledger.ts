@@ -188,9 +188,10 @@ export class PipelineUsageEventLedger {
    * back (db/page-base-fee.ts recordMaterializedPageFee). Like `checkpoint`,
    * nothing is dropped until `commit()`.
    */
-  takeRichPageCharges(documentId: string): PipelineUsageBatch {
+  takeRichPageCharges(documentId: string, includePage: (pageNumber: number) => boolean = () => true): PipelineUsageBatch {
     return this.take((event) => event.metric === BILLABLE_UNIT_METRICS.richPage
-      && isUnitChargeEvent(event) && event.metadata?.documentId === documentId);
+      && isUnitChargeEvent(event) && event.metadata?.documentId === documentId
+      && includePage(Number(event.metadata?.pageNumber)));
   }
 
   private take(include: (event: UsageEvent) => boolean): PipelineUsageBatch {

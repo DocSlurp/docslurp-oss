@@ -497,30 +497,43 @@ export async function materializePageRange(
   const fastIndexed = result.indexed.filter((page) => !ocrPages.includes(page)).length;
   result.costCredits = Math.round((spentCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
 
-  const markIndexed = async (client: Sql): Promise<void> => {
+  // Every ledger write below is fenced to pages this run still holds (claimed_by_run): a run that stalled past
+  // its claim TTL, while another run re-claimed a page, neither indexes nor bills that page.
+  const claimedBy = input.runId;
+  const markIndexed = async (client: Sql): Promise<number[]> => {
+    const owned: number[] = [];
     for (const [credits, group] of indexedByCost) {
-      await markPages(client, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model });
+      owned.push(...await markPages(client, documentId, group, "indexed", { costCredits: credits, embeddingModel: profile.model, claimedBy }));
     }
+    return owned.sort((a, b) => a - b);
   };
+  let owned: number[] = [];
   if (input.reason === "full-index") {
     // Full-index pages are charged by the run's completion fee (recordPageBaseFee), not stamped here.
-    await markIndexed(deps.sql);
+    owned = await markIndexed(deps.sql);
   } else if (result.indexed.length > 0) {
     // The pages turn indexed in the transaction that persists their Rich charges (taken from the usage ledger),
     // their Fast charges and their `fee_billed_run` stamp: a crash leaves them claimed and unbilled, never
     // indexed without the billing decision (a retry would otherwise find its own stamp and no Rich charge).
+    // Only the pages the transition moved are stamped and charged.
     await recordMaterializedPageFee(deps.sql as Sql<Record<string, unknown>>, input.runId, documentId, result.indexed, {
       ledger: deps.usage,
-      transition: (client) => markIndexed(client as unknown as Sql),
+      transition: async (client) => { owned = await markIndexed(client as unknown as Sql); return owned; },
     });
   }
-  const writes: Promise<void>[] = [];
-  if (blocked.length > 0) writes.push(markPages(deps.sql, documentId, blocked, "blocked-pii", { failureReason: "pii-policy" }));
+  const lost = result.indexed.filter((page) => !owned.includes(page));
+  if (lost.length > 0) {
+    // Another run holds these pages now; it indexes and bills them.
+    console.warn(`[materialize] run=${input.runId} document=${documentId} lost its claim on pages ${lost.join(",")}; not indexed or billed by this run`);
+    result.indexed = result.indexed.filter((page) => owned.includes(page));
+  }
+  const writes: Promise<number[]>[] = [];
+  if (blocked.length > 0) writes.push(markPages(deps.sql, documentId, blocked, "blocked-pii", { failureReason: "pii-policy", claimedBy }));
   const hardFailed = result.failed.filter((f) => !released.includes(f.page));
   const byReason = new Map<string, number[]>();
   for (const f of hardFailed) byReason.set(f.reason, [...(byReason.get(f.reason) ?? []), f.page]);
-  for (const [reason, group] of byReason) writes.push(markPages(deps.sql, documentId, group, "failed", { failureReason: reason }));
-  if (released.length > 0) writes.push(markPages(deps.sql, documentId, released, "unseen"));
+  for (const [reason, group] of byReason) writes.push(markPages(deps.sql, documentId, group, "failed", { failureReason: reason, claimedBy }));
+  if (released.length > 0) writes.push(markPages(deps.sql, documentId, released, "unseen", { claimedBy }));
   // A single postgres connection serializes these; awaiting together keeps code simple.
   await Promise.all(writes);
   return result;

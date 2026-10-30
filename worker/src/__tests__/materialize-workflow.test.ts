@@ -563,13 +563,83 @@ describe("runMaterializeRange activity", () => {
         // A stale stamp: m1 is recorded as the page's billing decision but never charged it (an older worker
         // stamped before charging, then lost the write; or the run was cancelled).
         await db.exec(`update document_page_states set state = 'indexed', materialized_by = 'query', fee_billed_run = 'm1', fee_billed_at = now()
-          where document_id = 'd1' and page_number = 4`);
+          where document_id = 'd1' and page_number = 4;
+          update workspace_runs set status = 'cancelled' where id = 'm1'`);
         await runMaterializeRange(ocrDeps(), input("m2", [4]));
         await runMaterializeRange(ocrDeps(), input("m2", [4]));
         await runMaterializeRange(ocrDeps(), input("m1", [4]));
         expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-fast", page: 4, amount: 1 }]);
         const [row] = (await db.query<{ fee_billed_run: string }>(`select fee_billed_run from document_page_states where document_id = 'd1' and page_number = 4`)).rows;
         expect(row!.fee_billed_run).toBe("m2");
+      });
+
+      describe("stale-stamp takeover (round 5 M2): only a stamping run that can no longer commit loses its page", () => {
+        const stampUncharged = async () => {
+          await db.exec(`update document_page_states set state = 'indexed', materialized_by = 'query', fee_billed_run = 'm1', fee_billed_at = now()
+            where document_id = 'd1' and page_number = 4`);
+        };
+        // m1 read page 4 with a model; its Rich charge is still buffered in its usage ledger.
+        const m1Ledger = () => {
+          const ledger = new PipelineUsageEventLedger();
+          ledger.runId = "m1";
+          ledger.chargeRichPage({ documentId: "d1", pageNumber: 4, readBy: "ocr", model: "vision-x" });
+          return ledger;
+        };
+
+        it("an active owner with a pending Rich charge keeps its page: no Fast charge from the later run", async () => {
+          await reset();
+          await db.exec(`update workspace_runs set lease_expires_at = now() + interval '10 minutes' where id = 'm1'`);
+          await stampUncharged();
+          const ledger = m1Ledger();
+          await runMaterializeRange(ocrDeps(), input("m2", [4]));
+          expect(await recordMaterializedPageFee(sql, "m2", "d1", [4])).toBe(0);
+          // m1 then persists its Rich read with its stamp.
+          await recordMaterializedPageFee(sql, "m1", "d1", [4], { ledger });
+          expect(ledger.snapshot()).toEqual([]);
+          expect(await charges()).toEqual([{ run_id: "m1", metric: "ingest-page-rich", page: 4, amount: 1 }]);
+          expect((await pageRows()).find((r) => r.page_number === 4)?.fee_billed_run).toBe("m1");
+        });
+
+        it.each([
+          ["terminal", `update workspace_runs set status = 'cancelled' where id = 'm1'`],
+          ["lease-expired", `update workspace_runs set status = 'processing', lease_expires_at = now() - interval '1 second' where id = 'm1'`],
+        ])("a %s owner loses its page, and its late Rich charge is dropped, not added", async (_label, ownerSql) => {
+          await reset();
+          await stampUncharged();
+          await db.exec(ownerSql);
+          const ledger = m1Ledger();
+          await runMaterializeRange(ocrDeps(), input("m2", [4]));
+          // The original run wakes up and tries to persist its buffered Rich read: m2 owns the page now.
+          expect(await recordMaterializedPageFee(sql, "m1", "d1", [4], { ledger })).toBe(0);
+          expect(ledger.snapshot()).toEqual([]);
+          expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-fast", page: 4, amount: 1 }]);
+          expect((await pageRows()).find((r) => r.page_number === 4)?.fee_billed_run).toBe("m2");
+        });
+      });
+
+      it("a run that stalled past its claim TTL neither indexes nor bills the page another run took (round 5 L1)", async () => {
+        await reset();
+        let stalled = false;
+        // m1 OCRs page 3 slowly: meanwhile its claim expires and m2 claims, reads and bills the page.
+        const stallingOps: Partial<PageMaterializerOps> = {
+          ...ocrOps,
+          async ocrPage(d, page) {
+            if (!stalled) {
+              stalled = true;
+              await db.exec(`update document_page_states set claim_expires_at = now() - interval '1 second' where document_id = 'd1' and page_number = 3`);
+              const peer = await runMaterializeRange(ocrDeps(), input("m2", [3]));
+              expect(peer.indexed).toEqual([3]);
+            }
+            return await ocrOps.ocrPage!(d, page);
+          },
+        };
+        const base = deps() as { materializer: Record<string, unknown> };
+        const late = await runMaterializeRange({ ...base, materializer: { ...base.materializer, ops: stallingOps } } as never, input("m1", [3]));
+        expect(late.indexed).toEqual([]);
+        expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-rich", page: 3, amount: 1 }]);
+        const [row] = (await db.query<{ state: string; fee_billed_run: string | null; claimed_by_run: string | null }>(
+          `select state, fee_billed_run, claimed_by_run from document_page_states where document_id = 'd1' and page_number = 3`)).rows;
+        expect(row).toEqual({ state: "indexed", fee_billed_run: "m2", claimed_by_run: null });
       });
 
       it("a stamp whose run charged the page is never taken over", async () => {
@@ -609,6 +679,31 @@ describe("runMaterializeRange activity", () => {
         await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
       }
     });
+  });
+
+  it("a full index charges a page whose query stamp is stale instead of treating it as paid (round 5 I1)", async () => {
+    process.env.DOCSLURP_DEFERRED_PROFILES = "1";
+    await db.exec(`
+      delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+        values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
+    try {
+      await ensurePageRows(sql, "d1", 12);
+      await db.exec(`update workspace_runs set status = 'processing' where id = 'm1'`);
+      await runMaterializeRange(deps() as never, input("m1", [3]));
+      // Page 4: stamped by m1, which charged nothing for it and then failed.
+      await db.exec(`update document_page_states set state = 'indexed', materialized_by = 'query', fee_billed_run = 'm1' where document_id = 'd1' and page_number = 4;
+        update workspace_runs set status = 'failed' where id = 'm1'`);
+      const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
+      // 12 pages - page 3 (paid by the query) = 11 Fast; the stale page 4 is not treated as paid.
+      expect(charges).toMatchObject({ fastPages: 11, richPages: 0 });
+    } finally {
+      delete process.env.DOCSLURP_DEFERRED_PROFILES;
+      await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
+        update workspace_runs set status = 'processing' where id = 'm1'`);
+    }
   });
 
   it("a full index subtracts a query-paid page it read again only once (no page left unbilled)", async () => {

@@ -2,7 +2,7 @@ import type { Sql } from "postgres";
 import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
-import { recordMaterializedPageFee, unchargedStampSql } from "../db/page-base-fee.js";
+import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
 import type { Store } from "../db/store.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { coerceIndexingModeForFlag } from "../pipeline/stage-execution.js";
@@ -139,8 +139,8 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
   /**
    * Pages another run indexed: charge any that carry no billing decision. A query page turns indexed in the
    * same transaction that writes its charges and stamp (materialize-pages.ts), so this normally finds nothing.
-   * It covers unstamped pages and stale stamps: a stamping run with no Fast or Rich charge for the page (its fee
-   * write failed for good, or it was cancelled) loses the page to this run (unchargedStampSql). A retry of this
+   * It covers unstamped pages and stale stamps: a stamping run with no Fast or Rich charge for the page that can
+   * no longer commit one (terminal, or its lease expired) loses the page to this run (staleStampSql). A retry of this
    * run finishes its own (ids are idempotent, and a page with a recorded Rich read gets no Fast charge).
    */
   const billUnbilled = async (pages: number[]): Promise<void> => {
@@ -149,9 +149,9 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
       select s.page_number from document_page_states s
       where s.document_id = ${input.documentId} and s.page_number = any(${pages}::int[])
         and s.state = 'indexed' and s.materialized_by in ('query', 'backfill')
-        and (s.fee_billed_run is null or s.fee_billed_run = ${input.runId} or ${unchargedStampSql(sql)})
+        and (s.fee_billed_run is null or s.fee_billed_run = ${input.runId} or ${staleStampSql(sql)})
     `;
-    await recordMaterializedPageFee(sql, input.runId, input.documentId, rows.map((r) => r.page_number));
+    await recordMaterializedPageFee(sql, input.runId, input.documentId, rows.map((r) => r.page_number), { ledger: state.usageLedger });
   };
 
   const claim = await claimPages(sql, {
