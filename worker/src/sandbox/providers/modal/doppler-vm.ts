@@ -18,7 +18,41 @@ export type DopplerVmJob = {
   range?: { first: number; last: number; final: boolean };
   /** Per-shard output cap, at most MAX_OUTPUT_BYTES: parallel shards share one host's memory. */
   outputLimit?: number;
+  /** The host's page count: a shard whose guest counts differently fails at once, not at the final shard. */
+  expectedDocumentPages?: number;
 };
+
+export const PAGE_COUNT_MISMATCH_MESSAGE = "Document VM page count disagrees with the host";
+
+/** The image's guest protocol as declared by the deploy beside its digest (0 when unset or invalid). */
+let warnedProtocol: string | undefined;
+export function declaredGuestProtocol(env: NodeJS.ProcessEnv = process.env): number {
+  const value = env.DOCSLURP_DOPPLER_VM_PROTOCOL?.trim() ?? "";
+  if (/^[2-4]$/.test(value)) return Number(value);
+  // A typo must be loud: an unrecognised value disables shards and the hardening requirement.
+  if (value && warnedProtocol !== value) {
+    warnedProtocol = value;
+    console.warn(`[document-vm] ignoring invalid DOCSLURP_DOPPLER_VM_PROTOCOL=${JSON.stringify(value.slice(0, 16))}; expected 2, 3 or 4`);
+  }
+  return 0;
+}
+
+/** The image does not match its declared hardened protocol: every run would fail the same way, so callers stop. */
+export const HARDENING_MISMATCH_MESSAGE = "Document VM image does not report the declared confinement";
+/** The guest could not confine itself (exit 3) and refused to parse. */
+export const CONFINEMENT_UNAVAILABLE_MESSAGE = "Document VM guest confinement unavailable";
+/** Minimum seccomp denials a protocol 4 report must claim (the policy denies 85 calls on x86-64). */
+export const MIN_SECCOMP_DENIED = 80;
+
+/** The guest hardening policy this host accepts; the guest refuses rather than apply a partial policy. */
+export const HARDENING_POLICY = "doppler-guest-hardening@2";
+
+/** Protocol 4 guests confine themselves with no_new_privs, Landlock (ABI >= 4) and seccomp, and report it. */
+export function validHardening(hardening: unknown): boolean {
+  const h = hardening as { policy?: unknown; noNewPrivs?: unknown; landlockAbi?: unknown; seccompDenied?: unknown } | null;
+  return h?.policy === HARDENING_POLICY && h.noNewPrivs === true && Number.isSafeInteger(h.landlockAbi) && (h.landlockAbi as number) >= 4 &&
+    Number.isSafeInteger(h.seccompDenied) && (h.seccompDenied as number) >= MIN_SECCOMP_DENIED;
+}
 
 /** Thrown when a ranged job reaches a guest that predates shards; callers stop sharding on it. */
 export const SHARDS_UNSUPPORTED_MESSAGE = "Document VM image does not support page-range shards";
@@ -62,10 +96,14 @@ export function dopplerVmUsage(image: string, seconds: number): UsageEvent {
  * so a worker can roll out ahead of its image.
  */
 export function validEnvelope(
-  diagnostics: { protocol?: unknown; engine?: unknown; outputBytes?: unknown; conversion?: Record<string, unknown> },
+  diagnostics: { protocol?: unknown; engine?: unknown; outputBytes?: unknown; hardening?: unknown; conversion?: Record<string, unknown> },
   output: Buffer,
   range: DopplerVmJob["range"],
+  declared = declaredGuestProtocol(),
 ): boolean {
+  // An image declared hardened must prove it on every result: an older or unconfined guest fails closed.
+  if (declared >= 4 && (diagnostics.protocol !== "doppler-vm@4" || !validHardening(diagnostics.hardening))) return false;
+  if (diagnostics.protocol === "doppler-vm@4" && !validHardening(diagnostics.hardening)) return false;
   const conversion = diagnostics.conversion ?? {};
   const pages = conversion.pages;
   if (diagnostics.engine !== "doppler" || diagnostics.outputBytes !== output.length || !Number.isSafeInteger(pages) || (pages as number) < 1) return false;
@@ -73,7 +111,7 @@ export function validEnvelope(
   let separators = 0;
   for (const byte of output) if (byte === 0x0c) separators++;
   if (diagnostics.protocol === "doppler-vm@2") return !range;
-  if (diagnostics.protocol !== "doppler-vm@3") return false;
+  if (diagnostics.protocol !== "doppler-vm@3" && diagnostics.protocol !== "doppler-vm@4") return false;
   const documentPages = conversion.documentPages;
   if (separators !== (pages as number) - 1 || !Number.isSafeInteger(documentPages)) return false;
   const first = range?.first ?? 1;
@@ -81,6 +119,13 @@ export function validEnvelope(
   if (conversion.first !== first || conversion.last !== last || pages !== (last as number) - first + 1) return false;
   if (!range) return true;
   return range.final ? documentPages === range.last : (documentPages as number) > range.last;
+}
+
+function hardenedEnvelope(stderr: Buffer): boolean {
+  try {
+    const parsed = JSON.parse(stderr.toString("utf8")) as { protocol?: unknown; hardening?: unknown };
+    return parsed.protocol === "doppler-vm@4" && validHardening(parsed.hardening);
+  } catch { return false; }
 }
 
 function guestProtocol(stderr: Buffer): unknown {
@@ -261,16 +306,24 @@ export async function executeDopplerVm(
       const [out, err, exit] = await control(() => Promise.allSettled([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
       // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
       // recognised even when its whole-document output overran this shard's cap.
+      // A declared-hardened image that is not is terminal and takes precedence over the old-image range check.
+      if (declaredGuestProtocol() >= 4 && err.status === "fulfilled" && exit.status === "fulfilled" && exit.value === 0 && !hardenedEnvelope(err.value)) {
+        throw new DopplerVmFailure(HARDENING_MISMATCH_MESSAGE);
+      }
       if (job.range && err.status === "fulfilled" && guestProtocol(err.value) === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
       if (out.status === "rejected") throw out.reason;
       if (err.status === "rejected") throw err.reason;
       if (exit.status === "rejected") throw exit.reason;
       const [output, stderr, code] = [out.value, err.value, exit.value];
+      if (code === 3) throw new DopplerVmFailure(CONFINEMENT_UNAVAILABLE_MESSAGE);
       if (code !== 0) throw new DopplerVmFailure(`Document VM parser failed (${code})`);
       // The fixed guest streams Markdown only after successful bounded extraction.
       // Its small diagnostic envelope distinguishes a valid empty page from a broken guest.
       const diagnostics = JSON.parse(stderr.toString("utf8"));
       if (job.range && diagnostics.protocol === "doppler-vm@2") throw new DopplerVmFailure(SHARDS_UNSUPPORTED_MESSAGE);
+      if (job.expectedDocumentPages !== undefined && diagnostics.conversion?.documentPages !== job.expectedDocumentPages) {
+        throw new DopplerVmFailure(PAGE_COUNT_MISMATCH_MESSAGE);
+      }
       if (!validEnvelope(diagnostics, output, job.range)) throw new DopplerVmFailure("Document VM invalid result envelope");
       if (cancelled) throw new DopplerVmFailure("Document VM cancelled before output commit");
       stagedOutput = `${job.output}.${randomUUID()}.partial`;
@@ -300,7 +353,9 @@ export async function executeDopplerVm(
         exposure.metadata = { ...exposure.metadata, allocationUnconfirmed: true,
           estimateReason: "VM termination unconfirmed; reserve full configured lifetime" };
         // Keep an old-image refusal recognisable: callers stop sharding on it.
-        throw new SandboxRunError(primaryMessage === SHARDS_UNSUPPORTED_MESSAGE ? SHARDS_UNSUPPORTED_MESSAGE
+        // Keep classifications callers act on (stop sharding, no fallback); the cost is reserved either way.
+        const keep = [SHARDS_UNSUPPORTED_MESSAGE, HARDENING_MISMATCH_MESSAGE, CONFINEMENT_UNAVAILABLE_MESSAGE];
+        throw new SandboxRunError(primaryMessage && keep.includes(primaryMessage) ? primaryMessage
           : "Document VM termination failed or exceeded cleanup deadline", exposure);
       }
       if (vm && allocationUsage) Object.assign(allocationUsage, usage());

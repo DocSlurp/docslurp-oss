@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 const execute = vi.hoisted(() => vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 })));
-vi.mock("../sandbox/providers/modal/doppler-vm.js", () => ({ executeDopplerVm: execute, VM_TIMEOUT_MS: 180_000 }));
+vi.mock("../sandbox/providers/modal/doppler-vm.js", async (importOriginal) => ({ ...(await importOriginal<object>()), executeDopplerVm: execute, VM_TIMEOUT_MS: 180_000 }));
 import { CommandRunner } from "./runner.js";
 import { SandboxSessionScope, runWithSandboxScope } from "../sandbox/session-context.js";
 
