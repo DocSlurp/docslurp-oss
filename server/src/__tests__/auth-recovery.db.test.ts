@@ -227,6 +227,23 @@ describe("password recovery with native Email OTP", () => {
     expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: codes[0], password: NEW_PASSWORD })).status).toBe(200);
   });
 
+  it("never lets resends stretch a code past 12 hours from its first send", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    const start = Date.now();
+    await requestReset(browser, user.email);
+    const expiry = async () => (await pool.query<{ expires: Date }>(`select "expiresAt" as expires from verification where identifier = $1`, [`forget-password-otp-${user.email}`])).rows[0]!.expires.getTime();
+    const first = await expiry();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(start + 6 * 60 * 60_000);
+    await requestReset(browser, user.email);
+    const codes = sentEmails.filter((sent) => sent.to === user.email).map((sent) => sent.code);
+    expect(codes[1]).toBe(codes[0]);
+    expect(await expiry()).toBe(first);
+    vi.setSystemTime(start + 12 * 60 * 60_000 + 60_000);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: codes[0], password: NEW_PASSWORD })).status).toBe(400);
+  });
+
   it("answers an unknown address like a known one and sends nothing", async () => {
     const response = await requestReset(new Browser(), `nobody-${randomBytes(3).toString("hex")}@example.test`);
     expect(response.status).toBe(200);
