@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
+import { OPENROUTER_BASE_URL, visionConfigSchema, visionListPriceCents } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { detectDegeneration, VisionOutputRejectedError, withIgnoredProvider } from "../tools/vision-stream.js";
 
@@ -133,7 +134,12 @@ describe("guarded hosted vision request", () => {
     expect(result.usageSource).toBe("estimated");
     expect(result.outputTokens).toBeGreaterThan(50 + 300);
     expect(result.inputTokens).toBeGreaterThan(1000);
-    expect(result.costCents).toBeGreaterThan(0.1);
+    // costCents is the provider's reported charge only (the second attempt), covering its own tokens; the aborted
+    // attempt's estimated tokens are priced on the served route, never at configured rates.
+    expect(result.costCents).toBeCloseTo(0.1, 10);
+    expect(result.chargedTokens).toEqual({ inputTokens: 1000, outputTokens: 50 });
+    const uncharged = { inputTokens: result.inputTokens - 1000, outputTokens: result.outputTokens - 50 };
+    expect(priceVisionResult(result, cfg)).toBeCloseTo(0.1 + visionListPriceCents(result.route.model, uncharged)!, 10);
     const usageLines = logs.mock.calls.map(([l]) => String(l)).filter((l) => l.startsWith("[vision-attempt]"));
     expect(usageLines).toHaveLength(2);
     expect(usageLines[0]).toContain("outcome=degenerate");

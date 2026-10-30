@@ -96,16 +96,37 @@ export function findVisionServedRoute(error: unknown): VisionServedRoute | null 
   return null;
 }
 
+/** Token counts of vision usage. */
+export interface VisionTokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 /**
- * Provider cost of vision usage served on `route`: the provider's charge, else 0 on an unbilled route (local,
- * loopback, private), else the model's catalog list price, else the configured per-1k rates.
+ * Provider cost of vision usage served on `route`. `costCents` is only ever a charge someone reported (the
+ * provider's `usage.cost`, an operator registry's price), never an estimate, and covers `chargedTokens` (all the
+ * tokens when unset). The tokens no charge covers are priced on the route that served them: 0 on an unbilled route
+ * (local, loopback, private), else the model's catalog list price, else the configured per-1k rates.
  */
 export function priceVisionServedUsage(
   route: Pick<VisionServedRoute, "billing" | "model">,
   cfg: Pick<Config, "costPer1kInputTokens" | "costPer1kOutputTokens">,
-  usage: { inputTokens: number; outputTokens: number; costCents?: number },
+  usage: VisionTokenCounts & { costCents?: number; chargedTokens?: VisionTokenCounts },
 ): number {
-  if (usage.costCents !== undefined) return usage.costCents;
+  if (usage.costCents === undefined) return priceVisionRouteTokens(route, cfg, usage);
+  const covered = usage.chargedTokens ?? usage;
+  const rest = {
+    inputTokens: Math.max(0, usage.inputTokens - covered.inputTokens),
+    outputTokens: Math.max(0, usage.outputTokens - covered.outputTokens),
+  };
+  return usage.costCents + (rest.inputTokens + rest.outputTokens > 0 ? priceVisionRouteTokens(route, cfg, rest) : 0);
+}
+
+function priceVisionRouteTokens(
+  route: Pick<VisionServedRoute, "billing" | "model">,
+  cfg: Pick<Config, "costPer1kInputTokens" | "costPer1kOutputTokens">,
+  usage: VisionTokenCounts,
+): number {
   if (!isBilledVisionRoute(route.billing)) return 0;
   return visionListPriceCents(route.model, usage) ??
     (usage.inputTokens / 1000) * cfg.costPer1kInputTokens + (usage.outputTokens / 1000) * cfg.costPer1kOutputTokens;

@@ -230,8 +230,10 @@ export class VisionOutputRejectedError extends Error {
     readonly attempts: AttemptSummary[],
     readonly inputTokens: number,
     readonly outputTokens: number,
+    /** Provider-reported charge only (never an estimate), covering `chargedTokens`. */
     readonly costCents: number | undefined,
     readonly degenerate: DegenerateSignal | null = null,
+    readonly chargedTokens?: TokenCounts,
   ) {
     super(message);
     this.name = "VisionOutputRejectedError";
@@ -251,12 +253,21 @@ const acceptedAttemptErrors = new WeakSet<object>();
 /** What an accepted stream delivered before it broke (text so far, usage if a usage chunk arrived). */
 const partialAttempts = new WeakMap<object, VisionAttempt>();
 
+export interface TokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 /** Provider usage a failed (not rejected) vision call was still billed for. */
 export interface VisionBilledUsage {
   inputTokens: number;
   outputTokens: number;
-  /** Provider charge when known; otherwise the caller prices the tokens. */
+  /**
+   * Provider-reported charge for `chargedTokens` (all tokens when unset), never an estimate; the caller prices
+   * every other token on the route that served it (lib/vision-pricing.ts `priceVisionServedUsage`).
+   */
   costCents?: number;
+  chargedTokens?: TokenCounts;
   /** Token counts came from the provider's usage, or were estimated (prompt estimate, streamed text). */
   usageSource?: "provider" | "estimated";
 }
@@ -287,6 +298,7 @@ export interface AttemptSummary {
   finishReason: string | null;
   inputTokens: number;
   outputTokens: number;
+  /** Provider-reported charge only. */
   costCents?: number;
   usageSource: "provider" | "estimated";
 }
@@ -448,6 +460,10 @@ export interface GuardedCompletionArgs {
   signal?: AbortSignal;
   /** Prompt plus image estimate, used for the rate reservation and for aborted streams without usage. */
   inputTokenEstimate: number;
+  /*
+   * No cost estimate is made here: `costCents` is only a provider-reported charge, and every uncharged token is
+   * priced by the caller on the route that served it, so an estimate can never stand in for a route's price.
+   */
   /** Profile-preferred route for the retry after a refusal or content filter (see `alternateRouteBody`). */
   preferredRetryRoute?: RetryRoute;
   /**
@@ -455,8 +471,6 @@ export interface GuardedCompletionArgs {
    * retries, the streaming fallback, the alternate-route retry); null only outside a run (benchmarks).
    */
   gate: VisionRequestGate | null;
-  /** Prices a discarded attempt that has no provider charge (config per-1k rates). */
-  estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
 }
 
 export interface GuardedCompletion {
@@ -468,7 +482,9 @@ export interface GuardedCompletion {
   inputTokens: number;
   outputTokens: number;
   usageSource: "provider" | "estimated";
+  /** Provider-reported charge only, covering `chargedTokens`. */
   costCents?: number;
+  chargedTokens?: TokenCounts;
   costMetadata?: Record<string, unknown>;
   attempts: number;
   attemptLog: AttemptSummary[];
@@ -512,8 +528,11 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       args.gate?.failed();
       // The provider accepted the request: it may bill the input even though no usage came back.
       if (error && typeof error === "object") acceptedAttemptErrors.add(error);
+      // A stream cut off after its usage chunk still reports what it billed.
+      await observeUsage(args, error && typeof error === "object" ? partialAttempts.get(error) ?? null : null);
       throw error;
     }
+    await observeUsage(args, attempt);
     return attempt;
   } finally {
     args.signal?.removeEventListener("abort", onCaller);
@@ -525,12 +544,27 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
   }
 }
 
+/** Report a request's provider usage to the gate, which compares it with the weight it was admitted at. */
+async function observeUsage(args: GuardedCompletionArgs, attempt: VisionAttempt | null): Promise<void> {
+  const usage = attempt?.usage;
+  if (!usage || !args.gate?.observed) return;
+  const charge = readProviderCharge(usage);
+  const inputTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
+  const outputTokens = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
+  if (inputTokens + outputTokens === 0 && charge.costCents === undefined) return;
+  try {
+    await args.gate.observed({ inputTokens, outputTokens, ...(charge.costCents !== undefined ? { costCents: charge.costCents } : {}), servedProvider: attempt.provider });
+  } catch (error) {
+    console.warn(`[vision-weight] usage check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: number, outcome: RetryableOutcome | null): AttemptSummary & { charge: ReturnType<typeof readProviderCharge> } {
   const charge = readProviderCharge(attempt.usage);
   const hasUsage = Boolean(attempt.usage);
   const inputTokens = attempt.usage?.prompt_tokens ?? args.inputTokenEstimate;
   const outputTokens = attempt.usage?.completion_tokens ?? estimateTokens(attempt.text);
-  const costCents = charge.costCents ?? (hasUsage ? undefined : args.estimateCostCents?.({ inputTokens, outputTokens }));
+  const costCents = charge.costCents;
   return {
     attempt: index, provider: attempt.provider, model: attempt.model, streamed: attempt.streamed, outcome: outcome ?? "ok",
     finishReason: attempt.finishReason, inputTokens, outputTokens, costCents, usageSource: hasUsage ? "provider" : "estimated", charge,
@@ -542,8 +576,7 @@ function acceptedWithoutOutput(args: GuardedCompletionArgs, index: number): Atte
   const inputTokens = args.inputTokenEstimate;
   return {
     attempt: index, provider: null, model: null, streamed: true, outcome: "stream-failed", finishReason: null,
-    inputTokens, outputTokens: 0, costCents: args.estimateCostCents?.({ inputTokens, outputTokens: 0 }),
-    usageSource: "estimated", charge: readProviderCharge(null),
+    inputTokens, outputTokens: 0, usageSource: "estimated", charge: readProviderCharge(null),
   };
 }
 
@@ -564,7 +597,7 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     const trail = log.map((s) => `attempt ${s.attempt}: ${s.outcome} via ${s.provider ?? "unknown provider"}`).join("; ");
     return new VisionOutputRejectedError(
       `vision output rejected after ${attempts} attempt${attempts === 1 ? "" : "s"} (${verdict.kind}: ${verdict.detail}); ${trail}`,
-      log.map(stripCharge), totals.inputTokens, totals.outputTokens, totals.costCents, degenerate,
+      log.map(stripCharge), totals.inputTokens, totals.outputTokens, totals.costCents, degenerate, totals.chargedTokens,
     );
   };
 
@@ -602,12 +635,17 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
       if (totals || estimate) {
         const inputTokens = (totals?.inputTokens ?? 0) + (estimate?.inputTokens ?? 0);
         const outputTokens = (totals?.outputTokens ?? 0) + (estimate?.outputTokens ?? 0);
-        const known = totals?.costCents ?? (totals ? undefined : 0);
-        const estimated = estimate ? readProviderCharge(partial?.usage ?? null).costCents ?? args.estimateCostCents?.(estimate) : 0;
+        // Only provider-reported charges are summed; the caller prices every other token on the served route.
+        const partialCharge = estimate ? readProviderCharge(partial?.usage ?? null).costCents : undefined;
+        const charged = totals?.costCents !== undefined || partialCharge !== undefined;
+        const chargedTokens = {
+          inputTokens: (totals?.chargedTokens?.inputTokens ?? 0) + (partialCharge !== undefined ? estimate!.inputTokens : 0),
+          outputTokens: (totals?.chargedTokens?.outputTokens ?? 0) + (partialCharge !== undefined ? estimate!.outputTokens : 0),
+        };
         const providerUsage = (!totals || totals.usageSource === "provider") && (!estimate || Boolean(partial?.usage));
         attachVisionBilledUsage(error, {
           inputTokens, outputTokens,
-          ...(known !== undefined && estimated !== undefined ? { costCents: known + estimated } : {}),
+          ...(charged ? { costCents: (totals?.costCents ?? 0) + (partialCharge ?? 0), chargedTokens } : {}),
           usageSource: providerUsage ? "provider" : "estimated",
         });
       }
@@ -661,12 +699,12 @@ function stripCharge(s: AttemptSummary & { charge?: unknown }): AttemptSummary {
 function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedCompletionArgs) {
   const inputTokens = log.reduce((n, s) => n + s.inputTokens, 0);
   const outputTokens = log.reduce((n, s) => n + s.outputTokens, 0);
-  const anyCharge = log.some((s) => s.charge.costCents !== undefined);
-  // Without any provider charge, leave cost to the caller's per-token pricing of the summed tokens
-  // (estimated ones included). With one, attempts without a charge add their estimate.
-  const costCents = anyCharge
-    ? log.reduce((n, s) => n + (s.charge.costCents ?? s.costCents ??
-      args.estimateCostCents?.({ inputTokens: s.inputTokens, outputTokens: s.outputTokens }) ?? 0), 0)
+  const charged = log.filter((s) => s.charge.costCents !== undefined);
+  const anyCharge = charged.length > 0;
+  // Provider-reported charges only, with the tokens they cover; the caller prices the rest on the served route.
+  const costCents = anyCharge ? charged.reduce((n, s) => n + s.charge.costCents!, 0) : undefined;
+  const chargedTokens = anyCharge
+    ? { inputTokens: charged.reduce((n, s) => n + s.inputTokens, 0), outputTokens: charged.reduce((n, s) => n + s.outputTokens, 0) }
     : undefined;
   const usageSource: "provider" | "estimated" = log.every((s) => s.usageSource === "provider") ? "provider" : "estimated";
   const costMetadata = anyCharge ? {
@@ -674,5 +712,5 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
     providerCostUsd: log.reduce((n, s) => n + (s.charge.costCents ?? 0), 0) / 100,
     ...(log.length > 1 ? { visionAttempts: log.map(stripCharge) } : log[0]!.charge.metadata),
   } : log.length > 1 ? { visionAttempts: log.map(stripCharge) } : undefined;
-  return { inputTokens, outputTokens, usageSource, costCents, costMetadata };
+  return { inputTokens, outputTokens, usageSource, costCents, ...(chargedTokens ? { chargedTokens } : {}), costMetadata };
 }
