@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CHAT_INSTRUCTIONS_MAX_CHARS, DEFAULT_SCOPE_DECLINE_THRESHOLD } from "@docslurp/shared";
+import { CHAT_INSTRUCTIONS_MAX_CHARS, CHINA_PROVIDER_SLUGS, DEFAULT_SCOPE_DECLINE_THRESHOLD } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({
   recordUsageEvent: vi.fn(async () => null),
@@ -174,12 +174,16 @@ describe("improveChatInstructions", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it("leaves hosts to the shared provider policy, records usage with the org and workspace scope, charges credits and strips rule overrides", async () => {
+  it("restricts instruction improvement to approved hosts, records usage with the org and workspace scope, charges credits and strips rule overrides", async () => {
     const result = await improveChatInstructions({ ...base, generate });
     const call = generate.mock.calls[0]![0] as { model: string; providerPreferences?: unknown; privacyMode: string };
     expect(call.model).toBe("z-ai/glm-5.3-flash");
-    // No per-call pin: the routing fetch applies the org/workspace China-provider policy to the request.
-    expect(call.providerPreferences).toBeUndefined();
+    // This helper retains its reviewed host boundary even when the organization permits other providers.
+    expect(call.providerPreferences).toEqual({
+      only: ["baseten", "gmicloud", "near-ai", "fireworks", "together"],
+      ignore: [...CHINA_PROVIDER_SLUGS],
+      allow_fallbacks: true,
+    });
     expect(mocks.recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({
       userId: "user-1",
       scope: { orgId: "org-1", workspaceId: "ws-1" },
