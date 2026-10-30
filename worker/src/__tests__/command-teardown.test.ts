@@ -283,7 +283,8 @@ describe.skipIf(!bwrap || !pidNamespace)("bubblewrap launcher teardown", () => {
     const runner = new CommandRunner({ openSession: async () => session });
     await expect(runner.run({ binary: "/bin/sleep", args: ["30"], available: true })).rejects.toThrow(/RSS budget/);
     // The old kill took the launcher with the parser, so its EXIT trap never removed run-XXXXXX.
-    expect(readdirSync(sandboxRoot)).toEqual([]);
+    // Only the worker's seccomp filter (sandbox/seccomp.ts) stays in the root, never an instance.
+    expect(readdirSync(sandboxRoot).filter((name) => !/^seccomp-.*\.bpf$/.test(name))).toEqual([]);
   }, 20_000);
 });
 

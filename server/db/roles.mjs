@@ -71,7 +71,7 @@ export const WORKER_TABLES = Object.freeze({
   performance_log: { privileges: DML, evidence: "worker/src/db/store.ts perf log and pruning" },
   pii_detections: { privileges: DML, evidence: "worker/src/stages/pii-detect.ts" },
   privacy_audit_log: { privileges: ["insert"], evidence: "worker/src/lib/privacy-guard.ts" },
-  quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "worker/src/sandbox/source-quarantine.ts (find; insert ... on conflict do update returning); operators delete rows" },
+  quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "worker/src/sandbox/source-quarantine.ts (find; insert ... on conflict do update returning; noteRefusal update); operators delete rows" },
   remote_capacity_leases: { privileges: DML, evidence: "worker/src/media/capacity, journal.ts" },
   remote_capacity_watchdog: { privileges: DML, evidence: "worker/src/media/capacity/store.ts" },
   remote_media_jobs: { privileges: DML, evidence: "worker/src/media/journal.ts, reconcile.ts" },
