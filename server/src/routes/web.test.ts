@@ -103,10 +103,12 @@ describe("web tools and public client keys", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("lets a client key that opted in to web reach the capability", async () => {
-    fetchSpy();
+  it("refuses unverified target fetching even for a key with web scope", async () => {
+    const run = fetchSpy();
     scoped.mockResolvedValueOnce({ id: "ws-allowed", orgId: "org-1" });
     const response = await post(clientKey(["search", "web"]), "/fetch", { urls: ["https://a.test/"] });
-    expect(response.status).not.toBe(403);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: "forbidden" } });
+    expect(run).not.toHaveBeenCalled();
   });
 });

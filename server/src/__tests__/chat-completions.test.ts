@@ -1,3 +1,5 @@
+import { emitTelemetryLog } from "@docslurp/shared/observability";
+vi.mock("@docslurp/shared/observability", async (original) => ({ ...await original<typeof import("@docslurp/shared/observability")>(), emitTelemetryLog: vi.fn() }));
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +44,16 @@ describe("OpenAI-compatible workspace chat", () => {
     getWorkspace.mockResolvedValue(workspace);
     listWorkspaces.mockResolvedValue([workspace, { ...workspace, id: "foreign", orgId: "org-2" }, { ...workspace, id: "archived", archivedAt: "today" }]);
     chatWorkspace.mockResolvedValue(answer);
+  });
+  it.each([[], ["system"], ["developer"], ["system", "developer"]])("counts discarded roles without retaining content: %j", async (...roles) => {
+    validateApiKey.mockResolvedValueOnce({ ...key, keyType: "client", workspaceIds: [id] });
+    const messages = roles.map(role => ({ role, content: "SECRET_SENTINEL" }));
+    const response = await request(input({ messages: [...messages, { role: "user", content: "question" }] }));
+    expect(response.status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ history: [] }));
+    const events = vi.mocked(emitTelemetryLog).mock.calls.filter(([event]) => event.eventName === "docslurp.chat.denied_instructions");
+    expect(events).toHaveLength(roles.length ? 1 : 0);
+    expect(JSON.stringify(events)).not.toMatch(/SECRET_SENTINEL|dslp_test|Authorization/);
   });
   it("does not apply chat authentication to unrelated v1 routes", async () => {
     const host = app().get("/v1/unrelated", (c) => c.json({ ok: true }));
