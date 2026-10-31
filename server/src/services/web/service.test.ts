@@ -59,6 +59,20 @@ describe("runWebCapability", () => {
     expect(t.recordCharge).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { orgId: "org-2" },
+    { workspaceId: "ws-2" },
+    { userId: "user-2" },
+  ])("isolates cached query history from another scope: %j", async scope => {
+    const t = setup({}, { orgPerMinute: 20 });
+    expect((await runWebCapability("search", search, ctx)).cached).toBe(false);
+    const other = { ...ctx, ...scope };
+    expect((await runWebCapability("search", search, other)).cached).toBe(false);
+    expect((await runWebCapability("search", search, other)).cached).toBe(true);
+    expect((await runWebCapability("search", search, ctx)).cached).toBe(true);
+    expect(t.run).toHaveBeenCalledTimes(2);
+  });
+
   it("charges nothing when nothing comes back, but still records the provider cost", async () => {
     const t = setup();
     t.run.mockResolvedValueOnce({ data: { results: [] }, costUsd: 0.0005, costSource: "reported" as const, units: { amount: 10_000, unit: "tokens" } });

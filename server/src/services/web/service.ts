@@ -137,8 +137,8 @@ function cacheDelete(key: string): void {
   cache.delete(key);
 }
 
-function cacheKey(capability: WebCapability, input: unknown): string {
-  return createHash("sha256").update(`${capability}\0${JSON.stringify(input)}`).digest("hex");
+function cacheKey(capability: WebCapability, input: unknown, ctx: WebCallContext): string {
+  return createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.workspaceId, ctx.userId, capability, input])).digest("hex");
 }
 
 function cacheGet<T>(key: string, now: number): T | undefined {
@@ -327,7 +327,7 @@ export async function runWebCapability<C extends WebCapability>(
 
     // Deep fetches ask for a fresh render, so they bypass the cache.
     const cacheable = !(capability === "fetch" && (input as WebInput<"fetch">).depth === "deep");
-    const key = cacheKey(capability, input);
+    const key = cacheKey(capability, input, ctx);
     let output = cacheable ? cacheGet<WebOutput<C>>(key, started) : undefined;
     const cached = output !== undefined;
     let provider: WebProviderId | undefined;
