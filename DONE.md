@@ -1,3 +1,13 @@
+## Browser-key security council follow-ups (2026-10-31)
+
+- #210: explicit server/ingest and UUID admission, with real persisted-key revocation/membership and migrated ownership tests for both upload-status modes.
+- #211: search results never authorize fetching; chat search accepts exact user text only. Target fetch/map/crawl and content-returning search fail closed pending verified provider egress. Provider redirects are refused, JSON bodies bounded, and query caches scoped by organization/workspace/user.
+- #212: count-only, trace-correlated telemetry for discarded browser system/developer messages, without prompt or credential content.
+- #213: composed canonical and OpenAI-compatible chat tests pin the model-visible tool set and authorized workspace search.
+- #214: public embed guidance explains exposed credentials, browser restrictions, trusted backends and immediate revocation.
+- #215: corrected the merged status of #182, #190 and #191 without claiming deployment.
+- Independent architecture/detail and adversarial council reviews of `f217b8279f2ac16550f4064f7fe51cdcd690694d` each report zero medium-or-higher findings. Both initially found the shared-cache query-history oracle; tenant/workspace/user isolation and regression tests resolved it. Each final review passed 190 focused tests. Full server validation: 3,437 passed, 54 skipped; database credit/ledger checks passed. See PR #244 for review evidence. Production deployment remains pending and must be verified separately.
+
 ## HTML table chunk preservation (2026-10-30)
 
 - Preserve bounded table/cell context in fallback and canonical embedding chunks; scan nested repository integrity without inheriting parent documentation exclusions. See [evidence and limits](docs/evals/html-table-chunks.md).

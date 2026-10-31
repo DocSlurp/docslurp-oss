@@ -1,12 +1,5 @@
 # TODO
 
-- Security council follow-ups (2026-10-28, live Ask AI assessment + council review; app-repo reports in `.scratch/council/`): the F1/F2/F3 fixes are merged on main (PRs #182, #190, #191) and production must be redeployed from current main to close them. Residual items below were found by the adversarial reviewer and remain open:
-  - Gate `GET /v1/uploads/direct/sessions/:sessionId` by key type/scope: a browser key can currently read its own org's upload/run/cost status that the chat surface deliberately hides from public visitors. Add negative tests for client keys. Security boundary: draft PR + council.
-  - webFetch allowlist admits URLs surfaced by same-turn webSearch results: an SEO-planting page can steer the agent's outbound fetch. Require the fetch target to be independent of model-chosen search results (or gate it behind an explicit allowlist/source). Security boundary: draft PR + council.
-  - Observability for dropped instructions: browser-key `system`/`developer` messages are silently filtered on `/v1/chat/completions`; log a denied-instruction event (counted, no content) so operators can see attempted injection.
-  - Add one end-to-end test that pins the composed browser-key chat ToolSet (catalog, toolset and execution layers are tested separately today).
-  - Document an operator warning against embedding a server (`dslp_priv_`) key in a public page; publishable keys only for browsers/embeds.
-
 - Vision self-critique prompt never reaches the model (council info, 2026-10-29, #235): the critique call in `worker/src/stages/extract-markdown.ts` (`runSelfCritique`) passes a prompt that `resolveVisionPromptTemplate` (`worker/src/tools/vision-runtime.ts`) does not recognize as a template key, so the request falls back to the `<OCR>` template and the model transcribes the page instead of critiquing the candidate. Pre-existing quality issue; give critique its own template (or pass its text through) and test that the sent prompt is the critique prompt.
 
 - Budget-cap admission race (council finding, 2026-10-28, #222): `enforceLiveBudgetCaps` (server/src/services/run-creation.ts) sums the month's spend outside the advisory-locked `admitRunSpend` transaction, so concurrent run creates and searches that materialize pages can all pass one under-cap snapshot and overshoot a monthly budget by roughly concurrency × per-run or `maxCreditsPerQuery` spend. Credits still gate the balance. Move the live sum inside the admission transaction after `pg_advisory_xact_lock`. Billing boundary: draft PR + council.
