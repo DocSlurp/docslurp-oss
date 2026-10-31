@@ -44,6 +44,19 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 `search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
 
+### Never embed a server key
+
+**Page HTML, JavaScript bundles and browser requests expose their credentials.**
+Use only a placeholder such as `dslp_pub_YOUR_BROWSER_KEY` in browser/embed setup,
+restricted to the intended workspaces, websites and `search`/`chat` scopes.
+Keep `dslp_priv_` server keys behind a trusted backend. Minification does not
+hide them. Origin restrictions are browser controls; arbitrary HTTP clients can
+spoof `Origin`.
+
+If a private key reaches a public page, revoke it immediately, remove it from
+client assets, and issue and deploy a replacement on the backend. Do not use
+overlapping rotation for a leaked key: it remains usable during the overlap.
+
 Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes retains only the `search` or `chat` permissions it already held. If none remain, it has no permissions: saving or rotating it never adds `search`. Edit its scopes explicitly to enable search or chat; default scopes apply only when creating a key.
 
 Controls per key type:

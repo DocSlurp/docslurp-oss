@@ -6,7 +6,6 @@
   - Observability for dropped instructions: browser-key `system`/`developer` messages are silently filtered on `/v1/chat/completions`; log a denied-instruction event (counted, no content) so operators can see attempted injection.
   - Add one end-to-end test that pins the composed browser-key chat ToolSet (catalog, toolset and execution layers are tested separately today).
   - Document an operator warning against embedding a server (`dslp_priv_`) key in a public page; publishable keys only for browsers/embeds.
-  - Hygiene: DONE.md still describes the merged `feat/chat-app-only-settings` hardening as "draft"; update it and note council approval.
 
 - Vision self-critique prompt never reaches the model (council info, 2026-10-29, #235): the critique call in `worker/src/stages/extract-markdown.ts` (`runSelfCritique`) passes a prompt that `resolveVisionPromptTemplate` (`worker/src/tools/vision-runtime.ts`) does not recognize as a template key, so the request falls back to the `<OCR>` template and the model transcribes the page instead of critiquing the candidate. Pre-existing quality issue; give critique its own template (or pass its text through) and test that the sent prompt is the critique prompt.
 
