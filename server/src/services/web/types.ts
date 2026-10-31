@@ -176,7 +176,7 @@ export class WebProviderError extends Error {
 export class WebToolError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 429 | 502 | 503,
-    readonly code: "web_disabled" | "invalid_request" | "url_blocked" | "privacy_mode_blocked" | "rate_limited" | "unavailable",
+    readonly code: "web_disabled" | "invalid_request" | "url_blocked" | "web_target_fetch_disabled" | "privacy_mode_blocked" | "rate_limited" | "unavailable",
     message: string,
     readonly retryAfterSeconds?: number,
   ) {

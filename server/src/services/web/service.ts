@@ -117,6 +117,7 @@ export function setWebServiceDeps(next: Partial<WebServiceDeps> | undefined): vo
 
 /** Whether web capabilities are on and at least one provider can serve `capability`. */
 export function webCapabilityAvailable(capability: WebCapability): boolean {
+  if (capability !== "search") return false;
   const current = deps();
   return current.config.enabled && current.router.configured(capability).length > 0;
 }
@@ -295,6 +296,12 @@ export async function runWebCapability<C extends WebCapability>(
   const fields: Record<string, string | number | boolean> = {};
   try {
     if (!d.config.enabled) throw new WebToolError(404, "web_disabled", "Web tools are not enabled on this server.");
+
+    // No installed provider contract enforces target DNS, redirects and rendered
+    // subresources. Reject before cache, spend or fallback; initial DNS is not enough.
+    if (capability !== "search" || (rawInput as WebInput<"search">).includeContent) {
+      throw new WebToolError(403, "web_target_fetch_disabled", "Target retrieval is unavailable until provider egress enforcement is verified.");
+    }
 
     // Validate and canonicalize every caller URL before anything is spent: private,
     // loopback and metadata addresses are refused even though a provider fetches them.

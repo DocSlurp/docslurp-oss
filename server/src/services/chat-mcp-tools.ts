@@ -300,30 +300,29 @@ function validationIssues(result: unknown): unknown {
   return serialized.length <= 2_000 ? issues : serialized.slice(0, 2_000);
 }
 
-/** Comparable form of a URL: no fragment, no trailing slash, lowercase host. */
+/** Comparable form of a URL: no fragment; preserve path and query exactly. */
 function urlKey(raw: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     url.hash = "";
-    return url.toString().replace(/\/+$/, "");
+    return url.toString();
   } catch {
     return null;
   }
 }
 
-/** HTTP(S) URLs written in user text (the only URLs webFetch may read before a web search). */
+/** HTTP(S) URLs written in user text (the only URLs webFetch may read at any time). */
 export function urlsInText(text: string): string[] {
   return [...text.matchAll(/https?:\/\/[^\s<>"'`)\]]+/gi)].map((match) => match[0].replace(/[.,;:!?]+$/, ""));
 }
 
 /**
- * Exfiltration guard: in chat, webFetch reads only URLs the user wrote or that
- * webSearch returned in this turn. Document or web text cannot make the model
+ * Exfiltration guard: in chat, webFetch reads only URLs the user wrote only. Document or web text cannot make the model
  * fetch an attacker URL carrying workspace data in its query string.
  */
 export const WEB_FETCH_URL_REFUSED = {
-  error: "webFetch can only read URLs from the user's messages or from webSearch results in this turn. This request is blocked.",
+  error: "webFetch can only read URLs from the user's messages. This request is blocked.",
   code: "url_not_allowed",
 } as const;
 
@@ -504,7 +503,19 @@ export function createChatMcpTools(args: {
           span.end("invalid_arguments");
           return fail("invalid_arguments");
         }
-        const supplied = input as Record<string, unknown>;
+        const supplied = { ...input } as Record<string, unknown>;
+        // The model may select user text, but may not construct an outbound query
+        // or filters from private evidence or hostile search results.
+        if (definition.id === "webSearch") {
+          if (typeof supplied.query !== "string" || !(args.userText ?? []).some(text => text.trim() === supplied.query)) {
+            span.end("query_not_allowed");
+            return fail("query_not_allowed");
+          }
+          for (const key of Object.keys(supplied)) {
+            if (key !== "query") delete supplied[key];
+          }
+        }
+
         if (definition.id === "webFetch") {
           const urls = Array.isArray(supplied.urls) ? supplied.urls : [];
           if (!urls.length || urls.some((url) => typeof url !== "string" || !allowedWebUrls.has(urlKey(url) ?? ""))) {
@@ -583,13 +594,7 @@ export function createChatMcpTools(args: {
           if (ok) {
             collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
-            if (definition.id === "webSearch") {
-              const found = (result as { results?: Array<{ url?: unknown }> } | null)?.results ?? [];
-              for (const item of found) {
-                const key = typeof item?.url === "string" ? urlKey(item.url) : null;
-                if (key) allowedWebUrls.add(key);
-              }
-            }
+
           }
           // A partial fetch failure still reports what was read and how many pages failed.
           if (response.ok && web) web = webActivityResult(web, result);

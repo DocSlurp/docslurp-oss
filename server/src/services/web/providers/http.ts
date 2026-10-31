@@ -21,7 +21,7 @@ export function providerErrorForStatus(provider: string, status: number, retryAf
 
 /**
  * One JSON request to a provider's fixed API host. Bodies of failed responses
- * are read (bounded) for logs only, never surfaced to callers.
+ * are canceled without reading; successful JSON is limited to 2 MiB.
  */
 export async function providerJson<T>(provider: string, ctx: ProviderCallContext, url: string, init: {
   method?: "GET" | "POST";
@@ -35,6 +35,7 @@ export async function providerJson<T>(provider: string, ctx: ProviderCallContext
       headers: { Accept: "application/json", ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}), ...init.headers },
       body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
       signal: ctx.signal,
+      redirect: "error",
     });
   } catch (error) {
     if (ctx.signal.aborted) {
@@ -42,16 +43,29 @@ export async function providerJson<T>(provider: string, ctx: ProviderCallContext
       if (reason?.name === "TimeoutError") throw new WebProviderError("timeout", `${provider} timed out`);
       throw error;
     }
-    throw new WebProviderError("unavailable", `${provider} request failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new WebProviderError("unavailable", `${provider} request failed`);
   }
   if (!response.ok) {
-    const detail = (await response.text().catch(() => "")).slice(0, 300);
-    const error = providerErrorForStatus(provider, response.status, response.headers.get("retry-after"));
-    if (detail) error.message = `${error.message}: ${detail}`;
-    throw error;
+    await response.body?.cancel();
+    throw providerErrorForStatus(provider, response.status, response.headers.get("retry-after"));
   }
   try {
-    return await response.json() as T;
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Missing body");
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 2 * 1024 * 1024) throw new Error("Response too large");
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel();
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
   } catch {
     throw new WebProviderError("unavailable", `${provider} returned invalid JSON`, response.status);
   }
