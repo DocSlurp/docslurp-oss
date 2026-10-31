@@ -10,6 +10,9 @@ import { twoFactor } from "better-auth/plugins";
 import { serialize, type CookieOptions } from "hono/utils/cookie";
 import type { Pool } from "pg";
 
+import { assertReviewedBetterAuth } from "./auth-compat.js";
+import { CHALLENGE_CREDENTIAL_GRACE_MS, challengeCredentialIdentifier, newSessionCredentialFingerprint, NO_PASSWORD } from "./auth-credential-binding.js";
+import { hasSensitiveAccess } from "./auth-sensitive-access.js";
 import { safeRedirectPath } from "./safe-redirect.js";
 
 /**
@@ -270,6 +273,8 @@ interface SessionRow {
   created_at: Date;
   two_factor_enabled: boolean;
   passkeys: number;
+  /** Issued by a password that has since changed (auth-credential-binding.ts). */
+  stale_credential: boolean;
 }
 
 /** Cookie pairs named `name` (or a chunk of it, `name.0`) in a raw Cookie header. */
@@ -311,7 +316,7 @@ const POLICY_BLOCKED_ALLOWED_PATHS = new Set([
 function allowedWhilePolicyBlocked(path: string): boolean {
   // Exact paths (plus sign-in and OAuth callbacks), so a newly enabled account
   // endpoint such as an email change stays blocked by default.
-  return POLICY_BLOCKED_ALLOWED_PATHS.has(path) || path.startsWith("/sign-in/") || path.startsWith("/callback/");
+  return path === "/sensitive-access" || path.startsWith("/sensitive-access/") || POLICY_BLOCKED_ALLOWED_PATHS.has(path) || path.startsWith("/sign-in/") || path.startsWith("/callback/");
 }
 
 async function loadSessionRow(pool: Pick<Pool, "query">, token: string): Promise<SessionRow | null> {
@@ -319,7 +324,11 @@ async function loadSessionRow(pool: Pick<Pool, "query">, token: string): Promise
     `select s.id as session_id, s.token, s."userId" as user_id, u.email, s."mfaVerified" as mfa_verified,
             s."authenticatedAt" as authenticated_at, s."createdAt" as created_at,
             u."twoFactorEnabled" as two_factor_enabled,
-            (select count(*)::int from passkey p where p."userId" = s."userId") as passkeys
+            (select count(*)::int from passkey p where p."userId" = s."userId") as passkeys,
+            coalesce(s."credentialFingerprint" is distinct from (
+              select encode(sha256(convert_to(a.password, 'UTF8')), 'hex') from account a
+               where a."userId" = s."userId" and a."providerId" = 'credential' and a.password is not null limit 1
+            ), false) and s."credentialFingerprint" is not null as stale_credential
        from session s join "user" u on u.id = s."userId"
       where s.token = $1 and s."expiresAt" > now()`,
     [token],
@@ -355,6 +364,9 @@ async function beginChallenge(ctx: HookContext, userId: string, maxAge: number):
   const expiresAt = new Date(Date.now() + maxAge * 1000);
   await ctx.context.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
   await ctx.context.internalAdapter.createVerificationValue({ value: "0", identifier: `2fa-attempts-${identifier}`, expiresAt });
+  // A challenge started by a password keeps that password's fingerprint for the session it ends in.
+  await ctx.context.internalAdapter.createVerificationValue({ value: await newSessionCredentialFingerprint() ?? NO_PASSWORD,
+    identifier: challengeCredentialIdentifier(identifier), expiresAt: new Date(expiresAt.getTime() + CHALLENGE_CREDENTIAL_GRACE_MS) });
   await ctx.setSignedCookie(cookie.name, identifier, ctx.context.secret, cookie.attributes);
 }
 
@@ -418,6 +430,7 @@ export function docslurpTwoFactorPlugin(config: MfaConfig): BetterAuthPlugin {
     backupCodeOptions: { amount: 10, length: 10, storeBackupCodes: "encrypted" },
     accountLockout: { enabled: true, maxFailedAttempts: config.lockout.maxFailedAttempts, durationSeconds: config.lockout.durationSeconds },
   } as Parameters<typeof twoFactor>[0]);
+  assertReviewedBetterAuth("twoFactor hook replacement", plugin.version);
   const after = plugin.hooks?.after ?? [];
   // Fail closed on an upgrade that changes the plugin's hook shape: the
   // replacement below assumes exactly the credential sign-in hook.
@@ -432,7 +445,7 @@ export function docslurpTwoFactorPlugin(config: MfaConfig): BetterAuthPlugin {
 export function docslurpPasskeyPlugin(options: MfaPluginOptions): BetterAuthPlugin {
   const { config, pool } = options;
   const isSsoEnforced = ssoCheck(options);
-  return passkey({
+  const plugin = passkey({
     rpID: config.rpID,
     rpName: config.rpName,
     origin: config.origins,
@@ -464,7 +477,10 @@ export function docslurpPasskeyPlugin(options: MfaPluginOptions): BetterAuthPlug
         await pool.query(`update passkey set "lastUsedAt" = now() where "credentialID" = $1`, [clientData.id]);
       },
     },
-  }) as unknown as BetterAuthPlugin;
+  });
+  // The user-verification checks above depend on what afterVerification reports.
+  assertReviewedBetterAuth("passkey verification hooks", plugin.version);
+  return plugin as unknown as BetterAuthPlugin;
 }
 
 /** The DocSlurp MFA gate (hooks only; no endpoints). */
@@ -485,6 +501,10 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
     const { ambiguous, row } = await requestSession(ctx, pool);
     if (ambiguous) {
       console.warn(`[auth-mfa] ignored a request carrying several session cookies path=${ctx.path}`);
+    } else if (row?.stale_credential) {
+      // Its password changed after (or while) it signed in: a reset or change must end it.
+      await pool.query(`delete from session where token = $1`, [row.token]);
+      console.warn(`[auth-mfa] revoked a session issued by a password that has since changed user=${row.user_id} session=${row.session_id}`);
     } else {
       if (!row || row.mfa_verified) return;
       if (!row.two_factor_enabled) {
@@ -518,9 +538,8 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
       throw forbidden(MFA_REQUIRED_CODE, "Sign in with your second factor or passkey to change sign-in methods");
     }
     if (FACTOR_REMOVAL_PATHS.has(ctx.path)) {
-      const authenticatedAt = toDate(row.authenticated_at) ?? toDate(row.created_at);
-      if (!authenticatedAt || Date.now() - authenticatedAt.getTime() > config.reauthMaxAgeSeconds * 1000) {
-        throw forbidden(REAUTH_REQUIRED_CODE, "Sign in again to remove a sign-in method");
+      if (!await hasSensitiveAccess(pool, row.user_id, row.session_id)) {
+        throw forbidden(REAUTH_REQUIRED_CODE, "Verify your identity to change a sign-in method");
       }
     }
     if (PASSKEY_REGISTRATION_PATHS.has(ctx.path) && await isSsoEnforced(row.email)) {
@@ -576,12 +595,17 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
    * every trusted device of the user, not just this browser's.
    */
   const forgetTrustedDevices = createAuthMiddleware(async (ctx) => {
-    let userId = ctx.context.session?.user?.id ?? null;
-    if (!userId && ctx.path === "/email-otp/reset-password" && typeof ctx.body?.email === "string") {
-      userId = (await pool.query<{ id: string }>(`select id from "user" where lower(email) = lower($1)`, [ctx.body.email])).rows[0]?.id ?? null;
-    }
+    // A reset changes the account its body names, whoever is signed in on this
+    // browser: never fall back to the caller's own session there.
+    const userId = ctx.path === "/email-otp/reset-password"
+      ? (typeof ctx.body?.email === "string"
+        ? (await pool.query<{ id: string }>(`select id from "user" where lower(email) = lower($1)`, [ctx.body.email.trim()])).rows[0]?.id ?? null
+        : null)
+      : ctx.context.session?.user?.id ?? null;
     if (!userId || isAPIError(ctx.context.returned)) return;
     await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [userId]);
+    // Pending second-factor challenges too (their sessions are also bound to the old password).
+    await pool.query(`delete from verification where identifier like '2fa-%' and value = $1`, [userId]);
   });
 
   /**
@@ -641,6 +665,7 @@ export function createMfaPlugins(options: MfaPluginOptions): BetterAuthPlugin[] 
 export const sessionAssuranceFields = {
   mfaVerified: { type: "boolean", required: false, defaultValue: false, input: false },
   authenticatedAt: { type: "date", required: false, input: false },
+  credentialFingerprint: { type: "string", required: false, input: false },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -662,6 +687,9 @@ export async function beginTwoFactorChallengeCookie(authContext: ChallengeAuthCo
   const expiresAt = new Date(Date.now() + maxAge * 1000);
   await authContext.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
   await authContext.internalAdapter.createVerificationValue({ value: "0", identifier: `2fa-attempts-${identifier}`, expiresAt });
+  // Company sign-in is not a password: its challenge's session isn't bound to one.
+  await authContext.internalAdapter.createVerificationValue({ value: NO_PASSWORD, identifier: challengeCredentialIdentifier(identifier),
+    expiresAt: new Date(expiresAt.getTime() + CHALLENGE_CREDENTIAL_GRACE_MS) });
   // Only the server's validated IdP callback supplies this org. Never read it
   // from the MFA request. Keep it separate from the stock plugin's user record.
   if (ssoOrgId) await authContext.internalAdapter.createVerificationValue({

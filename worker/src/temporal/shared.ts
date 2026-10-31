@@ -64,6 +64,44 @@ export interface StageShardInput extends StageInput {
   documentIds: string[];
   shardIndex: number;
   shardCount: number;
+  /**
+   * Page-range shard: only these pages of these documents (each document must also be in
+   * `documentIds`). The stage runs its `runPageRanges` path; absent = whole documents.
+   */
+  pageRanges?: PageRangeSlice[];
+}
+
+/** One contiguous page range of one document, 1-based and inclusive. */
+export interface PageRangeSlice {
+  documentId: string;
+  first: number;
+  last: number;
+}
+
+/** Stages that can run page-range shards (a `runPageRanges` implementation). */
+/**
+ * Stages with a range path. Workflows filter recorded stages through this list, so adding a stage here
+ * changes replay of in-flight runs that recorded it: gate any addition with patched().
+ */
+export const PAGE_RANGE_SHARDABLE_STAGES: readonly string[] = ["render-images"];
+
+/** Recorded in workflow input so replay never depends on later env changes. */
+export interface PageRangeShardingInput {
+  /** Stages that get page-range shards; only PAGE_RANGE_SHARDABLE_STAGES are honoured. */
+  stages: string[];
+  /** Most page-range shards per stage (already capped by the org's worker slots). */
+  maxShards: number;
+}
+
+export interface PageRangeShardPlanInput {
+  runId: string;
+  stageName: string;
+  maxShards: number;
+}
+
+export interface PageRangeShardPlan {
+  /** Each entry is one shard's ranges; empty or one entry = do not shard. */
+  shards: PageRangeSlice[][];
 }
 
 /** Recorded in workflow input so replay never depends on later env changes. */
@@ -153,6 +191,8 @@ export interface PipelineWorkflowInput {
   activityTaskQueue?: string;
   /** Split per-document stages into shards across machines (absent = one activity per stage). */
   documentSharding?: DocumentShardingInput;
+  /** Split long documents into page-range shards for these stages (absent = whole documents only). */
+  pageRangeSharding?: PageRangeShardingInput;
   /** Run adjacent LIGHT_STAGES in one activity (absent = one activity per stage). */
   groupLightStages?: boolean;
   /**
@@ -223,6 +263,10 @@ export interface VisionPageTask {
   pageNumber: number;
   pageCount: number;
   vision: VisionConfig;
+  /** Skip the call when the page's render is blank (pages nominated only by drawn-content bytes). */
+  inkCheck?: boolean;
+  /** The page has usable native or OCR text to keep if vision gives nothing. */
+  fallbackText?: boolean;
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }

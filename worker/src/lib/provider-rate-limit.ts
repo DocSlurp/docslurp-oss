@@ -550,19 +550,34 @@ const scopeStorage = new AsyncLocalStorage<{ orgId: string | null; allowChinaPro
 
 /**
  * Attributes provider calls inside `fn` to an org for the fair-share buckets,
- * and carries the org's China-provider policy to OpenRouter requests.
+ * and carries the run's China-provider policy (org AND workspace) to every
+ * provider request. Only an explicit `allowChinaProviders: true` allows them.
  */
 export function runWithProviderRateScope<T>(scope: { orgId: string | null | undefined; allowChinaProviders?: boolean }, fn: () => Promise<T>): Promise<T> {
-  return scopeStorage.run({ orgId: scope.orgId ?? null, allowChinaProviders: scope.allowChinaProviders !== false }, fn);
+  return scopeStorage.run({ orgId: scope.orgId ?? null, allowChinaProviders: scope.allowChinaProviders === true }, fn);
 }
 
-/** The current job's provider policy; undefined outside a job scope. */
-export function currentProviderPolicy(): { allowChinaProviders: boolean } | undefined {
-  const scope = scopeStorage.getStore();
-  return scope ? { allowChinaProviders: scope.allowChinaProviders } : undefined;
+/**
+ * The provider scope of work done for one workspace outside a run (graph rebuilds): its org, and China-based
+ * providers only when the workspace and its org both allow them. A missing workspace or org is restricted.
+ */
+export async function workspaceProviderScope(
+  sql: (strings: TemplateStringsArray, ...values: unknown[]) => PromiseLike<readonly unknown[]>,
+  workspaceId: string,
+): Promise<{ orgId: string | null; allowChinaProviders: boolean }> {
+  const [row] = await sql`
+    select w.org_id, (w.allow_china_providers and coalesce(o.allow_china_providers, false)) as allow
+    from workspaces w left join organizations o on o.id = w.org_id
+    where w.id = ${workspaceId}` as readonly ({ org_id: string | null; allow: boolean | null } | undefined)[];
+  return { orgId: row?.org_id ?? null, allowChinaProviders: row?.allow === true };
 }
 
-// Worker OpenRouter requests (text, vision, embeddings) read the job's policy.
+/** The current job's provider policy; outside a job scope China-based providers are not allowed (fail closed). */
+export function currentProviderPolicy(): { allowChinaProviders: boolean } {
+  return { allowChinaProviders: scopeStorage.getStore()?.allowChinaProviders === true };
+}
+
+// Worker provider requests (OpenRouter text, vision, embeddings; direct decision endpoints) read the job's policy.
 setOpenRouterProviderPolicyResolver(currentProviderPolicy);
 
 export function currentProviderRateOrg(): string | null {

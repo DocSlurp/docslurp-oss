@@ -8,10 +8,11 @@
  * `[ai-usage]` line) and summed into the returned totals, so a discarded attempt
  * is still billed honestly; the caller logs the single `[ai-usage]` total.
  */
-import { CHINA_PROVIDER_SLUGS, readProviderCharge } from "@docslurp/shared";
+import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
+import type { VisionRequestGate } from "../lib/vision-attempt-guard.js";
 
 export type DegenerateReason = "repeated-pattern" | "low-diversity" | "whitespace-run" | "leader-run";
 export interface DegenerateSignal {
@@ -229,15 +230,14 @@ export class VisionOutputRejectedError extends Error {
     readonly attempts: AttemptSummary[],
     readonly inputTokens: number,
     readonly outputTokens: number,
+    /** Provider-reported charge only (never an estimate), covering `chargedTokens`. */
     readonly costCents: number | undefined,
     readonly degenerate: DegenerateSignal | null = null,
+    readonly chargedTokens?: TokenCounts,
   ) {
     super(message);
     this.name = "VisionOutputRejectedError";
   }
-
-  /** Requested model and usage-ledger provider; set by `runVisionRequest` so callers can record the spend. */
-  route?: { model: string; provider: string };
 }
 
 /** The rejection behind `error` (it may be wrapped as a `cause`), whose summed usage was billed but produced no page. */
@@ -249,20 +249,116 @@ export function findVisionOutputRejected(error: unknown): VisionOutputRejectedEr
   return null;
 }
 
+const acceptedAttemptErrors = new WeakSet<object>();
+/** What an accepted stream delivered before it broke (text so far, usage if a usage chunk arrived). */
+const partialAttempts = new WeakMap<object, VisionAttempt>();
+
+export interface TokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** Provider usage a failed (not rejected) vision call was still billed for. */
+export interface VisionBilledUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /**
+   * Provider-reported charge for `chargedTokens` (all tokens when unset), never an estimate; the caller prices
+   * every other token on the route that served it (lib/vision-pricing.ts `priceVisionServedUsage`).
+   */
+  costCents?: number;
+  chargedTokens?: TokenCounts;
+  /** Token counts came from the provider's usage, or were estimated (prompt estimate, streamed text). */
+  usageSource?: "provider" | "estimated";
+}
+
+const billedUsage = new WeakMap<object, VisionBilledUsage>();
+
+/** Record on `error` the usage a failed vision call was billed for (first annotation wins). */
+export function attachVisionBilledUsage(error: unknown, usage: VisionBilledUsage): void {
+  if (error && typeof error === "object" && !billedUsage.has(error)) billedUsage.set(error, usage);
+}
+
+/** Usage billed for the failed vision call behind `error` (it may be wrapped as a `cause`), or null. */
+export function findVisionBilledUsage(error: unknown): VisionBilledUsage | null {
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (typeof cur === "object" && billedUsage.has(cur)) return billedUsage.get(cur)!;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 export interface AttemptSummary {
   attempt: number;
   provider: string | null;
   model: string | null;
   streamed: boolean;
-  outcome: RetryableOutcome | "ok";
+  /** `stream-failed`: the provider accepted a streaming request that broke before its first chunk. */
+  outcome: RetryableOutcome | "ok" | "stream-failed";
   finishReason: string | null;
   inputTokens: number;
   outputTokens: number;
+  /** Provider-reported charge only. */
   costCents?: number;
   usageSource: "provider" | "estimated";
 }
 
 class StreamStartError extends Error {}
+
+/**
+ * The endpoint refused the streaming request itself (400/404/405/415/422/501) before accepting it: a
+ * capability answer, not a billed failure. Its request is handed back to the vision guard.
+ */
+class StreamUnsupportedError extends StreamStartError {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+const STREAM_UNSUPPORTED_STATUSES: ReadonlySet<number> = new Set([400, 404, 405, 415, 422, 501]);
+/**
+ * Statuses that say the endpoint or method itself is unsupported. 400 and 422 are left out: they
+ * usually describe the request (a bad image, a schema), so they never turn streaming off.
+ */
+const STREAM_MEMO_STATUSES: ReadonlySet<number> = new Set([404, 405, 415, 501]);
+/** Refusals (each followed by a successful non-streaming retry) before streaming is turned off. */
+const STREAM_MEMO_OBSERVATIONS = 2;
+/** How long an endpoint stays non-streaming, and how far apart its two observations may be. */
+const STREAM_MEMO_TTL_MS = 10 * 60_000;
+
+/**
+ * Endpoints (chat completions URL + model) whose streaming request was refused with a capability
+ * status while the same request without streaming then succeeded, twice within the TTL: calls in this
+ * process go straight to non-streaming until the TTL ends. Learned only from that pair, so a refusal
+ * caused by the request itself never turns streaming off, and one stray answer cannot either.
+ */
+const streamingUnsupported = new Map<string, { observations: number; firstAt: number; disabledUntil: number }>();
+
+function streamingKey(args: { url: string; model: string }): string {
+  return `${args.url}\u0000${args.model}`;
+}
+
+function streamingDisabled(key: string, now = Date.now()): boolean {
+  const entry = streamingUnsupported.get(key);
+  return Boolean(entry && entry.disabledUntil > now);
+}
+
+/** Records one refused-then-served pair; true when it turns streaming off for this endpoint. */
+function noteStreamingUnsupported(key: string, status: number, now = Date.now()): boolean {
+  if (!STREAM_MEMO_STATUSES.has(status)) return false;
+  const previous = streamingUnsupported.get(key);
+  const entry = previous && now - previous.firstAt <= STREAM_MEMO_TTL_MS && previous.disabledUntil <= now
+    ? { ...previous, observations: previous.observations + 1 }
+    : { observations: 1, firstAt: now, disabledUntil: 0 };
+  if (entry.observations >= STREAM_MEMO_OBSERVATIONS) entry.disabledUntil = now + STREAM_MEMO_TTL_MS;
+  streamingUnsupported.set(key, entry);
+  return entry.disabledUntil > now;
+}
+
+/** Test hook: forget which endpoints refused streaming. */
+export function resetStreamingSupportForTest(): void {
+  streamingUnsupported.clear();
+}
 
 function chatText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -322,6 +418,8 @@ async function consumeStream(response: Response, abort: () => void): Promise<Vis
   } catch (error) {
     if (attempt.degenerate) return attempt;
     if (!sawChunk && !(error instanceof Error && error.name === "AbortError")) throw new StreamStartError(error instanceof Error ? error.message : String(error));
+    // Interrupted mid-stream: keep what arrived so the usage record counts the streamed output.
+    if (error && typeof error === "object") partialAttempts.set(error, attempt);
     throw error;
   }
   return attempt;
@@ -362,10 +460,17 @@ export interface GuardedCompletionArgs {
   signal?: AbortSignal;
   /** Prompt plus image estimate, used for the rate reservation and for aborted streams without usage. */
   inputTokenEstimate: number;
+  /*
+   * No cost estimate is made here: `costCents` is only a provider-reported charge, and every uncharged token is
+   * priced by the caller on the route that served it, so an estimate can never stand in for a route's price.
+   */
   /** Profile-preferred route for the retry after a refusal or content filter (see `alternateRouteBody`). */
   preferredRetryRoute?: RetryRoute;
-  /** Prices a discarded attempt that has no provider charge (config per-1k rates). */
-  estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
+  /**
+   * The vision attempt guard's admission for every HTTP request this call sends (first try, inline
+   * retries, the streaming fallback, the alternate-route retry); null only outside a run (benchmarks).
+   */
+  gate: VisionRequestGate | null;
 }
 
 export interface GuardedCompletion {
@@ -377,14 +482,30 @@ export interface GuardedCompletion {
   inputTokens: number;
   outputTokens: number;
   usageSource: "provider" | "estimated";
+  /** Provider-reported charge only, covering `chargedTokens`. */
   costCents?: number;
+  chargedTokens?: TokenCounts;
   costMetadata?: Record<string, unknown>;
   attempts: number;
   attemptLog: AttemptSummary[];
   degenerate: DegenerateSignal | null;
 }
 
+/**
+ * The body as sent: on OpenRouter the current organization/workspace provider policy is applied to every
+ * attempt (first try, inline retries, alternate route, streaming fallback), whatever routing built the body.
+ * Throws ProviderRegionRefusedError, before anything is sent, when no allowed provider is left.
+ */
+async function withProviderPolicy(args: GuardedCompletionArgs, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!args.openRouter) return body;
+  const policy = await currentOpenRouterProviderPolicy();
+  if (!policy || policy.allowChinaProviders) return body;
+  const own = body.provider && typeof body.provider === "object" ? body.provider as Record<string, unknown> : undefined;
+  return { ...body, provider: applyOpenRouterProviderPolicy(own, policy) };
+}
+
 async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unknown>, streaming: boolean): Promise<VisionAttempt> {
+  body = await withProviderPolicy(args, body);
   const controller = new AbortController();
   const onCaller = () => controller.abort(args.signal?.reason);
   if (args.signal?.aborted) controller.abort(args.signal.reason);
@@ -402,14 +523,35 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       label: "vision request",
       signal: controller.signal,
       rateLimit: { model: args.model, tokens: args.inputTokenEstimate, onLease: (l) => { lease = l; } },
+      ...(args.gate ? { gate: args.gate } : {}),
     });
     if (!response.ok) {
       const text = await response.text();
-      if (streaming && [400, 404, 405, 415, 422, 501].includes(response.status)) throw new StreamStartError(`${response.status} ${text.slice(0, 200)}`);
+      if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
+        // Refused before acceptance: no page admission, no breaker failure, no org count.
+        await args.gate?.unbilled("unsupported", { provider: args.providerLabel, status: response.status });
+        throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`, response.status);
+      }
+      args.gate?.failed();
       throw new Error(`vision request failed: ${response.status} ${text}`);
     }
     const isSse = streaming && (response.headers.get("content-type") ?? "").includes("text/event-stream");
-    attempt = isSse ? await consumeStream(response, () => controller.abort(new Error("degenerate vision output"))) : await consumeJson(response);
+    try {
+      attempt = isSse ? await consumeStream(response, () => controller.abort(new Error("degenerate vision output"))) : await consumeJson(response);
+    } catch (error) {
+      args.gate?.failed();
+      // The provider accepted the request: it may bill the input even though no usage came back.
+      if (error && typeof error === "object") acceptedAttemptErrors.add(error);
+      const partial = error && typeof error === "object" ? partialAttempts.get(error) ?? null : null;
+      // A stream cut off before its usage chunk: its charge by generation id, when OpenRouter has one.
+      if (partial) await attachGenerationReceipt(args, partial);
+      // A stream cut off after its usage chunk (or with a receipt) reports what it billed.
+      await observeUsage(args, partial);
+      throw error;
+    }
+    // A stream without a usage chunk (a degenerate-output abort included): its charge by generation id.
+    await attachGenerationReceipt(args, attempt);
+    await observeUsage(args, attempt);
     return attempt;
   } finally {
     args.signal?.removeEventListener("abort", onCaller);
@@ -421,15 +563,65 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
   }
 }
 
+/**
+ * An OpenRouter attempt that ended without usage (a stream aborted for degenerate output or cut off before its usage
+ * chunk): look its charge up by generation id (`resolveOpenRouterUsage`, OpenRouter's /generation receipt) and attach
+ * it as the attempt's provider usage, so it is reconciled against the request's weight and recorded as billed. Only
+ * a provider receipt is attached; without one the attempt keeps no usage and is recorded from estimates, labelled
+ * `usage_source=estimated`. Never throws.
+ */
+async function attachGenerationReceipt(args: GuardedCompletionArgs, attempt: VisionAttempt): Promise<void> {
+  if (attempt.usage || !args.openRouter || !attempt.id) return;
+  const apiKey = (args.headers.Authorization ?? args.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  if (!apiKey) return;
+  try {
+    const receipt = await resolveOpenRouterUsage({
+      apiKey, model: args.model, generationId: attempt.id,
+      usage: { inputTokens: args.inputTokenEstimate, outputTokens: estimateTokens(attempt.text) },
+    });
+    if (receipt.metadata?.costSource !== "provider" || receipt.costCents === undefined) {
+      console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} no usage and no receipt; recording estimated usage`);
+      return;
+    }
+    attempt.usage = { prompt_tokens: receipt.inputTokens, completion_tokens: receipt.outputTokens, cost: receipt.costCents / 100, generation_receipt: true };
+  } catch (error) {
+    console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} receipt lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Report a request's provider usage to the gate, which compares it with the weight it was admitted at. */
+async function observeUsage(args: GuardedCompletionArgs, attempt: VisionAttempt | null): Promise<void> {
+  const usage = attempt?.usage;
+  if (!usage || !args.gate?.observed) return;
+  const charge = readProviderCharge(usage);
+  const inputTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
+  const outputTokens = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
+  if (inputTokens + outputTokens === 0 && charge.costCents === undefined) return;
+  try {
+    await args.gate.observed({ inputTokens, outputTokens, ...(charge.costCents !== undefined ? { costCents: charge.costCents } : {}), servedProvider: attempt.provider });
+  } catch (error) {
+    console.warn(`[vision-weight] usage check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: number, outcome: RetryableOutcome | null): AttemptSummary & { charge: ReturnType<typeof readProviderCharge> } {
   const charge = readProviderCharge(attempt.usage);
   const hasUsage = Boolean(attempt.usage);
   const inputTokens = attempt.usage?.prompt_tokens ?? args.inputTokenEstimate;
   const outputTokens = attempt.usage?.completion_tokens ?? estimateTokens(attempt.text);
-  const costCents = charge.costCents ?? (hasUsage ? undefined : args.estimateCostCents?.({ inputTokens, outputTokens }));
+  const costCents = charge.costCents;
   return {
     attempt: index, provider: attempt.provider, model: attempt.model, streamed: attempt.streamed, outcome: outcome ?? "ok",
     finishReason: attempt.finishReason, inputTokens, outputTokens, costCents, usageSource: hasUsage ? "provider" : "estimated", charge,
+  };
+}
+
+/** A streaming request the provider accepted (200) that broke before any chunk: input estimated, no output. */
+function acceptedWithoutOutput(args: GuardedCompletionArgs, index: number): AttemptSummary & { charge: ReturnType<typeof readProviderCharge> } {
+  const inputTokens = args.inputTokenEstimate;
+  return {
+    attempt: index, provider: null, model: null, streamed: true, outcome: "stream-failed", finishReason: null,
+    inputTokens, outputTokens: 0, usageSource: "estimated", charge: readProviderCharge(null),
   };
 }
 
@@ -439,7 +631,7 @@ function logAttempt(s: AttemptSummary, model: string) {
 
 /** One guarded call: stream (with non-streaming fallback), classify, retry once on another route. */
 export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Promise<GuardedCompletion> {
-  let streaming = args.streaming;
+  let streaming = args.streaming && !streamingDisabled(streamingKey(args));
   const log: Array<ReturnType<typeof summarize>> = [];
   let body = args.body;
   let last: VisionAttempt | null = null;
@@ -450,20 +642,59 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     const trail = log.map((s) => `attempt ${s.attempt}: ${s.outcome} via ${s.provider ?? "unknown provider"}`).join("; ");
     return new VisionOutputRejectedError(
       `vision output rejected after ${attempts} attempt${attempts === 1 ? "" : "s"} (${verdict.kind}: ${verdict.detail}); ${trail}`,
-      log.map(stripCharge), totals.inputTokens, totals.outputTokens, totals.costCents, degenerate,
+      log.map(stripCharge), totals.inputTokens, totals.outputTokens, totals.costCents, degenerate, totals.chargedTokens,
     );
   };
 
   for (let index = 1; index <= 2; index++) {
     let attempt: VisionAttempt;
     try {
-      attempt = await runAttempt(args, body, streaming);
+      try {
+        attempt = await runAttempt(args, body, streaming);
+      } catch (error) {
+        if (!(error instanceof StreamStartError)) throw error;
+        // A 200 stream that broke before its first chunk was still accepted (and may be billed): count it.
+        if (acceptedAttemptErrors.has(error)) {
+          const summary = acceptedWithoutOutput(args, index);
+          log.push(summary);
+          logAttempt(summary, args.model);
+        }
+        // Endpoint rejects or fails streaming before the first chunk: one non-streaming retry of the same attempt.
+        console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
+        streaming = false;
+        attempt = await runAttempt(args, body, false);
+        if (error instanceof StreamUnsupportedError && noteStreamingUnsupported(streamingKey(args), error.status)) {
+          console.warn(`[vision-stream] model=${args.model} streaming unsupported by this endpoint (${error.status}); non-streaming for ${STREAM_MEMO_TTL_MS / 60_000} min in this process`);
+        }
+      }
     } catch (error) {
-      if (!(error instanceof StreamStartError)) throw error;
-      // Endpoint rejects or fails streaming before the first chunk: one non-streaming retry of the same attempt.
-      console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
-      streaming = false;
-      attempt = await runAttempt(args, body, false);
+      // Earlier attempts (and an accepted one that broke mid-response) were billed: keep that for the caller.
+      const accepted = error !== null && typeof error === "object" && acceptedAttemptErrors.has(error);
+      const totals = log.length > 0 ? totalsOf(log, args) : null;
+      const partial = accepted ? partialAttempts.get(error as object) ?? null : null;
+      // An interrupted stream counts its streamed output (provider usage when a usage chunk arrived).
+      const estimate = accepted ? {
+        inputTokens: partial?.usage?.prompt_tokens ?? args.inputTokenEstimate,
+        outputTokens: partial?.usage?.completion_tokens ?? estimateTokens(partial?.text ?? ""),
+      } : null;
+      if (totals || estimate) {
+        const inputTokens = (totals?.inputTokens ?? 0) + (estimate?.inputTokens ?? 0);
+        const outputTokens = (totals?.outputTokens ?? 0) + (estimate?.outputTokens ?? 0);
+        // Only provider-reported charges are summed; the caller prices every other token on the served route.
+        const partialCharge = estimate ? readProviderCharge(partial?.usage ?? null).costCents : undefined;
+        const charged = totals?.costCents !== undefined || partialCharge !== undefined;
+        const chargedTokens = {
+          inputTokens: (totals?.chargedTokens?.inputTokens ?? 0) + (partialCharge !== undefined ? estimate!.inputTokens : 0),
+          outputTokens: (totals?.chargedTokens?.outputTokens ?? 0) + (partialCharge !== undefined ? estimate!.outputTokens : 0),
+        };
+        const providerUsage = (!totals || totals.usageSource === "provider") && (!estimate || Boolean(partial?.usage));
+        attachVisionBilledUsage(error, {
+          inputTokens, outputTokens,
+          ...(charged ? { costCents: (totals?.costCents ?? 0) + (partialCharge ?? 0), chargedTokens } : {}),
+          usageSource: providerUsage ? "provider" : "estimated",
+        });
+      }
+      throw error;
     }
     last = attempt;
     degenerate ??= attempt.degenerate;
@@ -472,6 +703,7 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     log.push(summary);
     logAttempt(summary, args.model);
     if (!verdict) break;
+    args.gate?.failed();
     console.warn(`[vision-stream] attempt ${index} rejected: ${verdict.kind} (${verdict.detail}) provider=${attempt.provider ?? "unknown"}`);
     if (index === 2) throw rejected(index, verdict);
     if (args.openRouter) {
@@ -496,7 +728,8 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     model: finalAttempt.model,
     provider: finalAttempt.provider,
     ...totals,
-    attempts: log.length,
+    // Attempts that returned output; a stream broken before its first chunk is only in the log (and usage).
+    attempts: log.filter((s) => s.outcome !== "stream-failed").length,
     attemptLog: log.map(stripCharge),
     /** The signal that triggered a retry (the accepted output itself is never degenerate). */
     degenerate,
@@ -511,10 +744,12 @@ function stripCharge(s: AttemptSummary & { charge?: unknown }): AttemptSummary {
 function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedCompletionArgs) {
   const inputTokens = log.reduce((n, s) => n + s.inputTokens, 0);
   const outputTokens = log.reduce((n, s) => n + s.outputTokens, 0);
-  const anyCharge = log.some((s) => s.charge.costCents !== undefined);
-  // Without any provider charge, leave cost to the caller's per-token pricing of the summed tokens.
-  const costCents = anyCharge || log.length > 1 && log.some((s) => s.costCents !== undefined)
-    ? log.reduce((n, s) => n + (s.charge.costCents ?? s.costCents ?? 0), 0)
+  const charged = log.filter((s) => s.charge.costCents !== undefined);
+  const anyCharge = charged.length > 0;
+  // Provider-reported charges only, with the tokens they cover; the caller prices the rest on the served route.
+  const costCents = anyCharge ? charged.reduce((n, s) => n + s.charge.costCents!, 0) : undefined;
+  const chargedTokens = anyCharge
+    ? { inputTokens: charged.reduce((n, s) => n + s.inputTokens, 0), outputTokens: charged.reduce((n, s) => n + s.outputTokens, 0) }
     : undefined;
   const usageSource: "provider" | "estimated" = log.every((s) => s.usageSource === "provider") ? "provider" : "estimated";
   const costMetadata = anyCharge ? {
@@ -522,6 +757,5 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
     providerCostUsd: log.reduce((n, s) => n + (s.charge.costCents ?? 0), 0) / 100,
     ...(log.length > 1 ? { visionAttempts: log.map(stripCharge) } : log[0]!.charge.metadata),
   } : log.length > 1 ? { visionAttempts: log.map(stripCharge) } : undefined;
-  void args;
-  return { inputTokens, outputTokens, usageSource, costCents, costMetadata };
+  return { inputTokens, outputTokens, usageSource, costCents, ...(chargedTokens ? { chargedTokens } : {}), costMetadata };
 }

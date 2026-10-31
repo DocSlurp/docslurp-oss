@@ -27,6 +27,11 @@ import type { MaterializePagesInput } from "@docslurp/shared";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
 import type { MaterializeResult } from "./materialize-ranges.js";
 import type { Stage } from "../pipeline/pipeline.js";
+import { planRunPageRanges } from "../pipeline/page-range-plan.js";
+import { createShardCalibration } from "../pipeline/shard-calibration.js";
+import { SHARD_PROFILES, type ShardProfileKey } from "./page-shard-profiles.js";
+import { PAGE_RANGE_SHARDABLE_STAGES } from "./shared.js";
+import { pageRangeExecutorIsolated } from "../pipeline/page-ranges.js";
 import {
   createStageExecution,
   loadRunState,
@@ -42,6 +47,7 @@ import { workerShutdownState } from "../lib/worker-lifecycle.js";
 import {
   classifyActivityError,
   hungWorkFailure,
+  teardownFailure,
   interruptionFailure,
   type ActivityErrorClass,
 } from "./failure-classification.js";
@@ -57,6 +63,8 @@ import type {
   StageInput,
   StageShardInput,
   StageOutput,
+  PageRangeShardPlan,
+  PageRangeShardPlanInput,
   InitRunInput,
   InitRunOutput,
   CompleteRunInput,
@@ -122,6 +130,8 @@ export function toStageActivityFailure(
       return error;
     case "hung":
       return hungWorkFailure(error);
+    case "teardown":
+      return teardownFailure(error);
     case "throttled":
       return toActivityFailure(error);
     case "ordinary":
@@ -176,6 +186,7 @@ export async function withWorkerSlot<T>(
 
 export function createActivities(deps: ActivityDependencies) {
   const { store } = deps;
+  const shardCalibration = createShardCalibration(store);
   const stageMap = new Map(deps.stages.map((s) => [s.name, s]));
   const execution = createStageExecution(deps);
   const slotsEnabled = resolveWorkerSlotOptions().enabled;
@@ -260,6 +271,7 @@ export function createActivities(deps: ActivityDependencies) {
         const classification = classifyActivityError(error, { signal: Context.current().cancellationSignal });
         if (classification === "interruption") throw interruptionFailure(error);
         if (classification === "hung") throw hungWorkFailure(error);
+        if (classification === "teardown") throw teardownFailure(error);
         throw toActivityFailure(error);
       }
     },
@@ -380,6 +392,29 @@ export function createActivities(deps: ActivityDependencies) {
     },
 
     /**
+     * Page-range shards for one stage: long PDFs split by the calibrated cost model. Planned in an
+     * activity so the workflow only replays the recorded result. Unsupported stages, documents
+     * the stage already completed and runs that render nothing get no shards.
+     */
+    async planPageRangeShards(input: PageRangeShardPlanInput): Promise<PageRangeShardPlan> {
+      if (!PAGE_RANGE_SHARDABLE_STAGES.includes(input.stageName)) return { shards: [] };
+      if (!pageRangeExecutorIsolated(input.stageName)) return { shards: [] };
+      const key = `${input.stageName}:fly-shared-slot` as ShardProfileKey;
+      const prior = SHARD_PROFILES[key];
+      if (!prior) return { shards: [] };
+      const state = await loadRunState(store, input.runId, { hydrate: false });
+      const pipeline = state.run.pipeline;
+      if (input.stageName === "render-images" && !(pipeline.preserveImages || pipeline.visionFallback)) return { shards: [] };
+      const profile = await shardCalibration.profile(key);
+      return planRunPageRanges({
+        documents: state.documents.map((document) => ({ id: document.id, pageCount: document.pageCount, mimeType: document.mimeType,
+          completed: state.documentStages.get(document.id)?.get(input.stageName)?.status === "completed" })),
+        profile,
+        maxShards: input.maxShards,
+      });
+    },
+
+    /**
      * One document shard of a stage. Returns usage only: artifacts and
      * checkpoints go to the database, and the unsharded stage activity that
      * follows completes the stage.
@@ -395,12 +430,14 @@ export function createActivities(deps: ActivityDependencies) {
             attempt: context.info.attempt,
             classifyError: classify,
             documentIds: input.documentIds,
+            ...(input.pageRanges ? { pageRanges: input.pageRanges, shardIndex: input.shardIndex, shardCount: input.shardCount } : {}),
           }));
         return output.usage;
       } catch (error) {
         const classification = classify(error);
         if (classification === "interruption") throw interruptionFailure(error);
         if (classification === "hung") throw hungWorkFailure(error);
+        if (classification === "teardown") throw teardownFailure(error);
         throw toActivityFailure(error);
       }
     },
@@ -471,7 +508,7 @@ export function createActivities(deps: ActivityDependencies) {
       };
       console.log(`[page-task] run=${task.runId} document=${task.documentId} page=${task.pageNumber} worker=${workerId} started`);
       try {
-        const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.orgAllowChinaProviders },
+        const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders },
           () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId: task.runId, documentId: task.documentId },
             () => stage.runPageTask(state, task, controller.signal)));
         recordPageCompute();

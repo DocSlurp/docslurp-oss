@@ -393,8 +393,8 @@ test("public API error messages hide provider billing and proxy details while re
   await assert.rejects(sdk.getRun("run"), error => {
     assert.equal(error.status, 402);
     assert.deepEqual(error.body, raw);
-    assert.match(error.message, /temporarily unavailable/);
-    assert.doesNotMatch(error.message, /OpenRouter|credits|postgres/);
+    assert.match(error.message, /needs credits/);
+    assert.doesNotMatch(error.message, /OpenRouter|postgres|private-host/);
     return true;
   });
   const malformed = client(async () => new Response("<html>private gateway</html>", { status: 400, headers: { "content-type": "application/json" } }));
@@ -415,4 +415,19 @@ test("server runtimes label requests with the X-DocSlurp-Client analytics tag", 
   await sdk.listWorkspaces().catch(() => {});
   assert.equal(seen.get("x-docslurp-client"), "sdk");
   assert.equal(seen.get("authorization"), "Bearer key");
+});
+
+test("upload and uploadUrls send the processing quality as pipeline.quality", async () => {
+  const sent = [];
+  const sdk = client(async (url, init) => {
+    if (String(url).endsWith("/url")) sent.push(JSON.parse(init.body).pipeline);
+    else if (init.body instanceof FormData) sent.push(JSON.parse(init.body.get("pipeline")));
+    return json({ run: { id: "run", status: "queued" }, documents: [], workspace: { id: "w", name: "W" } });
+  });
+  await sdk.upload({ files: [new File(["text"], "note.txt")], quality: "fast" }, { directUpload: false });
+  await sdk.uploadUrls({ urls: ["https://example.test/a.pdf"], quality: "good" });
+  assert.deepEqual(sent, [{ quality: "fast" }, { quality: "good" }]);
+  // Without quality the workspace setting applies: no pipeline field is sent.
+  await sdk.uploadUrls({ urls: ["https://example.test/b.pdf"] });
+  assert.equal(sent[2], undefined);
 });

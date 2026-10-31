@@ -95,7 +95,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     const state = {
       artifactLedger: DocumentArtifactLedger.create({ "doc-1:classification": "s3://bucket/classification.json" }),
       pendingPerformance: [],
-      run: { pipeline: { vision: { forceAllPages: false, maxPagesPerDocument } } },
+      run: { pipeline: { quality: "auto", vision: {} } },
     } as unknown as WorkflowState;
     const decision = await (stage as unknown as {
       checkNeedsVision(document: Document, pageCount: number, state: WorkflowState): Promise<{ needed: boolean; selectedPages: number[]; reason: string }>;

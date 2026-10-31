@@ -1,3 +1,5 @@
+import { getSensitiveAccessStatus } from "../lib/auth-sensitive-access.js";
+import { requireSensitiveSession } from "../lib/require-sensitive-session.js";
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
@@ -38,7 +40,7 @@ export const accountRoutes = new Hono()
   .get("/security", async (c) => {
     const actor = getRequestActor(c);
     if (actor.type !== "session") return apiStatusError(c, 403, "Account management requires a signed-in session", { code: "session_required" });
-    const [{ rows: [account] }, { rows: passkeys }, { rows: [session] }] = await Promise.all([
+    const [{ rows: [account] }, { rows: passkeys }, { rows: [session] }, sensitiveAccess] = await Promise.all([
       appDbPool.query<{ two_factor_enabled: boolean; has_password: boolean; pending_totp: boolean }>(
         `select u."twoFactorEnabled" as two_factor_enabled,
                 exists (select 1 from account a where a."userId" = u.id and a."providerId" = 'credential' and a.password is not null) as has_password,
@@ -48,12 +50,13 @@ export const accountRoutes = new Hono()
         `select id, name, aaguid, "deviceType" as device_type, "backedUp" as backed_up, "createdAt" as created_at, "lastUsedAt" as last_used_at
            from passkey where "userId" = $1 order by "createdAt" desc nulls last`, [actor.userId]),
       appDbPool.query<{ mfa_verified: boolean; authenticated_at: Date | null; created_at: Date }>(
-        `select "mfaVerified" as mfa_verified, "authenticatedAt" as authenticated_at, "createdAt" as created_at from session where id = $1 and "userId" = $2`,
+        `select "mfaVerified" as mfa_verified, "authenticatedAt" as authenticated_at, "createdAt" as created_at
+           from session where id = $1 and "userId" = $2`,
         [actor.sessionId, actor.userId]),
+      getSensitiveAccessStatus(appDbPool, actor.userId, actor.sessionId),
     ]);
     const mfaVerified = session?.mfa_verified === true;
     const authenticatedAt = session ? (session.authenticated_at ?? session.created_at) : null;
-    const reauthUntil = authenticatedAt ? new Date(new Date(authenticatedAt).getTime() + mfaConfig.reauthMaxAgeSeconds * 1000) : null;
     return c.json({
       twoFactor: { enabled: account?.two_factor_enabled === true, pendingSetup: account?.pending_totp === true },
       hasPassword: account?.has_password === true,
@@ -69,16 +72,16 @@ export const accountRoutes = new Hono()
       session: {
         mfaVerified,
         authenticatedAt: authenticatedAt ? new Date(authenticatedAt).toISOString() : null,
-        /** Removing a factor needs a sign-in no older than this. */
-        reauthUntil: reauthUntil?.toISOString() ?? null,
+        /** Expiry of this session’s explicit sensitive-access proof, never sign-in freshness. */
+        reauthUntil: sensitiveAccess.verifiedUntil,
       },
       policy: await evaluateMfaPolicy(appDbPool, actor.userId, mfaVerified),
-      settings: { trustDeviceDays: Math.round(mfaConfig.trustDeviceMaxAgeSeconds / 86_400), reauthWindowSeconds: mfaConfig.reauthMaxAgeSeconds, rpID: mfaConfig.rpID },
+      settings: { trustDeviceDays: Math.round(mfaConfig.trustDeviceMaxAgeSeconds / 86_400), reauthWindowSeconds: sensitiveAccess.windowSeconds, rpID: mfaConfig.rpID },
     });
   })
   /** What deleting the account would do: orgs deleted, orgs left, and blockers. */
   .get("/deletion", async (c) => c.json(await planAccountDeletion(getRequestActor(c).userId)))
-  .delete("/", zValidator("json", deleteAccountSchema, validationHook), async (c) => {
+  .delete("/", requireSensitiveSession, zValidator("json", deleteAccountSchema, validationHook), async (c) => {
     const userId = getRequestActor(c).userId;
     const result = await deleteAccount({ userId, confirmation: c.req.valid("json").confirmation });
     const response = c.json({ ok: true, ...result });

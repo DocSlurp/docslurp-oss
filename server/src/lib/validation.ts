@@ -1,3 +1,4 @@
+import { publicValidationIssue } from "@docslurp/shared";
 import type { Context } from "hono";
 
 import { apiErrorResponse } from "./api-error.js";
@@ -6,6 +7,7 @@ export type ValidationIssue = {
   path: string;
   message: string;
   code: string;
+  [key: string]: unknown;
 };
 
 export type ValidationErrorSource = {
@@ -13,18 +15,20 @@ export type ValidationErrorSource = {
     path: PropertyKey[];
     message: string;
     code: string;
+    expected?: unknown;
+    minimum?: unknown;
+    maximum?: unknown;
+    inclusive?: unknown;
+    origin?: unknown;
+    format?: unknown;
   }>;
 };
 
 export function mapValidationIssues(error: ValidationErrorSource): ValidationIssue[] {
-  return error.issues.map((issue) => ({
-    path: issue.path.map(String).join("."),
-    message: issue.message,
-    code: issue.code
-  }));
+  return error.issues.map((issue) => publicValidationIssue(issue) as ValidationIssue);
 }
 
-/** Field-level validation failure in the native error envelope; only the field paths reach clients. */
+/** Field-level validation failure in the native error envelope; only reviewed paths and constraints reach clients. */
 export function validationErrorResponse(c: Context, error: ValidationErrorSource, message: string, status: 400 | 422 = 422): Response {
   return apiErrorResponse(c, status, "invalid_request", message, { issues: mapValidationIssues(error) });
 }

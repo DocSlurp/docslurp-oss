@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { inflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +35,9 @@ interface FakeDb {
     nonce: string | null;
     redirect_path: string | null;
     link_user_id: string | null;
+    sensitive_user_id?: string | null;
+    sensitive_session_id?: string | null;
+    created_at?: string;
     expires_at: string;
     consumed_at: string | null;
   }>;
@@ -120,10 +124,13 @@ function runFakeSql(strings: TemplateStringsArray, ...values: any[]): any[] {
     }
     return [];
   }
+  if (q.startsWith("select state from sso_auth_requests")) {
+    return db.requests.filter(row => row.state === v[0] && row.org_id === v[1] && row.provider === "saml").map(row => ({ state: row.state }));
+  }
   if (q.startsWith("insert into sso_auth_requests")) {
     db.requests.push({
       state: v[0], org_id: v[1], provider: v[2], code_verifier: v[3], nonce: v[4], redirect_path: v[5],
-      link_user_id: v[6], expires_at: now, consumed_at: null
+      link_user_id: v[6], sensitive_user_id: v[7], sensitive_session_id: v[8], created_at: now, expires_at: new Date(Date.now() + 600_000).toISOString(), consumed_at: null
     });
     return [];
   }
@@ -158,7 +165,17 @@ vi.mock("../lib/network-security.js", () => ({
   UnsafeExternalUrlError: FakeUnsafeExternalUrlError
 }));
 
+const sensitiveStatusMock = vi.fn(async (): Promise<{ requiresMfa: boolean; enrollmentOnly?: boolean }> => ({ requiresMfa: false }));
+const sensitiveGrantMock = vi.fn(async () => true);
+const sensitiveFirstFactorMock = vi.fn(async () => true);
+const hasSensitiveMock = vi.fn(async () => true);
+const sessionActorMock = vi.fn(async () => ({ type: "session", userId: "admin-1", sessionId: "session-original", user: { id: "admin-1", email: "admin@acme.com" } }));
+vi.mock("../lib/auth-sensitive-access.js", () => ({ getSensitiveAccessStatus: sensitiveStatusMock, grantSensitiveAccess: sensitiveGrantMock, recordSensitiveFirstFactorProof: sensitiveFirstFactorMock, hasSensitiveAccess: hasSensitiveMock }));
+vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: sessionActorMock, getRequestActor: () => ({ type: "session", userId: "admin-1", sessionId: "session-original" }) }));
+const sensitiveOptionsQuery = vi.fn(async (_query: string, values: unknown[]) => ({ rows: db.links.filter(link => link.user_id === values[0] && link.email === values[2]).map(link => ({ org_id: link.org_id, provider: link.provider })) }));
+
 vi.mock("../lib/auth.js", () => ({
+  appDbPool: { query: sensitiveOptionsQuery },
   auth: {
     $context: Promise.resolve({
       secret: "test-secret",
@@ -183,8 +200,9 @@ vi.mock("../lib/auth.js", () => ({
   }
 }));
 
-const { inferApiOrigin, resetSsoRateLimitBucketsForTests, samlCallbackRoutes, ssoRoutes } =
+const { inferApiOrigin, setSsoRateLimitStoreForTests, samlCallbackRoutes, ssoRoutes } =
   await import("../routes/sso.js");
+const { createMemoryAuthBudgetStore } = await import("../lib/auth-rate-limits.js");
 const { setTxtResolverForTests, validateClaimableDomain } = await import("../services/sso-domains.js");
 
 const issuer = "https://idp.acme.com";
@@ -271,11 +289,16 @@ beforeEach(() => {
   resetDb();
   sqlMock.mockClear();
   createSessionMock.mockClear();
+  sensitiveGrantMock.mockReset().mockResolvedValue(true);
+  sensitiveFirstFactorMock.mockReset().mockResolvedValue(true);
+  sensitiveStatusMock.mockReset().mockResolvedValue({ requiresMfa: false });
+  hasSensitiveMock.mockReset().mockResolvedValue(true);
+  sessionActorMock.mockReset().mockResolvedValue({ type: "session", userId: "admin-1", sessionId: "session-original", user: { id: "admin-1", email: "admin@acme.com" } });
   assertSafeExternalUrlMock.mockClear();
   safeExternalFetchMock.mockClear();
   vi.stubGlobal("fetch", vi.fn());
   setTxtResolverForTests(null);
-  resetSsoRateLimitBucketsForTests();
+  setSsoRateLimitStoreForTests(createMemoryAuthBudgetStore());
   delete process.env.PUBLIC_API_URL;
   delete process.env.API_URL;
   delete process.env.APP_URL;
@@ -438,10 +461,19 @@ describe("ssoRoutes security hardening", () => {
     expect(await test()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
   });
 
+  it("refuses SSO requests when the shared limiter can't count", async () => {
+    setSsoRateLimitStoreForTests({ consume: async () => { throw new Error("database unavailable"); }, release: async () => undefined });
+    const app = new Hono().route("/v1/auth", samlCallbackRoutes);
+    const response = await app.request("/v1/auth/oidc/missing/init", { headers: { "User-Agent": "limiter-down" } });
+    expect(response.status).toBe(500);
+    expect(response.headers.get("location")).toBeNull();
+  });
+
   it("rate limits repeated SSO auth endpoint requests", async () => {
     process.env.SSO_RATE_LIMIT_MAX = "2";
     vi.resetModules();
     const fresh = await import("../routes/sso.js");
+    fresh.setSsoRateLimitStoreForTests((await import("../lib/auth-rate-limits.js")).createMemoryAuthBudgetStore());
     const app = new Hono().route("/v1/auth", fresh.samlCallbackRoutes);
     process.env.SSO_RATE_LIMIT_MAX = "1000";
 
@@ -759,5 +791,107 @@ describe("SSO callback account binding", () => {
 
     expect(response.status).toBe(400);
     expect(createSessionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("fresh sensitive company verification", () => {
+  function seedSensitive(state = "sensitive-request") {
+    seedOrg(oidcConfig); verifiedDomain("org-1");
+    db.links.push({ org_id: "org-1", user_id: "admin-1", provider: "oidc", issuer, subject: "idp-admin", email: "admin@acme.com", created_at: "", last_used_at: null });
+    seedRequest(state);
+    Object.assign(db.requests.at(-1)!, { sensitive_user_id: "admin-1", sensitive_session_id: "session-original", created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 600_000).toISOString() });
+  }
+  it("starts a session-bound fresh authentication request with no account or return URL supplied by the client", async () => {
+    seedSensitive(); await stubIdp(() => ({}));
+    const response = await buildApp().request("/v1/auth/sensitive-sso/start", { method: "POST", headers: { Origin: "http://localhost:4321", "Content-Type": "application/json" }, body: JSON.stringify({ userId: "victim", redirect: "https://evil.test" }) });
+    expect(response.status).toBe(200);
+    const url = new URL((await response.json() as { authorizeUrl: string }).authorizeUrl);
+    expect(url.searchParams.get("prompt")).toBe("login"); expect(url.searchParams.get("max_age")).toBe("0");
+    expect(db.requests.at(-1)).toMatchObject({ sensitive_user_id: "admin-1", sensitive_session_id: "session-original", link_user_id: null, redirect_path: "/auth/sensitive-sso-complete" });
+  });
+  it("lets a policy-blocked unenrolled session start fresh SSO proof without granting general sensitive access", async () => {
+    seedSensitive();
+    sessionActorMock.mockImplementation(async (...args: unknown[]) => {
+      expect(args[1]).toEqual({ allowMfaPolicyBlocked: true });
+      return { type: "session", userId: "admin-1", sessionId: "session-original", user: { id: "admin-1", email: "admin@acme.com" }, mfaPolicyBlocked: true };
+    });
+    sensitiveStatusMock.mockResolvedValue({ requiresMfa: true, enrollmentOnly: true });
+    hasSensitiveMock.mockResolvedValue(false);
+    await stubIdp(() => ({ sub: "idp-admin", email: "admin@acme.com", nonce: db.requests.at(-1)!.nonce, auth_time: Math.floor(Date.now() / 1000) }));
+    const app = buildApp();
+    const start = await app.request("/v1/auth/sensitive-sso/start", { method: "POST", headers: { Origin: "http://localhost:4321", "Content-Type": "application/json" }, body: "{}" });
+    expect(start.status).toBe(200);
+    expect(sensitiveGrantMock).not.toHaveBeenCalled();
+    const state = db.requests.at(-1)!.state;
+    const callback = await app.request(`/v1/auth/oidc/org-1/callback?state=${state}&code=c`, { headers: ssoCookie(state) });
+    expect(callback.status).toBe(302);
+    expect(sensitiveFirstFactorMock).toHaveBeenCalledWith(expect.anything(), "admin-1", "session-original", { ssoVerified: true });
+    expect(sensitiveGrantMock).not.toHaveBeenCalled();
+    expect(createSessionMock).not.toHaveBeenCalled();
+    const sensitiveMutation = await app.request("/v1/organizations/org-1/sso/link", { method: "DELETE" });
+    expect(sensitiveMutation.status).toBe(403);
+    expect(await sensitiveMutation.json()).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+  });
+
+  it("requests fresh SAML authentication explicitly with ForceAuthn", async () => {
+    seedSensitive();
+    db.orgs[0]!.sso_config = { enabled: true, providerType: "saml", metadataUrl: "https://idp.acme.com/saml/metadata", emailDomain: "acme.com" };
+    db.links[0]!.provider = "saml";
+    vi.mocked(fetch).mockResolvedValue(new Response(`<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="urn:company"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><KeyDescriptor use="signing"><KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><X509Data><X509Certificate>MIIFAKE</X509Certificate></X509Data></KeyInfo></KeyDescriptor><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.acme.com/saml/login"/></IDPSSODescriptor></EntityDescriptor>`));
+    const response = await buildApp().request("/v1/auth/sensitive-sso/start", { method: "POST", headers: { Origin: "http://localhost:4321", "Content-Type": "application/json" }, body: "{}" });
+    expect(response.status).toBe(200);
+    const url = new URL((await response.json() as { authorizeUrl: string }).authorizeUrl);
+    const request = inflateRawSync(Buffer.from(url.searchParams.get("SAMLRequest")!, "base64")).toString();
+    expect(request).toContain('ForceAuthn="true"');
+    expect(request).toContain(`ID="${db.requests.at(-1)!.state}"`);
+  });
+
+  it("rejects malicious start origins before creating a state request", async () => {
+    seedSensitive(); const count = db.requests.length;
+    const response = await buildApp().request("/v1/auth/sensitive-sso/start", { method: "POST", headers: { Origin: "https://evil.test", "Content-Type": "application/json" }, body: "{}" });
+    expect(response.status).toBe(403); expect(db.requests).toHaveLength(count);
+  });
+  it.each([undefined, Math.floor(Date.now() / 1000) - 3600])("refuses signed but nonfresh OIDC proof auth_time=%s", async auth_time => {
+    seedSensitive(); await stubIdp(() => ({ sub: "idp-admin", email: "admin@acme.com", nonce: "nonce-sensitive-request", ...(auth_time !== undefined ? { auth_time } : {}) }));
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=sensitive-request&code=c", { headers: ssoCookie("sensitive-request") });
+    expect(response.status).toBe(403); expect(sensitiveGrantMock).not.toHaveBeenCalled(); expect(createSessionMock).not.toHaveBeenCalled();
+  });
+  it("grants only the existing session after fresh exact-linked proof and rejects replay", async () => {
+    seedSensitive(); await stubIdp(() => ({ sub: "idp-admin", email: "admin@acme.com", nonce: "nonce-sensitive-request", auth_time: Math.floor(Date.now() / 1000) }));
+    const app = buildApp(); const callback = "/v1/auth/oidc/org-1/callback?state=sensitive-request&code=c";
+    const response = await app.request(callback, { headers: ssoCookie("sensitive-request") });
+    expect(response.status).toBe(302); expect(response.headers.get("location")).toBe("http://localhost:4321/auth/sensitive-sso-complete");
+    expect(sensitiveGrantMock).toHaveBeenCalledWith(expect.anything(), "admin-1", "session-original", { ssoVerified: true }); expect(createSessionMock).not.toHaveBeenCalled();
+    expect(response.headers.get("set-cookie") ?? "").not.toContain("better-auth.session_token=");
+    const replay = await app.request(callback, { headers: ssoCookie("sensitive-request") }); expect(replay.status).toBe(400); expect(sensitiveGrantMock).toHaveBeenCalledTimes(1);
+  });
+  it("does not replace local MFA with an IdP first factor", async () => {
+    seedSensitive(); sensitiveStatusMock.mockResolvedValue({ requiresMfa: true });
+    await stubIdp(() => ({ sub: "idp-admin", email: "admin@acme.com", nonce: "nonce-sensitive-request", auth_time: Math.floor(Date.now() / 1000) }));
+    expect((await buildApp().request("/v1/auth/oidc/org-1/callback?state=sensitive-request&code=c", { headers: ssoCookie("sensitive-request") })).status).toBe(302);
+    expect(sensitiveFirstFactorMock).toHaveBeenCalledWith(expect.anything(), "admin-1", "session-original", { ssoVerified: true }); expect(sensitiveGrantMock).not.toHaveBeenCalled();
+  });
+  it("rejects another subject even with the same email", async () => {
+    seedSensitive(); await stubIdp(() => ({ sub: "other-idp-subject", email: "admin@acme.com", nonce: "nonce-sensitive-request", auth_time: Math.floor(Date.now() / 1000) }));
+    expect((await buildApp().request("/v1/auth/oidc/org-1/callback?state=sensitive-request&code=c", { headers: ssoCookie("sensitive-request") })).status).toBe(403);
+    expect(sensitiveGrantMock).not.toHaveBeenCalled();
+  });
+  it("refuses a proof bound to a different user even when the subject is correctly linked", async () => {
+    seedSensitive(); db.requests.at(-1)!.sensitive_user_id = "victim-1";
+    await stubIdp(() => ({ sub: "idp-admin", email: "admin@acme.com", nonce: "nonce-sensitive-request", auth_time: Math.floor(Date.now() / 1000) }));
+    expect((await buildApp().request("/v1/auth/oidc/org-1/callback?state=sensitive-request&code=c", { headers: ssoCookie("sensitive-request") })).status).toBe(403);
+    expect(sensitiveGrantMock).not.toHaveBeenCalled();
+  });
+
+  it("does not grant after the original session is revoked during the IdP round trip", async () => {
+    seedSensitive(); sensitiveGrantMock.mockResolvedValue(false);
+    await stubIdp(() => ({ sub: "idp-admin", email: "admin@acme.com", nonce: "nonce-sensitive-request", auth_time: Math.floor(Date.now() / 1000) }));
+    expect((await buildApp().request("/v1/auth/oidc/org-1/callback?state=sensitive-request&code=c", { headers: ssoCookie("sensitive-request") })).status).toBe(403);
+    expect(createSessionMock).not.toHaveBeenCalled();
+  });
+  it.each(["POST", "DELETE"])("requires recent sensitive proof for SSO identity %s", async method => {
+    seedSensitive(); hasSensitiveMock.mockResolvedValue(false);
+    const response = await buildApp().request("/v1/organizations/org-1/sso/link", { method, headers: { "Content-Type": "application/json" }, body: method === "POST" ? "{}" : undefined });
+    expect(response.status).toBe(403); expect(await response.json()).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
   });
 });

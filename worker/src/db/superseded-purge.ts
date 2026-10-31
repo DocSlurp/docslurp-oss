@@ -15,6 +15,7 @@ import { lockWorkspaceGraph, refreshGraphElements } from "../graph/graph-store.j
 import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
+import { deleteLanceDbRecords } from "../stages/lancedb-writer.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
@@ -100,6 +101,8 @@ export interface SupersededPurgeOptions {
   lancedbRoot: string;
   deleteVectorRows?: DeleteVectorRows;
   dropVectorTable?: DropVectorTable;
+  /** Deletes LanceDB rows by id (`vector_rows` queue entries). Defaults to deleteLanceDbRecords. */
+  deleteVectorIds?: (args: { uri: string; table: string; ids: string[] }) => Promise<void>;
   /** Cleanup-queue rows claimed per batch; vector and storage work is grouped per batch. */
   cleanupBatchSize?: number;
 }
@@ -1017,12 +1020,40 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original";
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
   artifact_uris: string[];
 };
+
+/** A deferred-materialization vector id of one document: `${documentId}:p<page>:g<generation>:c<index>`. */
+const DEFERRED_VECTOR_ID = /^([A-Za-z0-9_-]+):p[0-9]{1,9}(?::g[0-9a-f]{1,32})?:c[0-9]{1,9}$/;
+
+/**
+ * `vector_rows` (materialize-pages.ts queueOrphanVectors): vector ids of one document whose delete failed or whose
+ * publication's COMMIT outcome was unknown. Deletes, in the queuing workspace's own LanceDB table, only well-formed
+ * deferred ids of that document that no document_chunks row names: a commit that landed keeps its vectors.
+ */
+async function deleteOrphanVectorRows(client: Sql<Record<string, unknown>>, options: SupersededPurgeOptions, row: StorageCleanupRow) {
+  const payload = row.payload as { documentId?: unknown; embeddingModel?: unknown; dimension?: unknown; ids?: unknown };
+  const documentId = typeof payload.documentId === "string" ? payload.documentId : "";
+  const ids = Array.isArray(payload.ids) ? payload.ids : [];
+  if (!SAFE_DOCUMENT_ID.test(documentId) || typeof payload.embeddingModel !== "string" || typeof payload.dimension !== "number"
+    || ids.some((id) => typeof id !== "string" || DEFERRED_VECTOR_ID.exec(id)?.[1] !== documentId)) {
+    throw new Error(`Refusing malformed vector_rows entry: ${row.target}`);
+  }
+  const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), {
+    backend: "lancedb", embeddingModel: payload.embeddingModel, dimension: payload.dimension,
+  } as VectorTarget);
+  if (!location) throw new Error(`Unresolvable vector table: ${row.target}`);
+  const live = new Set((await client<{ id: string }[]>`
+    select id from document_chunks where document_id = ${documentId} and id = any(${ids as string[]}::text[])
+  `).map((r) => r.id));
+  const orphans = (ids as string[]).filter((id) => !live.has(id));
+  const deleteIds = options.deleteVectorIds ?? (({ uri, table, ids: rows }) => deleteLanceDbRecords(uri, table, rows));
+  if (orphans.length > 0) await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
+}
 
 /** `<userId>/<runId>/`: two safe segments, never a bucket root or a whole user. */
 const SAFE_RUN_PREFIX = /^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_-]+\/$/;
@@ -1053,7 +1084,7 @@ export async function drainStorageCleanupQueue(
         const txStorage = forgettingEmbeddingReuseRefs(client, storage);
         const [row] = await client<StorageCleanupRow[]>`
           select id::text, kind, org_id, target, payload, artifact_uris from storage_cleanup_queue
-          where attempts < 10 and not_before <= now()
+          where (attempts < 10 or kind = 'upload_original') and not_before <= now()
             and id::text <> all(${client.array(failedIds)}::text[])
           order by created_at, id
           limit 1
@@ -1061,7 +1092,29 @@ export async function drainStorageCleanupQueue(
         `;
         if (!row) return;
         claimed = row;
-        if (row.kind === "storage_prefix") {
+        if (row.kind === "upload_original") {
+          const sealed = row.payload.sealedKey;
+          const directory = row.target.slice(0, row.target.lastIndexOf("/") + 1);
+          if (!directory.endsWith("/raw/") || typeof sealed !== "string" ||
+              !sealed.startsWith(`${directory}sealed-`) || sealed === row.target ||
+              row.target.endsWith("/") || row.target.includes("..")) {
+            throw new Error("Refusing invalid original-upload cleanup target");
+          }
+          // Independent durable ownership cannot be changed by a malformed cleanup queue row.
+          const [owner] = await client`select 1 from upload_cleanup_owners
+            where original_key = ${row.target} and sealed_key = ${sealed} and org_id = ${row.org_id}`;
+          if (!row.org_id || !owner) throw new Error("Original upload ownership cannot be verified");
+          // Never delete a source still referenced by a document or an unfinished finalization.
+          const [reference] = await client`select 1 from documents where source_key = ${row.target}
+            union all select 1 from upload_session_files where source_key = ${row.target} limit 1`;
+          if (reference) throw new Error("Original upload is still referenced");
+          await txStorage.deleteKeys([row.target]);
+          // Keep a tombstone: a PUT started before authorization expired may finish later.
+          await client`update storage_cleanup_queue set attempts = 0, last_error = null,
+            not_before = now() + interval '1 day' where id = ${row.id}`;
+          result.purged += 1;
+          return;
+        } else if (row.kind === "storage_prefix") {
           if (!SAFE_RUN_PREFIX.test(row.target)) throw new Error(`Refusing unsafe storage prefix: ${row.target}`);
           // Direct-upload recovery deliberately reuses the session ID as its
           // run ID. An old cleanup record must not remove the recovered run's
@@ -1096,6 +1149,8 @@ export async function drainStorageCleanupQueue(
           }
         } else if (row.kind === "vector_prefix") {
           await purgeWorkspaceVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload));
+        } else if (row.kind === "vector_rows") {
+          await deleteOrphanVectorRows(client, options, row);
         } else {
           // Queued before workspaces had their own databases (migration 0082 marks them):
           // a deleted org's org-level tables, dropped with their legacy names.
@@ -1123,9 +1178,14 @@ export async function drainStorageCleanupQueue(
         failedIds.push(row.id);
         await sql`
           update storage_cleanup_queue
-          set attempts = attempts + 1, last_error = ${message.slice(0, 2000)}
+          set attempts = attempts + 1, last_error = ${message.slice(0, 2000)},
+            not_before = case when kind = 'upload_original' and ${message === 'Original upload ownership cannot be verified'} then 'infinity'::timestamptz
+              when kind = 'upload_original' then now() + interval '1 hour' else not_before end
           where id = ${row.id}
         `.catch(() => {});
+      }
+      if (row?.kind === "upload_original" && message === "Original upload ownership cannot be verified") {
+        console.error(`[storage-cleanup] status=ownership-quarantined id=${row.id} org=${row.org_id} action=manual-reconciliation-required`);
       }
       console.warn(`[storage-cleanup] failed target=${row?.target ?? "?"} error=${message}`);
     }

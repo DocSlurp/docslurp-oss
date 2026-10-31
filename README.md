@@ -37,7 +37,7 @@ docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d --build
 node scripts/selfhost-check.mjs --running       # waits for a healthy API and worker
 ```
 
-The stack runs the API, one worker, Postgres with pgvector, Redis, MinIO and Temporal. There is no bundled web UI: use the REST API under `/v1`, the CLI, the SDK or MCP. Back up `.env.selfhost`: changing encryption keys later can make stored secrets unreadable. Full details, configuration options and operations notes are in [docs/self-host/README.md](docs/self-host/README.md).
+The stack runs the API, one worker, Postgres, Redis, MinIO and Temporal. There is no bundled web UI: use the REST API under `/v1`, the CLI, the SDK or MCP. Back up `.env.selfhost`: changing encryption keys later can make stored secrets unreadable. Full details, configuration options and operations notes are in [docs/self-host/README.md](docs/self-host/README.md).
 
 ## Use it
 

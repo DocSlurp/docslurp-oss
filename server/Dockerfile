@@ -2,7 +2,7 @@
 #   docker build -f server/Dockerfile .
 # Runs the Hono API (server/src/main.ts) and, for the compose `migrate` service,
 # `node server/db/migrate.mjs`. No dashboard: the frontend is not part of this image.
-FROM node:24-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
+FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip \
     NODE_ENV=production
 WORKDIR /app

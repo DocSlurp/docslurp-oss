@@ -32,6 +32,7 @@ beforeAll(async () => {
   vi.stubEnv("DATABASE_URL", url);
   vi.stubEnv("BETTER_AUTH_URL", ORIGIN);
   vi.stubEnv("BETTER_AUTH_SECRET", SECRET);
+  vi.stubEnv("MFA_REAUTH_MAX_AGE_SECONDS", "90");
   vi.stubEnv("RESEND_API_KEY", "re_test");
   vi.stubEnv("EMAIL_FROM", "noreply@docslurp.io");
   vi.stubEnv("PASSKEY_ORIGINS", "");
@@ -60,7 +61,14 @@ afterAll(async () => {
   vi.unstubAllGlobals();
 });
 
-beforeEach(() => { sentEmails.length = 0; });
+beforeEach(() => {
+  sentEmails.length = 0;
+  // Keep real endpoint requests from crossing a TOTP step between enrollment
+  // (next-step code) and sign-in (current code). Database expiry remains real.
+  const now = Date.now();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Math.floor(now / 30_000) * 30_000 + 5_000);
+});
 afterEach(() => { vi.useRealTimers(); });
 
 // ---------------------------------------------------------------------------
@@ -120,6 +128,26 @@ async function signInPassword(browser: Browser, email: string) {
   return browser.json<{ twoFactorRedirect?: boolean; twoFactorMethods?: string[]; token?: string }>("/sign-in/email", { email, password: PASSWORD });
 }
 
+/** Fresh action proof is explicit: signing in, remembered devices and fixture
+ * timestamps never substitute for the sensitive-access endpoint. */
+async function verifySensitive(browser: Browser, secret?: Buffer) {
+  const status = await browser.json<{ verifiedUntil: string | null }>("/sensitive-access");
+  if (status.body.verifiedUntil) return;
+  const proof = await browser.json<{ requiresTotp?: boolean; enrollmentOnly?: boolean }>("/sensitive-access/password", { password: PASSWORD });
+  expect(proof.status).toBe(200);
+  if (!proof.body.requiresTotp) return;
+  if (!secret) { expect(proof.body.enrollmentOnly).toBe(true); return; }
+  const session = await browser.session();
+  const used = new Set((await pool.query<{ code_digest: string }>(`select code_digest from mfa_totp_replay where user_id = $1`, [session!.user.id])).rows.map(row => row.code_digest));
+  let code: string | undefined;
+  for (let step = 0; step < 4 && !code; step++) {
+    code = [-1, 0, 1].map(offset => totp(secret, offset)).find(value => !used.has(createHash("sha256").update(`${session!.user.id}:${value}`).digest("hex")));
+    if (!code) { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(Date.now() + 30_000); }
+  }
+  expect(code).toBeDefined();
+  expect((await browser.json("/two-factor/verify-totp", { code })).status).toBe(200);
+}
+
 // RFC 6238 TOTP over the raw secret Better Auth encodes in the otpauth URI.
 function base32Decode(input: string): Buffer {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -148,6 +176,7 @@ async function enrolledUser(): Promise<{ user: { id: string; email: string }; br
   const user = await createUser();
   const browser = new Browser();
   expect((await signInPassword(browser, user.email)).status).toBe(200);
+  await verifySensitive(browser);
   const enabled = await browser.json<{ totpURI: string; backupCodes: string[] }>("/two-factor/enable", { password: PASSWORD });
   expect(enabled.status).toBe(200);
   const secret = base32Decode(new URL(enabled.body.totpURI).searchParams.get("secret")!);
@@ -168,6 +197,7 @@ describe("TOTP enrolment", () => {
     const user = await createUser();
     const browser = new Browser();
     await signInPassword(browser, user.email);
+    await verifySensitive(browser);
     const enabled = await browser.json<{ totpURI: string; backupCodes: string[] }>("/two-factor/enable", { password: PASSWORD });
     expect(enabled.body.totpURI).toMatch(/^otpauth:\/\/totp\/DocSlurp:/);
     expect(enabled.body.backupCodes).toHaveLength(10);
@@ -188,6 +218,7 @@ describe("TOTP enrolment", () => {
     const user = await createUser();
     const browser = new Browser();
     await signInPassword(browser, user.email);
+    await verifySensitive(browser);
     expect((await browser.json("/two-factor/enable", { password: "wrong" })).status).toBe(400);
   });
 
@@ -196,6 +227,7 @@ describe("TOTP enrolment", () => {
     const laptop = new Browser(); const phone = new Browser();
     await signInPassword(laptop, user.email);
     await signInPassword(phone, user.email);
+    await verifySensitive(laptop);
     const enabled = await laptop.json<{ totpURI: string }>("/two-factor/enable", { password: PASSWORD });
     const secret = base32Decode(new URL(enabled.body.totpURI).searchParams.get("secret")!);
     await laptop.json("/two-factor/verify-totp", { code: totp(secret) });
@@ -205,6 +237,72 @@ describe("TOTP enrolment", () => {
 });
 
 describe("sign-in challenge", () => {
+  it("binds the session a challenge ends in to the password that started it", async () => {
+    const { user, secret } = await enrolledUser();
+    const browser = new Browser();
+    expect((await signInPassword(browser, user.email)).body.twoFactorRedirect).toBe(true);
+    expect((await browser.json("/two-factor/verify-totp", { code: totp(secret) })).status).toBe(200);
+    const hash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    const { credentialFingerprint } = await import("../lib/auth-credential-binding.js");
+    const session = await browser.session();
+    expect((await pool.query<{ fingerprint: string }>(`select "credentialFingerprint" as fingerprint from session where id = $1`, [session!.session.id])).rows[0]!.fingerprint)
+      .toBe(credentialFingerprint(hash));
+    // The password changes (by any path): the session the challenge produced ends at its next use.
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    expect(await browser.session()).toBeNull();
+  });
+
+  it("fails closed when a challenge's record of its first factor is missing", async () => {
+    const { user, secret } = await enrolledUser();
+    const browser = new Browser();
+    expect((await signInPassword(browser, user.email)).body.twoFactorRedirect).toBe(true);
+    // As if expiry cleanup had removed it while the completion was in flight.
+    await pool.query(`delete from verification where identifier like '2fa-credential-%'`);
+    const refused = await browser.json<{ code?: string }>("/two-factor/verify-totp", { code: totp(secret) });
+    expect(refused.status).toBe(403);
+    expect(refused.body.code).toBe("SIGN_IN_AGAIN");
+    expect(await browser.session()).toBeNull();
+  });
+
+  it("revokes the session and trusted devices a completion mints while the password changes underneath", async () => {
+    const { user, secret } = await enrolledUser();
+    const attacker = new Browser();
+    expect((await signInPassword(attacker, user.email)).body.twoFactorRedirect).toBe(true);
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    await attacker.json("/two-factor/verify-totp", { code: totp(secret), trustDevice: true });
+    expect(await attacker.session()).toBeNull();
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
+  });
+
+  it("still revokes trust when a reset already deleted the new session, and runs after the MFA gate", async () => {
+    const { user } = await enrolledUser();
+    const { credentialFingerprint, revokeIfPasswordMoved } = await import("../lib/auth-credential-binding.js");
+    const oldHash = (await pool.query<{ password: string }>(`select password from account where "userId" = $1 and "providerId" = 'credential'`, [user.id])).rows[0]!.password;
+    await pool.query(`insert into verification(id, identifier, value, "expiresAt") values ($1, $1, $2, now() + interval '1 day')`, [`trust-device-${user.id}-late`, user.id]);
+    const replaced = await (await auth.$context).password.hash("a brand new password");
+    await pool.query(`update account set password = $2 where "userId" = $1 and "providerId" = 'credential'`, [user.id, replaced]);
+    expect(await revokeIfPasswordMoved(pool, user.id, "session-already-deleted", credentialFingerprint(oldHash))).toBe(true);
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
+    expect(await revokeIfPasswordMoved(pool, user.id, "any", credentialFingerprint(replaced))).toBe(false);
+    const order = ((await auth.$context).options.plugins ?? []).map((plugin) => plugin.id);
+    expect(order.indexOf("docslurp-credential-recheck")).toBeGreaterThan(order.indexOf("docslurp-mfa"));
+  });
+
+  it("cancels a pending challenge when the password is reset", async () => {
+    const { user, secret } = await enrolledUser();
+    const attacker = new Browser();
+    expect((await signInPassword(attacker, user.email)).body.twoFactorRedirect).toBe(true);
+    const owner = new Browser();
+    expect((await owner.json("/email-otp/request-password-reset", { email: user.email })).status).toBe(200);
+    const code = sentEmails.filter((sent) => sent.to === user.email).at(-1)!.code;
+    expect((await owner.json("/email-otp/reset-password", { email: user.email, otp: code, password: "a brand new password" })).status).toBe(200);
+    expect((await attacker.json("/two-factor/verify-totp", { code: totp(secret) })).status).not.toBe(200);
+    expect(await attacker.session()).toBeNull();
+    expect((await pool.query(`select 1 from session where "userId" = $1`, [user.id])).rowCount).toBe(0);
+  });
+
   it("issues no session after the password; the second factor issues an MFA-verified one", async () => {
     const { user, secret } = await enrolledUser();
     const before = await sessionsFor(user.id);
@@ -247,20 +345,16 @@ describe("sign-in challenge", () => {
     expect(await browser.session()).toBeNull();
   });
 
-  it("turns redirect sign-ins (email links, OAuth callbacks) into a redirect to the challenge", async () => {
+  it("serves no link-based email verification: it would sign in without a challenge-free path but also skip the verification binding", async () => {
+    // Redirect sign-ins that stop at the challenge are covered by magic links (auth-magic-link.db.test.ts).
     const { user } = await enrolledUser();
     await pool.query(`update "user" set "emailVerified" = false where id = $1`, [user.id]);
     const { createEmailVerificationToken } = await import("better-auth/api");
     const token = await createEmailVerificationToken(SECRET, user.email);
     const browser = new Browser();
     const response = await browser.request(`/verify-email?token=${token}&callbackURL=${encodeURIComponent("/app/workspaces")}`);
-    expect(response.status).toBe(302);
-    const location = new URL(response.headers.get("location")!);
-    expect(location.pathname).toBe("/app/sign-in");
-    expect(location.searchParams.get("mfa")).toBe("required");
-    expect(location.searchParams.get("redirectTo")).toBe("/app/workspaces");
+    expect(response.status).toBe(404);
     expect(await browser.session()).toBeNull();
-    expect(browser.cookies.has("better-auth.two_factor")).toBe(true);
   });
 
   it("revokes a session that skipped the challenge, whatever minted it", async () => {
@@ -418,9 +512,9 @@ describe("sign-in challenge", () => {
 });
 
 describe("removing factors", () => {
-  it("needs a recent sign-in to disable 2FA or replace backup codes", async () => {
-    const { user, browser } = await enrolledUser();
-    await pool.query(`update session set "authenticatedAt" = now() - interval '1 hour' where "userId" = $1`, [user.id]);
+  it("needs fresh sensitive verification to disable 2FA or replace backup codes", async () => {
+    const { user, browser, secret } = await enrolledUser();
+    await pool.query(`update session set "sensitiveVerifiedAt" = now() - interval '1 hour' where "userId" = $1`, [user.id]);
     const disable = await browser.json<{ code?: string }>("/two-factor/disable", { password: PASSWORD });
     expect(disable.status).toBe(403);
     expect(disable.body.code).toBe("REAUTH_REQUIRED");
@@ -429,7 +523,7 @@ describe("removing factors", () => {
     expect((await browser.json("/update-user", { name: "Renamed" })).status).toBe(200);
     expect((await browser.json<{ code?: string }>("/two-factor/disable", { password: PASSWORD })).body.code).toBe("REAUTH_REQUIRED");
 
-    await pool.query(`update session set "authenticatedAt" = now() where "userId" = $1`, [user.id]);
+    await verifySensitive(browser, secret);
     expect((await browser.json("/two-factor/disable", { password: PASSWORD })).status).toBe(200);
     expect((await pool.query(`select "twoFactorEnabled" from "user" where id = $1`, [user.id])).rows[0].twoFactorEnabled).toBe(false);
   });
@@ -440,13 +534,14 @@ describe("removing factors", () => {
     await signInPassword(laptop, user.email);
     await laptop.json("/two-factor/verify-totp", { code: totp(secret, -1), trustDevice: true });
     expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(1);
-    await pool.query(`update session set "authenticatedAt" = now() where "userId" = $1`, [user.id]);
+    await verifySensitive(browser, secret);
     expect((await browser.json("/two-factor/disable", { password: PASSWORD })).status).toBe(200);
     expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
   });
 
   it("also needs the password for accounts that have one", async () => {
-    const { browser } = await enrolledUser();
+    const { browser, secret } = await enrolledUser();
+    await verifySensitive(browser, secret);
     expect((await browser.json("/two-factor/disable", { password: "wrong" })).status).toBe(400);
   });
 });
@@ -504,7 +599,8 @@ class SoftAuthenticator {
   }
 }
 
-async function registerPasskey(browser: Browser, authenticator: SoftAuthenticator, name = "Test key") {
+async function registerPasskey(browser: Browser, authenticator: SoftAuthenticator, name = "Test key", secret?: Buffer) {
+  await verifySensitive(browser, secret);
   const options = await browser.json<{ challenge: string; rp: { id: string } }>("/passkey/generate-register-options");
   expect(options.status).toBe(200);
   return browser.json<{ id?: string; code?: string }>("/passkey/verify-registration", { response: authenticator.register(options.body.challenge), name });
@@ -520,6 +616,7 @@ describe("passkeys", () => {
     const user = await createUser();
     const browser = new Browser();
     await signInPassword(browser, user.email);
+    await verifySensitive(browser);
     const options = await browser.json<{ rp: { id: string }; authenticatorSelection: { userVerification: string } }>("/passkey/generate-register-options");
     expect(options.body.rp.id).toBe("localhost");
     expect(options.body.authenticatorSelection.userVerification).toBe("required");
@@ -536,9 +633,9 @@ describe("passkeys", () => {
   });
 
   it("satisfies MFA for a 2FA user without a TOTP challenge", async () => {
-    const { user, browser } = await enrolledUser();
+    const { user, browser, secret } = await enrolledUser();
     const authenticator = new SoftAuthenticator();
-    expect((await registerPasskey(browser, authenticator)).status).toBe(200);
+    expect((await registerPasskey(browser, authenticator, "Test key", secret)).status).toBe(200);
     const fresh = new Browser();
     expect((await passkeySignIn(fresh, authenticator)).status).toBe(200);
     expect((await fresh.session())?.user.id).toBe(user.id);
@@ -605,18 +702,18 @@ describe("passkeys", () => {
   });
 
   it("needs re-auth to delete a passkey and an MFA session to add one once 2FA is on", async () => {
-    const { user, browser } = await enrolledUser();
+    const { user, browser, secret } = await enrolledUser();
     const authenticator = new SoftAuthenticator();
-    await registerPasskey(browser, authenticator);
+    await registerPasskey(browser, authenticator, "Test key", secret);
     const { rows: [key] } = await pool.query(`select id from passkey where "userId" = $1`, [user.id]);
-    await pool.query(`update session set "authenticatedAt" = now() - interval '1 hour' where "userId" = $1`, [user.id]);
+    await pool.query(`update session set "sensitiveVerifiedAt" = now() - interval '1 hour' where "userId" = $1`, [user.id]);
     const stale = await browser.json<{ code?: string }>("/passkey/delete-passkey", { id: key.id });
     expect(stale.status).toBe(403);
     expect(stale.body.code).toBe("REAUTH_REQUIRED");
-    // Renaming is not a removal.
+    // Renaming also changes the protected sign-in methods.
+    expect((await browser.json("/passkey/update-passkey", { id: key.id, name: "Laptop" })).status).toBe(403);
+    await verifySensitive(browser, secret);
     expect((await browser.json("/passkey/update-passkey", { id: key.id, name: "Laptop" })).status).toBe(200);
-
-    await pool.query(`update session set "authenticatedAt" = now() where "userId" = $1`, [user.id]);
     expect((await browser.json("/passkey/delete-passkey", { id: key.id })).status).toBe(200);
   });
 
@@ -629,6 +726,7 @@ describe("passkeys", () => {
     const other = await createUser();
     const otherBrowser = new Browser();
     await signInPassword(otherBrowser, other.email);
+    await verifySensitive(otherBrowser);
     expect((await otherBrowser.json("/passkey/delete-passkey", { id: key.id })).status).not.toBe(200);
     expect((await otherBrowser.json("/passkey/update-passkey", { id: key.id, name: "mine" })).status).not.toBe(200);
     expect((await pool.query(`select name from passkey where id = $1`, [key.id])).rows[0].name).toBe("Test key");
@@ -686,6 +784,7 @@ describe("org MFA policy", () => {
     const { member } = await orgWithMember(0);
     const browser = new Browser();
     await signInPassword(browser, member.email);
+    await verifySensitive(browser);
     const enabled = await browser.json<{ totpURI: string }>("/two-factor/enable", { password: PASSWORD });
     expect(enabled.status).toBe(200);
     const secret = base32Decode(new URL(enabled.body.totpURI).searchParams.get("secret")!);
@@ -718,6 +817,7 @@ describe("org MFA policy", () => {
       expect(result.status).toBe(403);
       expect(result.body.code).toBe("MFA_REQUIRED");
     }
+    await verifySensitive(browser);
     expect((await browser.json("/two-factor/enable", { password: PASSWORD })).status).toBe(200);
     expect(await browser.session()).not.toBeNull();
   });
@@ -863,4 +963,50 @@ it("forwards refreshed cookies while applying MFA session policy options", async
   const actor = await resolveBetterAuthSessionActor(browser.headers(), refreshedHeaders, { allowMfaPolicyBlocked: true });
   expect(actor?.sessionId).toBe(session!.session.id);
   expect(refreshedHeaders.getSetCookie().some(cookie => cookie.startsWith("better-auth.session_token="))).toBe(true);
+});
+
+
+it("reports explicit sensitive expiry separately from a young login", async () => {
+  const user = await createUser(); const browser = new Browser(); await signInPassword(browser, user.email);
+  const session = await browser.session();
+  const { Hono } = await import("hono");
+  const { accountRoutes } = await import("../routes/account.js");
+  const app = new Hono().use("*", async (c, next) => {
+    c.set("requestActor", { type: "session", userId: user.id, sessionId: session!.session.id,
+      user: { id: user.id, email: user.email, name: "Test" } });
+    await next();
+  }).route("/v1/account", accountRoutes);
+  const snapshot = async () => (await (await app.request("/v1/account/security")).json());
+  const status = async () => (await snapshot()).session;
+  expect((await snapshot()).settings.reauthWindowSeconds).toBe(90);
+  const young = await status();
+  expect(young.authenticatedAt).toBeTruthy();
+  expect(young.reauthUntil).toBeNull();
+  await verifySensitive(browser);
+  const proof = await browser.json<{ verifiedUntil: string }>("/sensitive-access");
+  expect((await status()).reauthUntil).toBe(proof.body.verifiedUntil);
+  await pool.query(`update session set "sensitiveVerifiedAt" = now() - interval '91 seconds' where id = $1`, [session!.session.id]);
+  const expired = await status();
+  expect(expired.authenticatedAt).toBe(young.authenticatedAt);
+  expect(expired.reauthUntil).toBeNull();
+  await verifySensitive(browser);
+  expect((await status()).reauthUntil).toBeTruthy();
+  const orgId = `status-policy-${randomBytes(4).toString("hex")}`;
+  await pool.query(`insert into organizations(id, name, slug, created_by_user_id, require_mfa, require_mfa_since, mfa_grace_period_days)
+    values($1, 'Status policy', $1, $2, true, now(), 0)`, [orgId, user.id]);
+  await pool.query(`insert into org_memberships(org_id, user_id, role) values ($1, $2, 'member')`, [orgId, user.id]);
+  expect((await browser.json<{ verifiedUntil: string | null }>("/sensitive-access")).body.verifiedUntil).toBeNull();
+  expect((await status()).reauthUntil).toBeNull();
+});
+
+it("returns the authoritative remaining email send cooldown in the real response", async () => {
+  const user = await createUser(); const browser = new Browser(); await signInPassword(browser, user.email);
+  expect((await browser.json("/sensitive-access/email-otp/send", {})).status).toBe(200);
+  const session = await browser.session();
+  await pool.query(`update session set "sensitiveEmailOTPSentAt" = now() - interval '40 seconds' where id = $1`, [session!.session.id]);
+  const throttled = await browser.json("/sensitive-access/email-otp/send", {});
+  expect(throttled.status).toBe(429);
+  const delay = Number(throttled.response.headers.get("Retry-After"));
+  expect(delay).toBeGreaterThanOrEqual(18);
+  expect(delay).toBeLessThanOrEqual(20);
 });

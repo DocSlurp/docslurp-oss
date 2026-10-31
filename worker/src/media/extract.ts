@@ -19,6 +19,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { stageSourceFile } from "../sandbox/source-integrity.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { mediaConfig, type MediaConfig } from "./config.js";
 import { configuredMediaProvider } from "./providers.js";
@@ -29,6 +30,8 @@ import { diarize, type DiarizationOutcome } from "./diarize.js";
 import { SegmentAssembler, planChunkWindows, toTimedSegments, type TimedSegment } from "./segments.js";
 import { buildMediaSummary } from "./summary.js";
 import type { MediaJournal, SpeakerTurn } from "./types.js";
+import { mediaWindowConcurrency, readMediaWindowConcurrency, runOrderedWindows } from "./windows.js";
+import { recordShardTiming } from "../pipeline/shard-calibration.js";
 
 /**
  * Chunk windows and the word flag are part of every receipt key, so the first plan a document runs with is persisted in the
@@ -82,7 +85,7 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
     if (!(await allowHostedCall(state, { provider: provider.id, model: provider.model, operation: "media.transcribe", target: "hosted" }, [document.id]))) {
       throw new RunPolicyError("Workspace privacy mode disallows the configured media provider");
     }
-    const source = await storage.downloadToTempFile(document.sourceKey, "source.media", { maxBytes: config.maxSourceBytes });
+    const source = await stageSourceFile(storage, document, "source.media", { maxBytes: config.maxSourceBytes });
     try {
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
       // Missing workspace configuration opts in; explicit false wins even for silent video.
@@ -106,13 +109,26 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       const plan = chunkPlan(state, document.id, provider, config);
       const windows = hasAudio ? planChunkWindows(duration, plan.chunkSeconds, plan.overlapSeconds) : [];
       const assembler = new SegmentAssembler();
+      const leased = provider instanceof LeasedMediaProvider;
+      const concurrency = mediaWindowConcurrency({ flag: readMediaWindowConcurrency(), journalMaxConcurrent: config.maxConcurrent,
+        windows: windows.length, leased });
+      const executor = `${provider.id}/${provider.model}`;
+      const transcripts = await runOrderedWindows({
+        items: windows, concurrency, signal,
+        prepare: async (window) => {
+          signal?.throwIfAborted();
+          return await prepareAudioChunk(runner, source, window.start, window.end - window.start, signal);
+        },
+        process: (bytes, window) => transcribeChunk({ state, scope, provider, journal: args.journal!, storage,
+          input: { bytes, durationSeconds: window.end - window.start, wordTimestamps: plan.wordTimestamps }, offset: window.start,
+          maxDocumentCostCents: policy?.maxCostCents, config, signal }),
+        // Per-window latency per provider/model feeds window sizing (units: audio seconds).
+        onTiming: (window, index, ms) => recordShardTiming(state, { stage: "media-transcribe", executor, documentId: document.id,
+          pages: Math.max(1, Math.round(window.end - window.start)), ms, shardIndex: index, shardCount: windows.length }),
+      });
+      // Applied in window order, exactly as the sequential loop did.
       for (const [index, window] of windows.entries()) {
-        signal?.throwIfAborted();
-        const seconds = window.end - window.start;
-        const bytes = await prepareAudioChunk(runner, source, window.start, seconds, signal);
-        const result = await transcribeChunk({ state, scope, provider, journal: args.journal, storage,
-          input: { bytes, durationSeconds: seconds, wordTimestamps: plan.wordTimestamps }, offset: window.start,
-          maxDocumentCostCents: policy?.maxCostCents, config, signal });
+        const result = transcripts[index]!;
         costUsd += result.costUsd;
         assembler.add(window, toTimedSegments(result, window), index === windows.length - 1);
       }
@@ -127,11 +143,25 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       if (vision && policy) {
         const scan = await scanVideo(runner, source, policy, signal);
         scanStats = { candidateCount: scan.candidateCount, selectedCount: scan.selectedCount, largestGapSeconds: scan.largestGapSeconds };
-        for (const batch of scan.batches) {
-          signal?.throwIfAborted();
-          const frames = [];
-          for (const frame of batch) frames.push(await prepareVideoFrame(runner, source, frame.seconds, signal));
-          const result = await describeVideoChunk({ state, scope, storage, journal: args.journal, provider: vision, frames, policy, config, signal });
+        // No overlap between frame batches: a batch description is free text keyed by its frames, so
+        // repeating context frames would re-describe them with no clean way to de-duplicate the text.
+        const descriptions = await runOrderedWindows({
+          items: scan.batches,
+          concurrency: mediaWindowConcurrency({ flag: readMediaWindowConcurrency(), journalMaxConcurrent: config.maxConcurrent,
+            windows: scan.batches.length, leased: false }),
+          signal,
+          prepare: async (batch) => {
+            signal?.throwIfAborted();
+            const frames = [];
+            for (const frame of batch) frames.push(await prepareVideoFrame(runner, source, frame.seconds, signal));
+            return frames;
+          },
+          process: (frames) => describeVideoChunk({ state, scope, storage, journal: args.journal!, provider: vision, frames, policy, config, signal }),
+          onTiming: (batch, index, ms) => recordShardTiming(state, { stage: "media-vision", executor: `${vision.id}/${vision.model}`,
+            documentId: document.id, pages: batch.length, ms, shardIndex: index, shardCount: scan.batches.length }),
+        });
+        for (const [index, batch] of scan.batches.entries()) {
+          const result = descriptions[index]!;
           costUsd += result.costUsd ?? 0;
           visualSegments.push({ id: `${document.id}:visual:${visualSegments.length}`, start: batch[0].seconds, end: batch[batch.length-1].seconds,
             samples: batch.map(f=>f.seconds), text: result.text });

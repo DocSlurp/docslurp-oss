@@ -1,3 +1,14 @@
+/** Fixed, non-sliding explicit proof window for sensitive account actions. */
+export const SENSITIVE_ACCESS_WINDOW_SECONDS = 600;
+/** Same knob as the existing MFA reauthentication policy, validated at startup. */
+export function sensitiveAccessWindowSeconds(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.MFA_REAUTH_MAX_AGE_SECONDS;
+  if (raw === undefined || raw.trim() === "") return SENSITIVE_ACCESS_WINDOW_SECONDS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 60 || value > 3600) throw new Error("MFA_REAUTH_MAX_AGE_SECONDS must be an integer from 60 to 3600");
+  return value;
+}
+
 /** Set only by the app (server/src/lib/client-ip.ts) before Better Auth sees a request. */
 export const BETTER_AUTH_CLIENT_IP_HEADER = "x-docslurp-client-ip";
 
@@ -143,6 +154,10 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
       window: 60,
       max: 100,
       customRules: {
+        "/sensitive-access/password": { window: 60, max: 5 },
+        "/sensitive-access/passkey/options": { window: 60, max: 10 },
+        "/sensitive-access/passkey/verify": { window: 60, max: 10 },
+        "/sign-in/magic-link": { window: 60, max: 3 },
         "/sign-in/email": {
           window: 10,
           max: 3
@@ -151,14 +166,9 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
           window: 60,
           max: 3
         },
-        "/forget-password": {
-          window: 60,
-          max: 3
-        },
-        "/reset-password": {
-          window: 60,
-          max: 5
-        },
+        // Password reset is native Email OTP (/email-otp/*, limited by that
+        // plugin); the link-based /request-password-reset and /reset-password
+        // are disabled in server/src/lib/better-auth.ts.
         // Second-factor codes: per-IP limits on top of the twoFactor plugin's
         // per-challenge (5) and per-account (10, then a 15-minute lock) budgets.
         "/two-factor/verify-totp": {

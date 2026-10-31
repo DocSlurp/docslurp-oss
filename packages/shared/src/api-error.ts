@@ -10,6 +10,7 @@ import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
  */
 export const API_ERROR_CODES = [
   "invalid_request",
+  "REAUTH_REQUIRED",
   "credit_request_rejected",
   "credit_reconciliation_required",
   "idempotency_conflict",
@@ -105,6 +106,7 @@ export const apiErrorEnvelopeSchema = z.object({
 /** Reviewed copy per code. The boundary sends this instead of route-authored text. */
 export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   invalid_request: PUBLIC_ERROR_MESSAGES.invalid,
+  REAUTH_REQUIRED: "Verify your identity to continue this sensitive account action.",
   credit_request_rejected: "Credit request rejected before issuance. Correct the recipient or request and try again.",
   credit_reconciliation_required: "Credit outcome requires operator reconciliation. Preserve this request ID; do not create a replacement.",
   idempotency_conflict: "This credit request ID belongs to different parameters or an administrator. Reconcile the original request.",
@@ -248,6 +250,33 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
   }
 }
 
+/** Reviewed validation metadata only. Never forward input, enum values or custom schema names. */
+export function publicValidationIssue(value: unknown): Record<string, unknown> {
+  const issue = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const safe: Record<string, unknown> = {
+    path: Array.isArray(issue.path) ? issue.path.filter(part => typeof part === "string" || typeof part === "number").join(".") : typeof issue.path === "string" ? issue.path : "",
+    message: PUBLIC_ERROR_MESSAGES.invalid,
+    code: "invalid_value",
+  };
+  const types = ["string", "number", "boolean", "array", "object", "date", "bigint", "null"];
+  if (issue.code === "invalid_type" && typeof issue.expected === "string" && types.includes(issue.expected)) {
+    safe.code = "invalid_type";
+    safe.expected = issue.expected;
+  } else if (issue.code === "too_small" || issue.code === "too_big") {
+    const key = issue.code === "too_small" ? "minimum" : "maximum";
+    if (typeof issue[key] === "number" && Number.isFinite(issue[key])) {
+      safe.code = issue.code;
+      safe[key] = issue[key];
+      if (typeof issue.inclusive === "boolean") safe.inclusive = issue.inclusive;
+      if (typeof issue.origin === "string" && types.includes(issue.origin)) safe.origin = issue.origin;
+    }
+  } else if (issue.code === "invalid_format" && ["email", "url", "uuid", "datetime", "date", "time", "duration", "ipv4", "ipv6"].includes(String(issue.format))) {
+    safe.code = "invalid_format";
+    safe.format = issue.format;
+  }
+  return safe;
+}
+
 /**
  * The only details that cross the boundary: validation field paths (issue text
  * may echo input), server-authored limit metadata, upgrade/billing `links` and
@@ -258,11 +287,7 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   const source = details as Record<string, unknown>;
   const safe: ApiErrorDetails = {};
   if (Array.isArray(source.issues)) {
-    safe.issues = source.issues.map((issue: { path?: unknown }) => ({
-      path: Array.isArray(issue?.path) ? issue.path.map(String).join(".") : typeof issue?.path === "string" ? issue.path : "",
-      message: PUBLIC_ERROR_MESSAGES.invalid,
-      code: "invalid_value",
-    }));
+    safe.issues = source.issues.map(publicValidationIssue);
   }
   for (const key of SAFE_DETAIL_NUMBERS) {
     if (typeof source[key] === "number" && Number.isFinite(source[key])) safe[key] = source[key];

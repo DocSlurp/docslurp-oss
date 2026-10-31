@@ -15,8 +15,8 @@ export interface WorkspaceRun {
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
   /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
   orgFunded?: boolean;
-  /** False when the org turned off China-based model providers. */
-  orgAllowChinaProviders?: boolean;
+  /** True when the org and the run's workspace both allow China-based model providers; unset is restricted. */
+  allowChinaProviders?: boolean;
   userId: string;
   workspaceId?: string;
   kind: string;
@@ -54,6 +54,8 @@ export interface Document {
   filename: string;
   mimeType: string;
   sourceKey: string;
+  /** sha256 the server computed over the source bytes; staged sources are checked against it (sandbox/source-integrity.ts). */
+  sourceSha256?: string | null;
   status: string;
   extractionMode: string;
   pageCount: number;
@@ -74,6 +76,11 @@ export interface UsageEvent {
   inputTokens?: number;
   outputTokens?: number;
   metadata?: JsonMap;
+  /**
+   * Rich page charges only: the vision guard request that read the page. Not persisted; the checkpoint
+   * that inserts this charge removes that request from the org's uncharged count (vision-attempt-store.ts).
+   */
+  visionAttemptTicket?: string;
 }
 
 export interface PerformanceEvent {

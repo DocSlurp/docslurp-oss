@@ -48,9 +48,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         if: matrix.worker-tools
         with:
+          version: '0.13.0'
           python-version: '3.11'
           enable-cache: true
           cache-dependency-glob: worker/requirements-base.lock.txt
@@ -149,9 +150,51 @@ jobs:
           (cd packages/contrib-search-compat && node ../../scripts/node-test.mjs test/*.test.mjs)
           node scripts/check-package-imports.mjs
 
+  # Real-Postgres and Redis tests (locks, concurrency, billing, OAuth) skip without
+  # their URLs, so run them here against service containers, one fresh copy of a
+  # migrated template database per file. The runner fails on skipped tests too.
+  database:
+    name: database integration
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+        env:
+          POSTGRES_USER: docslurp
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: tmpl
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U docslurp" --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7.4-alpine@sha256:6ba19c50b56777f5c11c58eff8ddb69d0d5f27ba131cffb63f180ccfd43c66af
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_TEST_ADMIN_URL: postgres://docslurp:ci-only-password@127.0.0.1:5432
+      DATABASE_TEST_TEMPLATE: tmpl
+      REDIS_TEST_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @docslurp/shared build
+      - name: Migrate the template database
+        run: DATABASE_URL="${DATABASE_TEST_ADMIN_URL}/${DATABASE_TEST_TEMPLATE}" node server/db/migrate.mjs
+      - name: Run gated database and Redis tests
+        run: node scripts/run-database-tests.mjs
+
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [test]
+    needs: [test, database]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

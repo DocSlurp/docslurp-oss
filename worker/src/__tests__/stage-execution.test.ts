@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -9,6 +10,8 @@ import {
   loadRunState,
   type StageExecutionStore,
 } from "../pipeline/stage-execution.js";
+import { runWithSandboxScope, SandboxSessionScope } from "../sandbox/session-context.js";
+import { CommandTeardownError, recordUnverifiedTeardown, resetUnverifiedTeardownsForTests } from "../sandbox/teardown.js";
 
 const config = { workerDocConcurrency: 2, workerAdaptiveTuning: false } as Config;
 
@@ -128,6 +131,64 @@ describe("Stage Execution", () => {
     expect(output.artifacts).toEqual({});
   });
 
+  afterEach(() => setVmIsolatedPageRangeStagesForTest([]));
+
+  it("refuses page-range shards for a stage whose executor is not VM-isolated", async () => {
+    const store = new FakeStore();
+    store.documents = [{ ...makeDocument(), pageCount: 100 }];
+    let ranged = 0;
+    const execution = createStageExecution({
+      store, config,
+      stages: [{ name: "render-images", run: async () => {}, runPageRanges: async () => { ranged++; } }],
+    });
+    const { runtime: rt } = runtime();
+    await expect(execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 33, last: 64 }], shardIndex: 1, shardCount: 3 }))
+      .rejects.toThrow(/not VM-isolated/);
+    expect(ranged).toBe(0);
+  });
+
+  it("runs a page-range shard through runPageRanges and leaves the stage and documents to the stage pass", async () => {
+    setVmIsolatedPageRangeStagesForTest(["render-images"]);
+    const store = new FakeStore();
+    store.documents = [{ ...makeDocument(), pageCount: 100 }];
+    const seen: Array<[string, unknown]> = [];
+    let wholeRuns = 0;
+    const execution = createStageExecution({
+      store, config,
+      stages: [{ name: "render-images", run: async () => { wholeRuns++; },
+        runPageRanges: async (_state, ranges) => { for (const [id, list] of ranges) seen.push([id, list]); } }],
+    });
+    const { runtime: rt } = runtime();
+    await execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 33, last: 64 }], shardIndex: 1, shardCount: 3 });
+    expect(seen).toEqual([["doc-1", [{ first: 33, last: 64 }]]]);
+    expect(wholeRuns).toBe(0);
+    expect(store.shardsFinished).toEqual([["doc-1"]]);
+    expect(store.stageStatus.has("render-images")).toBe(false);
+  });
+
+  it("refuses page-range shards for unsupported stages, foreign documents and bad bounds before doing any work", async () => {
+    const work: string[] = [];
+    const make = () => {
+      const store = new FakeStore();
+      store.documents = [{ ...makeDocument(), pageCount: 10 }, { ...makeDocument(), id: "doc-2", pageCount: 10 }];
+      return { store, execution: createStageExecution({ store, config, stages: [
+        stage("embed", async () => { work.push("embed"); }),
+        { name: "render-images", run: async () => { work.push("run"); }, runPageRanges: async () => { work.push("ranges"); } },
+      ] }) };
+    };
+    const { runtime: rt } = runtime();
+    await expect(make().execution.runStage(input("embed"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 1, last: 5 }] }))
+      .rejects.toThrow("does not support page-range shards");
+    // doc-2 belongs to the run but not to this shard: beginShard drops it, so its range is foreign here.
+    await expect(make().execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-2", first: 1, last: 5 }] }))
+      .rejects.toThrow("outside this shard");
+    await expect(make().execution.runStage(input("render-images"), { ...rt, documentIds: ["doc-1"], pageRanges: [{ documentId: "doc-1", first: 1, last: 11 }] }))
+      .rejects.toThrow("invalid range");
+    await expect(make().execution.runStage(input("render-images"), { ...rt, pageRanges: [{ documentId: "doc-1", first: 1, last: 5 }] }))
+      .rejects.toThrow("requires its document ids");
+    expect(work).toEqual([]);
+  });
+
   it("leaves a failed shard's stage to the unsharded pass", async () => {
     const store = new FakeStore();
     const execution = createStageExecution({
@@ -159,7 +220,7 @@ describe("Stage Execution", () => {
     const output = await execution.startRun({ runId: "run-1", totalStages: 3 });
 
     expect(store.runStatus).toBe("processing");
-    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
+    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v1" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
     expect(store.events.map((event) => event.eventType)).toEqual(["run.started"]);
   });
 
@@ -310,6 +371,39 @@ describe("Stage Execution", () => {
     const beatsAtFailure = heartbeats.length;
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(heartbeats.length).toBe(beatsAtFailure);
+  });
+
+  // #234 round 5 (H1): the stall watchdog replaced the caught error with its own HungWork reason,
+  // which an activity then retried on another worker even though a command's teardown had failed.
+  it.each([
+    ["thrown by the stage", true],
+    ["swallowed by the stage, which then failed on the abort", false],
+  ])("a command teardown failure %s wins over the stall watchdog", async (_label, rethrow) => {
+    resetUnverifiedTeardownsForTests();
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new FakeStore();
+    const { runtime: rt } = runtime({ heartbeatIntervalMs: 10 });
+    const execution = createStageExecution({
+      store,
+      config,
+      stages: [stage("parse", (_state, signal) => new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          // The watchdog stops the parser, whose teardown cannot be verified.
+          const teardown = new CommandTeardownError("pdftoppm teardown could not be verified");
+          recordUnverifiedTeardown(teardown, "label=pdftoppm");
+          reject(rethrow ? teardown : new Error("socket aborted"));
+        }, { once: true });
+      }))],
+    });
+    const scope = new SandboxSessionScope(async () => { throw new Error("unused"); });
+    const error = await runWithSandboxScope(scope, () =>
+      execution.runStage(input("parse"), { ...rt, stallTimeoutMs: 60, progressFromProcessCpu: false }))
+      .catch((caught: unknown) => caught);
+    // Old behavior: the hung-work stall reason.
+    expect(error).toBeInstanceOf(CommandTeardownError);
+    expect(scope.teardownError).toBe(error);
+    quiet.mockRestore();
+    resetUnverifiedTeardownsForTests();
   });
 
   it("keeps heartbeating while the stage reports progress", async () => {

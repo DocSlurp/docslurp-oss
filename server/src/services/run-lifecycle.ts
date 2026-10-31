@@ -1,8 +1,10 @@
 import {
+  compilePipelinePlan,
   getPipelineStageOrder,
   isTemporalConnectionUnavailable,
   planRunFailure,
   resolvePoisonRunFailureThreshold,
+  sanitizeStoredPipeline,
   type PipelineFeatures,
   type WorkspaceRun,
 } from "@docslurp/shared";
@@ -56,6 +58,21 @@ export type FailRunInput = {
 };
 
 export type FailedRunRow = Record<string, unknown> & { id: string; user_id: string };
+
+/** Category stored on a Run that start refused because its stored pipeline no longer validates. */
+export const INVALID_PIPELINE_FAILURE_CATEGORY = "invalid_pipeline";
+
+/**
+ * A Run's stored pipeline fails validation even after stored extractor settings are dropped. Permanent: start
+ * has already failed the Run (category `invalid_pipeline`), so recovery does not claim it again.
+ */
+export class RunPipelineInvalidError extends Error {
+  readonly code = INVALID_PIPELINE_FAILURE_CATEGORY;
+  constructor(readonly runId: string, cause: unknown) {
+    super(`Run ${runId} has an invalid pipeline: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "RunPipelineInvalidError";
+  }
+}
 
 export const TEMPORAL_DEFERRED_RUN_MESSAGE =
   "Run is queued, but processing has not started yet because Temporal is currently unavailable. Retry it after Temporal recovers.";
@@ -211,9 +228,26 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       select id from workspace_runs where id = ${run.id} and creation_ready_at is not null
     `;
     if (!ready) return { status: "deferred", reason: "Run creation has not been published for processing." };
+    // Recovery passes the raw stored row: drop extractor settings the strict schemas now reject, then validate.
+    // A pipeline that still does not compile will never start, so the Run fails once instead of retrying forever.
+    const pipeline = sanitizeStoredPipeline(run.pipeline, `run ${run.id}`);
+    try {
+      compilePipelinePlan(pipeline);
+    } catch (cause) {
+      const error = new RunPipelineInvalidError(run.id, cause);
+      console.error(`[run-start] ${error.message}`);
+      await fail(run.id, {
+        stage: "queued",
+        message: "The run's pipeline settings are invalid, so it cannot start. Reprocess the documents to run them again.",
+        fromStatuses: ["queued"],
+        stats: { startFailure: { category: INVALID_PIPELINE_FAILURE_CATEGORY, failedAt: new Date().toISOString() } },
+        payload: { reason: INVALID_PIPELINE_FAILURE_CATEGORY },
+      });
+      throw error;
+    }
     let outcome: RunStartOutcome;
     try {
-      await deps.startWorkflow(run.id, run.pipeline, options);
+      await deps.startWorkflow(run.id, pipeline, options);
       outcome = { status: "started" };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

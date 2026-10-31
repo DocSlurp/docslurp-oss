@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { parserPlaybookKeySchema } from "./embedding.js";
+import { qualityModeSchema } from "./quality.js";
 import { defaultPipelineFeatures, pipelineFeaturesSchema } from "./pipeline.js";
 import { searchCitationSchema } from "./chunks.js";
 import {
@@ -222,7 +222,7 @@ export type RunProcessingPreviewQualityLabel = z.infer<
 >;
 
 export const runProcessingPreviewScenarioSchema = z.object({
-  parserPlaybook: parserPlaybookKeySchema,
+  quality: qualityModeSchema,
   label: z.string(),
   estimatedCost: z.object({
     minCents: z.number(),

@@ -1,5 +1,30 @@
+## HTML table chunk preservation (2026-10-30)
+
+- Preserve bounded table/cell context in fallback and canonical embedding chunks; scan nested repository integrity without inheriting parent documentation exclusions. See [evidence and limits](docs/evals/html-table-chunks.md).
+## Processing quality: Fast / Auto / Good (2026-10-29)
+
+- Replace the five public parser playbooks and `vision.forceAllPages` with `pipeline.quality` (`fast` | `auto` | `good`, default `auto`), and the estimator's Fast/Standard/Deep profiles with the same ids. `QUALITY_MODES` prices each mode from `PRICE_CARD`: fast $0.05, auto $0.05 to $2.50, good $2.50 per 1,000 pages. `fast` never OCRs or calls a vision model: a page without a text layer keeps its rendered page image, its Markdown references `images/page-NNNN.png`, it adds no chunks, bills Fast and appears in the ingest report as `kept-as-image` with a recommendation to switch to Auto or Good. `good` reads every page with vision. Stored pipelines and requests with the retired keys still parse and map. SDK `quality`, CLI `--quality`, MCP `upload`/`extract` `quality`, run previews per quality.
+
+## Vision reads every page routing selects (2026-10-29)
+
+- Remove the per-document vision page cap (`vision.maxPagesPerDocument`, playbook `visionMaxPagesPerDocument`: 4 by default, 12 escalated, 32 with `forceAllPages`). A long scanned file got vision on its first few pages and Tesseract text on the rest, so quality depended on file length. Vision now reads every page the routing selects, each billed as a Rich page; run spend stays bounded by `maxCostCents`. The `fast` playbook still allows no vision (`visionAllowed: false`). Stored pipelines that carry the old key still parse (it is dropped); `over-cap` page facts are no longer produced; the autoscaler counts a vision run's real page demand.
+
+## Error recovery audit (2026-10-28)
+
+- [#228](https://github.com/DocSlurp/docslurp-oss/issues/228) (2026-10-29): Add native Better Auth magic-link sign-in with hashed five-minute single-use tokens, scanner-safe confirmation, trusted-origin and shared database rate guards, preserving MFA/SSO and separate sensitive grants.
+
+- [#224](https://github.com/DocSlurp/docslurp-oss/issues/224) Sensitive account verification (2026-10-29): Enforce fixed, session-bound sensitive-access grants for account credentials, factors, API-key mutations, destructive account/org actions, org MFA policy and SSO links. Require fresh proof, invalidate weaker grants when policy changes, and preserve narrowly scoped initial MFA enrollment and existing machine bulk-revoke permissions.
+
+Council-reviewed error contracts: allowlisted validation constraints, full Retry-After within SDK deadlines, and safe code-based SDK/CLI messages. No schema, retry eligibility, tenant-scope or deployment change.
+
+- [x] [#219](https://github.com/DocSlurp/docslurp-oss/issues/219) Error recovery: Retain safe validation constraints
+- [x] [#220](https://github.com/DocSlurp/docslurp-oss/issues/220) Error recovery: Honor the SDK’s full Retry-After delay
+- [x] [#221](https://github.com/DocSlurp/docslurp-oss/issues/221) Error recovery: Make SDK and CLI errors explain the actual refusal
+
 - Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
 # Completed
+
+- Default to Chinese-lab models on the cheapest qualifying host, with a fail-closed opt-out (2026-10-29): the DeepSeek-1017 vision route adds China-based StreamLake and DeepSeek and sorts by price (equal quality to Together on tune+select, $0.51 vs $1.03 per 1,000 pages); organizations and workspaces (workspace narrows org) can turn China-based providers off, enforced as a `provider.only` allowlist from a sourced provider-region table on every path and retry, with unknown regions and unknown scope restricted; served host and region on usage records; vision/OCR output collapses padded wide-space runs. See docs/provider-regions.md.
 
 - Prevent personal-organization slug collisions from failing first sign-in (2026-10-28): use the fresh organization UUID, retain owner-scoped membership creation, and cover shared user-ID prefixes, occupied slugs, repeat provisioning, deleted identities and hostile display names in migrated-database tests.
 
@@ -134,3 +159,7 @@
 - Bound worker CI apt installation to two five-minute attempts, retrying once with signed official Ubuntu archive/security sources when the runner mirror stalls.
 
 - Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
+
+- Fix dashboard chat nested-generation timeouts: retrieve evidence and synthesize in one agent, expose an unambiguous batch search contract, and retain direct answers for chat-only keys.
+
+- Add a configurable 15-second first-token deadline to agent chat model calls; retain native provider fallback and account for aborted calls without replaying requests.

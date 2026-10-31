@@ -5,6 +5,7 @@ import {
   uploadMediaKind,
   type UploadMediaEstimate,
   type UploadMediaFile,
+  sanitizeStoredPipeline,
   withoutStageSelection,
   type CostEstimate,
   type PipelineFeatures,
@@ -65,7 +66,8 @@ export async function estimateDocumentReprocess(args: {
   `;
   const groups = new Map<string, { orgId: string; features: PipelineFeatures; documents: number; pages: number }>();
   for (const row of rows) {
-    const base = (row.pipeline ?? {}) as PipelineFeatures;
+    // Same lenient read as the mutation: drop stored extractor settings the strict schemas now reject.
+    const base = sanitizeStoredPipeline((row.pipeline ?? {}) as PipelineFeatures, `a run in workspace ${row.workspace_id}`);
     const features = row.indexing_mode ? { ...base, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) } : base;
     const key = `${row.workspace_id}:${JSON.stringify(features)}`;
     const group = groups.get(key) ?? { orgId: row.org_id, features, documents: 0, pages: 0 };

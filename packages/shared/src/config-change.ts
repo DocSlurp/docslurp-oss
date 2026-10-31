@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { QUALITY_RANK } from "./quality.js";
 import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
 import { sha256Hex } from "./hash.js";
 import { embeddingModelBaseUri,
@@ -89,7 +90,6 @@ const piiStrictness = (features: PipelineFeatures): number =>
   features.piiPolicy.enabled ? PII_ACTION_RANK[features.piiPolicy.action] : 0;
 
 const PRIVACY_RANK = { standard: 0, "local-only": 1, "strict-privacy": 2 } as const;
-const PLAYBOOK_RANK = { fast: 0, balanced: 1, "layout-aware": 2, agentic: 3, "review-grade": 4 } as const;
 
 /**
  * Impact of changing each pipeline feature field on already-ingested documents. The record is keyed by every
@@ -120,7 +120,7 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   graph: "reindex-recommended",
   structuredExtraction: "reindex-recommended",
   outputSchema: "reindex-recommended",
-  parserPlaybook: (before, after) => (PLAYBOOK_RANK[after.parserPlaybook] > PLAYBOOK_RANK[before.parserPlaybook] ? "reindex-recommended" : "new-uploads"),
+  quality: (before, after) => (QUALITY_RANK[after.quality] > QUALITY_RANK[before.quality] ? "reindex-recommended" : "new-uploads"),
   documentExtraction: "reindex-recommended",
   vision: "reindex-recommended",
   visionFallback: toggled("visionFallback"),
@@ -158,7 +158,11 @@ const EFFECTS: Partial<Record<ConfigChangeKind, string>> = {
 /** Field-specific wording for the effect on stored data, where the generic text would mislead. */
 const FIELD_EFFECTS: Partial<Record<keyof PipelineFeatures, Partial<Record<ConfigChangeKind, string>>>> = {
   vision: {
-    "reindex-recommended": "New uploads use these vision page-selection settings. Existing documents keep their current text until you reprocess them; reprocessing re-reads their pages with vision and is billed per page.",
+    "reindex-recommended": "New uploads use these vision model settings. Existing documents keep their current text until you reprocess them; reprocessing re-reads their pages with vision and is billed per page.",
+  },
+  quality: {
+    "reindex-recommended": "New uploads use this processing quality. Existing documents keep their current text until you reprocess them; reprocessing re-reads their pages and is billed per page.",
+    "new-uploads": "New uploads use this processing quality. Existing documents keep the text already extracted.",
   },
   visionFallback: {
     "reindex-recommended": "New uploads can read scanned or image-only pages with vision. Existing documents keep their current text until you reprocess them.",
@@ -246,8 +250,7 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
 };
 
 
-const profileFor = (features: PipelineFeatures): PipelineProfileId =>
-  features.parserPlaybook === "fast" ? "fast" : features.parserPlaybook === "agentic" || features.parserPlaybook === "review-grade" ? "deep" : "standard";
+const profileFor = (features: PipelineFeatures): PipelineProfileId => features.quality;
 
 /**
  * Price and time a set of stages over `pages` pages. Ported from the worker's `forecastRunCost` (per-document

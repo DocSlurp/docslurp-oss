@@ -1,3 +1,4 @@
+import { requireSensitiveSession } from "../lib/require-sensitive-session.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -71,7 +72,7 @@ const rotateApiKeySchema = z.object({
 }).strict().default({});
 
 export const apiKeysRoutes = new Hono()
-  .post("/", zValidator("json", createApiKeySchema, validationHook), async (c) => {
+  .post("/", requireSensitiveSession, zValidator("json", createApiKeySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let result;
@@ -122,7 +123,7 @@ export const apiKeysRoutes = new Hono()
     const keys = await listApiKeys(userId);
     return c.json({ keys });
   })
-  .patch("/:id", zValidator("json", updateApiKeySchema, validationHook), async (c) => {
+  .patch("/:id", requireSensitiveSession, zValidator("json", updateApiKeySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let key;
@@ -174,7 +175,7 @@ export const apiKeysRoutes = new Hono()
 
     return c.json({ key });
   })
-  .post("/:id/rotate", async (c) => {
+  .post("/:id/rotate", requireSensitiveSession, async (c) => {
     const userId = c.get("sessionUser").id;
     // An empty body (older clients) rotates in place.
     const raw = c.req.header("content-length") === "0" ? {} : await c.req.json().catch(() => ({}));
@@ -209,7 +210,7 @@ export const apiKeysRoutes = new Hono()
 
     return c.json({ key: result.key, rawKey: result.rawKey, ...(result.previous ? { previous: result.previous } : {}) });
   })
-  .delete("/:id", async (c) => {
+  .delete("/:id", requireSensitiveSession, async (c) => {
     const userId = c.get("sessionUser").id;
     const key = await revokeApiKey(c.req.param("id"), userId);
     if (!key) {

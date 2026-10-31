@@ -77,6 +77,21 @@ function runUsageRows(client: Sql<Record<string, unknown>>, state: WorkflowState
   }));
 }
 
+/**
+ * Rich page charges in `usageEvents` that carry the vision guard request that read the page
+ * (vision-attempt-guard.ts `recordVisionRead`), as parallel id and ticket arrays.
+ */
+function chargedVisionTickets(usageEvents: UsageEvent[]): { eventIds: string[]; tickets: string[] } {
+  const eventIds: string[] = [];
+  const tickets: string[] = [];
+  for (const usage of usageEvents) {
+    if (!usage.id || !usage.visionAttemptTicket) continue;
+    eventIds.push(usage.id);
+    tickets.push(usage.visionAttemptTicket);
+  }
+  return { eventIds, tickets };
+}
+
 const USAGE_EVENT_COLUMNS = [
   "id", "user_id", "run_id", "provider", "model", "metric", "amount", "unit",
   "cost_cents", "input_tokens", "output_tokens", "metadata", "org_id", "workspace_id", "api_key_id",
@@ -84,7 +99,10 @@ const USAGE_EVENT_COLUMNS = [
 
 /**
  * Insert a run's usage events (ON CONFLICT (id) DO NOTHING) and return the
- * cost of the rows actually inserted.
+ * cost of the rows actually inserted. A Rich page charge this call inserts
+ * removes the vision request that read the page from the org's uncharged
+ * count, in the caller's transaction; one already persisted (by an earlier
+ * checkpoint or another worker) removes nothing, so its request stays counted.
  */
 export async function persistRunUsageEvents(args: {
   client: Sql<Record<string, unknown>>;
@@ -107,6 +125,15 @@ export async function persistRunUsageEvents(args: {
       `),
     );
   }
+  const charged = chargedVisionTickets(usageEvents);
+  const orgId = runUsageScope(state).orgId;
+  if (charged.tickets.length > 0 && orgId) {
+    const insertedIds = new Set(inserted.map((row) => row.id));
+    const tickets = charged.tickets.filter((_, index) => insertedIds.has(charged.eventIds[index]!));
+    if (tickets.length > 0) {
+      await client`delete from vision_org_attempts where org_id = ${orgId} and id = any(${client.array(tickets)}::text[])`;
+    }
+  }
 
   // Non-unit events are written at cost_cents = 0, so this is exactly what
   // the usage_events trigger adds to workspace_runs.spent_cents (0056): the
@@ -128,7 +155,30 @@ export function runUsageEventStatements(args: {
 }): { statements: PendingQuery<any>[]; cost: (results: readonly unknown[][]) => number } {
   const { client, state, usageEvents } = args;
   const orgId = state.run.orgId;
-  const statements = batchedRows(runUsageRows(client, state, usageEvents)).map((batch) => orgId
+  const statements = batchedRows(runUsageRows(client, state, usageEvents)).map((batch) => {
+    // Rich charges this statement inserts remove their reading request from the org's uncharged count.
+    const ids = new Set(batch.map((row) => row.id));
+    const charged = chargedVisionTickets(usageEvents.filter((usage) => usage.id !== undefined && ids.has(usage.id)));
+    return orgId && charged.tickets.length > 0
+    ? client`
+      with inserted as (
+        insert into usage_events ${client(batch, ...USAGE_EVENT_COLUMNS)}
+        on conflict (id) do nothing
+        returning id, cost_cents
+      ), total as (select coalesce(sum(cost_cents), 0) as cents from inserted),
+      debit as (
+        select enqueue_org_credit_debit(
+          ${orgId}, total.cents, ${state.run.userId}, 'usage', ${state.run.id}, ${state.run.workspaceId ?? null}, '{}'::jsonb
+        ) from total
+      ),
+      released as (
+        delete from vision_org_attempts a
+        using unnest(${client.array(charged.eventIds)}::text[], ${client.array(charged.tickets)}::text[]) as t(event_id, ticket)
+        where a.org_id = ${orgId} and a.id = t.ticket and t.event_id in (select id from inserted)
+        returning a.id
+      )
+      select id, cost_cents, (select count(*) from debit) as debits from inserted`
+    : orgId
     ? client`
       with inserted as (
         insert into usage_events ${client(batch, ...USAGE_EVENT_COLUMNS)}
@@ -144,7 +194,8 @@ export function runUsageEventStatements(args: {
     : client`
       insert into usage_events ${client(batch, ...USAGE_EVENT_COLUMNS)}
       on conflict (id) do nothing
-      returning id, cost_cents`);
+      returning id, cost_cents`;
+  });
   return {
     statements,
     cost: (results) => results.reduce((sum: number, rows) => sum + rows.reduce((inner: number, row) => inner + Number((row as { cost_cents?: unknown }).cost_cents ?? 0), 0), 0),

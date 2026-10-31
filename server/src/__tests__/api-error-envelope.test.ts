@@ -251,13 +251,15 @@ describe("native request-size and validation errors", () => {
     expect(await response.json()).toMatchObject({ error: { code: "payload_too_large", details: { maxBytes: 10 } } });
   });
 
-  it("answers a failed zValidator parse with invalid_request and field paths only", async () => {
+  it("answers a failed zValidator parse with reviewed field constraints and no input diagnostics", async () => {
     const hono = new Hono();
     hono.post("/v1/things", zValidator("json", z.object({ name: z.string() }), validationHook), (c) => c.json({ ok: true }));
-    const response = await guarded(hono).request("/v1/things", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: 5 }) });
+    const response = await guarded(hono).request("/v1/things", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: { private: "secret-validation-input" } }) });
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: { code: "invalid_request", message: PUBLIC_ERROR_MESSAGES.invalid, requestId: "req-uniform",
-      details: { issues: [{ path: "name", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }] } } });
+    const body = await response.json();
+    expect(body).toEqual({ error: { code: "invalid_request", message: PUBLIC_ERROR_MESSAGES.invalid, requestId: "req-uniform",
+      details: { issues: [{ path: "name", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_type", expected: "string" }] } } });
+    expect(JSON.stringify(body)).not.toMatch(/secret-validation-input|private|received|input/);
   });
 
   it("derives a code from the status unless a domain code is in the closed vocabulary", async () => {

@@ -166,6 +166,15 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
+| `VISION_ROUTING_V2` | `off` | off, on, workspace ids | Legacy vision routing v2 (below) for every run or a comma-separated canary list of workspace ids. Worker only, read once per run at run start. A malformed value reads as off with one warning. |
+| `VISION_PAGE_ATTEMPTS` | `2` | integer 1..4 (clamped) | Vision provider requests per page and purpose per run, retries and fallbacks included (vision run guard, below). |
+| `VISION_REGION_ATTEMPTS_PER_PAGE` | `12` | integer 0..64 (clamped) | Routed region requests per page per run. |
+| `VISION_BREAKER_MIN_FAILURES` | `20` | integer 1..10000 (clamped) | Failed or rejected requests before the rejection breaker can stop vision for the run. |
+| `VISION_BREAKER_FAILURE_RATE` | `0.25` | 0.01..1 (clamped) | Failed share of the run's requests that trips the breaker. |
+| `VISION_ORG_UNCHARGED_LIMIT_CENTS` | `4000` | integer 1..1000000 (clamped) | Worst-case cents of uncharged vision requests per org over a rolling 24 h before vision stops for the org's runs (each request weighs its own prompt, image and route's worst case). |
+| `VISION_THROTTLE_ALLOWANCE` | `5` | integer 0..20 (clamped) | Unbilled throttles (429, 503/529; not a 503 routing exclusion) one vision call may hand back before the wait goes to Temporal. |
+| `VISION_ROUTE_OVERRUN_LIMIT` | `3` | integer 1..1000 (clamped) | Responses of one org on one billed route (provider and model) billed above the route's catalog bound in 24 h before the route is refused for that org. |
+| `VISION_ROUTE_WEIGHT_CORRECTION_MAX` | `4` | 1..100 (clamped) | Cap on the route weight correction: every org's admissions on a route weigh its catalog bound times the route's highest billed/bound ratio in 24 h, across orgs. |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
@@ -179,9 +188,277 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When page OCR may come from the native engine (tesseract otherwise). |
 | `PDF_RASTER_ENGINE` | `pdftoppm` | pdftoppm, native-pdf | Page and crop raster engine (native falls back to pdftoppm/sharp). Stays pdftoppm: native renders add 670-810 MB per 8-slot worker process, over the 512 MB off-heap budget, for ~2.4x throughput. |
 | `PDF_RASTER_CONCURRENCY` | min(4, cores) | 1-32 | Native render lanes per document render. |
+| `PDF_PDFTOPPM_CONCURRENCY` | 2 | 1-4 | pdftoppm lanes per selected-page render (each lane is a sandboxed process holding a full-page bitmap). Independent of `PDF_RASTER_CONCURRENCY`. |
+| `PDF_PDFTOPPM_PROCESS_CONCURRENCY` | 8 | 1-32 | Process-wide semaphore for sandboxed raster commands (pdfinfo, pdftoppm): per-render lanes multiply with document concurrency, this bounds the total. On the first failed page the render aborts its sibling commands and uploads nothing more. |
+| `PROBE_OVERLAP_RENDER` | off | 1, true, on | Opt-in. Probe renders each page's 72 DPI image on a second handle while features are read. At most one render is in flight per handle; it settles before the page ends and before close. Off by default because the second handle parses the untrusted PDF again inside the worker process, which holds secrets; turning it on widens that in-process parsing gap. |
+| `PROBE_OVERLAP_MAX_PAGES` | 1000 | pages | Documents with more pages probe on one handle. The second handle also opens with `maxObjects` 10,000 on top of the probe limits (its memory follows the object count, ~3 KB per object: +29-32 MB peak RSS at 10,000 objects, +150 MB for a 474 KB object-stream PDF with 51,000 objects); past it the probe renders on one handle. |
 | image build args | off | `DOCSLURP_NATIVE_PDF`, `DOCSLURP_NATIVE_PDF_OCR_MODELS`, `DOCSLURP_NATIVE_PDF_CJK_FONTS` | Ship the binding, OCR models (~30 MB) and CJK fonts (~54 MB); see `vendor-artifacts/native-pdf/README.md` and `fly.worker.toml`. |
 
 `.env.example` lists every flag above with its default.
+
+### Legacy vision routing v2
+
+`VISION_ROUTING_V2` gates the fixes to the legacy (non-router) vision path so production can
+enable them for one workspace before everyone. The worker reads it once, when the run starts
+(`startRun`), and persists the resolved version as the run artifact `run:vision-routing-version`
+(`v1` or `v2`). Extract-markdown, classify-route, vision fan-out and page tasks read that artifact,
+so workers with different environments, retries and rehydrated runs route a run the same way
+(`worker/src/lib/vision-routing-v2.ts`). The pure routing functions take `{ routingV2 }`; none
+of them read the environment. Every comma-separated entry must be a valid workspace id: `ws-a,,`,
+`,ws-a` and `ws-a,` are malformed and read as off with one warning.
+
+Gated (v2 only):
+
+- Page triage counts native words from page facts' shared `pdftotext` run, so an OCR'd scan stays
+  sparse (`extract-markdown` passes `textLayerPages`; when `pdftotext` failed or its pages do not
+  line up, triage keeps the v1 count); uploaded images get full-page raster evidence
+  (`imageFilePageEvidence`).
+- Document labels use whole-word terms and need two distinct body terms, read from the first
+  256 KB of text (`hasDistinctTerms` stops at the answer, so memory does not grow with the upload).
+- Page routes: the numeric-row table cue, garbled-text detection, Unicode-math formula signals
+  (each scanning the first 64 KB of a page), and keeping structured routes (table, form, formula,
+  figure) for OCR'd pages.
+- A page without text layer or images whose OCR text has words counts as drawn content.
+- `selectLegacyVisionPages` also admits formula pages and lets the text route decide when raster
+  evidence does not authorize OCR; v1 lets any page-evidence decision decide alone.
+
+With the flag off, routing is v1 except for these always-on changes, so it does **not** reproduce
+`origin/main` exactly:
+
+- A page whose vision output is rejected (degenerate, refusal, truncated) no longer fails the
+  document (`shouldFailOpenVisionError`). It keeps its native or OCR text when that text is usable
+  (page fact `rejected`); otherwise the page is recorded as `failed`. Its model text is never kept.
+- A PDF with no extractable text whose bytes outside embedded images are large
+  (`drawnBytesPerPage`: file bytes minus every embedded image's bytes, over pages, from page facts'
+  whole-document `pdfimages` listing) nominates its pages as drawn content. Bytes are spoofable, so
+  vision-extract calls a model for such a page only if its own render is not blank
+  (`renderLooksBlank`); padding, metadata, attachments or a large font buy no vision calls.
+- The vision run guard below, and bounded counting in page classification (same counts, no match
+  arrays).
+
+#### Vision run guard
+
+Customers pay only for pages vision reads (one Rich page charge per page per run), and the run cost
+cap counts only those charges, but every request sent to a vision provider can cost us: rejected and
+failed requests, inline 429/5xx retries, the alternate-route retry, the streaming-to-JSON fallback,
+self-critique and a second read of a page already charged create no new charge. Provider cost data
+cannot bound that (an interrupted stream or a failure before the first chunk reports estimated or no
+usage), so the guard counts requests, each weighted by the worst case its route can cost, and admits
+without reading a reported cost (`worker/src/lib/vision-attempt-guard.ts`); billed usage only ever
+raises the count (billed overruns, below).
+
+Every HTTP request a vision call made through `executeVisionRuntime` sends is admitted before it is
+sent, at the lowest common request point: `fetchWithProviderRetry` (each try, inline retries
+included; admitted inside its concurrency limiter immediately before `fetch`, so limiter waits,
+timeouts and aborts before sending consume nothing, and an admission whose call is cancelled before
+`fetch` is handed back) and the local runtime call, through the
+`VisionRequestGate` that `executeVisionRuntime` requires (only operator benchmarks pass `null`). That
+covers legacy pages, page-router regions and their refusal fallbacks, cascade legs and
+workspace-model fallbacks, document-map OCR, extract-markdown self-critique and deferred page
+materialization, and every request inside each of them. Other model calls are outside it (see the
+end of this section).
+
+Requests the provider refuses before accepting them are handed back and leave every count (page
+bound, breaker, org): 429, 503 and 529, and on a streaming request a 400/404/405/415/422/501, which
+only says the endpoint does not stream (the same request then goes out without streaming). After two
+such 404/405/415/501 refusals within 10 minutes, each followed by a successful non-streaming retry,
+later calls to that endpoint and model skip streaming for 10 minutes in that process; 400 and 422,
+which usually describe the request, never turn streaming off. Every hand-back logs
+`[vision-throttle-handback]` with org, run and kind. Treating 429, 503 and 529 as unbilled is an
+assumption not verified against provider billing terms (they are answered before a model runs),
+bounded per call by the allowance below. A call
+may hand back `VISION_THROTTLE_ALLOWANCE` throttles; past that the wait goes to Temporal as a
+retryable provider error with its Retry-After. Anything that may have been accepted stays counted:
+other 5xx, timeouts and network errors after sending, accepted streams that break.
+
+The counts live in a shared ledger (migration 0101, `worker/src/db/vision-attempt-store.ts`):
+admission takes the run's then the org's advisory lock, so every worker of a run and every run of an
+org admit against the same rows. The org comes from the run row (its workspace's org when the run has
+none; the worker loads the run with that same org, so usage rows and the credit debit use it too); a
+run with neither is refused (`unscoped-run`), never run unbounded. A store-backed run whose store
+has no ledger refuses every request (`no-attempt-ledger`, logged as an error) instead of counting per
+process.
+
+| Setting | Default (range) | Refuses when |
+| --- | --- | --- |
+| `VISION_PAGE_ATTEMPTS` | 2 (1-4) | the run already sent this many requests for the page and purpose (whole-page read, document-map OCR, self-critique); that page only |
+| `VISION_REGION_ATTEMPTS_PER_PAGE` | 12 (0-64) | the run already sent this many routed region requests for the page; that page only |
+| `VISION_BREAKER_MIN_FAILURES` | 20 (1-10000) | at least this many of the run's requests failed or were rejected... |
+| `VISION_BREAKER_FAILURE_RATE` | 0.25 (0.01-1) | ...and they are at least this share of the run's requests (sticky for the run) |
+| `VISION_ORG_UNCHARGED_LIMIT_CENTS` | 4000 (1-1000000) | the org's uncharged requests in the last 24 hours, by worst-case weight, plus this one would pass it |
+| `VISION_ROUTE_OVERRUN_LIMIT` | 3 (1-1000) | this org's requests on the request's billed route (provider and model) billed above the route's catalog bound this many times in the last 24 hours (`route-overrun`; that org only, not sticky, and a configured fallback on another route is still tried) |
+| `VISION_ROUTE_WEIGHT_CORRECTION_MAX` | 4 (1-100) | never refuses: caps the factor every org's admissions on a route are weighed at (below) |
+| (none) | | an overrun of the org could not be written after retries (`overrun-unreconciled`; sticky for the run, and every admission of the org in that worker process is refused until a retry persists it) |
+
+**Billed overruns.** A weight is a bound computed from the catalog (the image's token bound, the
+prompt's bytes, the full output cap), not what the provider bills. After each response on a billed
+route (or a stream cut off after its usage chunk), the runtime prices the provider's `prompt_tokens`
+and `completion_tokens` at the model's list price, takes the reported cost instead when it is higher,
+and compares it with the route's catalog bound for the request. An OpenRouter stream that ends
+without a usage chunk (an abort for degenerate output, an endpoint that ignores `include_usage`, a
+stream cut off before its usage chunk) has its charge looked up by generation id
+(`resolveOpenRouterUsage`, OpenRouter's `/generation` receipt) and is reconciled and recorded with
+it; without a receipt it is recorded from estimates, labelled `usage_source=estimated`
+(`[vision-stream] ... no usage and no receipt`).
+
+An overrun logs `[vision-weight] overrun model=… provider=… upstream=… billed=… bound=…` and is
+reconciled against the request's admission ticket (`vision_admission_tickets`): a durable row,
+written at admission with the org the request was admitted under, its admitted weight and its catalog
+bound, that outlives the run, its workspace and the request's org-count row. In one transaction under
+the org's advisory lock it adds billed minus admitted weight to that org's count as a settled row of
+its own (`overrun:<ticket>`; no Rich charge checkpoint removes it) and inserts a
+`vision_route_overruns` row keyed by the ticket. Reconciliation is idempotent per ticket: a retried
+write whose first commit was not acknowledged changes nothing. A write that fails is retried; if it
+still fails the run stops (`overrun-unreconciled`, sticky) and every later admission of the org in
+that worker process retries it first and is refused while it fails. The org bound therefore holds on
+billed cost even when a provider counts more image tokens than the catalog bound.
+
+Overruns refuse a route per org: after `VISION_ROUTE_OVERRUN_LIMIT` of one org's overruns on a route
+in 24 hours the route is refused for that org only. No org's overruns refuse the route for another
+org. Instead every org pays the route's **weight correction**: later admissions on the route weigh
+its catalog bound times the route's highest billed/bound ratio of the last 24 hours across orgs,
+capped at `VISION_ROUTE_WEIGHT_CORRECTION_MAX`. One tenant cannot switch the default route off for
+everyone; at worst it makes the route weigh up to 4x more against every org's own bound. An overrun
+that raises the correction logs at error level, for alerting:
+`[vision-weight] correction provider=… model=… ratio=… previous=… factor=… cap=… capped=… org=… run=…`
+(`capped=true`: the ratio exceeds the cap, so the correction does not cover it and the catalog bound
+must be fixed).
+
+Two limits on the bound:
+
+- **Concurrency.** Admission sees only reconciled overruns, so the requests in flight on a route whose
+  bound is wrong can push an org past its bound by about (requests in flight) x (billed - bound)
+  before their top-ups land; each top-up then lands and later admissions see it. The correction, once
+  raised, closes the gap for later admissions.
+- **DeepSeek V4.1 Flash 1017 (the default).** Its 1,024-token image bound is the published
+  processor's `vision_max_n_token`; it holds only while every allowed provider (StreamLake, DeepSeek,
+  Together, Fireworks, Parasail) serves that limit. On the 2026-10-29 tune and select splits StreamLake and
+  DeepSeek billed the same input tokens per page as Together (per-page difference -2 to 0, maximum 1,158). A provider serving a larger limit bills above the bound; the weight
+  correction (and the per-org refusal for the org whose pages trigger it) is the safety net, and a
+  `[vision-weight] correction` line on this route means the bound must be revisited.
+
+MiMo V2.6 Flash and Nemotron 3.5 Super VL are refused (`refusedReason` in the catalog): their
+processor maxima are not proven serving maxima, so no weight can bound them. Config validation, the
+page router's target filter and the runtime all reject them until serving-level evidence exists.
+
+**Reset runbook.** The overrun rows age out after 24 hours. To lift a refusal or a correction sooner
+(after fixing the catalog bound, or for a false positive), delete the route's rows on the primary
+database, scoped as narrowly as the case allows, and record why:
+
+```sql
+-- One org's refusal of one route:
+delete from vision_route_overruns
+where org_id = '<org>' and provider = '<provider>' and model = '<model>';
+-- The route's correction for every org (every org's overruns on it):
+delete from vision_route_overruns where provider = '<provider>' and model = '<model>';
+```
+
+Deleting overrun rows does not lower any org's uncharged count: the `overrun:<ticket>` top-ups in
+`vision_org_attempts` stay until they age out, so the org bound keeps counting what was billed.
+
+**Org bound.** A request counts as uncharged from the moment it is admitted. It leaves the count
+only in the checkpoint transaction that persists the customer Rich page charge its read created: the
+charge (`rich:<run>:<document>:<page>`, deterministic per run and page) carries the request's ticket,
+and the checkpoint deletes the ticket's `vision_org_attempts` row only if its insert of that charge
+happened (`on conflict do nothing returning id`). A page charged earlier, by another activity or
+another path, removes nothing more. Until that checkpoint the request stays counted (and in flight,
+so it never makes a refusal sticky): a cancel, a workspace or run deletion, a lost page-task lease
+or a crash between the read and its checkpoint leaves it counted. Rejections, failures, retries,
+critique and second reads stay counted. The count is keyed by org only, with no foreign key to runs
+or workspaces, so deleting either cannot reset it; it holds across runs, reprocessing and
+extraction, and another org is never affected.
+
+Hosted vision is limited to the priced catalog. A vision route is `openai` or `openrouter` (a
+catalog model with a token price and an image-token bound), `private` (operator registry) or local
+(`local-cli`, or `ollama`/`vllm`/`lmstudio` on a loopback host). Any other provider, an uncataloged
+hosted model (OpenRouter included), a Pro/Ultra id or a model at or above $50/M output tokens is
+refused at config validation (`visionModelUriProblem`, `packages/shared/src/embedding.ts`) and again
+before admission, for the model and its fallback alike, so nothing is sent or counted. A `baseUrl`
+parameter is accepted only on a local provider and only for a loopback host, by the same check. Whether
+a route is billed follows its effective destination (a route with no base URL goes to
+`OPENAI_BASE_URL`, else api.openai.com, and is sent exactly there): only local, loopback and private
+routes are unbilled, and an unknown hosted destination is refused. The OpenAI key goes only to the
+configured OpenAI base URL and the OpenRouter key only to the official OpenRouter endpoint; loopback
+servers get no key. Usage is priced and labelled on the route that served or billed each request (a
+fallback's model and provider, the configured OpenAI base URL), never the workspace's configured
+primary.
+
+The page router plans only with targets the vision runtime accepts: `buildRuntimeCatalog` drops every
+VLM target that fails the same check (`vlmTargetProblem`, logged once per target as
+`[page-router] target=... filtered from the routing catalog`), so the planner picks the next-best
+admitted target, and a stored plan naming a dropped target falls back to the workspace vision model.
+Today that drops `anthropic/claude-haiku-5.5`, `anthropic/claude-sonnet-5.5` and
+`google/gemini-3.5-flash-lite` (not in the priced catalog) and the private seeds
+(`vlm:private/<id>`, whose URIs carry no registry alias).
+
+Weights: each request weighs what it can cost at most, priced when it is sent: its actual prompt
+(UTF-8 bytes, an upper bound on tokens for any tokenizer), its image at the header's pixel size
+(the model's catalog image-token bound, a 4,096 px square when the size is unreadable), a fixed
+overhead for the chat template and system message, and the model's full output cap (enforced as
+`max_tokens`), at catalog list price. The image bounds come from each provider's own formula:
+OpenAI's 32-px patches times the model multiplier (1.62 for `gpt-4.1-mini`, no credit for
+downscaling), Gemini 3's largest per-image count (2,240), Gemini 2.x's 258-token tiles counted per
+256 px, and, for open-weights models, the most tokens their published Hugging Face image processor
+gives one image at any size, after minimum-size upscaling, resizing, tiling and patch merging, plus
+framing tokens (DeepSeek V4.1 Flash 1,024; GLM 5.3 Flash 8,002; MiMo V2.6 Flash and Nemotron 3.5
+Super VL have no bound and are refused, above; see `visionModelImageTokenBound` in `packages/shared/src/embedding.ts`). Workspace schema labels in the
+`schema-form-fields` prompt are capped (100 labels, 80 characters each, 4 KB in total) and a prompt
+over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`:
+`prompt` and `completion` (USD per million tokens) equal to the prices the weight assumes, `image`
+(USD per image) at the image's token bound times the input price, and `request: 0`, on the
+alternate-route retry too, so no upstream provider or fallback can bill above the weight. The
+weight adds the image cap once, in case an upstream bills a per-image fee on top of prompt tokens.
+OpenRouter refuses a request no provider qualifies for; it documents 503 ("no available model
+provider that meets your routing requirements") for that, and such a 503 (or a body naming no
+matching endpoints or `max_price`) is a counted failure, not a throttle (`isRoutingExclusion`,
+`worker/src/lib/provider-retry.ts`; an assumption, not verified with a paid call). The in-process
+local runtime weighs 2 cents. So the most an org can cost us per day in uncharged requests is the
+$40 bound, whichever models its workspaces route to: at an unreadable size, 651 requests on the
+default `deepseek/deepseek-v4.1-flash-1017` (6.14 cents), 1,083 on `gpt-4.1-mini` (3.69 cents),
+1,553 on `google/gemini-3.1-flash-lite` (2.58 cents); a 1700x2200 page weighs 2.15 cents on the
+default model (1,864 a day). Any mix in one org shares the same bound.
+
+The worker refuses to start (`assertSchema`, `worker/src/db/vision-attempt-store.ts`) when the
+ledger is missing or comes from an earlier draft of migration 0101 (no
+`vision_org_attempts.weight_cents`, or a leftover `vision_run_charged_pages`): that database needs a
+reset, since 0101 was replaced in place before reaching main. A connection failure during that check
+is retried with backoff and then exits as a retryable startup failure; only a schema mismatch is fatal.
+
+**Refusals.** A refused request is never sent; requests sent before it in the same call record their
+billed usage once. A refusal is sticky for the activity only when a count limit is reached: the
+breaker, the org bound when finished uncharged requests alone leave no room, `unscoped-run` and
+`no-attempt-ledger`. Requests
+still in flight never make a refusal sticky (they may yet be charged). Pages it refused keep their
+own text and get the page fact `guarded` (ingest report reason `vision-stopped`); the vision manifest
+records `visionGuard` with the reason (`page-attempt-limit`, `rejection-breaker`,
+`org-attempt-limit`, `unscoped-run` or `no-attempt-ledger`). Document-map OCR leaves a refused page without text (and stops
+on a sticky refusal), self-critique is skipped, and deferred materialization releases the page
+(`vision-stopped:<reason>`) to be claimed again later. A malformed setting keeps the default with
+one warning and an out-of-range one is clamped; the guard cannot be turned off.
+
+Usage records (billing accuracy, separate from the guard): an interrupted stream records the input
+estimate plus the output it streamed before the break (`usageSource: estimated`, or provider usage
+when a usage chunk arrived), and a 200 stream that broke before its first chunk is recorded with the
+non-streaming fallback's usage (attempt outcome `stream-failed`) rather than dropped.
+
+Pages nominated only by drawn-content bytes go to vision only after their render is confirmed to
+hold ink: size and pixel dimensions are read from the render file vision would receive (a cached
+render carries no dimensions), and a render that cannot be confirmed is not sent
+(`unverified-render`, page fact `not-selected`).
+
+Outside the guard: the decision-model verifier (off unless a workspace values quality at or above
+0.50 USD per unit; stops at the run cost cap), page-image embeddings and media frame description,
+which are not page transcription calls and keep their own bounds.
+
+Telemetry: `classify-route` and `vision-extract` record `routingVersion` (`v1` or `v2`) in their
+stage stats, the vision manifest and the `vision-text-density-score`, `vision-fail-open` and
+`vision-attempt-failure` performance metadata. Per document, vision-extract logs
+`[vision-rejections] org=<id> run=<id> document=<id> rejected=<n> attempted=<n> rate=<r>` and records
+the `vision-rejection-rate` metric (alert per org on a sustained rate), plus `vision-page-outcome`
+per page without output and `vision-guard-stop` (`[vision-guard]` log line) when the guard stops a
+run. Alert on `vision-guard-stop` with tag `org-attempt-limit` (or the `[vision-guard] ...
+refused=org-attempt-limit` warning): an org hitting its uncharged-attempt limit is either hostile input or a
+provider regression. The manifest's `failedPages` lists each such page with its reason and whether it kept text.
 
 ## Economics
 

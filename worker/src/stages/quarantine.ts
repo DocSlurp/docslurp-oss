@@ -14,6 +14,7 @@ import {
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
+import { sha256Bytes, verifyStagedSource } from "../sandbox/source-integrity.js";
 
 export class QuarantineStage implements Stage {
   readonly name = "quarantine";
@@ -57,6 +58,8 @@ export class QuarantineStage implements Stage {
 
           try {
             const bytes = await readFile(tempFile);
+            // The scanned (and later parsed) bytes must be the bytes the server hashed.
+            verifyStagedSource(document, sha256Bytes(bytes));
             const artifact = await scanDocumentForQuarantine({
               documentId: document.id,
               filename: document.filename,

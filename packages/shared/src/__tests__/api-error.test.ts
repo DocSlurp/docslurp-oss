@@ -25,10 +25,11 @@ describe("apiError", () => {
 });
 
 describe("closed code vocabulary", () => {
-  it("has unique snake_case codes and reviewed copy for each", () => {
+  it("has unique native codes, the shared Better Auth reauth code, and reviewed copy for each", () => {
     expect(new Set(API_ERROR_CODES).size).toBe(API_ERROR_CODES.length);
     for (const code of API_ERROR_CODES) {
-      expect(code).toMatch(/^[a-z]+(_[a-z]+)*$/);
+      // One shared code bridges Better Auth and native action recovery.
+      if (code !== "REAUTH_REQUIRED") expect(code).toMatch(/^[a-z]+(_[a-z]+)*$/);
       expect(API_ERROR_PUBLIC_MESSAGES[code]).toBeTruthy();
     }
     expect(isApiErrorCode("chat_disabled")).toBe(true);
@@ -165,5 +166,28 @@ describe("domain error codes", () => {
     for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "source_not_reusable", "missing_stage_artifacts", "workspace_forbidden"]) {
       expect(API_ERROR_CODES).toContain(code);
     }
+  });
+});
+
+
+describe("reviewed validation constraints", () => {
+  it("retains only reviewed types, formats and finite numeric limits", () => {
+    const safe = publicApiErrorDetails({ issues: [
+      { path: ["title"], code: "too_big", maximum: 80, inclusive: true, origin: "string", message: "secret input", input: "secret" },
+      { path: ["count"], code: "invalid_type", expected: "number", received: "secret" },
+      { path: ["contact"], code: "invalid_format", format: "email", pattern: "secret" },
+      { code: "invalid_value", values: ["secret enum"], message: "secret" },
+      { code: "too_small", minimum: Infinity, origin: "secret schema" },
+      { code: "invalid_type", expected: "secret schema" },
+      { code: "invalid_format", format: "secret schema" },
+    ] });
+    expect(safe?.issues).toMatchObject([
+      { code: "too_big", maximum: 80, inclusive: true, origin: "string" },
+      { code: "invalid_type", expected: "number" },
+      { code: "invalid_format", format: "email" },
+      { code: "invalid_value" }, { code: "invalid_value" }, { code: "invalid_value" }, { code: "invalid_value" },
+    ]);
+    expect(JSON.stringify(safe)).not.toContain("secret");
+    expect(publicApiErrorDetails(safe)).toEqual(safe);
   });
 });

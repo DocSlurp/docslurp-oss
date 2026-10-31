@@ -3,7 +3,7 @@ import { mkdtemp, open, writeFile, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boundedStream, executeDopplerVm, MAX_PDF_BYTES, VM_TIMEOUT_MS, VM_CLEANUP_TIMEOUT_MS, dopplerVmUsage } from "./doppler-vm.js";
+import { boundedStream, executeDopplerVm, CONFINEMENT_UNAVAILABLE_MESSAGE, HARDENING_MISMATCH_MESSAGE, SHARDS_UNSUPPORTED_MESSAGE, MAX_PDF_BYTES, VM_TIMEOUT_MS, VM_CLEANUP_TIMEOUT_MS, dopplerVmUsage } from "./doppler-vm.js";
 import type { ModalSdk } from "./index.js";
 
 function stream(bytes: string) {
@@ -295,3 +295,66 @@ it("does not fall back to registry when imported image resolution fails", async 
   await expect(executeDopplerVm(j, undefined, async () => h.sdk)).rejects.toThrow(/^Document VM execution failed$/);
   expect(h.fromRegistry).not.toHaveBeenCalled(); expect(h.create).not.toHaveBeenCalled();
 });
+
+/** A mocked VM finishes within a millisecond; report a second of runtime so its cost is measurable. */
+function elapsedClock() {
+  const realNow = Date.now.bind(Date);
+  const start = realNow();
+  let reads = 0;
+  return vi.spyOn(Date, "now").mockImplementation(() => (reads++ === 0 ? start : realNow() + 1_000));
+}
+
+describe("shard jobs and publication receipts", () => {
+  it("recognises an old guest that ignored the range even when its output overran the shard cap", async () => {
+    const j = await job(); const h = harness();
+    h.exec.mockImplementation(async () => ({ stdout: stream("whole document output"), stderr: stream(diagnostics(21)), wait: async () => 0 }));
+    const clock = elapsedClock();
+    const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false }, outputLimit: 4 }, undefined, async () => h.sdk).catch((e) => e);
+    clock.mockRestore();
+    expect(error.message).toBe(SHARDS_UNSUPPORTED_MESSAGE);
+    expect(error.usage?.metric).toBe("sandbox_compute"); // a fake VM can finish in 0 ms, so its cost may be 0
+  });
+
+  it("keeps the old-guest classification when termination is unconfirmed", async () => {
+    const j = await job(); const h = harness();
+    h.terminate.mockImplementation(async () => { throw new Error("provider down"); });
+    const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false } }, undefined, async () => h.sdk).catch((e) => e);
+    expect(error.message).toBe(SHARDS_UNSUPPORTED_MESSAGE);
+    expect(error.usage?.metadata?.allocationUnconfirmed).toBe(true);
+  });
+
+  it("returns the VM's cost when publishing its output fails", async () => {
+    const j = await job(); const h = harness();
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(j.output); // rename onto a directory fails after a successful run
+    const clock = elapsedClock();
+    const error = await executeDopplerVm(j, undefined, async () => h.sdk).catch((e) => e);
+    clock.mockRestore();
+    expect(error.message).toBe("Document VM output publication failed");
+    expect(error.usage?.metric).toBe("sandbox_compute");
+  });
+
+  it("does not let a failing control-client close replace the result", async () => {
+    const j = await job(); const h = harness();
+    h.close.mockImplementation(() => { throw new Error("close failed"); });
+    await expect(executeDopplerVm(j, undefined, async () => h.sdk)).resolves.toMatchObject({ exitCode: 0 });
+    expect(await readFile(j.output, "utf8")).toBe("result");
+  });
+
+  it("under a declared hardened protocol, an old guest is a confinement mismatch, not a range refusal", async () => {
+    const j = await job(); const h = harness();
+    vi.stubEnv("DOCSLURP_DOPPLER_VM_PROTOCOL", "4");
+    const error = await executeDopplerVm({ ...j, range: { first: 1, last: 32, final: false }, outputLimit: 4 }, undefined, async () => h.sdk).catch((e) => e);
+    expect(error.message).toBe(HARDENING_MISMATCH_MESSAGE);
+  });
+
+  it("keeps confinement classifications through a failed termination", async () => {
+    const j = await job(); const h = harness(true);
+    h.exec.mockImplementation(async () => ({ stdout: stream(""), stderr: stream("Doppler guest confinement unavailable"), wait: async () => 3 }));
+    h.terminate.mockImplementation(async () => { throw new Error("provider down"); });
+    const error = await executeDopplerVm(j, undefined, async () => h.sdk).catch((e) => e);
+    expect(error.message).toBe(CONFINEMENT_UNAVAILABLE_MESSAGE);
+    expect(error.usage?.metadata?.allocationUnconfirmed).toBe(true);
+  });
+});
+

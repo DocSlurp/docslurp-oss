@@ -10,7 +10,7 @@ The current install is a single host running Docker Compose. It is suitable for 
 flowchart LR
   clients["Clients: REST, SDK, CLI, MCP, OpenAI-compatible chat, embeds"]
   server["Server (Hono, /v1, port 8787)"]
-  pg[("Postgres + pgvector")]
+  pg[("Postgres")]
   redis[("Redis: rate limits, ephemeral")]
   store[("Object storage: S3 or MinIO")]
   lance[("LanceDB vector index under lancedb/")]

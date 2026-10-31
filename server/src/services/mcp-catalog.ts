@@ -2,7 +2,7 @@ import { workspaceSettingsProposalInputSchema } from "./workspace-settings-propo
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
-import { deferredProfilesEnabled } from "@docslurp/shared";
+import { deferredProfilesEnabled, qualityModeSchema } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
@@ -41,6 +41,7 @@ const uploadInputShape = {
   }).strict().refine(file => Boolean(file.contentBase64) !== Boolean(file.text), "Supply either contentBase64 or text for each inline file")).min(1).max(10).optional()
     .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
+  quality: qualityModeSchema.optional().describe("Processing quality for these files; omit for the workspace setting (auto by default). fast: text layer only, scanned pages kept as images and not searchable ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50)."),
 };
 const exactlyOneSource = (value: { urls?: unknown; files?: unknown; inlineFiles?: unknown }) => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1;
 export const uploadInput = z.object(uploadInputShape).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
@@ -165,7 +166,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
     { id: "proposeWorkspaceSettings", title: "Propose workspace settings", scopes: ["search", "ingest"],
       // No API key of any type may list or call it: the signed-in app only.
       keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
-      description: "Prepare an exact workspace-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires workspace editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and vision page selection (vision.forceAllPages reads every page with vision up to vision.maxPagesPerDocument, at most 32; it adds per-page cost and applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a workspace chat session only.",
+      description: "Prepare an exact workspace-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires workspace editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a workspace chat session only.",
       inputSchema: toolInputJsonSchema(workspaceSettingsProposalInputSchema) },
     { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
       description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Pass a returned slug (or the name) as workspace in upload, search or chat. Does not call AI.",

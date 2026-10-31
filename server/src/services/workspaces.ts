@@ -1,5 +1,6 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { markWorkspaceAutoNamed, refineWorkspaceNames } from "./workspace-naming.js";
+import { forgetWorkspaceProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -11,6 +12,7 @@ import {
   isUntitledWorkspaceName,
   isWorkspaceUuid,
   normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   slugifyWorkspaceName,
   WORKSPACE_SLUG_MAX_LENGTH,
   type WorkspaceInputRef,
@@ -71,6 +73,7 @@ type WorkspaceRow = {
   artifact_retention_days?: number | null;
   run_retention_days?: number | null;
   retain_document_versions?: number | null;
+  allow_china_providers?: boolean | null;
   auto_confirm_reindex?: boolean | null;
   document_count: number;
   total_page_count: number;
@@ -280,6 +283,7 @@ function parseWorkspaceTemplateKey(value: string | null): WorkspaceRecord["templ
 }
 
 function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
+  const pipeline = normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `workspace ${row.id}`);
   return workspaceSchema.parse({
     id: row.id,
     orgId: row.org_id,
@@ -287,15 +291,16 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     name: row.name,
     templateKey: parseWorkspaceTemplateKey(row.template_key),
     systemPrompt: row.system_prompt ?? null,
-    summaries: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures).summarize,
+    summaries: pipeline.summarize,
     pipeline: {
-      ...normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+      ...pipeline,
       indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
     },
     monthlyBudgetCents: row.monthly_budget_cents ?? null,
     artifactRetentionDays: row.artifact_retention_days ?? null,
     runRetentionDays: row.run_retention_days ?? null,
     retainDocumentVersions: row.retain_document_versions ?? null,
+    allowChinaProviders: row.allow_china_providers !== false,
     autoConfirmReindex: row.auto_confirm_reindex ?? false,
     documentCount: row.document_count ?? 0,
     totalPageCount: row.total_page_count ?? 0,
@@ -335,7 +340,7 @@ function mapWorkspaceRun(row: WorkspaceRunRow): WorkspaceRun {
     processedDocuments: row.processed_documents,
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
-    pipeline: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+    pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
     error: publicDocumentError(row.error),
@@ -630,6 +635,7 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
       w.artifact_retention_days,
       w.run_retention_days,
       w.retain_document_versions,
+      w.allow_china_providers,
       w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
@@ -738,6 +744,7 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
       w.artifact_retention_days,
       w.run_retention_days,
       w.retain_document_versions,
+      w.allow_china_providers,
       w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
@@ -992,7 +999,7 @@ export async function updateWorkspace(
     pipeline = await resolveUpdatedPipeline(workspaceId, current, parsed, options);
   }
   // With precomputed inputs the caller already validated the switch (this may run inside its transaction).
-  if (!options.precomputed && deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
+  if (!options.precomputed && deferredProfilesEnabled() && (pipeline.indexingMode !== current.pipeline.indexingMode || (pipeline.indexingMode === "visual" && pipeline.quality === "fast"))) {
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 
@@ -1013,6 +1020,7 @@ export async function updateWorkspace(
   const nextRunRetention = retention(parsed.runRetentionDays, current.runRetentionDays);
   const nextRetainVersions = parsed.retainDocumentVersions === undefined ? current.retainDocumentVersions ?? null : parsed.retainDocumentVersions;
   const nextAutoConfirm = parsed.autoConfirmReindex ?? current.autoConfirmReindex ?? false;
+  const nextAllowChina = parsed.allowChinaProviders ?? current.allowChinaProviders ?? true;
   const client = options.client ?? sql;
 
   await client`
@@ -1033,6 +1041,7 @@ export async function updateWorkspace(
       run_retention_days = ${nextRunRetention},
       retain_document_versions = ${nextRetainVersions},
       auto_confirm_reindex = ${nextAutoConfirm},
+      allow_china_providers = ${nextAllowChina},
       budget_paused = case
         when ${nextBudget}::integer is null then false
         when (select spend_cents from current_month_spend) < ${nextBudget} then false
@@ -1048,6 +1057,7 @@ export async function updateWorkspace(
     throw error;
   });
 
+  if (parsed.allowChinaProviders !== undefined) forgetWorkspaceProviderPolicy(workspaceId);
   return options.client ? current : await getWorkspace(workspaceId, userId);
 }
 

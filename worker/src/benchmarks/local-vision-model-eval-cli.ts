@@ -234,7 +234,6 @@ async function runLocalEval(args: CliArgs): Promise<void> {
       target: "local",
       modelUri: `llm://vllm/${runtime.model}?baseUrl=${encodeURIComponent(runtime.baseUrl)}`,
       prompt: args.prompt ?? profile.defaultPrompt,
-      maxPagesPerDocument: args.maxPages ?? 4,
     },
   });
 
@@ -265,7 +264,6 @@ async function runOpenAiCompatibleEval(args: CliArgs): Promise<void> {
       target: "local",
       modelUri: `llm://vllm/${servedModel}?baseUrl=${encodeURIComponent(baseUrl)}`,
       prompt: args.prompt ?? "markdown",
-      maxPagesPerDocument: args.maxPages ?? 4,
     },
   });
   await writePayload(args, {

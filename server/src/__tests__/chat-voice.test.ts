@@ -1,3 +1,4 @@
+import { setOpenRouterProviderPolicyResolver } from "@docslurp/shared";
 import { Hono } from "hono";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { CHAT_VOICE_MAX_BYTES, CHAT_VOICE_MODEL } from "@docslurp/shared/chat-voice";
@@ -34,9 +35,18 @@ beforeEach(() => {
   mocks.record.mockReset().mockResolvedValue({});
   mocks.workspace.mockReset().mockResolvedValue({ id: "ws", orgId: "org" });
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+afterEach(() => { setOpenRouterProviderPolicyResolver(undefined); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("Mastra workspace speech input", () => {
+  it("explains regional refusal without uploading audio or recording spend", async () => {
+    setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false }));
+    await expect(new WorkspaceChatVoice(context, "standard").listen(audio())).rejects.toMatchObject({
+      status: 403, message: "Voice input is unavailable under your provider-region policy. Type your message instead.",
+    });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(mocks.record).not.toHaveBeenCalled();
+  });
+
   it("uses OpenRouter's transcription contract and persists duration-only spend with workspace scope", async () => {
     const voice = new WorkspaceChatVoice(context, "standard");
     expect(await voice.listen(audio())).toBe("My question?");

@@ -163,8 +163,8 @@ describe("ingest report on a migrated database", () => {
       .rejects.toMatchObject({ status: 403 });
     await expect(report.reprocessIngestRecommendation({ workspace: asViewer, userId: "viewer", recommendationId: "vision-all-pages" }))
       .rejects.toMatchObject({ status: 403 });
-    const [{ pipeline }] = await sql<{ pipeline: { vision?: { forceAllPages?: boolean } } }[]>`select pipeline from workspaces where id = 'w1'`;
-    expect(pipeline.vision?.forceAllPages ?? false).toBe(false);
+    const [{ pipeline }] = await sql<{ pipeline: { quality?: string } }[]>`select pipeline from workspaces where id = 'w1'`;
+    expect(pipeline.quality ?? "auto").toBe("auto");
   });
 
   it("applies a recommendation for an editor by merging onto the stored pipeline", async () => {
@@ -173,11 +173,13 @@ describe("ingest report on a migrated database", () => {
     await expect(report.applyIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "made-up" }))
       .rejects.toMatchObject({ status: 409 });
     const applied = await report.applyIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "vision-all-pages" });
-    expect(applied.pipeline.vision).toMatchObject({ forceAllPages: true, maxPagesPerDocument: 4 });
+    expect(applied.pipeline.quality).toBe("good");
+    expect(applied.pipeline.vision).not.toHaveProperty("maxPagesPerDocument");
+    expect(applied.pipeline.vision).not.toHaveProperty("forceAllPages");
     expect(applied.pipeline.summarize).toBe(true);
     // The rule no longer fires the same way once vision covers every page; the scans still need reprocessing.
     const after = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true });
-    expect(after.config.find((item) => item.key === "vision.forceAllPages")?.value).toBe("On");
+    expect(after.config.find((item) => item.key === "quality")?.value).toBe("Good");
   });
 
   it("reprocesses the affected files with the workspace's current settings", async () => {
@@ -188,9 +190,9 @@ describe("ingest report on a migrated database", () => {
     const result = await report.reprocessIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "reprocess-with-vision" });
     expect(result.documentIds.sort()).toEqual(["mixed", "scan"]);
     expect(result.runs).toHaveLength(1);
-    const [run] = await sql<{ pipeline: { vision: { forceAllPages: boolean } }; workspace_id: string }[]>`
+    const [run] = await sql<{ pipeline: { quality: string }; workspace_id: string }[]>`
       select pipeline, workspace_id from workspace_runs where id = ${result.runs[0]!.id}`;
-    expect(run).toMatchObject({ workspace_id: "w1", pipeline: { vision: { forceAllPages: true } } });
+    expect(run).toMatchObject({ workspace_id: "w1", pipeline: { quality: "good" } });
     const versions = await sql<{ filename: string; file_size: number; page_count: number }[]>`
       select filename, file_size::int as file_size, page_count from documents where run_id = ${result.runs[0]!.id} order by filename`;
     expect(versions).toEqual([{ filename: "mixed.pdf", file_size: 900000, page_count: 4 }, { filename: "scan.pdf", file_size: 2000000, page_count: 2 }]);

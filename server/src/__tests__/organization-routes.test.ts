@@ -1,3 +1,6 @@
+vi.mock("../lib/require-sensitive-session.js", () => ({
+  requireSensitiveSession: async (_c: unknown, next: () => Promise<void>) => next(),
+}));
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ actor: { type: "session", userId: "actor" } as any, getOrganization: vi.fn(), details: vi.fn(), access: vi.fn(), invite: vi.fn(), accept: vi.fn(), create: vi.fn(), list: vi.fn(), deleteOrganization: vi.fn() }));

@@ -94,7 +94,6 @@ export const ROLE_PROMPT: Partial<Record<Assignment["role"], string>> = {
 export function visionConfigForModel(
   selection: VisionConfig,
   modelUri: string,
-  pageCount: number,
   role?: Assignment["role"],
 ): VisionConfig {
   const prompt = role ? ROLE_PROMPT[role] : undefined;
@@ -102,8 +101,6 @@ export function visionConfigForModel(
     ...selection,
     modelUri,
     target: inferModelTarget(modelUri),
-    // The plan's budget guard bounds spend; the playbook page cap applies to the legacy selector.
-    maxPagesPerDocument: Math.max(selection.maxPagesPerDocument, pageCount),
     ...(prompt ? { prompt } : {}),
   };
 }
@@ -287,7 +284,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
         skipped.push({ targetId: cascadeId, pages, reason: "cost-cap" });
         continue;
       }
-      const cascadeVision = visionConfigForModel(selection, modelUri, pages.length);
+      const cascadeVision = visionConfigForModel(selection, modelUri);
       if (!(await args.allow(cascadeVision))) {
         skipped.push({ targetId: cascadeId, pages, reason: "privacy-mode" });
         continue;
@@ -318,7 +315,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
       skipped.push({ targetId: group.targetId, pages: group.pages, reason: "cost-cap" });
       continue;
     }
-    const vision = visionConfigForModel(selection, group.modelUri, group.pages.length);
+    const vision = visionConfigForModel(selection, group.modelUri);
     if (!(await args.allow(vision))) {
       skipped.push({ targetId: group.targetId, pages: group.pages, reason: "privacy-mode" });
       continue;

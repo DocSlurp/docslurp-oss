@@ -1,7 +1,7 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { resolveCreditLeaseConfig } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, UNIT_CHARGE_PROVIDER, resolveCreditLeaseConfig, unitChargeMetadata } from "@docslurp/shared";
 
 import { setCreditLeaseConfig } from "../db/credit-lease.js";
 import { setSpendCheckConfig, spendCounterSql } from "../db/spend-check.js";
@@ -30,6 +30,23 @@ const realUrl = process.env.CHECKPOINT_LOCK_TEST_DATABASE_URL;
 const prefix = "lockorder";
 const runId = `${prefix}-run`;
 const docIds = Array.from({ length: 16 }, (_, index) => `${prefix}-doc-${index}`);
+
+/**
+ * Only price-card unit charges bill: internal cost events (local compute, AI
+ * calls) persist at cost_cents = 0 (usage-ledger.ts billableCents). Spend
+ * accounting needs a billable unit charge to have something to count.
+ */
+function unitCharge(costCents: number, metadata: Record<string, unknown>) {
+  return {
+    provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
+    amount: 1, unit: "page", costCents, metadata: unitChargeMetadata(metadata),
+  };
+}
+
+/** An internal cost event: persisted for reporting, never billed. */
+function localCompute(costCents: number, metadata: Record<string, unknown> = {}) {
+  return { provider: "docslurp", model: "local-compute", metric: "worker-stage", amount: 1, unit: "stage", costCents, metadata };
+}
 
 async function seed(pg: Sql) {
   await pg`insert into "user" (id, name, email) values ('lock-u1', 'U', 'lock-u1@example.com') on conflict do nothing`;
@@ -136,10 +153,8 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
         for (let round = 0; round < rounds; round++) {
           // A multi-row page batch (one FK check per row) racing other shards' checkpoints.
           await store.setPagesStageComplete(runId, documentId, `extract-markdown-${round}`, pageNumbers);
-          state.usageLedger.enqueue({
-            provider: "docslurp", model: "local-compute", metric: "worker-stage",
-            amount: 1, unit: "stage", costCents: 0.5, metadata: { shardIndex, round, documentId },
-          });
+          state.usageLedger.enqueue(localCompute(0.25, { shardIndex, round, documentId }));
+          state.usageLedger.enqueue(unitCharge(0.5, { shardIndex, round, documentId, pageNumber: round + 1 }));
           expectedCents += 0.5;
           state.artifactLedger.record(`${documentId}:round-${round}`, `s3://x/${documentId}/${round}`);
           await store.updateProgress(state);
@@ -153,9 +168,15 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
     })));
 
     expect(errors.map((error) => (error as { code?: string; message?: string }).code ?? String(error))).toEqual([]);
-    const [usage] = await pg<{ events: number; cents: string }[]>`
-      select count(*)::int as events, coalesce(sum(cost_cents), 0) as cents from usage_events where run_id = ${runId}`;
-    expect(usage!.events).toBe(shards * docsPerShard * rounds);
+    const [usage] = await pg<{ events: number; charges: number; internal_cents: string; cents: string }[]>`
+      select count(*)::int as events,
+        count(*) filter (where metric = ${BILLABLE_UNIT_METRICS.fastPage})::int as charges,
+        coalesce(sum(cost_cents) filter (where metric = 'worker-stage'), 0) as internal_cents,
+        coalesce(sum(cost_cents), 0) as cents
+      from usage_events where run_id = ${runId}`;
+    expect(usage!.events).toBe(2 * shards * docsPerShard * rounds);
+    expect(usage!.charges).toBe(shards * docsPerShard * rounds);
+    expect(Number(usage!.internal_cents)).toBe(0);
     expect(Number(usage!.cents)).toBeCloseTo(expectedCents, 6);
     const [run] = await pg<{ spent_cents: string; artifacts: Record<string, string> }[]>`
       select spent_cents, artifacts from workspace_runs where id = ${runId}`;
@@ -167,11 +188,14 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
     const state = WorkflowState.create(await store.loadRun(runId), []);
     state.stage = "extract-markdown";
     state.beginShard(docIds.slice(0, 2));
-    state.usageLedger.enqueue({ provider: "docslurp", model: "local-compute", metric: "worker-stage", amount: 1, unit: "stage", costCents: 5 });
+    state.usageLedger.enqueue(localCompute(3));
+    state.usageLedger.enqueue(unitCharge(5, { documentId: docIds[0]!, pageNumber: 1 }));
     await Promise.all([store.updateProgress(state), store.updateProgress(state), store.finishShard(state)]);
     const [run] = await pg<{ spent_cents: string }[]>`select spent_cents from workspace_runs where id = ${runId}`;
     expect(Number(run!.spent_cents)).toBe(5);
-    const [usage] = await pg<{ cents: string }[]>`select coalesce(sum(cost_cents), 0) as cents from usage_events where run_id = ${runId}`;
+    const [usage] = await pg<{ events: number; cents: string }[]>`
+      select count(*)::int as events, coalesce(sum(cost_cents), 0) as cents from usage_events where run_id = ${runId}`;
+    expect(usage!.events).toBe(2);
     expect(Number(usage!.cents)).toBe(5);
   }, 30_000);
 });

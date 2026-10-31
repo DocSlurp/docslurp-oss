@@ -35,7 +35,9 @@ x-server-environment: &server-environment
 
 services:
   postgres:
-    image: pgvector/pgvector:pg17
+    # Bookworm keeps glibc 2.36 collations for volumes created by the former
+    # pgvector/pgvector:pg17 image; vectors live in LanceDB, not Postgres.
+    image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
     environment:
       POSTGRES_DB: docslurp
       POSTGRES_USER: docslurp

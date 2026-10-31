@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import {
   appDbPool,
   auth,
+  configuredMagicLinkAuth,
   getDevSeedAccountCredential,
   handleAuthRequest,
   isDevSeedQuickLoginEnabled,
@@ -20,6 +21,8 @@ import { isInProcessEnv } from "../lib/client-ip.js";
 import { isDevSeedRequestAllowed } from "../lib/dev-auth-access.js";
 import { resolveSsoRedirect, ssoBaseUrl } from "../lib/sso-lookup.js";
 import { hasValidSsoUnlinkedPass, ssoUnlinkedPassFromCookieHeader } from "../lib/sso-unlinked-pass.js";
+import { confirmMagicLink, consumeMagicLinkConfirmation } from "../lib/auth-magic-link.js";
+import { AUTH_CLIENT_IP_HEADER, withTrustedAuthClientIp } from "../lib/client-ip.js";
 import { apiIpRateLimit } from "../middleware/rate-limit.js";
 
 /**
@@ -45,6 +48,18 @@ async function enforcedSsoRedirect(request: Request, email: string): Promise<str
   if (pass && hasValidSsoUnlinkedPass((await auth.$context).secret, pass, email)) return null;
   return ssoUrl;
 }
+
+// Explicit confirmation precedes the native catch-all. Native verification is server-only.
+authRoutes.post("/api/auth/magic-link/confirm", async c => {
+  if (!configuredMagicLinkAuth) return new Response(null, { status: 404 });
+  const request = withTrustedAuthClientIp(c.req.raw, { trustedInternal: isInProcessEnv(c.env) });
+  if (!await consumeMagicLinkConfirmation(appDbPool, request.headers.get(AUTH_CLIENT_IP_HEADER))) {
+    return new Response(JSON.stringify({ code: "RATE_LIMITED", message: "Wait a minute before confirming another sign-in link." }),
+      { status: 429, headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" } });
+  }
+  const context = await auth.$context;
+  return confirmMagicLink(request, input => auth.api.magicLinkVerify(input), async origin => context.isTrustedOrigin(origin));
+});
 
 // Better Auth's router: sign-in/up, OAuth callbacks, sessions, OTP, password reset...
 authRoutes.all("/api/auth/*", (c) => handleAuthRequest(c.req.raw, { trustedInternal: isInProcessEnv(c.env) }));
@@ -85,7 +100,10 @@ authRoutes.post("/api/session/sign-in", async (c) => {
   }));
   if (!result.ok) {
     const payload = await result.json().catch(() => null) as { message?: string } | null;
-    return Response.redirect(buildAuthFailureUrl(request.url, payload?.message ?? "Unable to sign in"), 302);
+    // Keep the verification binding an unverified sign-in earns (auth-credential-binding.ts).
+    const failure = new Response(null, { status: 302, headers: { location: buildAuthFailureUrl(request.url, payload?.message ?? "Unable to sign in").toString() } });
+    for (const cookie of result.headers.getSetCookie()) failure.headers.append("set-cookie", cookie);
+    return failure;
   }
   const response = new Response(null, { status: 302, headers: { location: new URL(redirectTo, request.url).toString() } });
   for (const cookie of result.headers.getSetCookie()) response.headers.append("set-cookie", cookie);

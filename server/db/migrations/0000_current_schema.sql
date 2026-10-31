@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
---> statement-breakpoint
 CREATE TABLE "credit_ledger" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
@@ -258,7 +256,6 @@ CREATE TABLE "document_chunks" (
 	"text" text NOT NULL,
 	"heading_path" text[] DEFAULT '{""}' NOT NULL,
 	"page_number" integer,
-	"vector" vector(384),
 	"token_estimate" integer DEFAULT 0 NOT NULL,
 	"metadata" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"content_hash" text,
@@ -345,7 +342,6 @@ CREATE TABLE "document_summaries" (
 	"run_id" text NOT NULL,
 	"user_id" text NOT NULL,
 	"summary" text NOT NULL,
-	"vector" vector(384),
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
@@ -414,7 +410,6 @@ CREATE TABLE "document_propositions" (
 	"chunk_index" integer NOT NULL,
 	"text" text NOT NULL,
 	"source_paragraph" text NOT NULL,
-	"vector" vector(384),
 	"token_estimate" integer DEFAULT 0 NOT NULL,
 	"ts_content" "tsvector" GENERATED ALWAYS AS (to_tsvector('english'::regconfig, text)) STORED,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
@@ -812,7 +807,6 @@ CREATE TABLE "kg_communities" (
 	"level" integer DEFAULT 0 NOT NULL,
 	"label" text NOT NULL,
 	"summary" text NOT NULL,
-	"vector" vector,
 	"member_count" integer DEFAULT 0 NOT NULL,
 	"metadata" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -1258,10 +1252,6 @@ CREATE INDEX "document_chunks_user_id_run_id_idx" ON "document_chunks" USING btr
 --> statement-breakpoint
 CREATE INDEX "document_chunks_user_id_run_id_idx1" ON "document_chunks" USING btree ("user_id","run_id");
 --> statement-breakpoint
-CREATE INDEX "document_chunks_vector_idx" ON "document_chunks" USING ivfflat ("vector" vector_cosine_ops) WITH (lists=100);
---> statement-breakpoint
-CREATE INDEX "document_chunks_vector_idx1" ON "document_chunks" USING ivfflat ("vector" vector_cosine_ops) WITH (lists=100);
---> statement-breakpoint
 CREATE INDEX "webhook_deliveries_user_id_idx" ON "webhook_deliveries" USING btree ("user_id","created_at");
 --> statement-breakpoint
 CREATE INDEX "webhook_deliveries_webhook_id_idx" ON "webhook_deliveries" USING btree ("webhook_id","created_at");
@@ -1285,10 +1275,6 @@ CREATE INDEX "api_keys_org_id_idx" ON "api_keys" USING btree ("org_id","created_
 CREATE INDEX "document_summaries_user_id_run_id_idx" ON "document_summaries" USING btree ("user_id","run_id");
 --> statement-breakpoint
 CREATE INDEX "document_summaries_user_id_run_id_idx1" ON "document_summaries" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "document_summaries_vector_idx" ON "document_summaries" USING ivfflat ("vector" vector_cosine_ops) WITH (lists=10);
---> statement-breakpoint
-CREATE INDEX "document_summaries_vector_idx1" ON "document_summaries" USING ivfflat ("vector" vector_cosine_ops) WITH (lists=10);
 --> statement-breakpoint
 CREATE INDEX "search_sessions_user_id_created_at_idx" ON "search_sessions" USING btree ("user_id","created_at");
 --> statement-breakpoint
@@ -1339,10 +1325,6 @@ CREATE INDEX "document_propositions_ts_content_idx1" ON "document_propositions" 
 CREATE INDEX "document_propositions_user_id_run_id_idx" ON "document_propositions" USING btree ("user_id","run_id");
 --> statement-breakpoint
 CREATE INDEX "document_propositions_user_id_run_id_idx1" ON "document_propositions" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "document_propositions_vector_idx" ON "document_propositions" USING ivfflat ("vector" vector_cosine_ops) WITH (lists=10);
---> statement-breakpoint
-CREATE INDEX "document_propositions_vector_idx1" ON "document_propositions" USING ivfflat ("vector" vector_cosine_ops) WITH (lists=10);
 --> statement-breakpoint
 CREATE INDEX "idempotency_cache_expires_at_idx" ON "idempotency_cache" USING btree ("expires_at");
 --> statement-breakpoint

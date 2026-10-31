@@ -1,7 +1,7 @@
 # Docker Compose install
 
 This is the single-host Docker Compose install. It runs the API server, one lean
-worker, Postgres with pgvector, Redis, MinIO, and Temporal. Postgres and MinIO
+worker, Postgres, Redis, MinIO, and Temporal. Postgres and MinIO
 use named Docker volumes. Only the server binds a host port, on localhost by
 default. This setup is suitable for a small private installation or a server
 behind a TLS reverse proxy; it is not a multi-host or high-availability design.
@@ -73,6 +73,15 @@ bundles](../worker-image.md) for sizes, flags and building bundles yourself. To 
 ```sh
 docker compose --env-file .env.selfhost -f compose.selfhost.yml --profile full stop worker-full
 ```
+
+## Upgrading from the pgvector image
+
+Earlier releases ran Postgres from `pgvector/pgvector:pg17`. Vectors live in
+LanceDB, so the stack now uses stock `postgres:17-bookworm`, which reads the same
+data volume: both are Postgres 17 on Debian bookworm, so text collations match.
+Migration `0095_drop_pgvector_extension` removes the unused `vector` extension
+on the next start. Do not switch to a non-bookworm Postgres 17 image on an
+existing volume: a newer glibc changes collation order under existing indexes.
 
 ## Stop
 

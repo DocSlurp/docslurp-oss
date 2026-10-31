@@ -41,7 +41,7 @@ import { appendAuditLog } from "./audit-log.js";
 import { explainRemoteIngestBlock, isComplexRemoteIngestFormat } from "./remote-parser-surface.js";
 import { runCreation, type CreatedRun } from "./run-creation.js";
 import { AllSourcesUnreadableError } from "./source-metadata.js";
-import { effectiveIndexingMode } from "./workspace-indexing-mode.js";
+import { assertVisualModeAllowed, effectiveIndexingMode } from "./workspace-indexing-mode.js";
 import { inferWorkspaceTitleFromFilenames, inferWorkspaceTitleFromUrls, markWorkspaceAutoNamed, nameWorkspaceFromUpload } from "./workspace-naming.js";
 import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDefaults } from "./processing-defaults.js";
 import { updateWorkspaceSearchSettingsForUser } from "./search-controls.js";
@@ -631,6 +631,9 @@ export async function intakeIntoWorkspace(
       ...pipeline,
       indexingMode: effectiveIndexingMode(request.indexingMode ?? pipeline.indexingMode),
     };
+    // Per-request overrides (quality, indexingMode) are merged unvalidated above: refuse Fast with visual mode
+    // before any run exists. The overrides apply to the whole request, so the whole request is refused (400).
+    if (pipeline.indexingMode === "visual") assertVisualModeAllowed(pipeline);
     try {
       created = await records.createRun({
         userId: request.userId,

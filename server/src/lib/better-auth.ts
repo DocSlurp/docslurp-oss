@@ -9,11 +9,17 @@ import { ensureUserAndOrganization } from "../services/account-provisioning.js";
 import { cookieHeaderFromAuthContext, recordSignupAttribution } from "../services/signup-attribution.js";
 import { applyAccountKindRules } from "../services/account-kind.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
-import { createAuthEmailOptions } from "./auth-email.js";
+import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
+import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
+import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
+import { uniformCodeRefusal } from "./auth-recovery.js";
+import { credentialBindingPlugin, credentialRecheckPlugin, sessionCredentialFingerprint } from "./auth-credential-binding.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
 import { createMfaPlugins, resolveMfaConfig, sessionAssuranceFields, sessionAssuranceFor } from "./auth-mfa.js";
+import { sensitiveEmailPlugin } from "./auth-sensitive-email.js";
+import { sensitiveAccessPlugin, grantSensitiveAccess, recordSensitiveFirstFactorProof, getSensitiveAccessStatus } from "./auth-sensitive-access.js";
 import { ssoEnforcementPlugin } from "./sso-enforcement.js";
 
 /**
@@ -76,6 +82,7 @@ if (betterAuthSecret === "dev-secret-change-me" && process.env.NODE_ENV === "pro
 
 export const appDbPool = pool;
 export const configuredEmailAuth = isEmailAuthConfigured(process.env);
+export const configuredMagicLinkAuth = configuredEmailAuth;
 
 const oauthTokenEncryptionKey = process.env.OAUTH_TOKEN_ENCRYPTION_KEY?.trim();
 if (!oauthTokenEncryptionKey && process.env.NODE_ENV === "production") {
@@ -171,7 +178,17 @@ export function getDevSeedAccountCredential(id: DevSeedAccountKey): DevSeedAccou
 }
 
 const securityOptions = createBetterAuthSecurityOptions(process.env);
-const emailOptions = createAuthEmailOptions(process.env);
+const recipientLimiter = emailRecipientLimiter({ store: databaseAuthBudgetStore(pool), enabled: emailRecipientLimitsEnabled(process.env) });
+const emailOptions = createAuthEmailOptions(process.env, recipientLimiter.guardDelivery);
+/** Invalid values fail startup; see auth-breached-password.ts for the outage policy. */
+export const breachedPasswordPolicy = resolveBreachedPasswordPolicy(process.env);
+/**
+ * One password-recovery path: native Email OTP reset. The link-based reset
+ * endpoints have no sender configured, and the deprecated OTP alias would be a
+ * second spelling of the same flow for every policy to track. The generic code
+ * checker has no caller and would be one more place to guess codes.
+ */
+export const DISABLED_AUTH_PATHS = ["/forget-password/email-otp", "/request-password-reset", "/reset-password", "/email-otp/check-verification-otp", "/verify-email"];
 /** Passkey relying party and 2FA settings; invalid passkey origins fail startup. */
 export const mfaConfig = resolveMfaConfig(process.env, securityOptions.baseURL);
 export const auth = betterAuth({
@@ -183,8 +200,17 @@ export const auth = betterAuth({
   trustedOrigins: (request) => developmentTrustedOrigins(securityOptions.trustedOrigins, request),
   baseURL: resolveBetterAuthBaseUrl(process.env),
   ...emailOptions,
+  disabledPaths: DISABLED_AUTH_PATHS,
   // SSO issuance policy and MFA assurance both apply to every new session.
-  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }), ...createMfaPlugins({ pool, config: mfaConfig })],
+  // The recipient limit follows SSO enforcement: an enforced address is
+  // refused before it spends any email budget.
+  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }),
+    recipientLimiter.plugin, credentialBindingPlugin({ pool }),
+    ...breachedPasswordPlugins(breachedPasswordPolicy),
+    ...createMfaPlugins({ pool, config: mfaConfig }), sensitiveAccessPlugin({ pool, config: mfaConfig }),
+    sensitiveEmailPlugin({ pool, sendCode: sendAuthEmailCode, grant: grantSensitiveAccess, recordFirstFactor: recordSensitiveFirstFactorProof, getStatus: getSensitiveAccessStatus }),
+    // Last: its after-hook must see what the MFA gate's after-hooks wrote.
+    credentialRecheckPlugin({ pool })],
   session: { ...securityOptions.session, additionalFields: sessionAssuranceFields },
   databaseHooks: {
     session: {
@@ -200,7 +226,7 @@ export const auth = betterAuth({
             .catch(error => console.warn("[account-kind] not applied", error instanceof Error ? error.message : error));
           // Whether this session passed a second factor, decided by the endpoint
           // that created it (see sessionAssuranceFor), never by request input.
-          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId) } };
+          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId), credentialFingerprint: await sessionCredentialFingerprint(pool, ctx as Parameters<typeof sessionCredentialFingerprint>[1]) } };
         }
       }
     },
@@ -294,5 +320,5 @@ export const auth = betterAuth({
  * sign-in, sign-up and password-reset rate limits key on the real client.
  */
 export async function handleAuthRequest(request: Request, options: { trustedInternal?: boolean } = {}): Promise<Response> {
-  return safeErrorResponse(await auth.handler(withTrustedAuthClientIp(request, options)));
+  return safeErrorResponse(await uniformCodeRefusal(request, await auth.handler(withTrustedAuthClientIp(request, options))));
 }

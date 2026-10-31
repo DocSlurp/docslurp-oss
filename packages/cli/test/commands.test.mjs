@@ -365,3 +365,51 @@ test("extract files go through /v1/extracts/bulk and extract-status reports an e
   assert.equal(gone.code, 1);
   assert.match(gone.stderr, /expired/);
 });
+
+test("HTTP failures print reviewed recovery copy and a safe support ID", async () => {
+  const result = await invoke(["search", "question"], () => ({ status: 403, body: {
+    error: { code: "mfa_required", message: "secret provider text", requestId: "req-safe-1", details: { secret: "private" } },
+  } }));
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /authenticator/);
+  assert.match(result.stderr, /req-safe-1/);
+  assert.doesNotMatch(result.stderr, /secret|private/);
+});
+
+test("--json emits a safe typed HTTP error without raw body diagnostics", async () => {
+  const result = await invoke(["search", "question", "--json"], () => ({ status: 402, body: {
+    error: { code: "credit_exhausted", message: "secret provider text", requestId: "req-safe-2", details: { secret: "private", retryAfterSeconds: 30 } },
+  } }));
+  assert.equal(result.code, 1);
+  const body = JSON.parse(result.stderr);
+  assert.equal(body.error.code, "credit_exhausted");
+  assert.equal(body.error.status, 402);
+  assert.equal(body.error.requestId, "req-safe-2");
+  assert.equal(body.error.retryAfterSeconds, 30);
+  assert.doesNotMatch(result.stderr, /secret|private/);
+});
+
+test("--quality sends pipeline.quality on upload and ingest-url, and rejects unknown modes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "docslurp-cli-"));
+  try {
+    const file = join(dir, "note.txt");
+    await writeFile(file, "Plain text");
+    const respond = () => ({ body: { run: { id: "run" }, workspace: { id: "workspace", name: "Docs" }, documents: [{}] } });
+    let result = await invoke(["upload", file, "--quality", "fast"], respond);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fast"\}/);
+
+    result = await invoke(["ingest-url", "https://example.test/a.pdf", "--quality", "good"], respond);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { quality: "good" });
+
+    // Without --quality the workspace setting applies.
+    result = await invoke(["upload", file], respond);
+    assert.doesNotMatch(result.requests[0].body, /name="pipeline"/);
+
+    result = await invoke(["upload", file, "--quality", "deep"], respond);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /--quality must be fast, auto or good/);
+    assert.deepEqual(result.requests, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

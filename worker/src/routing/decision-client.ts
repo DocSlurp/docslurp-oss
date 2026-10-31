@@ -26,6 +26,10 @@
 import { spawn } from "node:child_process";
 import {
   assertProviderAllowed,
+  baseProviderSlug,
+  currentOpenRouterProviderPolicy,
+  isProviderAllowedByRegion,
+  providerRegion,
   resolveDecisionModelLicense,
   type DecisionModel,
   type PrivacyMode,
@@ -326,6 +330,13 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
           target: "hosted",
           baseUrl: spec.url,
         });
+        // The upstream that serves the decision: OpenRouter's /systemone forwards to the model's own lab.
+        const upstream = model.endpoint === "openrouter-systemone" ? baseProviderSlug(model.id) : spec.provider;
+        const policy = await currentOpenRouterProviderPolicy();
+        if (policy && !isProviderAllowedByRegion(upstream, policy.allowChinaProviders)) {
+          console.warn(`[provider-region] refused decision model=${model.id} upstream=${upstream} region=${providerRegion(upstream)}`);
+          throw new DecisionUnavailableError(`${model.id} is served by ${upstream}, which China-provider settings do not allow (region ${providerRegion(upstream)})`);
+        }
         const key = env[spec.keyEnv]?.trim();
         if (!key) throw new DecisionUnavailableError(`${spec.keyEnv} is not set`);
         const payload = JSON.stringify(request);

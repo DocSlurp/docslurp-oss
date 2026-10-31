@@ -33,6 +33,8 @@ type RequestContextState = {
   error?: unknown;
   /** The workspace a slug or `default` route reference resolved to. */
   workspaceId?: string | null;
+  /** Every workspace whose content this request sent (or may send) to a hosted AI call; their provider settings all apply. */
+  providerPolicyWorkspaceIds?: Set<string>;
   requestStartedAt: number;
   userId: string | null;
   apiKeyId?: string | null;
@@ -194,10 +196,25 @@ export function setCurrentRequestError(error: unknown): void {
   if (store) store.error = error;
 }
 
-/** Records the workspace a slug or `default` reference resolved to, for telemetry. */
+/** Records the workspace a slug or `default` reference resolved to, for telemetry and the provider policy. */
 export function setCurrentRequestWorkspaceId(workspaceId: string): void {
   const store = requestContextStorage.getStore();
   if (store) store.workspaceId = workspaceId;
+  noteProviderPolicyWorkspace(workspaceId);
+}
+
+/**
+ * Adds a workspace whose content a hosted AI call in this request carries. The China-provider policy is the
+ * AND of the organization's and every noted workspace's setting, so a workspace opt-out is never widened.
+ */
+export function noteProviderPolicyWorkspace(workspaceId: string | null | undefined): void {
+  const store = requestContextStorage.getStore();
+  if (!store || !workspaceId) return;
+  (store.providerPolicyWorkspaceIds ??= new Set()).add(workspaceId);
+}
+
+export function currentProviderPolicyWorkspaceIds(): readonly string[] {
+  return [...(requestContextStorage.getStore()?.providerPolicyWorkspaceIds ?? [])].sort();
 }
 
 export function currentRequestUserId(): string | null {
