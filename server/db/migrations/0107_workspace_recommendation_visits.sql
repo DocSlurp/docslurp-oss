@@ -11,3 +11,20 @@ CREATE TABLE workspace_recommendation_visits (
   CHECK ((pending_token IS NULL) = (pending_snapshot IS NULL))
 );
 CREATE INDEX workspace_recommendation_visits_workspace_idx ON workspace_recommendation_visits (workspace_id);
+-- The start of tracking is fixed; acknowledgement must never skip a transaction
+-- that was invisible at snapshot time but commits later with an older created_at.
+ALTER TABLE workspace_recommendation_visits ADD COLUMN tracking_since timestamptz NOT NULL DEFAULT clock_timestamp();
+ALTER TABLE workspace_recommendation_visits ADD COLUMN pending_events jsonb;
+CREATE TABLE workspace_recommendation_seen_events (
+  user_id text NOT NULL,
+  org_id text NOT NULL,
+  workspace_id text NOT NULL,
+  source text NOT NULL CHECK (source IN ('search', 'message', 'run')),
+  event_id text NOT NULL,
+  event_created_at timestamptz NOT NULL,
+  PRIMARY KEY (user_id, org_id, workspace_id, source, event_id),
+  FOREIGN KEY (user_id, org_id, workspace_id)
+    REFERENCES workspace_recommendation_visits(user_id, org_id, workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX workspace_recommendation_seen_expiry_idx
+  ON workspace_recommendation_seen_events (user_id, org_id, workspace_id, event_created_at);

@@ -158,6 +158,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   stripe_webhook_events: "billing: Stripe",
   twoFactor: "Better Auth TOTP secrets and backup codes",
   user_settings: "user preferences",
+  workspace_recommendation_seen_events: "per-user reviewed activity IDs; dashboard only",
   workspace_recommendation_visits: "per-user workspace review state; dashboard only",
   verification: "Better Auth verification tokens",
   waitlist_signups: "marketing sign-ups (PII)",
