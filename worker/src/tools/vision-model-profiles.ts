@@ -12,6 +12,7 @@ import { normalizeVisionWhitespace } from "./vision-whitespace.js";
 
 /** Shared evidence rules; relationships remain Markdown, not a new response schema. */
 export const VISUAL_RELATIONSHIP_INSTRUCTIONS = [
+  "Keep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.",
   "For charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.",
   "Distinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.",
   "For diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain.",
@@ -27,7 +28,7 @@ export const MARKDOWN_LATEX_VISION_PROMPT =
  */
 export const MARKDOWN_TRANSCRIPTION_VISION_PROMPT = [
   "Transcribe this document page into GitHub-flavored Markdown, exactly as printed and in natural reading order (in multi-column layouts, finish each column before starting the next).",
-  "- Copy every visible word verbatim in its original language and script. Do not translate, summarize or add commentary.",
+  "- Copy every visible word verbatim in its original language and script. Do not translate, summarize or add unrelated commentary.",
   "- Mark titles and section headings with # headings and bulleted or numbered items as Markdown lists.",
   "- Use a Markdown pipe table only for real tabular data: rows of values under column headers, such as line items, schedules, registers and timetables. Keep one table row per printed row. Do not turn page columns, side-by-side articles, cards, adverts or form fields into tables; write those as ordinary text, one block after another, and form fields as \"Label: value\" lines.",
   "- Write mathematical formulas and equations in LaTeX: inline formulas inside $...$ and each displayed equation inside its own $$...$$ block on separate lines, one block per printed equation line. Never output a formula without these delimiters. Keep ordinary words, numbers, footnote markers, identifiers and code as plain text.",
