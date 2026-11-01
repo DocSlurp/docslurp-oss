@@ -181,3 +181,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Add a configurable 15-second first-token deadline to agent chat model calls; retain native provider fallback and account for aborted calls without replaying requests.
 
 - Add exact-scan, operator-attested integrity candidate adjudication with strict decisions and synthetic fail-closed coverage; findings remain non-waivable. Independent council review required before use on held-out runs.
+
+## Table preservation and comparison gate (2026-11-01)
+
+- Emit span-preserving HTML in the Doppler guest and group compact table records by row with bounded, explicitly labelled header context. Add an independent authored-gold acceptance gate and retain failing scan/rotation/borderless warnings. See [comparison and limits](docs/evals/table-preservation-2026-11-01.md).
