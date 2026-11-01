@@ -27,10 +27,9 @@ export const workspaceTemplateKeySchema = z.enum([
 export type WorkspaceTemplateKey = z.infer<typeof workspaceTemplateKeySchema>;
 
 export const workspaceTemplateLockedSettingSchema = z.enum([
-  "parserPlaybook",
+  "quality",
   "visionFallback",
   "vision.benchmarkProfile",
-  "vision.maxPagesPerDocument",
   "preserveTables",
   "preserveCode",
   "preserveImages",
@@ -101,6 +100,11 @@ export const workspaceSchema = z.object({
   billingEnforced: z.boolean().optional(),
   /** Retained versions per document for this workspace; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /**
+   * China-based model providers may serve this workspace's requests. Narrows the organization's
+   * `allowChinaProviders`: requests use those providers only when both are true (docs/provider-regions.md).
+   */
+  allowChinaProviders: z.boolean().default(true),
   /** Skip the confirm dialog for re-index-queuing changes; recommended changes re-index when `apply` is omitted. */
   autoConfirmReindex: z.boolean().default(false),
   runCount: z.number().int().nonnegative().default(0),
@@ -854,6 +858,8 @@ export const updateWorkspaceSchema = z.object({
   autoConfirmReindex: z.boolean().optional(),
   /** Versions kept per document chain; null inherits the organization setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
+  /** False keeps China-based model providers out of this workspace's requests; true cannot widen an org opt-out. */
+  allowChinaProviders: z.boolean().optional(),
 });
 export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;
 
@@ -878,10 +884,9 @@ const workspaceTemplateLockedSettingPaths: Record<
   WorkspaceTemplateLockedSetting,
   string[]
 > = {
-  parserPlaybook: ["parserPlaybook"],
+  quality: ["quality"],
   visionFallback: ["visionFallback"],
   "vision.benchmarkProfile": ["vision", "benchmarkProfile"],
-  "vision.maxPagesPerDocument": ["vision", "maxPagesPerDocument"],
   preserveTables: ["preserveTables"],
   preserveCode: ["preserveCode"],
   preserveImages: ["preserveImages"],
@@ -1000,7 +1005,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["party", "agreement", "clause", "obligation", "date", "amount", "jurisdiction"] },
-      parserPlaybook: "review-grade",
+      quality: "auto",
       preserveTables: true,
       preserveCode: true,
       pageIndex: true,
@@ -1020,7 +1025,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "preserveTables",
       "preserveCode",
       "pageIndex",
@@ -1039,14 +1044,13 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["patient", "clinician", "condition", "medication", "procedure", "facility", "date"] },
-      parserPlaybook: "review-grade",
+      quality: "auto",
       visionFallback: true,
       // strict-privacy forbids hosted models: local Florence OCR for vision,
       // and summaries/propositions (hosted text models only) stay off.
       vision: {
         profile: "cheapest-local",
         benchmarkProfile: "ocr-heavy",
-        maxPagesPerDocument: 8,
       },
       preserveTables: true,
       pageIndex: true,
@@ -1062,10 +1066,9 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "visionFallback",
       "vision.benchmarkProfile",
-      "vision.maxPagesPerDocument",
       "preserveTables",
       "pageIndex",
       "summarize",
@@ -1084,7 +1087,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["company", "metric", "segment", "period", "amount", "person", "risk"] },
-      parserPlaybook: "layout-aware",
+      quality: "auto",
       preserveTables: true,
       preserveImages: true,
       pageIndex: true,
@@ -1095,7 +1098,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "preserveTables",
       "preserveImages",
       "pageIndex",
@@ -1112,7 +1115,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["component", "service", "api", "configuration", "team", "requirement", "version"] },
-      parserPlaybook: "layout-aware",
+      quality: "auto",
       preserveCode: true,
       preserveImages: true,
       chunkOverlap: true,
@@ -1122,7 +1125,7 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
       },
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "preserveCode",
       "preserveImages",
       "chunkOverlap",
@@ -1138,14 +1141,14 @@ export const workspaceTemplates: WorkspaceTemplate[] = [
     pipeline: buildTemplatePipeline({
       // Vocabulary only; the graph stays off until the workspace enables it.
       graph: { entityTypes: ["person", "team", "decision", "action_item", "project", "date"] },
-      parserPlaybook: "fast",
+      quality: "fast",
       visionFallback: false,
       summarize: true,
       propositionIndex: true,
       inferenceLane: "realtime",
     }),
     lockedSettings: [
-      "parserPlaybook",
+      "quality",
       "visionFallback",
       "summarize",
       "propositionIndex",

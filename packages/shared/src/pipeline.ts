@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
+import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
+  sanitizeStoredDocumentExtraction,
 } from "./extraction.js";
 import {
   defaultEmbeddingConfig,
@@ -434,11 +436,10 @@ export const pipelineFeaturesSchema = z
       .default({ route: "auto", coarseFallback: false }),
     inferenceLane: inferenceLaneSchema.default("standard"),
     textGeneration: textGenerationConfigSchema.default(defaultTextGenerationConfig),
-    // Named parser playbook selection controls which extraction/vision strategies to prefer.
-    // Exposed as a coarse, opinionated knob rather than a dozen low-level flags.
-    parserPlaybook: z
-      .enum(["fast", "balanced", "layout-aware", "agentic", "review-grade"])
-      .default("balanced"),
+    // Processing quality (fast / auto / good): the one public extraction knob. The worker derives its internal
+    // parser playbook and vision page selection from it. Retired `parserPlaybook` and `vision.forceAllPages`
+    // inputs are mapped onto it by migrateLegacyQualitySettings.
+    quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
     documentExtraction: documentExtractionConfigSchema.default(
       defaultDocumentExtractionConfig,
     ),
@@ -632,7 +633,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   visualPages: { route: "auto", coarseFallback: false },
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
-  parserPlaybook: "balanced",
+  quality: DEFAULT_QUALITY_MODE,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
   vision: defaultVisionConfig,
@@ -899,7 +900,7 @@ export type PipelineFeatureOverrides = Omit<
 export function normalizePipelineFeatures(
   source?: PipelineFeatureOverrides | PipelineFeatures | null,
 ): PipelineFeatures {
-  source = migrateStoredModelSettings(source);
+  source = migrateLegacyQualitySettings(migrateStoredModelSettings(source));
   // Privacy-only configuration must never opt into a hosted embedding call.
   // Explicit model/profile selections still pass through the privacy validator.
   const fallbackEmbedding = source?.privacyMode && source.privacyMode !== "standard"
@@ -985,7 +986,32 @@ export function normalizePipelineFeatures(
       ...defaultWorkspaceWebhookSettings,
       ...(source?.webhooks ?? {}),
     },
+    // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
+    // would otherwise bill as Good while skipping vision. A run cost cap (maxCostCents) can still stop vision early.
+    ...(source?.quality === "good" ? { visionFallback: true } : {}),
   });
+}
+
+/**
+ * `normalizePipelineFeatures` for a stored pipeline (a workspace or run row). Stored extractor settings that the
+ * strict schemas now reject (an unknown extractor id or key, a Dolphin path, an invalid OCR language) are dropped
+ * with a loud log naming `source` and the dropped paths (sanitizeStoredDocumentExtraction), instead of failing the
+ * read. Requests stay strict, and nothing else is relaxed: an invalid `quality` or any other setting still throws.
+ */
+export function normalizeStoredPipelineFeatures(
+  stored: PipelineFeatureOverrides | PipelineFeatures | null | undefined,
+  source: string,
+): PipelineFeatures {
+  return normalizePipelineFeatures(sanitizeStoredPipeline(stored, source));
+}
+
+/** Drops invalid stored extractor settings (see normalizeStoredPipelineFeatures), logging what it dropped. */
+export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
+  if (!isPlainRecord(stored) || !isPlainRecord(stored.documentExtraction)) return stored;
+  const { value, dropped } = sanitizeStoredDocumentExtraction(stored.documentExtraction);
+  if (dropped.length === 0) return stored;
+  console.error(`[pipeline] stored pipeline of ${source} has extractor settings the schema rejects; dropped ${dropped.join(", ")}`);
+  return { ...stored, documentExtraction: value } as T;
 }
 
 /** Keys whose override value replaces the base value instead of merging into it. */
@@ -1018,6 +1044,7 @@ export function mergePipelineFeatures(
   overrides?: PipelineFeatureOverrides | null,
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
+  overrides = migrateLegacyQualitySettings(overrides);
   if (!overrides || Object.keys(overrides).length === 0) return normalizedBase;
   return normalizePipelineFeatures(
     mergeOverrideRecord(
@@ -1035,7 +1062,7 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
  * filling in defaults, so they can be merged onto the workspace pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .record(z.string(), z.unknown())
+  .preprocess(migrateLegacyQualitySettings, z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {
@@ -1428,8 +1455,8 @@ export function compilePipelinePlan(
  * required. Each validation pass drops exactly the fields the schema reports
  * so defaults fill them; a list of historical runs never fails on one row.
  */
-export function parseStoredPipelineFeatures(stored: unknown): PipelineFeatures {
-  let source = structuredClone((stored ?? null) as Record<string, unknown> | null);
+export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a stored pipeline"): PipelineFeatures {
+  let source = structuredClone(sanitizeStoredPipeline((stored ?? null) as Record<string, unknown> | null, sourceName));
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       return normalizePipelineFeatures(source as PipelineFeatureOverrides | null);
@@ -1464,7 +1491,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   visualPages: [],
   inferenceLane: [],
   textGeneration: [],
-  parserPlaybook: ["extract-markdown"],
+  quality: ["extract-markdown", "vision-extract"],
   documentExtraction: ["extract-markdown"],
   visionFallback: ["vision-extract"],
   vision: ["vision-extract"],

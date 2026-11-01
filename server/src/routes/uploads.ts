@@ -50,6 +50,8 @@ import {
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
+import { IndexingModeError } from "../services/workspace-indexing-mode.js";
+import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { workspaceInputNotFoundError } from "../services/default-workspace.js";
 import { estimateUpload } from "../services/work-estimates.js";
 import { ExtractError } from "../services/extracts.js";
@@ -188,6 +190,8 @@ export function workspaceIntakeErrorResponse(
   c: Context,
   error: unknown,
 ): Response | null {
+  // Fast (or a refused privacy policy) with visual indexing, from the request's overrides (run-creation.ts).
+  if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
   if (error instanceof WorkspaceAccessError) {
     return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
@@ -217,13 +221,16 @@ export function apiKeyMayCreateWorkspace(c: Context): boolean {
 export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntakePorts) => acceptApiKeys(new Hono()
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
 
+    const sessionMatch = c.req.path.match(/\/direct\/sessions\/([^/]+)(?:\/|$)/);
+    if (sessionMatch && !z.string().uuid().safeParse(sessionMatch[1]).success) {
+      return apiStatusError(c, 400, "Invalid upload session ID");
+    }
     if (actor.type === "apiKey") {
       if (!actor.apiKey.orgId) return apiStatusError(c, 403, "Forbidden");
-      const sessionMatch = c.req.path.match(/\/direct\/sessions\/([^/]+)(?:\/|$)/);
       if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedWorkspaceIds(actor))) {
         return apiStatusError(c, 404, "Upload session not found");
       }
@@ -522,7 +529,7 @@ export const uploadEstimateRoutes = new Hono().post(
     const body = c.req.valid("json");
     const actor = getRequestActor(c);
     // Same gate as the upload itself: ingest scope, bound to the key's organization and workspaces.
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest"]))) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
     // Read-only: an estimate never creates a workspace, the default one included.

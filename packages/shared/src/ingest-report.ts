@@ -42,10 +42,14 @@ export type IngestReportHistogram = z.infer<typeof ingestReportHistogramSchema>;
 
 export const ingestReportPageReasonSchema = z.enum([
   "scanned-no-vision",
+  /** Quality fast kept a page without a text layer as its page image (never read). */
+  "kept-as-image",
   "no-text",
   "vision-failed",
   "vision-page-limit",
   "vision-cost-cap",
+  /** The run's vision attempt guard (page bound, rejection breaker, org attempt limit) refused this page. */
+  "vision-stopped",
   "not-indexed",
   "document-failed",
   "processing",
@@ -277,6 +281,10 @@ export const ingestReportSchema = z.object({
     visionOverCapPages: count,
     visionFailedPages: count,
     visionCostCapPages: count,
+    /** Vision output was rejected (degenerate, refusal, truncated); the page kept its native or OCR text. */
+    visionRejectedPages: count.optional(),
+    /** The run's vision attempt guard (page bound, rejection breaker, org attempt limit) refused these pages. */
+    visionStoppedPages: count.optional(),
     nativeTextPages: count,
     visionCents: nullableCount,
   }),

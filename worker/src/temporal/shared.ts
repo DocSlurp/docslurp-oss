@@ -263,6 +263,10 @@ export interface VisionPageTask {
   pageNumber: number;
   pageCount: number;
   vision: VisionConfig;
+  /** Skip the call when the page's render is blank (pages nominated only by drawn-content bytes). */
+  inkCheck?: boolean;
+  /** The page has usable native or OCR text to keep if vision gives nothing. */
+  fallbackText?: boolean;
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }

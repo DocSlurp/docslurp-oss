@@ -46,24 +46,26 @@ def find_markdown_file(save_dir: Path) -> Path | None:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config_json)
-    dolphin_cfg = config.get("dolphin") if isinstance(config.get("dolphin"), dict) else {}
+    # The worker passes this extractor's options (dolphinExtractorOptionsSchema): only mode and maxBatchSize.
+    # Repository, model and Python paths come from the worker environment only; a workspace never chooses them.
+    unknown = sorted(set(config) - {"mode", "maxBatchSize"})
+    if unknown:
+        raise SystemExit(f"dolphin options not allowed: {', '.join(unknown)}")
 
-    repo_path = (
-        dolphin_cfg.get("repoPath")
-        or os.environ.get("DOLPHIN_REPO_PATH")
-    )
-    model_path = (
-        dolphin_cfg.get("modelPath")
-        or os.environ.get("DOLPHIN_MODEL_PATH")
-    )
-    mode = dolphin_cfg.get("mode") or "page"
-    max_batch_size = str(dolphin_cfg.get("maxBatchSize") or 8)
+    repo_path = os.environ.get("DOLPHIN_REPO_PATH")
+    model_path = os.environ.get("DOLPHIN_MODEL_PATH")
+    mode = config.get("mode") or "page"
+    if mode not in ("page", "layout"):
+        raise SystemExit(f"dolphin mode must be page or layout, got {mode!r}")
+    batch = config.get("maxBatchSize", 8)
+    if isinstance(batch, bool) or not isinstance(batch, int) or not 1 <= batch <= 32:
+        raise SystemExit("dolphin maxBatchSize must be an integer from 1 to 32")
+    max_batch_size = str(batch)
     python_bin = os.environ.get("DOLPHIN_PYTHON_BIN") or sys.executable
 
     if not repo_path or not model_path:
         raise SystemExit(
-            "dolphin extraction requires repo/model paths via documentExtraction.dolphin or "
-            "DOLPHIN_REPO_PATH and DOLPHIN_MODEL_PATH"
+            "dolphin extraction requires DOLPHIN_REPO_PATH and DOLPHIN_MODEL_PATH in the worker environment"
         )
 
     repo_dir = Path(repo_path)

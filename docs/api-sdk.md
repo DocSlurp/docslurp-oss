@@ -44,6 +44,19 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 `search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
 
+### Never embed a server key
+
+**Page HTML, JavaScript bundles and browser requests expose their credentials.**
+Use only a placeholder such as `dslp_pub_YOUR_BROWSER_KEY` in browser/embed setup,
+restricted to the intended workspaces, websites and `search`/`chat` scopes.
+Keep `dslp_priv_` server keys behind a trusted backend. Minification does not
+hide them. Origin restrictions are browser controls; arbitrary HTTP clients can
+spoof `Origin`.
+
+If a private key reaches a public page, revoke it immediately, remove it from
+client assets, and issue and deploy a replacement on the backend. Do not use
+overlapping rotation for a leaked key: it remains usable during the overlap.
+
 Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes retains only the `search` or `chat` permissions it already held. If none remain, it has no permissions: saving or rotating it never adds `search`. Edit its scopes explicitly to enable search or chat; default scopes apply only when creating a key.
 
 Controls per key type:
@@ -354,6 +367,7 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
+- **2026-10-29, non-breaking.** Workspaces gain `allowChinaProviders` (default `true`; `PATCH /v1/workspaces/:workspace`), which narrows the organization's setting. With either off, OpenRouter requests carry a `provider.only` allowlist of providers with a known non-China headquarters, unknown-region providers are excluded and unknown scope is restricted. See [provider regions](provider-regions.md).
 - **2026-10-21, breaking.** One `workspace` request field replaces `workspaceId` and `workspaceName` everywhere a request targets a workspace (bodies, query strings, multipart fields, MCP tool arguments; aggregate search takes `workspaces` instead of `workspaceIds`). It takes a UUID, slug, former slug or name, matched by slug. Uploads into a name that matches nothing create that workspace; other requests answer `404 workspace_not_found` naming the slug. The SDK option and inputs, embed and widget attribute (`workspace`), CLI `--workspace` (`--workspace-name` is removed) and the `DOCSLURP_WORKSPACE` environment variable follow. Responses still carry `workspaceId`. See [Workspaces](#workspaces).
 
 - **2026-10-20.** New workspaces default to `summaries: true`. Create/update bodies and workspace responses expose this document-summary option. It adds a one-time processing cost to improve document search and workspace overviews. See [document summaries, costs and limits](document-summaries.md).
@@ -601,18 +615,18 @@ Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `w
 | `text.perPage` | Plain-text bytes of each page's native text layer (whitespace collapsed), as a histogram with p50/p95. `zeroTextPages` and `nearZeroTextPages` (under 64 bytes) count pages with no usable text layer. |
 | `text.indexedPerPage` | Bytes of indexed chunk text per page, after vision and chunking. |
 | `images` | Embedded images per page, pages with images, and `scannedLookingPages` (images and almost no text layer: scans and photos of text). Pages of failed files are excluded: a crash during extraction says nothing about page triage. |
-| `extraction` | Pages read with vision versus the native text layer, and pages vision skipped: not selected by page triage, past the per-file vision page limit, failed, or stopped by the run cost cap. |
+| `extraction` | Pages read with vision versus the native text layer, and pages vision skipped: not selected by page triage, failed, or stopped by the run cost cap (reports on files processed before 2026-10-29 can also show pages past the former per-file vision page limit). |
 | `searchability` | Searchable pages (a page with chunks), unsearchable pages grouped by reason, pages still processing, and up to 20 example pages. |
 | `failures` | Files that failed: `total`, counts `byReason` and up to 20 `examples`, each with the failed `stage`, a classified `reason` (`ocr_unavailable`, `extractor_failed`, `unsupported_format`, `unreadable_file`, `timeout`, `provider_failed`, `policy_blocked`, `cancelled`, `unknown`), reviewed `message`, whether `retryable` and a short sanitized `detail` (first line of the recorded error with paths, URLs, e-mail addresses and credential-looking values removed). The raw error stays in the database and logs. |
 | `stages`, `languages`, `media`, `tables` | Failed and skipped stages, detected languages, audio and video files (and minutes), and table-heavy pages. |
 | `performance` | Cost (`costCents`, the same figure as the run records: billed spend plus the flagged unbilled compute estimate, `computeEstimated`), `billedCostCents` (billed spend only, what the run cost cap is enforced against), pages per minute, minutes per 100 pages and pages per $1, from run wall time including queueing. |
 | `coverage` | Per-page text and image facts exist for files processed from 2026-10-14; older files report them as not recorded. |
-| `config` | The pipeline settings that shaped what was observed (vision, vision page limit, playbook, OCR language, tables, embeddings, chunking, video, cost cap, privacy mode), each with why it matters here. |
+| `config` | The pipeline settings that shaped what was observed (vision, processing quality, OCR language, tables, embeddings, chunking, video, cost cap, privacy mode), each with why it matters here. |
 | `recommendations` | Deterministic rules with the evidence, the expected effect, `cost.centsPer100Pages` for future uploads, `cost.reprocessCents` for re-running the affected files, and the pipeline `patch` an editor can apply. |
 
 Video frame reading defaults to enabled for new workspaces and configurations that omit `mediaVideo.enabled`. Explicit `false` disables frame reading even for silent video, and bills the file as audio (see below). Every organization gets the same video limits (up to 2 hours per file); only credits and budgets bound what a video costs. This workspace policy still requires the worker's `MEDIA_VIDEO_ENABLED=true`, remote-media support, privacy permission and available budget. The report shows workspace policy, not proof that frames were processed. Changing the default does not reprocess existing uploads; reprocessing remains explicit.
 
-Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `vision.forceAllPages` and a page limit of up to 32); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. A failed file never produces a vision recommendation; `retry-failed-files` names the cause and says when retrying will fail the same way (for example `ocr_unavailable`). Singular and plural wording follows the counts. Every recommendation id is classified in `INGEST_RECOMMENDATION_CATALOG`: those with a `patch` (`turn-on-vision`, `vision-all-pages`, `preserve-tables`, `turn-on-embeddings`, `turn-on-video`) can be prepared in the DocSlurp app's chat with `proposeWorkspaceSettings` as `{changes: {pipeline: <patch>}}` (app-only; API callers apply a patch with `POST /v1/workspaces/:id/ingest-report/apply`); the rest are reprocess-only, informational or outside the proposal allowlist, and a test enforces that. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
+Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the former per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `quality: "good"`); make pages that Fast kept as page images searchable (`fast-kept-as-image`, reason `kept-as-image`; the patch sets `quality: "auto"`, and the effect names Good as the other choice, or only a reprocess once the workspace has left Fast); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. A failed file never produces a vision recommendation; `retry-failed-files` names the cause and says when retrying will fail the same way (for example `ocr_unavailable`). Singular and plural wording follows the counts. Every recommendation id is classified in `INGEST_RECOMMENDATION_CATALOG`: those with a `patch` (`turn-on-vision`, `vision-all-pages`, `fast-kept-as-image`, `preserve-tables`, `turn-on-embeddings`, `turn-on-video`) can be prepared in the DocSlurp app's chat with `proposeWorkspaceSettings` as `{changes: {pipeline: <patch>}}` (app-only; API callers apply a patch with `POST /v1/workspaces/:id/ingest-report/apply`); the rest are reprocess-only, informational or outside the proposal allowlist, and a test enforces that. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
 
 In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`; API keys need a server key with `workspaces:manage`) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings (server keys need `ingest`). The report's `permissions.canEdit` tells you whether the caller may do either.
 
@@ -993,6 +1007,18 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 
 `spend_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
 
+### Processing quality
+
+`pipeline.quality` is the one extraction setting: set it on the workspace (`PATCH /v1/workspaces/:workspace` with `{ "pipeline": { "quality": "fast" } }`) or per upload in the request's `pipeline` overrides (SDK `quality`, CLI `--quality`, MCP `upload`/`extract` `quality`). Indexing mode (`pipeline.indexingMode`, full or on demand) is a separate, advanced setting.
+
+| Quality | What it does | Price per 1,000 pages |
+| --- | --- | --- |
+| `fast` | Reads the text layer only, never OCR or a vision model. Request or workspace extraction settings that could read a page (OCR options, `forceOcr`, model or OCR extractors in `documentExtraction.order`, artifact-graph `enrich`) are removed for the run and logged; Kreuzberg gets no OCR options and never receives an image (it would OCR one regardless of settings); extractor options are validated per extractor and unknown extractors or keys are rejected. A page without a usable text layer keeps its stored page image, and its Markdown is `![Page N: scanned page image, no text layer](images/page-NNNN.png)` (the export's page-image path; the extension follows the stored image, so a JPEG upload links `images/page-0001.jpg`). Markdown-only exports include these page images. Renders are capped at `WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT` (default 1,000) per document and `WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN` (default 10,000) per run, a budget shared by every worker. A page counts against the budget when it is granted, so a render that then fails still uses its share and is not retried from the budget; pages past a cap, and pages whose render failed, stay unread with no reference (previews still render them on demand). On-demand indexing (search-triggered, index-all, map mode) follows the same rule: text layer only. Such a page has no text, adds no chunks and is not searchable; the ingest report lists it as `kept-as-image`. | $0.05 (pages bill Fast; a page bills Rich only when a model actually reads it, and Fast cannot be combined with visual indexing mode) |
+| `auto` (default) | Reads each page the cheapest faithful way: the text layer for born-digital pages, a vision model for scans and complex layouts. | $0.05 to $2.50, depending on the mix |
+| `good` | A vision model reads every page, for the most faithful tables, figures and layout. Good turns `visionFallback` on. A run cost cap (`maxCostCents`) can still stop vision early; pages it did not read bill as in Auto. | $2.50 (every page a vision model reads bills Rich, plus the extra-output-token rule) |
+
+`QUALITY_MODES` in `@docslurp/shared` holds these labels, descriptions and prices (from `PRICE_CARD`), and `estimateIngest` takes the same three ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `forceAllPages: true` to good, and every other playbook, `review-grade` and `agentic` included, to auto: those playbooks never read every page). Run previews (`POST /v1/runs/preview`) return one option per quality.
+
 ### Credits and budgets
 
 DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 250 free credits, no card needed. You pay per unit:
@@ -1000,7 +1026,7 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 | Unit | Credits |
 | --- | --- |
 | Fast page (text-layer PDF, Office, HTML, Markdown, EPUB, text) | 5 per 1,000 pages |
-| Rich page (scanned page, image, or a page read by a vision model) | 250 per 1,000 pages; a page whose model output runs past 1,000 tokens counts once more per extra 1,000 tokens |
+| Rich page (scanned page, image, or a page read by a vision model) | 250 per 1,000 pages; a page whose model output runs past 1,000 tokens counts once more per extra 1,000 tokens. In Fast quality nothing is read, so scans and images bill as Fast pages |
 | Audio | 1 Rich page per minute |
 | Video (frames read) | 3 Rich pages per minute |
 | Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
@@ -1077,7 +1103,7 @@ Finance/                      one folder per document (a document export is just
     structured.json           schema fields, when the workspace has a schema
     metadata.json             filename, type, status, page count, version, tags
     original/Q3 plan.pdf      "all" only: the uploaded file
-    images/page-0001.png      "all" only: rendered page images
+    images/page-0001.png      "all": rendered page images; Markdown-only: pages Fast kept as images
     outputs/html.html         "all" only: readable pipeline outputs (HTML, canonical document, …)
   README.md                   the layout, a document table, and any file that could not be included
 ```

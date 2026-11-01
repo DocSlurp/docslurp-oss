@@ -252,7 +252,7 @@ describe("Workspace Intake", () => {
     await intakeIntoWorkspace(
       request({
         workspace: "ws-legal",
-        pipeline: { summarize: !template.pipeline.summarize, piiPolicy: { enabled: false }, parserPlaybook: "fast", chunkOverlap: true },
+        pipeline: { summarize: !template.pipeline.summarize, piiPolicy: { enabled: false }, quality: "fast", chunkOverlap: true },
       }),
       fakes.ports,
     );
@@ -260,7 +260,7 @@ describe("Workspace Intake", () => {
     const run = fakes.runs[0].pipeline;
     expect(run.summarize).toBe(template.pipeline.summarize);
     expect(run.piiPolicy.enabled).toBe(true);
-    expect(run.parserPlaybook).toBe("review-grade");
+    expect(run.quality).toBe("auto"); // the template locks auto; the upload asked for fast
     expect(run.chunkOverlap).toBe(true); // not locked, so the override applies
   });
 

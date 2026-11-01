@@ -21,6 +21,7 @@ import { textUsageLabels } from "../lib/text-model-route.js";
 import type { EmbeddingProfile } from "../models.js";
 import { embedTextChunks, type RemoteEmbeddingUsage } from "../stages/embedding-runtime.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import { CommandRunner } from "../tools/runner.js";
 
 const BASE_URL = "https://gpu1.example.com/v1";
@@ -199,7 +200,7 @@ describe("worker private endpoint vision", () => {
     await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     const result = await runWithPrivacyAuditScope({ workspaceId: "ws-1", runId: "run-1", documentId: "doc-1" }, () => executeVisionRuntime({
       imagePath,
-      outputPath: `${imagePath}.json`,
+      outputPath: `${imagePath}.json`, gate: null,
       vision: visionConfigSchema.parse({ modelUri: "llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", prompt: "markdown" }),
       cfg: fromEnv(),
       runner: new CommandRunner(),
@@ -211,6 +212,9 @@ describe("worker private endpoint vision", () => {
     expect(calls[0]!.body.chat_template_kwargs).toBeUndefined();
     expect(result).toMatchObject({ provider: "private", model: "gpu1/lightonai/LightOnOCR-3-0.8B", inputTokens: 120, outputTokens: 30, usageSource: "provider" });
     expect(result.costCents).toBeCloseTo((120 * 0.5 + 30 * 2) / 1_000_000 * 100);
+    // The registry's price is an explicit charge for the whole call: kept as it is on the (unbilled) private route.
+    expect(result.chargedTokens).toBeUndefined();
+    expect(priceVisionResult(result, fromEnv())).toBeCloseTo(result.costCents!, 12);
     expect(audit).toEqual([expect.objectContaining({ workspaceId: "ws-1", documentId: "doc-1", endpoint: "private:gpu1:worker.vision" })]);
   });
 });

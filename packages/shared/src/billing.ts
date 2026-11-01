@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
+import { qualityModeSchema, type QualityMode } from "./quality.js";
 
 // ---------------------------------------------------------------------------
 // Credits
@@ -662,8 +663,62 @@ export function priceAiUsageEvent<T extends PriceableAiEvent>(event: T): T {
 export const pageClassSchema = z.enum(["text", "complex", "scanned"]);
 export type PageClass = z.infer<typeof pageClassSchema>;
 
-export const pipelineProfileIdSchema = z.enum(["fast", "standard", "deep"]);
-export type PipelineProfileId = z.infer<typeof pipelineProfileIdSchema>;
+/** Estimator profiles are the processing quality modes (`pipeline.quality`). */
+export const pipelineProfileIdSchema = qualityModeSchema;
+export type PipelineProfileId = QualityMode;
+
+export type QualityModeInfo = {
+  id: QualityMode;
+  label: string;
+  /** One line for the picker. */
+  description: string;
+  /** What the price depends on, for a tooltip or footnote. */
+  priceNote: string;
+  /** Credits per 1,000 pages, from PRICE_CARD; min === max for a flat price. */
+  creditsPer1kPages: { min: number; max: number };
+};
+
+/**
+ * The public processing quality choice. Prices come from PRICE_CARD: Fast never reads a page with OCR or a model
+ * (scans are kept as page images), so its pages bill Fast unless the usage ledger records a read; Auto bills each page by how it was read; Good
+ * reads every page with a vision model (Rich, plus the extra-output-token rule, richPagesForOutputTokens).
+ */
+export const QUALITY_MODES: Record<QualityMode, QualityModeInfo> = {
+  fast: {
+    id: "fast",
+    label: "Fast",
+    description: "Text layer only. Scanned pages are kept as images, not read.",
+    priceNote: "Pages bill Fast. A page bills Rich only when a model actually reads it, such as visual indexing embedding its page image; a workspace cannot combine Fast with visual mode. Pages without a text layer are stored as page images and are not searchable.",
+    creditsPer1kPages: { min: PRICE_CARD.fastPer1kPages, max: PRICE_CARD.fastPer1kPages },
+  },
+  auto: {
+    id: "auto",
+    label: "Auto",
+    description: "Reads each page the cheapest faithful way: text layer, or a vision model for scans and complex layouts.",
+    priceNote: "Text pages bill Fast; scanned and complex pages read by a model bill Rich, so the price depends on the mix.",
+    creditsPer1kPages: { min: PRICE_CARD.fastPer1kPages, max: PRICE_CARD.richPer1kPages },
+  },
+  good: {
+    id: "good",
+    label: "Good",
+    description: "A vision model reads every page for the most faithful tables, figures and layout.",
+    priceNote: `Every page a vision model reads bills Rich, and a page whose output exceeds ${PRICE_CARD.richIncludedOutputTokens.toLocaleString("en-US")} tokens counts as extra Rich pages. A run cost cap can stop vision early; pages it did not read bill as in Auto.`,
+    creditsPer1kPages: { min: PRICE_CARD.richPer1kPages, max: PRICE_CARD.richPer1kPages },
+  },
+};
+
+export const QUALITY_MODE_ORDER: readonly QualityMode[] = qualityModeSchema.options;
+
+const formatUsdPer1k = (credits: number): string => {
+  const dollars = creditsToDollars(credits);
+  return `$${dollars.toFixed(2)}`;
+};
+
+/** "$0.05", "$0.05 to $2.50" or "$2.50" per 1,000 pages for a quality mode. */
+export function qualityModePriceRange(mode: QualityMode): string {
+  const { min, max } = QUALITY_MODES[mode].creditsPer1kPages;
+  return min === max ? formatUsdPer1k(min) : `${formatUsdPer1k(min)} to ${formatUsdPer1k(max)}`;
+}
 
 export type PageCost = {
   /** Seconds one worker slot is busy with the page. */
@@ -753,34 +808,42 @@ export const PIPELINE_PROFILE_BASIS = {
  * and were not part of the load test.
  *
  * Byte columns (sourceBytes, artifactBytes, indexBytes) are unchanged.
+ *
+ * 2026-10-29: profiles became the quality modes. standard -> auto (unchanged);
+ * deep -> good, where a vision model reads every page, so text pages hold a slot
+ * for one vision call (4.2 s, from the scanned figure) and summaries and graph
+ * enrichment are no longer assumed; fast scanned pages are kept as page images
+ * (render and store only, 1 s, unmeasured) and bill Fast.
  */
 export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
   fast: {
     id: "fast",
-    label: "Fast",
-    description: "Text layer and OCR where needed, chunk, embed. Best for born-digital prose.",
+    label: QUALITY_MODES.fast.label,
+    description: QUALITY_MODES.fast.description,
     pages: {
       text: { workerSeconds: 0.2, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
       complex: { workerSeconds: 0.8, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 40 * KB, indexBytes: 24 * KB },
-      scanned: { workerSeconds: 3, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 40 * KB, indexBytes: 20 * KB },
+      // Kept as a page image: render and store it, no OCR or model read, no text to index. Render time unmeasured.
+      scanned: { workerSeconds: 1, mode: "fast", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 0 },
     },
   },
-  standard: {
-    id: "standard",
-    label: "Standard",
-    description: "Layout-aware tables and figures, model reading where pages need it, page images.",
+  auto: {
+    id: "auto",
+    label: QUALITY_MODES.auto.label,
+    description: QUALITY_MODES.auto.description,
     pages: {
       text: { workerSeconds: 0.3, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
       complex: { workerSeconds: 4, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 160 * KB, indexBytes: 30 * KB },
       scanned: { workerSeconds: 4.2, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
     },
   },
-  deep: {
-    id: "deep",
-    label: "Deep",
-    description: "Standard plus vision-model reading of figures, complex layouts and scans, summaries and knowledge graph.",
+  good: {
+    id: "good",
+    label: QUALITY_MODES.good.label,
+    description: QUALITY_MODES.good.description,
     pages: {
-      text: { workerSeconds: 0.8, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 72 * KB, indexBytes: 32 * KB },
+      // Every page holds a slot for one vision call (production worker.vision p50 4.1 s).
+      text: { workerSeconds: 4.2, mode: "rich", sourceBytes: 30 * KB, artifactBytes: 160 * KB, indexBytes: 30 * KB },
       complex: { workerSeconds: 6, mode: "rich", sourceBytes: 120 * KB, artifactBytes: 180 * KB, indexBytes: 40 * KB },
       scanned: { workerSeconds: 6, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 180 * KB, indexBytes: 35 * KB },
     },
@@ -852,7 +915,7 @@ function normalizeMix(mix: Partial<PageMix>): PageMix {
 }
 
 export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
-  const profile = PIPELINE_PROFILES[input.profile ?? "standard"];
+  const profile = PIPELINE_PROFILES[input.profile ?? "auto"];
   const workers = Math.max(1, Math.round(nonNegative(input.workerSlots ?? FUNDED_WORKER_SLOTS)) || FUNDED_WORKER_SLOTS);
   const pages = Math.max(0, Math.round(nonNegative(input.pages)));
   const documents = Math.max(1, Math.round(nonNegative(input.documents ?? 1)));

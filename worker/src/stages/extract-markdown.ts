@@ -3,7 +3,7 @@ import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
-import { copyFile, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -16,6 +16,9 @@ import {
   resolveVisionRoute,
   splitTextIntoPages,
   parserPlaybookCatalog,
+  parserPlaybookForQuality,
+  qualityAllowsPageReading,
+  documentExtractionForQuality,
   deriveDocumentTitle,
   htmlDocumentTitle,
   type ExtractionContract,
@@ -57,7 +60,11 @@ import { evaluateParserPolicy } from "../lib/parser-policy.js";
 import {
   SPARSE_PAGE_WORDS,
   collectPageImageEvidence,
+  drawnBytesPerPage,
+  imageFilePageEvidence,
+  totalEmbeddedImageBytes,
   pageAlignedTexts,
+  type PageImageEvidence,
   type PageImageEvidenceArtifact,
 } from "../lib/page-image-evidence.js";
 import {
@@ -83,9 +90,13 @@ import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore } from "../tools/storage.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
-import { pageFactsEnabled, probePdfPageFacts, recordPageFacts } from "../pipeline/page-facts.js";
-import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
+import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { guardedVisionCall, priceVisionResult } from "../lib/guarded-vision-call.js";
+import type { VisionServedRoute } from "../lib/vision-pricing.js";
+import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
+import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -184,16 +195,18 @@ export class ExtractMarkdownStage implements Stage {
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
-          (
-            state.run.pipeline as unknown as {
-              parserPlaybook?: keyof typeof parserPlaybookCatalog;
-            }
-          ).parserPlaybook ??
-          "balanced";
-        const extractionConfig = {
-          ...defaultDocumentExtractionConfig,
-          ...(state.run.pipeline.documentExtraction ?? {}),
-        };
+          parserPlaybookForQuality(state.run.pipeline.quality);
+        // Fast runs only text-layer extractors with OCR off, whatever the request or workspace asked for.
+        const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
+          { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
+          state.run.pipeline.quality,
+        );
+        if (fastRemoved.length > 0) {
+          console.warn(
+            `[extract-markdown] quality fast removed page-reading extraction settings run=${state.run.id} ` +
+              `document=${document.id} removed=${fastRemoved.join(",")}`,
+          );
+        }
         assertSupportedDocumentTarget(extractionConfig.target);
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
@@ -285,7 +298,12 @@ export class ExtractMarkdownStage implements Stage {
                   };
                 }
 
-                let plannedExtractors = await this.planExtractors({
+                // Fast never OCRs: an image file keeps its page image (render-images) and has no extracted text.
+                // The same image test billing and render-images use (MIME image/*), so an image MIME the format map
+                // does not know is kept unread too instead of reaching an OCR-capable extractor.
+                const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
+                  !qualityAllowsPageReading(state.run.pipeline.quality);
+                let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -296,7 +314,14 @@ export class ExtractMarkdownStage implements Stage {
                 });
                 // Why an image continues without extracted text (reported in the manifest and stats).
                 let textlessFallback: string | null = null;
-                if (!plannedExtractors) {
+                if (keepImageUnread) {
+                  textlessFallback = "quality fast keeps images unread";
+                  plannedExtractors = {
+                    primary: this.textlessImageExtractor(state, document, textlessFallback),
+                    secondary: null,
+                    tableAware: false,
+                  };
+                } else if (!plannedExtractors) {
                   if (lastUsableResult) return lastUsableResult;
                   const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
                   if (format !== "image") throw new Error(cause);
@@ -756,10 +781,8 @@ export class ExtractMarkdownStage implements Stage {
                     parserScores.length > 0
                       ? this.storage.uri(parserEvalKey)
                       : null;
-                  const pageImageEvidenceUri =
-                    isPdf && state.run.pipeline.visionFallback
-                      ? await this.recordPageImageEvidence(document, tempFile, winningText, state, signal)
-                      : null;
+                  const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
+                    document, tempFile, winningText, state, { isPdf, format }, signal);
                   registerHash(state, contentHash, artifactUri);
 
                   for (const parserArtifact of parserArtifacts) {
@@ -1030,6 +1053,7 @@ export class ExtractMarkdownStage implements Stage {
         } finally {
           await pageFacts;
           this.imageListings.delete(this.imageListingKey(state, document));
+          this.textLayerListings.delete(this.imageListingKey(state, document));
         }
       },
     );
@@ -1066,12 +1090,92 @@ export class ExtractMarkdownStage implements Stage {
 
   /** Pending `pdfimages -list` runs from page facts, per run and document, shared with page triage. */
   private readonly imageListings = new Map<string, { lastPage: number; stdout: Promise<string | null> }>();
+  /** Pending `pdftotext` runs from page facts (the native text layer), shared with page triage. */
+  private readonly textLayerListings = new Map<string, { lastPage: number; stdout: Promise<string | null> }>();
 
   private imageListingKey(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
   ): string {
     return `${state.run.id}:${document.id}`;
+  }
+
+  /**
+   * The PDF's own text layer per page from page facts' pdftotext run, or null when page facts
+   * did not run or failed. OCR text from the extractor is word-shaped, so page triage needs the
+   * text layer to see that an OCR'd scan is still a raster page.
+   */
+  private async textLayerPages(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+  ): Promise<string[] | null> {
+    const listing = this.textLayerListings.get(this.imageListingKey(state, document));
+    if (!listing) return null;
+    const stdout = await listing.stdout.catch(() => null);
+    return stdout === null ? null : splitFormFeedPages(stdout, listing.lastPage);
+  }
+
+  /**
+   * Raster evidence for classify-route: PDFs get page triage (`pdfimages`), and with routing v2
+   * an uploaded image gets one full-page raster page (`image-file`). Null when vision fallback is
+   * off or the format has none.
+   */
+  async recordDocumentImageEvidence(
+    document: import("../models.js").Document,
+    sourcePath: string,
+    winningText: string,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    source: { isPdf: boolean; format: string },
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (!state.run.pipeline.visionFallback) return null;
+    if (source.isPdf) return await this.recordPageImageEvidence(document, sourcePath, winningText, state, signal);
+    if (source.format === "image" && resolveRunRoutingV2(state)) {
+      return await this.storePageImageEvidence(document, state, imageFilePageEvidence(), "image-file");
+    }
+    return null;
+  }
+
+  /**
+   * (File bytes - every embedded image's bytes) / pages, from page facts' whole-document
+   * `pdfimages -list` run; null when that listing is missing, failed or stops short of the last
+   * page (the drawn-content hint then stays off rather than counting unlisted images as drawing).
+   */
+  private async drawnBytesPerPage(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    sourcePath: string,
+  ): Promise<number | null> {
+    const pageCount = Math.max(1, document.pageCount);
+    const listing = this.imageListings.get(this.imageListingKey(state, document));
+    if (!listing || listing.lastPage < pageCount) return null;
+    const stdout = await listing.stdout.catch(() => null);
+    if (stdout === null) return null;
+    const fileBytes = await stat(sourcePath).then((info) => info.size).catch(() => null);
+    return drawnBytesPerPage(fileBytes, totalEmbeddedImageBytes(stdout), pageCount);
+  }
+
+  private async storePageImageEvidence(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    pages: PageImageEvidence[],
+    source: PageImageEvidenceArtifact["source"],
+    drawnBytesPerPage: number | null = null,
+  ): Promise<string> {
+    const artifact: PageImageEvidenceArtifact = {
+      documentId: document.id,
+      source,
+      sparsePageWords: SPARSE_PAGE_WORDS,
+      drawnBytesPerPage,
+      pages,
+    };
+    const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
+    await this.storage.putJson(key, artifact);
+    console.log(
+      `[extract-debug] document=${document.id} pageImageEvidence source=${source} sparsePages=${pages.length} ` +
+        `withImages=${pages.filter((page) => page.imageCount > 0).length}`,
+    );
+    return this.storage.uri(key);
   }
 
   /**
@@ -1095,21 +1199,12 @@ export class ExtractMarkdownStage implements Stage {
         pageTexts,
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
+        // Routing v2 counts native words from the text layer, so an OCR'd scan stays sparse.
+        textLayerPages: resolveRunRoutingV2(state) ? await this.textLayerPages(state, document) : null,
       });
       if (!pages) return null;
-      const artifact: PageImageEvidenceArtifact = {
-        documentId: document.id,
-        source: "pdfimages",
-        sparsePageWords: SPARSE_PAGE_WORDS,
-        pages,
-      };
-      const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
-      await this.storage.putJson(key, artifact);
-      console.log(
-        `[extract-debug] document=${document.id} pageImageEvidence sparsePages=${pages.length} ` +
-          `withImages=${pages.filter((page) => page.imageCount > 0).length}`,
-      );
-      return this.storage.uri(key);
+      return await this.storePageImageEvidence(document, state, pages, "pdfimages",
+        await this.drawnBytesPerPage(state, document, sourcePath));
     } catch (error) {
       rethrowIfTeardown(error);
       if (signal?.aborted) throw error;
@@ -1149,6 +1244,7 @@ export class ExtractMarkdownStage implements Stage {
         signal,
         // Page triage (recordPageImageEvidence) reuses this pdfimages run instead of a second one.
         onImagesList: (listing) => this.imageListings.set(this.imageListingKey(state, document), listing),
+        onPageText: (listing) => this.textLayerListings.set(this.imageListingKey(state, document), listing),
       });
       await recordPageFacts(state.store, rows);
     } catch (error) {
@@ -1192,10 +1288,12 @@ export class ExtractMarkdownStage implements Stage {
     cause: string,
   ): PreparedExtractor {
     const pipeline = state.run.pipeline;
+    // Fast keeps the image as its page image on purpose; nothing has to read it.
+    const keptAsImage = !qualityAllowsPageReading(pipeline.quality);
     const visionAllowed =
       pipeline.visionFallback &&
       isProviderCallAllowed(pipeline.privacyMode, visionCall(resolveVisionRoute(pipeline.vision)));
-    if (!visionAllowed) {
+    if (!visionAllowed && !keptAsImage) {
       console.error(
         `[extract-error] stage=${this.name} document=${document.id} image-unreadable ` +
           `visionFallback=${pipeline.visionFallback} privacyMode=${pipeline.privacyMode} cause=${cause}`,
@@ -1535,6 +1633,10 @@ export class ExtractMarkdownStage implements Stage {
     if (!critiqueEnabled() || !Number.isFinite(maxCostCents) || maxCostCents <= 0) {
       return null;
     }
+    // Self-critique re-reads page rasters with a vision model; fast never reads a page.
+    if (!qualityAllowsPageReading(args.state.run.pipeline.quality)) {
+      return null;
+    }
     const maxCostPerPageCents = Number.parseFloat(
       process.env.DOCSLURP_CRITIQUE_MAX_COST_PER_PAGE_CENTS ??
         String(maxCostCents),
@@ -1545,6 +1647,10 @@ export class ExtractMarkdownStage implements Stage {
       maxCostPerPageCents,
     );
     if (critiquePages.length === 0) {
+      return null;
+    }
+    // Vision already stopped for the run (rejection breaker, org attempt limit): no renders, no calls.
+    if (visionGuardFor(args.state).stop) {
       return null;
     }
     // Self-critique is optional; skip it when the vision route is hosted and
@@ -1581,6 +1687,8 @@ export class ExtractMarkdownStage implements Stage {
         }),
       );
 
+      // The route each page's critique was served on (a fallback's when it served), for the usage records below.
+      const critiqueRoutes = new Map<number, VisionServedRoute>();
       const corrections = await Promise.all(
         critiquePages.map(async (pageNumber): Promise<SelfCritiqueCorrection> => {
         const imagePath = path.join(
@@ -1589,22 +1697,38 @@ export class ExtractMarkdownStage implements Stage {
         );
         try {
           const originalText = pageTexts[pageNumber - 1] ?? "";
-          const result = await executeVisionRuntime({
-            imagePath,
-            outputPath: `${imagePath}.json`,
-            privacyMode: args.state.run.pipeline.privacyMode,
-            vision: {
-              ...args.state.run.pipeline.vision,
-              prompt: buildCritiquePrompt(
-                originalText,
-                args.state.run.pipeline.preserveTables,
-                args.state.run.pipeline.preserveCode,
-              ),
-            },
+          const critiqueVision = {
+            ...args.state.run.pipeline.vision,
+            prompt: buildCritiquePrompt(
+              originalText,
+              args.state.run.pipeline.preserveTables,
+              args.state.run.pipeline.preserveCode,
+            ),
+          };
+          // The run's vision attempt guard admits every critique request like every other vision
+          // request; critique never creates a customer charge, so its requests stay uncharged. A
+          // rejected or failed call records its spend there.
+          const guarded = await guardedVisionCall({
+            host: args.state,
+            vision: critiqueVision,
             cfg: this.cfg,
-            runner: this.runner,
-            signal: args.signal,
+            target: { documentId: args.document.id, pageNumber, purpose: "critique" },
+            record: (input) => args.state.usageLedger.record(input),
+            metadata: { critique: true },
+            call: (gate) => executeVisionRuntime({
+              imagePath,
+              outputPath: `${imagePath}.json`,
+              privacyMode: args.state.run.pipeline.privacyMode,
+              vision: critiqueVision,
+              cfg: this.cfg,
+              runner: this.runner,
+              signal: args.signal,
+              gate,
+            }),
           });
+          if (!guarded.admitted) throw new Error(`vision-stopped: ${guarded.stop.reason}`);
+          const result = guarded.result;
+          critiqueRoutes.set(pageNumber, result.route);
           const normalizedText = normalizeCritiqueText(result.text);
           const originalPlausibilityScore = scoreExtractionPlausibility(
             originalText,
@@ -1628,13 +1752,8 @@ export class ExtractMarkdownStage implements Stage {
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
             latencyMs: result.latencyMs,
-            costCents: result.provider === "private" && result.costCents !== undefined ? result.costCents : calculateCritiqueCost(
-              this.cfg,
-              result.runtime,
-              result.baseUrl,
-              result.inputTokens,
-              result.outputTokens,
-            ),
+            // Priced on the route that served it (a fallback's, the configured OpenAI base URL).
+            costCents: priceVisionResult(result, this.cfg),
             text: normalizedText,
             reason: accepted ? "plausibility-gain" : "requires-review",
           };
@@ -1679,30 +1798,13 @@ export class ExtractMarkdownStage implements Stage {
       const acceptedCorrections = corrections.filter(
         (correction) => correction.accepted,
       );
-      args.state.usageLedger.record({
-          provider:
-            resolveVisionRoute(args.state.run.pipeline.vision).runtime === "remote-openai"
-              ? "openai"
-              : "vision-runtime",
-          model: resolveVisionRoute(args.state.run.pipeline.vision).model,
-          metric: "page-critique",
-          amount: corrections.length,
-          unit: "page",
-          costCents,
-          inputTokens,
-          outputTokens,
-          metadata: {
-            documentId: args.document.id,
-            artifact: this.storage.uri(critiqueArtifactKey),
-            reviewedPages: corrections.map((correction) => correction.pageNumber),
-            acceptedPages: acceptedCorrections.map(
-              (correction) => correction.pageNumber,
-            ),
-            maxCostCents,
-            budgetExceeded: costCents > maxCostCents,
-          },
-        },
-      );
+      recordCritiqueUsage({
+        ledger: args.state.usageLedger,
+        corrections,
+        routes: critiqueRoutes,
+        configuredRoute: configuredVisionServedRoute(args.state.run.pipeline.vision, this.cfg),
+        metadata: { documentId: args.document.id, artifact: this.storage.uri(critiqueArtifactKey), maxCostCents, budgetExceeded: costCents > maxCostCents },
+      });
 
       for (const correction of corrections) {
         args.state.pendingPerformance.push({
@@ -2583,6 +2685,48 @@ function shouldAcceptCritique(args: {
   return false;
 }
 
+/**
+ * Records a document's self-critique usage: one `page-critique` event per route that served critiques (a fallback's
+ * when it served), each with its own pages, tokens and cost, so no route's spend is labelled as another's. Pages
+ * whose critique failed (zero usage; their billed spend was recorded by the guarded call) are counted under the
+ * configured route.
+ */
+export function recordCritiqueUsage(args: {
+  ledger: Pick<import("../pipeline/usage-ledger.js").PipelineUsageEventLedger, "record">;
+  corrections: Array<Pick<SelfCritiqueCorrection, "pageNumber" | "accepted" | "inputTokens" | "outputTokens" | "costCents">>;
+  routes: ReadonlyMap<number, VisionServedRoute>;
+  configuredRoute: VisionServedRoute;
+  metadata: Record<string, unknown>;
+}): void {
+  const byRoute = new Map<string, { route: VisionServedRoute; corrections: typeof args.corrections }>();
+  for (const correction of args.corrections) {
+    const route = args.routes.get(correction.pageNumber) ?? args.configuredRoute;
+    const key = `${route.provider}\u0000${route.model}\u0000${route.runtime}\u0000${route.baseUrl ?? ""}`;
+    const group = byRoute.get(key) ?? { route, corrections: [] };
+    group.corrections.push(correction);
+    byRoute.set(key, group);
+  }
+  for (const { route, corrections } of byRoute.values()) {
+    args.ledger.record({
+      provider: route.provider,
+      model: route.model,
+      metric: "page-critique",
+      amount: corrections.length,
+      unit: "page",
+      costCents: corrections.reduce((sum, correction) => sum + correction.costCents, 0),
+      inputTokens: corrections.reduce((sum, correction) => sum + correction.inputTokens, 0),
+      outputTokens: corrections.reduce((sum, correction) => sum + correction.outputTokens, 0),
+      metadata: {
+        ...args.metadata,
+        reviewedPages: corrections.map((correction) => correction.pageNumber),
+        acceptedPages: corrections.filter((correction) => correction.accepted).map((correction) => correction.pageNumber),
+        runtime: route.runtime,
+        billing: route.billing,
+      },
+    });
+  }
+}
+
 function critiqueEnabled(): boolean {
   return ["1", "true", "yes", "on"].includes(
     (process.env.DOCSLURP_CRITIQUE_ENABLED ?? "").trim().toLowerCase(),
@@ -2618,30 +2762,6 @@ function buildCritiquePrompt(
     pageMarkdown.slice(0, 12_000),
   ].filter(Boolean);
   return constraints.join("\n");
-}
-
-function calculateCritiqueCost(
-  cfg: Config,
-  runtime: string,
-  baseUrl: string | null,
-  inputTokens: number,
-  outputTokens: number,
-): number {
-  const normalizedBaseUrl = baseUrl?.replace(/\/+$/, "") ?? null;
-  const normalizedOpenAiBaseUrl = cfg.openAiBaseUrl.replace(/\/+$/, "");
-  const billableRuntime =
-    runtime === "remote-openai" ||
-    (runtime === "openai-compatible" &&
-      normalizedBaseUrl === normalizedOpenAiBaseUrl);
-
-  if (!billableRuntime) {
-    return 0;
-  }
-
-  return Math.ceil(
-    (inputTokens / 1000) * cfg.costPer1kInputTokens +
-      (outputTokens / 1000) * cfg.costPer1kOutputTokens,
-  );
 }
 
 class FanoutWritable extends Writable {

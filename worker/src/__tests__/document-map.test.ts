@@ -15,6 +15,7 @@ import type { MapDraft } from "../deferred/siphon-agent.js";
 import { DocumentMapStage, mapCoverage, type DocumentMapOps } from "../stages/document-map.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { MemoryVisionAttemptBackend, visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { makeTestPdf, type TestPdfOptions } from "../test/make-outline-pdf.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -177,6 +178,20 @@ describe("DocumentMapStage", () => {
     expect(usage.snapshot().some((e) => e.metric === "document-map-siphon" && e.inputTokens === 500)).toBe(true);
   });
 
+  it.each([
+    ["fast", 0],
+    ["good", 1],
+    ["auto", 1],
+  ] as const)("map mode under %s quality OCRs a scanned document's siphon windows %d time(s)", async (quality, ocrCalls) => {
+    const texts = Array.from({ length: 100 }, () => "");
+    const ocr = vi.fn(async ({ first, last }: { first: number; last: number }) => ({ pageTexts: Array.from({ length: last - first + 1 }, (_, i) => `OCR page ${first + i}`), costCents: 0 }));
+    const { stage, state, decide } = await setup({ pages: texts }, texts, { pipeline: { quality }, ops: { ocrPages: ocr as never } });
+    decide.mockImplementation(async () => ({ decision: { action: "stop", reason: "done" }, extracted: { nodes: [], terms: [] } }));
+    await stage.mapDocument(state, document(100));
+    // Fast reads the siphon window from the text layer instead of a vision model.
+    expect(ocr).toHaveBeenCalledTimes(ocrCalls);
+  });
+
   it("writes plain page text for pages the map does not cover", async () => {
     const texts = bodyPages(30, () => null);
     const mid = await setup({ pages: texts, outline: [{ title: "Middle", page: 10 }, { title: "Next", page: 12 }] }, texts);
@@ -191,12 +206,13 @@ describe("DocumentMapStage", () => {
 
 describe("DocumentMapStage coarse text layer PII", () => {
   const SSN = "123-45-6789";
-  const run = async (action: "block_indexing" | "redact_artifacts" | "flag_for_review") => {
+  const run = async (action: "block_indexing" | "redact_artifacts" | "flag_for_review", before?: () => Promise<void>) => {
     const texts = bodyPages(30, () => null);
     texts[1] = `${texts[1]} SSN ${SSN}`;
     const t = await setup({ pages: texts, outline: [{ title: "Middle", page: 10 }, { title: "Next", page: 12 }] }, texts, {
       pipeline: { piiPolicy: { enabled: true, patterns: ["ssn"], action, allowlistPatterns: [] } },
     });
+    await before?.();
     await t.stage.mapDocument(t.state, document(30));
   };
 
@@ -207,6 +223,20 @@ describe("DocumentMapStage coarse text layer PII", () => {
     expect(pages.rows).toHaveLength(8);
     const [state] = (await db.query<{ state: string }>(`select state from document_page_states where document_id='d1' and page_number=2`)).rows;
     expect(state!.state).toBe("blocked-pii");
+  });
+
+  it("drops a kept model read of a page it blocks (round 8 M1), keeping its billing decision", async () => {
+    await run("block_indexing", async () => {
+      await db.exec(`insert into document_page_states (document_id, page_number, state, read_billed_run, read_text)
+        values ('d1', 2, 'failed', 'm0', 'kept read SSN ${SSN}'), ('d1', 3, 'failed', 'm0', 'kept read page 3')`);
+    });
+    const rows = (await db.query<{ page_number: number; state: string; read_billed_run: string | null; read_text: string | null }>(
+      `select page_number, state, read_billed_run, read_text from document_page_states where document_id='d1' and page_number in (2, 3) order by page_number`)).rows;
+    expect(rows).toEqual([
+      { page_number: 2, state: "blocked-pii", read_billed_run: "m0", read_text: null },
+      // An unblocked page keeps its kept read.
+      { page_number: 3, state: expect.any(String), read_billed_run: "m0", read_text: "kept read page 3" },
+    ]);
   });
 
   it("writes redacted text under redact_artifacts", async () => {
@@ -362,3 +392,22 @@ describe("mapCoverage", () => {
     expect(mapCoverage([], 20)).toBe(0);
   });
 });
+
+describe("document-map OCR under the vision guard", () => {
+  it("renders nothing and calls nothing once vision stopped for the run", async () => {
+    const { stage, state } = await setup({ pages: ["", ""] }, ["", ""]);
+    const run = state as unknown as { run: { id: string; orgId: string | null }; visionAttempts?: MemoryVisionAttemptBackend };
+    run.visionAttempts = new MemoryVisionAttemptBackend();
+    // A run with no org is refused at its first request; the refusal is sticky for this state.
+    run.run = { ...run.run, orgId: null };
+    await expect(visionGuardFor(run as never).call({ documentId: "doc", pageNumber: 1, purpose: "map-ocr" }).admit())
+      .rejects.toMatchObject({ stop: { reason: "unscoped-run", sticky: true } });
+    const render = vi.spyOn((stage as unknown as { rasters: { renderSelectedPages: () => Promise<unknown[]> } }).rasters, "renderSelectedPages");
+    const result = await (stage as unknown as {
+      ocrPages(args: unknown): Promise<{ pageTexts: string[]; costCents: number }>;
+    }).ocrPages({ document: document(2), first: 1, last: 2, state });
+    expect(result).toEqual({ pageTexts: ["", ""], costCents: 0 });
+    expect(render).not.toHaveBeenCalled();
+  });
+});
+

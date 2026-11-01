@@ -12,6 +12,8 @@
  * Only pages with sparse native text are inspected, so born-digital documents pay nothing.
  */
 
+import { open } from "node:fs/promises";
+
 import type { CommandRunner } from "../tools/runner.js";
 import { embeddedImageBytesByPage } from "./page-yield-evidence.js";
 
@@ -42,7 +44,15 @@ export interface PageImageEvidence {
 
 export interface PageImageEvidenceArtifact {
   documentId: string;
-  source: "pdfimages";
+  source: "pdfimages" | "image-file";
+  /**
+   * Source file bytes minus the bytes of every embedded image in the file, over page count, or
+   * null when the image listing did not cover every page. Without any extracted text, a large
+   * figure suggests drawn content (vector glyphs, outlined text). It is only a hint: padding,
+   * metadata, attachments and fonts also count, so vision-extract confirms each such page's
+   * render is not blank before calling a model (`renderLooksBlank`).
+   */
+  drawnBytesPerPage?: number | null;
   sparsePageWords: number;
   pages: PageImageEvidence[];
 }
@@ -121,13 +131,112 @@ export function buildPageImageEvidence(args: {
  * Sparse pages (page number → native word count) from page-aligned texts. Returns an
  * empty map when no page is sparse.
  */
-export function findSparsePages(pageTexts: string[]): Map<number, number> {
+export function findSparsePages(pageTexts: string[], textLayerPages?: string[] | null): Map<number, number> {
   const sparse = new Map<number, number>();
   pageTexts.forEach((text, index) => {
-    const words = pageEvidenceWordCount(text);
+    const words = nativePageWords(text, textLayerPages?.[index]);
     if (words < SPARSE_PAGE_WORDS) sparse.set(index + 1, words);
   });
   return sparse;
+}
+
+/**
+ * Native words on a page. Extracted text can come from OCR of a raster (Tesseract inside the
+ * extractor), which is word-shaped yet says nothing about the text layer: a scan with OCR text
+ * is still a raster page. When the PDF's own text layer is known (page facts' pdftotext run), the
+ * smaller of the two counts is the native one.
+ */
+export function nativePageWords(extractedText: string, textLayerText?: string | null): number {
+  const extracted = pageEvidenceWordCount(extractedText);
+  if (typeof textLayerText !== "string") return extracted;
+  return Math.min(extracted, pageEvidenceWordCount(textLayerText));
+}
+
+/**
+ * Bytes of every distinct embedded image in a `pdfimages -list` listing (an image object drawn
+ * on several pages counts once, as it is stored once), or null when any row's size is unknown or
+ * the listing is implausibly long.
+ */
+export function totalEmbeddedImageBytes(stdout: string): number | null {
+  const seen = new Set<string>();
+  let total = 0;
+  let rows = 0;
+  for (const line of stdout.split("\n")) {
+    const f = line.trim().split(/\s+/);
+    if (!/^\d+$/.test(f[0] ?? "")) continue;
+    if (++rows > 100_000) return null;
+    if (!["image", "mask", "smask", "stencil"].includes(f[2] ?? "")) return null;
+    const size = /^(\d+(?:\.\d+)?)([BKMG]?)$/.exec(f[14] ?? "");
+    const bytes = size ? Math.round(Number(size[1]) * 1024 ** ("BKMG".indexOf(size[2] || "B"))) : NaN;
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return null;
+    const id = /^\d+$/.test(f[10] ?? "") && /^\d+$/.test(f[11] ?? "") ? `${f[10]}:${f[11]}` : `inline:${rows}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    total += bytes;
+  }
+  return Number.isSafeInteger(total) ? total : null;
+}
+
+/**
+ * Drawn bytes per page: (file bytes - all embedded image bytes) / pages, or null when either is
+ * unknown. See `PageImageEvidenceArtifact.drawnBytesPerPage`.
+ */
+export function drawnBytesPerPage(fileBytes: number | null, imageBytes: number | null, pageCount: number): number | null {
+  if (fileBytes === null || imageBytes === null || !Number.isFinite(fileBytes) || fileBytes < 0) return null;
+  return Math.round(Math.max(0, fileBytes - imageBytes) / Math.max(1, pageCount));
+}
+
+/**
+ * Whether a PNG page render (pdftoppm, RGB) is blank: its compressed size is within 5% of a white
+ * page of the same pixel count (about 3.6 KB per megapixel plus 0.75 KB of headers at 72 to 300
+ * dpi; one short line of anti-aliased text adds 15 to 35%). A page holding only a few solid bars
+ * also reads as blank; it has nothing for vision to transcribe. The size of our own render needs no decoding
+ * and cannot be inflated by bytes the PDF carries but never draws (padding, metadata,
+ * attachments, unused fonts). Unknown dimensions or a non-PNG raster are never called blank.
+ */
+export function renderLooksBlank(raster: { sizeBytes: number; widthPx: number | null; heightPx: number | null; mimeType: string }): boolean {
+  if (raster.mimeType !== "image/png" || !raster.widthPx || !raster.heightPx || !(raster.sizeBytes > 0)) return false;
+  const megapixels = (raster.widthPx * raster.heightPx) / 1e6;
+  const whitePageBytes = 3.6 * 1024 * megapixels + 0.75 * 1024;
+  return raster.sizeBytes <= whitePageBytes * BLANK_RENDER_TOLERANCE;
+}
+
+const BLANK_RENDER_TOLERANCE = 1.05;
+
+/**
+ * Ink check for a page nominated only by drawn-content bytes: `ink` goes to vision; `blank` and
+ * `unknown` do not. Fails closed: a render whose type, size or pixel dimensions cannot be
+ * confirmed is never sent, since the nomination itself is only a byte-count hint.
+ */
+export function inkCheckVerdict(raster: { sizeBytes: number; widthPx: number | null; heightPx: number | null; mimeType: string }): "ink" | "blank" | "unknown" {
+  if (raster.mimeType !== "image/png" || !raster.widthPx || !raster.heightPx || !(raster.sizeBytes > 0)) return "unknown";
+  return renderLooksBlank(raster) ? "blank" : "ink";
+}
+
+/**
+ * Size and pixel dimensions of a PNG on disk, read from the file itself (24 header bytes), so a
+ * cached render needs no manifest: the file is the one vision would receive. Nulls when it is not
+ * a PNG.
+ */
+export async function readPngFileFacts(filePath: string): Promise<{ sizeBytes: number; widthPx: number | null; heightPx: number | null }> {
+  const handle = await open(filePath, "r");
+  try {
+    const { size } = await handle.stat();
+    const header = Buffer.alloc(24);
+    const { bytesRead } = await handle.read(header, 0, 24, 0);
+    const png = bytesRead === 24 && header.readUInt32BE(0) === 0x89504e47 && header.toString("ascii", 12, 16) === "IHDR";
+    return { sizeBytes: size, widthPx: png ? header.readUInt32BE(16) : null, heightPx: png ? header.readUInt32BE(20) : null };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Evidence for an uploaded image file: one page with no text layer whose content is a single
+ * full-page raster. Any text extracted for it came from OCR.
+ */
+export function imageFilePageEvidence(): PageImageEvidence[] {
+  return [{ pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, embeddedImageBytes: null }];
 }
 
 /**
@@ -174,8 +283,13 @@ export async function collectPageImageEvidence(args: {
    * report's page facts). Reused when it covers every sparse page and succeeded.
    */
   sharedImagesList?: { lastPage: number; stdout: Promise<string | null> };
+  /**
+   * The PDF's own text layer per page (form-feed split pdftotext output from page facts), when
+   * known. Pages past its range keep the extracted text's word count.
+   */
+  textLayerPages?: string[] | null;
 }): Promise<PageImageEvidence[] | null> {
-  const sparsePages = findSparsePages(args.pageTexts);
+  const sparsePages = findSparsePages(args.pageTexts, args.textLayerPages);
   if (sparsePages.size === 0) return null;
   const pageNumbers = [...sparsePages.keys()];
   const first = Math.min(...pageNumbers);

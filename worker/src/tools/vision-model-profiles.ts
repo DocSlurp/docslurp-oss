@@ -8,10 +8,19 @@ import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/s
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
 import { insertMissingTableDelimiters } from "./vision-table-delimiter.js";
+import { normalizeVisionWhitespace } from "./vision-whitespace.js";
+
+/** Shared evidence rules; relationships remain Markdown, not a new response schema. */
+export const VISUAL_RELATIONSHIP_INSTRUCTIONS = [
+  "Keep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.",
+  "For charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.",
+  "Distinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.",
+  "For diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain.",
+].join("\n");
 
 /** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
 export const MARKDOWN_LATEX_VISION_PROMPT =
-  "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct or describe the page. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown.";
+  "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct the text or add unrelated descriptions. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS;
 
 /**
  * Markdown transcription with explicit rules for tables (real tabular data only), multi-column reading order,
@@ -19,22 +28,24 @@ export const MARKDOWN_LATEX_VISION_PROMPT =
  */
 export const MARKDOWN_TRANSCRIPTION_VISION_PROMPT = [
   "Transcribe this document page into GitHub-flavored Markdown, exactly as printed and in natural reading order (in multi-column layouts, finish each column before starting the next).",
-  "- Copy every visible word verbatim in its original language and script. Do not translate, summarize or add commentary.",
+  "- Copy every visible word verbatim in its original language and script. Do not translate, summarize or add unrelated commentary.",
   "- Mark titles and section headings with # headings and bulleted or numbered items as Markdown lists.",
   "- Use a Markdown pipe table only for real tabular data: rows of values under column headers, such as line items, schedules, registers and timetables. Keep one table row per printed row. Do not turn page columns, side-by-side articles, cards, adverts or form fields into tables; write those as ordinary text, one block after another, and form fields as \"Label: value\" lines.",
   "- Write mathematical formulas and equations in LaTeX: inline formulas inside $...$ and each displayed equation inside its own $$...$$ block on separate lines, one block per printed equation line. Never output a formula without these delimiters. Keep ordinary words, numbers, footnote markers, identifiers and code as plain text.",
-  "- Transcribe the text, labels and formulas printed inside figures, charts and diagrams, then their captions. Do not add image placeholders or describe what a picture shows.",
+  "- Transcribe the text, labels and formulas printed inside figures, charts and diagrams, then their captions. Do not add image placeholders or unrelated picture descriptions.",
   "- Write each paragraph as a single line and separate paragraphs with a blank line.",
+  VISUAL_RELATIONSHIP_INSTRUCTIONS,
   "Output only the Markdown transcription.",
 ].join("\n");
 
 /** Page-wide Markdown transcription with LaTeX math, GFM tables for printed tables, and text inside figures. */
 export const PAGE_MARKDOWN_LATEX_VISION_PROMPT = [
-  "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate, describe or add commentary.",
+  "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate or add unrelated commentary.",
   "- Headings as # headings; lists as - or numbered lists.",
   "- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.",
   "- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.",
-  "- Text inside charts, diagrams and figures: transcribe it as plain lines.",
+  "- Text inside charts, diagrams and figures: transcribe it with its visible relationships.",
+  VISUAL_RELATIONSHIP_INSTRUCTIONS,
   "- Do not pad lines with alignment spaces. Output only the Markdown.",
 ].join("\n");
 
@@ -44,6 +55,15 @@ export interface OpenRouterProviderPreferences {
   order: string[];
   allow_fallbacks: boolean;
 }
+
+/**
+ * First-attempt OpenRouter routing: a pinned `order`, or an `only` allowlist of measured hosts that OpenRouter
+ * sorts by current price. An org or workspace without China-based providers narrows either to its allowed hosts
+ * (openrouter-routing.ts `restrictToNonChinaProviders`, applied before every send).
+ */
+export type OpenRouterRoute =
+  | OpenRouterProviderPreferences
+  | { only: string[]; sort: "price"; allow_fallbacks: boolean };
 
 export interface VisionModelProfile {
   /** Prompt template key used in place of the generic `<OCR>` default. Explicit other keys are kept. */
@@ -56,7 +76,7 @@ export interface VisionModelProfile {
    */
   maxOutputTokensMode?: "default" | "ceiling";
   /** OpenRouter routing for this model. */
-  openRouterProvider?: OpenRouterProviderPreferences;
+  openRouterProvider?: OpenRouterRoute;
   /**
    * Reasoning control for page transcription. Kept here, not in the shared chat floor table, so it
    * never changes how the same model reasons in chat. Models without one fall back to `openRouterReasoningParams`.
@@ -81,9 +101,10 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // 2026-10-21 tune split (68 pages): with `<OCR>` this snapshot writes plain-text math
   // (`softmax(QK^T / √d_k) V`); the Markdown/LaTeX prompt lifts math partial 0.44 -> 0.86.
   // BaseTen served runaway repetition loops ("| | | …" to the cap) and word substitutions;
-  // DeepSeek native and Together had none. Routing is restricted to US-hosted providers measured on the
-  // 2026-10-22 select split (Together p50 2.2 s, Fireworks 4.1 s, Parasail 3.6 s; equal quality, 0 failures);
-  // DeepSeek's own China-hosted endpoint is excluded for customer documents.
+  // DeepSeek native and Together had none. Routing is restricted to hosts measured to transcribe faithfully:
+  // US-hosted Together, Fireworks and Parasail (2026-10-22 select split: p50 2.2 / 4.1 / 3.6 s, equal quality,
+  // 0 failures), and China-based StreamLake and DeepSeek (2026-10-29 tune + select, 95 pages each: content,
+  // tables and math equal to Together within noise, 0 failures, p50 4.1-4.3 / 3.3-3.8 s).
   // Asking for text inside figures recovers formulas and labels printed in figures (+0.2 math on those pages).
   // The longest legitimate page was ~3k output tokens, so 8k bounds a runaway's cost.
   "deepseek/deepseek-v4.1-flash-1017": {
@@ -91,9 +112,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // US-hosted providers for every organization: page images never go to a different jurisdiction because of the
-    // account's balance. (DeepSeek's own China-hosted endpoint is about 62% cheaper per page; it is not used.)
-    openRouterProvider: { order: ["together", "fireworks", "parasail"], allow_fallbacks: false },
+    // Keep the established hosts until disclosure, notice and rollout gates pass.
+    openRouterProvider: { only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.
@@ -160,9 +180,12 @@ export function visionPromptKeyForModel(prompt: string | undefined, model: strin
 }
 
 /** Request-body fragment with the profile's OpenRouter routing, or nothing. */
-export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterProviderPreferences } {
+export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterRoute } {
   const provider = visionModelProfile(model)?.openRouterProvider;
-  return provider ? { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } } : {};
+  if (!provider) return {};
+  return "only" in provider
+    ? { provider: { only: [...provider.only], sort: provider.sort, allow_fallbacks: provider.allow_fallbacks } }
+    : { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } };
 }
 
 /**
@@ -176,9 +199,13 @@ export function visionOutputCapForModel(model: string | undefined, shared: { val
   return shared.configured ? shared.value : profile.maxOutputTokens;
 }
 
-/** Post-process a hosted page transcription with the model's profile repair; other models are returned unchanged. */
+/**
+ * Post-process a page transcription from any vision/OCR model: the model's profile repair (if any), then the
+ * shared padding-whitespace collapse. Runs after the repair so a whole-page fence is unwrapped before the
+ * collapse skips fenced code.
+ */
 export function postProcessVisionText(model: string | undefined, text: string): string {
-  return visionModelProfile(model)?.postProcess?.(text) ?? text;
+  return normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text);
 }
 
 /** Request-body fragment with the reasoning control for `model`: the profile's, else the shared verified floor. */

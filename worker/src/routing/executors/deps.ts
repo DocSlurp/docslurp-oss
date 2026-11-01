@@ -270,7 +270,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     async vlm({ target, role, raster, pageNumber, signal }) {
       const modelUri = target.ref.modelUri;
       if (!modelUri) throw new Error(`target ${target.id} has no model uri`);
-      const vision = visionConfigForModel(input.selection, modelUri, 1, role);
+      const vision = visionConfigForModel(input.selection, modelUri, role);
       if (!(await input.allow(vision))) throw new Error(`privacy mode refuses ${target.id}`);
       return await input.callVision(vision, { imagePath: raster.path, mimeType: raster.mimeType, pageNumber }, signal);
     },

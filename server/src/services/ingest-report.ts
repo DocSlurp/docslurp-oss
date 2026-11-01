@@ -11,7 +11,9 @@ import {
   INGEST_REPORT_TEXT_BYTE_EDGES,
   applyDefaultVisionOverride,
   mergePipelineFeatures,
-  parserPlaybookCatalog,
+  qualityAllowsPageReading,
+  qualityModePriceRange,
+  QUALITY_MODES,
   visionModelCatalogByUri,
   visionProfileCatalog,
   type IngestReport,
@@ -41,7 +43,6 @@ import { workspaceRunsUsageCost } from "./usage-attribution.js";
 const MAX_PAGES_PER_DOCUMENT = 5_000;
 /** Embedding planning constant, as in run-processing-preview.ts (local profiles are free). */
 const EMBED_CENTS_PER_PAGE = 0.002;
-const VISION_PAGE_CAP_MAX = 32;
 const EXAMPLE_LIMIT = 20;
 
 export interface IngestReportDocumentRow {
@@ -199,10 +200,9 @@ export function visionModelUri(pipeline: PipelineFeatures): string {
   return applyDefaultVisionOverride(pipeline).vision.modelUri ?? visionProfileCatalog[pipeline.vision.profile]?.config.modelUri ?? "";
 }
 
-/** Pages per file vision may read: forceAllPages uses vision.maxPagesPerDocument, otherwise the playbook's cap wins. */
-export function effectiveVisionPageCap(pipeline: PipelineFeatures): number {
-  if (pipeline.vision.forceAllPages) return pipeline.vision.maxPagesPerDocument;
-  return parserPlaybookCatalog[pipeline.parserPlaybook]?.guidance?.visionMaxPagesPerDocument ?? pipeline.vision.maxPagesPerDocument;
+/** Whether the workspace's quality lets vision read pages at all (fast never does; there is no per-file page count). */
+export function qualityAllowsVision(pipeline: PipelineFeatures): boolean {
+  return qualityAllowsPageReading(pipeline.quality);
 }
 
 interface PageView extends IngestReportPage {
@@ -232,8 +232,10 @@ function classifyPage(doc: IngestReportDocumentRow, row: IngestReportPageRow): P
     reason = "processing";
   } else {
     searchable = false;
-    if (row.visionStatus === "over-cap") reason = "vision-page-limit";
+    if (fastLeftUnread(row.visionStatus)) reason = "kept-as-image";
+    else if (row.visionStatus === "over-cap") reason = "vision-page-limit";
     else if (row.visionStatus === "cost-cap") reason = "vision-cost-cap";
+    else if (row.visionStatus === "guarded") reason = "vision-stopped";
     else if (row.visionStatus === "failed") reason = "vision-failed";
     else if (scannedLooking) reason = "scanned-no-vision";
     else if (lowText) reason = "no-text";
@@ -338,7 +340,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
   const pendingPages = evaluated.filter((page) => page.searchable === null).length;
   const reasonCounts = new Map<IngestReportPageReason, number>();
   for (const page of unsearchable) if (page.reason) reasonCounts.set(page.reason, (reasonCounts.get(page.reason) ?? 0) + 1);
-  const reasonOrder: IngestReportPageReason[] = ["scanned-no-vision", "vision-page-limit", "vision-cost-cap", "vision-failed", "not-indexed", "no-text", "document-failed", "processing"];
+  const reasonOrder: IngestReportPageReason[] = ["scanned-no-vision", "kept-as-image", "vision-page-limit", "vision-cost-cap", "vision-stopped", "vision-failed", "not-indexed", "no-text", "document-failed", "processing"];
   const examples = [...unsearchable]
     .sort((a, b) => reasonOrder.indexOf(a.reason ?? "processing") - reasonOrder.indexOf(b.reason ?? "processing"))
     .slice(0, EXAMPLE_LIMIT)
@@ -465,6 +467,8 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
       visionOverCapPages: visionCount("over-cap"),
       visionFailedPages: visionCount("failed"),
       visionCostCapPages: visionCount("cost-cap"),
+      visionRejectedPages: visionCount("rejected"),
+      visionStoppedPages: visionCount("guarded"),
       nativeTextPages,
       visionCents: visionCentsKnown ? round(visionCents, 4) : null,
     },
@@ -582,7 +586,6 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
   const items: IngestReportConfigItem[] = [];
   const kinds = new Set(observed.docs.map((doc) => fileKind(doc.mimeType, doc.filename)));
   const paged = kinds.has("pdf") || kinds.has("image");
-  const cap = effectiveVisionPageCap(pipeline);
   const model = visionModelUri(pipeline);
   const perPage = visionModelCatalogByUri[model]?.estimatedCostPerPageCents;
   if (paged) {
@@ -593,24 +596,12 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
         : "Pages without a text layer (scans, photos of text) produce no text and cannot be found.",
     });
     items.push({
-      key: "vision.forceAllPages", label: "Vision on every page", value: onOff(pipeline.vision.forceAllPages),
-      note: pipeline.vision.forceAllPages
-        ? `Every page up to the per-file limit is read with vision${perPage ? ` (about ${formatCents(perPage)} per page)` : ""}.`
-        : "Only pages that page triage selects are read with vision.",
-    });
-    items.push({
-      key: "vision.maxPagesPerDocument", label: "Vision pages per file", value: String(cap),
-      note: pipeline.vision.forceAllPages
-        ? "Vision stops after this many pages in each file."
-        : `The "${pipeline.parserPlaybook}" playbook caps vision at ${cap} page${cap === 1 ? "" : "s"} per file; vision.maxPagesPerDocument applies only with vision on every page.`,
+      key: "quality", label: "Processing quality", value: QUALITY_MODES[pipeline.quality].label,
+      note: `${QUALITY_MODES[pipeline.quality].description} ${qualityModePriceRange(pipeline.quality)} per 1,000 pages.`,
     });
     items.push({
       key: "vision.modelUri", label: "Vision model", value: model.replace(/^llm:\/\//, "") || "default",
       note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "No catalog price for this model.",
-    });
-    items.push({
-      key: "parserPlaybook", label: "Parser playbook", value: pipeline.parserPlaybook,
-      note: parserPlaybookCatalog[pipeline.parserPlaybook]?.description ?? "",
     });
     if (pipeline.pageRouter?.mode && pipeline.pageRouter.mode !== "off") {
       items.push({ key: "pageRouter.mode", label: "Page router", value: pipeline.pageRouter.mode, note: "The decision-model router chooses an extractor per page; only active mode changes extraction." });
@@ -682,10 +673,13 @@ function reprocessEstimate(observed: Observed, documentIds: string[], visionPage
  */
 export const INGEST_RECOMMENDATION_CATALOG = {
   "turn-on-vision": { proposal: "pipeline-patch", note: "visionFallback and vision page selection are proposable." },
-  "vision-all-pages": { proposal: "pipeline-patch", note: "vision.forceAllPages and vision.maxPagesPerDocument are proposable." },
+  "vision-all-pages": { proposal: "pipeline-patch", note: "quality is proposable." },
+  "fast-kept-as-image": { proposal: "pipeline-patch", note: "quality is proposable." },
   "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
   "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
   "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
+  "vision-stopped": { proposal: "outside-allowlist", note: "The per-page vision attempt bound, rejection breaker and organization attempt limit are operator settings." },
+  "vision-rejected-pages": { proposal: "informational", note: "Pages kept their own text; nothing to change." },
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
   "turn-on-embeddings": { proposal: "pipeline-patch", note: "embed and indexVectors are proposable." },
   "turn-on-video": { proposal: "pipeline-patch", note: "mediaVideo.enabled is proposable." },
@@ -702,10 +696,23 @@ export type IngestRecommendationId = keyof typeof INGEST_RECOMMENDATION_CATALOG;
  * evidence, the expected effect and an estimated cost; "patch" is merged onto
  * the stored pipeline when applied.
  */
+/**
+ * Fast left the page unread on purpose: kept as its page image, or (past the render cap, or blank) not read at all.
+ * Both read as "kept as a page image" to users: previews render any page on demand.
+ */
+function fastLeftUnread(status: string | null | undefined): boolean {
+  return status === "kept-as-image" || status === "not-read";
+}
+
 export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Observed): IngestReportRecommendation[] {
   const recs: Array<IngestReportRecommendation & { id: IngestRecommendationId }> = [];
   const vision = visionCentsPerPage(pipeline, observed);
-  const missedScans = observed.scannedPages.filter((page) => page.visionStatus !== "extracted" && page.searchable !== true);
+  // Fast's unread images have their own recommendation; rejected/guarded pages
+  // already attempted vision and are not missing a setting.
+  const keptAsImage = observed.pageViews.filter((page) => fastLeftUnread(page.visionStatus) && page.searchable !== true);
+  const missedScans = observed.scannedPages.filter((page) =>
+    page.visionStatus !== "extracted" && page.visionStatus !== "rejected" && page.visionStatus !== "guarded"
+    && !fastLeftUnread(page.visionStatus) && page.searchable !== true);
   const overCap = observed.pageViews.filter((page) => page.visionStatus === "over-cap" && page.searchable !== true);
   const affected = [...new Map([...missedScans, ...overCap].map((page) => [`${page.documentId}:${page.pageNumber}`, page])).values()];
   const affectedDocIds = [...new Set(affected.map((page) => page.documentId))];
@@ -713,41 +720,61 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   const recordedPages = observed.textPages;
 
   if (affected.length > 0) {
-    const longest = Math.max(...observed.docs.filter((doc) => affectedDocIds.includes(doc.id)).map((doc) => doc.pageCount), 1);
-    // Never lower an existing limit; raise it to the longest affected file, up to the schema maximum.
-    const cap = Math.max(pipeline.vision.maxPagesPerDocument, Math.min(VISION_PAGE_CAP_MAX, longest));
-    const patch = { visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: cap } };
-    // Already configured this way: the pages predate the setting (or exceed the 32-page maximum), so only reprocessing helps.
+    const patch = { visionFallback: true, quality: "good" as const };
+    // Already configured this way: the pages predate the setting, so only reprocessing helps.
     const settingInPlace = patchHolds(pipeline, patch);
-    const estimate = reprocessEstimate(observed, affectedDocIds, (doc) => Math.min(cap, Math.max(0, doc.pageCount)), vision.cents);
-    const capNote = longest > VISION_PAGE_CAP_MAX ? ` Files longer than ${VISION_PAGE_CAP_MAX} pages get vision on their first ${VISION_PAGE_CAP_MAX} pages only.` : "";
+    const estimate = reprocessEstimate(observed, affectedDocIds, (doc) => Math.max(0, doc.pageCount), vision.cents);
     const evidence = missedScans.length > 0
       ? `${plural(missedScans.length, "page")}${recordedPages ? ` of ${recordedPages.toLocaleString("en-US")} measured` : ""} ${agree(missedScans.length, "has", "have")} images and almost no text layer (${agree(missedScans.length, "it looks", "they look")} scanned) and no searchable text`
-      : `${plural(overCap.length, "page")} ${agree(overCap.length, "was", "were")} selected for vision but went past the per-file vision page limit`;
+      : `${plural(overCap.length, "page")} ${agree(overCap.length, "was", "were")} selected for vision but went past the former per-file vision page limit`;
     const why = !pipeline.visionFallback
       ? "Vision is off, so nothing reads text from page images."
-      : pipeline.vision.forceAllPages
-        ? `Vision stops after ${pipeline.vision.maxPagesPerDocument} pages per file.`
-        : `Page triage did not send them to vision, and the "${pipeline.parserPlaybook}" playbook reads at most ${effectiveVisionPageCap(pipeline)} vision pages per file.`;
+      : !qualityAllowsVision(pipeline)
+        ? "Fast quality never reads pages with OCR or vision."
+        : "Page triage did not send them to vision.";
     recs.push({
       id: settingInPlace ? "reprocess-with-vision" : pipeline.visionFallback ? "vision-all-pages" : "turn-on-vision",
       severity: "high",
       title: settingInPlace ? "Reprocess scanned pages with vision" : pipeline.visionFallback ? "Read every page with vision" : "Turn on vision for scanned pages",
       reason: settingInPlace
-        ? `${evidence}. Vision already reads every page (up to ${cap} per file), so these files were processed before that setting${longest > VISION_PAGE_CAP_MAX ? " or are longer than the vision page maximum" : ""}.`
+        ? `${evidence}. Vision already reads every page, so these files were processed before that setting (or before the per-file vision page limit was removed).`
         : `${evidence}. ${why}`,
       effect: settingInPlace
-        ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so ${agree(affectedDocIds.length, "its", "their")} scanned pages are read from the page images.${capNote}`
-        : `Pages are read from their images, so scanned text becomes searchable and citable. Applies to new uploads; reprocess the ${plural(affectedDocIds.length, "affected file")} to fix existing pages.${capNote}`,
+        ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so ${agree(affectedDocIds.length, "its", "their")} scanned pages are read from the page images.`
+        : `Pages are read from their images, so scanned text becomes searchable and citable. Applies to new uploads; reprocess the ${plural(affectedDocIds.length, "affected file")} to fix existing pages.`,
       affectedPages: affected.length,
       affectedDocuments: affectedDocIds.length,
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),
         reprocessCents: round(estimate.cents, 2),
-        basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}), charged on every page up to ${cap} per file. Reprocessing re-runs the ${plural(estimate.pages, "page")} of the affected files${estimate.baseKnown ? " at this workspace's observed cost per page" : ""} plus vision.`,
+        basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}), charged on every page. Reprocessing re-runs the ${plural(estimate.pages, "page")} of the affected files${estimate.baseKnown ? " at this workspace's observed cost per page" : ""} plus vision.`,
       },
       patch: settingInPlace ? null : patch,
       reprocessDocumentIds: affectedDocIds,
+    });
+  }
+
+  if (keptAsImage.length > 0) {
+    const ids = [...new Set(keptAsImage.map((page) => page.documentId))];
+    const patch = { visionFallback: true, quality: "auto" as const };
+    const settingInPlace = patchHolds(pipeline, patch) || pipeline.quality === "good";
+    const estimate = reprocessEstimate(observed, ids, (doc) => keptAsImage.filter((page) => page.documentId === doc.id).length, vision.cents);
+    recs.push({
+      id: "fast-kept-as-image", severity: "medium",
+      title: settingInPlace ? "Reprocess pages kept as images" : "Make pages kept as images searchable",
+      reason: `${plural(keptAsImage.length, "page")} in ${plural(ids.length, "file")} had no text layer and ${agree(keptAsImage.length, "was", "were")} kept as ${agree(keptAsImage.length, "a page image", "page images")} in Fast mode, so ${agree(keptAsImage.length, "its", "their")} text was not read and cannot be searched.${
+        settingInPlace ? " The workspace no longer uses Fast, so these files were processed before that change." : ""}`,
+      effect: settingInPlace
+        ? `Reprocess the ${plural(ids.length, "affected file")} so ${agree(keptAsImage.length, "this page is", "these pages are")} read.`
+        : `Switch processing quality to Auto (reads only the pages that need it, ${qualityModePriceRange("auto")} per 1,000 pages) or Good (a vision model reads every page, ${qualityModePriceRange("good")} per 1,000 pages). Applies to new uploads; reprocess the ${plural(ids.length, "affected file")} to read existing pages.`,
+      affectedPages: keptAsImage.length, affectedDocuments: ids.length,
+      cost: {
+        centsPer100Pages: round(vision.cents * 100, 2),
+        reprocessCents: round(estimate.cents, 2),
+        basis: `Pages read by a model bill Rich (${qualityModePriceRange("good")} per 1,000 pages); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
+      },
+      patch: settingInPlace ? null : patch,
+      reprocessDocumentIds: ids,
     });
   }
 
@@ -763,6 +790,34 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       affectedPages: failedVision.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: ids,
+    });
+  }
+
+  const stopped = observed.pageViews.filter((page) => page.visionStatus === "guarded");
+  if (stopped.length > 0) {
+    const ids = [...new Set(stopped.map((page) => page.documentId))];
+    recs.push({
+      id: "vision-stopped", severity: "medium",
+      title: "Vision stopped for the run",
+      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, or too many vision requests in the run returned unusable output.`,
+      effect: "These pages keep only their own text. Reprocess the files once the cause is fixed; contact support if the limit is too low for your files.",
+      affectedPages: stopped.length, affectedDocuments: ids.length,
+      cost: { centsPer100Pages: null, reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
+      patch: null, reprocessDocumentIds: [],
+    });
+  }
+
+  const rejected = observed.pageViews.filter((page) => page.visionStatus === "rejected");
+  if (rejected.length > 0) {
+    const ids = [...new Set(rejected.map((page) => page.documentId))];
+    recs.push({
+      id: "vision-rejected-pages", severity: "info",
+      title: "Vision output rejected on some pages",
+      reason: `${plural(rejected.length, "page")} in ${plural(ids.length, "file")} returned unusable vision output (repeated, refused or cut off), so ${agree(rejected.length, "it keeps", "they keep")} ${agree(rejected.length, "its", "their")} own text layer or OCR text instead.`,
+      effect: "Search and answers use the page's own text, which may miss layout, tables or formulas vision would have kept.",
+      affectedPages: rejected.length, affectedDocuments: ids.length,
+      cost: { centsPer100Pages: null, reprocessCents: null, basis: "No charge: rejected vision pages are not billed." },
+      patch: null, reprocessDocumentIds: [],
     });
   }
 
@@ -949,6 +1004,7 @@ function summarizeFailureLine(failures: IngestReport["failures"]): string {
 export function describeReason(reason: IngestReportPageReason | null): string {
   switch (reason) {
     case "scanned-no-vision": return "looks scanned and was not read with vision";
+    case "kept-as-image": return "kept as a page image in Fast mode, text not read";
     case "no-text": return "no text on the page";
     case "vision-failed": return "vision returned no text";
     case "vision-page-limit": return "past the vision page limit";

@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import {
   calculateAiUsageCostCents,
   graphConfigSchema,
-  normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   resolvePipelineTextModel,
   type GraphConfig,
   type PipelineFeatures,
@@ -17,6 +17,7 @@ import { extractDocumentGraph } from "./extract.js";
 import { replaceDocumentGraph } from "./graph-store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { allowHostedCallForWorkspace, openRouterTextCall, runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { runWithProviderRateScope, workspaceProviderScope } from "../lib/provider-rate-limit.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { DOCUMENT_FEATURE_METRICS, UNIT_CHARGE_PROVIDER, featureCredits, unitChargeMetadata } from "@docslurp/shared";
 
@@ -104,7 +105,9 @@ export async function runGraphJobs(sql: Client, options: GraphJobRunnerOptions):
 
   try {
     // Private endpoint calls in this job are attributed to its workspace (strict-privacy audit).
-    await runWithPrivacyAuditScope({ workspaceId: job.workspace_id }, () => runClaimedJob(sql, job, options, leaseMs));
+    const providers = await workspaceProviderScope(sql, job.workspace_id);
+    await runWithPrivacyAuditScope({ workspaceId: job.workspace_id },
+      () => runWithProviderRateScope(providers, () => runClaimedJob(sql, job, options, leaseMs)));
   } catch (error) {
     const message = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
     console.error(`[graph-job] failed job=${job.id} workspace=${job.workspace_id} error=${message}`);
@@ -123,7 +126,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
     select name, pipeline from workspaces where id = ${job.workspace_id}
   `;
   if (!workspace) throw new Error("Workspace no longer exists");
-  const pipeline = normalizePipelineFeatures(workspace.pipeline as PipelineFeatures);
+  const pipeline = normalizeStoredPipelineFeatures(workspace.pipeline as PipelineFeatures, `workspace ${job.workspace_id}`);
   const graphConfig: GraphConfig = graphConfigSchema.parse(job.config);
   const scope = graphConfig.domain ?? `Workspace "${workspace.name}"`;
   const concurrency = Math.max(1, options.concurrency ?? 4);

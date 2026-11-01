@@ -274,6 +274,8 @@ describe("PdfRasterCache", () => {
     const storage = { async objectSize() { return null; }, async putBytes() {}, uri(key: string) { return `s3://test/${key}`; } };
     const started: number[] = [];
     let running = 0;
+    let releaseBothStarted!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { releaseBothStarted = resolve; });
     const runner = {
       async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
       async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
@@ -282,8 +284,12 @@ describe("PdfRasterCache", () => {
         const page = Number(plan.args[1]);
         started.push(page);
         running += 1;
+        if (started.length === 2) releaseBothStarted();
         try {
-          await new Promise((resolve) => setTimeout(resolve, page === 1 ? 1 : 20));
+          // Coordinate lane entry explicitly: a timer can fire before the sibling
+          // finishes its filesystem setup on a busy CI runner.
+          await bothStarted;
+          if (page !== 1) await new Promise((resolve) => setTimeout(resolve, 20));
           if (page === 1) throw new Error("pdftoppm crashed");
           await writeFile(`${plan.args[0]}-${page}.png`, "x");
           return { stdout: "", stderr: "" };

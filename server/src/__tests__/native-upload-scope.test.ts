@@ -22,10 +22,10 @@ vi.mock("../services/workspaces.js", () => ({
   getWorkspace: vi.fn(), ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-default" })),
 }));
 const { uploadsRoutes } = await import("../routes/uploads.js");
-function app(orgId: string | null = "org-a", workspaceIds: string[] = []) {
+function app(orgId: string | null = "org-a", workspaceIds: string[] = [], keyType = "server", scopes = ["ingest"]) {
   const server = new Hono(); server.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-a", email: "", name: "" });
-    c.set("apiKey", { orgId, workspaceIds, scopes: ["ingest"] } as never); await next();
+    c.set("apiKey", { orgId, workspaceIds, keyType, scopes } as never); await next();
   }); return server.route("/uploads", uploadsRoutes);
 }
 function upload(fields: Record<string, string | undefined> = {}) {
@@ -35,6 +35,14 @@ function upload(fields: Record<string, string | undefined> = {}) {
 }
 describe("native key ingestion organization isolation", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.intake.mockResolvedValue({ payload: { ok: true }, status: 201 }); });
+  it.each(["bad", "x".repeat(8192)])("rejects malformed session identifiers before lookup", async id => {
+    expect((await app().request(`/uploads/direct/sessions/${id}`)).status).toBe(400);
+    expect(mocks.sessionAccess).not.toHaveBeenCalled();
+  });
+  it.each([["client", ["ingest"]], ["server", ["search"]]])("rejects prohibited key type/scope", async (type, scopes) => {
+    expect((await app("org-a", [], type as string, scopes as string[]).request("/uploads/direct/sessions/11111111-1111-4111-8111-111111111111")).status).toBe(403);
+    expect(mocks.sessionAccess).not.toHaveBeenCalled();
+  });
   it.each([
     { newWorkspace: "true" }, { templateKey: "legal-contracts" },
   ])("rejects every bulk workspace creation signal for scoped keys: %j", async fields => {
@@ -89,10 +97,10 @@ describe("native key ingestion organization isolation", () => {
     expect((await app().request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: "org-b" }) })).status).toBe(403);
     expect(mocks.intake).not.toHaveBeenCalled(); expect(mocks.direct).not.toHaveBeenCalled();
   });
-  it.each(["/uploads/direct/sessions/foreign", "/uploads/direct/sessions/foreign/abort", "/uploads/direct/sessions/foreign/confirm", "/uploads/direct/sessions/foreign/files/complete"])("hides foreign direct-upload sessions at %s", async path => {
+  it.each(["/uploads/direct/sessions/11111111-1111-4111-8111-111111111111", "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/abort", "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/confirm", "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/files/complete"])("hides foreign direct-upload sessions at %s", async path => {
     mocks.sessionAccess.mockResolvedValue(false);
-    expect((await app().request(path, { method: path.endsWith("/foreign") ? "GET" : "POST" })).status).toBe(404);
-    expect(mocks.sessionAccess).toHaveBeenCalledWith("foreign", "user-a", "org-a", null);
+    expect((await app().request(path, { method: path.endsWith("/11111111-1111-4111-8111-111111111111") ? "GET" : "POST" })).status).toBe(404);
+    expect(mocks.sessionAccess).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "user-a", "org-a", null);
   });
   it("rejects keys without an organization", async () => {
     expect((await app(null).request("/uploads/bulk", upload())).status).toBe(403);

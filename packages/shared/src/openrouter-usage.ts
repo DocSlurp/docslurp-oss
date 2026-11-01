@@ -1,3 +1,4 @@
+import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
 
 /** Provider charges are USD; the application ledger uses fractional USD cents. */
@@ -27,7 +28,12 @@ export function readProviderCharge(usage: unknown): Pick<ProviderTextUsage, "cos
 }
 
 /** The OpenAI adapter strips router-specific usage fields. Recover charges by generation ID. */
-export async function resolveOpenRouterUsage(args: {
+export async function resolveOpenRouterUsage(args: Parameters<typeof resolveOpenRouterUsageInner>[0]): Promise<ProviderTextUsage> {
+  const usage = await resolveOpenRouterUsageInner(args);
+  return { ...usage, metadata: withServedProviderRegion(usage.metadata, usage.metadata?.providerName ?? args.providerName) };
+}
+
+async function resolveOpenRouterUsageInner(args: {
   apiKey: string;
   model: string;
   providerName?: string;

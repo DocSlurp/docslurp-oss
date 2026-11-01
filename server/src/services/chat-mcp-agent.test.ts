@@ -365,6 +365,30 @@ function hangUntilAborted(seen: { signals: AbortSignal[] }) {
 const recordedMetadata = () => mocks.record.mock.calls.map(([entry]) => entry.usage.metadata as Record<string, unknown>);
 
 describe("chat agent turn deadline", () => {
+  it("summarizes retrieved evidence without exposing a nested model call that can exhaust the tool deadline", async () => {
+    mocks.manifestIds = ["search", "chat"];
+    let calls = 0;
+    const model = new MockLanguageModelV4({ doStream: async options => {
+      if (calls++ > 0) return answerStep("The policy is supported [1].");
+      const name = options.tools?.some(tool => tool.type === "function" && tool.name === "chat") ? "chat" : "search";
+      return { stream: simulateReadableStream({ chunks: [
+        { type: "stream-start", warnings: [] },
+        { type: "tool-call", toolCallId: "read", toolName: name, input: JSON.stringify(name === "chat" ? { q: "summarize" } : { queries: [{ q: "summary" }] }) },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: undefined }, usage: usageChunk },
+      ], initialDelayInMs: 0, chunkDelayInMs: 0 }) };
+    } });
+    mocks.provider.mockReturnValue(model);
+    mocks.dispatch.mockImplementation(async (path, init) => path === "/tools/chat"
+      ? hangUntilAborted({ signals: [] })(path, init)
+      : Response.json({ results: [{ text: "The policy is supported.", score: 1, citation: { filename: "policy.pdf", documentId: "doc", chunkIndex: 0, headingPath: [], pageNumber: 1 } }] }));
+    const result = await runChatMcpAgent({ ...args, query: "summarize", abortedStepLookupDelayMs: 0,
+      timeBudget: budget({ turnDeadlineMs: 2000, toolTimeoutMs: 50, finalReserveMs: 500 }) });
+    expect(result.answer).toBe("The policy is supported [1].");
+    expect(JSON.stringify(model.doStreamCalls[0]!.prompt)).not.toContain("Use the chat tool");
+    expect(result.citations).toHaveLength(1);
+    expect(mocks.dispatch.mock.calls.map(([path]) => path)).toEqual(["/tools/search"]);
+  });
+
   it("blocks a slow tool without generating a fallback answer", async () => {
     const model = new MockLanguageModelV4({ doStream: [toolStep("slow"), answerStep("Unverified fallback")] });
     mocks.provider.mockReturnValue(model);

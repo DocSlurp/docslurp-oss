@@ -53,7 +53,7 @@ describe("privacyMode enforcement in worker clients", () => {
   it("the vision runtime refuses hosted routes under strict-privacy", async () => {
     await expect(executeVisionRuntime({
       imagePath: "/nonexistent.png",
-      outputPath: "/nonexistent.json",
+      outputPath: "/nonexistent.json", gate: null,
       vision: normalizePipelineFeatures({}).vision,
       cfg: config,
       runner: {} as CommandRunner,

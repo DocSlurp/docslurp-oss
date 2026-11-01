@@ -38,7 +38,7 @@ function setup() {
     createdAt: new Date(), updatedAt: new Date(),
   };
   const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "vision-extract", status: "processing",
-    pipeline: normalizePipelineFeatures({ summarize: true, vision: { forceAllPages: true } }), stats: {}, artifacts: {} } as unknown as WorkspaceRun;
+    pipeline: normalizePipelineFeatures({ summarize: true, quality: "good" }), stats: {}, artifacts: {} } as unknown as WorkspaceRun;
   const state = WorkflowState.create(run, [document]);
   return { storage, document, state };
 }

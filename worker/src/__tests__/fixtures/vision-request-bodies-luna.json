@@ -11,7 +11,7 @@
         "content": [
           {
             "type": "text",
-            "text": "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate, describe or add commentary.\n- Headings as # headings; lists as - or numbered lists.\n- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.\n- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.\n- Text inside charts, diagrams and figures: transcribe it as plain lines.\n- Do not pad lines with alignment spaces. Output only the Markdown."
+            "text": "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate or add unrelated commentary.\n- Headings as # headings; lists as - or numbered lists.\n- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.\n- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.\n- Text inside charts, diagrams and figures: transcribe it with its visible relationships.\nKeep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.\nFor charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.\nDistinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.\nFor diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain.\n- Do not pad lines with alignment spaces. Output only the Markdown."
           },
           {
             "type": "image_url",
@@ -31,6 +31,14 @@
     "stream": true,
     "stream_options": {
       "include_usage": true
+    },
+    "provider": {
+      "max_price": {
+        "prompt": 0.1,
+        "completion": 0.5,
+        "image": 0.0040305,
+        "request": 0
+      }
     }
   }
 }

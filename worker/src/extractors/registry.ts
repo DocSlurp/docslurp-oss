@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, parseExtractorOptions, type ExtractorDescriptor } from "@docslurp/shared";
 import type { DocumentExtractionResult } from "../lib/document-extraction-adapter.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
@@ -129,6 +129,12 @@ const registered = [
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
     prepare: async (runner, source, config, context) => {
       const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
+      // Kreuzberg ignores disableOcr and OCRs every image (@kreuzberg/node 4.10.2), so an image never reaches it
+      // when OCR is meant to be off (Fast): report it unavailable instead.
+      if (kreuzbergOcrDisabled(config) && kreuzbergImageInput(source, context)) {
+        console.warn(`[extractors] kreuzberg refused an image input with OCR disabled format=${context?.format ?? "unknown"}`);
+        return { ...plan, available: false };
+      }
       // An image has no text layer, so Kreuzberg can only OCR it. Without Tesseract language data (an image or
       // local setup built without it) that fails on every image, so report it unavailable and let the stage
       // route the image to vision. Text-layer formats never invoke OCR.
@@ -254,8 +260,34 @@ function kreuzbergOcrLanguage(configJson?: string): string | undefined {
   }
 }
 
+/**
+ * One extractor's options as the JSON its script receives. Every extractor's options are re-parsed through their
+ * shared strict schema (parseExtractorOptions) even when the pipeline already was, so no other id or key reaches a
+ * script: Dolphin's paths come only from the worker environment.
+ */
 export function serializeExtractorOptions(options: Record<string, unknown>, id: string): string | undefined {
-  return options[id] === undefined ? undefined : JSON.stringify(options[id]);
+  // Every id is re-parsed against its own strict schema; an id without one, or an unknown key, throws (fail closed).
+  for (const [other, value] of Object.entries(options)) if (value !== undefined) parseExtractorOptions(other, value);
+  const value = Object.hasOwn(options, id) ? options[id] : undefined;
+  if (value === undefined) return undefined;
+  return JSON.stringify(parseExtractorOptions(id, value));
+}
+
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".heif", ".avif", ".jp2", ".jpx", ".pnm", ".pbm", ".pgm", ".ppm"]);
+
+/** True when Kreuzberg would read `source` as an image (format id or file extension). */
+function kreuzbergImageInput(source: string, context?: PrepareContext): boolean {
+  return context?.format === "image" || IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase());
+}
+
+/** True when the options carry the `disableOcr` marker (Fast sets it; documentExtractionForQuality). */
+function kreuzbergOcrDisabled(configJson?: string): boolean {
+  if (!configJson) return false;
+  try {
+    return (JSON.parse(configJson) as { disableOcr?: unknown }).disableOcr === true;
+  } catch {
+    return true;
+  }
 }
 
 export const documentExtractorRegistry = new ExtractorRegistry();

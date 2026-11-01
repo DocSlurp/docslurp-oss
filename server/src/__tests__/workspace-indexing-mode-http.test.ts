@@ -220,3 +220,76 @@ describe("full-index routes", () => {
     expect((await dispatch("/tools/fullIndex", json("POST", { workspace: "t-mcp" }))).status).toBe(404);
   });
 });
+
+describe("stored extractor settings the strict schemas reject (round 4 M2)", () => {
+  const hostile = {
+    options: { dolphin: { mode: "page", repoPath: "/tmp/attacker" }, kreuzberg: { useCache: false }, liteparse: {} },
+    ocr: { language: "en", autoRotate: true },
+  };
+
+  it("lists and gets a workspace and run whose stored pipeline has them, with every rejected path gone", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await seedWorkspace("t-stale-x", "gold", "full", { quality: "fast", documentExtraction: { ...defaultPipelineFeatures.documentExtraction, ...hostile } });
+      await sql`insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+        values ('t-stale-run', 'gold', 'u1', 't-stale-x', 'bulk-upload', 'completed', 'completed',
+          ${sql.json({ ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction, ...hostile } } as never)}, 1)`;
+      const list = await app.request("/v1/workspaces");
+      expect(list.status).toBe(200);
+      const get = await app.request("/v1/workspaces/t-stale-x");
+      expect(get.status).toBe(200);
+      const body = await get.json() as { pipeline: { quality: string; documentExtraction: { options: unknown; ocr: { language: string } } } };
+      expect(body.pipeline.quality).toBe("fast");
+      expect(body.pipeline.documentExtraction.options).toEqual({ kreuzberg: {}, dolphin: { mode: "page" } });
+      expect(body.pipeline.documentExtraction.ocr.language).toBe("eng");
+      expect(JSON.stringify(await list.json())).not.toContain("/tmp/attacker");
+      const runs = await import("../services/runs.js");
+      const listed = (await runs.listRuns("u1")).filter((run) => run.id === "t-stale-run");
+      expect(listed).toHaveLength(1);
+      expect(JSON.stringify(listed)).not.toContain("/tmp/attacker");
+      const logged = errors.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(logged).toContain("workspace t-stale-x");
+      expect(logged).toContain("documentExtraction.options.dolphin.repoPath");
+      expect(logged).toContain("run t-stale-run");
+    } finally {
+      errors.mockRestore();
+      await sql`delete from workspace_runs where id = 't-stale-run'`;
+    }
+  });
+
+  it("full index and its estimate succeed on a stale workspace row, and the run row drops the rejected paths (round 5 M1)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await seedWorkspace("t-stale-fi", "gold", "map", { documentExtraction: { ...defaultPipelineFeatures.documentExtraction, ...hostile } });
+      await seedDoc("t-stale-fi-a", "t-stale-fi", "gold", 5, 2);
+      const estimate = await app.request("/v1/workspaces/t-stale-fi/full-index/estimate", json("POST", {}));
+      expect(estimate.status).toBe(200);
+      const res = await app.request("/v1/workspaces/t-stale-fi/full-index", json("POST", {}));
+      expect(res.status).toBe(202);
+      const [run] = await sql<{ pipeline: unknown }[]>`select pipeline from workspace_runs where kind = 'full-index' and workspace_id = 't-stale-fi'`;
+      expect(run).toBeDefined();
+      expect(JSON.stringify(run!.pipeline)).not.toContain("/tmp/attacker");
+      expect(JSON.stringify(run!.pipeline)).not.toContain("useCache");
+      expect((run!.pipeline as { documentExtraction: { ocr: { language: string } } }).documentExtraction.ocr.language).not.toBe("en");
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("rejects the same settings on write with 400", async () => {
+    await seedWorkspace("t-strict-x", "gold", "full");
+    for (const documentExtraction of [
+      { options: { dolphin: { repoPath: "/tmp/attacker" } } },
+      { options: { kreuzberg: { useCache: false } } },
+      { options: { liteparse: {} } },
+      { ocr: { language: "en" } },
+    ]) {
+      const patch = await app.request("/v1/workspaces/t-strict-x", json("PATCH", { pipeline: { documentExtraction } }));
+      expect(patch.status, JSON.stringify(documentExtraction)).toBe(400);
+      const create = await app.request("/v1/workspaces", json("POST", { name: "S", orgId: "gold", pipeline: { documentExtraction } }));
+      expect(create.status, JSON.stringify(documentExtraction)).toBe(400);
+    }
+    const stored = (await sql<{ p: unknown }[]>`select pipeline -> 'documentExtraction' -> 'options' as p from workspaces where id = 't-strict-x'`)[0]?.p;
+    expect(JSON.stringify(stored ?? {})).not.toContain("/tmp/attacker");
+  });
+});

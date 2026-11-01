@@ -1,3 +1,4 @@
+import { emitTelemetryLog } from "@docslurp/shared/observability";
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID } from "node:crypto";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
@@ -189,6 +190,17 @@ export const chatCompletionsRoutes = new Hono()
     // workspace instructions with system authority, so they are dropped; only
     // server keys may set system instructions.
     const systemAllowed = actor.type !== "apiKey" || actor.apiKey.keyType === "server";
+    if (!systemAllowed) {
+      const systemCount = input.messages.filter(message => message.role === "system").length;
+      const developerCount = input.messages.filter(message => message.role === "developer").length;
+      if (systemCount + developerCount > 0) emitTelemetryLog({
+        eventName: "docslurp.chat.denied_instructions",
+        severityText: "warn",
+        body: "Discarded browser-key privileged instructions",
+        attributes: { "docslurp.workspaceId": workspaceId, "docslurp.denied.system_count": systemCount,
+          "docslurp.denied.developer_count": developerCount },
+      });
+    }
     const history: Array<Pick<WorkspaceChatTurn, "role" | "content">> = input.messages.slice(0, -1)
       .filter((message) => systemAllowed || (message.role !== "system" && message.role !== "developer"))
       .map((message) => ({

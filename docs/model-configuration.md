@@ -53,13 +53,13 @@ page than the previous default, `google/gemini-3.1-flash-lite`, which stays in t
 catalog. The default is one constant,
 `DEFAULT_OPENROUTER_VISION_MODEL` in `packages/shared/src/embedding.ts`; the
 profile label, description and default config are derived from its catalog entry.
-NVIDIA Nemotron 3.5 Super VL is an opt-in hosted
-route: set `pipeline.vision.modelUri` to
-`llm://openrouter/nvidia/nemotron-3.5-super-vl` or `pipeline.vision.profile` to
-`open-weights-hosted`. Its OpenRouter list price, verified on 2026-10-20, is
-$0.15 per million input tokens and $0.50 per million output tokens (individual
-OpenRouter providers range from $0.10 to $0.25 input and $0.40 to $1.25 output).
-Page transcription sends it `reasoning: { enabled: false }`. The provider-reported
+NVIDIA Nemotron 3.5 Super VL (`llm://openrouter/nvidia/nemotron-3.5-super-vl`) and MiMo V2.6 Flash are
+in the catalog but refused: their per-image token maximum is a processor maximum, not a proven serving
+maximum, so the vision guard cannot weigh their requests. Config validation and the runtime reject both
+until serving-level evidence exists (`refusedReason` in `packages/shared/src/embedding.ts`). The
+`open-weights-hosted` profile, formerly Nemotron, now sends the open-weights (MIT) default,
+DeepSeek V4.1 Flash 1017.
+The provider-reported
 charge is recorded when present. Otherwise cataloged hosted vision models fall back
 to their own list price instead of the generic `COST_PER_1K_*` rates.
 
@@ -73,8 +73,8 @@ Per-model prompt, output cap, routing and reasoning settings live in
 
 | Model URI | List $/M in / out | Est. cost/page | Profile behaviour |
 | --- | --- | --- | --- |
-| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Together, Fireworks, Parasail (US), no other fallbacks, for every organization (DeepSeek's own China-hosted endpoint is cheaper but is not used: where page images go never depends on the account's balance) |
-| `llm://openrouter/xiaomi/mimo-v2.6-flash` | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
+| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (route ceiling) | 0.103 cents (US route) | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Only Together, Fireworks and Parasail (US), cheapest first; new hosts stay gated pending disclosure and rollout ([provider regions](provider-regions.md)) |
+| `llm://openrouter/xiaomi/mimo-v2.6-flash` (refused, see above) | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
 | `llm://openrouter/openai/gpt-6-luna` | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
 | `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Markdown transcription prompt, output cap ceiling 8,192, reasoning `minimal`, routed to Wafer, Friendli then InferenceNet with no other fallbacks, missing table delimiter rows repaired |
 
@@ -196,23 +196,23 @@ prices. DocSlurp adds routing preferences to each OpenRouter request:
   `deepseek/deepseek-*` sort hosts by price (`provider.sort: "price"`) and only
   use hosts that serve FP8 or better weights. Fallbacks stay on. Keeping the same
   cheap host across chat steps also keeps prompt-cache reads working.
-- **China-based providers, per organization.** These are on by default. Owners
-  and admins can turn them off for the whole organization with
-  `PATCH /v1/organizations/:orgId { "allowChinaProviders": false }`, or with the
-  toggle in organization settings. When off, every OpenRouter request made for
-  the organization excludes the China-based hosts. This covers chat, search
-  helpers, ingestion text and vision, and embeddings. Hosted open models such as
-  DeepSeek and GLM often cost about half as much on these hosts as on US-hosted
-  ones, so turning them off can raise model costs. The setting picks hosts; it
-  does not block models built by Chinese labs, which also run on hosts elsewhere.
-  The current host list is `CHINA_PROVIDER_SLUGS` in
-  `packages/shared/src/openrouter-routing.ts`: Alibaba, Baidu, DeepSeek, MiniMax,
-  Moonshot AI, Nex AGI, SiliconFlow, StepFun, StreamLake, Tencent, Xiaomi and
-  Z.AI.
+- **China-based providers, per organization and workspace.** These are on by
+  default. Owners and admins can turn them off for the organization with
+  `PATCH /v1/organizations/:orgId { "allowChinaProviders": false }`, and a
+  workspace can turn them off for itself with
+  `PATCH /v1/workspaces/:workspace { "allowChinaProviders": false }` (it can
+  narrow, never widen, its organization). When off, every request carries an
+  allowlist of providers with a known non-China headquarters (`provider.only`)
+  plus the China-based ones on `provider.ignore`, on every path and every retry;
+  providers of unknown region are excluded and a request with no allowed
+  provider is refused. Unknown scope fails closed. The region table, its sources,
+  the measured vision route and the costs are in
+  [provider regions](provider-regions.md).
 
 A request knows its organization from its API key or from the workspace it
-uses. A signed-in request without either applies the restriction when any of
-the user's organizations has it on. Changes apply within 30 seconds.
+uses, and its workspaces from the privacy check every hosted call makes. A
+signed-in request without either applies the restriction when any of the
+user's organizations has it on. Changes apply within 30 seconds.
 
 ## Privacy modes
 

@@ -1,27 +1,24 @@
 /**
  * OpenRouter host routing: which upstream providers may serve a request, and
- * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`.
+ * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`
+ * (and by the worker's vision runtime right before each send).
  *
  * - Open-weight models served by many hosts (GLM, DeepSeek) are sorted by
  *   price, so OpenRouter tries the cheapest host first and keeps using it for
  *   later steps (the same host is also what makes prompt-cache reads hit).
  *   Hosts must serve at least FP8 weights: the cheapest listings are often
  *   FP4/NVFP4 or undisclosed quantizations.
- * - An organization can turn off China-based providers (`allowChinaProviders`).
- *   Those hosts are then on the request's `ignore` list for every model.
+ * - China-based providers are allowed by default. An organization, or a
+ *   workspace inside an allowing organization, can turn them off
+ *   (`allowChinaProviders`). A restricted request then carries an allowlist,
+ *   `provider.only`, of providers with a known headquarters outside China
+ *   (provider-regions.ts), plus every China-based provider on `ignore`; any
+ *   caller `only`/`order` entry outside the allowlist is dropped, and a request
+ *   with nothing left is refused before it is sent. Providers with no known
+ *   region are never on the allowlist.
  */
 
-/**
- * OpenRouter provider slugs for China-based companies: headquartered in China
- * per OpenRouter's provider list (Baidu, DeepSeek, Nex AGI, StreamLake,
- * Tencent, Xiaomi), or Chinese-owned and listed under an international entity
- * (Alibaba, MiniMax, Moonshot AI, SiliconFlow, StepFun, Z.AI). Checked
- * 2026-10-25 against https://openrouter.ai/api/v1/providers.
- */
-export const CHINA_PROVIDER_SLUGS = [
-  "alibaba", "baidu", "deepseek", "minimax", "moonshotai", "nex-agi",
-  "siliconflow", "stepfun", "streamlake", "tencent", "xiaomi", "z-ai",
-] as const;
+import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS, isProviderAllowedByRegion } from "./provider-regions.js";
 
 /** Models routed to their cheapest host (by model id prefix). */
 const PRICE_ROUTED_MODEL_PREFIXES = ["z-ai/glm-", "deepseek/deepseek-"] as const;
@@ -30,8 +27,17 @@ const PRICE_ROUTED_MODEL_PREFIXES = ["z-ai/glm-", "deepseek/deepseek-"] as const
 const PRICE_ROUTED_QUANTIZATIONS = ["fp8", "fp16", "bf16", "fp32"] as const;
 
 export interface OpenRouterProviderPolicy {
-  /** False when the organization turned off China-based providers. */
+  /** False when the organization or workspace turned off China-based providers. */
   allowChinaProviders: boolean;
+}
+
+/** A restricted request that no allowed provider could serve; it is never sent. */
+export class ProviderRegionRefusedError extends Error {
+  readonly code = "PROVIDER_REGION_REFUSED";
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderRegionRefusedError";
+  }
 }
 
 /** Whether `model` is sent to its cheapest qualifying host first. */
@@ -39,26 +45,55 @@ export function isPriceRoutedModel(model: string): boolean {
   return PRICE_ROUTED_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
 }
 
-/** The `provider` preferences for one OpenRouter request, or undefined to leave routing to OpenRouter. */
-export function openRouterProviderPreferences(model: string, policy?: OpenRouterProviderPolicy): Record<string, unknown> | undefined {
-  const preferences: Record<string, unknown> = {};
-  if (isPriceRoutedModel(model)) Object.assign(preferences, { sort: "price", quantizations: [...PRICE_ROUTED_QUANTIZATIONS], allow_fallbacks: true });
-  if (policy && !policy.allowChinaProviders) preferences.ignore = [...CHINA_PROVIDER_SLUGS];
-  return Object.keys(preferences).length ? preferences : undefined;
+/** The price-routing `provider` preferences for `model`, or undefined to leave routing to OpenRouter. */
+export function openRouterProviderPreferences(model: string): Record<string, unknown> | undefined {
+  return isPriceRoutedModel(model)
+    ? { sort: "price", quantizations: [...PRICE_ROUTED_QUANTIZATIONS], allow_fallbacks: true }
+    : undefined;
+}
+
+function stringList(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : undefined;
 }
 
 /**
- * A request body with routing preferences merged in. Preferences the caller
- * set itself win, except that the China restriction is always added to any
- * `ignore` list the caller supplied.
+ * `provider` preferences restricted to providers with a known non-China headquarters. Caller `only` and
+ * `order` entries are filtered to that allowlist (endpoint slugs such as `amazon-bedrock/us-east-1` resolve to
+ * their provider); `ignore` gains every China-based provider. Throws when a caller allowlist has no allowed
+ * entry left, since sending an empty `only` would not restrict anything.
  */
-export function withOpenRouterProviderPreferences<T extends Record<string, unknown>>(body: T, policy?: OpenRouterProviderPolicy): T {
+export function restrictToNonChinaProviders(provider: Record<string, unknown> | undefined): Record<string, unknown> {
+  const own = provider ?? {};
+  const callerOnly = stringList(own.only);
+  const only = callerOnly ? callerOnly.filter((slug) => isProviderAllowedByRegion(slug, false)) : [...NON_CHINA_PROVIDER_SLUGS];
+  if (only.length === 0) {
+    throw new ProviderRegionRefusedError("China-based providers are turned off and none of the request's allowed providers has a known region outside China");
+  }
+  const ignore = [...new Set([...(stringList(own.ignore) ?? []), ...CHINA_PROVIDER_SLUGS])];
+  const callerOrder = stringList(own.order);
+  const order = callerOrder?.filter((slug) => isProviderAllowedByRegion(slug, false));
+  const { order: _order, ...rest } = own;
+  return { ...rest, ...(order?.length ? { order } : {}), only, ignore };
+}
+
+/** `provider` preferences with `policy` applied (unchanged when China-based providers are allowed). */
+export function applyOpenRouterProviderPolicy(provider: Record<string, unknown> | undefined, policy: OpenRouterProviderPolicy): Record<string, unknown> | undefined {
+  return policy.allowChinaProviders ? provider : restrictToNonChinaProviders(provider);
+}
+
+/**
+ * A request body with routing preferences merged in. Price-routing preferences the caller set itself win; the
+ * China restriction (when `policy` turns it on) then applies to the merged preferences, so a caller can narrow
+ * it but never widen it.
+ */
+export function withOpenRouterProviderPreferences<T extends Record<string, unknown>>(body: T, policy?: OpenRouterProviderPolicy): T & { provider?: Record<string, unknown> } {
   const model = typeof body.model === "string" ? body.model : "";
-  const preferences = openRouterProviderPreferences(model, policy);
-  if (!preferences) return body;
-  const own = body.provider && typeof body.provider === "object" ? body.provider as Record<string, unknown> : {};
-  const ignore = [...new Set([...(Array.isArray(own.ignore) ? own.ignore as string[] : []), ...((preferences.ignore as string[] | undefined) ?? [])])];
-  return { ...body, provider: { ...preferences, ...own, ...(ignore.length ? { ignore } : {}) } };
+  const preferences = openRouterProviderPreferences(model);
+  const own = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? body.provider as Record<string, unknown> : undefined;
+  const merged = preferences || own ? { ...preferences, ...own } : undefined;
+  const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
+  if (!routed || (routed === own && !preferences)) return body;
+  return { ...body, provider: routed };
 }
 
 type PolicyResolver = () => OpenRouterProviderPolicy | undefined | Promise<OpenRouterProviderPolicy | undefined>;
@@ -66,30 +101,54 @@ let policyResolver: PolicyResolver | undefined;
 
 /**
  * Registers how the current organization's policy is found (the server reads
- * its request context, the worker its job scope). Without one, or outside any
- * organization, China-based providers stay allowed.
+ * its request context, the worker its job scope). Without a resolver (scripts,
+ * benchmarks) China-based providers stay allowed; with one, a call it cannot
+ * place in a scope is restricted.
  */
 export function setOpenRouterProviderPolicyResolver(resolver: PolicyResolver | undefined): void {
   policyResolver = resolver;
 }
 
-/** The current organization's provider policy, if a resolver knows it. */
+/** The current provider policy: the resolver's answer, restricted when it has none; undefined without a resolver. */
 export async function currentOpenRouterProviderPolicy(): Promise<OpenRouterProviderPolicy | undefined> {
-  return policyResolver ? await policyResolver() : undefined;
+  if (!policyResolver) return undefined;
+  return (await policyResolver()) ?? { allowChinaProviders: false };
 }
 
-/** Wraps an OpenRouter fetch so each JSON request carries the routing preferences for its model and organization. */
+/**
+ * Wraps an OpenRouter fetch so each JSON request carries the routing preferences for its model and
+ * organization. A restricted request whose body is not a JSON object cannot carry the restriction, so it is
+ * refused rather than sent.
+ */
 export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): typeof fetch {
   return async (input, init) => {
-    if (typeof init?.body !== "string") return baseFetch(input, init);
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(init.body) as Record<string, unknown>;
-    } catch {
+    const policy = await currentOpenRouterProviderPolicy();
+    const restricted = policy !== undefined && !policy.allowChinaProviders;
+    // Request objects carry their body separately from init. Clone it so policy
+    // enforcement cannot be bypassed by the standard fetch(Request) form.
+    const request = input instanceof Request ? input : undefined;
+    const rawBody = init?.body ?? (request?.body ? await request.clone().text() : undefined);
+    if (rawBody === undefined || rawBody === null) return baseFetch(input, init);
+    const url = new URL(request?.url ?? String(input));
+    // These endpoints document provider routing. Audio transcription does not:
+    // refuse restricted uploads rather than assume an ignored field protects them.
+    if (restricted && !["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/embeddings", "/api/v1/responses"].includes(url.pathname)) {
+      throw new ProviderRegionRefusedError("Provider-region restrictions are not verified for this endpoint; use a supported text endpoint or a private transcription service");
+    }
+    let body: Record<string, unknown> | undefined;
+    if (typeof rawBody === "string") {
+      try {
+        const parsed = JSON.parse(rawBody) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+      } catch {
+        body = undefined;
+      }
+    }
+    if (!body) {
+      if (restricted) throw new ProviderRegionRefusedError("China-based providers are turned off and this request body cannot carry a provider restriction");
       return baseFetch(input, init);
     }
-    if (!body || typeof body !== "object" || Array.isArray(body)) return baseFetch(input, init);
-    const routed = withOpenRouterProviderPreferences(body, await currentOpenRouterProviderPolicy());
+    const routed = withOpenRouterProviderPreferences(body, policy);
     return routed === body ? baseFetch(input, init) : baseFetch(input, { ...init, body: JSON.stringify(routed) });
   };
 }

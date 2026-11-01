@@ -156,7 +156,7 @@ export function createFirecrawlAdapter(options: { usdPerCredit: number }): WebPr
             throw error;
           } finally {
             // Stop a crawl we no longer wait for, so it stops spending credits.
-            if (!finished) await ctx.fetch(`${BASE}/crawl/${encodeURIComponent(id)}`, { method: "DELETE", headers: auth(ctx.apiKey) }).catch(() => undefined);
+            if (!finished) await ctx.fetch(`${BASE}/crawl/${encodeURIComponent(id)}`, { method: "DELETE", redirect: "error", headers: auth(ctx.apiKey) }).catch(() => undefined);
           }
           const items = [...(status.data ?? [])];
           // Large results are paginated (`next`, ~10 MB per page). Follow while under the limit and the
