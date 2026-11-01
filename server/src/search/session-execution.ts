@@ -10,7 +10,7 @@ import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
 import { recordSearchPhase, timePhase } from "./timings.js";
-import { mmrSelect } from "./mmr.js";
+import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
 import { rerankBM25, type RankedChunk } from "./rerank.js";
@@ -227,17 +227,28 @@ export async function applySearchPostRetrievalProcessing(
     }));
   }
 
-  const selected = input.options.useMmr
-    ? mmrSelect(
-        ranked.map((chunk) => ({
-          id: chunk.id,
-          text: chunk.text,
-          score: chunk.crossScore ?? chunk.score,
-        })),
-        input.limit,
-        input.options.mmrLambda,
-      )
-    : ranked.slice(0, input.limit);
+  let selected: Array<{ id: string; score: number }> = ranked.slice(0, input.limit);
+  if (input.options.useMmr) {
+    const mmr = mmrSelectWithDiagnostics(
+      ranked.map((chunk) => ({
+        id: chunk.id,
+        text: chunk.text,
+        score: chunk.crossScore ?? chunk.score,
+      })),
+      input.limit,
+      input.options.mmrLambda,
+    );
+    const relevanceTop = new Set(selected.map((chunk) => chunk.id));
+    input.session.recordDiagnostic("mmr", {
+      similarity: mmr.similarity,
+      lambda: input.options.mmrLambda ?? 0.5,
+      candidates: ranked.length,
+      selected: mmr.selected.length,
+      // Passages MMR chose over a more relevant but redundant one.
+      diversified: mmr.selected.filter((chunk) => !relevanceTop.has(chunk.id)).length,
+    });
+    selected = mmr.selected;
+  }
 
   const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));
   const selectedScores = selected.map((chunk) => ({

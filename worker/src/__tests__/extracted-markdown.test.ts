@@ -27,96 +27,35 @@ describe("extraction plausibility", () => {
 });
 
 describe("normalizeExtractedMarkdown", () => {
-  it("converts supporting policy form lists into an html table", () => {
-    const markdown = `# **ACTUARIAL MEMORANDUM**
+  it("converts markdown pipe tables to html when tables are preserved", () => {
+    const markdown = `Recovery targets:
 
-**Supporting Policy Form:**
-
-**ICC18 ENT-06 1805** **Single Premium Deferred Annuity Contract with Market**
-**Value Adjustment Feature**
-**ICC18 ENT-06 1805 DP** **Data Page**
-**ICC22 EE.48 2208** **Account Value Band Interest Rate Endorsement**
-`;
-
-    const normalized = normalizeExtractedMarkdown({
-      markdown,
-      preserveTables: true,
-    });
-
-    expect(normalized).toContain("<table>");
-    expect(normalized).toContain(
-      "<td>ICC18 ENT-06 1805</td><td>Single Premium Deferred Annuity Contract with Market Value Adjustment Feature</td>",
-    );
-    expect(normalized).not.toContain("**ICC22 EE.48 2208** **Account Value Band Interest Rate Endorsement**");
-  });
-
-  it("expands collapsed four-column html tables into multiple rows", () => {
-    const markdown = `<table>
-<thead>
-<tr><th>Class</th><th>Relativity</th><th>Class</th><th>Relativity</th></tr>
-</thead>
-<tbody>
-<tr><td>8833 8837 8838 8858</td><td>1.08 'a' 0.87 0.41</td><td></td><td></td></tr>
-</tbody>
-</table>`;
-
-    const normalized = normalizeExtractedMarkdown({
-      markdown,
-      preserveTables: true,
-    });
-
-    expect(normalized).toContain("<th>Class</th><th>Relativity</th><th>Class</th><th>Relativity</th>");
-    expect(normalized).toContain("<tr><td>8833</td><td>1.08</td><td></td><td></td></tr>");
-    expect(normalized).toContain("<tr><td>8837</td><td>'a'</td><td></td><td></td></tr>");
-    expect(normalized).toContain("<tr><td>8838</td><td>0.87</td><td></td><td></td></tr>");
-    expect(normalized).toContain("<tr><td>8858</td><td>0.41</td><td></td><td></td></tr>");
-  });
-
-  it("repairs supporting policy html tables that promoted the first row into headers", () => {
-    const markdown = `## Supporting Policy Form:
-
-<table>
-<thead>
-<tr><th>ICC18 ENT-06 1805</th><th>Single Premium Deferred Annuity Contract with Market Value Adjustment Feature</th></tr>
-</thead>
-<tbody>
-<tr><td>ICC18 ENT-06 1805 DP ICC18 ENT-06 1805 DP-A ICC18 ENT-06 1805 DP-B ICC18 ENT-06 1805 DP-C ICC18 ENT-06 1805 DP-D ICC18 ENT-06 1805 DP-E ICC22 EE.48 2208</td><td>Data Page Data Page Data Page Data Page Data Page Data Page AccountValue BandInterestRate Endorsement</td></tr>
-</tbody>
-</table>`;
-
-    const normalized = normalizeExtractedMarkdown({
-      markdown,
-      preserveTables: true,
-    });
-
-    expect(normalized).toContain("<th>Supporting Policy Form</th><th>Supporting Policy Form</th>");
-    expect(normalized).toContain("<td>ICC18 ENT-06 1805</td><td>Single Premium Deferred Annuity Contract with Market Value Adjustment Feature</td>");
-    expect(normalized).toContain("<td>ICC18 ENT-06 1805 DP-A</td><td>Data Page</td>");
-    expect(normalized).toContain("<td>ICC22 EE.48 2208</td><td>Account Value Band Interest Rate Endorsement</td>");
-  });
-
-  it("repairs supporting policy markdown tables before generic html conversion", () => {
-    const markdown = `## Supporting Policy Form:
-
-| ICC18 ENT-06 1805 | Single Premium Deferred Annuity Contract with Market Value Adjustment Feature |
+| Service | RTO |
 | --- | --- |
-| ICC18 ENT-06 1805 DP ICC18 ENT-06 1805 DP-A ICC18 ENT-06 1805 DP-B ICC18 ENT-06 1805 DP-C ICC18 ENT-06 1805 DP-D ICC18 ENT-06 1805 DP-E ICC22 EE.48 2208 | Data Page Data Page Data Page Data Page Data Page Data Page AccountValue BandInterestRate Endorsement |
+| Checkout | 15 min |
+| Search | 1 h |
 `;
 
-    const normalized = normalizeExtractedMarkdown({
-      markdown,
-      preserveTables: true,
-    });
+    const normalized = normalizeExtractedMarkdown({ markdown, preserveTables: true });
 
-    expect(normalized).toContain("<th>Supporting Policy Form</th><th>Supporting Policy Form</th>");
-    expect(normalized).toContain("<td>ICC18 ENT-06 1805 DP</td><td>Data Page</td>");
-    expect(normalized).toContain("<td>ICC22 EE.48 2208</td><td>Account Value Band Interest Rate Endorsement</td>");
+    expect(normalized).toContain("<th>Service</th><th>RTO</th>");
+    expect(normalized).toContain("<tr><td>Checkout</td><td>15 min</td></tr>");
+    expect(normalized).not.toContain("| --- |");
+  });
+
+  it("leaves html tables exactly as extracted", () => {
+    const markdown = `<table>
+<thead><tr><th>A</th><th>B</th><th>A</th><th>B</th></tr></thead>
+<tbody><tr><td>1 2 3 4</td><td>w x y z</td><td></td><td></td></tr></tbody>
+</table>`;
+
+    expect(normalizeExtractedMarkdown({ markdown, preserveTables: true })).toBe(markdown);
   });
 
   it("leaves markdown unchanged when table preservation is disabled", () => {
-    const markdown = `| Class | Relativity |
+    const markdown = `| Service | RTO |
 | --- | --- |
-| 8833 | 1.08 |
+| Checkout | 15 min |
 `;
 
     const normalized = normalizeExtractedMarkdown({
