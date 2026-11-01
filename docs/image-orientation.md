@@ -1,0 +1,17 @@
+# Optional CPU image orientation
+
+`DOCSLURP_IMAGE_ORIENTATION=1` enables conservative quarter-turn normalization. It defaults to `0`; deploy the updated Doppler VM image before enabling it. There is no local decoder fallback when the guest or its model is unavailable.
+
+The shared detector runs on vision page/region inputs and Doppler extracted PDF images. Original assets remain unchanged. Corrected embedded images are separate PNG derivatives linked to their originals, with the decision in the media map; vision decisions are persisted in successful page details. EXIF transforms are applied once and alpha is preserved. Linked masks and their associated images are skipped together.
+
+The [official PaddleOCR document orientation model](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/module_usage/doc_img_orientation_classification.en.md), PP-LCNet_x1_0_doc_ori, has approximately 7 MB of weights and four classes (0, 90, 180, 270 degrees). Build-time conversion uses the Apache-2.0 [PaddlePaddle model repository](https://huggingface.co/PaddlePaddle/PP-LCNet_x1_0_doc_ori) pinned at `d3b95a6dff5fe8a94f2748e12b61cb26818a0df8`. Source hashes and converted-model hash are recorded in the baked manifest. Paddle is absent from the runtime; ONNX Runtime runs with one CPU thread.
+
+Correction requires confidence >=0.90, margin >=0.50, and a second upright classification after rotation. Tiny, low-contrast, extreme-aspect and ambiguous images abstain. These are conservative policy thresholds, not calibrated probabilities. PNG/JPEG/WebP only; animated images, inputs above 32 MB or 16 million pixels are refused. The guest retains resource limits, no credentials/network, Landlock and seccomp. Customer pixels are decoded only inside the dedicated VM.
+
+Each image currently starts a separate VM. Compute usage, including failed jobs, is recorded in the scoped ledger. Vision admission precedes preprocessing. At most 64 orientation attempts are allowed per run state, including failed attempts, shared across both paths; the count is saved with run stats at checkpoints. This allowance is not an exactly-once monetary budget: a crash before a checkpoint may replay attempts. Infrastructure compute is not customer-billable spend, so the customer credit cap alone does not bound it.
+
+Local validation on 2026-11-01 used three original synthetic text layouts at four quarter turns and two nontext controls. Eleven of twelve text outputs were pixel-exact upright; one 270-degree table abstained and remained sideways. Blank and graphic controls remained unchanged. The separate evaluation-integrity gate passed. This is smoke coverage, not general accuracy evidence or justification to enable the feature globally.
+
+Measured local guest execution was 152–187 ms, including initialization, decoding and correction; local container wall time was 400–625 ms. Isolated model inference was approximately 4–5 ms. Remote VM startup latency was not measured. The complete local guest image was approximately 971 MB uncompressed, including its existing Node base and runtime dependencies; 7 MB describes the model, not the deployment image.
+
+This first integration does not change PDF vector/text rotation, native OCR-only paths, arbitrary skew, or linked-mask composition. Keep the flag off until a broader held-out false-rotation study and remote startup/cost measurements justify rollout.

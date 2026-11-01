@@ -436,7 +436,48 @@ def image_options(args):
     return True, values[0], values[1]
 
 
+def orientation_main():
+    resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024,) * 2)
+    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT,) * 2)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+    try:
+        hardening = harden()
+    except Exception as error:
+        raise HardeningError('confinement unavailable') from error
+    info = os.lstat('/job/input')
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024 * 1024:
+        raise ValueError('invalid orientation input')
+    # -I excludes script directory; load only this immutable, image-baked module.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('image_orientation', '/opt/docslurp/image_orientation.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    started = time.monotonic()
+    # Native runtime discovery may warn about intentionally blocked /proc and /sys.
+    # Keep stdout/stderr exclusively for the bounded transport and JSON envelope.
+    saved_out, saved_err = os.dup(1), os.dup(2)
+    try:
+        with open('/job/orientation-runtime.log', 'xb') as log:
+            os.dup2(log.fileno(), 1)
+            os.dup2(log.fileno(), 2)
+            result = module.normalize('/job/input', '/job/oriented.png')
+    finally:
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+    size = Path('/job/oriented.png').stat().st_size
+    print(json.dumps({'protocol': DOPPLER_GUEST_PROTOCOL, 'engine':'orientation', 'hardening':hardening,
+                      'outputBytes':size, 'runtimeLogBytes':Path('/job/orientation-runtime.log').stat().st_size, 'elapsedMs':round((time.monotonic()-started)*1000), 'orientation':result}), file=sys.stderr)
+    with open('/job/oriented.png','rb') as output:
+        while data := output.read(65536):
+            sys.stdout.buffer.write(data)
+
+
 def main():
+    if sys.argv[1:] == ['--orientation']:
+        return orientation_main()
     images_requested, min_width, min_height = image_options(sys.argv[1:])
     resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024,) * 2)
     resource.setrlimit(resource.RLIMIT_CPU, (JOB_SECONDS, JOB_SECONDS))

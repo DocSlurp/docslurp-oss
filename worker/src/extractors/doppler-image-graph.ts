@@ -1,3 +1,5 @@
+import { imageOrientationEnabled, normalizeImageOrientation } from "../lib/image-orientation.js";
+import type { UsageEvent } from "../models.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, writeFile } from "node:fs/promises";
@@ -27,6 +29,8 @@ export function resolveDopplerImages(config: DocumentExtractionConfig, format: s
 export async function dopplerImageGraph(args: {
   bundlePath: string; sourcePath: string; sourceDocumentId: string; sourceHash: string;
   pageCount: number; targets: string[]; scratchDir: string; signal?: AbortSignal;
+  recordUsage?: (event: UsageEvent) => void;
+  canContinue?: () => boolean;
 }): Promise<LocalPdfGraphOutput> {
   if (!args.targets.length || args.targets.some(t => !DOPPLER_IMAGE_TARGETS.has(t))) throw new Error("Doppler image enrichment supports image targets only");
   args.signal?.throwIfAborted();
@@ -52,6 +56,9 @@ export async function dopplerImageGraph(args: {
     producer: { id: "source", optionsDigest: args.sourceHash } };
   const artifacts: ExtractionArtifactRef[] = [source];
   const imageIds = new Map<string, string>();
+  const orientation = new Map<string, unknown>();
+  const normalize = imageOrientationEnabled();
+  if (normalize && !args.recordUsage) throw new Error("Image orientation requires scoped usage recording");
   const digest = createHash("sha256").update("doppler-images@1:lossless-webp:page-only").digest("hex");
   const emit = async (kind: string, name: string, bytes: Buffer, mediaType: string, pages: number[]): Promise<ExtractionArtifactRef> => {
     args.signal?.throwIfAborted();
@@ -69,9 +76,26 @@ export async function dopplerImageGraph(args: {
     const ref = await emit(onlyMasks ? "page/embedded-image-mask" : "page/embedded-image", `${asset.sha256}.webp`, asset.bytes, asset.mediaType,
       placements.map(p => p.pageNumber));
     imageIds.set(asset.sha256, ref.id);
+    // Mask pixels and their associated source must remain aligned; never turn one independently.
+    const linkedMask = placements.some(p => p.role !== "image" || images.placements.some(mask => mask.pageNumber === p.pageNumber && mask.maskOf === p.occurrence));
+    if (normalize && !linkedMask) {
+      if (args.canContinue && !args.canContinue()) throw new Error("Image orientation refused: run cost cap exceeded");
+      const prepared = await normalizeImageOrientation(ref.uri, args.recordUsage!, args.signal);
+      try {
+        if (prepared.metadata.status === "corrected" || prepared.metadata.exifApplied) {
+          const bytes = await import("node:fs/promises").then(fs => fs.readFile(prepared.path));
+          const derived = await emit("page/embedded-image", `${asset.sha256}.upright.png`, bytes, "image/png", placements.map(p => p.pageNumber));
+          derived.derivedFrom = [ref.id];
+          derived.producer = { id: prepared.metadata.model, optionsDigest: createHash("sha256")
+            .update(JSON.stringify({ policy: "quarter-turn@1", ...prepared.metadata })).digest("hex") };
+          orientation.set(asset.sha256, { ...prepared.metadata, artifactId: derived.id });
+        } else orientation.set(asset.sha256, prepared.metadata);
+      } finally { await prepared.release(); }
+    } else if (normalize) orientation.set(asset.sha256, { status: "skipped-linked-mask" });
   }
   const entries = images.placements.map(p => ({ pageNumber: p.pageNumber, occurrence: p.occurrence, role: p.role,
     artifactId: imageIds.get(p.sha256)!, sha256: p.sha256, mediaType: "image/webp", placement: "page-only", width: p.width, height: p.height,
+    ...(orientation.has(p.sha256) ? { orientation: orientation.get(p.sha256) } : {}),
     ...(p.maskOf === undefined ? {} : { maskOf: { pageNumber: p.pageNumber, occurrence: p.maskOf } }) }));
   if (args.targets.includes("page/embedded-image-set")) {
     if (images.pageCount > 10_000) throw new Error("Doppler page image set limit exceeded");
