@@ -160,6 +160,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   user_settings: "user preferences",
   workspace_recommendation_seen_events: "per-user reviewed activity IDs; dashboard only",
   workspace_recommendation_visits: "per-user workspace review state; dashboard only",
+  auth_otp_generations: "Better Auth OTP generation digests and recipient identifiers",
   verification: "Better Auth verification tokens",
   waitlist_signups: "marketing sign-ups (PII)",
   webhook_deliveries: "webhook delivery log, sent by the API",
