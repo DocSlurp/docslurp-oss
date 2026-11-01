@@ -764,6 +764,13 @@
       "when": 1793300000012,
       "tag": "0108_otp_generation_fence",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1793300000013,
+      "tag": "0109_projection_revision",
+      "breakpoints": true
     }
   ]
 }
