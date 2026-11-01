@@ -50,10 +50,35 @@ function executableCallOffsets(file, text) {
   return offsets;
 }
 
+// Numeric prose is less specific than an identifier, but only parser-proven
+// comments can explain it. Never tokenize raw text as comments: strings,
+// templates, regular expressions and JSX can contain comment-like bytes.
+function commentRanges(file, text) {
+  if (!/\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/.test(file)) return [];
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  if (source.parseDiagnostics.length) return [];
+  const ranges = [];
+  const literals = [];
+  const visit = (node) => {
+    if (ts.isLiteralExpression(node) || ts.isTemplateHead(node)
+      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node) || ts.isJsxText(node)) {
+      literals.push({ pos: node.getStart(source), end: node.end });
+    }
+    ranges.push(...(ts.getTrailingCommentRanges(text, node.pos) ?? []));
+    ranges.push(...(ts.getLeadingCommentRanges(text, node.pos) ?? []));
+    ranges.push(...(ts.getTrailingCommentRanges(text, node.end) ?? []));
+    for (const child of node.getChildren(source)) visit(child);
+  };
+  visit(source);
+  return ranges.filter(({ pos, end }) =>
+    !literals.some((literal) => pos < literal.end && end > literal.pos));
+}
+
 export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
   const findings = [];
+  const candidates = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
-  const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, productionHash: null, gitHead: null, base, repositories: [], scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings };
+  const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, productionHash: null, gitHead: null, base, repositories: [], scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings, candidates };
   try {
     repo = realpathSync(repo);
     dataset = realpathSync(dataset);
@@ -150,6 +175,16 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
         if (lstatSync(path).isSymbolicLink() || !within(root, realpathSync(path))) throw new Error('repository-symlink-escape');
         if (!existsSync(resolve(path, '.git'))) throw new Error('nested-repository-uninitialized');
       }
+      // Scan working-tree bytes, but refuse partially staged paths: their index
+      // version could contain leakage hidden by an unstaged replacement/deletion.
+      // Pure unstaged repairs and fully staged changes retain existing semantics.
+      for (const entry of run('ls-files', '-v', '-z').split('\0').filter(Boolean)) {
+        if (/^[a-zS]/.test(entry)) add('unverified-index-flags', { file: prefix + entry.slice(2) });
+      }
+      const staged = new Set(run('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD', '--').split('\0').filter(Boolean));
+      for (const name of run('diff', '--name-only', '--no-renames', '-z', '--').split('\0').filter(Boolean)) {
+        if (staged.has(name)) add('index-working-tree-mismatch', { file: prefix + name });
+      }
       coverage.dirty = Boolean(run('status', '--porcelain').trim());
       const names = [...new Set([...entries.keys(), ...run('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean)])].sort();
       const changed = new Set(run('diff', '--name-only', '-z', revision, '--').split('\0'));
@@ -197,13 +232,33 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     for (const value of expected) terms.push({ rule: 'labeled-answer', value });
     const seen = new Set();
     const executableAnswers = new Set();
+    const commentAnswers = new Set();
     const match = (file, text, origin) => {
-      let callOffsets;
+      let callOffsets, comments;
       for (const { rule, value } of terms) {
         const key = `${file}:${rule}:${hash(value)}`;
         if (seen.has(key)) continue;
         let found = pattern(value).exec(text);
         if (!found) continue;
+        // Shape-based specificity, never a unit or benchmark phrase allowlist.
+        if (rule === 'labeled-answer' && /^\d+(?:\.\d+)?\s+\p{Ll}+$/u.test(value)) {
+          if (origin === 'working-tree') {
+            comments ??= commentRanges(file, text);
+            const expression = pattern(value);
+            const occurrences = [...text.matchAll(new RegExp(expression.source, expression.flags + 'g'))];
+            const inComment = (occurrence) => comments.some(({ pos, end }) =>
+              pos <= occurrence.index && occurrence.index + occurrence[0].length <= end);
+            for (const occurrence of occurrences.filter(inComment)) {
+              candidates.push({ rule: 'comment-quantity-overlap', file, origin,
+                line: text.slice(0, occurrence.index).split('\n').length, evidenceHash: hash(value) });
+            }
+            found = occurrences.find((occurrence) => !inComment(occurrence));
+            if (!found) { commentAnswers.add(key); continue; }
+          } else if (commentAnswers.has(key)) {
+            // Classify using the complete parsed file, not a diff fragment.
+            continue;
+          }
+        }
         if (rule === 'labeled-answer' && /^[a-z_$][a-z0-9_$]*\.[a-z_$][a-z0-9_$]*\(\)$/i.test(value)) {
           if (origin === 'working-tree') {
             callOffsets ??= executableCallOffsets(file, text);
@@ -256,7 +311,8 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     const known = /^[a-z][a-z-]+$/.test(error.message ?? '') ? error.message : 'unreadable-or-invalid-input';
     add(known);
   }
-  result.passed = findings.length === 0;
+  result.status = findings.length ? 'blocked' : candidates.length ? 'needs-review' : 'passed';
+  result.passed = result.status === 'passed';
   return result;
 }
 
