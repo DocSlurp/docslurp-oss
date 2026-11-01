@@ -59,6 +59,20 @@ describe("runWebCapability", () => {
     expect(t.recordCharge).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { orgId: "org-2" },
+    { workspaceId: "ws-2" },
+    { userId: "user-2" },
+  ])("isolates cached query history from another scope: %j", async scope => {
+    const t = setup({}, { orgPerMinute: 20 });
+    expect((await runWebCapability("search", search, ctx)).cached).toBe(false);
+    const other = { ...ctx, ...scope };
+    expect((await runWebCapability("search", search, other)).cached).toBe(false);
+    expect((await runWebCapability("search", search, other)).cached).toBe(true);
+    expect((await runWebCapability("search", search, ctx)).cached).toBe(true);
+    expect(t.run).toHaveBeenCalledTimes(2);
+  });
+
   it("charges nothing when nothing comes back, but still records the provider cost", async () => {
     const t = setup();
     t.run.mockResolvedValueOnce({ data: { results: [] }, costUsd: 0.0005, costSource: "reported" as const, units: { amount: 10_000, unit: "tokens" } });
@@ -67,9 +81,22 @@ describe("runWebCapability", () => {
     expect(t.recordCost).toHaveBeenCalledOnce();
   });
 
-  it("charges deep or content-returning searches double", async () => {
+  it.each(["https://example.com", "http://127.0.0.1", "http://169.254.169.254", "https://[::1]"])("blocks target retrieval before spend or cached/fallback routing: %s", async url => {
+    const spend = vi.fn();
+    const t = setup({ assertCanSpend: spend });
+    for (const surface of ["api", "chat", "mcp"] as const) {
+      await expect(runWebCapability("fetch", { urls: [url], depth: "fast", maxCharacters: 1000 }, { ...ctx, surface })).rejects.toMatchObject({ code: "web_target_fetch_disabled" });
+      await expect(runWebCapability("map", { url, limit: 1, includeSubdomains: false }, { ...ctx, surface })).rejects.toMatchObject({ code: "web_target_fetch_disabled" });
+      await expect(runWebCapability("crawl", { url, limit: 1, maxDepth: 1, maxCharacters: 1000 }, { ...ctx, surface })).rejects.toMatchObject({ code: "web_target_fetch_disabled" });
+    }
+    await expect(runWebCapability("search", { ...search, includeContent: true }, ctx)).rejects.toMatchObject({ code: "web_target_fetch_disabled" });
+    expect(spend).not.toHaveBeenCalled();
+    expect(t.run).not.toHaveBeenCalled();
+  });
+
+  it("charges deep searches double", async () => {
     const t = setup();
-    expect((await runWebCapability("search", { ...search, includeContent: true }, ctx)).usage.credits).toBe(2);
+    expect((await runWebCapability("search", { ...search, depth: "deep" }, ctx)).usage.credits).toBe(2);
     expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: 2 }) }));
   });
 
@@ -79,7 +106,7 @@ describe("runWebCapability", () => {
 
     setup();
     await expect(runWebCapability("fetch", { urls: ["http://169.254.169.254/latest"], depth: "fast", maxCharacters: 1000 }, ctx))
-      .rejects.toMatchObject({ status: 400, code: "url_blocked" });
+      .rejects.toMatchObject({ status: 403, code: "web_target_fetch_disabled" });
 
     setup({ workspaceAccess: async () => "privacy" as const });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 403, code: "privacy_mode_blocked" });
@@ -102,7 +129,7 @@ describe("runWebCapability", () => {
   it("keeps the shortened-page note intact for the chat model", async () => {
     const t = setup();
     t.run.mockResolvedValueOnce({ data: { results: [{ url: "https://example.com/long", markdown: "word ".repeat(5_000) }] } as never, costUsd: 0.001, costSource: "reported" as const, units: { amount: 1, unit: "credits" } });
-    const result = await runWebCapability("search", { ...search, query: "long page", includeContent: true }, { ...ctx, surface: "chat" });
+    const result = await runWebCapability("search", { ...search, query: "long page" }, { ...ctx, surface: "chat" });
     expect(result.results[0]!.markdown).toContain(CHAT_SHORTENED_NOTE);
     expect(result.results[0]!.markdown).not.toContain("suppressed");
   });

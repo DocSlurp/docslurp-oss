@@ -1281,7 +1281,10 @@ async function chatWorkspaceTurn(
   if (workspace && !publicClientKey && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
   // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
-  if (args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
+  // Chat-only keys may receive grounded answers, but cannot invoke raw search
+  // tools. Keep them on the existing direct answer path without widening scope.
+  const canUseSearchTools = args.actor?.type !== "apiKey" || args.actor.apiKey.scopes.includes("search");
+  if (canUseSearchTools && args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
     // No server-side scope decline on the agent path: the agent's own searches
     // decide relevance, and the model applies the fixed core rule (decline

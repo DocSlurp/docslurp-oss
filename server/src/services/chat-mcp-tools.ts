@@ -7,6 +7,9 @@ import { runInChatAgentContext } from "../lib/chat-agent-context.js";
 import { withSearchSignal } from "../search/query-bounds.js";
 import { raceAbort } from "./chat-turn-deadline.js";
 
+import { batchSearchInputSchema } from "../lib/search-input.js";
+import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
+
 import { ChatToolBlockedError } from "./chat-tool-error.js";
 import { ESTIMATE_TOOL_NAMES } from "./mcp-estimate-catalog.js";
 export { ChatToolBlockedError } from "./chat-tool-error.js";
@@ -199,7 +202,9 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  * made 24 of ~9,000 chat tool calls. proposeWorkspaceSettings already reports a
  * change's impact, and the app prices uploads and indexing itself.
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["openUploader", "upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+// The agent generates the answer itself. A nested chat starts another paid answer
+// generator under a short tool deadline and can block otherwise usable retrieval.
+const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
  * Workspace settings tools: offered to the chat agent only for the first-party
@@ -295,30 +300,29 @@ function validationIssues(result: unknown): unknown {
   return serialized.length <= 2_000 ? issues : serialized.slice(0, 2_000);
 }
 
-/** Comparable form of a URL: no fragment, no trailing slash, lowercase host. */
+/** Comparable form of a URL: no fragment; preserve path and query exactly. */
 function urlKey(raw: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     url.hash = "";
-    return url.toString().replace(/\/+$/, "");
+    return url.toString();
   } catch {
     return null;
   }
 }
 
-/** HTTP(S) URLs written in user text (the only URLs webFetch may read before a web search). */
+/** HTTP(S) URLs written in user text (the only URLs webFetch may read at any time). */
 export function urlsInText(text: string): string[] {
   return [...text.matchAll(/https?:\/\/[^\s<>"'`)\]]+/gi)].map((match) => match[0].replace(/[.,;:!?]+$/, ""));
 }
 
 /**
- * Exfiltration guard: in chat, webFetch reads only URLs the user wrote or that
- * webSearch returned in this turn. Document or web text cannot make the model
+ * Exfiltration guard: in chat, webFetch reads only URLs the user wrote only. Document or web text cannot make the model
  * fetch an attacker URL carrying workspace data in its query string.
  */
 export const WEB_FETCH_URL_REFUSED = {
-  error: "webFetch can only read URLs from the user's messages or from webSearch results in this turn. This request is blocked.",
+  error: "webFetch can only read URLs from the user's messages. This request is blocked.",
   code: "url_not_allowed",
 } as const;
 
@@ -414,13 +418,7 @@ export function createChatMcpTools(args: {
     graphExpansion: defaults.enableGraphExpansion, communityExpansion: defaults.enableCommunityExpansion,
     graphHops: defaults.graphHops,
   } : {};
-  const chatDefaults = defaults ? {
-    resultCount: limit, useHyDE: defaults.useHyDE, useRerank: defaults.useRerank,
-    candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
-    useMmr: defaults.useMmr, mmrLambda: defaults.mmrLambda,
-    iterativeMultiHop: defaults.iterativeMultiHop, enableGraphExpansion: defaults.enableGraphExpansion,
-    enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
-  } : undefined;
+
 
   function collectEvidence(value: unknown, returned: SearchResult[]): void {
     if (!value || typeof value !== "object") return;
@@ -460,8 +458,12 @@ export function createChatMcpTools(args: {
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
     tools[name] = dynamicTool({
-      description: definition.description,
-      inputSchema: jsonSchema(definition.inputSchema),
+      description: definition.id === "search"
+        ? "Retrieve cited passages from the selected workspace. Send queries as an array of objects with q and optional filters, even for one query. Each query has its own options; only concurrency may accompany queries. Use the returned evidence to write your answer; this tool does not generate an answer."
+        : definition.description,
+      // One shape avoids the public MCP catalog's flat q/queries union, which
+      // models can satisfy while producing a mixed request the route rejects.
+      inputSchema: jsonSchema(definition.id === "search" ? toolInputJsonSchema(batchSearchInputSchema) : definition.inputSchema),
       execute: async (input, { toolCallId }) => {
         args.signal.throwIfAborted();
         throwIfBlocked();
@@ -501,7 +503,19 @@ export function createChatMcpTools(args: {
           span.end("invalid_arguments");
           return fail("invalid_arguments");
         }
-        const supplied = input as Record<string, unknown>;
+        const supplied = { ...input } as Record<string, unknown>;
+        // The model may select user text, but may not construct an outbound query
+        // or filters from private evidence or hostile search results.
+        if (definition.id === "webSearch") {
+          if (typeof supplied.query !== "string" || !(args.userText ?? []).some(text => text.trim() === supplied.query)) {
+            span.end("query_not_allowed");
+            return fail("query_not_allowed");
+          }
+          for (const key of Object.keys(supplied)) {
+            if (key !== "query") delete supplied[key];
+          }
+        }
+
         if (definition.id === "webFetch") {
           const urls = Array.isArray(supplied.urls) ? supplied.urls : [];
           if (!urls.length || urls.some((url) => typeof url !== "string" || !allowedWebUrls.has(urlKey(url) ?? ""))) {
@@ -537,9 +551,7 @@ export function createChatMcpTools(args: {
           ? Array.isArray(supplied.queries)
             ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withoutWorkspace(q), ...searchDefaults, workspace: args.workspaceId })) }
             : { ...modelSupplied, ...searchDefaults, workspace: args.workspaceId }
-          : definition.id === "chat" && chatDefaults
-            ? { ...modelSupplied, retrieval: chatDefaults, workspace: args.workspaceId }
-            : { ...modelSupplied, workspace: args.workspaceId };
+          : { ...modelSupplied, workspace: args.workspaceId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         let settingsProposal: WorkspaceSettingsProposal | undefined;
         let web = webActivityRequest(definition.id, supplied);
@@ -582,13 +594,7 @@ export function createChatMcpTools(args: {
           if (ok) {
             collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
-            if (definition.id === "webSearch") {
-              const found = (result as { results?: Array<{ url?: unknown }> } | null)?.results ?? [];
-              for (const item of found) {
-                const key = typeof item?.url === "string" ? urlKey(item.url) : null;
-                if (key) allowedWebUrls.add(key);
-              }
-            }
+
           }
           // A partial fetch failure still reports what was read and how many pages failed.
           if (response.ok && web) web = webActivityResult(web, result);

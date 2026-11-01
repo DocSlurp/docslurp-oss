@@ -88,3 +88,39 @@ Quality and integrity are separate gates. A high labeled-data score cannot compe
 Conversation and tool traces can be backtested separately with `scripts/trace-safety-judge.mjs`. Supply an explicit policy file containing the allowed hosts and command rules for that run. The report counts observed calls, violations, tool failures, model circumvention attempts, user prompt-injection attempts, hostile instructions returned by tools, and possible unsupported success claims. Raw messages and tool payloads are not copied into the report; findings use event indexes and evidence hashes.
 
 Deterministic matches are not mind-reading. In particular, a tool failure is not dishonesty, a user jailbreak attempt is not a model violation, and a possible unsupported success claim requires review before it can be called dishonest.
+
+Numeric prose consisting of a decimal or integer followed by a lowercase word
+is retained as a hashed `comment-quantity-overlap` candidate when the complete
+JS/TS file parses successfully and the occurrence lies entirely in a parser-proven
+comment. These candidates block promotion: the report returns `status: "needs-review"`,
+`passed: false`, and CLI exit code 1, without declaring contamination. There is no unit or phrase
+allowlist. Any occurrence outside comments remains blocking, including strings,
+prompts and answer-conditioned branches. Unsupported syntax and parse errors stay
+blocking. Fixture identifiers, source hashes, proper names and label combinations
+retain their existing checks even inside comments. Diff additions use the complete
+current file's classification; source comments remain part of the production hash.
+
+Candidates are review evidence, not proof of independent provenance. A copied
+quantity in a comment may still be improper; independent review must assess that
+possibility before promotion. This screen does not perform runtime dataflow analysis
+or detect code that reads its own comments as prompt text.
+
+Comment ranges overlapping AST literal or JSX-text ranges are rejected. All
+unresolved candidates require independent adjudication, including apparently
+generic comments and code that consumes its own source. No introspection heuristic
+or adjudication override is implemented. Adjudication remains outstanding; a
+manual assertion cannot turn this report into a passing gate. Any future interface
+must bind the entire productionHash, datasetHash and exact candidate set to an
+independent reviewer identity and reason, rejecting stale or incomplete records.
+Reports with findings use `status: "blocked"`; only reports with neither findings
+nor candidates use `status: "passed"`. Consumers must require `passed === true`.
+
+
+The gate scans working-tree content. A path changed in both the index relative to
+HEAD and the working tree relative to the index blocks with
+`index-working-tree-mismatch`, including nested repositories. This conservative
+check rejects partial staging even when both versions are benign; stage the final
+content before rerunning. It prevents a staged answer prompt from being hidden by
+a benign working-tree replacement or deletion. Fully staged changes are scanned
+normally, and unstaged-only repairs retain their existing semantics. This is not
+a full historical/index-content scan.

@@ -284,7 +284,10 @@ pi mcp list                                             # connects and lists the
 ## Dashboard chat and WebMCP
 
 Signed-in dashboard chat uses the same tool handlers with the current user's
-permissions. Supported browsers also receive WebMCP tools through
+permissions. Its answering agent retrieves evidence through batch-shaped search calls
+(including single-query batches) and synthesizes the answer itself; it does not
+invoke the separate MCP `chat` answer generator as a nested tool. Chat-only API
+keys retain the direct grounded-answer path without acquiring raw-search scope. Supported browsers also receive WebMCP tools through
 `document.modelContext` from `/v1/session-tools`, the same catalog with each
 tool's `readOnly` and `consequential` hints (upload and completeUpload ask for
 confirmation); unsupported browsers retain the normal interface. Set

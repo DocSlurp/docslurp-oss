@@ -10,6 +10,7 @@ import { CommandRunner } from "../tools/runner.js";
 import { normalizeMarkdownMathDelimiters } from "../tools/vision-math-delimiters.js";
 import {
   MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
+  VISUAL_RELATIONSHIP_INSTRUCTIONS,
   openRouterProviderParams,
   postProcessVisionText,
   visionOutputCapForModel,
@@ -59,7 +60,9 @@ describe("MiMo vision profile", () => {
   it("asks for delimited LaTeX and real Markdown tables", () => {
     expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT).toContain("$$...$$");
     expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT).toContain("pipe table");
-    expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT.length).toBeLessThan(2_000);
+    // Preserve the original budget and bound the shared evidence instructions separately.
+    expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT.replace(VISUAL_RELATIONSHIP_INSTRUCTIONS, "").length).toBeLessThan(2_000);
+    expect(VISUAL_RELATIONSHIP_INSTRUCTIONS.length).toBeLessThan(1_200);
   });
 
   it("prefers the fast endpoints with fallbacks allowed, and only for MiMo", () => {
