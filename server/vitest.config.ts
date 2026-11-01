@@ -16,6 +16,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
       "@docslurp/shared/error-reporting": shared("error-reporting"),
       "@docslurp/shared/error-response": shared("error-response"),
