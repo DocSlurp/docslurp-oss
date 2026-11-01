@@ -1,3 +1,5 @@
+import { nitroBaseModel } from "../workspace-chat-models.js";
+import { openRouterProviderPreferences } from "../openrouter-routing.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CHAT_MODEL_PRICES_USD_PER_MTOK, chatModelPricePerToken } from "../chat-model-prices.js";
@@ -16,7 +18,13 @@ describe("chat model prices", () => {
     }
   });
   it("prices every catalog chat model and admits no prohibited or over-priced model", () => {
-    for (const { id } of WORKSPACE_CHAT_MODELS) expect(CHAT_MODEL_PRICES_USD_PER_MTOK[id], id).toBeDefined();
+    for (const { id } of WORKSPACE_CHAT_MODELS) {
+      if (nitroBaseModel(id)) {
+        // Dynamic Nitro endpoints have no static base price: enforce an explicit low ceiling instead.
+        expect(openRouterProviderPreferences(id)?.max_price, id).toEqual({ prompt: 1, completion: 5 });
+        expect(chatModelPricePerToken(id), id).toBeUndefined();
+      } else expect(CHAT_MODEL_PRICES_USD_PER_MTOK[id], id).toBeDefined();
+    }
     for (const [model, price] of Object.entries(CHAT_MODEL_PRICES_USD_PER_MTOK)) {
       expect(isProhibitedRoutingModelId(model), model).toBe(false);
       expect(price.output, model).toBeLessThan(MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE);

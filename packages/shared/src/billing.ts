@@ -1,3 +1,4 @@
+import { nitroBaseModel } from "./workspace-chat-models.js";
 import { z } from "zod";
 
 import { PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
@@ -266,7 +267,8 @@ export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
 
 /** Tier of a chat model id (`provider/model`, bare `model`, or a `workspace:` alias resolved by the caller). */
 export function chatModelTier(model: string | null | undefined): ChatAnswerTier {
-  const raw = (model ?? "").trim().toLowerCase();
+  const selected = (model ?? "").trim().toLowerCase();
+  const raw = nitroBaseModel(selected) ?? selected;
   if (!raw) return "premium";
   const bare = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
   const exact = CHAT_MODEL_TIERS[bare];
