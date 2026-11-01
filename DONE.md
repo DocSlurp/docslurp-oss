@@ -177,3 +177,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Fix dashboard chat nested-generation timeouts: retrieve evidence and synthesize in one agent, expose an unambiguous batch search contract, and retain direct answers for chat-only keys.
 
 - Add a configurable 15-second first-token deadline to agent chat model calls; retain native provider fallback and account for aborted calls without replaying requests.
+
+- Add exact-scan, operator-attested integrity candidate adjudication with strict decisions and synthetic fail-closed coverage; findings remain non-waivable. Independent council review required before use on held-out runs.
