@@ -1,5 +1,5 @@
 """Offline CPU orientation for document rasters. Called only inside the confined VM.
-Originals are immutable; output is a lossless PNG derivative. Model policy is opt-in,
+Originals are immutable; output is a lossless PNG derivative. Model policy is CPU,
 not calibrated for arbitrary photographs/diagrams. No OCR or arbitrary-angle deskew.
 """
 import hashlib

@@ -31,6 +31,7 @@ export async function dopplerImageGraph(args: {
   pageCount: number; targets: string[]; scratchDir: string; signal?: AbortSignal;
   recordUsage?: (event: UsageEvent) => void;
   canContinue?: () => boolean;
+  reserveOrientation?: () => boolean;
 }): Promise<LocalPdfGraphOutput> {
   if (!args.targets.length || args.targets.some(t => !DOPPLER_IMAGE_TARGETS.has(t))) throw new Error("Doppler image enrichment supports image targets only");
   args.signal?.throwIfAborted();
@@ -80,6 +81,10 @@ export async function dopplerImageGraph(args: {
     const linkedMask = placements.some(p => p.role !== "image" || images.placements.some(mask => mask.pageNumber === p.pageNumber && mask.maskOf === p.occurrence));
     if (normalize && !linkedMask) {
       if (args.canContinue && !args.canContinue()) throw new Error("Image orientation refused: run cost cap exceeded");
+      if (args.reserveOrientation && !args.reserveOrientation()) {
+        orientation.set(asset.sha256, { status: "skipped-limit" });
+        continue;
+      }
       const prepared = await normalizeImageOrientation(ref.uri, args.recordUsage!, args.signal);
       try {
         if (prepared.metadata.status === "corrected" || prepared.metadata.exifApplied) {

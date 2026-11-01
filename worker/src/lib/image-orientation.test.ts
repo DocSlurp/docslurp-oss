@@ -7,7 +7,10 @@ import {executeDopplerVm} from '../sandbox/providers/modal/doppler-vm.js';
 import {SandboxRunError} from '../sandbox/types.js';
 vi.mock('../sandbox/providers/modal/doppler-vm.js',()=>({executeDopplerVm:vi.fn(),VM_TIMEOUT_MS:60000,dopplerVmUsage:()=>({costCents:1})}));
 afterEach(()=>{vi.unstubAllEnvs();vi.resetAllMocks();});
-it('defaults off and refuses an invalid flag',()=>{
+it('defaults on, accepts explicit booleans and legacy digits, and refuses invalid flags',()=>{
+ vi.stubEnv('DOCSLURP_IMAGE_ORIENTATION',undefined);expect(imageOrientationEnabled()).toBe(true);
+ vi.stubEnv('DOCSLURP_IMAGE_ORIENTATION','true');expect(imageOrientationEnabled()).toBe(true);
+ vi.stubEnv('DOCSLURP_IMAGE_ORIENTATION','false');expect(imageOrientationEnabled()).toBe(false);
  vi.stubEnv('DOCSLURP_IMAGE_ORIENTATION','0');expect(imageOrientationEnabled()).toBe(false);
  vi.stubEnv('DOCSLURP_IMAGE_ORIENTATION','1');expect(imageOrientationEnabled()).toBe(true);
  vi.stubEnv('DOCSLURP_IMAGE_ORIENTATION','yes');expect(()=>imageOrientationEnabled()).toThrow();
@@ -38,7 +41,7 @@ it('holds admission during preparation and releases the unsent model request on 
 it('bounds attempts including failures and refuses malformed persisted counters',()=>{
  const state={run:{stats:{} as Record<string,unknown>}};
  for(let i=0;i<64;i++)reserveOrientationAttempt(state);
- expect(()=>reserveOrientationAttempt(state)).toThrow('attempt limit');
+ expect(reserveOrientationAttempt(state)).toBe(false);
  expect(state.run.stats.imageOrientationAttempts).toBe(64);
  for(const value of [-1,NaN,'0',Infinity]){state.run.stats.imageOrientationAttempts=value;expect(()=>reserveOrientationAttempt(state)).toThrow();}
 });
