@@ -3,6 +3,6 @@ unstructured[pdf]
 # Marker/Surya are not part of the stack (GPLv3 code, restricted weights); see THIRD_PARTY_NOTICES.md.
 
 # Optional vector backends are installed at startup, not baked into images.
-lancedb>=0.10.0
+lancedb>=0.41.0,<0.42
 pymilvus>=2.5.0
 chromadb>=0.5.0
