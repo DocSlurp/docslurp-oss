@@ -211,7 +211,9 @@ export function judgeIntegrity(options) {
       result.repositories.push(coverage);
       productionDigest.update(JSON.stringify({ path: coverage.path, head, base: revision })).update('\0');
       const entries = new Map();
-      for (const entry of run('ls-files', '--stage', '-z').split('\0').filter(Boolean)) {
+      const indexInventory = run('ls-files', '--stage', '-z');
+      productionDigest.update('index\0').update(indexInventory).update('\0');
+      for (const entry of indexInventory.split('\0').filter(Boolean)) {
         const tab = entry.indexOf('\t');
         const [mode, oid, stage] = entry.slice(0, tab).split(' ');
         if (stage !== '0') throw new Error('unmerged-repository-index');

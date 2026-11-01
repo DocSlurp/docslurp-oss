@@ -432,6 +432,10 @@ test('operator adjudication binds the entire scan and never waives findings', (t
   };
   assert.equal(run().passed, true);
   assert.ok(!JSON.stringify(run()).includes('Synthetic generic clearance'));
+  f.git('add', 'worker.ts');
+  assert.equal(run().passed, false, 'staging invalidates the exact index binding');
+  f.git('restore', '--staged', 'worker.ts');
+  assert.equal(run().passed, true, 'restoring the exact reviewed index restores context');
   for (const mutate of [
     (r) => { r.datasetHash = '0'.repeat(64); }, (r) => { r.productionHash = '0'.repeat(64); },
     (r) => { r.candidateSetHash = '0'.repeat(64); }, (r) => { r.decisions = []; },
