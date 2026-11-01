@@ -63,3 +63,13 @@ it("accepts compact geo annotations with explicit encoding", async () => {
   expect(geoAnnotationSchema.parse({ encoding: "geojson" })).toMatchObject({ version: 1, geometryTypes: ["Point", "MultiPoint", "Polygon", "MultiPolygon"] });
   expect(geoAnnotationSchema.parse({ encoding: "lat-lon", latitude: "/lat", longitude: "/lng" })).toMatchObject({ version: 1 });
 });
+
+
+it("rejects references inside geo mappings but preserves reference-shaped literal data", () => {
+  const wrap = (field: unknown) => ({ type: "object", properties: { site: field } });
+  for (const key of ["$ref", "$dynamicRef", "$recursiveRef"]) {
+    expect(() => validateGeoAnnotations(wrap({ type: "object", [key]: "#/$defs/place", geo: { encoding: "geojson" } }))).toThrow(/Reference/);
+    expect(() => validateGeoAnnotations(wrap({ type: "object", geo: { encoding: "geojson" }, properties: { coordinates: { [key]: "#/$defs/coords" } } }))).toThrow(/Reference/);
+  }
+  expect(() => validateGeoAnnotations(wrap({ type: "object", geo: { encoding: "geojson" }, const: { $ref: "ordinary data" } }))).not.toThrow();
+});

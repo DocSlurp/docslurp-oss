@@ -101,6 +101,10 @@ export function validateGeoAnnotations(schema: Record<string, unknown>): void {
   mapSchemaNodes(schema, (obj, path) => {
     if (Object.hasOwn(obj, "geo")) {
       if (path.length !== 2 || path[0] !== "properties" || obj.type !== "object") throw new Error("Geo annotations require top-level object properties");
+      mapSchemaNodes(obj, (child) => {
+        if (["$ref", "$dynamicRef", "$recursiveRef"].some(key => Object.hasOwn(child, key))) throw new Error("Reference-based geo mappings are not supported");
+        return child;
+      });
       const a = geoAnnotationSchema.parse(obj["geo"]);
       if (a.encoding === "lat-lon") {
         const props = obj.properties as Record<string, { type?: string }> | undefined;
