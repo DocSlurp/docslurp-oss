@@ -757,6 +757,13 @@
       "when": 1793300000011,
       "tag": "0107_workspace_recommendation_visits",
       "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1793300000012,
+      "tag": "0108_otp_generation_fence",
+      "breakpoints": true
     }
   ]
 }
