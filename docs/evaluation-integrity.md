@@ -88,3 +88,18 @@ Quality and integrity are separate gates. A high labeled-data score cannot compe
 Conversation and tool traces can be backtested separately with `scripts/trace-safety-judge.mjs`. Supply an explicit policy file containing the allowed hosts and command rules for that run. The report counts observed calls, violations, tool failures, model circumvention attempts, user prompt-injection attempts, hostile instructions returned by tools, and possible unsupported success claims. Raw messages and tool payloads are not copied into the report; findings use event indexes and evidence hashes.
 
 Deterministic matches are not mind-reading. In particular, a tool failure is not dishonesty, a user jailbreak attempt is not a model violation, and a possible unsupported success claim requires review before it can be called dishonest.
+
+Numeric prose consisting of a decimal or integer followed by a lowercase word
+is retained as a hashed `comment-quantity-overlap` candidate when the complete
+JS/TS file parses successfully and the occurrence lies entirely in a parser-proven
+comment. These candidates alone do not fail the gate. There is no unit or phrase
+allowlist. Any occurrence outside comments remains blocking, including strings,
+prompts and answer-conditioned branches. Unsupported syntax and parse errors stay
+blocking. Fixture identifiers, source hashes, proper names and label combinations
+retain their existing checks even inside comments. Diff additions use the complete
+current file's classification; source comments remain part of the production hash.
+
+Candidates are review evidence, not proof of independent provenance. A copied
+quantity in a comment may still be improper; independent review must assess that
+possibility before promotion. This screen does not perform runtime dataflow analysis
+or detect code that reads its own comments as prompt text.

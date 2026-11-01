@@ -266,3 +266,55 @@ test('directory aliases fail closed on cycles, escapes and broken links', (t) =>
     assert.equal(f.run().passed, false, target);
   }
 });
+
+
+test('quantity prose in proven comments is a candidate, executable dependence still blocks', (t) => {
+  const f = fixture(t);
+  const expected = '37 millimeters';
+  const labels = JSON.stringify({ labels: [{ name: 'measured_span', expected }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  for (const source of ['// Allow 37 millimeters of clearance.\nexport const size = 37;', 'export const size = 37; /* Allow 37 millimeters. */']) {
+    writeFileSync(join(f.repo, 'worker.ts'), source);
+    const report = f.run();
+    assert.equal(report.passed, true);
+    assert.equal(report.candidates[0].rule, 'comment-quantity-overlap');
+    assert.ok(!JSON.stringify(report).includes(expected));
+  }
+  for (const source of [
+    'if (input === "37 millimeters") route();',
+    'const prompt = `Return 37 millimeters`;',
+    'const prompt = "// 37 millimeters";',
+    '// 37 millimeters\nconst answer = "37 millimeters";',
+    'function broken( { /* 37 millimeters */',
+  ]) {
+    writeFileSync(join(f.repo, 'worker.ts'), source);
+    assert.ok(rules(f.run()).includes('labeled-answer'), source);
+  }
+  writeFileSync(join(f.repo, 'worker.ts'), '// Distinctive Example Supplier');
+  const original = JSON.stringify({ labels: [{ name: 'owner', expected: 'Distinctive Example Supplier' }] });
+  writeFileSync(join(f.dataset, 'labels.json'), original);
+  f.manifest.cases[0].labels.sha256 = sha(original); f.save();
+  assert.ok(rules(f.run()).includes('labeled-answer'));
+});
+
+
+test('comment classification varies quantities and fails closed outside supported syntax', (t) => {
+  for (const expected of ['12 radians', '4.25 centimeters', '800 pixels']) {
+    const f = fixture(t);
+    const labels = JSON.stringify({ labels: [{ name: 'field_alpha', expected }, { name: 'field_beta', expected: 'ordinary' }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'worker.ts'), `/* Generic geometry: ${expected}. */`);
+    assert.equal(f.run().passed, true);
+    writeFileSync(join(f.repo, 'unknown.py'), `# ${expected}`);
+    assert.ok(rules(f.run()).includes('labeled-answer'));
+    rmSync(join(f.repo, 'unknown.py'));
+    writeFileSync(join(f.repo, 'worker.ts'), `/* ${expected}; field_alpha field_beta ordinary */`);
+    assert.ok(rules(f.run()).includes('answer-label-combination'));
+    writeFileSync(join(f.repo, 'worker.ts'), `/* ${expected}; held-out-fixture-001 */`);
+    assert.ok(rules(f.run()).includes('fixture-identifier'));
+    writeFileSync(join(f.repo, 'worker.ts'), `const prompt = \`/* ${expected} */\`;`);
+    assert.ok(rules(f.run()).includes('labeled-answer'));
+  }
+});
