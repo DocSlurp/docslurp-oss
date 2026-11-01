@@ -14,6 +14,8 @@ export const qualityModeSchema = z.enum(["fast", "auto", "good"]);
 export type QualityMode = z.infer<typeof qualityModeSchema>;
 export const DEFAULT_QUALITY_MODE: QualityMode = "auto";
 
+export const DIGITAL_IMAGE_TARGETS = ["document/media-map", "page/embedded-image", "page/embedded-image-set"] as const;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
@@ -57,7 +59,7 @@ const KREUZBERG_OCR_KEYS = ["ocr", "forceOcr", "forceOcrPages", "disableOcr"] as
  * extractors' entries, Kreuzberg loses every OCR option (no `ocr`, `forceOcr` or `forceOcrPages`) and gets the
  * `disableOcr: true` marker, which Kreuzberg itself ignores: the worker reads it to refuse image inputs to Kreuzberg,
  * the one format Kreuzberg OCRs without being asked. Artifact-graph
- * enrichment (which can OCR) is off, an explicit voting secondary outside the text-layer set falls back to
+ * enrichment that can OCR is off; explicit image preservation remains (the worker requires a Doppler-only VM route), an explicit voting secondary outside the text-layer set falls back to
  * next-in-order, and `forceOcr` is false. `removed` lists what was dropped, for a loud log line.
  * Other quality modes return the config unchanged.
  */
@@ -89,7 +91,8 @@ export function documentExtractionForQuality(
   }
   // The marker the worker reads to keep images away from Kreuzberg (it ignores disableOcr and OCRs images anyway).
   options.kreuzberg = { ...kreuzberg, disableOcr: true };
-  if ((config.enrich ?? []).length > 0) removed.push("enrich");
+  const enrich = (config.enrich ?? []).filter(target => (DIGITAL_IMAGE_TARGETS as readonly string[]).includes(target));
+  if (enrich.length !== (config.enrich ?? []).length) removed.push("enrich");
   const secondary = config.voting?.secondary ?? "next-in-order";
   const votingSecondary = secondary === "next-in-order" || TEXT_LAYER_EXTRACTORS.has(secondary) ? secondary : "next-in-order";
   if (votingSecondary !== secondary) removed.push(`voting.secondary:${secondary}`);
@@ -99,7 +102,7 @@ export function documentExtractionForQuality(
       ...config,
       order,
       options,
-      enrich: [],
+      enrich,
       voting: { ...config.voting, secondary: votingSecondary },
       forceOcr: false,
     },

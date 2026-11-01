@@ -13,13 +13,34 @@ function encode(value: string): string {
 function* recordsAsChunks(source: string, maxChars: number, tableIndex: number): Generator<string> {
   if (maxChars < 128) throw new RangeError("HTML table chunks require maxChars >= 128");
   if (source.length <= maxChars) { yield source; return; }
-  const records = readCells(source) ?? [{ label: "unparsed source", value: source }];
+  const parsed = readCells(source);
+  const records = parsed ?? [{ label: "unparsed source", value: source }];
+  // Tiny budgets retain the existing fully labelled format so span and part
+  // identities always retain the baseline continuation capacity.
+  const compactRecords = parsed !== null && maxChars >= 256;
+  const legend = compactRecords ? tableLegend(tableIndex) : "";
+  maxChars -= legend.length + (legend ? 1 : 0);
+  function prefix(label: string, part: number) {
+    if (!compactRecords) return `[Table ${tableIndex} ${label} part ${part}]\n`;
+    const compact = label.replace(/^row (\d+) column (\d+) rowspan (\d+) colspan (\d+)$/, (_, r, c, rs, cs) =>
+      `r${r} c${c}` + (rs === "1" ? "" : ` rowspan=${rs}`) + (cs === "1" ? "" : ` colspan=${cs}`));
+    return `[${compact}${part === 1 ? "" : ` part=${part}`}]\n`;
+  }
   for (const record of records) {
+    const wholePrefix = prefix(record.label, 1);
+    // Encoding can expand text; avoid allocating an unbounded fallback payload.
+    if (record.value.length <= maxChars - wholePrefix.length) {
+      const whole = encode(record.value);
+      if (wholePrefix.length + whole.length <= maxChars) {
+        yield wholePrefix + whole;
+        continue;
+      }
+    }
     let part = 1;
     let offset = 0;
     do {
-      const prefix = `[Table ${tableIndex} ${record.label} part ${part}]\n`;
-      const capacity = maxChars - prefix.length - 2; // JSON quotes
+      const context = prefix(record.label, part);
+      const capacity = maxChars - context.length - 2; // JSON quotes
       if (capacity < 6) throw new RangeError("Table record context exceeds chunk budget");
       let value = "";
       let encodedLength = 0;
@@ -33,18 +54,26 @@ function* recordsAsChunks(source: string, maxChars: number, tableIndex: number):
         encodedLength += size;
         offset += char.length;
       }
-      yield prefix + encode(value);
+      yield context + encode(value);
       part++;
     } while (offset < record.value.length);
   }
 }
 
-/** Pack complete records without slicing their identity or JSON payload. */
+function tableLegend(index: number): string {
+  return `[Table ${index} v2: r=row c=column; default rowspan,colspan,part=1; JSON]`;
+}
+
+/** Repeat the schema in every independently retrievable chunk, within budget. */
 export function* tableChunks(source: string, maxChars: number, tableIndex: number): Generator<string> {
   let current = "";
+  let legend = "";
   for (const record of recordsAsChunks(source, maxChars, tableIndex)) {
+    if (!current && (record.startsWith("[r") || record.startsWith("[caption"))) {
+      legend = tableLegend(tableIndex) + "\n";
+    }
     if (current && current.length + 2 + record.length > maxChars) { yield current; current = ""; }
-    current += (current ? "\n\n" : "") + record;
+    current += (current ? "\n\n" : legend) + record;
   }
   if (current) yield current;
 }

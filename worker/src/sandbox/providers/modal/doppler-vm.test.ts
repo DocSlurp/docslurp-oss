@@ -358,3 +358,27 @@ describe("shard jobs and publication receipts", () => {
   });
 });
 
+
+describe("optional embedded images share the Markdown VM", () => {
+  it("publishes bounded lossless image sidecar and Markdown from one VM", async () => {
+    const { encodeImageBundle } = await import("./doppler-images.js");
+    const j = { ...await job(), embeddedImages: true }; const h = harness();
+    const wire = encodeImageBundle({pageCount:1,first:1,last:1,assets:[],placements:[]},Buffer.from("text"));
+    h.exec.mockImplementation(async () => ({stdout: new ReadableStream({start(c){c.enqueue(wire);c.close();}}),
+      stderr:stream(JSON.stringify({protocol:"doppler-vm@5",engine:"doppler",embeddedImages:true,wireBytes:wire.length,outputBytes:4,
+        hardening:{policy:"doppler-guest-hardening@2",noNewPrivs:true,landlockAbi:4,seccompDenied:85},
+        conversion:{pages:1,documentPages:1,first:1,last:1}})), wait:async()=>0}));
+    await executeDopplerVm(j,undefined,async()=>h.sdk);
+    expect(h.create).toHaveBeenCalledOnce();
+    expect(JSON.stringify(h.exec.mock.calls)).toContain("--images");
+    expect(await readFile(j.output,"utf8")).toBe("text");
+    expect((await readFile(`${j.output}.images`)).subarray(0,8).toString()).toBe("DOPIMG1\n");
+  });
+  it("refuses an old image rather than silently omitting requested assets", async () => {
+    const j={...await job(),embeddedImages:true};const h=harness();
+    await expect(executeDopplerVm(j,undefined,async()=>h.sdk)).rejects.toThrow("image extraction unsupported");
+    await expect(readFile(j.output)).rejects.toThrow();
+    await expect(readFile(`${j.output}.images`)).rejects.toThrow();
+    expect(h.terminate).toHaveBeenCalledOnce();
+  });
+});

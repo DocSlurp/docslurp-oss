@@ -1,3 +1,4 @@
+- Preserve requested born-digital embedded images as lossless WebP in the existing Doppler VM, with bounded framed transport, page/mask manifests, shard deduplication, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/doppler-images.md; deployment remains manual.
 ## Durable workspace recommendation visits (2026-11-01)
 
 - Add session-scoped SQL snapshots and atomic token acknowledgements for return-visit recommendations, with bounded aggregate activity and account/workspace deletion cleanup.
@@ -174,6 +175,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
 
+- Compact oversized supported table records with per-chunk schema, bounded JSON fast path, exact reconstruction checks and proxy-token measurements; retain legacy tiny-budget mode. See docs/evals/table-chunk-cost.md.
 - Fix dashboard chat nested-generation timeouts: retrieve evidence and synthesize in one agent, expose an unambiguous batch search contract, and retain direct answers for chat-only keys.
 
 - Add a configurable 15-second first-token deadline to agent chat model calls; retain native provider fallback and account for aborted calls without replaying requests.
