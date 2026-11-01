@@ -27,13 +27,13 @@ describe("geo foundation", () => {
   });
   it("rejects nested and cross-row mappings", () => {
     expect(() => geometryFromAnnotation({}, { ...annotation, latitude: "/rows/0/lat" })).toThrow();
-    expect(() => validateGeoAnnotations({ type: "object", "geo": annotation })).toThrow();
+    expect(() => validateGeoAnnotations({ type: "object", format: "geojson", "geo": annotation })).toThrow();
   });
 });
 
 it("validates outputSchema annotation compatibility and preserves accepted metadata", async () => {
   const { pipelineFeatureOverridesSchema } = await import("./pipeline.js");
-  const outputSchema = { type: "object", properties: { site: { type: "object", properties: { lat: { type: "number" }, lon: { type: "number" } }, "geo": annotation } } };
+  const outputSchema = { type: "object", properties: { site: { type: "object", format: "geojson", properties: { lat: { type: "number" }, lon: { type: "number" } }, "geo": annotation } } };
   expect(pipelineFeatureOverridesSchema.parse({ outputSchema }).outputSchema).toEqual(outputSchema);
   const invalid = structuredClone(outputSchema);
   invalid.properties.site.properties.lat.type = "string";
@@ -53,7 +53,7 @@ it("treats annotation-named properties and literal data as data", async () => {
   const schema = { type: "object", properties: { "geo": { type: "string" }, payload: { type: "object", const: literal, default: literal, enum: [literal] } } };
   expect(() => validateGeoAnnotations(schema)).not.toThrow();
   expect(geoProviderSchema(schema)).toEqual(schema);
-  const nested = { type: "object", properties: { rows: { type: "array", items: { type: "object", "geo": { version: 1, encoding: "geojson", geometryTypes: ["Point"] } } } } };
+  const nested = { type: "object", properties: { rows: { type: "array", items: { type: "object", format: "geojson", "geo": { version: 1, encoding: "geojson", geometryTypes: ["Point"] } } } } };
   expect(() => validateGeoAnnotations(nested)).toThrow();
 });
 
@@ -68,8 +68,20 @@ it("accepts compact geo annotations with explicit encoding", async () => {
 it("rejects references inside geo mappings but preserves reference-shaped literal data", () => {
   const wrap = (field: unknown) => ({ type: "object", properties: { site: field } });
   for (const key of ["$ref", "$dynamicRef", "$recursiveRef"]) {
-    expect(() => validateGeoAnnotations(wrap({ type: "object", [key]: "#/$defs/place", geo: { encoding: "geojson" } }))).toThrow(/Reference/);
-    expect(() => validateGeoAnnotations(wrap({ type: "object", geo: { encoding: "geojson" }, properties: { coordinates: { [key]: "#/$defs/coords" } } }))).toThrow(/Reference/);
+    expect(() => validateGeoAnnotations(wrap({ type: "object", format: "geojson", [key]: "#/$defs/place", geo: { encoding: "geojson" } }))).toThrow(/Reference/);
+    expect(() => validateGeoAnnotations(wrap({ type: "object", format: "geojson", geo: { encoding: "geojson" }, properties: { coordinates: { [key]: "#/$defs/coords" } } }))).toThrow(/Reference/);
   }
-  expect(() => validateGeoAnnotations(wrap({ type: "object", geo: { encoding: "geojson" }, const: { $ref: "ordinary data" } }))).not.toThrow();
+  expect(() => validateGeoAnnotations(wrap({ type: "object", format: "geojson", geo: { encoding: "geojson" }, const: { $ref: "ordinary data" } }))).not.toThrow();
+});
+
+
+it("does not spatially validate untyped JSON and rejects mapping without geo type", async () => {
+  const { structuredFieldDefSchema, structuredSchemaDefSchema, structuredResultEnvelopeSchema, validateStructuredResult } = await import("./structured.js");
+  expect(structuredFieldDefSchema.safeParse({ type: "object", geo: { encoding: "geojson" } }).success).toBe(false);
+  const schema = structuredSchemaDefSchema.parse({ name: "opt-in", fields: { ordinary: { type: "object" }, location: { type: "geo" } } });
+  const malformed = { type: "Polygon", coordinates: [[]] };
+  const result = structuredResultEnvelopeSchema.parse({ schema: { name: "opt-in", version: "v1" }, documentId: "geo-test", createdAt: "2026-11-01T00:00:00Z", fields: { ordinary: { value: malformed, confidence: 1 }, location: { value: malformed, confidence: 1 } } });
+  const validation = validateStructuredResult({ schema, result });
+  expect(validation.fieldIssues.ordinary).toBeUndefined();
+  expect(validation.fieldIssues.location).toContain("invalid-geo");
 });

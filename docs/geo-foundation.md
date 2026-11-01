@@ -7,10 +7,10 @@ Page evidence polygons are page coordinates, never geographic inputs.
 Copyable outputSchema for a single document-level location:
 
 ```json
-{"type":"object","properties":{"site":{"type":"object","properties":{"lat":{"type":"number"},"lon":{"type":"number"}},"geo":{"version":1,"encoding":"lat-lon","latitude":"/lat","longitude":"/lon"}}}}
+{"type":"object","properties":{"site":{"type":"object","format":"geojson","properties":{"lat":{"type":"number"},"lon":{"type":"number"}},"geo":{"version":1,"encoding":"lat-lon","latitude":"/lat","longitude":"/lon"}}}}
 ```
 
-Alternatively annotate an object with
+After explicitly selecting `format: "geojson"`, optionally configure its mapping with
 `{"version":1,"encoding":"geojson","geometryTypes":["Point","MultiPoint","Polygon","MultiPolygon"]}`.
 Only top-level object fields and direct sibling JSON Pointers are supported.
 Nested mappings, row arrays and references are not supported; explicitly reject
@@ -37,4 +37,23 @@ are weak evidence. Values valid in either axis order are counted ambiguous.
 Unlabeled x/y never gets a mapping. Suggestions never activate indexing and must
 only receive structured values, not evidence boxes or page polygons.
 
-The `geo` keyword is an application annotation, not a standard JSON Schema keyword. `version` defaults to 1; GeoJSON `geometryTypes` defaults to the four supported geometry types. Use `{"geo":{"encoding":"geojson"},"type":"object"}` on a top-level field for the compact form. A property named `geo` and literal `const`/`default`/`enum` values remain ordinary data.
+The `geo` keyword is an application annotation, not a standard JSON Schema keyword. `version` defaults to 1; GeoJSON `geometryTypes` defaults to the four supported geometry types. Use `{"type":"object","format":"geojson"}` on a top-level field for the compact form. A property named `geo` and literal `const`/`default`/`enum` values remain ordinary data.
+
+
+## Explicit column-type opt-in and cost
+
+Spatial fields are opt-in: a DocSlurp structured field must have `type: "geo"`.
+In workspace JSON Schema, select this type with `type: "object", format: "geojson"`.
+`geojson` is a documented application format, not a standard JSON Schema format.
+A `geo` mapping without that format is rejected. Ordinary objects, GeoJSON-looking
+values, numeric columns and detector suggestions do not select the geo type.
+Only geo-typed values enter deterministic geometry validation. Detection runs only
+when explicitly requested and returns advice; it does not mutate the schema.
+
+The forthcoming projection/index and backfill paths must apply the same gate:
+no spatial rows, spatial indexes for a field, topology work or geo maintenance for
+non-geo columns. Queries against a non-geo field must fail explicitly. Geo opt-in
+adds normalized geometry/index storage and validation/write/query time; no fixed
+cost estimate is claimed. Disabling the type must invalidate existing projection
+readiness and remove derived data through its lifecycle. These storage/query gates
+are integration requirements, not functionality implemented by this foundation.
