@@ -410,3 +410,60 @@ test('index flags cannot hide staged prompts behind comment candidates', (t) => 
     assert.ok(rules(report).includes('unverified-index-flags'));
   }
 });
+
+test('operator adjudication binds the entire scan and never waives findings', (t) => {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'span', expected: '37 millimeters' }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  const source = '// clearance 37 millimeters\nexport const size = 37;';
+  writeFileSync(join(f.repo, 'worker.ts'), source);
+  const reviewContext = 'synthetic-review-001';
+  const initial = judgeIntegrity({ repo: f.repo, dataset: f.dataset, reviewContext });
+  assert.equal(initial.status, 'needs-review');
+  const record = { schema: 'docslurp-integrity-adjudication@v1', datasetHash: initial.datasetHash,
+    productionHash: initial.productionHash, candidateSetHash: initial.candidateSetHash, reviewContext,
+    reviewer: { identity: 'synthetic-independent-reviewer', independent: true, provenance: 'Separate synthetic test review session' },
+    decisions: initial.candidates.map((candidate) => ({ candidate, decision: 'accept', reason: 'Synthetic generic clearance comment', reviewedAt: '2026-01-01T00:00:00.000Z' })) };
+  const adjudication = join(f.dataset, 'review.json');
+  const run = (value = record, context = reviewContext) => {
+    writeFileSync(adjudication, JSON.stringify(value));
+    return judgeIntegrity({ repo: f.repo, dataset: f.dataset, adjudication, reviewContext: context });
+  };
+  assert.equal(run().passed, true);
+  assert.ok(!JSON.stringify(run()).includes('Synthetic generic clearance'));
+  f.git('add', 'worker.ts');
+  assert.equal(run().passed, false, 'staging invalidates the exact index binding');
+  f.git('restore', '--staged', 'worker.ts');
+  assert.equal(run().passed, true, 'restoring the exact reviewed index restores context');
+  for (const mutate of [
+    (r) => { r.datasetHash = '0'.repeat(64); }, (r) => { r.productionHash = '0'.repeat(64); },
+    (r) => { r.candidateSetHash = '0'.repeat(64); }, (r) => { r.decisions = []; },
+    (r) => { r.decisions.push(r.decisions[0]); }, (r) => { r.extra = true; },
+    (r) => { r.reviewer.independent = false; }, (r) => { delete r.reviewer.provenance; },
+    (r) => { r.decisions[0].decision = 'reject'; }, (r) => { r.decisions[0].decision = 'maybe'; },
+    (r) => { r.decisions[0].reason = ''; }, (r) => { r.decisions[0].reviewedAt = 'tomorrow'; },
+    ...['file', 'line', 'origin', 'evidenceHash', 'candidateId', 'rule'].map((key) => (r) => { r.decisions[0].candidate[key] = 'changed'; }),
+  ]) {
+    const changed = structuredClone(record); mutate(changed); assert.equal(run(changed).passed, false);
+  }
+  assert.equal(run(record, 'another-review').passed, false, 'cross-context replay');
+  assert.equal(run(record, '').passed, false);
+  writeFileSync(join(f.repo, 'worker.ts'), source + '\nexport const other = 1;');
+  assert.equal(run().passed, false, 'changed production');
+  writeFileSync(join(f.repo, 'worker.ts'), source + '\n// clearance 37 millimeters');
+  assert.equal(run().passed, false, 'changed candidate set');
+  writeFileSync(join(f.repo, 'worker.ts'), source);
+  f.manifest.cases[0].provenance.description = 'Changed synthetic dataset'; f.save();
+  assert.equal(run().passed, false, 'changed dataset');
+  writeFileSync(join(f.repo, 'worker.ts'), source + '\nconst leaked = "held-out-fixture-001";');
+  const blocked = judgeIntegrity({ repo: f.repo, dataset: f.dataset, reviewContext });
+  const updated = { ...record, datasetHash: blocked.datasetHash, productionHash: blocked.productionHash,
+    candidateSetHash: blocked.candidateSetHash, decisions: blocked.candidates.map((candidate) => ({ ...record.decisions[0], candidate })) };
+  assert.equal(run(updated).passed, false, 'fresh valid candidate acceptance cannot waive finding');
+  assert.ok(rules(run(updated)).includes('fixture-identifier'));
+  writeFileSync(adjudication, '{');
+  assert.equal(judgeIntegrity({ repo: f.repo, dataset: f.dataset, adjudication, reviewContext }).passed, false);
+  assert.throws(() => main(['--dataset', f.dataset, '--dataset', f.dataset]));
+  assert.throws(() => main(['--dataset', f.dataset, '--unknown', 'value']));
+});

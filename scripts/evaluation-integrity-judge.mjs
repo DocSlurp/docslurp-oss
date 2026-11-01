@@ -74,7 +74,56 @@ function commentRanges(file, text) {
     !literals.some((literal) => pos < literal.end && end > literal.pos));
 }
 
-export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
+// Attestation is trusted operator input, not authenticated reviewer evidence.
+const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+const candidateBinding = (candidate) => ({ rule: candidate.rule, file: candidate.file,
+  origin: candidate.origin, line: candidate.line, evidenceHash: candidate.evidenceHash });
+const candidateId = (candidate) => hash(JSON.stringify(candidateBinding(candidate)));
+function applyAdjudication(result, path, reviewContext) {
+  result.candidates = result.candidates.map((candidate, index) => ({ ...candidate, candidateId: hash(`${index}:${candidateId(candidate)}`) }));
+  result.candidateSetHash = hash(JSON.stringify(result.candidates));
+  result.reviewContext = reviewContext ?? null;
+  if (reviewContext !== undefined && (!nonempty(reviewContext) || reviewContext.length > 200)) {
+    result.findings.push({ rule: 'invalid-review-context' }); return;
+  }
+  if (path === undefined) return;
+  try {
+    if (!nonempty(path) || !nonempty(reviewContext)) throw new Error();
+    const bytes = readFileSync(path);
+    const record = JSON.parse(bytes);
+    if (!exactKeys(record, ['schema', 'datasetHash', 'productionHash', 'candidateSetHash', 'reviewContext', 'reviewer', 'decisions'])
+      || record.schema !== 'docslurp-integrity-adjudication@v1'
+      || record.datasetHash !== result.datasetHash || record.productionHash !== result.productionHash
+      || record.candidateSetHash !== result.candidateSetHash || record.reviewContext !== reviewContext
+      || !result.datasetHash || !result.productionHash) throw new Error();
+    const reviewer = record.reviewer;
+    if (!exactKeys(reviewer, ['identity', 'independent', 'provenance']) || reviewer.independent !== true
+      || !nonempty(reviewer.identity) || !nonempty(reviewer.provenance)) throw new Error();
+    if (!Array.isArray(record.decisions) || record.decisions.length !== result.candidates.length || !record.decisions.length) throw new Error();
+    const remaining = new Map(result.candidates.map((c) => [c.candidateId, c]));
+    for (const decision of record.decisions) {
+      if (!exactKeys(decision, ['candidate', 'decision', 'reason', 'reviewedAt'])
+        || !['accept', 'reject'].includes(decision.decision) || !nonempty(decision.reason)
+        || typeof decision.reviewedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(decision.reviewedAt)
+        || !Number.isFinite(Date.parse(decision.reviewedAt)) || new Date(decision.reviewedAt).toISOString() !== decision.reviewedAt
+        || Date.parse(decision.reviewedAt) > Date.now()) throw new Error();
+      const candidate = remaining.get(decision.candidate?.candidateId);
+      if (!candidate || !exactKeys(decision.candidate, Object.keys(candidate))
+        || Object.keys(candidate).some((key) => candidate[key] !== decision.candidate[key])) throw new Error();
+      remaining.delete(candidate.candidateId);
+    }
+    // Never echo free-text attestations: they could contain expected answers.
+    result.adjudication = { recordHash: hash(bytes), accepted: record.decisions.every((d) => d.decision === 'accept') };
+    if (!result.adjudication.accepted) result.findings.push({ rule: 'adjudication-rejected' });
+  } catch {
+    result.findings.push({ rule: 'invalid-adjudication' });
+  }
+}
+
+export function judgeIntegrity(options) {
+  if (!options || Object.keys(options).some((key) => !['dataset', 'repo', 'base', 'adjudication', 'reviewContext'].includes(key))) throw new Error('invalid-judge-options');
+  let { dataset, repo = process.cwd(), base = 'HEAD', adjudication, reviewContext } = options;
   const findings = [];
   const candidates = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
@@ -162,7 +211,9 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       result.repositories.push(coverage);
       productionDigest.update(JSON.stringify({ path: coverage.path, head, base: revision })).update('\0');
       const entries = new Map();
-      for (const entry of run('ls-files', '--stage', '-z').split('\0').filter(Boolean)) {
+      const indexInventory = run('ls-files', '--stage', '-z');
+      productionDigest.update('index\0').update(indexInventory).update('\0');
+      for (const entry of indexInventory.split('\0').filter(Boolean)) {
         const tab = entry.indexOf('\t');
         const [mode, oid, stage] = entry.slice(0, tab).split(' ');
         if (stage !== '0') throw new Error('unmerged-repository-index');
@@ -311,7 +362,8 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     const known = /^[a-z][a-z-]+$/.test(error.message ?? '') ? error.message : 'unreadable-or-invalid-input';
     add(known);
   }
-  result.status = findings.length ? 'blocked' : candidates.length ? 'needs-review' : 'passed';
+  applyAdjudication(result, adjudication, reviewContext);
+  result.status = findings.length ? 'blocked' : candidates.length && !result.adjudication?.accepted ? 'needs-review' : 'passed';
   result.passed = result.status === 'passed';
   return result;
 }
@@ -319,11 +371,12 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
 export function main(argv = process.argv.slice(2)) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
-    if (!['--dataset', '--repo', '--base', '--output'].includes(argv[i]) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>]');
+    if (!['--dataset', '--repo', '--base', '--output', '--adjudication', '--review-context'].includes(argv[i]) || Object.hasOwn(options, argv[i].slice(2)) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>]');
     options[argv[i].slice(2)] = argv[i + 1];
   }
   if (!options.dataset) throw new Error('--dataset is required');
-  const report = judgeIntegrity(options);
+  const { 'review-context': reviewContext, output, ...judgeOptions } = options;
+  const report = judgeIntegrity({ ...judgeOptions, reviewContext });
   const json = `${JSON.stringify(report, null, 2)}\n`;
   if (options.output) { mkdirSync(dirname(resolve(options.output)), { recursive: true }); writeFileSync(options.output, json); }
   else process.stdout.write(json);
