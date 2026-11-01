@@ -1,3 +1,4 @@
+import { geoProviderSchema, validateGeoAnnotations } from "@docslurp/shared";
 import { resolvePipelineTextModel } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -108,6 +109,7 @@ export function findStructuredField(
 }
 
 function fieldTypeFromJsonSchema(property: Record<string, unknown>): StructuredFieldDef["type"] {
+  if (property.format === "geojson") return "geo";
   if (property.format === "date" || property.format === "date-time") return "date";
   const type = Array.isArray(property.type)
     ? property.type.find((entry) => entry !== "null")
@@ -121,6 +123,7 @@ function fieldTypeFromJsonSchema(property: Record<string, unknown>): StructuredF
 export function structuredSchemaFromJsonSchema(
   schema: Record<string, unknown>,
 ): StructuredSchemaDef {
+  validateGeoAnnotations(schema);
   const properties = isRecord(schema.properties) ? schema.properties : {};
   const required = new Set(
     Array.isArray(schema.required)
@@ -138,6 +141,7 @@ export function structuredSchemaFromJsonSchema(
         : undefined;
       return [key, {
         type: fieldTypeFromJsonSchema(property),
+        "geo": property["geo"],
         description: typeof property.description === "string" ? property.description : undefined,
         validator: {
           required: required.has(key),
@@ -634,10 +638,11 @@ export function buildStructuredFieldsEnvelopeSchema(outputSchema: Record<string,
     ? outputSchema.properties as Record<string, unknown>
     : {};
   const names = Object.keys(properties);
+  // Provider schema is disposable; never mutate authoritative annotation metadata.
   const field = (valueSchema: unknown) => ({
     type: "object",
     properties: {
-      value: valueSchema && typeof valueSchema === "object" ? { anyOf: [valueSchema, { type: "null" }] } : {},
+      value: valueSchema && typeof valueSchema === "object" ? { anyOf: [geoProviderSchema(valueSchema), { type: "null" }] } : {},
       confidence: { type: "number", minimum: 0, maximum: 1 },
       evidence: { type: "array", items: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     },

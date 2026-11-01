@@ -197,3 +197,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and Doppler embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
 
 - Added optional, bounded OpenRouter Nitro chat variants for GLM, DeepSeek and Luna, preserving base answer tiers and actual provider receipt accounting. Draft evaluation; missing receipts require manual reconciliation (see docs/openrouter-nitro.md).
+- 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.
