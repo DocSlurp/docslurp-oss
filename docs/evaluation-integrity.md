@@ -92,7 +92,8 @@ Deterministic matches are not mind-reading. In particular, a tool failure is not
 Numeric prose consisting of a decimal or integer followed by a lowercase word
 is retained as a hashed `comment-quantity-overlap` candidate when the complete
 JS/TS file parses successfully and the occurrence lies entirely in a parser-proven
-comment. These candidates alone do not fail the gate. There is no unit or phrase
+comment. These candidates block promotion: the report returns `status: "needs-review"`,
+`passed: false`, and CLI exit code 1, without declaring contamination. There is no unit or phrase
 allowlist. Any occurrence outside comments remains blocking, including strings,
 prompts and answer-conditioned branches. Unsupported syntax and parse errors stay
 blocking. Fixture identifiers, source hashes, proper names and label combinations
@@ -103,3 +104,13 @@ Candidates are review evidence, not proof of independent provenance. A copied
 quantity in a comment may still be improper; independent review must assess that
 possibility before promotion. This screen does not perform runtime dataflow analysis
 or detect code that reads its own comments as prompt text.
+
+Comment ranges overlapping AST literal or JSX-text ranges are rejected. All
+unresolved candidates require independent adjudication, including apparently
+generic comments and code that consumes its own source. No introspection heuristic
+or adjudication override is implemented. Adjudication remains outstanding; a
+manual assertion cannot turn this report into a passing gate. Any future interface
+must bind the entire productionHash, datasetHash and exact candidate set to an
+independent reviewer identity and reason, rejecting stale or incomplete records.
+Reports with findings use `status: "blocked"`; only reports with neither findings
+nor candidates use `status: "passed"`. Consumers must require `passed === true`.

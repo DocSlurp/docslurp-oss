@@ -277,7 +277,9 @@ test('quantity prose in proven comments is a candidate, executable dependence st
   for (const source of ['// Allow 37 millimeters of clearance.\nexport const size = 37;', 'export const size = 37; /* Allow 37 millimeters. */']) {
     writeFileSync(join(f.repo, 'worker.ts'), source);
     const report = f.run();
-    assert.equal(report.passed, true);
+    assert.equal(report.passed, false);
+    assert.equal(report.status, 'needs-review');
+    assert.equal(report.findings.length, 0);
     assert.equal(report.candidates[0].rule, 'comment-quantity-overlap');
     assert.ok(!JSON.stringify(report).includes(expected));
   }
@@ -306,7 +308,7 @@ test('comment classification varies quantities and fails closed outside supporte
     writeFileSync(join(f.dataset, 'labels.json'), labels);
     f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
     writeFileSync(join(f.repo, 'worker.ts'), `/* Generic geometry: ${expected}. */`);
-    assert.equal(f.run().passed, true);
+    assert.equal(f.run().status, 'needs-review');
     writeFileSync(join(f.repo, 'unknown.py'), `# ${expected}`);
     assert.ok(rules(f.run()).includes('labeled-answer'));
     rmSync(join(f.repo, 'unknown.py'));
@@ -316,5 +318,41 @@ test('comment classification varies quantities and fails closed outside supporte
     assert.ok(rules(f.run()).includes('fixture-identifier'));
     writeFileSync(join(f.repo, 'worker.ts'), `const prompt = \`/* ${expected} */\`;`);
     assert.ok(rules(f.run()).includes('labeled-answer'));
+  }
+});
+
+test('literal ranges cannot masquerade as comments in staged or untracked TSX', (t) => {
+  for (const staged of [false, true]) for (const expected of ['37 millimeters', '62 hectares']) {
+    const f = fixture(t);
+    const labels = JSON.stringify({ labels: [{ name: 'synthetic_extent', expected }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'view.tsx'), `export const x = <div>// ${expected}</div>;`);
+    if (staged) f.git('add', 'view.tsx');
+    const report = f.run();
+    assert.equal(report.passed, false);
+    assert.ok(rules(report).includes('labeled-answer'));
+    assert.equal(report.candidates.length, 0);
+  }
+});
+
+test('comments block promotion including toString and self-source consumption', (t) => {
+  for (const source of [
+    "function answer(){ //62 hectares\n return 0;} export const prompt=answer.toString().split('//')[1].split('\\n')[0];",
+    "import {readFileSync} from 'node:fs'; //62 hectares\nexport const prompt = readFileSync(import.meta.filename, 'utf8');",
+    "//62 hectares\nexport const size = 62;",
+  ]) {
+    const f = fixture(t);
+    const labels = JSON.stringify({ labels: [{ name: 'synthetic_extent', expected: '62 hectares' }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'worker.ts'), source);
+    const report = f.run();
+    assert.equal(report.passed, false);
+    assert.equal(report.status, 'needs-review');
+    assert.equal(report.findings.length, 0);
+    assert.ok(report.candidates.length);
+    const output = join(f.dataset, 'report.json');
+    assert.equal(main(['--dataset', f.dataset, '--repo', f.repo, '--output', output]), 1);
   }
 });

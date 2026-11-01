@@ -58,13 +58,20 @@ function commentRanges(file, text) {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   if (source.parseDiagnostics.length) return [];
   const ranges = [];
+  const literals = [];
   const visit = (node) => {
+    if (ts.isLiteralExpression(node) || ts.isTemplateHead(node)
+      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node) || ts.isJsxText(node)) {
+      literals.push({ pos: node.getStart(source), end: node.end });
+    }
+    ranges.push(...(ts.getTrailingCommentRanges(text, node.pos) ?? []));
     ranges.push(...(ts.getLeadingCommentRanges(text, node.pos) ?? []));
     ranges.push(...(ts.getTrailingCommentRanges(text, node.end) ?? []));
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return ranges;
+  return ranges.filter(({ pos, end }) =>
+    !literals.some((literal) => pos < literal.end && end > literal.pos));
 }
 
 export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
@@ -294,7 +301,8 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     const known = /^[a-z][a-z-]+$/.test(error.message ?? '') ? error.message : 'unreadable-or-invalid-input';
     add(known);
   }
-  result.passed = findings.length === 0;
+  result.status = findings.length ? 'blocked' : candidates.length ? 'needs-review' : 'passed';
+  result.passed = result.status === 'passed';
   return result;
 }
 
