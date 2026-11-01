@@ -25,3 +25,9 @@
 - MCP Apps uploader: explicit `createWorkspace` flag on `upload`/`completeUpload`; today a workspace name that matches none creates a workspace, which a prompt-injected model can trigger.
 
 - MCP Apps uploader: have the widget refuse presigned `putUrl` origins outside the server's `connectDomains` (and plain http outside localhost); today the CSP is the only guard.
+
+## Table coverage gaps (2026-11-01)
+
+- [ ] Validate full OCR/vision → canonical storage → retrieval → renderer coverage for scans and rotated pages; native-only comparison currently fails.
+- [ ] Evaluate general borderless-table and orientation recovery on independent held-out documents, preserving ambiguous source text.
+- [ ] Expand the table parity corpus to degraded scans, diverse financial layouts and cross-page continuation before broad parity claims. See docs/evals/table-preservation-2026-11-01.md.

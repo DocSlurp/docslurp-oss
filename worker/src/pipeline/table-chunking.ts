@@ -1,6 +1,6 @@
 import { parseFragment, type DefaultTreeAdapterTypes as Tree } from "parse5";
 
-type Record = { label: string; value: string };
+type Record = { label: string; value: string; header?: boolean };
 const STRUCTURE = new Set(["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption"]);
 const INLINE = new Set(["br", "b", "strong", "em", "i", "span", "code", "sub", "sup"]);
 
@@ -10,16 +10,11 @@ function encode(value: string): string {
 }
 
 /** Keep every source character for unsupported HTML, explicitly without inferred geometry. */
-function* recordsAsChunks(source: string, maxChars: number, tableIndex: number): Generator<string> {
+function* recordsAsChunks(source: string, maxChars: number, tableIndex: number, compactRecords = false): Generator<string> {
   if (maxChars < 128) throw new RangeError("HTML table chunks require maxChars >= 128");
   if (source.length <= maxChars) { yield source; return; }
   const parsed = readCells(source);
   const records = parsed ?? [{ label: "unparsed source", value: source }];
-  // Tiny budgets retain the existing fully labelled format so span and part
-  // identities always retain the baseline continuation capacity.
-  const compactRecords = parsed !== null && maxChars >= 256;
-  const legend = compactRecords ? tableLegend(tableIndex) : "";
-  maxChars -= legend.length + (legend ? 1 : 0);
   function prefix(label: string, part: number) {
     if (!compactRecords) return `[Table ${tableIndex} ${label} part ${part}]\n`;
     const compact = label.replace(/^row (\d+) column (\d+) rowspan (\d+) colspan (\d+)$/, (_, r, c, rs, cs) =>
@@ -64,18 +59,35 @@ function tableLegend(index: number): string {
   return `[Table ${index} v2: r=row c=column; default rowspan,colspan,part=1; JSON]`;
 }
 
-/** Repeat the schema in every independently retrievable chunk, within budget. */
+/** Keep complete rows together and repeat bounded schema/header context. */
 export function* tableChunks(source: string, maxChars: number, tableIndex: number): Generator<string> {
-  let current = "";
-  let legend = "";
-  for (const record of recordsAsChunks(source, maxChars, tableIndex)) {
-    if (!current && (record.startsWith("[r") || record.startsWith("[caption"))) {
-      legend = tableLegend(tableIndex) + "\n";
+  if (!Number.isSafeInteger(maxChars) || maxChars < 128) throw new RangeError("HTML table chunks require maxChars >= 128");
+  if (source.length <= maxChars) { yield source; return; }
+  const cells = readCells(source);
+  const header = cells?.filter(c => c.header).map(c =>
+    `[Table ${tableIndex} context ${c.label}]\n${encode(c.value)}`).join("\n\n") ?? "";
+  const context = header && header.length + 2 <= Math.floor(maxChars / 3) && maxChars - header.length - 2 >= 128 ? header + "\n\n" : "";
+  const compact = cells !== null && maxChars - context.length >= 256;
+  const prefix = (compact ? tableLegend(tableIndex) + "\n" : "") + context;
+  const budget = maxChars - prefix.length;
+  function* groups(): Generator<string> {
+    let row = "", group = "";
+    for (const record of recordsAsChunks(source, budget, tableIndex, compact)) {
+      const identity = record.match(/(?: row |^\[r)(\d+)(?: column | c)/)?.[1] ?? "";
+      if (group && (identity !== row || group.length + 2 + record.length > budget)) {
+        yield group; group = "";
+      }
+      row = identity;
+      group += (group ? "\n\n" : "") + record;
     }
-    if (current && current.length + 2 + record.length > maxChars) { yield current; current = ""; }
-    current += (current ? "\n\n" : legend) + record;
+    if (group) yield group;
   }
-  if (current) yield current;
+  let current = "";
+  for (const item of groups()) {
+    if (current && current.length + 2 + item.length > budget) { yield prefix + current; current = ""; }
+    current += (current ? "\n\n" : "") + item;
+  }
+  if (current) yield prefix + current;
 }
 
 function readCells(source: string): Record[] | null {
@@ -125,7 +137,7 @@ function readCells(source: string): Record[] | null {
         if ((blockedUntil.get(c) ?? 0) >= row) throw new Error("overlapping spans");
         blockedUntil.set(c, row + rowspan - 1);
       }
-      records.push({ label: `row ${row} column ${column} rowspan ${rowspan} colspan ${colspan}`, value });
+      records.push({ label: `row ${row} column ${column} rowspan ${rowspan} colspan ${colspan}`, value, header: tag === "th" });
       column += colspan;
       return;
     }
