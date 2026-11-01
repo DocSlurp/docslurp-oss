@@ -175,6 +175,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
 
+- Compact oversized supported table records with per-chunk schema, bounded JSON fast path, exact reconstruction checks and proxy-token measurements; retain legacy tiny-budget mode. See docs/evals/table-chunk-cost.md.
 - Fix dashboard chat nested-generation timeouts: retrieve evidence and synthesize in one agent, expose an unambiguous batch search contract, and retain direct answers for chat-only keys.
 
 - Add a configurable 15-second first-token deadline to agent chat model calls; retain native provider fallback and account for aborted calls without replaying requests.

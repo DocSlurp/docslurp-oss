@@ -1,14 +1,23 @@
+import { tableChunks } from "../pipeline/table-chunking.js";
 import { describe, expect, it } from "vitest";
 import { chunkTextWithMeta, chunkText } from "../pipeline/chunking.js";
 
 function records(chunks: string[]) {
-  return chunks.flatMap(chunk => chunk.split("\n\n")).map(record => {
+  return chunks.flatMap(chunk => chunk.replace(/^\[Table \d+ v2:[^\n]*\n/, "").split("\n\n")).map(record => {
     const split = record.indexOf("\n");
-    return { context: record.slice(0, split), value: JSON.parse(record.slice(split + 1)) as string };
+    return { context: record.slice(0, split).replace(/^\[r(\d+) c(\d+)(?: rowspan=(\d+))?(?: colspan=(\d+))?(?: part=(\d+))?\]$/, (_, r, c, rs, cs, part) => `[row ${r} column ${c} rowspan ${rs ?? 1} colspan ${cs ?? 1} part ${part ?? 1}]`), value: JSON.parse(record.slice(split + 1)) as string };
   });
 }
 
 describe("HTML table chunks", () => {
+  it("budgets growing continuations with combined spans", () => {
+    const source = '<table><tr><td rowspan="2" colspan="2048">' + "x".repeat(10_000) + '</td></tr><tr></tr></table>';
+    for (const tableIndex of [1, 10, 1000]) {
+      const chunks = [...tableChunks(source, 128, tableIndex)];
+      expect(chunks.every(c => c.length <= 128 && c.startsWith(`[Table ${tableIndex} `))).toBe(true);
+      expect(records(chunks).map(r => r.value).join("")).toBe("x".repeat(10_000));
+    }
+  });
   it("keeps a small table whole amid long prose and suppresses sliced table overlap", () => {
     const table = '<table><tr><td colspan="2">A &amp; B</td></tr></table>';
     const result = [...chunkTextWithMeta("# Parent\n" + "Before. ".repeat(40) + "\n" + table + "\n" + "After. ".repeat(40), 180, { overlapFraction: 0.2 })];
