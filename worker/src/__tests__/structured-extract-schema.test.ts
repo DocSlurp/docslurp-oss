@@ -37,3 +37,13 @@ describe("structuredSchemaFromJsonSchema", () => {
     ]);
   });
 });
+
+it("preserves authoritative geo annotations when building provider schemas", async () => {
+  const { buildStructuredFieldsEnvelopeSchema } = await import("../stages/structured-extract.js");
+  const annotation = { version: 1, encoding: "geojson", geometryTypes: ["Point"] };
+  const source = { type: "object", properties: { site: { type: "object", "x-docslurp-geo": annotation } } };
+  const before = JSON.stringify(source);
+  expect(structuredSchemaFromJsonSchema(source).fields.site["x-docslurp-geo"]).toEqual(annotation);
+  expect(JSON.stringify(buildStructuredFieldsEnvelopeSchema(source))).not.toContain("x-docslurp-geo");
+  expect(JSON.stringify(source)).toBe(before);
+});

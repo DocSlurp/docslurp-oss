@@ -1,3 +1,4 @@
+import { validateGeoAnnotations } from "@docslurp/shared";
 import { resolvePipelineTextModel } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -121,6 +122,7 @@ function fieldTypeFromJsonSchema(property: Record<string, unknown>): StructuredF
 export function structuredSchemaFromJsonSchema(
   schema: Record<string, unknown>,
 ): StructuredSchemaDef {
+  validateGeoAnnotations(schema);
   const properties = isRecord(schema.properties) ? schema.properties : {};
   const required = new Set(
     Array.isArray(schema.required)
@@ -138,6 +140,7 @@ export function structuredSchemaFromJsonSchema(
         : undefined;
       return [key, {
         type: fieldTypeFromJsonSchema(property),
+        "x-docslurp-geo": property["x-docslurp-geo"],
         description: typeof property.description === "string" ? property.description : undefined,
         validator: {
           required: required.has(key),
@@ -634,10 +637,16 @@ export function buildStructuredFieldsEnvelopeSchema(outputSchema: Record<string,
     ? outputSchema.properties as Record<string, unknown>
     : {};
   const names = Object.keys(properties);
+  // Provider schema is disposable; never mutate authoritative annotation metadata.
+  const providerCopy = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(providerCopy);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "x-docslurp-geo").map(([key, child]) => [key, providerCopy(child)]));
+    return value;
+  };
   const field = (valueSchema: unknown) => ({
     type: "object",
     properties: {
-      value: valueSchema && typeof valueSchema === "object" ? { anyOf: [valueSchema, { type: "null" }] } : {},
+      value: valueSchema && typeof valueSchema === "object" ? { anyOf: [providerCopy(valueSchema), { type: "null" }] } : {},
       confidence: { type: "number", minimum: 0, maximum: 1 },
       evidence: { type: "array", items: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     },
