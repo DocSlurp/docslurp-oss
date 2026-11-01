@@ -323,6 +323,27 @@ describe("Search Session execution helpers", () => {
     );
   });
 
+  it("lets MMR replace a near-duplicate with a different passage", async () => {
+    const failover = "The backup region takes traffic after fifteen minutes of checkout errors.";
+    const chunks = searchResultsToChunks([
+      { ...result, text: failover, score: 1 },
+      { ...result, text: `Copy: ${failover}`, score: 0.95, citation: { ...result.citation, chunkIndex: 3 } },
+      { ...result, text: "Vendor credits accrue per hour of downtime.", score: 0.9, citation: { ...result.citation, chunkIndex: 4 } },
+    ]);
+    const run = async (useMmr: boolean) => {
+      const session = createSearchSessionJournal({});
+      const processed = await applySearchPostRetrievalProcessing({
+        query: "when does the backup region take traffic", chunks, limit: 2,
+        options: { useMmr, resultOrder: "relevance" }, privacyMode: "standard", session,
+      });
+      return { ids: processed.map((chunk) => chunk.id), diagnostics: session.diagnostics() };
+    };
+    expect((await run(false)).ids).toEqual([chunks[0]!.id, chunks[1]!.id]);
+    const diversified = await run(true);
+    expect(diversified.ids).toEqual([chunks[0]!.id, chunks[2]!.id]);
+    expect(diversified.diagnostics.mmr).toMatchObject({ similarity: "lexical", lambda: 0.5, candidates: 3, selected: 2, diversified: 1 });
+  });
+
   it("keeps an explicit candidate window fixed when rerank is toggled", async () => {
     const chunks = searchResultsToChunks(Array.from({ length: 80 }, (_, i) => ({
       ...result, text: i === 49 ? "cobalt calibration" : "routine maintenance",
