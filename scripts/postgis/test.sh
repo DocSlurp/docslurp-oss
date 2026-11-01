@@ -19,3 +19,10 @@ for attempt in $(seq 1 60); do
 done
 [[ "$ready" == true ]] || { docker logs "$name"; exit 1; }
 docker exec -i "$name" psql -X -U postgres -v ON_ERROR_STOP=1 < "$root/test.sql"
+
+{
+  cat "$root/projection-test.sql"
+  cat "$root/../../server/db/migrations/0109_projection_revision.sql"
+  cat "$root/../../server/db/migrations/postgis/0001_projection.sql"
+  cat "$root/projection-assert.sql"
+} | docker exec -i "$name" psql -X -U postgres -v ON_ERROR_STOP=1
