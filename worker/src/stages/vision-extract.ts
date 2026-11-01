@@ -1,3 +1,4 @@
+import { imageOrientationEnabled, normalizeImageOrientation, withOrientationAdmission, reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { rm } from "node:fs/promises";
 import {
   adaptiveRoutingDecisionSurfaceSchema,
@@ -89,6 +90,7 @@ export interface VisionPageOutput {
   finishReason?: string | null;
   /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
   servedModel?: string;
+  orientation?: import("../sandbox/providers/modal/image-orientation.js").OrientationResult;
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
 }
@@ -493,6 +495,7 @@ export class VisionExtractStage implements Stage {
                 costCents: page.costCents,
                 ...(page.servedModel ? { servedModel: page.servedModel } : {}),
                 ...(page.modelSwap ? { modelSwap: page.modelSwap } : {}),
+                ...(page.orientation ? { orientation: page.orientation } : {}),
                 text: page.text,
               })),
             });
@@ -512,6 +515,7 @@ export class VisionExtractStage implements Stage {
                   model: page.model,
                   fallbackUsed: page.fallbackUsed,
                   ...(page.modelSwap ? { modelSwap: page.modelSwap } : {}),
+                ...(page.orientation ? { orientation: page.orientation } : {}),
                 },
               });
             }
@@ -1226,9 +1230,21 @@ export class VisionExtractStage implements Stage {
     // Every request of every vision call of the run (legacy page, routed region, refusal fallback,
     // cascade leg; first try, inline retries, streaming fallback, alternate route) is admitted by the
     // run's attempt guard through this gate before it is sent.
-    return await withVisionCall(state, { ...pageRef, purpose }, (gate) => this.runVisionCall(
-      state, document, vision, { ...image, imagePath, outputPath }, page, gate, signal, usageSink,
-    ));
+    return await withVisionCall(state, { ...pageRef, purpose }, async (gate) => {
+      const normalized = imageOrientationEnabled() ? await withOrientationAdmission(gate, async () => {
+        if (isCostCapExceeded(state)) throw new Error("Image orientation refused: run cost cap exceeded");
+        reserveOrientationAttempt(state);
+        return await normalizeImageOrientation(imagePath, event => {
+        state.usageLedger.enqueue({ ...event, metadata: { ...event.metadata, documentId: document.id, stage: "image-orientation", pageNumber: image.pageNumber } });
+      }, signal);
+      }) : null;
+      try {
+        const result = await this.runVisionCall(state, document, vision,
+          { ...image, imagePath: normalized?.path ?? imagePath, outputPath },
+          { ...page, mimeType: normalized ? "image/png" : page.mimeType }, gate, signal, usageSink);
+        return normalized ? { ...result, orientation: normalized.metadata } : result;
+      } finally { await normalized?.release(); }
+    });
   }
 
   private async runVisionCall(

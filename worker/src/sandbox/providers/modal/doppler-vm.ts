@@ -1,3 +1,4 @@
+import { validOrientationEnvelope } from "./image-orientation.js";
 import { decodeImageBundle, encodeImageBundle } from "./doppler-images.js";
 import { constants, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -15,7 +16,7 @@ class DopplerVmFailure extends Error {}
 
 /** `range` asks the guest for one parallel shard; it must start on the guest's 32-page chunk grid. */
 export type DopplerVmJob = {
-  operation: "doppler-markdown"; input: string; output: string;
+  operation: "doppler-markdown" | "image-orientation"; input: string; output: string;
   /** Request bounded embedded raster assets beside Markdown, in the same VM. */
   embeddedImages?: boolean;
   imageMinWidth?: number;
@@ -164,6 +165,9 @@ export async function executeDopplerVm(
   signal?: AbortSignal,
   loadSdk: () => Promise<ModalSdk> = () => import("modal"),
 ) {
+  if (job.operation !== "doppler-markdown" && job.operation !== "image-orientation") throw new SandboxRunError("Unknown document VM operation");
+  const orientation = job.operation === "image-orientation";
+  if (orientation && (job.range || job.embeddedImages || job.expectedDocumentPages !== undefined)) throw new SandboxRunError("Orientation refuses PDF options");
   if (signal?.aborted) throw new SandboxRunError("Document VM aborted");
   if (!validShardRange(job.range)) throw new SandboxRunError("Document VM invalid shard range");
   if (job.embeddedImages && [job.imageMinWidth ?? 1, job.imageMinHeight ?? 1].some(n => !Number.isSafeInteger(n) || n < 1 || n > 4096)) {
@@ -241,7 +245,7 @@ export async function executeDopplerVm(
       try {
         checkActive();
         const info = await input.stat();
-        if (!info.isFile() || info.size > MAX_PDF_BYTES) throw new DopplerVmFailure("Document VM invalid or oversized input");
+        if (!info.isFile() || info.size > (orientation ? 32 * 1024 * 1024 : MAX_PDF_BYTES)) throw new DopplerVmFailure("Document VM invalid or oversized input");
         const inMemory = info.size <= INPUT_BUFFER_BYTES;
         const buffer = Buffer.alloc(inMemory ? info.size + 1 : 1024 * 1024);
         let snapshotPath: string | undefined;
@@ -313,7 +317,7 @@ export async function executeDopplerVm(
         await control(() => vm!.filesystem.writeBytes(Buffer.from(JSON.stringify({ first, last, final })), "/job/shard.json"));
       }
       const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/job", TMPDIR: "/job", PYTHONNOUSERSITE: "1", CUDA_VISIBLE_DEVICES: "", HF_HUB_OFFLINE: "1" };
-      const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py", ...(job.embeddedImages ? ["--images", "--min-image-width", String(job.imageMinWidth ?? 1), "--min-image-height", String(job.imageMinHeight ?? 1)] : [])];
+      const parserArgs = ["python3", "-I", "/opt/docslurp/doppler-vm.py", ...(orientation ? ["--orientation"] : job.embeddedImages ? ["--images", "--min-image-width", String(job.imageMinWidth ?? 1), "--min-image-height", String(job.imageMinHeight ?? 1)] : [])];
       const child = await control(() => vm!.exec(["/usr/bin/env", "-i", ...Object.entries(env).map(([k,v]) => `${k}=${v}`), ...parserArgs], { timeoutMs: 155_000, mode: "binary" }));
       const [out, err, exit] = await control(() => Promise.allSettled([boundedStream(child.stdout, outputLimit), boundedStream(child.stderr, MAX_LOG_BYTES), child.wait()]));
       // The guest writes its envelope before streaming Markdown, so an old guest that ignored the range is
@@ -354,7 +358,7 @@ export async function executeDopplerVm(
       if (job.expectedDocumentPages !== undefined && diagnostics.conversion?.documentPages !== job.expectedDocumentPages) {
         throw new DopplerVmFailure(PAGE_COUNT_MISMATCH_MESSAGE);
       }
-      if (!validEnvelope(diagnostics, output, job.range)) throw new DopplerVmFailure("Document VM invalid result envelope");
+      if (!(orientation ? validOrientationEnvelope(diagnostics, output) : validEnvelope(diagnostics, output, job.range))) throw new DopplerVmFailure("Document VM invalid result envelope");
       if (cancelled) throw new DopplerVmFailure("Document VM cancelled before output commit");
       stagedOutput = `${job.output}.${randomUUID()}.partial`;
       // Bounded local write is awaited so cancellation cannot race its cleanup.

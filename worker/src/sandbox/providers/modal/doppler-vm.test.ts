@@ -382,3 +382,24 @@ describe("optional embedded images share the Markdown VM", () => {
     expect(h.terminate).toHaveBeenCalledOnce();
   });
 });
+
+describe('orientation operation isolation', () => {
+  it('rejects PDF options before opening a VM', async () => {
+    const j = await job(), h = harness();
+    await expect(executeDopplerVm({...j,operation:'image-orientation',embeddedImages:true},undefined,async()=>h.sdk)).rejects.toThrow('refuses PDF options');
+    expect(h.create).not.toHaveBeenCalled();
+  });
+  it('refuses an old Markdown-only guest for image orientation', async () => {
+    const j = await job(), h = harness();
+    await expect(executeDopplerVm({...j,operation:'image-orientation'},undefined,async()=>h.sdk)).rejects.toThrow('invalid result envelope');
+    expect(h.terminate).toHaveBeenCalledOnce();
+    expect(JSON.stringify(h.exec.mock.calls)).toContain('--orientation');
+    expect(h.create.mock.calls[0]?.[2]).toMatchObject({runtime:'vm',blockNetwork:true,secrets:[],env:{},includeOidcIdentityToken:false});
+  });
+  it('rejects oversized raster input before opening a VM', async () => {
+    const j = await job(), h = harness();
+    const f=await open(j.input,'w');await f.truncate(32*1024*1024+1);await f.close();
+    await expect(executeDopplerVm({...j,operation:'image-orientation'},undefined,async()=>h.sdk)).rejects.toThrow('oversized input');
+    expect(h.create).not.toHaveBeenCalled();
+  });
+});

@@ -1,3 +1,4 @@
+import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { dopplerImageGraph, resolveDopplerImages } from "../extractors/doppler-image-graph.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -35,6 +36,7 @@ import type { Stage } from "../pipeline/pipeline.js";
 import { adaptiveUnstructuredSettingsForStage } from "../pipeline/adaptive-tuning.js";
 import {
   checkDedup,
+  isCostCapExceeded,
   DocumentStageError,
   type DocumentStageResult,
   emitDocumentPageProgress,
@@ -683,6 +685,9 @@ export class ExtractMarkdownStage implements Stage {
                         sourceHash: contentHash,
                         format,
                         targets: extractionConfig.enrich,
+                        canContinue: () => { if (isCostCapExceeded(state)) return false; reserveOrientationAttempt(state); return true; },
+                        recordUsage: event => state.usageLedger.enqueue({ ...event,
+                          metadata: { ...event.metadata, documentId: document.id, stage: "embedded-image-orientation" } }),
                         dopplerImageBundle: imageCandidate ? `${imageCandidate.tempTextPath}.images` : undefined,
                         pageNumbers: allPages,
                         runId: state.run.id,
@@ -2443,6 +2448,8 @@ export class ExtractMarkdownStage implements Stage {
     signal?: AbortSignal;
     graphRunner?: typeof runLocalPdfArtifactGraph;
     dopplerImageBundle?: string;
+    canContinue?: () => boolean;
+    recordUsage?: (event: import("../models.js").UsageEvent) => void;
   }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris?: string[] }> {
     const startedAt = Date.now();
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-artifact-graph-"));
@@ -2453,7 +2460,8 @@ export class ExtractMarkdownStage implements Stage {
       const result = args.dopplerImageBundle
         ? await dopplerImageGraph({ bundlePath: args.dopplerImageBundle, sourcePath: args.sourcePath,
             sourceDocumentId: args.document.id, sourceHash: args.sourceHash, pageCount: args.pageNumbers.length,
-            targets: args.targets, scratchDir, signal: args.signal })
+            targets: args.targets, scratchDir, signal: args.signal,
+            recordUsage: args.recordUsage, canContinue: args.canContinue })
         : await (args.graphRunner ?? runLocalPdfArtifactGraph)({
         sourcePath: args.sourcePath,
         sourceDocumentId: args.document.id,
