@@ -1,6 +1,6 @@
 import { reportPublicError } from "../../lib/public-errors.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../../lib/upgrade-links.js";
-import { publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
+import { PipelineSpeedBoostRequiredError, publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { TransactionSql } from "postgres";
@@ -407,6 +407,7 @@ export function spendBlockedResponse(c: Context, error: SpendBlockedError) {
 
 /** Hono onError: 402 for blocked spend, Hono's defaults otherwise. */
 export function spendAwareErrorHandler(error: Error, c: Context) {
+  if (error instanceof PipelineSpeedBoostRequiredError) return c.json({ error: error.message, code: error.code }, 400);
   if (isSpendBlockedError(error)) return spendBlockedResponse(c, error);
   reportPublicError(error, { requestId: c.get("requestId") ?? "", status: error instanceof HTTPException ? error.status : 500 });
   if (error instanceof HTTPException) return c.json({ error: publicErrorForStatus(error.status) }, error.status);
