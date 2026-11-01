@@ -325,7 +325,7 @@ def main():
                 raise ValueError('PDF chunk text layer exceeds limit')
             with open('/job/chunk.md', 'wb') as chunk, open('/job/converter-report.json', 'wb') as report:
                 params = chunk_settings(settings, pages, last - first + 1)
-                run(['/opt/doppler/bin/doppler-md', '--report', '--params', params, '/job/raw.xhtml'], chunk, report)
+                run(['/opt/doppler/bin/doppler-md', '--html', '--report', '--params', params, '/job/raw.xhtml'], chunk, report)
             with open('/job/converter-report.json', 'rb') as report:
                 diagnostics = json.loads(report.read(16385))
             if type(diagnostics.get('pages')) is not int or diagnostics['pages'] != last - first + 1:

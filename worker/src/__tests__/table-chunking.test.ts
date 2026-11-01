@@ -100,3 +100,25 @@ describe("HTML table chunks", () => {
     expect(() => [...chunkText('<table><tr><td>x</td></tr></table>', 50)]).toThrow(RangeError);
   });
 });
+
+it('keeps fitting rows together and repeats explicitly labelled header context', () => {
+ const source='<table><tr><th>Key</th><th>Value</th></tr>'+Array.from({length:18},(_,i)=>`<tr><td>entry-${i}</td><td>amount-${i}</td></tr>`).join('')+'</table>';
+ const chunks=[...chunkText(source,600)];
+ expect(chunks.length).toBeGreaterThan(1);
+ for (const chunk of chunks) {
+  expect(chunk.length).toBeLessThanOrEqual(600);
+  expect(chunk).toContain('context row 1 column 1');
+  for(let i=0;i<18;i++) if(chunk.includes(`"entry-${i}"`)) expect(chunk).toContain(`"amount-${i}"`);
+ }
+ const sourceRecords=records(chunks).filter(r=>!r.context.includes(' context '));
+ expect(sourceRecords).toHaveLength(38);
+ expect(sourceRecords.filter(r=>r.value==='entry-12')).toHaveLength(1);
+});
+it('keeps all supported budgets valid even when header context nearly fills its allowance',()=>{
+ const source='<table><tr><th>A</th></tr>'+ '<tr><td>data</td></tr>'.repeat(12)+'</table>';
+ for(let budget=128;budget<=256;budget++){
+  const chunks=[...chunkText(source,budget)];expect(chunks.every(c=>c.length<=budget)).toBe(true);
+  const values=records(chunks).filter(r=>!r.context.includes(' context ')).map(r=>r.value);
+  expect(values).toEqual(['A',...Array(12).fill('data')]);
+ }
+});

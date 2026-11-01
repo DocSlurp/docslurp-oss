@@ -1,6 +1,6 @@
 import { parseFragment, type DefaultTreeAdapterTypes as Tree } from "parse5";
 
-type Record = { label: string; value: string };
+type Record = { label: string; value: string; header?: boolean };
 const STRUCTURE = new Set(["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption"]);
 const INLINE = new Set(["br", "b", "strong", "em", "i", "span", "code", "sub", "sup"]);
 
@@ -39,14 +39,34 @@ function* recordsAsChunks(source: string, maxChars: number, tableIndex: number):
   }
 }
 
-/** Pack complete records without slicing their identity or JSON payload. */
+/** Prefer whole rows; repeat bounded header context without inventing cell ownership. */
 export function* tableChunks(source: string, maxChars: number, tableIndex: number): Generator<string> {
-  let current = "";
-  for (const record of recordsAsChunks(source, maxChars, tableIndex)) {
-    if (current && current.length + 2 + record.length > maxChars) { yield current; current = ""; }
-    current += (current ? "\n\n" : "") + record;
+  if (!Number.isSafeInteger(maxChars) || maxChars < 128) throw new RangeError("HTML table chunks require maxChars >= 128");
+  if (source.length <= maxChars) { yield source; return; }
+  const cells = readCells(source);
+  const header = cells?.filter(c => c.header).map(c =>
+    `[Table ${tableIndex} context ${c.label}]\n${encode(c.value)}`).join("\n\n") ?? "";
+  // Huge headers remain ordinary source records. Never consume the value budget with context.
+  const context = header && header.length + 2 <= Math.floor(maxChars / 3) && maxChars - header.length - 2 >= 128 ? header + "\n\n" : "";
+  const budget = maxChars - context.length;
+  function* groups(): Generator<string> {
+  let row = "", group = "";
+  for (const record of recordsAsChunks(source, budget, tableIndex)) {
+    const identity = record.match(/ row (\d+) column /)?.[1] ?? "";
+    if (group && (identity !== row || group.length + 2 + record.length > budget)) {
+      yield group; group = "";
+    }
+    row = identity;
+    group += (group ? "\n\n" : "") + record;
   }
-  if (current) yield current;
+  if (group) yield group;
+  }
+  let current = "";
+  for (const item of groups()) {
+    if (current && current.length + 2 + item.length > budget) { yield context + current; current = ""; }
+    current += (current ? "\n\n" : "") + item;
+  }
+  if (current) yield context + current;
 }
 
 function readCells(source: string): Record[] | null {
@@ -96,7 +116,7 @@ function readCells(source: string): Record[] | null {
         if ((blockedUntil.get(c) ?? 0) >= row) throw new Error("overlapping spans");
         blockedUntil.set(c, row + rowspan - 1);
       }
-      records.push({ label: `row ${row} column ${column} rowspan ${rowspan} colspan ${colspan}`, value });
+      records.push({ label: `row ${row} column ${column} rowspan ${rowspan} colspan ${colspan}`, value, header: tag === "th" });
       column += colspan;
       return;
     }
