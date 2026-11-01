@@ -1,3 +1,4 @@
+import { geoAnnotationSchema, geometryFromAnnotation } from "./geo.js";
 import { z } from "zod";
 import { layoutPolygonPointSchema, layoutRegionSchema, sourceTraceSchema } from "./layout.js";
 
@@ -10,7 +11,8 @@ export const structuredFieldTypeSchema = z.enum([
   "boolean",
   "date",
   "array",
-  "object"
+  "object",
+  "geo"
 ]);
 export type StructuredFieldType = z.infer<typeof structuredFieldTypeSchema>;
 
@@ -47,11 +49,12 @@ export type FieldPolicy = z.infer<typeof fieldPolicySchema>;
 
 export const structuredFieldDefSchema = z.object({
   description: z.string().optional(),
+  "geo": geoAnnotationSchema.optional(),
   type: structuredFieldTypeSchema,
   validator: fieldValidatorSchema.default({ required: false, normalizer: "none", compare: "exact" }),
   policy: fieldPolicySchema.default({ autoAcceptMinConfidence: 0.85, escalateIfMissing: true, rejectIfPatternFail: false }),
   examples: z.array(z.unknown()).optional()
-});
+}).refine(field => field.geo === undefined || field.type === "geo", "Geo mapping requires explicit geo field type");
 export type StructuredFieldDef = z.infer<typeof structuredFieldDefSchema>;
 
 export const structuredSchemaDefSchema = z.object({
@@ -167,6 +170,11 @@ export function validateStructuredResult(args: {
     if ((def.type === "number" || def.type === "integer") && typeof normalized === "number") {
       if (validator.min !== undefined && normalized < validator.min) issues.push("min-violation");
       if (validator.max !== undefined && normalized > validator.max) issues.push("max-violation");
+    }
+
+    if (def.type === "geo" && present) {
+      try { geometryFromAnnotation(normalized, def.geo ?? geoAnnotationSchema.parse({ encoding: "geojson" })); }
+      catch { issues.push("invalid-geo"); }
     }
 
     if (def.type === "date") {

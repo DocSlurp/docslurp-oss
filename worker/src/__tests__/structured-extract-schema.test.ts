@@ -37,3 +37,33 @@ describe("structuredSchemaFromJsonSchema", () => {
     ]);
   });
 });
+
+it("preserves authoritative geo annotations when building provider schemas", async () => {
+  const { buildStructuredFieldsEnvelopeSchema } = await import("../stages/structured-extract.js");
+  const annotation = { version: 1, encoding: "geojson", geometryTypes: ["Point"] };
+  const source = { type: "object", properties: { site: { type: "object", format: "geojson", "geo": annotation } } };
+  const before = JSON.stringify(source);
+  expect(structuredSchemaFromJsonSchema(source).fields.site["geo"]).toEqual(annotation);
+  expect(JSON.stringify(buildStructuredFieldsEnvelopeSchema(source))).not.toContain("geo");
+  expect(JSON.stringify(source)).toBe(before);
+});
+
+
+it("preserves annotation-named property keys and literal constraints in provider output", async () => {
+  const { buildStructuredFieldsEnvelopeSchema } = await import("../stages/structured-extract.js");
+  const valueSchema = { type: "object", properties: { "geo": { type: "string" } }, const: { "geo": "keep", other: 1 } };
+  const result = buildStructuredFieldsEnvelopeSchema({ type: "object", properties: { payload: valueSchema } });
+  expect(result).toMatchObject({ properties: { fields: { properties: { payload: { properties: { value: { anyOf: [valueSchema, { type: "null" }] } } } } } } });
+});
+
+
+it("requires explicit geo column type and leaves GeoJSON-shaped ordinary objects untyped", () => {
+  const schema = structuredSchemaFromJsonSchema({ type: "object", properties: {
+    ordinary: { type: "object", properties: { type: { const: "Point" }, coordinates: { type: "array" } } },
+    location: { type: "object", format: "geojson" }
+  } });
+  expect(schema.fields.ordinary.type).toBe("object");
+  expect(schema.fields.ordinary.geo).toBeUndefined();
+  expect(schema.fields.location.type).toBe("geo");
+  expect(() => structuredSchemaFromJsonSchema({ type: "object", properties: { location: { type: "object", geo: { encoding: "geojson" } } } })).toThrow(/explicit/);
+});

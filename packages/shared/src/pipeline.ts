@@ -1,3 +1,4 @@
+import { validateGeoAnnotations } from "./geo.js";
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
@@ -589,6 +590,7 @@ export const pipelineFeaturesSchema = z
         });
       } else {
         validateOutputSchemaDefinition(value.outputSchema, ctx);
+        try { validateGeoAnnotations(value.outputSchema); } catch (error) { ctx.addIssue({ code: "custom", path: ["outputSchema"], message: String(error) }); }
       }
     }
 

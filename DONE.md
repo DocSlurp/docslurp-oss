@@ -191,3 +191,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Emit span-preserving HTML in the Doppler guest and group compact table records by row with bounded, explicitly labelled header context. Add an independent authored-gold acceptance gate and retain failing scan/rotation/borderless warnings. See [comparison and limits](docs/evals/table-preservation-2026-11-01.md).
 
 - Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and Doppler embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
+
+- 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.
