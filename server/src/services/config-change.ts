@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  assertPipelineSpeedBoost,
   mergePipelineFeatures, type PipelineFeatureOverrides,
   analyzePipelineChange,
+  speedBoostMultiplier,
   compilePipelinePlan,
   deferredProfilesEnabled,
   effectiveIndexingMode,
@@ -161,7 +163,7 @@ export async function estimateWork(args: {
   orgId: string;
   env?: EstimateEnv;
 }): Promise<CostEstimate> {
-  return estimatePipelineWork({
+  const estimate = estimatePipelineWork({
     features: args.features,
     stages: args.stages,
     documents: args.documents,
@@ -169,6 +171,8 @@ export async function estimateWork(args: {
     workerSlots: await orgWorkerSlots(args.orgId),
     env: args.env ?? process.env,
   });
+  const multiplier = speedBoostMultiplier(args.features.speedBoost);
+  return { ...estimate, credits: estimate.credits ? { low: estimate.credits.low * multiplier, high: estimate.credits.high * multiplier } : null };
 }
 
 /**
@@ -270,7 +274,7 @@ export async function planWorkspaceChange(args: {
     const parts: CostEstimate[] = [];
     for (const group of groups.values()) {
       parts.push(await estimateWork({
-        features: nextPipeline, stages: group.stages, documents: group.documents, pages: group.pages, orgId: workspace.orgId, env: args.env,
+        features: { ...nextPipeline, speedBoost: input.speedBoost === true }, stages: group.stages, documents: group.documents, pages: group.pages, orgId: workspace.orgId, env: args.env,
       }));
     }
     estimate = parts.length === 1 ? parts[0]! : sumEstimates(parts);
@@ -316,6 +320,7 @@ export async function createReindexRuns(args: {
   /** Partial groups re-run `stages` over documents seeded from their source run; `full` re-runs everything. */
   reusable: ReusableSplit;
 }): Promise<ReindexRunResult> {
+  assertPipelineSpeedBoost(args.pipeline);
   const { tx, workspace } = args;
   const runIds: string[] = [];
   const batches: Array<{ docs: ReindexTarget[]; pipeline: PipelineFeatures; partial: boolean }> = [];
@@ -664,7 +669,7 @@ async function applyPlannedChange(args: {
       if (block) blockedReason = spendBlockJobReason(block.code);
     }
     const runs = await createReindexRuns({
-      tx, workspace, pipeline: plan.nextPipeline, userId,
+      tx, workspace, pipeline: { ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, userId,
       meta: jobMeta, blockedReason, reusable: split,
     });
     return { runs, cancelled };

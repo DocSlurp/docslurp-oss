@@ -191,12 +191,12 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   if ("response" in deferred) return deferred.response;
   // This route knows whether the answer reached the client, so it owns the
   // chat turn's bill. A nested grounded call joins the agent's turn instead.
-  const turn = beginChatTurn();
+  const turn = beginChatTurn({ speedBoost: parsed.data.speedBoost });
   const signal = c.req.raw.signal;
   let response: Awaited<ReturnType<typeof chatWorkspace>>;
   try {
     response = await turn.run(() => withDeferredContext(deferred.context, () => chatWorkspace({ workspaceId, userId,
-      query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model,
+      query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model, speedBoost: body.speedBoost,
       actor: getRequestActor(c), signal,
       ...(mode === "grounded"
         ? { allowAgentTools: false, allowConfiguration: false }
@@ -250,7 +250,7 @@ async function workspaceChatStreamHandler(c: Context) {
     workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
     sessionId: c.req.query("sessionId"),
     sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
-    model: c.req.query("model") });
+    model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") });
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const { q: query, sessionToken, model } = parsed.data;
 
@@ -275,7 +275,7 @@ async function workspaceChatStreamHandler(c: Context) {
   const deferred = await deferredRequestContext(c, workspaceId, (event) => sink(event));
   if ("response" in deferred) return deferred.response;
 
-  const turn = beginChatTurn();
+  const turn = beginChatTurn({ speedBoost: parsed.data.speedBoost });
   return streamSSE(c, (stream) => turn.run(async () => {
     const abort = new AbortController();
     stream.onAbort(() => abort.abort());
@@ -301,7 +301,7 @@ async function workspaceChatStreamHandler(c: Context) {
         query,
         actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
         sessionId, sessionToken,
-        model
+        model, speedBoost: parsed.data.speedBoost
       }));
       await pendingEvents;
       await stream.writeSSE({

@@ -55,6 +55,17 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(events).toHaveLength(roles.length ? 1 : 0);
     expect(JSON.stringify(events)).not.toMatch(/SECRET_SENTINEL|dslp_test|Authorization/);
   });
+  it.each([undefined, false, true])("keeps API boost off unless explicitly enabled (%s)", async (speedBoost) => {
+    const response = await request(input(speedBoost === undefined ? {} : { docslurp: { speedBoost } }));
+    expect(response.status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ speedBoost: speedBoost === true }));
+  });
+  it("rejects malformed boost and does not let boost bypass the key scope", async () => {
+    expect((await request(input({ docslurp: { speedBoost: "true" } }))).status).toBe(400);
+    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search"] });
+    expect((await request(input({ docslurp: { speedBoost: true } }))).status).toBe(403);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
   it("does not apply chat authentication to unrelated v1 routes", async () => {
     const host = app().get("/v1/unrelated", (c) => c.json({ ok: true }));
     expect((await host.request("/v1/unrelated")).status).toBe(200);

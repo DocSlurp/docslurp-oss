@@ -798,6 +798,7 @@ export type UploadRequest = z.infer<typeof uploadRequestSchema>;
  */
 export const reprocessRunSchema = z
   .object({
+    speedBoost: z.boolean().optional(),
     stages: z.array(pipelineRunStageSchema).min(1).optional(),
     stageFrom: pipelineRunStageSchema.optional(),
   })
@@ -836,6 +837,7 @@ export const createWorkspaceSchema = z.object({
 export type CreateWorkspaceInput = z.input<typeof createWorkspaceSchema>;
 
 export const updateWorkspaceSchema = z.object({
+  speedBoost: z.boolean().optional(),
   name: z.string().trim().min(1).max(120).optional(),
   /** Renaming keeps old slugs resolving to this workspace. */
   slug: z.string().trim().min(3).max(63).optional(),

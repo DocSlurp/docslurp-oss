@@ -4,6 +4,7 @@ import type { TransactionSql } from "postgres";
 
 import {
   UNIT_CHARGE_PROVIDER,
+  applySpeedBoostUnitCharge,
   unitChargeMetadata,
   type BillableUnitMetric,
   buildPricedAiUsageLedgerEvent,
@@ -162,7 +163,7 @@ export async function recordUnitCharge(args: {
   client?: UsageClient;
 }): Promise<UsageEvent> {
   const { charge } = args;
-  const event: UsageEvent = {
+  const event: UsageEvent = applySpeedBoostUnitCharge({
     id: charge.id,
     provider: UNIT_CHARGE_PROVIDER,
     model: "price-card",
@@ -173,7 +174,7 @@ export async function recordUnitCharge(args: {
     inputTokens: 0,
     outputTokens: 0,
     metadata: { ...usageTraceContext(), ...unitChargeMetadata(charge.metadata) },
-  };
+  }, currentChatTurn()?.speedBoost);
   console.log(`[usage] ${charge.metric} amount=${charge.amount} unit=${charge.unit} credits=${event.costCents}`);
   return await insertUsageEvent(args.client ?? sql, args.userId, args.scope, event);
 }

@@ -332,6 +332,32 @@ export function isBillableUnitMetric(metric: string | null | undefined): metric 
 /** Provider recorded on billable unit events. */
 export const UNIT_CHARGE_PROVIDER = "docslurp";
 
+/** The opt-in acceleration price is fixed server policy, never a client multiplier. */
+export function speedBoostMultiplier(speedBoost: boolean | undefined = false): 1 | 4 {
+  if (typeof speedBoost !== "boolean") throw new Error("speedBoost must be a boolean");
+  return speedBoost ? 4 : 1;
+}
+
+/** Apply a trusted request/run snapshot once, without changing provider-dollar receipts. */
+export function applySpeedBoostUnitCharge<T extends {
+  provider?: string; costCents: number; metric?: string | null; metadata?: Record<string, unknown> | null;
+}>(event: T, speedBoost: boolean | undefined = false): T {
+  const multiplier = speedBoostMultiplier(speedBoost);
+  if (event.provider !== UNIT_CHARGE_PROVIDER || !isUnitChargeEvent(event)) return event;
+  const previous = event.metadata?.speedBoostCharge;
+  const applied = previous && typeof previous === "object" ? previous as Record<string, unknown> : null;
+  const base = applied?.version === 1 && typeof applied.baseCredits === "number"
+    && Number.isFinite(applied.baseCredits) && applied.baseCredits >= 0
+    && (applied.multiplier === 1 || applied.multiplier === 4)
+    && event.costCents === applied.baseCredits * applied.multiplier
+      ? applied.baseCredits : event.costCents;
+  if (!Number.isFinite(base) || base < 0) throw new Error("Invalid unit credits");
+  if (multiplier === 1 && !applied) return event;
+  return { ...event, costCents: base * multiplier,
+    metadata: { ...event.metadata, speedBoost: speedBoost === true,
+      speedBoostCharge: { version: 1, baseCredits: base, multiplier } } };
+}
+
 /** Metadata every billable unit event carries. */
 export function unitChargeMetadata(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { ...extra, billable: true, unitCharge: true, priceCard: PRICE_CARD_VERSION };

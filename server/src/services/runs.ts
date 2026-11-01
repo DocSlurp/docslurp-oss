@@ -534,7 +534,7 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string },
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean },
 ): Promise<{ run: WorkspaceRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
@@ -557,6 +557,7 @@ export async function reprocessRun(
   // A reprocess of a partial run starts from that run's full feature set.
   const pipelineConfig: PipelineFeatures = {
     ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
+    speedBoost: options?.speedBoost === true,
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
@@ -578,6 +579,7 @@ export async function reprocessRun(
     workspaceId: original.workspaceId,
     kind: original.kind,
     priority: original.priority ?? 0,
+    speedBoost: options?.speedBoost === true,
     pipeline: pipelineConfig,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
   });

@@ -422,9 +422,31 @@ export function withPlatformPageRouterMode<T extends { pageRouter?: Partial<Page
   return { ...features, pageRouter: { ...(features.pageRouter ?? {}), mode: "shadow" } };
 }
 
+/** Validate configured hosted generation routes before sanitization or run persistence. */
+export function assertPipelineSpeedBoost(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const pipeline = value as Record<string, unknown>;
+  if (pipeline.speedBoost === true) return;
+  const record = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
+  const vision = record(pipeline.vision), text = record(pipeline.textGeneration), router = record(pipeline.pageRouter);
+  const candidates = [vision.model, vision.modelUri, vision.remoteFallbackModelUri, text.model,
+    ...Object.values(record(text.models)), ...(Array.isArray(router.decisionModel) ? router.decisionModel : [router.decisionModel])];
+  if (candidates.some((model) => typeof model === "string" && !model.startsWith("llm://private/")
+    && (!model.startsWith("llm://") || model.startsWith("llm://openrouter/")) && model.trim().endsWith(":nitro"))) {
+    throw new PipelineSpeedBoostRequiredError();
+  }
+}
+
+export class PipelineSpeedBoostRequiredError extends Error {
+  readonly status = 400;
+  readonly code = "speed_boost_required";
+  constructor() { super("Configured Nitro models require explicit speedBoost: true"); this.name = "PipelineSpeedBoostRequiredError"; }
+}
+
 export const pipelineFeaturesSchema = z
   .object({
     // Deferred indexing: `full` indexes eagerly; `map`/`visual` defer parsing until a query needs pages.
+    speedBoost: z.boolean().default(false),
     indexingMode: indexingModeSchema.default("full"),
     materialization: materializationPolicyOverridesSchema.default({}),
     visualPages: z
@@ -535,6 +557,9 @@ export const pipelineFeaturesSchema = z
     }).default({ enabled: true }),
   })
   .superRefine((value, ctx) => {
+    try { assertPipelineSpeedBoost(value); } catch (error) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["speedBoost"], message: error instanceof Error ? error.message : "Nitro requires Speed boost" });
+    }
     if (value.privacyMode !== "standard") {
       if (value.embed && value.embedding.target === "hosted") {
         ctx.addIssue({
@@ -628,6 +653,7 @@ export const pipelineFeaturesSchema = z
 export type PipelineFeatures = z.infer<typeof pipelineFeaturesSchema>;
 
 export const defaultPipelineFeatures: PipelineFeatures = {
+  speedBoost: false,
   indexingMode: "full",
   materialization: {},
   visualPages: { route: "auto", coarseFallback: false },
@@ -1486,6 +1512,7 @@ export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a sto
  * the new config) plus whatever consumes their outputs. `[]` means the field never changes stored data.
  */
 const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStage[]> = {
+  speedBoost: [],
   indexingMode: [],
   materialization: [],
   visualPages: [],

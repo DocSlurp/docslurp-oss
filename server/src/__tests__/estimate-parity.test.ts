@@ -119,3 +119,14 @@ describe("retained version storage", () => {
     expect(billed.monthlyCredits).toBeGreaterThan(0);
   });
 });
+
+it("upload estimates require explicit boost even when the workspace snapshot was boosted", async () => {
+  const args = { files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace: { orgId: "o1", pipeline: { ...defaultPipelineFeatures, speedBoost: true } }, env: BILLED };
+  const omitted = await work.estimateUpload(args);
+  const off = await work.estimateUpload({ ...args, speedBoost: false });
+  const on = await work.estimateUpload({ ...args, speedBoost: true });
+  expect(omitted).toEqual(off);
+  expect(on.estimate.credits!.low).toBe(off.estimate.credits!.low * 4);
+  expect(on.estimate.credits!.high).toBe(off.estimate.credits!.high * 4);
+  expect(on.estimate.seconds).toEqual(off.estimate.seconds);
+});

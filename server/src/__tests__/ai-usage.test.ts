@@ -280,3 +280,30 @@ describe("Usage Event ledger", () => {
     }
   });
 });
+
+
+describe("Speed boost API accounting", () => {
+  beforeEach(() => { sqlMock.mockReset(); sqlMock.mockResolvedValue([]); vi.restoreAllMocks(); });
+  it("uses the immutable outer turn flag, preserves provider cost and cannot leak into another turn", async () => {
+    const { createChatTurnContext, runInChatTurnContext } = await import("../lib/chat-turn-context.js");
+    const { beginChatTurn } = await import("../services/billing/chat-turn-billing.js");
+    sqlMock.mockResolvedValue([]);
+    const boosted = createChatTurnContext({ refundOnFailure: true, speedBoost: true });
+    const normal = createChatTurnContext({ refundOnFailure: true });
+    const write = (orgId: string) => recordUnitCharge({ userId: orgId + "-user", scope: { orgId },
+      charge: { id: orgId + "-answer", metric: "chat-answer", amount: 1, unit: "answer", credits: 2 } });
+    const [a, b] = await Promise.all([runInChatTurnContext(boosted, () => write("boost-org")), runInChatTurnContext(normal, () => write("base-org"))]);
+    expect(a.costCents).toBe(8); expect(b.costCents).toBe(2);
+    const scopes = usageInserts().map(insertedMetadata);
+    expect(scopes).toEqual(expect.arrayContaining([expect.objectContaining({ orgId: "boost-org", chatTurnId: boosted.id }), expect.objectContaining({ orgId: "base-org", chatTurnId: normal.id })]));
+    expect(Reflect.set(boosted, "speedBoost", false)).toBe(false);
+    runInChatTurnContext(normal, () => expect(() => beginChatTurn({ speedBoost: true })).toThrow("Nested chat"));
+    runInChatTurnContext(boosted, () => {
+      expect(() => beginChatTurn({ speedBoost: false })).toThrow("Nested chat");
+      expect(beginChatTurn().owned).toBe(false);
+    });
+    const receipt = await runInChatTurnContext(boosted, () => recordUsageEvent({ userId: "boost-user", scope: { orgId: "boost-org" },
+      usage: { provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "chat", inputTokens: 10, outputTokens: 5, costCents: 0.123 } }));
+    expect(receipt).toMatchObject({ costCents: 0, metadata: { providerCostCents: 0.123 } });
+  });
+});

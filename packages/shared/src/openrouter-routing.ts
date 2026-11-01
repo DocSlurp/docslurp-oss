@@ -1,4 +1,5 @@
 import { nitroBaseModel } from "./workspace-chat-models.js";
+export { nitroBaseModel } from "./workspace-chat-models.js";
 /**
  * OpenRouter host routing: which upstream providers may serve a request, and
  * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`
@@ -30,6 +31,19 @@ const PRICE_ROUTED_QUANTIZATIONS = ["fp8", "fp16", "bf16", "fp32"] as const;
 export interface OpenRouterProviderPolicy {
   /** False when the organization or workspace turned off China-based providers. */
   allowChinaProviders: boolean;
+  /** Explicit per-request or immutable run opt-in; unsupported models remain unchanged. */
+  speedBoost?: boolean;
+}
+
+/** Only reviewed routing variants can be selected by the Speed boost option. */
+export function isSpeedBoostEligible(model: string): boolean {
+  return nitroBaseModel(model) !== undefined || nitroBaseModel(`${model}:nitro`) !== undefined;
+}
+
+/** Unsupported models retain their existing route; admission may require eligibility explicitly. */
+export function speedBoostModel(model: string, enabled: boolean | undefined): string {
+  if (enabled === false && model.endsWith(":nitro")) throw new Error("Explicit Nitro models require speedBoost: true");
+  return enabled === true && !nitroBaseModel(model) && isSpeedBoostEligible(model) ? `${model}:nitro` : model;
 }
 
 /** A restricted request that no allowed provider could serve; it is never sent. */
@@ -167,6 +181,12 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): t
     if (!body) {
       if (restricted) throw new ProviderRegionRefusedError("China-based providers are turned off and this request body cannot carry a provider restriction");
       return baseFetch(input, init);
+    }
+    // Never rewrite embedding, audio or other non-generation model identities.
+    if (["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/responses"].includes(url.pathname)
+      && typeof body.model === "string") {
+      const model = speedBoostModel(body.model, policy?.speedBoost);
+      if (model !== body.model) body = { ...body, model };
     }
     const routed = withOpenRouterProviderPreferences(body, policy);
     return routed === body ? baseFetch(input, init) : baseFetch(input, { ...init, body: JSON.stringify(routed) });

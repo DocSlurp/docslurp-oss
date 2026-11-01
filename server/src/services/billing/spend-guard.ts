@@ -7,14 +7,16 @@ import type { TransactionSql } from "postgres";
 
 import {
   chatCreditOverdraft,
+  speedBoostMultiplier,
   chatCreditReserve,
   isBillingExemptOrg,
   resolveChatCreditReserveConfig,
   type ChatCreditReserveConfig,
 } from "@docslurp/shared";
 
+import { currentChatTurn } from "../../lib/chat-turn-context.js";
 import { sql, type SqlClient } from "../../db.js";
-import { creditLeasesEnabled, grantRunCreditLease } from "./credit-leases.js";
+import { creditLeaseConfig, creditLeasesEnabled, grantRunCreditLease } from "./credit-leases.js";
 import { fleetSupportsNow, taskQueueForOrgKey } from "../worker-fleet.js";
 
 /**
@@ -267,6 +269,8 @@ export interface SpendCheckOptions {
   client?: Client;
   kind?: SpendKind;
   hold?: boolean;
+  /** Validated operation opt-in; nested chat calls inherit the outer turn. */
+  speedBoost?: boolean;
 }
 
 export async function assertCanSpend(
@@ -295,7 +299,12 @@ async function spendDecision(
   options: SpendCheckOptions,
 ): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean; details?: Record<string, unknown> } | null> {
   const kind = options.kind ?? "job";
-  const config = resolveChatCreditReserveConfig();
+  const current = currentChatTurn();
+  speedBoostMultiplier(options.speedBoost);
+  if (current && options.speedBoost !== undefined && current.speedBoost !== options.speedBoost) throw new Error("Nested spend cannot change speedBoost");
+  const multiplier = speedBoostMultiplier(current?.speedBoost ?? options.speedBoost);
+  const baseConfig = resolveChatCreditReserveConfig();
+  const config = { ...baseConfig, holdCredits: baseConfig.holdCredits * multiplier };
   const status = await loadSpendStatus(orgId, workspaceId, { client: options.client });
   const reason = spendBlockReason(status, kind, config)
     ?? (kind === "interactive" && status ? await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config) : null);
@@ -314,8 +323,9 @@ export async function admitRunSpend<T>(
   orgId: string,
   workspaceId: string,
   admit: (client: TransactionSql) => Promise<T>,
-  options: { leaseRunId?: string } = {},
+  options: { leaseRunId?: string; speedBoost?: boolean } = {},
 ): Promise<T> {
+  const multiplier = speedBoostMultiplier(options.speedBoost);
   const guarded = !spendGuardsSkipped();
   // Leases need every worker that may run the job to consume them
   // (services/worker-fleet.ts). Admission is a request path, so it reads the
@@ -331,7 +341,11 @@ export async function admitRunSpend<T>(
         // Leases replace the per-run reservation: `reserved` holds them all.
         runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
       });
-      const reason = spendBlockReason(status);
+      // Existing runs reserve their own immutable multiplier in SQL. Reserve the
+      // new boosted run before insertion; base admissions retain their prior rule.
+      const checked = status && multiplier > 1 ? { ...status, reserved: status.reserved
+        + (leases ? creditLeaseConfig().minCredits : runAdmissionReserveCredits()) * multiplier } : status;
+      const reason = spendBlockReason(checked);
       if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { spendKind: "job",
         availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
         chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
@@ -368,15 +382,17 @@ export async function admissionBlock(
   tx: TransactionSql,
   orgId: string,
   workspaceId: string,
+  options: { speedBoost?: boolean } = {},
 ): Promise<{ code: SpendBlockedCode; message: string } | null> {
   if (spendGuardsSkipped()) return null;
   await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
-  return spendBlockReason(
-    await loadSpendStatus(orgId, workspaceId, {
-      client: tx,
-      runReserveCredits: creditLeasesEnabled() ? 0 : runAdmissionReserveCredits(),
-    }),
-  );
+  const multiplier = speedBoostMultiplier(options.speedBoost);
+  const leases = creditLeasesEnabled();
+  const status = await loadSpendStatus(orgId, workspaceId, {
+    client: tx, runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
+  });
+  return spendBlockReason(status && multiplier > 1 ? { ...status, reserved: status.reserved
+    + (leases ? creditLeaseConfig().minCredits : runAdmissionReserveCredits()) * multiplier } : status);
 }
 
 /** JSON 402 body for a blocked spend, with billing links on hosted deployments. */

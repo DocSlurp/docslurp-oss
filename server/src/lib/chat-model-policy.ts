@@ -1,3 +1,4 @@
+import { isSpeedBoostEligible, speedBoostModel } from "@docslurp/shared";
 import {
   CHAT_AGENT_BASE_STEPS,
   CHAT_AGENT_LIMIT_DEFAULTS,
@@ -146,4 +147,10 @@ export async function chatModelRefused(actor: RequestActor | undefined, model: s
     if (error instanceof ChatModelNotAllowedError) return true;
     throw error;
   }
+}
+
+/** A Nitro model cannot bypass explicit credit opt-in. Unsupported routes fail before spending. */
+export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false): string {
+  if ((model.endsWith(":nitro") && !enabled) || (enabled && !isSpeedBoostEligible(model))) throw new ChatModelNotAllowedError();
+  return speedBoostModel(model, enabled);
 }

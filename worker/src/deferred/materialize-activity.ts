@@ -121,7 +121,7 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
     heartbeat?.();
     try {
       // Provider calls carry the run's org for fair share and its China-provider policy (org AND workspace).
-      const own = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders }, () => materializePageRange(
+      const own = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => materializePageRange(
         { ...deps.materializer, sql, store, usage: state.usageLedger },
         { ...input, reason, pages, document, pipeline: run.pipeline, run: state.run },
       ));

@@ -143,7 +143,9 @@ export type UpdateWorkspaceInput = JsonObject & {
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
-export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
+export type UploadEstimateInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean; files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -339,6 +341,8 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   /** Canonical ID for a single-file or streamed upload. Use UploadFileInput.canonicalId for several files. */
@@ -367,6 +371,8 @@ export type UploadOptions = RequestOptions & {
 };
 
 export type UploadInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   files: Array<Blob | File | UploadFileInput>;
@@ -435,6 +441,8 @@ export type ExtractRecord = {
 export type ExtractResponse = UploadResponse & { extract: ExtractRecord };
 
 export type UploadUrlsInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   idempotencyKey?: string;
@@ -521,6 +529,8 @@ export function formatSearchContext(response: SearchResponse): string {
 }
 
 export type ChatInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   q: string;
   sessionId?: string;
   /** Browser (publishable) keys: the `sessionToken` from the previous answer, required to continue `sessionId`. */
@@ -604,10 +614,12 @@ export type DeletedDocument = JsonObject & {
 };
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
-export type ReprocessRunInput = { stageFrom?: string; stages?: string[] };
+export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
   documentIds: string[];
   tags?: string[];
@@ -615,7 +627,7 @@ export type BulkDocumentsInput = {
 /** Per action: `{ runs, failed, warnings, job? }` (reprocess), `{ updated, documentIds }` (tags), `{ deleted, documentIds }` or `{ artifacts }`. */
 export type BulkDocumentsResult = JsonObject;
 /** Names an ingest report recommendation, optionally scoped like the report it came from. */
-export type IngestRecommendationInput = { recommendationId: string; runId?: string; documentIds?: string[] };
+export type IngestRecommendationInput = { recommendationId: string; runId?: string; documentIds?: string[]; speedBoost?: boolean };
 export type IngestRecommendationReprocessResult = JsonObject & { runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null };
 export type IngestRecommendationApplyResult = JsonObject & { recommendationId: string; patch: JsonObject | null; pipeline: JsonObject };
 
@@ -1348,9 +1360,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     };
   }
 
-  /** Pipeline overrides an upload sends: only the processing quality today. */
-  function pipelineFields(metadata: { quality?: QualityMode }): { pipeline?: { quality: QualityMode } } {
-    return metadata.quality ? { pipeline: { quality: metadata.quality } } : {};
+  /** Quality is a pipeline override; Speed boost is an explicit request-level opt-in. */
+  function pipelineFields(metadata: { quality?: QualityMode; speedBoost?: boolean }): { pipeline?: { quality: QualityMode }; speedBoost?: boolean } {
+    return { ...(metadata.quality ? { pipeline: { quality: metadata.quality } } : {}),
+      ...(metadata.speedBoost !== undefined ? { speedBoost: metadata.speedBoost } : {}) };
   }
 
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
@@ -1407,6 +1420,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
     if (metadata.quality) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
+    if (metadata.speedBoost !== undefined) fields.speedBoost = String(metadata.speedBoost);
     for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
@@ -1814,6 +1828,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
+      if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
       let completed = false;
       // The session grant goes in a header, never the URL.
       const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};

@@ -72,7 +72,7 @@ export type BulkWorkspaceIntakeFile = Pick<File, "arrayBuffer" | "name" | "size"
 
 type IntakeTargetArgs = Pick<
   WorkspaceIntakeRequest,
-  "userId" | "orgId" | "workspace" | "newWorkspace" | "templateKey" | "allowedWorkspaceIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId"
+  "speedBoost" | "userId" | "orgId" | "workspace" | "newWorkspace" | "templateKey" | "allowedWorkspaceIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId"
 >;
 
 /**
@@ -241,6 +241,7 @@ export async function confirmDirectUploadWorkspaceIntake(
       newWorkspace: !session.workspace_id && !session.workspace_name,
       templateKey: session.template_key ? workspaceTemplateKeySchema.parse(session.template_key) : undefined,
       // Stored with the session; a session created before an extractor schema tightened is read leniently.
+      speedBoost: session.pipeline?.speedBoost === true,
       pipeline: session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined,
       tags: session.tags ?? [],
       apiKeyId: session.api_key_id,

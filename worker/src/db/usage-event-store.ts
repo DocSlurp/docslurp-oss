@@ -1,3 +1,4 @@
+import { applySpeedBoostUnitCharge } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import type { JSONValue, PendingQuery, Sql } from "postgres";
@@ -54,7 +55,9 @@ export function runUsageScope(state: WorkflowState): {
 
 function runUsageRows(client: Sql<Record<string, unknown>>, state: WorkflowState, usageEvents: UsageEvent[]) {
   const scope = runUsageScope(state);
-  return usageEvents.map((usage) => ({
+  return usageEvents.map((event) => {
+    const usage = applySpeedBoostUnitCharge(event, state.usageLedger.speedBoost);
+    return ({
     id: usage.id ?? randomUUID(),
     user_id: state.run.userId,
     run_id: state.run.id,
@@ -74,7 +77,8 @@ function runUsageRows(client: Sql<Record<string, unknown>>, state: WorkflowState
     output_tokens: usage.outputTokens ?? 0,
     // runId keeps the event classified as ingest spend after the run is deleted.
     metadata: toJson(client, { ...persistedMetadata(usage), runId: state.run.id }),
-  }));
+  });
+  });
 }
 
 /**

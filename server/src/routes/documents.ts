@@ -54,6 +54,7 @@ import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/con
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 
 const bulkSchema = z.object({
+  speedBoost: z.boolean().optional(),
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
   documentIds: z.array(z.string()).min(1),
   tags: documentTagsSchema.optional()
@@ -528,12 +529,12 @@ export const documentsRoutes = new Hono()
     // Same selection as the workspace-scoped twin when the documents live in one workspace.
     const bulkWorkspaceId = await singleWorkspaceOf(body.documentIds, userId);
     const bulkInline = await inlineEstimate(
-      () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
+      () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, speedBoost: body.speedBoost === true, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
       `/v1/workspaces/${bulkWorkspaceId ?? "{workspaceId}"}/documents/bulk/estimate`,
     );
     let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
     try {
-      bulk = await bulkReprocessDocuments(body.documentIds, userId);
+      bulk = await bulkReprocessDocuments(body.documentIds, userId, { speedBoost: body.speedBoost === true });
     } catch (error) {
       if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
       // Every group refused (for example Fast with visual indexing); a partial refusal is reported in `failed`.

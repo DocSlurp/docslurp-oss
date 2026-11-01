@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  assertPipelineSpeedBoost,
   documentVersionKey,
   effectiveIndexingMode,
   pageRouterModeSchema,
@@ -70,6 +71,8 @@ export type RunSources =
   | { kind: "versionsOf"; documentIds: string[]; reuse?: boolean };
 
 export interface CreateRunInput {
+  /** Explicit admission opt-in; never inherit this from workspace or prior-run settings. */
+  speedBoost?: boolean;
   /** Internal durable intake identity; never accepted from HTTP input. */
   runId?: string;
   /** The requester: access is checked against them and the Run belongs to them. */
@@ -684,7 +687,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
       if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
       return rows;
-    }, { leaseRunId: args.id });
+    }, { leaseRunId: args.id, speedBoost: args.pipeline.speedBoost });
     return row!;
   }
 
@@ -906,7 +909,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     // Callers often pass a stored workspace or run pipeline (reprocess, bulk reprocess, full index, connectors).
     // Extractor settings the strict schemas now reject are dropped here, before anything is written, so the
     // Run row never carries them (a Dolphin repoPath, an unknown extractor id). Request schemas stay strict.
-    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(request.pipeline, `run creation in workspace ${request.workspaceId}`) };
+    const requestedPipeline = { ...request.pipeline, speedBoost: request.speedBoost === true };
+    assertPipelineSpeedBoost(requestedPipeline);
+    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(requestedPipeline, `run creation in workspace ${request.workspaceId}`) };
+    assertPipelineSpeedBoost(input.pipeline);
     const access = await getWorkspaceAccess(input.workspaceId, input.userId);
     if (!access) throw new Error("Workspace not found");
     if (!canContributeToWorkspace(access, input.userId)) throw new Error("Forbidden");

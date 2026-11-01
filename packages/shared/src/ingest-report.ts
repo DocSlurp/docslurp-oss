@@ -338,7 +338,7 @@ export const applyIngestRecommendationSchema = z.object({
   runId: z.string().trim().min(1).max(128).optional(),
   documentIds: z.array(z.string().trim().min(1).max(128)).min(1).max(INGEST_REPORT_MAX_DOCUMENT_IDS).optional(),
 }).strict();
-export const reprocessIngestRecommendationSchema = applyIngestRecommendationSchema;
+export const reprocessIngestRecommendationSchema = applyIngestRecommendationSchema.extend({ speedBoost: z.boolean().optional() });
 
 /** Doubling byte bins, 0 then 1 B, 64 B, 256 B ... 4 MB+. */
 export const INGEST_REPORT_TEXT_BYTE_EDGES = [0, 1, 64, 256, 1024, 4096, 16_384, 65_536];

@@ -50,6 +50,7 @@ const requestSchema = z.object({
   tool_choice: z.enum(["auto", "none"], { error: 'tool_choice must be "auto" or "none"; DocSlurp runs its own workspace tools and does not accept client-defined tools' }).optional(),
   /** DocSlurp extension (send it with extra_body in OpenAI SDKs), mirroring the response's `docslurp` field. */
   docslurp: z.object({
+    speedBoost: z.boolean().default(false),
     /** Per-request retrieval overrides, as `retrieval` on POST /v1/chat. */
     retrieval: chatRetrievalOverridesSchema.optional(),
   }).strict().optional(),
@@ -209,6 +210,7 @@ export const chatCompletionsRoutes = new Hono()
       }));
     const args = {
       workspaceId,
+      speedBoost: input.docslurp?.speedBoost === true,
       userId: actor.userId,
       actor, allowAgentTools: env.publicChatAgentEnabled && input.tool_choice !== "none", signal: c.req.raw.signal,
       ...(input.docslurp?.retrieval ? { retrieval: input.docslurp.retrieval } : {}),

@@ -2,6 +2,7 @@ import type { Sql } from "postgres";
 import {
   BILLABLE_UNIT_METRICS,
   UNIT_CHARGE_PROVIDER,
+  speedBoostMultiplier,
   compilePipelinePlan,
   deferredProfilesEnabled,
   pageCredits,
@@ -132,7 +133,8 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       }
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
       const richCredits = pageCredits("rich", richPages) * multiplier;
-      charges = { fastPages, richPages, multiplier, credits: fastCredits + richCredits };
+      charges = { fastPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
+        credits: (fastCredits + richCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
       const base = { workspaceId: state.run.workspaceId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
       // The insert and its pending debit (for exactly the rows it inserted) are one statement.
       const usage = runUsageEventStatements({ client, state, usageEvents: [

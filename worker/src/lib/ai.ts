@@ -1,4 +1,5 @@
-import { assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
+import { currentProviderPolicy } from "./provider-rate-limit.js";
+import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -127,7 +128,7 @@ export async function generateOpenRouterText(args: {
   // `llm://private/<alias>/<model>` routes go to the operator-registered endpoint.
   if (isPrivateModelUri(args.model)) return await generatePrivateText(args);
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model, operation: `worker.text.${args.operation}`, target: "hosted" });
-  args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
+  args = { ...args, model: speedBoostModel(resolveSupportedModelIdWithWarning(args.model), currentProviderPolicy().speedBoost === true) };
   const settings = resolvePipelineTextGenerationOptions({ operation: args.operation, config: args.textGeneration, deploymentProfile: args.deploymentProfile, maxOutputTokens: args.maxOutputTokens });
   const system = [args.system, settings.systemSuffix].filter(Boolean).join("\n\n") || undefined;
   return withObservation(
@@ -166,7 +167,7 @@ export async function generateOpenRouterText(args: {
 
       noteWorkProgress(`ai:${args.operation}`);
       const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model, providerName: accounting.providerName(), generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
-      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
+      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: args.model, reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
       return { text: result.text, finishReason: result.finishReason, usage: recordedUsage };
     },
   );

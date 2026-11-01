@@ -1,3 +1,4 @@
+import { speedBoostMultiplier } from "@docslurp/shared";
 import { createHash } from "node:crypto";
 import { sql, type SqlClient } from "../../db.js";
 import { voidChatTurnUsage } from "../../lib/ai-usage.js";
@@ -115,10 +116,16 @@ const refunds = new WeakMap<ChatTurnContext, number>();
  * Start a chat turn, or join the current one. `id` becomes the turn id (the
  * chat response id); omit it for a fresh UUID.
  */
-export function beginChatTurn(options: { id?: string } = {}): ChatTurn {
+export function beginChatTurn(options: { id?: string; speedBoost?: boolean } = {}): ChatTurn {
+  speedBoostMultiplier(options.speedBoost);
   const current = currentChatTurn();
-  if (current) return handle(current, false);
-  return handle(createChatTurnContext({ id: options.id, refundOnFailure: chatTurnRefundsEnabled() }), true);
+  if (current) {
+    if (options.speedBoost !== undefined && options.speedBoost !== current.speedBoost) {
+      throw new Error("Nested chat cannot change the outer speedBoost choice");
+    }
+    return handle(current, false);
+  }
+  return handle(createChatTurnContext({ id: options.id, speedBoost: options.speedBoost, refundOnFailure: chatTurnRefundsEnabled() }), true);
 }
 
 /** The turn the caller is running in, if any (joined, never owned). */
