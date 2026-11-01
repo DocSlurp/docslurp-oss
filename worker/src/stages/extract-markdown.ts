@@ -685,7 +685,8 @@ export class ExtractMarkdownStage implements Stage {
                         sourceHash: contentHash,
                         format,
                         targets: extractionConfig.enrich,
-                        canContinue: () => { if (isCostCapExceeded(state)) return false; reserveOrientationAttempt(state); return true; },
+                        canContinue: () => !isCostCapExceeded(state),
+                        reserveOrientation: () => reserveOrientationAttempt(state),
                         recordUsage: event => state.usageLedger.enqueue({ ...event,
                           metadata: { ...event.metadata, documentId: document.id, stage: "embedded-image-orientation" } }),
                         dopplerImageBundle: imageCandidate ? `${imageCandidate.tempTextPath}.images` : undefined,
@@ -2449,6 +2450,7 @@ export class ExtractMarkdownStage implements Stage {
     graphRunner?: typeof runLocalPdfArtifactGraph;
     dopplerImageBundle?: string;
     canContinue?: () => boolean;
+    reserveOrientation?: () => boolean;
     recordUsage?: (event: import("../models.js").UsageEvent) => void;
   }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris?: string[] }> {
     const startedAt = Date.now();
@@ -2461,7 +2463,7 @@ export class ExtractMarkdownStage implements Stage {
         ? await dopplerImageGraph({ bundlePath: args.dopplerImageBundle, sourcePath: args.sourcePath,
             sourceDocumentId: args.document.id, sourceHash: args.sourceHash, pageCount: args.pageNumbers.length,
             targets: args.targets, scratchDir, signal: args.signal,
-            recordUsage: args.recordUsage, canContinue: args.canContinue })
+            recordUsage: args.recordUsage, canContinue: args.canContinue, reserveOrientation: args.reserveOrientation })
         : await (args.graphRunner ?? runLocalPdfArtifactGraph)({
         sourcePath: args.sourcePath,
         sourceDocumentId: args.document.id,

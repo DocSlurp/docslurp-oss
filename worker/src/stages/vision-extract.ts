@@ -90,7 +90,7 @@ export interface VisionPageOutput {
   finishReason?: string | null;
   /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
   servedModel?: string;
-  orientation?: import("../sandbox/providers/modal/image-orientation.js").OrientationResult;
+  orientation?: import("../sandbox/providers/modal/image-orientation.js").OrientationResult | { status: "skipped-limit" };
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
 }
@@ -1231,9 +1231,10 @@ export class VisionExtractStage implements Stage {
     // cascade leg; first try, inline retries, streaming fallback, alternate route) is admitted by the
     // run's attempt guard through this gate before it is sent.
     return await withVisionCall(state, { ...pageRef, purpose }, async (gate) => {
+      let skippedLimit = false;
       const normalized = imageOrientationEnabled() ? await withOrientationAdmission(gate, async () => {
         if (isCostCapExceeded(state)) throw new Error("Image orientation refused: run cost cap exceeded");
-        reserveOrientationAttempt(state);
+        if (!reserveOrientationAttempt(state)) { skippedLimit = true; return null; }
         return await normalizeImageOrientation(imagePath, event => {
         state.usageLedger.enqueue({ ...event, metadata: { ...event.metadata, documentId: document.id, stage: "image-orientation", pageNumber: image.pageNumber } });
       }, signal);
@@ -1242,7 +1243,7 @@ export class VisionExtractStage implements Stage {
         const result = await this.runVisionCall(state, document, vision,
           { ...image, imagePath: normalized?.path ?? imagePath, outputPath },
           { ...page, mimeType: normalized ? "image/png" : page.mimeType }, gate, signal, usageSink);
-        return normalized ? { ...result, orientation: normalized.metadata } : result;
+        return normalized ? { ...result, orientation: normalized.metadata } : skippedLimit ? { ...result, orientation: { status: "skipped-limit" } } : result;
       } finally { await normalized?.release(); }
     });
   }

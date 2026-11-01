@@ -7,9 +7,9 @@ import { SandboxRunError } from '../sandbox/types.js';
 import type { UsageEvent } from '../models.js';
 
 export function imageOrientationEnabled(): boolean {
-  const value = process.env.DOCSLURP_IMAGE_ORIENTATION ?? '0';
-  if (!['0','1'].includes(value)) throw new Error('DOCSLURP_IMAGE_ORIENTATION must be 0 or 1');
-  return value === '1';
+  const value = process.env.DOCSLURP_IMAGE_ORIENTATION ?? 'true';
+  if (!['false','true','0','1'].includes(value)) throw new Error('DOCSLURP_IMAGE_ORIENTATION must be true, false, 0 or 1');
+  return value === 'true' || value === '1';
 }
 
 /** Shared for page scans and extracted image assets; no local parsing/fallback. */
@@ -39,10 +39,12 @@ export async function withOrientationAdmission<T>(gate: VisionRequestGate, prepa
 /** A bounded allowance per workflow state; failures consume an attempt too.
  * Checkpoints persist the count, but this is not an exactly-once monetary budget.
  */
-export function reserveOrientationAttempt(state: { run: { stats: Record<string, unknown> } }): void {
+export function reserveOrientationAttempt(state: { run: { stats: Record<string, unknown> } }): boolean {
   const count = state.run.stats.imageOrientationAttempts ?? 0;
-  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || count >= 64) {
-    throw new Error('Image orientation attempt limit reached (64 per run)');
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+    throw new Error('Invalid image orientation attempt counter');
   }
+  if (count >= 64) return false;
   state.run.stats.imageOrientationAttempts = count + 1;
+  return true;
 }

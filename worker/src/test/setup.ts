@@ -10,3 +10,6 @@ if (process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS === undefined) {
 if (process.env.DOCSLURP_LOCAL_EMBED_THREAD === undefined) {
   process.env.DOCSLURP_LOCAL_EMBED_THREAD = "off";
 }
+
+// Unit suites do not launch paid VM preprocessing; orientation suites explicitly enable/mock it.
+process.env.DOCSLURP_IMAGE_ORIENTATION = "false";
