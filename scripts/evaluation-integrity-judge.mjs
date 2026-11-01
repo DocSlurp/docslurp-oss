@@ -178,6 +178,9 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       // Scan working-tree bytes, but refuse partially staged paths: their index
       // version could contain leakage hidden by an unstaged replacement/deletion.
       // Pure unstaged repairs and fully staged changes retain existing semantics.
+      for (const entry of run('ls-files', '-v', '-z').split('\0').filter(Boolean)) {
+        if (/^[a-zS]/.test(entry)) add('unverified-index-flags', { file: prefix + entry.slice(2) });
+      }
       const staged = new Set(run('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD', '--').split('\0').filter(Boolean));
       for (const name of run('diff', '--name-only', '--no-renames', '-z', '--').split('\0').filter(Boolean)) {
         if (staged.has(name)) add('index-working-tree-mismatch', { file: prefix + name });

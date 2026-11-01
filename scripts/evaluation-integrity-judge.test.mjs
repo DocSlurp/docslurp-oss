@@ -393,3 +393,20 @@ test('blocks partially staged nested repository paths', (t) => {
   writeFileSync(join(f.nested, 'engine.ts'), 'export const generic = true;');
   assert.ok(f.run().findings.some(x => x.rule === 'index-working-tree-mismatch' && x.file === 'core/engine.ts'));
 });
+
+
+test('index flags cannot hide staged prompts behind comment candidates', (t) => {
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    const f = fixture(t);
+    const labels = JSON.stringify({ labels: [{ name: 'area', expected: '71 hectares' }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'worker.ts'), 'export const prompt="71 hectares";');
+    f.git('add', 'worker.ts'); f.git('update-index', flag, 'worker.ts');
+    writeFileSync(join(f.repo, 'worker.ts'), '//71 hectares\nexport const safe=1;');
+    const report = f.run();
+    assert.equal(report.passed, false);
+    assert.equal(report.status, 'blocked');
+    assert.ok(rules(report).includes('unverified-index-flags'));
+  }
+});
