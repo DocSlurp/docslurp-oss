@@ -36,6 +36,7 @@ export const GATED = {
   "server/src/__tests__/workspace-graph-service.db.test.ts": { db: ["WORKSPACE_GRAPH_TEST_DATABASE_URL"] },
   "server/src/__tests__/workspace-naming.db.test.ts": { db: ["WORKSPACE_NAMING_RACE_DATABASE_URL"] },
   "server/src/__tests__/workspace-settings-proposals.db.test.ts": { db: ["SETTINGS_LOCK_TEST_DATABASE_URL"] },
+  "server/src/__tests__/workspace-recommendation-visits.db.test.ts": { db: ["RECOMMENDATION_TEST_DATABASE_URL"] },
   "server/src/__tests__/workspace-state.test.ts": { db: ["WORKSPACE_STATE_TEST_DATABASE_URL"] },
   "server/src/lib/dependency-postgres.test.ts": { db: ["GRAPH_PURGE_TEST_DATABASE_URL"] },
   "worker/src/__tests__/checkpoint-lock-order.test.ts": { db: ["CHECKPOINT_LOCK_TEST_DATABASE_URL"] },

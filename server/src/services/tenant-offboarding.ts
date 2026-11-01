@@ -323,6 +323,7 @@ export async function deleteAccount(
     await client`delete from oauth_accounts where user_id = ${userId}`;
     await client`delete from sso_identity_links where user_id = ${userId}`;
     // Personal settings and activity.
+    await client`delete from workspace_recommendation_visits where user_id = ${userId}`;
     await client`delete from user_settings where user_id = ${userId}`;
     await client`delete from notification_prefs where user_id = ${userId}`;
     await client`delete from notification_deliveries where user_id = ${userId}`;

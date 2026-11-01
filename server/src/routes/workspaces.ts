@@ -1,3 +1,4 @@
+import { workspaceRecommendationVisitsRoutes } from "./workspace-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { applyWorkspaceSettingsProposalSchema } from "@docslurp/shared";
 import { applySettingsProposal, SettingsProposalError } from "../services/workspace-settings-proposals.js";
@@ -585,6 +586,7 @@ function findProhibitedModelId(value: unknown): string | null {
 }
 
 export const workspacesRoutes = new Hono()
+  .route("/", workspaceRecommendationVisitsRoutes)
   .post("/:workspaceId/settings-proposals/apply", zValidator("json", applyWorkspaceSettingsProposalSchema, validationHook), async c => {
     try {
       const result = await applySettingsProposal({ actor: getRequestActor(c), workspaceId: String(c.req.param("workspaceId")), ...c.req.valid("json") });
