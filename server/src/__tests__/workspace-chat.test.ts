@@ -375,6 +375,26 @@ describe("chatWorkspace", () => {
     }
   });
 
+  it.each(["server", "client"] as const)("answers chat-only %s keys directly without granting raw search tools", async keyType => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, results: [], reason: "empty-workspace", stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "chat-key", userId: "user-1", orgId: "org-1", keyType, scopes: ["chat"], workspaceIds: ["ws-1"], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } };
+    try {
+      const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], actor, allowConfiguration: false });
+      expect(response).toBeDefined();
+      expect(runChatMcpAgent).not.toHaveBeenCalled();
+      expect(hybridSearch).toHaveBeenCalledOnce();
+      expect(actor.apiKey.scopes).toEqual(["chat"]);
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
   it("answers directly with agent.tools false and passes parentRetrieval through to retrieval", async () => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });

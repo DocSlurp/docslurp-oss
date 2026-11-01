@@ -2,6 +2,7 @@ import { resolveSupportedModelIdWithWarning, withServedProviderRegion } from "@d
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
+  VISUAL_RELATIONSHIP_INSTRUCTIONS,
   MARKDOWN_LATEX_VISION_PROMPT,
   MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
   PAGE_MARKDOWN_LATEX_VISION_PROMPT,
@@ -80,18 +81,18 @@ import type { CommandRunner } from "./runner.js";
 
 export const visionPromptTemplates = {
   "<OCR>":
-    "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible.",
+    "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS,
   "markdown-latex": MARKDOWN_LATEX_VISION_PROMPT,
   "markdown-transcription": MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
   "page-markdown-latex": PAGE_MARKDOWN_LATEX_VISION_PROMPT,
   markdown:
-    "Convert the visible document page into concise GitHub-flavored markdown. Preserve tables, headings, lists, formulas, and code blocks.",
+    "Convert the visible document page into concise GitHub-flavored markdown. Preserve tables, headings, lists, formulas, and code blocks." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS,
   layout:
-    "Extract visible document content with layout-aware structure. Preserve section order, table rows, captions, and page-local labels.",
+    "Extract visible document content with layout-aware structure. Preserve section order, table rows, captions, and page-local labels." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS,
   "chart-data":
-    "This image is a chart or graph. Transcribe its title, axis labels and units, and every data series as a GitHub-flavored markdown table of the plotted values. Estimate values only when no labels are printed, and say so.",
+    "This image is a chart or graph. Transcribe its title, axis labels and units, and every data series as a GitHub-flavored markdown table of the plotted values. Keep printed values distinct from visual readings." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS,
   diagram:
-    "This image is a diagram. Describe its nodes, labels and the relationships or flow between them as a concise markdown outline.",
+    "This image is a diagram. Describe its nodes, labels and the relationships or flow between them as a concise markdown outline." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS,
   "image-label":
     "Describe this image in one or two plain sentences, including any visible text.",
   "form-fields":

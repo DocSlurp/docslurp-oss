@@ -117,6 +117,7 @@ export function setWebServiceDeps(next: Partial<WebServiceDeps> | undefined): vo
 
 /** Whether web capabilities are on and at least one provider can serve `capability`. */
 export function webCapabilityAvailable(capability: WebCapability): boolean {
+  if (capability !== "search") return false;
   const current = deps();
   return current.config.enabled && current.router.configured(capability).length > 0;
 }
@@ -136,8 +137,8 @@ function cacheDelete(key: string): void {
   cache.delete(key);
 }
 
-function cacheKey(capability: WebCapability, input: unknown): string {
-  return createHash("sha256").update(`${capability}\0${JSON.stringify(input)}`).digest("hex");
+function cacheKey(capability: WebCapability, input: unknown, ctx: WebCallContext): string {
+  return createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.workspaceId, ctx.userId, capability, input])).digest("hex");
 }
 
 function cacheGet<T>(key: string, now: number): T | undefined {
@@ -296,6 +297,12 @@ export async function runWebCapability<C extends WebCapability>(
   try {
     if (!d.config.enabled) throw new WebToolError(404, "web_disabled", "Web tools are not enabled on this server.");
 
+    // No installed provider contract enforces target DNS, redirects and rendered
+    // subresources. Reject before cache, spend or fallback; initial DNS is not enough.
+    if (capability !== "search" || (rawInput as WebInput<"search">).includeContent) {
+      throw new WebToolError(403, "web_target_fetch_disabled", "Target retrieval is unavailable until provider egress enforcement is verified.");
+    }
+
     // Validate and canonicalize every caller URL before anything is spent: private,
     // loopback and metadata addresses are refused even though a provider fetches them.
     let input = rawInput;
@@ -320,7 +327,7 @@ export async function runWebCapability<C extends WebCapability>(
 
     // Deep fetches ask for a fresh render, so they bypass the cache.
     const cacheable = !(capability === "fetch" && (input as WebInput<"fetch">).depth === "deep");
-    const key = cacheKey(capability, input);
+    const key = cacheKey(capability, input, ctx);
     let output = cacheable ? cacheGet<WebOutput<C>>(key, started) : undefined;
     const cached = output !== undefined;
     let provider: WebProviderId | undefined;
