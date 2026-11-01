@@ -76,3 +76,28 @@ not verified in this follow-up. Six reconciliation tests and the worker build
 passed. No new security boundary changed; boundary integration coverage listed
 above remains outstanding. This follow-up is diagnostic test coverage, not a
 claim that the original visual extraction task is fixed.
+
+## General instruction correction (2026-11-01)
+
+Default OCR, markdown/layout, all three model-profile templates, and chart/diagram
+templates now require legible axes, units, ticks, series/value associations,
+arrows, containment and label relationships. Exact printed values remain distinct
+from individually marked approximate readings supported by readable marks and
+scales. Hidden values and invented relationships are forbidden; uncertainty stays
+explicit in Markdown. No output schema changes.
+
+Explicit named form/schema-form/image-label overrides remain unchanged; unknown
+template keys retain the existing OCR fallback. Fallback providers receive the
+already constructed prompt. No free-text prompt override is introduced.
+
+There is no prompt-version response cache in this path. Distributed completed
+page tasks are persisted per run and rehydrated into the document/page map on
+resume; they remain historical evidence and are not invalidated (which could
+repeat billed calls). New runs use the corrected instructions. Raster caching
+contains images, not prompt responses.
+
+Validation: 23 focused prompt/profile and synthetic canonical-reconciliation tests
+passed; shared and worker build passed, including TypeScript checking.
+These establish instruction construction and retention of supplied evidence only.
+No image-grounded model calls were made and no quality improvement is measured.
+Full provider/render boundary integration coverage listed above remains pending.

@@ -9,7 +9,7 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { MARKDOWN_LATEX_VISION_PROMPT, VISION_MODEL_PROFILES, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
-import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, resolveVisionPromptTemplate, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
 const SNAPSHOT = "deepseek/deepseek-v4.1-flash-1017";
@@ -91,6 +91,33 @@ describe("vision catalog route pricing", () => {
       else {
         expect(route!.allow_fallbacks, entry.id).toBe(false);
         expect(route!.order, entry.id).toEqual(entry.tokenPricing.providers);
+      }
+    }
+  });
+});
+
+describe("visual evidence prompt construction contract", () => {
+  it.each(["<OCR>", "markdown", "layout", "markdown-latex", "markdown-transcription", "page-markdown-latex", "chart-data", "diagram"])("preserves relationships and uncertainty in %s", (key) => {
+    const prompt = resolveVisionPromptTemplate(key);
+    for (const requirement of ["axes, units, tick labels", "series and category or coordinate", "exact printed values", "label each such reading approximate", "marks and scale are legible", "Never infer hidden values", "arrow direction and endpoints", "containment", "label-to-node or label-to-edge", "Never invent relationships"]) {
+      expect(prompt).toContain(requirement);
+    }
+    expect(prompt).not.toContain("transcribe it as plain lines");
+    expect(prompt).not.toContain("Estimate values only when no labels");
+  });
+
+  it("applies the contract to every model default and the unknown-key fallback", () => {
+    for (const model of [undefined, ...Object.keys(VISION_MODEL_PROFILES)]) {
+      expect(resolveVisionPromptTemplate(visionPromptKeyForModel(undefined, model))).toContain("Never invent relationships");
+    }
+    expect(resolveVisionPromptTemplate("unknown")).toBe(visionPromptTemplates["<OCR>"]);
+  });
+
+  it("keeps explicit specialized overrides instead of replacing them with model defaults", () => {
+    for (const model of Object.keys(VISION_MODEL_PROFILES)) {
+      for (const key of ["chart-data", "diagram", "image-label", "form-fields", "schema-form-fields"]) {
+        expect(visionPromptKeyForModel(key, model)).toBe(key);
+        expect(resolveVisionPromptTemplate(visionPromptKeyForModel(key, model))).toBe(visionPromptTemplates[key as keyof typeof visionPromptTemplates]);
       }
     }
   });

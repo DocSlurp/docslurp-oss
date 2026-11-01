@@ -194,4 +194,20 @@ describe("Canonical Reconciliation Module", () => {
     expect(result.extractionContract.metadata.strategy).toContain("canonical-reconciliation");
     expect(result.extractionContract.markdown).not.toContain("weak scan one");
   });
+  it("preserves approximate and unreadable values without manufacturing diagram edges", () => {
+    const markdown = "# Synthetic plot\n\nHorizontal axis: time (s); ticks: 0, 5.\nSeries A at 0 s: printed value 3; at 5 s: approximate visual reading 7.\nSeries B: value unreadable.\n\nContainer encloses Source and Sink.\nSource -> Sink: transfer.\nOther arrow endpoint: uncertain.";
+    const result = reconcileCanonicalArtifacts({
+      ...baseline(),
+      replacements: [{
+        pageNumber: 1, markdown,
+        source: { adapter: "vision", model: "test-vision", confidence: 0.9, confidenceBasis: "page-triage", reason: "scan" },
+      }],
+    });
+    for (const phrase of ["printed value 3", "approximate visual reading 7", "value unreadable", "Container encloses Source and Sink", "Source -> Sink: transfer", "Other arrow endpoint: uncertain"]) {
+      expect(result.markdown).toContain(phrase);
+      expect(result.extractionContract.markdown).toContain(phrase);
+    }
+    expect(result.changedPages).toEqual([1]);
+  });
+
 });
