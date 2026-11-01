@@ -155,14 +155,20 @@ export type KreuzbergExtractorOptions = z.infer<typeof kreuzbergExtractorOptions
  * Option schemas by extractor id. Only these extractors take options; every other id, and every key a schema does
  * not name, is rejected. The worker re-parses each id before handing options to a script (parseExtractorOptions).
  */
+export const dopplerExtractorOptionsSchema = z.object({
+  images: extractionImageConfigSchema.strict().optional(),
+  pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
+}).strict();
+
 export const extractorOptionSchemas = {
+  doppler: dopplerExtractorOptionsSchema,
   kreuzberg: kreuzbergExtractorOptionsSchema,
   dolphin: dolphinExtractorOptionsSchema,
 } as const;
 
 /** Extractor options by extractor id (extractorOptionSchemas); unknown ids and keys are rejected. */
 export const documentExtractorOptionsSchema = z
-  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional() })
+  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional(), doppler: dopplerExtractorOptionsSchema.optional() })
   .strict();
 
 /**

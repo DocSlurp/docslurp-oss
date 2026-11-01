@@ -1,3 +1,4 @@
+- Preserve requested born-digital embedded images as lossless WebP in the existing Doppler VM, with bounded framed transport, page/mask manifests, shard deduplication, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/doppler-images.md; deployment remains manual.
 ## Durable workspace recommendation visits (2026-11-01)
 
 - Add session-scoped SQL snapshots and atomic token acknowledgements for return-visit recommendations, with bounded aggregate activity and account/workspace deletion cleanup.

@@ -1,5 +1,7 @@
+import { renameSync } from "node:fs";
+import { decodeImageBundle, encodeImageBundle, mergeImageBundles, type EmbeddedImages } from "./doppler-images.js";
 import { randomUUID } from "node:crypto";
-import { lstat, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, open, readFile, writeFile, rm } from "node:fs/promises";
 import { planPageShards, type PageShardPlan, type ShardCostProfile } from "../../../temporal/page-shards.js";
 import { SHARD_PROFILES, shardCapacity } from "../../../temporal/page-shard-profiles.js";
 import { SandboxRunError, type SandboxResult } from "../../types.js";
@@ -267,6 +269,8 @@ export async function executeDopplerShards(
   const outputs = plan.shards.map((_, index) => `${job.output}.shard-${index}.${token}`);
   const usages: Array<UsageEvent | undefined> = new Array(plan.shards.length);
   const staged = `${job.output}.${token}.partial`;
+  let publishedImages = false;
+  let publishedOutput = false;
   let failure: unknown;
   let next = 0;
   // The final shard runs first: it alone proves the host's page count matches the guest's last page.
@@ -300,7 +304,8 @@ export async function executeDopplerShards(
           // Stop paying for shards as soon as the merged output can no longer fit.
           // Await first, then add: concurrent completions must not overwrite each other's increments.
           const shardBytes = (await lstat(outputs[index]!)).size;
-          completedBytes += shardBytes + 1;
+          const imageBytes = job.embeddedImages ? (await lstat(`${outputs[index]!}.images`)).size : 0;
+          completedBytes += shardBytes + imageBytes + 1;
           if (completedBytes > MAX_OUTPUT_BYTES + 1) throw new SandboxRunError(OUTPUT_LIMIT_MESSAGE, result.usage);
           deps.recordTiming?.({ stage: "extract-markdown", executor: "doppler-vm", pages: shard.last - shard.first + 1,
             ms: Date.now() - started, shardIndex: index, shardCount: plan.shards.length });
@@ -321,7 +326,7 @@ export async function executeDopplerShards(
       // Nothing to fall back to: one VM cannot convert a document over the per-VM limit, and an image that cannot
       // confine itself (or does not report its declared confinement) fails a whole-document VM the same way.
       const reason = failureReason(failure);
-      if (mustSplit || reason === "image-hardening-mismatch" || reason === "confinement-unavailable") {
+      if (job.embeddedImages || mustSplit || reason === "image-hardening-mismatch" || reason === "confinement-unavailable") {
         logPlan({ outcome: "failed", shards: plan.shards.length, pages: pageCount, reason: failureReason(failure), wallMs: Date.now() - dispatched,
           shardPages: plan.shardPages, vms, fallback: false });
         return fail(failure instanceof SandboxRunError ? failure.message : "Document VM shard failed");
@@ -357,8 +362,14 @@ export async function executeDopplerShards(
       } finally {
         await handle.close();
       }
+      if (job.embeddedImages) {
+        const parts: EmbeddedImages[] = [];
+        for (const output of outputs) parts.push(decodeImageBundle(await readFile(`${output}.images`)).images);
+        await writeFile(`${staged}.images`, encodeImageBundle(mergeImageBundles(parts, pageCount)), { flag: "wx", mode: 0o600 });
+      }
       if (signal?.aborted) fail("Document VM cancelled before output commit");
-      await rename(staged, job.output);
+      if (job.embeddedImages) { renameSync(`${staged}.images`, `${job.output}.images`); publishedImages = true; }
+      renameSync(staged, job.output); publishedOutput = true;
     } catch (error) {
       if (error instanceof SandboxRunError) throw error;
       fail("Document VM shard merge failed"); // filesystem errors stay out of the message; the cost stays in
@@ -380,6 +391,7 @@ export async function executeDopplerShards(
   } finally {
     signal?.removeEventListener("abort", onAbort);
     // Cleanup never replaces the result or the usage-bearing error.
-    await Promise.allSettled([...outputs, staged].map((file) => rm(file, { force: true })));
+    if (publishedImages && !publishedOutput) await rm(`${job.output}.images`, { force: true }).catch(() => {});
+    await Promise.allSettled([...outputs, staged, ...outputs.map(p => `${p}.images`), `${staged}.images`].map((file) => rm(file, { force: true })));
   }
 }
