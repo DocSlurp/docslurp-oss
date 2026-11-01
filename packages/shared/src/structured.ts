@@ -48,7 +48,7 @@ export type FieldPolicy = z.infer<typeof fieldPolicySchema>;
 
 export const structuredFieldDefSchema = z.object({
   description: z.string().optional(),
-  "x-docslurp-geo": geoAnnotationSchema.optional(),
+  "geo": geoAnnotationSchema.optional(),
   type: structuredFieldTypeSchema,
   validator: fieldValidatorSchema.default({ required: false, normalizer: "none", compare: "exact" }),
   policy: fieldPolicySchema.default({ autoAcceptMinConfidence: 0.85, escalateIfMissing: true, rejectIfPatternFail: false }),

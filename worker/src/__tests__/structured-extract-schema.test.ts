@@ -41,9 +41,17 @@ describe("structuredSchemaFromJsonSchema", () => {
 it("preserves authoritative geo annotations when building provider schemas", async () => {
   const { buildStructuredFieldsEnvelopeSchema } = await import("../stages/structured-extract.js");
   const annotation = { version: 1, encoding: "geojson", geometryTypes: ["Point"] };
-  const source = { type: "object", properties: { site: { type: "object", "x-docslurp-geo": annotation } } };
+  const source = { type: "object", properties: { site: { type: "object", "geo": annotation } } };
   const before = JSON.stringify(source);
-  expect(structuredSchemaFromJsonSchema(source).fields.site["x-docslurp-geo"]).toEqual(annotation);
-  expect(JSON.stringify(buildStructuredFieldsEnvelopeSchema(source))).not.toContain("x-docslurp-geo");
+  expect(structuredSchemaFromJsonSchema(source).fields.site["geo"]).toEqual(annotation);
+  expect(JSON.stringify(buildStructuredFieldsEnvelopeSchema(source))).not.toContain("geo");
   expect(JSON.stringify(source)).toBe(before);
+});
+
+
+it("preserves annotation-named property keys and literal constraints in provider output", async () => {
+  const { buildStructuredFieldsEnvelopeSchema } = await import("../stages/structured-extract.js");
+  const valueSchema = { type: "object", properties: { "geo": { type: "string" } }, const: { "geo": "keep", other: 1 } };
+  const result = buildStructuredFieldsEnvelopeSchema({ type: "object", properties: { payload: valueSchema } });
+  expect(result).toMatchObject({ properties: { fields: { properties: { payload: { properties: { value: { anyOf: [valueSchema, { type: "null" }] } } } } } } });
 });

@@ -7,7 +7,7 @@ Page evidence polygons are page coordinates, never geographic inputs.
 Copyable outputSchema for a single document-level location:
 
 ```json
-{"type":"object","properties":{"site":{"type":"object","properties":{"lat":{"type":"number"},"lon":{"type":"number"}},"x-docslurp-geo":{"version":1,"encoding":"lat-lon","latitude":"/lat","longitude":"/lon"}}}}
+{"type":"object","properties":{"site":{"type":"object","properties":{"lat":{"type":"number"},"lon":{"type":"number"}},"geo":{"version":1,"encoding":"lat-lon","latitude":"/lat","longitude":"/lon"}}}}
 ```
 
 Alternatively annotate an object with
@@ -36,3 +36,5 @@ Structurally valid GeoJSON is strong evidence; named lat/lon headers plus ranges
 are weak evidence. Values valid in either axis order are counted ambiguous.
 Unlabeled x/y never gets a mapping. Suggestions never activate indexing and must
 only receive structured values, not evidence boxes or page polygons.
+
+The `geo` keyword is an application annotation, not a standard JSON Schema keyword. `version` defaults to 1; GeoJSON `geometryTypes` defaults to the four supported geometry types. Use `{"geo":{"encoding":"geojson"},"type":"object"}` on a top-level field for the compact form. A property named `geo` and literal `const`/`default`/`enum` values remain ordinary data.

@@ -27,15 +27,39 @@ describe("geo foundation", () => {
   });
   it("rejects nested and cross-row mappings", () => {
     expect(() => geometryFromAnnotation({}, { ...annotation, latitude: "/rows/0/lat" })).toThrow();
-    expect(() => validateGeoAnnotations({ type: "object", "x-docslurp-geo": annotation })).toThrow();
+    expect(() => validateGeoAnnotations({ type: "object", "geo": annotation })).toThrow();
   });
 });
 
 it("validates outputSchema annotation compatibility and preserves accepted metadata", async () => {
   const { pipelineFeatureOverridesSchema } = await import("./pipeline.js");
-  const outputSchema = { type: "object", properties: { site: { type: "object", properties: { lat: { type: "number" }, lon: { type: "number" } }, "x-docslurp-geo": annotation } } };
+  const outputSchema = { type: "object", properties: { site: { type: "object", properties: { lat: { type: "number" }, lon: { type: "number" } }, "geo": annotation } } };
   expect(pipelineFeatureOverridesSchema.parse({ outputSchema }).outputSchema).toEqual(outputSchema);
   const invalid = structuredClone(outputSchema);
   invalid.properties.site.properties.lat.type = "string";
   expect(pipelineFeatureOverridesSchema.safeParse({ outputSchema: invalid }).success).toBe(false);
+});
+
+
+it("rejects empty rings without throwing through validation or detection", () => {
+  const malformed = { type: "Polygon", coordinates: [[]] };
+  expect(geoGeometrySchema.safeParse(malformed).success).toBe(false);
+  expect(suggestGeoMapping([malformed]).suggestions).toEqual([]);
+});
+
+it("treats annotation-named properties and literal data as data", async () => {
+  const { geoProviderSchema } = await import("./geo.js");
+  const literal = { "geo": "keep", other: 1 };
+  const schema = { type: "object", properties: { "geo": { type: "string" }, payload: { type: "object", const: literal, default: literal, enum: [literal] } } };
+  expect(() => validateGeoAnnotations(schema)).not.toThrow();
+  expect(geoProviderSchema(schema)).toEqual(schema);
+  const nested = { type: "object", properties: { rows: { type: "array", items: { type: "object", "geo": { version: 1, encoding: "geojson", geometryTypes: ["Point"] } } } } };
+  expect(() => validateGeoAnnotations(nested)).toThrow();
+});
+
+
+it("accepts compact geo annotations with explicit encoding", async () => {
+  const { geoAnnotationSchema } = await import("./geo.js");
+  expect(geoAnnotationSchema.parse({ encoding: "geojson" })).toMatchObject({ version: 1, geometryTypes: ["Point", "MultiPoint", "Polygon", "MultiPolygon"] });
+  expect(geoAnnotationSchema.parse({ encoding: "lat-lon", latitude: "/lat", longitude: "/lng" })).toMatchObject({ version: 1 });
 });
