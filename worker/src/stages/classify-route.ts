@@ -462,6 +462,8 @@ export function selectLegacyVisionPages(
       return (
         page.extractorHint === "vision-rescue" ||
         page.route === "formula-heavy" ||
+        // Native text retains labels, but not plotted values or diagram relationships.
+        page.route === "chart-or-figure" ||
         ((page.route === "form" || page.route === "table-heavy") && page.textDensityScore < 0.45)
       );
     })

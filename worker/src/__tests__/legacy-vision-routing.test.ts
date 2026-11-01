@@ -284,3 +284,21 @@ describe("bounded text scans", () => {
     expect(classifyTextAndFilename(late, "upload.pdf").label).toBe("invoice");
   });
 });
+
+describe("visual relationships on native-text pages", () => {
+  const page = {
+    pageNumber: 3, route: "chart-or-figure" as const, confidence: 0.9,
+    textDensityScore: 0.9, signals: [], extractorHint: "layout-aware" as const,
+    specializedContent: [],
+    ocrDecision: { authorized: false, confidence: 0.9, signals: ["native-text-present"] },
+  };
+  it("reads a figure despite a dense native text layer in v2", () => {
+    expect(selectLegacyVisionPages([page], V2)).toEqual([3]);
+  });
+  it("preserves v1 and excludes verified blank figures", () => {
+    expect(selectLegacyVisionPages([page])).toEqual([]);
+    expect(selectLegacyVisionPages([{ ...page, ocrDecision: {
+      ...page.ocrDecision, signals: ["ocr-not-authorized:blank-page"],
+    } }], V2)).toEqual([]);
+  });
+});
