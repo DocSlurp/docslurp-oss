@@ -285,20 +285,19 @@ describe("bounded text scans", () => {
   });
 });
 
-describe("visual relationships on native-text pages", () => {
-  const page = {
-    pageNumber: 3, route: "chart-or-figure" as const, confidence: 0.9,
-    textDensityScore: 0.9, signals: [], extractorHint: "layout-aware" as const,
-    specializedContent: [],
-    ocrDecision: { authorized: false, confidence: 0.9, signals: ["native-text-present"] },
-  };
-  it("reads a figure despite a dense native text layer in v2", () => {
-    expect(selectLegacyVisionPages([page], V2)).toEqual([3]);
-  });
-  it("preserves v1 and excludes verified blank figures", () => {
-    expect(selectLegacyVisionPages([page])).toEqual([]);
-    expect(selectLegacyVisionPages([{ ...page, ocrDecision: {
-      ...page.ocrDecision, signals: ["ocr-not-authorized:blank-page"],
-    } }], V2)).toEqual([]);
+describe("visual relationships through the decision surface", () => {
+  it("already selects dense figure page 3 without fabricating an extractor hint", () => {
+    const result = surface({
+      text: [OCR_PROSE, "", OCR_PROSE + "\nFigure: quarterly chart with axis and legend. Q1 growth 12%"].join("\f"),
+      pageCount: 3,
+      evidence: [
+        { pageNumber: 2, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 },
+        { pageNumber: 3, wordCount: 250, imageCount: 1, imageCoverage: 0.1, largestImageCoverage: 0.1 },
+      ],
+    });
+    expect(result.status).toBe("ready");
+    expect(result.pages[2]?.route).toBe("chart-or-figure");
+    expect(result.pages[2]?.extractorHint).toBe("vision-rescue");
+    expect(selected(result)).toEqual([3]);
   });
 });
