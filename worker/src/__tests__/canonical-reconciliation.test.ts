@@ -26,6 +26,34 @@ function baseline() {
 }
 
 describe("Canonical Reconciliation Module", () => {
+  it("preserves explicit visual relationships through canonical and contract rebuilding", () => {
+    const markdown = [
+      "## Chart", "", "Horizontal axis: elapsed time (s); ticks: 0, 5, 10.",
+      "Vertical axis: pressure (kPa); ticks: 0, 20, 40.",
+      "Series: inlet (solid), outlet (dashed). Unlabeled values are unknown.", "",
+      "| Printed time (s) | Printed inlet pressure (kPa) |",
+      "| --- | --- |", "| 5 | 20 |", "", "## Diagram", "",
+      "- Enclosure contains pump and valve.",
+      "- Pump → valve: supply.", "- Valve → pump: return.",
+    ].join("\n");
+    const result = reconcileCanonicalArtifacts({
+      ...baseline(),
+      replacements: [{ pageNumber: 3, markdown, source: {
+        adapter: "vision", model: "synthetic", confidence: 0.9,
+        confidenceBasis: "page-triage", reason: "figure-content",
+      } }],
+    });
+    expect(result.changedPages).toEqual([3]);
+    for (const fact of ["elapsed time (s)", "ticks: 0, 20, 40", "outlet (dashed)",
+      "Unlabeled values are unknown", "| 5 | 20 |", "contains pump and valve",
+      "Pump → valve: supply", "Valve → pump: return"]) {
+      expect(result.markdown).toContain(fact);
+      expect(result.extractionContract.markdown).toContain(fact);
+      expect(result.rawText).toContain(fact);
+    }
+    expect(result.markdown.split("\f")[1]).toContain("keep this");
+  });
+
   it.each(["", "Existing native text"])("handles missing triage confidence with native text %j", (text) => {
     const canonicalDocument = buildCanonicalDocumentFromMarkdown({
       documentId: "scan", text, pageCount: 1, extractor: "baseline",

@@ -48,3 +48,31 @@ stands in for those boundaries.
 No paid calls, held-out reruns, production changes, deployment, global configuration
 changes, or subagents. No new general omission fix established. The draft remains
 incomplete for coordinator follow-up; no merge requested.
+
+## Follow-up: canonical content preservation
+
+A synthetic regression now supplies chart axes, units, ticks, series, a printed
+value table, directed arrows, and containment through the real canonical
+reconciliation and extraction-contract rebuilding functions. All survive in
+Markdown and raw text; untouched page content also survives. The test passes on
+the unchanged implementation. This rules out dropping these Markdown structures
+at that seam only; it is not a render/provider end-to-end regression.
+
+`vision-extract.ts` passes `output.text` as replacement Markdown. The runtime
+returns text, not a structured chart schema. Default model transcription prompts
+explicitly flatten chart labels or forbid descriptions; the specialized
+`chart-data` prompt explicitly asks for estimates when labels are absent. These
+are concrete prompt-contract gaps relative to faithful visual relationships and
+no inferred numeric values, but no model experiment establishes their causal
+contribution or validates a replacement prompt. No production prompt changed.
+
+Quality auto and routing auto are separate decisions: the active stored router
+plan replaces legacy selection/model choice; routing off/shadow retains legacy
+selection. Quality good forces every page in the legacy selector. A rendered
+page alone therefore proves neither vision selection nor successful merge.
+
+Fetched main was `7f3ec4e0`, already an ancestor of this branch. Deployed SHA was
+not verified in this follow-up. Six reconciliation tests and the worker build
+passed. No new security boundary changed; boundary integration coverage listed
+above remains outstanding. This follow-up is diagnostic test coverage, not a
+claim that the original visual extraction task is fixed.
