@@ -303,7 +303,7 @@ export class ConfigConflictError extends Error {
 }
 const MAX_REPLANS = 5;
 
-export type ReindexRunResult = { runIds: string[]; blockedReason: "credits" | "budget" | "policy" | null; documents: number };
+export type ReindexRunResult = { runIds: string[]; queuedRunIds: string[]; blockedReason: "credits" | "budget" | "policy" | null; documents: number };
 
 /**
  * Creates the minimal-stage re-index runs inside `tx`. Documents whose source artifacts can no longer be
@@ -323,6 +323,8 @@ export async function createReindexRuns(args: {
   assertPipelineSpeedBoost(args.pipeline);
   const { tx, workspace } = args;
   const runIds: string[] = [];
+  const queuedRunIds: string[] = [];
+  let blockedReason = args.blockedReason;
   const batches: Array<{ docs: ReindexTarget[]; pipeline: PipelineFeatures; partial: boolean }> = [];
   const fullPipeline = { ...withoutStageSelection(args.pipeline) } as PipelineFeatures;
   for (const group of args.reusable.partial) {
@@ -335,9 +337,17 @@ export async function createReindexRuns(args: {
     batches.push({ docs: args.reusable.full.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: fullPipeline, partial: false });
   }
   const jobId = randomUUID();
-  const status = args.blockedReason ? "blocked" : "queued";
   let documents = 0;
   for (const [index, batch] of batches.entries()) {
+    // Recheck under the org admission lock for every batch. Earlier batches in
+    // this transaction already hold their own reservation/lease; a single
+    // check for the whole job would over-admit large workspaces.
+    let batchBlockedReason = args.blockedReason;
+    if (!batchBlockedReason) {
+      const block = await admissionBlock(tx, workspace.orgId, workspace.id, { speedBoost: batch.pipeline.speedBoost });
+      if (block) batchBlockedReason = spendBlockJobReason(block.code);
+    }
+    const status = batchBlockedReason ? "blocked" : "queued";
     const runId = index === 0 ? jobId : randomUUID();
     const pages = batch.docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
     const stats = { job: { id: jobId, ...args.meta } };
@@ -347,7 +357,7 @@ export async function createReindexRuns(args: {
         creation_ready_at, creation_expires_at)
       -- The documents are inserted in this transaction, so the manifest is complete when it commits; without
       -- creation_ready_at neither runLifecycle.start nor run-start recovery would ever start the run.
-      values (${runId}, ${workspace.orgId}, ${args.userId}, ${workspace.id}, 'reindex', ${status}, ${args.blockedReason}, ${jobId}, 0, 'queued',
+      values (${runId}, ${workspace.orgId}, ${args.userId}, ${workspace.id}, 'reindex', ${status}, ${batchBlockedReason}, ${jobId}, 0, 'queued',
         ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
         now(), null)
     `;
@@ -367,16 +377,28 @@ export async function createReindexRuns(args: {
       `;
     }
     documents += batch.docs.length;
-    if (!args.blockedReason && creditLeasesEnabled() && !spendGuardsSkipped()) {
+    if (!batchBlockedReason && creditLeasesEnabled() && !spendGuardsSkipped()) {
       try {
-        await tx.savepoint((sp) => grantRunCreditLease(sp, { runId, orgId: workspace.orgId, workspaceId: workspace.id }));
+        await tx.savepoint(async (sp) => {
+          const grant = await grantRunCreditLease(sp, { runId, orgId: workspace.orgId, workspaceId: workspace.id });
+          if (!grant || grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
+            throw new Error("Reindex admission did not acquire a usable credit lease");
+          }
+        });
       } catch (error) {
-        console.warn(`[credit-leases] run=${runId} admission lease failed: ${error instanceof Error ? error.message : String(error)}`);
+        // Save the requested configuration and document manifests, but never
+        // publish queued work whose mandatory lease was refused or uncertain.
+        batchBlockedReason = "credits";
+        await tx`update workspace_runs set status = 'blocked', blocked_reason = 'credits'
+          where id = ${runId} and org_id = ${workspace.orgId} and workspace_id = ${workspace.id}`;
+        console.warn(`[credit-leases] run=${runId} admission blocked: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    if (batchBlockedReason) blockedReason ??= batchBlockedReason;
+    else queuedRunIds.push(runId);
     runIds.push(runId);
   }
-  return { runIds, blockedReason: args.blockedReason, documents };
+  return { runIds, queuedRunIds, blockedReason, documents };
 }
 
 export type ReusableSplit = {
@@ -664,10 +686,6 @@ async function applyPlannedChange(args: {
       planned.set(stages.join(","), group);
     }
     split.partial = [...planned.values()];
-    if (!blockedReason) {
-      const block = await admissionBlock(tx, workspace.orgId, workspace.id);
-      if (block) blockedReason = spendBlockJobReason(block.code);
-    }
     const runs = await createReindexRuns({
       tx, workspace, pipeline: { ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, userId,
       meta: jobMeta, blockedReason, reusable: split,
@@ -689,7 +707,7 @@ async function applyPlannedChange(args: {
     result.runs.runIds,
     userId,
   );
-  return { workspace: updated, plan, job, queuedRunIds: result.runs.blockedReason ? [] : result.runs.runIds, cancelledRunIds: result.cancelled.all };
+  return { workspace: updated, plan, job, queuedRunIds: result.runs.queuedRunIds, cancelledRunIds: result.cancelled.all };
 }
 
 /** What `POST /v1/workspaces/:id/estimate` returns. */

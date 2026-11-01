@@ -439,6 +439,7 @@ export function assertPipelineSpeedBoost(value: unknown): void {
 }
 
 export class PipelineSpeedBoostRequiredError extends Error {
+  readonly statusCode = 400;
   readonly status = 400;
   readonly code = "speed_boost_required";
   constructor() { super("Configured Nitro models require explicit speedBoost: true"); this.name = "PipelineSpeedBoostRequiredError"; }

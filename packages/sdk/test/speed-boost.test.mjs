@@ -27,3 +27,19 @@ test("URL and multipart uploads retain true and false independently of quality",
   assert.equal(JSON.parse(calls[0]).speedBoost, true);
   assert.equal(calls[1].get("speedBoost"), "false");
 });
+
+test("full-index mutation and estimate transports preserve all opt-in states", async () => {
+  const bodies = [];
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async (_url, init) => { bodies.push(JSON.parse(init.body)); return Response.json({}); } });
+  for (const speedBoost of [undefined, false, true]) {
+    const input = speedBoost === undefined ? {} : { speedBoost };
+    await client.fullIndex(input);
+    await client.fullIndexDocument("doc", input);
+    await client.fullIndexEstimate(input);
+    await client.fullIndexEstimate({ documentId: "doc", ...input });
+    for (const body of bodies.splice(0)) {
+      assert.equal(body.speedBoost, speedBoost);
+      assert.equal(Object.hasOwn(body, "speedBoost"), speedBoost !== undefined);
+    }
+  }
+});

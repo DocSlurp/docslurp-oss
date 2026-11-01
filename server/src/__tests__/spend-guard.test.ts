@@ -1,3 +1,4 @@
+import { nativeApiErrors } from "../lib/api-error.js";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -172,4 +173,12 @@ it("rejects configured Nitro without opt-in as a client error", async () => {
   const response = await app.request("/");
   expect(response.status).toBe(400);
   expect(await response.json()).toMatchObject({ code: "speed_boost_required" });
+});
+
+it("preserves the opt-in client error through native API middleware", async () => {
+  const app = new Hono();
+  app.use("*", nativeApiErrors);
+  app.get("/v1/test", () => { throw new PipelineSpeedBoostRequiredError(); });
+  app.onError(spendAwareErrorHandler);
+  expect((await app.request("/v1/test")).status).toBe(400);
 });

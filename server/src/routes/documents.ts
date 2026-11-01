@@ -171,7 +171,7 @@ export const documentsRoutes = new Hono()
     });
     return c.json({ documents });
   })
-  .post("/:documentId/full-index", async (c) => {
+  .post("/:documentId/full-index", zValidator("json", z.object({ speedBoost: z.boolean().optional() }).default({}), validationHook), async (c) => {
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
     const userId = c.get("sessionUser").id;
     const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
@@ -195,10 +195,11 @@ export const documentsRoutes = new Hono()
     if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
     try {
       const inline = await inlineEstimate(
-        () => estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] }),
+        () => estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] }),
         `/v1/documents/${viewer.document.id}/full-index/estimate`,
       );
       const result = await requestFullIndex({
+        speedBoost: c.req.valid("json").speedBoost === true,
         orgId: workspace.orgId,
         workspaceId: workspace.id,
         documentIds: [viewer.document.id],
@@ -216,7 +217,7 @@ export const documentsRoutes = new Hono()
       throw error;
     }
   })
-  .post("/:documentId/full-index/estimate", async (c) => {
+  .post("/:documentId/full-index/estimate", zValidator("json", z.object({ speedBoost: z.boolean().optional() }).default({}), validationHook), async (c) => {
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
     const userId = c.get("sessionUser").id;
     const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
@@ -243,7 +244,7 @@ export const documentsRoutes = new Hono()
     }
     const access = await getWorkspaceAccess(workspace.id, userId);
     if (!access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
-    const estimate = await estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] });
+    const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] });
     return c.json({ estimate, billing: billingState() });
   })
   .get("/index", async (c) => {

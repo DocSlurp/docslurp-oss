@@ -1456,7 +1456,7 @@ export const workspacesRoutes = new Hono()
           });
           if ("policy" in resolved) {
             prepared = await prepareModeSwitchJobs({
-              workspace: modeChange, to: requestedMode.data, indexAll: raw?.indexAll === true, actor, policy: resolved.policy,
+              workspace: modeChange, speedBoost: raw?.speedBoost === true, to: requestedMode.data, indexAll: raw?.indexAll === true, actor, policy: resolved.policy,
             });
           }
         } catch (error) {
@@ -1589,7 +1589,7 @@ export const workspacesRoutes = new Hono()
   )
   .post(
     "/:workspaceId/full-index",
-    zValidator("json", z.object({ documentIds: z.array(z.string().min(1)).max(500).optional() }).default({}), validationHook),
+    zValidator("json", z.object({ speedBoost: z.boolean().optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }).default({}), validationHook),
     async (c) => {
       if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
       const userId = c.get("sessionUser").id;
@@ -1613,10 +1613,11 @@ export const workspacesRoutes = new Hono()
       if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
       try {
         const inline = await inlineEstimate(
-          () => estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds }),
+          () => estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds }),
           `/v1/workspaces/${workspace.id}/full-index/estimate`,
         );
         const result = await requestFullIndex({
+          speedBoost: c.req.valid("json").speedBoost === true,
           orgId: workspace.orgId,
           workspaceId: workspace.id,
           documentIds: c.req.valid("json").documentIds,
@@ -1637,7 +1638,7 @@ export const workspacesRoutes = new Hono()
   )
   .post(
     "/:workspaceId/full-index/estimate",
-    zValidator("json", z.object({ documentIds: z.array(z.string().min(1)).max(500).optional() }).default({})),
+    zValidator("json", z.object({ speedBoost: z.boolean().optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }).default({})),
     async (c) => {
       if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
       const userId = c.get("sessionUser").id;
@@ -1663,7 +1664,7 @@ export const workspacesRoutes = new Hono()
       if (!resolved.policy.allowFullIndexRequest) {
         return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
       }
-      const estimate = await estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds });
+      const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds });
       return c.json({ estimate, billing: billingState() });
     },
   )

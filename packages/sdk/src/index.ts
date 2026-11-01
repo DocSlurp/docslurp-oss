@@ -1706,9 +1706,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
     /** Cost of fully indexing one document (`{ documentId }`) or a workspace (`{ workspace?, documentIds? }`). */
-    fullIndexEstimate(input: { documentId: string } | { workspace?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
-      if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, {}, requestOptions);
-      return estimateAt(`${wsPath(input.workspace)}/full-index/estimate`, { documentIds: input.documentIds }, requestOptions);
+    fullIndexEstimate(input: { documentId: string; speedBoost?: boolean } | { workspace?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, { speedBoost: input.speedBoost }, requestOptions);
+      return estimateAt(`${wsPath(input.workspace)}/full-index/estimate`, { documentIds: input.documentIds, speedBoost: input.speedBoost }, requestOptions);
     },
     rebuildGraphEstimate(input: { workspace?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       const { workspace, ...body } = input;
@@ -1954,13 +1954,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     /** Indexes every unindexed page of a workspace (or the given documents) in the background. */
-    fullIndex(input: { workspace?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
-      return request<FullIndexResponse>(`${wsPath(input.workspace)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds }), requestOptions);
+    fullIndex(input: { workspace?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`${wsPath(input.workspace)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds, speedBoost: input.speedBoost }), requestOptions);
     },
 
     /** Indexes one document in full. */
-    fullIndexDocument(documentId: string, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
-      return request<FullIndexResponse>(`/v1/documents/${encodeURIComponent(documentId)}/full-index`, { method: "POST" }, requestOptions);
+    fullIndexDocument(documentId: string, requestOptions?: RequestOptions & { speedBoost?: boolean }): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`/v1/documents/${encodeURIComponent(documentId)}/full-index`, jsonRequest("POST", { speedBoost: requestOptions?.speedBoost }), requestOptions);
     },
 
     estimateIndexingMode,

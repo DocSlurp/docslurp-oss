@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   pageCredits,
+  speedBoostMultiplier,
+  assertPipelineSpeedBoost,
   deferredProfilesEnabled,
   effectiveIndexingMode,
   estimatePageEmbedCredits,
@@ -247,6 +249,7 @@ async function validateBatches(batches: RunBatch[]): Promise<void> {
 export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
   const result = { runIds: [] as string[], pipelines: new Map<string, PipelineFeatures>() };
   if (prepared.batches.length === 0) return result;
+  for (const batch of prepared.batches) assertPipelineSpeedBoost(batch.pipeline);
   await enforceLiveBudgetCaps(prepared.workspaceId, prepared.orgId);
   await admitRunSpend(prepared.orgId, prepared.workspaceId, async (tx) => {
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.workspaceId}`}, 0))`;
@@ -281,11 +284,12 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       result.runIds.push(runId);
       result.pipelines.set(runId, batch.pipeline);
     }
-  });
+  }, { speedBoost: prepared.batches.some(batch => batch.pipeline.speedBoost === true) });
   return result;
 }
 
 type FullIndexArgs = {
+  speedBoost?: boolean;
   orgId: string;
   workspaceId: string;
   documentIds?: string[];
@@ -318,13 +322,15 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
   assertDocumentCap(todo.length);
   const docs = await liveDocs(args.workspaceId, todo.map((row) => row.id));
   // Stored extractor settings the strict schemas now reject are dropped before the run row is written.
-  const pipeline = { ...sanitizeStoredPipeline(ws.pipeline as PipelineFeatures, `workspace ${args.workspaceId}`), indexingMode: "full" as const };
+  const requestedPipeline = { ...ws.pipeline, speedBoost: args.speedBoost === true };
+  assertPipelineSpeedBoost(requestedPipeline);
+  const pipeline = { ...sanitizeStoredPipeline(requestedPipeline as PipelineFeatures, `workspace ${args.workspaceId}`), indexingMode: "full" as const };
   const batches: RunBatch[] = [{ docs, pipeline, mode: "full", partial: false }];
   await validateBatches(batches);
   const unindexed = todo.reduce((sum, row) => sum + row.unindexed, 0);
   return {
     orgId: args.orgId, workspaceId: args.workspaceId, batches, pages: unindexed,
-    unindexedPages: unindexed, estimatedCredits: priceOrNull(round(unindexed * fullIndexCreditsPerPage())), billing: billingMode(),
+    unindexedPages: unindexed, estimatedCredits: priceOrNull(round(unindexed * fullIndexCreditsPerPage() * speedBoostMultiplier(args.speedBoost))), billing: billingMode(),
   };
 }
 
@@ -373,6 +379,7 @@ export async function validateModeSwitch(args: { current: WorkspaceRecord; nextP
  * Throws 4xx when the jobs are impossible or too large.
  */
 export async function prepareModeSwitchJobs(args: {
+  speedBoost?: boolean;
   workspace: WorkspaceRecord;
   to: IndexingMode;
   indexAll: boolean;
@@ -387,7 +394,7 @@ export async function prepareModeSwitchJobs(args: {
     if (!args.indexAll) return none;
     try {
       const prepared = await prepareFullIndex({
-        orgId: args.workspace.orgId, workspaceId: args.workspace.id, actor: args.actor, policy: args.policy,
+        orgId: args.workspace.orgId, workspaceId: args.workspace.id, actor: args.actor, policy: args.policy, speedBoost: args.speedBoost === true,
       });
       return prepared;
     } catch (error) {
@@ -404,7 +411,7 @@ export async function prepareModeSwitchJobs(args: {
   assertDocumentCap(sources.length);
   const busy = await inFlightSourceIds(sql as unknown as Client, args.workspace.id, sources.map((row) => row.id), [stage]);
   const docs = await liveDocs(args.workspace.id, sources.map((row) => row.id).filter((id) => !busy.has(id)));
-  const pipeline = { ...args.workspace.pipeline, indexingMode: to, stageSubset: [stage] } as PipelineFeatures;
+  const pipeline = { ...args.workspace.pipeline, speedBoost: args.speedBoost === true, indexingMode: to, stageSubset: [stage] } as PipelineFeatures;
   const batches = docs.map((doc) => ({ docs: [doc], pipeline, mode: to, partial: true }));
   await validateBatches(batches);
   return { ...none, batches, pages: docs.reduce((sum, doc) => sum + doc.page_count, 0) };
@@ -412,6 +419,7 @@ export async function prepareModeSwitchJobs(args: {
 
 /** Prepare and commit in one step (tests and simple callers). */
 export async function startModeSwitchJobs(args: {
+  speedBoost?: boolean;
   before: WorkspaceRecord;
   after: WorkspaceRecord;
   indexAll: boolean;
@@ -419,7 +427,7 @@ export async function startModeSwitchJobs(args: {
   policy: MaterializationPolicy;
 }): Promise<ModeSwitchResult> {
   const prepared = await prepareModeSwitchJobs({
-    workspace: args.before, to: args.after.pipeline.indexingMode, indexAll: args.indexAll, actor: args.actor, policy: args.policy,
+    workspace: args.before, speedBoost: args.speedBoost === true, to: args.after.pipeline.indexingMode, indexAll: args.indexAll, actor: args.actor, policy: args.policy,
   });
   return await commitIndexJobs(prepared, args.actor.userId);
 }
@@ -441,6 +449,7 @@ export { SpendBlockedError };
  * this same value as `job.estimate`.
  */
 export async function estimateFullIndex(args: {
+  speedBoost?: boolean;
   workspaceId: string;
   orgId: string;
   documentIds?: string[];
@@ -453,7 +462,9 @@ export async function estimateFullIndex(args: {
   const pending = (await unindexedPages(args.workspaceId, args.documentIds)).filter((row) => row.unindexed > 0);
   const busy = await inFlightSourceIds(sql as unknown as Client, args.workspaceId, pending.map((row) => row.id), null);
   const todo = pending.filter((row) => !busy.has(row.id));
-  const features = { ...sanitizeStoredPipeline(ws.pipeline, `workspace ${args.workspaceId}`), indexingMode: "full" as const } as PipelineFeatures;
+  const requestedPipeline = { ...ws.pipeline, speedBoost: args.speedBoost === true };
+  assertPipelineSpeedBoost(requestedPipeline);
+  const features = { ...sanitizeStoredPipeline(requestedPipeline, `workspace ${args.workspaceId}`), indexingMode: "full" as const } as PipelineFeatures;
   return await estimateWork({
     features,
     stages: compilePipelinePlan(features).stageOrder,
