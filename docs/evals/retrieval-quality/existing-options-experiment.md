@@ -35,8 +35,11 @@ reconciliation; the runner stops when its cumulative estimated bound is reached.
   retrieval-adapter candidate limit to 200 (baseline uses requested limit), as well as the
   post-fusion candidate cap from `limit*2` to 200; this is an existing-option
   comparison, not an isolated scoring-formula experiment.
-- Production MMR receives no vectors. It uses positional selection, and
-  `mmrLambda` has no effect on that fallback. Do not describe it as semantic MMR.
+- Production MMR received no vectors when this experiment ran. It used positional
+  selection, and `mmrLambda` had no effect on that fallback. Do not describe it as
+  semantic MMR. DocSlurp/docslurp-oss#249 later replaced it with term-frequency
+  similarity and rescaled relevance. The MMR rows below measure the old fallback
+  only and say nothing about the current implementation.
 - Either enabled postprocessing path applies lost-in-the-middle ordering.
   Reported support rank and reciprocal rank measure presentation order, not
   original relevance order. Recall at 10 remains the primary measure.

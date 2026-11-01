@@ -346,6 +346,17 @@ Both controls are also optional workspace retrieval defaults and per-request/thr
 
 Omitting both controls preserves existing behavior: rerank-enabled searches acquire and rank up to 200 candidates, while rerank-disabled acquisition follows the result limit. Existing postprocessing packs its selected results; unprocessed fusion returns relevance order. Explicit controls are opt-in so this interface change does not claim a new ranking default based on exposed development evaluations. Scores remain the existing reciprocal output-position scores, and confidence is not a calibrated probability of answer correctness.
 
+### Optional result diversity (MMR)
+
+`mmr: true` turns on maximal marginal relevance, which stops near-duplicate passages from filling the results. It is off by default and is also available as `useMmr` / `mmrLambda` in workspace retrieval defaults and chat retrieval overrides.
+
+- MMR picks results one at a time. Each pick maximizes `mmrLambda × relevance − (1 − mmrLambda) × similarity to the results already picked`. `mmrLambda` runs from 0 to 1, where 1 is pure relevance; the workspace default is 0.4, and 0.5 applies when neither the request nor the workspace sets it.
+- Candidates are compared by term-frequency cosine over their words, because fused candidates don't carry embeddings. Relevance is rescaled to 0–1 across the candidate window before the subtraction.
+- Without `rerank` or an explicit `candidateDepth`, each adapter returns `2 × limit` candidates so MMR has alternatives to choose from.
+- The Search Session diagnostics record `mmr: { similarity, lambda, candidates, selected, diversified }`, where `diversified` counts results MMR picked over a more relevant but redundant passage.
+
+MMR changes which passages are returned, not only their order. No retrieval-quality improvement from it has been measured.
+
 ### Optional hosted learned reranking
 
 Workspace search settings can explicitly select DeepInfra's pointwise
