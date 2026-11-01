@@ -5,6 +5,8 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import type { Pool } from "pg";
 
+import { EMAIL_CODE_SECONDS } from "./auth-email.js";
+
 /**
  * Two bindings between a password and what it unlocks.
  *
@@ -30,7 +32,8 @@ import type { Pool } from "pg";
 
 export const VERIFY_WITH_PASSWORD_CODE = "VERIFY_WITH_PASSWORD";
 const BINDING_COOKIE = "verify_binding";
-const BINDING_SECONDS = 30 * 60;
+/** As long as the code it lets this browser enter. */
+const BINDING_SECONDS = EMAIL_CODE_SECONDS;
 
 /** SHA-256 of a stored password hash; the same function as the SQL check in auth-mfa.ts. */
 export function credentialFingerprint(storedHash: string): string {

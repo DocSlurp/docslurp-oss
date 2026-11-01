@@ -208,10 +208,36 @@ describe("password recovery with native Email OTP", () => {
     await requestReset(browser, other.email);
     const late = lastCodeFor(other.email);
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 11 * 60_000);
+    vi.setSystemTime(Date.now() + 12 * 60 * 60_000 + 60_000);
     expect((await browser.json("/email-otp/reset-password", { email: other.email, otp: late, password: NEW_PASSWORD })).status).toBe(400);
     vi.useRealTimers();
     expect((await new Browser().json("/sign-in/email", { email: other.email, password: PASSWORD })).status).toBe(200);
+  });
+
+  it("accepts an unused hashed code after eleven hours without a resend", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    await requestReset(browser, user.email);
+    const code = lastCodeFor(user.email);
+    const stored = await pool.query<{ value: string }>(`select value from verification where identifier = $1`, [`forget-password-otp-${user.email}`]);
+    expect(stored.rows).toHaveLength(1);
+    expect(stored.rows[0]!.value).not.toContain(code);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60 * 60_000);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: code, password: NEW_PASSWORD })).status).toBe(200);
+  });
+
+  it("keeps a code usable for hours; a resend replaces it with a new one", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    await requestReset(browser, user.email);
+    const first = lastCodeFor(user.email);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60 * 60_000);
+    await requestReset(browser, user.email);
+    const second = lastCodeFor(user.email);
+    if (second !== first) expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: first, password: NEW_PASSWORD })).status).toBe(400);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: second, password: NEW_PASSWORD })).status).toBe(200);
   });
 
   it("answers an unknown address like a known one and sends nothing", async () => {
@@ -355,6 +381,11 @@ describe("password recovery with native Email OTP", () => {
     expect(options.databaseHooks?.account?.create?.before).toBe(beforeOAuthAccountCreate);
     const plugins = (options.plugins ?? []).map((plugin) => plugin.id);
     expect(plugins).toEqual(expect.arrayContaining(["email-otp", "magic-link"]));
+    // Emailed codes: 12 hours, hashed, five attempts.
+    const emailOtp = (options.plugins ?? []).find((plugin) => plugin.id === "email-otp") as { options?: Record<string, unknown> } | undefined;
+    const { EMAIL_CODE_SECONDS } = await import("../lib/auth-email.js");
+    expect(emailOtp?.options).toMatchObject({ expiresIn: EMAIL_CODE_SECONDS, storeOTP: "hashed", allowedAttempts: 5 });
+    expect(EMAIL_CODE_SECONDS).toBeGreaterThanOrEqual(12 * 60 * 60);
     expect(plugins.filter((id) => ["admin", "anonymous", "username", "phone-number", "one-tap", "generic-oauth"].includes(id))).toEqual([]);
   });
 

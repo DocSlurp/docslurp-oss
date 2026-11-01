@@ -1,3 +1,7 @@
+## Email OTP generation fencing (2026-11-01)
+
+- Fence native wrong-code restoration against concurrent resends in Postgres, preserving hashed 12-hour codes and attempts. See `docs/security/otp-generation-fence.md`; final council review remains required.
+
 - Preserve requested born-digital embedded images as lossless WebP in the existing Doppler VM, with bounded framed transport, page/mask manifests, shard deduplication, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/doppler-images.md; deployment remains manual.
 ## Durable workspace recommendation visits (2026-11-01)
 

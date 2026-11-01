@@ -5,13 +5,13 @@ import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api
 import { generateRandomString } from "better-auth/crypto";
 import { isEmailAuthConfigured } from "@docslurp/shared/auth-security";
 import { z } from "zod";
-import { sendAuthEmailCode } from "./auth-email.js";
+import { EMAIL_CODE_SECONDS, sendAuthEmailCode } from "./auth-email.js";
 import { evaluateMfaPolicy, ssoEnforcedForEmail } from "./auth-mfa.js";
 
 type Database = Pick<Pool, "query">;
 const denied = () => new APIError("FORBIDDEN", { code: "REAUTH_REQUIRED", message: "Verify your identity to continue this sensitive account action." });
 const invalidCode = () => new APIError("BAD_REQUEST", { code: "INVALID_OTP", message: "That code is invalid or has expired. Request a new code." });
-const CODE_SECONDS = 600;
+const CODE_SECONDS = EMAIL_CODE_SECONDS;
 const SEND_COOLDOWN_SECONDS = 60;
 const MAX_ATTEMPTS = 5;
 
@@ -66,7 +66,7 @@ export function sensitiveEmailPlugin({ pool, deliveryEnabled = isEmailAuthConfig
         const code = generateRandomString(6, "0-9");
         const hash = digestCode(ctx.context.secret, user.id, session.id, eligible.email, code);
         const result = await pool.query(`update session s set "sensitiveEmailOTPHash" = $3,
-          "sensitiveEmailOTPExpiresAt" = now() + interval '600 seconds', "sensitiveEmailOTPSentAt" = now(), "sensitiveEmailOTPAttempts" = 0
+          "sensitiveEmailOTPExpiresAt" = now() + make_interval(secs => ${CODE_SECONDS}), "sensitiveEmailOTPSentAt" = now(), "sensitiveEmailOTPAttempts" = 0
           from "user" u where s.id = $1 and s."userId" = $2 and u.id = s."userId" and u.deleted_at is null
             and s."expiresAt" > now() and u.email = $4 and u."emailVerified" = true
             and (s."sensitiveEmailOTPSentAt" is null or s."sensitiveEmailOTPSentAt" <= now() - interval '60 seconds') returning s.id`,
