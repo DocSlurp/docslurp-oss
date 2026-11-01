@@ -11,7 +11,7 @@
         "content": [
           {
             "type": "text",
-            "text": "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible."
+            "text": "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible.\nKeep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.\nFor charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.\nDistinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.\nFor diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain."
           },
           {
             "type": "image_url",
@@ -49,7 +49,7 @@
         "content": [
           {
             "type": "text",
-            "text": "Extract visible document content with layout-aware structure. Preserve section order, table rows, captions, and page-local labels."
+            "text": "Extract visible document content with layout-aware structure. Preserve section order, table rows, captions, and page-local labels.\nKeep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.\nFor charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.\nDistinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.\nFor diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain."
           },
           {
             "type": "image_url",
@@ -87,7 +87,7 @@
         "content": [
           {
             "type": "text",
-            "text": "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct or describe the page. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown."
+            "text": "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct the text or add unrelated descriptions. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown.\nKeep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.\nFor charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.\nDistinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.\nFor diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain."
           },
           {
             "type": "image_url",
@@ -135,7 +135,7 @@
         "content": [
           {
             "type": "text",
-            "text": "Extract visible document content with layout-aware structure. Preserve section order, table rows, captions, and page-local labels."
+            "text": "Extract visible document content with layout-aware structure. Preserve section order, table rows, captions, and page-local labels.\nKeep printed text verbatim. The visual evidence descriptions and explicitly marked approximate readings requested below are permitted additions to the transcription; they must be grounded in visible marks, not unrelated commentary.\nFor charts, preserve legible titles, axes, units, tick labels, legends and series. Keep each value associated with its series and category or coordinate.\nDistinguish exact printed values from approximate visual readings. Only report an approximate visual reading when the marks and scale are legible, and label each such reading approximate; otherwise state that the value is unreadable or uncertain. Never infer hidden values.\nFor diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain."
           },
           {
             "type": "image_url",

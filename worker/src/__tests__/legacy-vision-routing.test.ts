@@ -284,3 +284,20 @@ describe("bounded text scans", () => {
     expect(classifyTextAndFilename(late, "upload.pdf").label).toBe("invoice");
   });
 });
+
+describe("visual relationships through the decision surface", () => {
+  it("already selects dense figure page 3 without fabricating an extractor hint", () => {
+    const result = surface({
+      text: [OCR_PROSE, "", OCR_PROSE + "\nFigure: quarterly chart with axis and legend. Q1 growth 12%"].join("\f"),
+      pageCount: 3,
+      evidence: [
+        { pageNumber: 2, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 },
+        { pageNumber: 3, wordCount: 250, imageCount: 1, imageCoverage: 0.1, largestImageCoverage: 0.1 },
+      ],
+    });
+    expect(result.status).toBe("ready");
+    expect(result.pages[2]?.route).toBe("chart-or-figure");
+    expect(result.pages[2]?.extractorHint).toBe("vision-rescue");
+    expect(selected(result)).toEqual([3]);
+  });
+});
