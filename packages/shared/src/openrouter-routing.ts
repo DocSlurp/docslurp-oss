@@ -1,3 +1,4 @@
+import { nitroBaseModel } from "./workspace-chat-models.js";
 /**
  * OpenRouter host routing: which upstream providers may serve a request, and
  * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`
@@ -47,6 +48,12 @@ export function isPriceRoutedModel(model: string): boolean {
 
 /** The price-routing `provider` preferences for `model`, or undefined to leave routing to OpenRouter. */
 export function openRouterProviderPreferences(model: string): Record<string, unknown> | undefined {
+  if (model.endsWith(":nitro")) {
+    const base = nitroBaseModel(model);
+    if (!base) throw new Error("Unsupported OpenRouter Nitro model");
+    return { sort: "throughput", ...(isPriceRoutedModel(base) ? { quantizations: [...PRICE_ROUTED_QUANTIZATIONS] } : {}),
+      max_price: { prompt: 1, completion: 5 }, allow_fallbacks: true };
+  }
   return isPriceRoutedModel(model)
     ? { sort: "price", quantizations: [...PRICE_ROUTED_QUANTIZATIONS], allow_fallbacks: true }
     : undefined;
@@ -91,6 +98,19 @@ export function withOpenRouterProviderPreferences<T extends Record<string, unkno
   const preferences = openRouterProviderPreferences(model);
   const own = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? body.provider as Record<string, unknown> : undefined;
   const merged = preferences || own ? { ...preferences, ...own } : undefined;
+  if (nitroBaseModel(model) && merged) {
+    // Request preferences may narrow, but cannot remove or raise the endpoint ceiling.
+    const price = own?.max_price as Record<string, unknown> | undefined;
+    const cap = (value: unknown, ceiling: number) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(value, ceiling) : ceiling;
+    merged.max_price = { prompt: cap(price?.prompt, 1), completion: cap(price?.completion, 5) };
+    merged.sort = "throughput";
+    if (isPriceRoutedModel(nitroBaseModel(model)!)) {
+      const requested = stringList(own?.quantizations);
+      const allowed = [...PRICE_ROUTED_QUANTIZATIONS].filter((value) => !requested || requested.includes(value));
+      if (!allowed.length) throw new Error("No supported Nitro quantization remains");
+      merged.quantizations = allowed;
+    }
+  }
   const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
   if (!routed || (routed === own && !preferences)) return body;
   return { ...body, provider: routed };

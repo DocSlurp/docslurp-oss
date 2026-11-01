@@ -1,3 +1,4 @@
+import { nitroBaseModel } from "./workspace-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
 
@@ -66,6 +67,15 @@ async function resolveOpenRouterUsageInner(args: {
       }
     } catch { /* Record explicit fallback provenance; accounting must not discard the answer. */ }
   }
+  // Nitro can select priority endpoints. A base-model listing cannot price this call.
+  // Preserve tokens using an explicitly estimated ceiling. This is NOT a held budget reserve:
+  // operators must reconcile missing receipts manually; no automatic reconciliation exists.
+  if (args.model.endsWith(":nitro")) return { ...base,
+    costCents: (base.inputTokens * 1 + base.outputTokens * 5) / 10_000,
+    metadata: { costSource: "estimate", accountingStatus: "receipt-missing", reconciliationRequired: true,
+      pricingSource: "nitro-endpoint-ceiling-estimate", generationId: args.generationId ?? null,
+      ...(args.providerName ? { providerName: args.providerName } : {}) },
+  };
   // No receipt: estimate from the verified price table, then the live listing.
   const verified = chatModelPricePerToken(args.model);
   const pricing = verified ?? await getModelPricing(args.model);
@@ -118,7 +128,7 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {
-  return model ? OPENROUTER_LOWEST_REASONING[model] : undefined;
+  return model ? OPENROUTER_LOWEST_REASONING[nitroBaseModel(model) ?? model] : undefined;
 }
 
 /** Request-body fragment for page-transcription calls: the model's verified lowest reasoning, or nothing. */
