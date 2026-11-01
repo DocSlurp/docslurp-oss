@@ -214,6 +214,19 @@ describe("password recovery with native Email OTP", () => {
     expect((await new Browser().json("/sign-in/email", { email: other.email, password: PASSWORD })).status).toBe(200);
   });
 
+  it("accepts an unused hashed code after eleven hours without a resend", async () => {
+    const user = await createUser();
+    const browser = new Browser();
+    await requestReset(browser, user.email);
+    const code = lastCodeFor(user.email);
+    const stored = await pool.query<{ value: string }>(`select value from verification where identifier = $1`, [`forget-password-otp-${user.email}`]);
+    expect(stored.rows).toHaveLength(1);
+    expect(stored.rows[0]!.value).not.toContain(code);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60 * 60_000);
+    expect((await browser.json("/email-otp/reset-password", { email: user.email, otp: code, password: NEW_PASSWORD })).status).toBe(200);
+  });
+
   it("keeps a code usable for hours; a resend replaces it with a new one", async () => {
     const user = await createUser();
     const browser = new Browser();
