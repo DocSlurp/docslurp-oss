@@ -114,3 +114,13 @@ must bind the entire productionHash, datasetHash and exact candidate set to an
 independent reviewer identity and reason, rejecting stale or incomplete records.
 Reports with findings use `status: "blocked"`; only reports with neither findings
 nor candidates use `status: "passed"`. Consumers must require `passed === true`.
+
+
+The gate scans working-tree content. A path changed in both the index relative to
+HEAD and the working tree relative to the index blocks with
+`index-working-tree-mismatch`, including nested repositories. This conservative
+check rejects partial staging even when both versions are benign; stage the final
+content before rerunning. It prevents a staged answer prompt from being hidden by
+a benign working-tree replacement or deletion. Fully staged changes are scanned
+normally, and unstaged-only repairs retain their existing semantics. This is not
+a full historical/index-content scan.

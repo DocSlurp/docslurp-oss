@@ -356,3 +356,40 @@ test('comments block promotion including toString and self-source consumption', 
     assert.equal(main(['--dataset', f.dataset, '--repo', f.repo, '--output', output]), 1);
   }
 });
+
+
+test('empty-body comments remain unresolved candidates', (t) => {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'span', expected: '93 furlongs' }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), 'function a(){/*93 furlongs*/} export const prompt=a.toString();');
+  const report = f.run();
+  assert.equal(report.passed, false);
+  assert.equal(report.status, 'needs-review');
+  assert.ok(report.candidates.length > 0);
+});
+
+
+test('blocks index-only leakage while allowing matching staged changes', (t) => {
+  for (const fresh of [false, true]) {
+    const f = fixture(t), name = fresh ? 'new-worker.ts' : 'worker.ts';
+    writeFileSync(join(f.repo, name), 'export const prompt = "Distinctive Example Supplier";');
+    f.git('add', name);
+    writeFileSync(join(f.repo, name), 'export const generic = true;');
+    assert.ok(rules(f.run()).includes('index-working-tree-mismatch'));
+    rmSync(join(f.repo, name));
+    assert.ok(rules(f.run()).includes('index-working-tree-mismatch'));
+    writeFileSync(join(f.repo, name), 'export const generic = true;');
+    f.git('add', name);
+    assert.equal(f.run().passed, true);
+  }
+});
+
+test('blocks partially staged nested repository paths', (t) => {
+  const f = nestedFixture(t);
+  writeFileSync(join(f.nested, 'engine.ts'), '"Distinctive Example Supplier"');
+  f.nestedGit('add', 'engine.ts');
+  writeFileSync(join(f.nested, 'engine.ts'), 'export const generic = true;');
+  assert.ok(f.run().findings.some(x => x.rule === 'index-working-tree-mismatch' && x.file === 'core/engine.ts'));
+});

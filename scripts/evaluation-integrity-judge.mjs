@@ -67,7 +67,7 @@ function commentRanges(file, text) {
     ranges.push(...(ts.getTrailingCommentRanges(text, node.pos) ?? []));
     ranges.push(...(ts.getLeadingCommentRanges(text, node.pos) ?? []));
     ranges.push(...(ts.getTrailingCommentRanges(text, node.end) ?? []));
-    ts.forEachChild(node, visit);
+    for (const child of node.getChildren(source)) visit(child);
   };
   visit(source);
   return ranges.filter(({ pos, end }) =>
@@ -174,6 +174,13 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
         if (!existsSync(path)) throw new Error('nested-repository-missing');
         if (lstatSync(path).isSymbolicLink() || !within(root, realpathSync(path))) throw new Error('repository-symlink-escape');
         if (!existsSync(resolve(path, '.git'))) throw new Error('nested-repository-uninitialized');
+      }
+      // Scan working-tree bytes, but refuse partially staged paths: their index
+      // version could contain leakage hidden by an unstaged replacement/deletion.
+      // Pure unstaged repairs and fully staged changes retain existing semantics.
+      const staged = new Set(run('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD', '--').split('\0').filter(Boolean));
+      for (const name of run('diff', '--name-only', '--no-renames', '-z', '--').split('\0').filter(Boolean)) {
+        if (staged.has(name)) add('index-working-tree-mismatch', { file: prefix + name });
       }
       coverage.dirty = Boolean(run('status', '--porcelain').trim());
       const names = [...new Set([...entries.keys(), ...run('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean)])].sort();
