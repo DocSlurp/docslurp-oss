@@ -1,3 +1,7 @@
+## Durable workspace recommendation visits (2026-11-01)
+
+- Add session-scoped SQL snapshots and atomic token acknowledgements for return-visit recommendations, with bounded aggregate activity and account/workspace deletion cleanup.
+
 ## Browser-key security council follow-ups (2026-10-31)
 
 - #210: explicit server/ingest and UUID admission, with real persisted-key revocation/membership and migrated ownership tests for both upload-status modes.
