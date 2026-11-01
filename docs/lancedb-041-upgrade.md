@@ -60,3 +60,41 @@ and native parsing faults. Existing tenancy predicates are unchanged.
 Two independent council reviewers (one adversarial) and boundary-negative
 coverage are required before merge. Neither review has been performed.
 No production data, model calls, merge or deployment was used for validation.
+
+
+## Coordinator completion and independent review evidence
+
+The affected server/worker typechecks, shared/SDK builds and worker build passed.
+Additional focused checks passed: 69 worker Lance tests and 16 SDK search/chat
+adapter tests. The independent platform reviewer passed 106 server/auth tests
+and verified all five changed Python release hashes against PyPI. Python platform
+artifacts include manylinux_2_28 x86_64/aarch64, macOS arm64 and Windows amd64;
+other targets may require a source build. Node deployment images use Node24 on
+Debian trixie; optional SDK offline/native search requires Node22 even though the
+HTTP SDK supports Node20. Deployment CPU feature availability is not certified.
+
+Independent Python 3.13.7 execution passed native import/CRUD, a 300-row 0.40
+indexed dataset read and updated by 0.41, and a COPY reopened by 0.40. This covers
+ordinary CRUD on that synthetic dataset, not general downgrade safety, new index
+formats, compaction, remote storage or concurrent writers. The smoke used Arrow26
+and pydantic2.14.2, not the complete worker lock environment.
+
+The published JS 0.41 native binary has no RTree factory. ST_Point/ST_DWithin are
+unknown functions; recognized st_intersects/st_within fail at execution with a
+requires-geo-build-feature error even for valid WKB. This release does not supply
+usable geospatial execution through the tested published JS binary.
+
+Review found a pre-existing empty-eligibility inconsistency: vector search treated
+an explicit empty document allowlist as unrestricted, while full-text returned no
+hits. This upgrade now returns no vector results before opening storage for an
+explicit empty list; only an omitted list means unrestricted within the selected
+workspace. The post-query scope check also keeps an empty allowlist empty. Native
+service and eligibility tests (37 across three files) passed, including a populated
+workspace and empty/omitted/empty sequence. This narrows behavior and requires
+fresh council review of the resulting head.
+
+Remaining validation: hostile persisted embedding metadata, exact complete Python
+lock environment/target CPU execution, and independent final-head council. No
+process-wide remote-code or endpoint permission was added. Earlier draft pending
+lists above are historical; this section records which gaps were subsequently
+covered, with their limits.
