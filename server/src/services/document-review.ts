@@ -825,7 +825,7 @@ export async function saveDocumentCorrection(args: {
     )
     on conflict (document_id) do update
     set user_id = excluded.user_id,
-        corrected_markdown = excluded.corrected_markdown,
+        corrected_markdown = case when ${args.markdown !== undefined} then excluded.corrected_markdown else document_corrections.corrected_markdown end,
         corrected_structured_data = case when ${args.structuredData !== undefined}
           then excluded.corrected_structured_data
           else document_corrections.corrected_structured_data end,
@@ -833,6 +833,10 @@ export async function saveDocumentCorrection(args: {
         updated_at = now()
     returning corrected_structured_data
   `;
+    // Explicit structured edits are new authority, even NULL -> NULL clears.
+    // Notes-only inserts carry no source mutation and must not fence geometry.
+    if (args.structuredData !== undefined) await transaction`update documents set projection_revision=projection_revision+1
+      where id=${args.docId} and workspace_id=${document.workspace_id} and org_id=${document.org_id}`;
     const corrected = args.structuredData !== undefined ? args.structuredData : savedCorrection.corrected_structured_data as Record<string, unknown> | null;
     if (args.structuredData !== undefined || corrected !== null) await publishGeoCorrection(transaction, {
       documentId: args.docId, workspaceId: document.workspace_id, orgId: document.org_id,

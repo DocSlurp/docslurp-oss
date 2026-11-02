@@ -39,7 +39,13 @@ describe("human-correction reindex", () => {
   it("preserves omitted structured corrections and clears explicit null", async () => {
     const { saveDocumentCorrection } = await import("../services/document-review.js");
     await saveDocumentCorrection({ docId: "d", userId: "u", structuredData: { location: "corrected" } });
+    await saveDocumentCorrection({docId:"d",userId:"u",markdown:"Keep corrected prose."});
+    const [beforeNote] = await sql`select projection_revision from documents where id='d'`;
     await saveDocumentCorrection({ docId: "d", userId: "u", notes: "Only notes changed" });
+    const [afterNote] = await sql`select projection_revision from documents where id='d'`;
+    expect(afterNote).toEqual(beforeNote);
+    const [prose] = await sql`select corrected_markdown from document_corrections where document_id='d'`;
+    expect(prose.corrected_markdown).toBe("Keep corrected prose.");
     const [preserved] = await sql`select corrected_structured_data from document_corrections where document_id = 'd'`;
     expect(preserved.corrected_structured_data).toEqual({ location: "corrected" });
     await saveDocumentCorrection({ docId: "d", userId: "u", structuredData: null, markdown: "Corrected page one." });

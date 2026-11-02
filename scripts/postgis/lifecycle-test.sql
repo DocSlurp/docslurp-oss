@@ -24,6 +24,12 @@ DO $$ BEGIN
   RAISE EXCEPTION 'wrong workspace accepted';
  EXCEPTION WHEN raise_exception THEN IF SQLERRM='wrong workspace accepted' THEN RAISE; END IF; END;
 END $$;
+INSERT INTO document_corrections(id,document_id,run_id,user_id,notes)
+VALUES('geo-note','geo-doc','geo-r','geo-u','Only a note');
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM ready_geo_projection_generations WHERE document_id='geo-doc') THEN RAISE EXCEPTION 'notes-only insert invalidated geometry'; END IF;
+END $$;
+DELETE FROM document_corrections WHERE id='geo-note';
 UPDATE documents SET status='completed',updated_at=now() WHERE id='geo-doc';
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM ready_geo_projection_generations WHERE document_id='geo-doc') THEN RAISE EXCEPTION 'operational completion invalidated geometry'; END IF;

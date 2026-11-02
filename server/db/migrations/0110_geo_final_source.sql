@@ -19,6 +19,8 @@ END $$;
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION invalidate_corrected_projection() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP='INSERT' AND NEW.corrected_structured_data IS NULL AND NEW.corrected_markdown IS NULL THEN RETURN NULL; END IF;
+  IF TG_OP='DELETE' AND OLD.corrected_structured_data IS NULL AND OLD.corrected_markdown IS NULL THEN RETURN NULL; END IF;
   IF TG_OP='UPDATE' AND NEW.corrected_structured_data IS NOT DISTINCT FROM OLD.corrected_structured_data
     AND NEW.corrected_markdown IS NOT DISTINCT FROM OLD.corrected_markdown THEN RETURN NULL; END IF;
   UPDATE documents SET projection_revision = projection_revision + 1,

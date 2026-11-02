@@ -51,3 +51,12 @@ it("the actual checkpoint store cannot mark a geo stage complete after publicati
   expect((await db.query("select * from geo_accepted_sources")).rows).toEqual([]);
  } finally {await store.close();await served.server.stop();}
 });
+
+it("inserting and deleting a notes-only correction preserves the source revision",async()=>{
+ const old=await revision();
+ await db.exec(`insert into document_corrections(id,document_id,run_id,user_id,notes)
+ values('note-only','d','r','u','A note');`);
+ expect(await revision()).toBe(old);
+ await db.exec("delete from document_corrections where id='note-only'");
+ expect(await revision()).toBe(old);
+});
