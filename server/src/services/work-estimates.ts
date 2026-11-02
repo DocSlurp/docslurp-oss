@@ -112,7 +112,14 @@ export async function estimateUpload(args: {
     0,
   );
   const media = estimateUploadMedia(args.files, { videoFrames: args.workspace.pipeline.mediaVideo?.enabled !== false });
-  if (media) { const multiplier = speedBoostMultiplier(args.speedBoost); media.credits = { low: media.credits.low * multiplier, high: media.credits.high * multiplier }; }
+  if (media) {
+    const multiplier = speedBoostMultiplier(args.speedBoost);
+    media.credits = { low: media.credits.low * multiplier, high: media.credits.high * multiplier };
+    if (media.lighter) {
+      media.lighter.credits *= multiplier;
+      media.lighter.savedCredits *= multiplier;
+    }
+  }
   const documents = estimateWork({
     features: { ...args.workspace.pipeline, speedBoost: args.speedBoost === true },
     stages: compilePipelinePlan(args.workspace.pipeline).stageOrder,
