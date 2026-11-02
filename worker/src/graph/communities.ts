@@ -8,6 +8,7 @@ import {
   type TextGenerationProfile,
 } from "@docslurp/shared";
 
+import { operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
 import { generateOpenRouterText } from "../lib/ai.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
 import { lockWorkspaceGraph } from "./graph-store.js";
@@ -256,6 +257,7 @@ export async function refreshWorkspaceCommunities(args: {
 
   // Summaries are independent calls; a few at a time instead of one after another.
   let llmFailures = 0;
+  let firstFailure: Record<string, string | number | boolean> | undefined;
   await runBounded(pending.length, COMMUNITY_SUMMARY_CONCURRENCY, async (index) => {
     const { record, prompt } = pending[index]!;
     try {
@@ -289,10 +291,11 @@ export async function refreshWorkspaceCommunities(args: {
       if (args.context.signal?.aborted) throw error;
       // Keep the heuristic summary when the optional LLM path is unavailable.
       llmFailures += 1;
+      firstFailure ??= operationErrorAttributes(error);
     }
   });
   if (llmFailures > 0) {
-    console.warn(`[graph-communities] workspace=${workspaceId} model=${args.context.model} llm_fallback communities=${llmFailures}/${pending.length}`);
+    console.warn(`[graph-communities] workspace=${workspaceId} model=${args.context.model} llm_fallback communities=${llmFailures}/${pending.length} first=${operationErrorSummary(firstFailure ?? {})}`);
   }
 
   const idByHash = new Map(records.map((record) => [record.memberHash, record.id]));

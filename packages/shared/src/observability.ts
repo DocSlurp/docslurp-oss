@@ -113,6 +113,7 @@ export async function withObservation<T>(
     metadataContext.run(metadata, async () => {
       const started = performance.now();
       let outcome: "ok" | "error" | "cancelled" = "ok";
+      let failure: unknown;
       contextObservations.set(metadata, observation);
       safeUpdate(observation, {
         model: options.model,
@@ -156,6 +157,7 @@ export async function withObservation<T>(
           return savedOutcome;
         }
         outcome = "error";
+        failure = error;
         safeUpdate(observation, {
           level: "ERROR",
           statusMessage: capture
@@ -173,7 +175,7 @@ export async function withObservation<T>(
         // overwrite our content policy with a raw provider error body.
         return savedOutcome;
       } finally {
-        observationTelemetry(options.name, options.type ?? "span", (performance.now() - started) / 1000, outcome, metadata);
+        observationTelemetry(options.name, options.type ?? "span", (performance.now() - started) / 1000, outcome, metadata, failure);
       }
     });
   let outcome;
@@ -228,5 +230,6 @@ export function aiResultDetails(result: {
 export { instrumentPostgres, type PostgresQueryHooks } from "./dependency-postgres.js";
 export { isTracingActive, startDependencySpan, withDependencySpan, setActiveSpanAttributes } from "./telemetry.js";
 export { instrumentFetch } from "./dependency-fetch.js";
+export { operationErrorAttributes, operationErrorSummary } from "./operation-error.js";
 export { instrumentS3Client } from "./dependency-s3.js";
 export { recordUsageReceipt, usageTraceContext } from "./dependency-usage.js";

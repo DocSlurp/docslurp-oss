@@ -77,3 +77,23 @@ it("flags a provider failure on every window, but not a run without a model", as
   expect(await extractDocumentGraph({ filename: "synthetic.html", chunks, context }))
     .toMatchObject({ source: "heuristic", llmFailed: false });
 });
+
+it("stops after a permanent provider refusal, but keeps reading windows after a rate limit", async () => {
+  const { APICallError } = await import("ai");
+  const refusal = (statusCode: number) => new APICallError({ message: "No allowed providers are available for the selected model.",
+    url: "https://openrouter.ai/api/v1/chat/completions", requestBodyValues: {}, statusCode, isRetryable: statusCode === 429 });
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const extract = () => extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example ".repeat(4000) }],
+    context: { config: { ...defaultGraphConfig, depth: "standard" }, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} },
+  });
+
+  vi.mocked(generateOpenRouterText).mockReset().mockRejectedValue(refusal(404));
+  expect(await extract()).toMatchObject({ source: "heuristic", llmFailed: true });
+  expect(generateOpenRouterText).toHaveBeenCalledTimes(1);
+  expect(warning).toHaveBeenCalledWith(expect.stringContaining("outcome=provider-error (HTTP 404, not retryable)"));
+
+  vi.mocked(generateOpenRouterText).mockReset().mockRejectedValue(refusal(429));
+  await extract();
+  expect(vi.mocked(generateOpenRouterText).mock.calls.length).toBeGreaterThan(1);
+});
