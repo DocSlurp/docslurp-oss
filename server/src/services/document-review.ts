@@ -1,3 +1,4 @@
+import { publishGeoCorrection } from "./geo-correction.js";
 import { randomUUID } from "node:crypto";
 import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
 
@@ -796,7 +797,10 @@ export async function saveDocumentCorrection(args: {
     await setDocumentTags(args.docId, args.userId, args.tags);
   }
 
-  await sql`
+  await sql.begin(async tx => {
+    const transaction = tx as unknown as typeof sql;
+    await transaction`select id from workspaces where id=${document.workspace_id} and org_id=${document.org_id} for share`;
+  const [savedCorrection] = await transaction`
     insert into document_corrections (
       id,
       document_id,
@@ -814,18 +818,30 @@ export async function saveDocumentCorrection(args: {
       ${document.run_id},
       ${args.userId},
       ${args.markdown ?? null},
-      ${args.structuredData ? sql.json(JSON.parse(JSON.stringify(args.structuredData))) : null}::jsonb,
+      ${args.structuredData ? transaction.json(JSON.parse(JSON.stringify(args.structuredData))) : null}::jsonb,
       ${args.notes ?? null},
       now(),
       now()
     )
     on conflict (document_id) do update
     set user_id = excluded.user_id,
-        corrected_markdown = excluded.corrected_markdown,
-        corrected_structured_data = excluded.corrected_structured_data,
+        corrected_markdown = case when ${args.markdown !== undefined} then excluded.corrected_markdown else document_corrections.corrected_markdown end,
+        corrected_structured_data = case when ${args.structuredData !== undefined}
+          then excluded.corrected_structured_data
+          else document_corrections.corrected_structured_data end,
         notes = excluded.notes,
         updated_at = now()
+    returning corrected_structured_data
   `;
+    // Explicit structured edits are new authority, even NULL -> NULL clears.
+    // Notes-only inserts carry no source mutation and must not fence geometry.
+    if (args.structuredData !== undefined) await transaction`update documents set projection_revision=projection_revision+1
+      where id=${args.docId} and workspace_id=${document.workspace_id} and org_id=${document.org_id}`;
+    const corrected = args.structuredData !== undefined ? args.structuredData : savedCorrection.corrected_structured_data as Record<string, unknown> | null;
+    if (args.structuredData !== undefined || corrected !== null) await publishGeoCorrection(transaction, {
+      documentId: args.docId, workspaceId: document.workspace_id, orgId: document.org_id,
+    }, corrected);
+  });
 
   return await getCorrectionWorkbench(args.docId, args.userId);
 }

@@ -87,3 +87,4 @@ export * from "./extract-mode.js";
 export * from "./workspace-settings-proposal.js";
 
 export * from "./geo.js";
+export * from "./geo-projection-contract.js";
