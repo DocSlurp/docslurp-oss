@@ -111,6 +111,7 @@ function documentGraph(documentId: string, supplier: string, customers: string[]
       pageNumbers: [1],
     })),
     source: "llm",
+    llmFailed: false,
     windows: 1,
     inputTokens: 100,
     outputTokens: 50,
@@ -320,6 +321,49 @@ describe("workspace knowledge graph persistence", () => {
 
     const second = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
     expect(second).toMatchObject({ communities: 2, summarized: 0, reused: 2 });
+  });
+
+  it("summarizes heuristic stand-ins again once the model answers, then reuses them", async () => {
+    await seedDocument("d1", "Acme supplies Globex and Hooli");
+    await seedDocument("d2", "Umbrella supplies Initech and Wonka");
+    await write("d1", documentGraph("d1", "Acme", ["Globex", "Hooli"]));
+    await write("d2", documentGraph("d2", "Umbrella", ["Initech", "Wonka"]));
+    const context = { scope: "Supply chain", model: "test-model", privacyMode: "standard" as const, apiKey: "mock-only" };
+    const summarySources = () => sql<{ source: string }[]>`
+      select metadata->>'summarySource' as source from kg_communities order by source
+    `;
+
+    vi.mocked(generateOpenRouterText).mockRejectedValue(new Error("404 No endpoints found"));
+    const failed = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    expect(failed).toMatchObject({ summarized: 2, reused: 0 });
+    expect(await summarySources()).toEqual([{ source: "heuristic" }, { source: "heuristic" }]);
+
+    vi.mocked(generateOpenRouterText).mockResolvedValue({
+      text: "Suppliers and their customers.", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    const recovered = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    expect(recovered).toMatchObject({ summarized: 2, reused: 0, inputTokens: 20, outputTokens: 10 });
+    expect(await summarySources()).toEqual([{ source: "llm" }, { source: "llm" }]);
+
+    const again = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    expect(again).toMatchObject({ summarized: 0, reused: 2 });
+    expect(generateOpenRouterText).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps a failed model extraction stale so retries and rebuilds extract it again", async () => {
+    const configHash = graphConfigFingerprint(defaultGraphConfig, "test-model");
+    await seedDocument("d1", "Acme supplies Globex");
+    await seedDocument("d2", "Acme supplies Hooli");
+    await write("d1", documentGraph("d1", "Acme", ["Globex"]), configHash);
+    await write("d2", { ...documentGraph("d2", "Acme", ["Hooli"]), source: "heuristic", llmFailed: true }, configHash);
+
+    // The fallback graph is stored and searchable, but never counts as current.
+    expect(await nodes()).toContainEqual({ name: "hooli", mentions: 1, documents: 1 });
+    expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1"]));
+    expect(await countGraphJobDocuments(sql, { workspaceId: "w", mode: "stale", configHash })).toBe(1);
+
+    await write("d2", documentGraph("d2", "Acme", ["Hooli"]), configHash);
+    expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1", "d2"]));
   });
 });
 

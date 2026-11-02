@@ -58,7 +58,16 @@ Elements no current document supports are deleted. Re-extracting a document
 therefore replaces exactly its contribution, retries never double count, and
 the superseded-version purge and manual deletes use the same refresh.
 `kg_document_state` records which settings fingerprint (`domain`, entity types,
-depth and model) each document was extracted with.
+depth and model) each document was extracted with. When the model was asked
+but every extraction window failed (for example, the provider was down), the
+heuristic graph is stored so the document stays searchable, but its state
+records the fingerprint with an `:llm-fallback` suffix. It therefore still
+counts as stale: a stage retry, a later run or a `stale` rebuild extracts it
+again with the model. The stage logs `[graph-enrich] ... llm_fallback
+documents=N/M` and records the `graph-llm-fallback-documents` run metric.
+
+Within a run, the `graph-enrich` stage extracts `WORKER_GRAPH_JOB_CONCURRENCY`
+documents at a time (default 4); graph writes still serialize per workspace.
 
 ## Rebuilds with estimates and live progress
 
@@ -105,7 +114,10 @@ propagation (co-mention edges count half), which splits large connected
 components into topical clusters. Level 1 groups level-0 communities by the
 edges between them. Each community has a member fingerprint (`member_hash`).
 Unchanged communities keep their summary, and only new ones are summarized:
-by LLM up to 200 per refresh, heuristically beyond that. Summaries are matched
+by LLM up to 200 per refresh (four calls at a time), heuristically beyond
+that. A community whose LLM summary failed keeps the heuristic text, marked
+`metadata.summarySource = "heuristic"`, and is summarized again on the next
+refresh that has a model. Summaries are matched
 by full-text search; Postgres keeps no vectors (see migration 0008).
 
 ### Tags and graph context
