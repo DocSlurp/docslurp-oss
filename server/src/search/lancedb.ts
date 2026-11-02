@@ -136,7 +136,8 @@ function nativeColumns(capabilities: LanceTableCapabilities, score: "_distance" 
 }
 
 function documentIdFilter(documentIds: string[] | undefined): string | null {
-  if (!documentIds?.length) return null;
+  if (documentIds === undefined) return null;
+  if (documentIds.length === 0) return "false";
   const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
   return `"documentId" IN (${literals.join(", ")})`;
 }
@@ -199,6 +200,10 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
   } else {
     table = getDb(uri).then(async (db) => {
       const opened = await openLanceTable(name, () => db.openTable(name), lanceNamespace(uri));
+      if ((await opened.schema()).metadata.has("embedding_functions")) {
+        opened.close();
+        throw new Error("LanceDB search refuses persisted embedding_functions metadata");
+      }
       const { config } = lanceSession();
       if (config.prewarmIndex || config.prewarmData) {
         lastPrewarm.set(key, Date.now());
@@ -349,7 +354,7 @@ function searchTarget(args: { orgId: string; workspaceId: string; embeddingModel
 }
 
 function documentIdSet(documentIds?: string[]): Set<string> | null {
-  if (!documentIds || documentIds.length === 0) {
+  if (documentIds === undefined) {
     return null;
   }
   return new Set(documentIds);
@@ -411,6 +416,9 @@ export async function lanceDbVectorSearch(args: {
   if (!args.orgId.trim() || !args.workspaceId.trim()) {
     return [];
   }
+
+  // An explicit empty eligibility set authorizes no documents; omission alone is unrestricted.
+  if (args.documentIds?.length === 0) return [];
 
   const refineFactor = process.env.LANCEDB_REFINE_FACTOR;
   // Validate outside the native-query catch: configuration errors must be visible.

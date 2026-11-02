@@ -53,6 +53,18 @@ def lancedb_target(raw: str) -> tuple[str, dict | None]:
     return root, options
 
 
+class UnsupportedEmbeddingMetadata(ValueError):
+    pass
+
+
+def assert_numeric_lance_table(table):
+    # All vectors are supplied by our usage-accounted embedding stage. Never
+    # restore arbitrary provider configuration from persisted table metadata.
+    metadata = table.schema.metadata or {}
+    if b"embedding_functions" in metadata or "embedding_functions" in metadata:
+        raise UnsupportedEmbeddingMetadata("LanceDB worker refuses persisted embedding_functions metadata")
+
+
 def write_lancedb(args: argparse.Namespace, payload: dict) -> dict:
     try:
         import lancedb  # type: ignore
@@ -65,7 +77,10 @@ def write_lancedb(args: argparse.Namespace, payload: dict) -> dict:
     mode = "append"
     try:
         table = db.open_table(args.collection)
+        assert_numeric_lance_table(table)
         table.add(records)
+    except UnsupportedEmbeddingMetadata:
+        raise
     except Exception:
         try:
             db.create_table(args.collection, data=records)
@@ -73,6 +88,7 @@ def write_lancedb(args: argparse.Namespace, payload: dict) -> dict:
         except Exception:
             # Another worker may have created the org table after our open failed.
             table = db.open_table(args.collection)
+            assert_numeric_lance_table(table)
             table.add(records)
     return {
         "backend": "lancedb",

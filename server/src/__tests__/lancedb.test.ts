@@ -73,6 +73,13 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     expect((await search({ workspaceId: "ws-b", queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-sibling"]);
   });
 
+  it("never widens explicit empty eligibility to the workspace", async () => {
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "private", vector: [1, 0] }]);
+    expect(await search({ queryVector: [1, 0], limit: 10, documentIds: [] })).toEqual([]);
+    expect((await search({ queryVector: [1, 0], limit: 10 })).map(hit => hit.id)).toEqual(["chunk-a"]);
+    expect(await search({ queryVector: [1, 0], limit: 10, documentIds: [] })).toEqual([]);
+  });
+
   it("searches workspace/model/dimension databases without mixing vector spaces", async () => {
     for (const [model, dims, id] of [
       [MODEL, 2, "wanted"],
@@ -225,6 +232,6 @@ describe("filterLanceDbRowsByDocumentIds", () => {
     const rows = [{ id: "chunk-1", documentId: "doc-1", _distance: 0.1 }];
 
     expect(filterLanceDbRowsByDocumentIds(rows)).toBe(rows);
-    expect(filterLanceDbRowsByDocumentIds(rows, [])).toBe(rows);
+    expect(filterLanceDbRowsByDocumentIds(rows, [])).toEqual([]);
   });
 });

@@ -118,6 +118,11 @@ async function writeLanceDbRecordsNow(
         const table = await withAttemptTimeout(db.openTable(collection), attemptTimeoutMs);
         initializingTable = false;
         try {
+          // This adapter owns precomputed vectors. Persisted provider configuration
+          // must never instantiate code or clients in the credential-bearing worker.
+          if ((await withAttemptTimeout(table.schema(), attemptTimeoutMs)).metadata.has("embedding_functions")) {
+            throw new Error("LanceDB worker refuses persisted embedding_functions metadata");
+          }
           if (hydrated) await withAttemptTimeout(ensureLanceHydrationColumns(table), attemptTimeoutMs);
           await withAttemptTimeout(
             table.mergeInsert("id").whenMatchedUpdateAll().whenNotMatchedInsertAll().execute(rows),
