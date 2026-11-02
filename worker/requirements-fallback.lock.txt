@@ -1578,11 +1578,12 @@ lance-namespace-urllib3-client==0.13.0 \
     --hash=sha256:1e8a79c6e4e6277033597fd76aa0e2f33d909ca1436c935936e9e569221f43ef \
     --hash=sha256:fb361eb4f6c7f2d1f9e92809609657b73e38241393e9c4516e12d6b6ee643a0a
     # via lance-namespace
-lancedb==0.40.0 \
-    --hash=sha256:10e6fbacc9a9be5698c8e635f150ef4346e428db71d15b31bc1b79aec2a382ff \
-    --hash=sha256:aac9e08a710ba2071a8aefc4b4ef7d8534f5f7e4e4ce1761f11469d97c36f1e2 \
-    --hash=sha256:aaea68920b88e3d0b84a9ec84bc1585ad04239b9ca1bfcd1e491c2c12bffddc2 \
-    --hash=sha256:e967577fe42980217e43f9b6ecbe042c5ae314370a34b88f1c54e825f96b26f0
+lancedb==0.41.0 \
+    --hash=sha256:984d97c50169face1539ccaa802a2002ebc7b50a445c3e7e8cd24513569c1aab \
+    --hash=sha256:b8892ff52eb32224c0414feb6f57357c4b79edeed0c2a4afe6d7f6f538dc12d0 \
+    --hash=sha256:c00ba59f0f880c2581566851a6018c00ef5c49be56ac4484c600e5129135f059 \
+    --hash=sha256:ca0b0418eaaa5c2aa8e9ff1e98a475b14d4517af3b9face22300213871bd1ebc \
+    --hash=sha256:e3da8fbde2c916d41fc324a91a25b3f57a7b8ac5eb2981d5fb8fd0914901c44e
     # via -r worker/requirements-fallback.txt
 langdetect==1.0.9 \
     --hash=sha256:7cbc0746252f19e76f77c0b1690aadf01963be835ef0cd4b56dddf2a8f1dfc2a \
