@@ -109,6 +109,7 @@ export function findStructuredField(
 }
 
 function fieldTypeFromJsonSchema(property: Record<string, unknown>): StructuredFieldDef["type"] {
+  if (property.format === "geojson") return "geo";
   if (property.format === "date" || property.format === "date-time") return "date";
   const type = Array.isArray(property.type)
     ? property.type.find((entry) => entry !== "null")

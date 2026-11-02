@@ -92,16 +92,21 @@ function mapSchemaNodes(value: unknown, transform: (node: Record<string, unknown
 /** Remove application annotations from schema nodes, preserving const/default/enum data. */
 export function geoProviderSchema(schema: unknown): unknown {
   if (!boundedGeoJson(schema)) throw new Error("Output schema exceeds geo JSON bounds");
-  return mapSchemaNodes(structuredClone(schema), (node) => Object.fromEntries(Object.entries(node).filter(([key]) => key !== "geo")));
+  return mapSchemaNodes(structuredClone(schema), (node) => Object.fromEntries(Object.entries(node).filter(([key, value]) => key !== "geo" && !(key === "format" && value === "geojson"))));
 }
 
 /** Only top-level object fields are supported in v1; reject hidden mappings. */
 export function validateGeoAnnotations(schema: Record<string, unknown>): void {
   if (!boundedGeoJson(schema)) throw new Error("Output schema exceeds geo JSON bounds");
   mapSchemaNodes(schema, (obj, path) => {
-    if (Object.hasOwn(obj, "geo")) {
+    if (Object.hasOwn(obj, "geo") && obj.format !== "geojson") throw new Error("Geo mappings require explicit format: geojson column type");
+    if (obj.format === "geojson") {
       if (path.length !== 2 || path[0] !== "properties" || obj.type !== "object") throw new Error("Geo annotations require top-level object properties");
-      const a = geoAnnotationSchema.parse(obj["geo"]);
+      mapSchemaNodes(obj, (child) => {
+        if (["$ref", "$dynamicRef", "$recursiveRef"].some(key => Object.hasOwn(child, key))) throw new Error("Reference-based geo mappings are not supported");
+        return child;
+      });
+      const a = geoAnnotationSchema.parse(obj["geo"] ?? { encoding: "geojson" });
       if (a.encoding === "lat-lon") {
         const props = obj.properties as Record<string, { type?: string }> | undefined;
         for (const p of [a.latitude, a.longitude]) {
