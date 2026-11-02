@@ -6,6 +6,8 @@
  * UUIDs remain valid absolute references.
  */
 
+import { foldFullWidthAscii, normalizeExtractedText } from "./text-normalization.js";
+
 export const WORKSPACE_SLUG_MAX_LENGTH = 63;
 
 /**
@@ -30,8 +32,8 @@ export function isWorkspaceUuid(value: string): boolean {
 
 /** Lowercases, strips accents, and joins words with single hyphens. */
 export function slugifyWorkspaceName(value: string): string {
-  return value
-    .normalize("NFKD")
+  return foldFullWidthAscii(normalizeExtractedText(value))
+    .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")

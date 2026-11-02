@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
-export const normalize = text => String(text ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+// NFC keeps compatibility characters (x², ½) distinct; only full-width ASCII is read as ASCII.
+const foldFullWidthAscii = text => text.replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+export const normalize = text => foldFullWidthAscii(String(text ?? "").normalize("NFC")).toLowerCase().replace(/\s+/g, " ").trim();
 export const hash = data => createHash("sha256").update(data).digest("hex");
 const json = path => JSON.parse(readFileSync(path, "utf8"));
 const write = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + "\n", { flag: "wx" });

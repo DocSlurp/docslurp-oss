@@ -40,7 +40,7 @@ def tokens(text):
     text='\n'.join(line for line in text.splitlines()
                    if not ('-' in line and set(line.strip())<=set('|:- \t') and line.count('-')>=3))
     text=re.sub(r'(?m)^\s*[-*]\s+','',text)
-    return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]", unicodedata.normalize("NFKC", text).casefold())
+    return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]", unicodedata.normalize("NFC", text).casefold())
 
 def value_contexts(text):
     """Bind numeric values and mathematical operators to adjacent semantic tokens."""
@@ -75,7 +75,7 @@ def content_score(reference, text, legacy):
     statement_recall=sum((' '+' '.join(s)+' ') in actual_stream for s in statements)/len(statements) if statements else None
     wanted_contexts=value_contexts(reference['expectedMarkdown']);actual_contexts=value_contexts(text)
     contextual=sum((wanted_contexts&actual_contexts).values())/sum(wanted_contexts.values()) if wanted_contexts else None
-    compact=lambda s:re.sub(r'[^\w]','',unicodedata.normalize('NFKC',s).casefold())
+    compact=lambda s:re.sub(r'[^\w]','',unicodedata.normalize('NFC',s).casefold())
     excluded = any(compact(x) and compact(x) in compact(text) for x in reference["excludedText"])
     ordered=SequenceMatcher(None,tokens(reference['expectedMarkdown']),tokens(text),autojunk=False).ratio()
     stream=" " + " ".join(tokens(text)) + " "

@@ -16,7 +16,7 @@ import { CHAT_INSTRUCTIONS_MAX_CHARS, type WorkspaceSearchSettings } from "@docs
  *    context notes.
  * 5. A short fixed reminder that the core rules still apply.
  *
- * Workspace-provided text is NFKC-normalised and every angle bracket in it is
+ * Workspace-provided text is NFC-normalised and every angle bracket in it is
  * replaced, so it can never open or close a delimiter, however it is spelled.
  * The rules are prompt guidance for the model: they make overrides ineffective
  * as instructions, but they are not an enforcement mechanism on their own.
@@ -89,17 +89,17 @@ function defaultRules(args: { citations?: boolean; answerStyle?: WorkspaceSearch
 }
 
 /**
- * Workspace text made safe to place inside a delimited block: NFKC-normalised
- * (full-width brackets become ASCII first), every `<` and `>` (and look-alike
- * angle brackets) replaced with `‹` and `›` so no tag can be formed, opened or
- * reassembled, control characters removed, and bounded.
+ * Workspace text made safe to place inside a delimited block: NFC-normalised,
+ * every `<` and `>` (and full-width, small and look-alike angle brackets)
+ * replaced with `‹` and `›` so no tag can be formed, opened or reassembled,
+ * control characters removed, and bounded.
  */
 export function neutralizeWorkspaceText(text: string | null | undefined, maxChars = CHAT_INSTRUCTIONS_MAX_CHARS): string {
   if (!text) return "";
   return text
-    .normalize("NFKC")
-    .replace(/[<‹❮〈⟨〈﹤˂ᐸ❬❰⧼]/g, "‹")
-    .replace(/[>›❯〉⟩〉﹥˃ᐳ❭❱⧽]/g, "›")
+    .normalize("NFC")
+    .replace(/[<‹❮〈⟨〈﹤＜˂ᐸ❬❰⧼]/g, "‹")
+    .replace(/[>›❯〉⟩〉﹥＞˃ᐳ❭❱⧽]/g, "›")
     // Bidirectional embedding, override and isolate controls can disguise text order.
     .replace(/[‪-‮⁦-⁩‎‏]/g, "")
     .replace(/\r\n?/g, "\n")

@@ -273,11 +273,16 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(text).not.toContain('"usage"');
   });
   it("accepts successful Unicode output despite service normalization", async () => {
-    chatWorkspace.mockImplementationOnce(async (args) => { await args.onTextDelta("x² = 4"); return { ...answer, answer: "x2 = 4" }; });
+    chatWorkspace.mockImplementationOnce(async (args) => { await args.onTextDelta("Cafe\u0301: x² = 4"); return { ...answer, answer: "Caf\u00e9: x² = 4" }; });
     const response = await request(input({ stream: true }));
     const text = await response.text();
     expect(text).toContain("[DONE]");
     expect(text).not.toContain('"type":"server_error"');
+  });
+  it("rejects streamed output that only matched under compatibility folding", async () => {
+    chatWorkspace.mockImplementationOnce(async (args) => { await args.onTextDelta("x² = 4"); return { ...answer, answer: "x2 = 4" }; });
+    const text = await (await request(input({ stream: true }))).text();
+    expect(text).toContain('"type":"server_error"');
   });
   it.each([false, true])("preserves output-limit termination with streaming=%s", async (stream) => {
     chatWorkspace.mockResolvedValueOnce({ ...answer, finishReason: "length" });

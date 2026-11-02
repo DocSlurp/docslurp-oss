@@ -52,6 +52,11 @@ describe("validators", () => {
     expect(validateCandidate(cand([["(Kyoto)", "x"], ["Tea", "12"]]), [...split, "x"]).valid).toBe(true);
   });
 
+  it("matches native ligatures and decomposed accents, but not compatibility look-alikes", () => {
+    expect(validateCandidate(cand([["Profit", "Cafe\u0301"], ["Tea", "12"]]), ["Pro\ufb01t", "Caf\u00e9", "Tea", "12"]).valid).toBe(true);
+    expect(validateCandidate(cand([["Area", "m2"], ["Tea", "12"]]), ["Area", "m\u00b2", "Tea", "12"]).valid).toBe(false);
+  });
+
   it("rejects ragged rows and degenerate tables", () => {
     expect(validateCandidate(cand([["Item", "Cost"], ["Tea"], ["Milk", "30", "x"]]), []).issues.map((i) => i.kind)).toContain("ragged-rows");
     expect(validateCandidate(cand([["Item", "Cost"]]), []).issues.map((i) => i.kind)).toContain("degenerate");

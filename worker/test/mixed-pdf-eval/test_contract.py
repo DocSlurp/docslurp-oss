@@ -2,6 +2,10 @@ import copy,unittest
 from contract import identity_hash,validate_manifest,validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,page_content_hash
 
 class ContractTests(unittest.TestCase):
+    def test_page_content_hash_is_nfc_not_nfkc(self):
+        same=lambda a,b:page_content_hash({'expectedMarkdown':a})==page_content_hash({'expectedMarkdown':b})
+        self.assertTrue(same('Cafe\u0301','Caf\u00e9'))
+        self.assertFalse(same('x\u00b2','x2'))
     def manifest(self):
         return {'schema':'mixed-pdf-authored@v2','families':1,'pageCount':60,'cases':[
             {'id':f'authored-case-{i}','family':'source-a','split':'train','pages':[{}]*10,'hardPercent':i,
