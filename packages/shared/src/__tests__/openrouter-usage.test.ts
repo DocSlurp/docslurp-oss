@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createOpenRouterRoutingFetch, setOpenRouterProviderPolicyResolver } from "../openrouter-routing.js";
+import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS } from "../provider-regions.js";
 import { createOpenRouterReasoningFetch, lowestOpenRouterReasoning, openRouterReasoningParams, createOpenRouterUsageCapture, readProviderCharge, resolveOpenRouterUsage } from "../openrouter-usage.js";
 afterEach(() => vi.unstubAllGlobals());
 describe("OpenRouter thinking controls", () => {
@@ -56,6 +58,22 @@ describe("lowest accepted reasoning", () => {
     expect(response.status).toBe(200);
     expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string).reasoning).toEqual({ enabled: false });
     expect(baseFetch.mock.calls[1][1]!.body).toBe(body);
+
+    // Composed as the worker does, the retry still carries a restricted run's provider allowlist.
+    setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false }));
+    try {
+      const network = vi.fn<typeof fetch>().mockResolvedValueOnce(mandatory()).mockResolvedValueOnce(new Response("{}"));
+      const chain = createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(network), "none");
+      await chain("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body });
+      expect(network).toHaveBeenCalledTimes(2);
+      for (const [, sent] of network.mock.calls) {
+        const provider = JSON.parse(sent!.body as string).provider;
+        expect(provider.only).toEqual([...NON_CHINA_PROVIDER_SLUGS]);
+        expect(provider.ignore).toEqual(expect.arrayContaining([...CHINA_PROVIDER_SLUGS]));
+      }
+    } finally {
+      setOpenRouterProviderPolicyResolver(undefined);
+    }
 
     // A verified floor is never second-guessed, and other 400s are returned as they are.
     for (const [model, reply] of [["z-ai/glm-5.3-flash", mandatory()], ["vendor/thinker", new Response("{}", { status: 400 })]] as const) {

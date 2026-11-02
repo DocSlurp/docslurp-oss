@@ -179,6 +179,7 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
     const detail = await response.clone().text().catch(() => "");
     if (!/reasoning is mandatory/i.test(detail)) return response;
     console.warn(`[openrouter] reasoning_floor_rejected model=${String(body.model)}; retrying with the provider default`);
+    await response.body?.cancel().catch(() => undefined);
     return baseFetch(input, { ...init, body: original });
   };
 }

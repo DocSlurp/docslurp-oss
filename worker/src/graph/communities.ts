@@ -8,7 +8,7 @@ import {
   type TextGenerationProfile,
 } from "@docslurp/shared";
 
-import { generateOpenRouterText } from "../lib/ai.js";
+import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
 import { lockWorkspaceGraph } from "./graph-store.js";
 
@@ -155,6 +155,8 @@ export interface CommunitySummaryContext {
   textGeneration?: TextGenerationConfig;
   deploymentProfile?: TextGenerationProfile;
   signal?: AbortSignal;
+  /** Record each completed provider call at once, so a later cancellation cannot discard its usage. */
+  onUsage?: (usage: TextGenerationUsage, details: { finishReason: string }) => void;
 }
 
 export interface CommunityRefreshResult {
@@ -284,6 +286,7 @@ export async function refreshWorkspaceCommunities(args: {
         );
         result.inputTokens += generated.usage.inputTokens;
         result.outputTokens += generated.usage.outputTokens;
+        args.context.onUsage?.(generated.usage, { finishReason: generated.finishReason });
         if (generated.finishReason === "length" && maxOutputTokens === COMMUNITY_SUMMARY_TOKENS) {
           maxOutputTokens *= 2;
           continue;

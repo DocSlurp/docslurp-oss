@@ -42,6 +42,8 @@ beforeEach(async () => {
       values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);
   `);
   vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 async function observedScope() {
@@ -68,6 +70,28 @@ describe("run-level stage provider scope", () => {
   it("stays restricted when the run's org turned them off, whatever another org allows", async () => {
     await db.exec(`update organizations set allow_china_providers = (id = 'o2'); update workspaces set allow_china_providers = true;`);
     expect(await observedScope()).toEqual({ policy: { allowChinaProviders: false, speedBoost: false }, org: "o1" });
+  });
+
+  it("keeps concurrent runs' scopes apart", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = (id = 'w');
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);`);
+    const seen = new Map<string, { allow: boolean; org: string | null }>();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // r1 reads its policy only after r2's stage has started, so both scopes are live at once.
+    const stage: Stage = {
+      name: "graph-enrich",
+      run: async (state) => {
+        if (state.run.id === "r1") await gate;
+        else release();
+        seen.set(state.run.id, { allow: currentProviderPolicy().allowChinaProviders, org: currentProviderRateOrg() });
+      },
+    };
+    const execution = createStageExecution({ store, stages: [stage], config: { workerDocConcurrency: 1, workerAdaptiveTuning: false } as Config });
+    const runtime = { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1 };
+    await Promise.all(["r1", "r2"].map((runId) => execution.runStage({ stageName: "graph-enrich", runId, totalStages: 1, artifacts: {} }, runtime)));
+    expect(Object.fromEntries(seen)).toEqual({ r1: { allow: true, org: "o1" }, r2: { allow: false, org: "o2" } });
   });
 
   it("leaves no scope behind after the stage", async () => {
