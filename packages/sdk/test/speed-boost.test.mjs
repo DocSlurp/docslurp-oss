@@ -33,6 +33,8 @@ test("full-index mutation and estimate transports preserve all opt-in states", a
   const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async (_url, init) => { bodies.push(JSON.parse(init.body)); return Response.json({}); } });
   for (const speedBoost of [undefined, false, true]) {
     const input = speedBoost === undefined ? {} : { speedBoost };
+    await client.estimateIndexingMode("full", input);
+    await client.setIndexingModeEstimate("visual", input);
     await client.fullIndex(input);
     await client.fullIndexDocument("doc", input);
     await client.fullIndexEstimate(input);
