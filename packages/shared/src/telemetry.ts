@@ -1,6 +1,6 @@
 import { observabilityRuntimeKey } from "./telemetry-state.js";
 import { isCancellation } from "./cancellation.js";
-import { operationErrorAttributes, operationErrorSummary } from "./operation-error.js";
+import { operationErrorAttributes, operationErrorSummary, spanSafeErrorAttributes } from "./operation-error.js";
 import { logs as logsApi } from "@opentelemetry/api-logs";
 // Server-only runtime. One provider owns context; exporters never own app lifecycle.
 import { hostname } from "node:os";
@@ -331,7 +331,7 @@ export function observationTelemetry(name: string, type: string, durationSeconds
   const chat = typeof metadata.chatSessionId === "string" ? { "docslurp.chat.session_id": metadata.chatSessionId } : {};
   for (const [key, value] of Object.entries({ ...correlations, ...media, ...chat })) bestEffort(() => active?.setAttribute(key, value));
   const errorAttributes = failed && error !== undefined ? operationErrorAttributes(error) : undefined;
-  if (errorAttributes) bestEffort(() => active?.setAttributes(errorAttributes));
+  if (errorAttributes) bestEffort(() => active?.setAttributes(spanSafeErrorAttributes(errorAttributes)));
   if (outcome !== "ok" || name.startsWith("worker.stage.")) emitTelemetryLog({
     eventName: "docslurp.operation.completed", severityText: failed ? "error" : "info",
     body: `${name.slice(0, 200)} ${failed ? "failed" : outcome === "cancelled" ? "cancelled" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`

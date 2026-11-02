@@ -230,6 +230,6 @@ export function aiResultDetails(result: {
 export { instrumentPostgres, type PostgresQueryHooks } from "./dependency-postgres.js";
 export { isTracingActive, startDependencySpan, withDependencySpan, setActiveSpanAttributes } from "./telemetry.js";
 export { instrumentFetch } from "./dependency-fetch.js";
-export { operationErrorAttributes, operationErrorSummary } from "./operation-error.js";
+export { isRouteLevelProviderFailure, operationErrorAttributes, operationErrorSummary } from "./operation-error.js";
 export { instrumentS3Client } from "./dependency-s3.js";
 export { recordUsageReceipt, usageTraceContext } from "./dependency-usage.js";

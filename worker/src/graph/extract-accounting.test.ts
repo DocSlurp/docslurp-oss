@@ -78,7 +78,7 @@ it("flags a provider failure on every window, but not a run without a model", as
     .toMatchObject({ source: "heuristic", llmFailed: false });
 });
 
-it("stops after a permanent provider refusal, but keeps reading windows after a rate limit", async () => {
+it("stops after a route-level provider refusal, but keeps reading windows after a rate limit or a per-request 4xx", async () => {
   const { APICallError } = await import("ai");
   const refusal = (statusCode: number) => new APICallError({ message: "No allowed providers are available for the selected model.",
     url: "https://openrouter.ai/api/v1/chat/completions", requestBodyValues: {}, statusCode, isRetryable: statusCode === 429 });
@@ -93,7 +93,9 @@ it("stops after a permanent provider refusal, but keeps reading windows after a 
   expect(generateOpenRouterText).toHaveBeenCalledTimes(1);
   expect(warning).toHaveBeenCalledWith(expect.stringContaining("outcome=provider-error (HTTP 404, not retryable)"));
 
-  vi.mocked(generateOpenRouterText).mockReset().mockRejectedValue(refusal(429));
-  await extract();
-  expect(vi.mocked(generateOpenRouterText).mock.calls.length).toBeGreaterThan(1);
+  for (const status of [429, 400, 403, 413, 422]) {
+    vi.mocked(generateOpenRouterText).mockReset().mockRejectedValue(refusal(status));
+    await extract();
+    expect(vi.mocked(generateOpenRouterText).mock.calls.length).toBeGreaterThan(1);
+  }
 });

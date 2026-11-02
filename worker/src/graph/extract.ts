@@ -7,7 +7,7 @@ import {
   type TextGenerationProfile,
 } from "@docslurp/shared";
 
-import { operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
+import { isRouteLevelProviderFailure, operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 
@@ -145,12 +145,12 @@ export async function extractDocumentGraph(args: {
       } catch (error) {
         if (context.signal?.aborted) throw error;
         // Status and type only: provider error bodies may contain document content.
-        // withObservation already sent the error's telemetry attributes to SigNoz.
+        // generateOpenRouterText's observation sends the full telemetry to SigNoz.
         const failure = operationErrorAttributes(error);
         console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error ${operationErrorSummary(failure)}`);
-        // The SDK already retried 429s and 5xx. A permanent refusal (an unservable
-        // model or route, auth, quota) fails every remaining window the same way.
-        if (isPermanentProviderFailure(failure)) break;
+        // The SDK already retried 429s and 5xx. A route-level refusal (an
+        // unservable model or route, auth, credit) fails every later window too.
+        if (isRouteLevelProviderFailure(failure)) break;
         continue;
       }
       inputTokens += result.usage.inputTokens;
@@ -378,12 +378,6 @@ async function extractWindowWithLlm(args: {
  * Splits chunk texts into prompt-sized windows on chunk boundaries. When the
  * document needs more windows than the depth allows, keeps an even spread.
  */
-/** A 4xx other than timeout or rate limit, after the SDK's own retries: retrying the next window cannot succeed. */
-export function isPermanentProviderFailure(failure: Record<string, string | number | boolean>): boolean {
-  const status = failure["http.response.status_code"];
-  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
-}
-
 export function buildExtractionWindows(texts: string[], windowChars: number, maxWindows: number): string[] {
   const windows: string[] = [];
   let current = "";
