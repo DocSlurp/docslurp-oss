@@ -10,7 +10,7 @@ def digest(value): return hashlib.sha256(value).hexdigest()
 def file_hash(path): return digest(Path(path).read_bytes())
 def identity_hash(value): return digest(json.dumps(value,sort_keys=True,separators=(',',':')).encode())
 def page_content_hash(page):
-    return identity_hash(re.findall(r'\w+',unicodedata.normalize('NFKC',page['expectedMarkdown']).casefold()))
+    return identity_hash(re.findall(r'\w+',unicodedata.normalize('NFC',page['expectedMarkdown']).casefold()))
 
 def immutable_json(path,value):
     path=Path(path)

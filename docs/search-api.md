@@ -235,7 +235,7 @@ The system message is always composed in this order:
 4. **The ingest instruction** (`systemPrompt`, up to 2,000 characters), inside its own `<ingest_instructions>` block, then the current search settings.
 5. A fixed reminder that the core rules still apply.
 
-Workspace text is NFKC-normalised and every `<` and `>` in it (including full-width and look-alike brackets) is replaced with `‹` and `›`, so it cannot open, close or reassemble a block delimiter. On the search agent path (the default in the app and `/v1/chat`) the core rules come first in the agent's prompt and the workspace part comes after the agent's own tool and citation rules.
+Workspace text is NFC-normalised and every `<` and `>` in it (including full-width, small and look-alike brackets) is replaced with `‹` and `›`, so it cannot open, close or reassemble a block delimiter. On the search agent path (the default in the app and `/v1/chat`) the core rules come first in the agent's prompt and the workspace part comes after the agent's own tool and citation rules.
 
 These are instructions to the model. Ordering and delimiting stop workspace text from posing as DocSlurp's rules, but whether an answer follows the core rules still rests on the model; see [output moderation](#output-moderation) for an optional check on public answers.
 

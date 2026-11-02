@@ -5,13 +5,16 @@ import unittest
 sys.path.insert(0,os.environ["MIXED_PDF_SCORERS"])
 import tolerant_markdown
 from generate import author
-from measure import content_score
+from measure import content_score,tokens
 
 class ScorerTests(unittest.TestCase):
     def setUp(self):
         self.ref=author(1,0)
         self.text=self.ref["expectedMarkdown"]
     def score(self,text): return content_score(self.ref,text,tolerant_markdown)
+    def test_tokens_use_nfc_not_nfkc(self):
+        self.assertEqual(tokens("Cafe\u0301"),tokens("Caf\u00e9"))
+        self.assertNotEqual(tokens("x\u00b2"),tokens("x2"))
     def test_exact_and_whitespace(self):
         self.assertTrue(self.score(self.text)["acceptable"])
         self.assertTrue(self.score(self.text.replace("\n","  "))["acceptable"])

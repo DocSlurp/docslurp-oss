@@ -5,6 +5,7 @@ import { isWorkspaceUuid, slugifyWorkspaceName, workspaceSlugProblem } from "../
 describe("workspace slugs", () => {
   it("slugifies names into URL-safe words", () => {
     expect(slugifyWorkspaceName("  Légal Contracts — 2026! ")).toBe("legal-contracts-2026");
+    expect(slugifyWorkspaceName("Le\u0301gal \ufb01les \uff21\uff11")).toBe("legal-files-a1");
   });
 
   it("rejects reserved, UUID-shaped and malformed slugs", () => {

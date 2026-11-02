@@ -20,6 +20,7 @@ test("top-k cutoff and joint premise rank", () => {
 });
 test("normalization preserves punctuation and rejects empty oracle", () => {
  assert.equal(normalize("ＯＦＦＩＣＥ\n total  40"), "office total 40");
+ assert.equal(normalize("Cafe\u0301 x\u00b2 \u00bd"), "caf\u00e9 x\u00b2 \u00bd");
  assert.throws(() => score({ ...example, premises: [{ ...premise, quotes: [""] }] }, [hit]));
 });
 test("empty retrieval never proves answer abstention", () => {

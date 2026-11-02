@@ -8,6 +8,7 @@ import {
   chatAnswerCredits,
   chatModelPricePerToken,
   chatModelTier,
+  foldFullWidthAscii,
   type WorkspaceSearchSettings,
 } from "@docslurp/shared";
 
@@ -78,7 +79,7 @@ const CORE_RULE_OVERRIDES: readonly RegExp[] = [
 /** Lines of `text` that try to override the fixed core rules. */
 export function findCoreRuleConflicts(text: string | null | undefined): string[] {
   if (!text) return [];
-  return text.normalize("NFKC").split(/\r?\n/).map(line => line.trim()).filter(line => line && CORE_RULE_OVERRIDES.some(pattern => pattern.test(line)));
+  return foldFullWidthAscii(text.normalize("NFC")).split(/\r?\n/).map(line => line.trim()).filter(line => line && CORE_RULE_OVERRIDES.some(pattern => pattern.test(line)));
 }
 
 function withoutConflictingLines(text: string): { text: string; removed: string[] } {

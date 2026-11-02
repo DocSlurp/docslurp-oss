@@ -1,9 +1,11 @@
 /** Token helpers shared by the conservation validators. Generic text handling only. */
 
+import { normalizeExtractedText } from "@docslurp/shared";
+
 const ZERO_WIDTH = /[​-‍⁠﻿­]/g;
 
 export function normalizeText(text: string): string {
-  return text.normalize("NFKC").replace(ZERO_WIDTH, "").replace(/\s+/g, " ").trim();
+  return normalizeExtractedText(text).replace(ZERO_WIDTH, "").replace(/\s+/g, " ").trim();
 }
 
 export function tokenize(text: string): string[] {
@@ -34,7 +36,7 @@ export function parseNumber(cell: string): number | null {
   return sign * Number(s.replace(/,/g, ""));
 }
 
-/** Multiset of non-space characters after NFKC. Robust to span splitting, hyphenation spacing and word-level bidi reordering. */
+/** Multiset of non-space characters after NFC and ligature expansion. Robust to span splitting, hyphenation spacing and word-level bidi reordering. */
 export function countChars(texts: Iterable<string>): Map<string, number> {
   const m = new Map<string, number>();
   for (const t of texts) {
