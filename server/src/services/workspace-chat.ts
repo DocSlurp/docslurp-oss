@@ -1071,7 +1071,7 @@ async function chatWorkspaceInTurn(args: {
     limits: resolveChatAgentLimits(args.agent, isAdmin),
   };
   // "/status" and "how did my files process?" are answered from the ingest report, without a model.
-  if (args.answerIngestReport && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
+  if (args.answerIngestReport && !args.filters?.geo && args.filters?.documentIds?.length !== 0 && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
     return await answerIngestReportTurn(args);
   }
   // Every chat turn calls a model: refuse before spending (402 when blocked).
@@ -1210,7 +1210,7 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
   const report = await loadIngestReport({
     workspace,
     canEdit: Boolean(access && canEditWorkspace(access, args.userId)),
-    documentIds: args.filters?.documentIds?.length ? args.filters.documentIds.slice(0, 100) : null,
+    documentIds: args.filters?.documentIds?.slice(0, 100) ?? null,
     focusPages: ingestReportFocusPages(args.query),
   });
   const answer = summarizeIngestReport(report);
@@ -1272,10 +1272,10 @@ async function chatWorkspaceTurn(
     searchConfiguration = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
     searchSettings = searchConfiguration.settings;
   }
-  const filterDocumentIds = args.filters?.documentIds?.length ? args.filters.documentIds : undefined;
+  const filterDocumentIds = args.filters?.documentIds;
   // Type, tag and date filters only exist in retrieval; whole-corpus and stored-summary paths can't honour them.
   const narrowingFilters = Boolean(
-    args.filters?.geo || args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
+    args.filters?.documentIds !== undefined || args.filters?.geo || args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
   );
   const history = args.history ?? await listRecentTurns(sessionId, 20);
   if (workspace && !publicClientKey && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
@@ -1723,7 +1723,7 @@ async function chatWorkspaceTurn(
     historyTurns: history.length,
     searchConfigured: Boolean(searchConfiguration),
     webTools: false,
-    filtered: Boolean(documentIds?.length || narrowingFilters),
+    filtered: Boolean(documentIds !== undefined || narrowingFilters),
   });
   if (scopeDecision.decline) {
     return await answerScopeDecline({ args, responseId, sessionId, searchSessionId: retrieved.sessionId, availability,
