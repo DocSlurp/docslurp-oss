@@ -30,8 +30,8 @@ import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./workspace-indexing-mode.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
-import { admissionBlock, isSpendBlockedError, spendBlockJobReason, spendGuardsSkipped } from "./billing/spend-guard.js";
-import { creditLeasesEnabled, grantRunCreditLease } from "./billing/credit-leases.js";
+import { admissionBlock, requireRunCreditLease, isSpendBlockedError, spendBlockJobReason, spendGuardsSkipped } from "./billing/spend-guard.js";
+import { creditLeasesEnabled } from "./billing/credit-leases.js";
 import { getWorkspaceAccess, canEditWorkspace } from "./organizations.js";
 import {
   INLINE_ESTIMATE_BUDGET_MS,
@@ -380,10 +380,7 @@ export async function createReindexRuns(args: {
     if (!batchBlockedReason && creditLeasesEnabled() && !spendGuardsSkipped()) {
       try {
         await tx.savepoint(async (sp) => {
-          const grant = await grantRunCreditLease(sp, { runId, orgId: workspace.orgId, workspaceId: workspace.id });
-          if (!grant || grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
-            throw new Error("Reindex admission did not acquire a usable credit lease");
-          }
+          await requireRunCreditLease(sp, { runId, orgId: workspace.orgId, workspaceId: workspace.id });
         });
       } catch (error) {
         // Save the requested configuration and document manifests, but never

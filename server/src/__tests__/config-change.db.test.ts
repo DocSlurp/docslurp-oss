@@ -135,3 +135,31 @@ describe("config-change transactional credit admission", () => {
     expect(applied!.workspace.pipeline.embedding.modelUri).toBe(embeddingChange().pipeline.embedding.modelUri);
   });
 });
+
+
+describe("blocked boosted run recovery", () => {
+  it("retains boosted reservations when retrying admission", async () => {
+    await seed({ credits: 103 });
+    const { applied } = await patch({ ...embeddingChange(), speedBoost: true });
+    const { resumeBlockedRuns } = await import("../services/blocked-runs.js");
+    expect(await resumeBlockedRuns({ sql: sql as never })).toEqual({ resumed: 0, stillBlocked: 1 });
+    await sql`update organizations set credit_balance_cents = 105 where id = 'o1'`;
+    expect(await resumeBlockedRuns({ sql: sql as never })).toEqual({ resumed: 1, stillBlocked: 0 });
+    const [run] = await sql`select status, pipeline from workspace_runs where id = ${applied!.job!.id}`;
+    expect(run!.status).toBe("queued");
+    expect(run!.pipeline.speedBoost).toBe(true);
+  });
+  it.each(["throw-after-grant", "refuse"] as const)("retains blocked state and no lease on recovery %s", async (mode) => {
+    await seed({ credits: 103 });
+    const { applied } = await patch({ ...embeddingChange(), speedBoost: true });
+    vi.stubEnv("WORKER_CREDIT_LEASES", "on");
+    await sql`update organizations set credit_balance_cents = 1000 where id = 'o1'`;
+    failLease = mode;
+    const { resumeBlockedRuns } = await import("../services/blocked-runs.js");
+    expect(await resumeBlockedRuns({ sql: sql as never })).toEqual({ resumed: 0, stillBlocked: 1 });
+    const [run] = await sql`select status from workspace_runs where id = ${applied!.job!.id}`;
+    expect(run!.status).toBe("blocked");
+    const leases = await sql`select id from credit_leases where holder_id = ${applied!.job!.id} and status = 'active'`;
+    expect(leases).toHaveLength(0);
+  });
+});

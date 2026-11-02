@@ -1,3 +1,4 @@
+import type { TransactionSql } from "postgres";
 import {
   compilePipelinePlan,
   getPipelineStageOrder,
@@ -267,8 +268,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   }
 
   /** Atomically move a failed Run back to queued, keeping completed checkpoints and paid work. */
-  async function resumeFailed(runId: string): Promise<boolean> {
-    const [row] = await sql.begin(async (tx) => {
+  async function resumeFailed(runId: string, transaction?: TransactionSql): Promise<boolean> {
+    const transition = async (tx: TransactionSql) => {
       const [locked] = await tx<{ status: string }[]>`
         select status from workspace_runs where id = ${runId} for update
       `;
@@ -306,7 +307,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         where id = ${runId} and status = 'failed'
         returning id
       `;
-    });
+    };
+    const [row] = transaction ? await transition(transaction) : await sql.begin(transition);
     return Boolean(row);
   }
 
@@ -318,9 +320,9 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
    * checkpoints from the earliest failed stage onward are cleared so stage
    * groups do not skip that work; earlier stages stay completed.
    */
-  async function resumeCompletedWithFailures(run: RunLifecycleRun): Promise<boolean> {
+  async function resumeCompletedWithFailures(run: RunLifecycleRun, transaction?: TransactionSql): Promise<boolean> {
     const stageOrder: readonly string[] = getPipelineStageOrder(run.pipeline);
-    const [row] = await sql.begin(async (tx) => {
+    const transition = async (tx: TransactionSql) => {
       const [locked] = await tx<{ status: string; failed: number }[]>`
         select status,
                (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null) as failed
@@ -374,8 +376,20 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         where id = ${run.id} and status = 'completed'
         returning id
       `;
-    });
+    };
+    const [row] = transaction ? await transition(transaction) : await sql.begin(transition);
     return Boolean(row);
+  }
+
+  /** Prepare retry inside the caller's admission transaction; never start a workflow before commit. */
+  async function prepareRetry(run: RunLifecycleRun & { status: RunStatus }, transaction: TransactionSql): Promise<"resumed" | "restarted" | "not-retryable"> {
+    if (run.status === "failed") return await resumeFailed(run.id, transaction) ? "resumed" : "not-retryable";
+    if (run.status === "completed") return await resumeCompletedWithFailures(run, transaction) ? "resumed" : "not-retryable";
+    if (run.status === "queued") {
+      const [current] = await transaction<{ status: string }[]>`select status from workspace_runs where id = ${run.id} for update`;
+      return current?.status === "queued" ? "restarted" : "not-retryable";
+    }
+    return "not-retryable";
   }
 
   /**
@@ -598,7 +612,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     return row?.id ?? null;
   }
 
-  return { start, retry, fail, control };
+  return { start, retry, prepareRetry, fail, control };
 }
 
 export type RunLifecycle = ReturnType<typeof createRunLifecycle>;

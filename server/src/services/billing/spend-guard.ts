@@ -314,6 +314,17 @@ async function spendDecision(
       chatReserveCredits: status ? chatCreditReserve(status.funded, config) : 0 } } : null;
 }
 
+/** A queued run with mandatory leases must own usable credit in this transaction. */
+export async function requireRunCreditLease(
+  tx: TransactionSql,
+  run: { runId: string; orgId: string; workspaceId: string },
+): Promise<void> {
+  const grant = await grantRunCreditLease(tx, run);
+  if (!grant || grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
+    throw new SpendBlockedError("Run admission could not acquire a usable credit lease", "credit_exhausted");
+  }
+}
+
 /**
  * Run admission: serialise the org's admissions on an advisory lock, check
  * spend with the per-run reservation, and call `admit` (which must insert the
@@ -333,6 +344,9 @@ export async function admitRunSpend<T>(
   // grants the lease at its first checkpoint.
   const leases = guarded && creditLeasesEnabled()
     && fleetSupportsNow("billing.credit-leases", taskQueueForOrgKey(orgId).taskQueue);
+  if (leases && multiplier > 1 && !options.leaseRunId?.trim()) {
+    throw new Error("Boosted run admission requires a lease run ID");
+  }
   return (await sql.begin(async (tx) => {
     if (guarded) {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
@@ -351,16 +365,10 @@ export async function admitRunSpend<T>(
         chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
     }
     const admitted = await admit(tx);
-    // The run's first lease, under the same advisory lock (re-entrant).
-    // A failed grant never blocks admission: the savepoint keeps the
-    // transaction usable and the worker grants the lease at its first checkpoint.
+    // Failure aborts this transaction, including the queued run and any partial
+    // lease writes. A worker checkpoint cannot repair unreserved admission.
     if (leases && options.leaseRunId) {
-      const runId = options.leaseRunId;
-      try {
-        await tx.savepoint((sp) => grantRunCreditLease(sp, { runId, orgId, workspaceId }));
-      } catch (error) {
-        console.warn(`[credit-leases] run=${runId} admission lease failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      await requireRunCreditLease(tx, { runId: options.leaseRunId, orgId, workspaceId });
     }
     return admitted;
   })) as T;

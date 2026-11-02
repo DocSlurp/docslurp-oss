@@ -22,7 +22,7 @@ describe("spend-paused run sweep", () => {
     signals.resume.mockClear();
   });
 
-  function respond(available: Record<string, number>) {
+  function respond(available: Record<string, number>, lease = { lease_remaining: 0.5, available_credits: 10, outstanding_credits: 0.5, block_reason: null as string | null }) {
     const updates: string[] = [];
     sqlMock.mockImplementation((strings: unknown, ...values: unknown[]) => {
       const query = text(strings);
@@ -36,7 +36,7 @@ describe("spend-paused run sweep", () => {
         const id = values[0] as string;
         return Promise.resolve([{ id, org_id: id === "run-ok" ? "org-ok" : "org-blocked", workspace_id: "ws", user_id: "u1", pause_reason: "credit_exhausted" }]);
       }
-      if (query.includes("from grant_credit_lease(")) return Promise.resolve([{ lease_remaining: 0.5, available_credits: 10, outstanding_credits: 0.5, block_reason: null }]);
+      if (query.includes("from grant_credit_lease(")) return Promise.resolve([lease]);
       if (query.includes("org_spend_status")) return Promise.resolve([status(available[values[0] as string] ?? 0)]);
       if (query.includes("update workspace_runs")) {
         updates.push(values.find((value) => typeof value === "string" && value.startsWith("run-")) as string);
@@ -55,6 +55,15 @@ describe("spend-paused run sweep", () => {
     expect(signals.resume).toHaveBeenCalledWith("run-ok");
     expect(signals.pause).toHaveBeenCalledWith("run-blocked");
     expect(signals.resume).not.toHaveBeenCalledWith("run-blocked");
+  });
+
+  it.each([
+    { lease_remaining: Number.NaN, block_reason: null },
+    { lease_remaining: 0.5, block_reason: "credit_exhausted" },
+  ])("does not signal resume for an unusable lease %j", async (lease) => {
+    respond({ "org-ok": 112, "org-blocked": 112 }, { ...lease, available_credits: 10, outstanding_credits: 0.5 });
+    expect(await sweepSpendPausedRuns({ sql: sqlMock as never, signals })).toEqual({ resumed: 0, stillBlocked: 2 });
+    expect(signals.resume).not.toHaveBeenCalled();
   });
 
   it("keeps runs paused while only the chat reserve is left", async () => {

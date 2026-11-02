@@ -663,9 +663,28 @@ export async function retryRun(
     throw new Error("Forbidden");
   }
 
-  // A retried run spends again: admit it like a new one (no insert).
-  await admitRunSpend(run.orgId, run.workspaceId, async () => undefined);
-  const outcome = await runLifecycle.retry(run);
+  // Boosted retries retain their immutable original mode. Admission, checkpoint reset,
+  // queued transition and lease acquisition commit together; Temporal starts only afterward.
+  let outcome: RunRetryOutcome;
+  if (run.pipeline.speedBoost === true) {
+    const notRetryable = Symbol("retry-no-longer-eligible");
+    try {
+      const prepared = await admitRunSpend(run.orgId, run.workspaceId, async tx => {
+        const status = await runLifecycle.prepareRetry(run, tx);
+        // Abort admission before its post-callback lease acquisition. A stale or
+        // clean completed run must not retain credits for work it cannot retry.
+        if (status === "not-retryable") throw notRetryable;
+        return status;
+      }, { speedBoost: true, leaseRunId: run.id });
+      outcome = { status: prepared, start: await runLifecycle.start(run, { restartExisting: true }) };
+    } catch (error) {
+      if (error !== notRetryable) throw error;
+      outcome = { status: "not-retryable" };
+    }
+  } else {
+    await admitRunSpend(run.orgId, run.workspaceId, async () => undefined);
+    outcome = await runLifecycle.retry(run);
+  }
   if (outcome.status === "not-retryable") return { run, outcome };
   return { run: (await getRun(run.id, userId)) ?? run, outcome };
 }

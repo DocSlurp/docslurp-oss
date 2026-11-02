@@ -21,7 +21,8 @@ import {
 import { sql } from "../db.js";
 import { nextVersionNumber } from "./version-number.js";
 import type { RequestActor } from "../lib/request-actor.js";
-import { admitRunSpend, SpendBlockedError } from "./billing/spend-guard.js";
+import { admissionBlock, requireRunCreditLease, spendGuardsSkipped, SpendBlockedError } from "./billing/spend-guard.js";
+import { creditLeasesEnabled } from "./billing/credit-leases.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
@@ -251,13 +252,17 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
   if (prepared.batches.length === 0) return result;
   for (const batch of prepared.batches) assertPipelineSpeedBoost(batch.pipeline);
   await enforceLiveBudgetCaps(prepared.workspaceId, prepared.orgId);
-  await admitRunSpend(prepared.orgId, prepared.workspaceId, async (tx) => {
+  await sql.begin(async (tx) => {
+    // Lock organization before workspace, matching other admission paths.
+    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${prepared.orgId}))`;
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.workspaceId}`}, 0))`;
     for (const batch of prepared.batches) {
       const stageSubset = batch.pipeline.stageSubset ?? null;
       const busy = await inFlightSourceIds(tx as unknown as Client, prepared.workspaceId, batch.docs.map((doc) => doc.id), stageSubset);
       const docs = batch.docs.filter((doc) => !busy.has(doc.id));
       if (docs.length === 0) continue;
+      const block = await admissionBlock(tx, prepared.orgId, prepared.workspaceId, { speedBoost: batch.pipeline.speedBoost === true });
+      if (block) throw new SpendBlockedError(block.message, block.code);
       const runId = randomUUID();
       const pages = docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
       await tx`
@@ -281,10 +286,14 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
             ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode}, ${doc.id})
         `;
       }
+      // A queued run must hold its own validated lease before another batch can pass.
+      if (!spendGuardsSkipped() && creditLeasesEnabled()) {
+        await requireRunCreditLease(tx, { runId, orgId: prepared.orgId, workspaceId: prepared.workspaceId });
+      }
       result.runIds.push(runId);
       result.pipelines.set(runId, batch.pipeline);
     }
-  }, { speedBoost: prepared.batches.some(batch => batch.pipeline.speedBoost === true) });
+  });
   return result;
 }
 
