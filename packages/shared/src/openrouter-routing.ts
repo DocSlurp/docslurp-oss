@@ -182,6 +182,7 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): t
       if (restricted) throw new ProviderRegionRefusedError("China-based providers are turned off and this request body cannot carry a provider restriction");
       return baseFetch(input, init);
     }
+    const original = body;
     // Never rewrite embedding, audio or other non-generation model identities.
     if (["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/responses"].includes(url.pathname)
       && typeof body.model === "string") {
@@ -189,6 +190,15 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): t
       if (model !== body.model) body = { ...body, model };
     }
     const routed = withOpenRouterProviderPreferences(body, policy);
-    return routed === body ? baseFetch(input, init) : baseFetch(input, { ...init, body: JSON.stringify(routed) });
+    const response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
+    const base = typeof routed.model === "string" ? nitroBaseModel(routed.model) : undefined;
+    if (response.status !== 404 || !base) return response;
+    // Nitro routing (throughput sort, price ceiling, quantization filter) can leave
+    // no endpoint, which OpenRouter answers with 404. Retry once on the base
+    // model's normal route instead of failing the call.
+    console.warn(`[openrouter] nitro_fallback model=${routed.model} base=${base} status=404`);
+    await response.body?.cancel().catch(() => undefined);
+    const fallback = withOpenRouterProviderPreferences({ ...original, model: base }, policy && { ...policy, speedBoost: false });
+    return baseFetch(input, { ...init, body: JSON.stringify(fallback) });
   };
 }
