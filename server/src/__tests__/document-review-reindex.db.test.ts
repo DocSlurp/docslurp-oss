@@ -16,6 +16,7 @@ beforeAll(async () => {
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn(async () => null) }));
   vi.doMock("../search/eligibility-hint.js", () => ({ notifySearchEligibilityChanged: vi.fn(async () => {}) }));
   ({ reindexDocumentCorrection } = await import("../services/document-review.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
@@ -35,6 +36,22 @@ beforeAll(async () => {
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 describe("human-correction reindex", () => {
+  it("preserves omitted structured corrections and clears explicit null", async () => {
+    const { saveDocumentCorrection } = await import("../services/document-review.js");
+    await saveDocumentCorrection({ docId: "d", userId: "u", structuredData: { location: "corrected" } });
+    await saveDocumentCorrection({docId:"d",userId:"u",markdown:"Keep corrected prose."});
+    const [beforeNote] = await sql`select projection_revision from documents where id='d'`;
+    await saveDocumentCorrection({ docId: "d", userId: "u", notes: "Only notes changed" });
+    const [afterNote] = await sql`select projection_revision from documents where id='d'`;
+    expect(afterNote).toEqual(beforeNote);
+    const [prose] = await sql`select corrected_markdown from document_corrections where document_id='d'`;
+    expect(prose.corrected_markdown).toBe("Keep corrected prose.");
+    const [preserved] = await sql`select corrected_structured_data from document_corrections where document_id = 'd'`;
+    expect(preserved.corrected_structured_data).toEqual({ location: "corrected" });
+    await saveDocumentCorrection({ docId: "d", userId: "u", structuredData: null, markdown: "Corrected page one." });
+    const [cleared] = await sql`select corrected_structured_data from document_corrections where document_id = 'd'`;
+    expect(cleared.corrected_structured_data).toBeNull();
+  });
   it("clears kept model reads of the document and keeps their billing decision", async () => {
     const result = await reindexDocumentCorrection({ docId: "d", userId: "u" });
     expect(result).toMatchObject({ documentId: "d" });
@@ -47,4 +64,17 @@ describe("human-correction reindex", () => {
       { page_number: 2, read_billed_run: "m1", read_text: null },
     ]);
   });
+  it("refuses cross-user corrections and rolls back geo edits without spatial capability", async () => {
+    const { saveDocumentCorrection } = await import("../services/document-review.js");
+    await sql`insert into "user" (id,name,email) values('outsider','Other','other@example.com')`;
+    expect(await saveDocumentCorrection({docId:"d",userId:"outsider",structuredData:{site:{type:"Point",coordinates:[0,0]}}})).toBeNull();
+    await sql`update workspaces set pipeline=${sql.json({outputSchema:{type:"object",properties:{site:{type:"object",format:"geojson"}}}})}::jsonb where id='w'`;
+    const [before] = await sql`select projection_revision from documents where id='d'`;
+    await expect(saveDocumentCorrection({docId:"d",userId:"u",structuredData:{site:{type:"Point",coordinates:[0,0]}}})).rejects.toThrow("spatial migrations");
+    const [after] = await sql`select projection_revision from documents where id='d'`;
+    expect(after).toEqual(before);
+    const [correction] = await sql`select corrected_structured_data from document_corrections where document_id='d'`;
+    expect(correction.corrected_structured_data).toBeNull();
+  });
+
 });

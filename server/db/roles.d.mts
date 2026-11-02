@@ -1,6 +1,8 @@
 // Types for roles.mjs (plain JS so migrate.mjs can load it without a build step).
 export type DbRoles = { owner: string; app: string; worker: string; backup: string };
 export type WorkerTableSpec = {
+  /** Installed only with optional spatial migrations. */
+  optional?: boolean;
   privileges: readonly string[];
   columns?: Readonly<Record<string, readonly string[]>>;
   evidence: string;

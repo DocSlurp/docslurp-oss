@@ -1,3 +1,7 @@
+## Opt-in geo accepted-source lifecycle (2026-11-02)
+
+- Commit accepted geo values with structured checkpoints; fence stale attempts, publish authorized corrections atomically, and retain tenant scope. Full-migration PostGIS rollback/concurrency tests and non-spatial PGlite regressions pass. Search integration and independent council remain separate gates.
+
 ## Email OTP generation fencing (2026-11-01)
 
 - Fence native wrong-code restoration against concurrent resends in Postgres, preserving hashed 12-hour codes and attempts. See `docs/security/otp-generation-fence.md`; final council review remains required.

@@ -1,3 +1,4 @@
+import { acceptedGeoSource, geoSchemaFields } from "../db/geo-final-source.js";
 import { geoProviderSchema, validateGeoAnnotations } from "@docslurp/shared";
 import { resolvePipelineTextModel } from "@docslurp/shared";
 import type { Config } from "../config.js";
@@ -215,6 +216,11 @@ export class StructuredExtractStage implements Stage {
           artifactSlot,
           "structured extraction complete",
           async () => {
+            if (geoSchemaFields(outputSchema).length && (!state.store?.beginGeoAttempt || !state.run.workspaceId || !state.run.orgId)) {
+              throw new Error("Geo extraction requires a scoped persistent store");
+            }
+            const geoAttempt = geoSchemaFields(outputSchema).length
+              ? await state.store!.beginGeoAttempt!(state, document.id, outputSchema) : undefined;
             const pageCount = Math.max(1, document.pageCount);
             await emitDocumentPageProgress(
               state,
@@ -611,6 +617,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
             );
 
             return {
+              geoFinalSource: geoAttempt ? acceptedGeoSource(geoAttempt, outputSchema, envelope) : undefined,
               artifactUri: this.storage.uri(key),
               stats: {
                 inputTokens,
