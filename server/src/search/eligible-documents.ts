@@ -341,14 +341,14 @@ export function scopeEligibleDocuments(
   runId: string | undefined,
 ): EligibleDocument[] {
   if (filters?.workspaceId && filters.workspaceId !== set.workspaceId) return [];
-  const ids = new Set([...(filters?.documentId ? [filters.documentId] : []), ...(filters?.documentIds ?? [])]);
+  const ids = new Set(filters?.documentIds ?? []);
   const filename = filters?.filenameContains ? ilikeContainsMatcher(filters.filenameContains) : null;
   const mimeTypes = filters?.mimeTypes?.length ? new Set(filters.mimeTypes) : null;
   const tags = filters?.tags?.length ? new Set(filters.tags) : null;
   const runIds = [runId, filters?.runId].filter((id): id is string => Boolean(id));
   return set.documents.filter((document) =>
     (!filters?.documentId || document.id === filters.documentId)
-    && (!filters?.documentIds?.length || ids.has(document.id))
+    && (filters?.documentIds === undefined || ids.has(document.id))
     && (!filename || filename(document.filename))
     && (!mimeTypes || (document.mimeType !== null && mimeTypes.has(document.mimeType)))
     && (!tags || document.tags.some((tag) => tags.has(tag)))

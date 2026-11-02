@@ -233,6 +233,21 @@ describe("searchRoutes", () => {
     }
   });
 
+  it("rechecks geo readiness instead of reusing a complete response", async () => {
+    process.env.SEARCH_RESPONSE_CACHE_TTL_MS = "30000";
+    clearSearchResponseCacheForTests();
+    const geo = { field: "site", op: "radius", center: [0, 0], radiusMeters: 100 };
+    try {
+      hybridSearch.mockResolvedValue({ results: [], sessionId: "geo", availability: { status: "complete" } });
+      for (let i = 0; i < 2; i++) {
+        const response = await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "road", workspace: "ws-2", geo }) });
+        expect(response.status).toBe(200);
+      }
+      expect(hybridSearch).toHaveBeenCalledTimes(2);
+      expect(hybridSearch).toHaveBeenLastCalledWith("road", "user-1", expect.objectContaining({filters: expect.objectContaining({geo})}));
+    } finally { delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS; clearSearchResponseCacheForTests(); }
+  });
+
   it("searches the default workspace when POST /search omits workspace", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search", {

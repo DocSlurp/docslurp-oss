@@ -1,3 +1,5 @@
+import { geoProjectionFieldPointer } from "@docslurp/shared";
+import { spatialPredicate } from "./geo-predicate.js";
 import { sql } from "../db.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import type { SearchFilters } from "./filters.js";
@@ -13,7 +15,17 @@ export function retrievalScope(args: { workspaceId?: string; filters?: SearchFil
     if (args.workspaceId) conditions.push(sql`scope_document.workspace_id = ${args.workspaceId}`);
     if (filters.workspaceId) conditions.push(sql`scope_document.workspace_id = ${filters.workspaceId}`);
     if (filters.documentId) conditions.push(sql`scope_document.id = ${filters.documentId}`);
-    if (filters.documentIds?.length) conditions.push(sql`scope_document.id in (select jsonb_array_elements_text(${sql.json(filters.documentIds)}::jsonb))`);
+    if (filters.documentIds !== undefined) conditions.push(sql`scope_document.id in (select jsonb_array_elements_text(${sql.json(filters.documentIds)}::jsonb))`);
+    if (filters.geo) {
+      if (!filters.geoSchemaDigest || filters.documentIds === undefined) throw new Error("Unresolved spatial retrieval scope");
+      conditions.push(sql`exists(select 1 from ready_geo_projection_generations geo_g
+        join geo_projection_features geo_f on (geo_f.document_id,geo_f.workspace_id,geo_f.org_id,geo_f.source_revision)=
+          (geo_g.document_id,geo_g.workspace_id,geo_g.org_id,geo_g.source_revision)
+        where geo_g.document_id=scope_document.id and geo_g.workspace_id=scope_document.workspace_id
+          and geo_g.org_id=scope_document.org_id and geo_g.schema_digest=${filters.geoSchemaDigest}
+          and geo_f.field_path=${geoProjectionFieldPointer(filters.geo.field)}
+          and ${spatialPredicate(filters.geo,sql`geo_f.geom`)})`);
+    }
     if (filters.filenameContains) conditions.push(sql`scope_document.filename ilike ${`%${filters.filenameContains}%`}`);
     if (filters.mimeTypes?.length) conditions.push(sql`scope_document.mime_type = any(${sql.array(filters.mimeTypes)})`);
     if (filters.tags?.length) conditions.push(sql`exists (select 1 from document_tags tagged where tagged.document_id = scope_document.id and tagged.tag = any(${sql.array(filters.tags)}))`);

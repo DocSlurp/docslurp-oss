@@ -1275,7 +1275,7 @@ async function chatWorkspaceTurn(
   const filterDocumentIds = args.filters?.documentIds?.length ? args.filters.documentIds : undefined;
   // Type, tag and date filters only exist in retrieval; whole-corpus and stored-summary paths can't honour them.
   const narrowingFilters = Boolean(
-    args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
+    args.filters?.geo || args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
   );
   const history = args.history ?? await listRecentTurns(sessionId, 20);
   if (workspace && !publicClientKey && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
@@ -1343,7 +1343,7 @@ async function chatWorkspaceTurn(
   const wholeCorpus = await loadWorkspaceWholeCorpusContext({
     workspaceId: args.workspaceId,
     userId: args.userId,
-    filters: { documentIds },
+    filters: { documentIds, ...(args.filters?.geo ? {geo:args.filters.geo} : {}) },
   });
   const wholeCorpusDebug = buildWholeCorpusDebug({
     attempted: true,
@@ -1652,6 +1652,7 @@ async function chatWorkspaceTurn(
     graphHops: searchSettings.retrievalDefaults.graphHops,
     filters: {
       workspaceId: args.workspaceId,
+      ...(args.filters?.geo ? {geo:args.filters.geo} : {}),
       ...(documentIds ? { documentIds } : {}),
       ...(args.filters?.mimeTypes?.length ? { mimeTypes: args.filters.mimeTypes } : {}),
       ...(args.filters?.tags?.length ? { tags: args.filters.tags } : {}),

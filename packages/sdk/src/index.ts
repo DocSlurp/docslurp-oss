@@ -453,7 +453,14 @@ export type UploadUrlsInput = {
 /** @deprecated Use UploadUrlsInput. */
 export type IngestUrlInput = UploadUrlsInput;
 
+/** Explicitly opted-in GeoJSON column filter. Coordinates are [longitude, latitude]. */
+export type GeoPredicate =
+  | {field:string;op:"radius";center:[number,number];radiusMeters:number}
+  | {field:string;op:"bbox";bbox:[number,number,number,number]}
+  | {field:string;op:"intersects"|"within";geometry:{type:"Polygon";coordinates:[number,number][][]}|{type:"MultiPolygon";coordinates:[number,number][][][]}};
+
 export type SearchInput = {
+  geo?: GeoPredicate;
   /** Independent per-adapter and fused candidate cap, 1..200. Omitted preserves server defaults. */
   candidateDepth?: number;
   /** Keep ranked search order, or pack the same selected passages for a prompt. */
@@ -521,6 +528,7 @@ export function formatSearchContext(response: SearchResponse): string {
 }
 
 export type ChatInput = {
+  filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
   q: string;
   sessionId?: string;
   /** Browser (publishable) keys: the `sessionToken` from the previous answer, required to continue `sessionId`. */

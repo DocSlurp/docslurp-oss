@@ -70,7 +70,7 @@ function mergeFilters(
   return {
     ...base,
     ...derived,
-    documentIds: base?.documentIds?.length
+    documentIds: base?.documentIds !== undefined
       ? base.documentIds
       : derived.documentIds,
     tags: base?.tags?.length ? base.tags : derived.tags,

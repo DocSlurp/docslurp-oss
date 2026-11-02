@@ -1,3 +1,4 @@
+import { resolveGeoDocumentScope } from "../search/geo-scope.js";
 import type { ScopeSignal } from "../search/scope-relevance.js";
 import { randomUUID } from "node:crypto";
 import { qualifyCommunitySummary } from "../search/community-context.js";
@@ -459,6 +460,10 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       return emptyContext;
     }
 
+    if (args.filters?.geo) {
+      const [workspace] = await sql`select pipeline from workspaces where id=${access.workspaceId} and org_id=${access.orgId}`;
+      args = {...args,filters:await resolveGeoDocumentScope(access,args.filters,(workspace?.pipeline as {outputSchema?:unknown})?.outputSchema,args.runId)};
+    }
     const scope = retrievalScope({ workspaceId: access.workspaceId, filters: args.filters, runId: args.runId });
     const [summary] = await sql<WholeCorpusSummaryRow[]>`
       select
@@ -1410,6 +1415,7 @@ async function communitySummarySearch(
   workspaceId: string,
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
+  if (options.filters?.geo) return [];
   const limit = options.limit ?? 20;
   const rows = await degradeOnTimeout<CommunitySummaryRow[]>("community", [], () => boundedSearchQuery((client) => client<CommunitySummaryRow[]>`
     select
