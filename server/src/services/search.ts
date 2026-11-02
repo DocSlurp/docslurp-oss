@@ -1055,7 +1055,7 @@ async function nativeTextSearch(
         documentIds: scope.searchDocumentIds, limit,
       });
     } catch (error) {
-      if (isSearchAborted(error)) throw error;
+      if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
       countSearchEvent("nativeLexicalError");
       return null;
     }
@@ -1289,7 +1289,7 @@ async function textSearch(
       }
     }
   } catch (error) {
-    if (isSearchAborted(error)) throw error;
+    if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
     // The statement timeout degrades this search to its other branches (dense,
     // pages); the chat pending-search retry reads `lexicalTimeout` and stops.
     countSearchEvent("lexicalTimeout");
@@ -1299,11 +1299,11 @@ async function textSearch(
 }
 
 /** A branch whose statement hit the search timeout contributes nothing; the search continues. */
-async function degradeOnTimeout<T>(branch: string, fallback: T, run: () => Promise<T>): Promise<T> {
+async function degradeOnTimeout<T>(branch: string, fallback: T, run: () => Promise<T>, failClosed = false): Promise<T> {
   try {
     return await run();
   } catch (error) {
-    if (!isSearchStatementTimeout(error)) throw error;
+    if (failClosed || !isSearchStatementTimeout(error)) throw error;
     countSearchEvent(`${branch}Timeout`);
     console.warn(`[search] ${branch} branch timed out after ${searchStatementTimeoutMs()}ms; continuing without it`);
     return fallback;
@@ -1367,7 +1367,7 @@ async function progressivePageSearch(
         and progressive_pages.ts_content @@ websearch_to_tsquery('english', ${query})
       order by ts_rank_cd(progressive_pages.ts_content, websearch_to_tsquery('english', ${query})) desc
       limit ${limit}
-  `));
+  `), Boolean(options.filters?.geo));
 
   return rows.map((row) => mapProgressivePageRow(row, 1 / (80 + row.rank)));
 }
@@ -1407,7 +1407,7 @@ async function completedPageSearch(args: {
       mapProgressivePageRow(row, 1 / (80 + row.rank)),
     );
   } catch (error) {
-    if (isSearchAborted(error)) throw error;
+    if (isSearchAborted(error) || (args.options.filters?.geo && isSearchBoundError(error))) throw error;
     if (isSearchStatementTimeout(error)) countSearchEvent("completedPagesTimeout");
     // websearch_to_tsquery may fail on degenerate inputs; skip silently.
     return [];
@@ -1540,7 +1540,7 @@ async function graphNeighborSearch(
     `);
     return mapRankedChunkRows(rows);
   } catch (error) {
-    if (isSearchAborted(error)) throw error;
+    if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
     if (isSearchStatementTimeout(error)) countSearchEvent("graphTimeout");
     return [];
   }

@@ -416,6 +416,21 @@ describe("searchRoutes", () => {
     });
   });
 
+  it("GET chat stream preserves empty and geo filters",async()=>{
+    const actor={type:"apiKey" as const,userId:"user-1",apiKey:{keyId:"key",userId:"user-1",orgId:"org",keyType:"server" as const,allowedDomains:[],scopes:["chat"],rateLimitRpm:60,rateLimitPpd:1000,rateLimits:[],workspaceIds:["ws-chat"]}};
+    getWorkspace.mockResolvedValue({id:"ws-chat",orgId:"org"});
+    sqlMock.mockResolvedValue([{org_id:"org",funded:true,auto_top_up_on:false,available:1000000,reserved:0,workspace_budget_paused:false,org_budget_paused:false,workspace_in_org:true,has_credit_grants:true}]);
+    chatWorkspace.mockResolvedValue({id:"a",answer:"Empty",citations:[],sessionId:"s",searchSessionId:null});
+    const filters={documentIds:[],geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}};
+    const response=await buildApp(actor).request(`/chat/stream?q=road&workspace=ws-chat&filters=${encodeURIComponent(JSON.stringify(filters))}`);
+    expect(response.status).toBe(200); expect(await response.text()).toContain("event: done");
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({filters}));
+  });
+  it.each(["{",JSON.stringify({geo:{field:"site",op:"radius",center:[999,0],radiusMeters:100}}),"x".repeat(16385)])("rejects invalid streaming filters before chat",async filters=>{
+    const response=await buildApp().request(`/chat/stream?q=road&filters=${encodeURIComponent(filters)}`,{headers:{"Sec-Fetch-Site":"same-origin"}});
+    expect(response.status).toBe(400);expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
   it("applies the same key scope and workspace denials to GET /chat/stream as to POST /chat", async () => {
     const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
     getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });

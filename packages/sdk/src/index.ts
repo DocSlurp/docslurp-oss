@@ -1837,6 +1837,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
+      if (target.filters !== undefined) {
+        const filters = JSON.stringify(target.filters);
+        if (filters.length > 16384) throw new Error("Chat stream filters exceed 16384 characters; use chat() for larger requests");
+        params.set("filters", filters);
+      }
       let completed = false;
       // The session grant goes in a header, never the URL.
       const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};

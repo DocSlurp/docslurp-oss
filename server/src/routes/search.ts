@@ -250,7 +250,15 @@ async function workspaceChatStreamHandler(c: Context) {
   if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
   }
-  const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
+  let filters: unknown;
+  const rawFilters = c.req.query("filters");
+  if (rawFilters !== undefined) {
+    try {
+      if (rawFilters.length > 16384) throw new Error("Filters too large");
+      filters = JSON.parse(rawFilters);
+    } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
+  }
+  const parsed = workspaceChatInputSchema.safeParse({ filters, q: c.req.query("q"),
     workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
     sessionId: c.req.query("sessionId"),
     sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
@@ -303,9 +311,9 @@ async function workspaceChatStreamHandler(c: Context) {
         workspaceId,
         userId,
         query,
-        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
+        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: AbortSignal.any([c.req.raw.signal, abort.signal]),
         sessionId, sessionToken,
-        model, speedBoost: parsed.data.speedBoost
+        model, speedBoost: parsed.data.speedBoost, filters: parsed.data.filters
       }));
       await pendingEvents;
       await stream.writeSSE({
