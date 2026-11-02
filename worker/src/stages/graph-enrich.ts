@@ -18,6 +18,7 @@ import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
+import { runBounded } from "../lib/bounded-concurrency.js";
 
 /** Store surface graph enrichment writes through (the Postgres `Store`). */
 export interface KnowledgeGraphStore {
@@ -88,22 +89,27 @@ export class GraphEnrichStage implements Stage {
     const documents: Array<Record<string, unknown>> = [];
     let windows = 0;
     let llmDocuments = 0;
+    let fallbackDocuments = 0;
     let nodes = 0;
     let edges = 0;
+    const workspaceId = state.run.workspaceId;
 
+    // A failed model extraction records a fallback hash, so it is not skipped here.
     const alreadyExtracted = graphStore?.documentsWithGraph
-      ? await graphStore.documentsWithGraph(state.run.workspaceId, configHash, documentIds)
+      ? await graphStore.documentsWithGraph(workspaceId, configHash, documentIds)
       : new Set<string>();
-    for (const document of indexableDocuments(state)) {
-      if (alreadyExtracted.has(document.id)) continue;
+    const pending = indexableDocuments(state).filter((document) => !alreadyExtracted.has(document.id));
+    // Documents are independent model calls; graph writes serialize on the workspace lock.
+    await runBounded(pending.length, this.config.graphJobConcurrency ?? 4, async (index) => {
+      const document = pending[index]!;
       const artifactUri = state.artifactLedger.readDocument(document.id, "embeddings");
       const key = artifactUri ? keyFromStorageUri(artifactUri, this.storage.bucket) : null;
-      if (!key) continue;
+      if (!key) return;
       // Reused embedding artifacts keep the source document's chunk IDs, while
       // reuse materializes new relational IDs. Graph mentions must point at the
       // current document's rows, just as workspace graph rebuilds do.
       const chunks: GraphChunk[] = graphStore
-        ? await graphStore.loadDocumentGraphChunks(state.run.workspaceId, document.id)
+        ? await graphStore.loadDocumentGraphChunks(workspaceId, document.id)
         : ((await this.storage.getJson<EmbeddingArtifact>(key)).chunks ?? []).map((chunk) => ({
             id: chunk.id,
             text: chunk.text,
@@ -140,7 +146,7 @@ export class GraphEnrichStage implements Stage {
               outputTokens: usage.outputTokens,
               metadata: {
                 ...usage.metadata,
-                workspaceId: state.run.workspaceId,
+                workspaceId,
                 documentId: document.id,
                 depth: graphConfig.depth,
                 ...details,
@@ -150,6 +156,7 @@ export class GraphEnrichStage implements Stage {
         },
       });
       windows += graph.windows;
+      if (graph.llmFailed) fallbackDocuments += 1;
       if (graph.source === "llm") {
         llmDocuments += 1;
         // Price card: knowledge graph per started 10 pages, once per document per run, only when the
@@ -160,7 +167,7 @@ export class GraphEnrichStage implements Stage {
       // Persist per document: search sees the graph grow during long runs.
       const written = graphStore
         ? await graphStore.replaceDocumentGraph({
-            workspaceId: state.run.workspaceId,
+            workspaceId,
             userId: state.run.userId,
             runId: state.run.id,
             documentId: document.id,
@@ -178,8 +185,14 @@ export class GraphEnrichStage implements Stage {
         chunks: chunks.length,
         windows: graph.windows,
         source: graph.source,
+        llmFailed: graph.llmFailed,
         durationMs: graph.durationMs,
       });
+    });
+    documents.sort((left, right) => String(left.documentId).localeCompare(String(right.documentId)));
+    if (fallbackDocuments > 0) {
+      // Searchable through the heuristic graph; a stage retry or a stale rebuild re-extracts these.
+      console.warn(`[graph-enrich] run=${state.run.id} model=${graphModel} llm_fallback documents=${fallbackDocuments}/${pending.length}`);
     }
 
     const includeCommunities = pipeline.graphRag || pipeline.graphCommunitySummaries;
@@ -239,6 +252,7 @@ export class GraphEnrichStage implements Stage {
     state.pendingPerformance.push(
       { scope: "run", stageName: this.name, metric: "graph-node-count", value: nodes, unit: "node", tags: ["graph", "entity"], metadata },
       { scope: "run", stageName: this.name, metric: "graph-edge-count", value: edges, unit: "edge", tags: ["graph", "relationship"], metadata },
+      { scope: "run", stageName: this.name, metric: "graph-llm-fallback-documents", value: fallbackDocuments, unit: "document", tags: ["graph", "llm"], metadata },
       { scope: "run", stageName: this.name, metric: "graph-community-count", value: communities?.communities ?? 0, unit: "community", tags: ["graph", "community"], metadata },
       {
         scope: "run",
@@ -251,6 +265,7 @@ export class GraphEnrichStage implements Stage {
           ...metadata,
           depth: graphConfig.depth,
           llmDocuments,
+          fallbackDocuments,
           documents: state.documents.length,
           customEntityTypes: graphConfig.entityTypes.length > 0,
           domain: Boolean(graphConfig.domain),

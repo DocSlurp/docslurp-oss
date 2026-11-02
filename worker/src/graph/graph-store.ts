@@ -34,6 +34,14 @@ export interface ReplaceDocumentGraphInput {
   graph: DocumentGraph;
 }
 
+/** Recorded instead of the config hash when model extraction failed, so the document still counts as stale. */
+export const GRAPH_FALLBACK_HASH_SUFFIX = ":llm-fallback";
+
+/** The config hash a document's graph state records: a failed model extraction never counts as current. */
+export function graphStateHash(configHash: string, graph: Pick<DocumentGraph, "llmFailed">): string {
+  return graph.llmFailed ? `${configHash}${GRAPH_FALLBACK_HASH_SUFFIX}` : configHash;
+}
+
 /**
  * Replaces one document's contribution to the workspace graph: its chunk
  * mentions and edge evidence are swapped for the new extraction, nodes and
@@ -142,7 +150,7 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
         input_tokens, output_tokens, duration_ms, extracted_at
       )
       values (
-        ${input.documentId}, ${input.workspaceId}, ${input.configHash}, ${graph.source}, ${graph.windows},
+        ${input.documentId}, ${input.workspaceId}, ${graphStateHash(input.configHash, graph)}, ${graph.source}, ${graph.windows},
         ${graph.nodes.length}, ${graph.edges.length}, ${graph.inputTokens}, ${graph.outputTokens},
         ${graph.durationMs}, now()
       )

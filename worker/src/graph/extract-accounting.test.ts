@@ -17,7 +17,7 @@ it.each([
     filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example System handles documents." }],
     context: { config: defaultGraphConfig, scope: "Synthetic workspace", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage },
   });
-  expect(graph).toMatchObject({ source: "heuristic", windows: 0, inputTokens: 100, outputTokens: 1600 });
+  expect(graph).toMatchObject({ source: "heuristic", llmFailed: true, windows: 0, inputTokens: 100, outputTokens: 1600 });
   expect(onUsage).toHaveBeenCalledExactlyOnceWith({ inputTokens: 100, outputTokens: 1600 }, expect.objectContaining({ finishReason, window: 1 }));
   expect(warning).toHaveBeenCalledWith(expect.stringContaining(`finishReason=${finishReason}`));
 });
@@ -65,4 +65,15 @@ it("preserves asymmetric subject/object order and distinct reciprocal relationsh
   expect(coMentions).toHaveLength(1);
   expect(coMentions[0]).toMatchObject({ weight: 2 });
   expect(coMentions[0]!.sourceKey < coMentions[0]!.targetKey).toBe(true);
+});
+
+it("flags a provider failure on every window, but not a run without a model", async () => {
+  vi.mocked(generateOpenRouterText).mockRejectedValue(new Error("404 No endpoints found"));
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const chunks = [{ id: "chunk", text: "Example System handles documents." }];
+  const context = { config: defaultGraphConfig, scope: "Synthetic", model: "test-model", useLlm: true, privacyMode: "standard" as const };
+  expect(await extractDocumentGraph({ filename: "synthetic.html", chunks, context: { ...context, apiKey: "mock" } }))
+    .toMatchObject({ source: "heuristic", llmFailed: true });
+  expect(await extractDocumentGraph({ filename: "synthetic.html", chunks, context }))
+    .toMatchObject({ source: "heuristic", llmFailed: false });
 });

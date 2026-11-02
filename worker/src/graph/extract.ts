@@ -72,6 +72,8 @@ export interface DocumentGraph {
   edges: GraphEdgeDraft[];
   chunkEntities: GraphChunkEntityDraft[];
   source: "llm" | "heuristic";
+  /** The model was asked and no window succeeded; the heuristic graph stands in until a retry or rebuild. */
+  llmFailed: boolean;
   windows: number;
   inputTokens: number;
   outputTokens: number;
@@ -119,8 +121,9 @@ export async function extractDocumentGraph(args: {
   let windowsRead = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  const llmAttempted = Boolean(context.useLlm && context.apiKey && windows.length);
 
-  if (context.useLlm && context.apiKey && windows.length) {
+  if (llmAttempted) {
     let llmGraph: DocumentGraphExtraction = { entities: [], relationships: [] };
     let succeeded = false;
     for (const [index, window] of windows.entries()) {
@@ -128,7 +131,7 @@ export async function extractDocumentGraph(args: {
       try {
         result = await extractWindowWithLlm({
           context,
-          apiKey: context.apiKey,
+          apiKey: context.apiKey!,
           filename: args.filename,
           text: window,
           part: windows.length > 1 ? { index: index + 1, total: windows.length } : undefined,
@@ -182,6 +185,7 @@ export async function extractDocumentGraph(args: {
   return {
     ...graph,
     source,
+    llmFailed: llmAttempted && source === "heuristic",
     windows: windowsRead,
     inputTokens,
     outputTokens,

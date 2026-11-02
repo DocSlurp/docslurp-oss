@@ -9,6 +9,7 @@ import {
 } from "@docslurp/shared";
 
 import { generateOpenRouterText } from "../lib/ai.js";
+import { runBounded } from "../lib/bounded-concurrency.js";
 import { lockWorkspaceGraph } from "./graph-store.js";
 
 type Client = Sql<Record<string, unknown>>;
@@ -16,6 +17,7 @@ type Client = Sql<Record<string, unknown>>;
 const MAX_COMMUNITY_SUMMARY_CHARS = 6_000;
 const LABEL_PROPAGATION_ROUNDS = 20;
 const CO_MENTION_WEIGHT = 0.5;
+const COMMUNITY_SUMMARY_CONCURRENCY = 4;
 
 export interface CommunityGraphNode {
   id: string;
@@ -185,8 +187,8 @@ export async function refreshWorkspaceCommunities(args: {
     from kg_edges where workspace_id = ${workspaceId}
   `;
   const detected = detectCommunities([...nodes], [...edges]);
-  const existing = await sql<{ member_hash: string; label: string; summary: string }[]>`
-    select member_hash, label, summary
+  const existing = await sql<{ member_hash: string; label: string; summary: string; summary_source: string | null }[]>`
+    select member_hash, label, summary, metadata->>'summarySource' as summary_source
     from kg_communities
     where workspace_id = ${workspaceId} and member_hash is not null
   `;
@@ -199,10 +201,12 @@ export async function refreshWorkspaceCommunities(args: {
     level: number;
     label: string;
     summary: string;
+    summarySource: "llm" | "heuristic" | null;
     memberHash: string;
     nodeIds: string[];
     childHashes: string[];
   }> = [];
+  const pending: Array<{ record: (typeof records)[number]; prompt: string }> = [];
   // Largest communities first, so the LLM cap goes where retrieval benefits most.
   const ordered = [...detected].sort((left, right) => right.nodeIds.length - left.nodeIds.length);
   let llmBudget = MAX_SUMMARIZED_GRAPH_COMMUNITIES;
@@ -214,9 +218,14 @@ export async function refreshWorkspaceCommunities(args: {
       .sort((left, right) => right.mentions - left.mentions);
     const label = members.slice(0, 5).map((member) => member.name).join(", ").slice(0, 120) || "Graph community";
     const reused = previous.get(community.memberHash);
-    if (reused) {
+    // A heuristic stand-in (the model was unavailable last time) is summarized again once a model is.
+    if (reused && !(args.context.apiKey && reused.summary_source === "heuristic")) {
       result.reused += 1;
-      records.push({ id: randomUUID(), level: community.level, label: reused.label, summary: reused.summary, memberHash: community.memberHash, nodeIds: community.nodeIds, childHashes: community.childHashes });
+      records.push({
+        id: randomUUID(), level: community.level, label: reused.label, summary: reused.summary,
+        summarySource: reused.summary_source === "llm" || reused.summary_source === "heuristic" ? reused.summary_source : null,
+        memberHash: community.memberHash, nodeIds: community.nodeIds, childHashes: community.childHashes,
+      });
       continue;
     }
 
@@ -227,45 +236,63 @@ export async function refreshWorkspaceCommunities(args: {
       .sort((left, right) => right.weight - left.weight)
       .slice(0, 8)
       .map((edge) => `${nodesById.get(edge.source)?.name ?? edge.source} -> ${edge.predicate} -> ${nodesById.get(edge.target)?.name ?? edge.target} (weight: ${edge.weight})`);
-    let summary = `Community focus: ${memberLabels.join(", ")}. Strongest relations: ${edgeLabels.join("; ") || "sparse graph connections"}.`.slice(0, MAX_COMMUNITY_SUMMARY_CHARS);
-
+    const summary = `Community focus: ${memberLabels.join(", ")}. Strongest relations: ${edgeLabels.join("; ") || "sparse graph connections"}.`.slice(0, MAX_COMMUNITY_SUMMARY_CHARS);
+    const record: (typeof records)[number] = { id: randomUUID(), level: community.level, label, summary, summarySource: "heuristic", memberHash: community.memberHash, nodeIds: community.nodeIds, childHashes: community.childHashes };
+    result.summarized += 1;
+    records.push(record);
     if (args.context.apiKey && llmBudget > 0) {
       llmBudget -= 1;
-      try {
-        const generated = await generateOpenRouterText({
-          operation: "community-summary",
-          apiKey: args.context.apiKey,
-          privacyMode: args.context.privacyMode,
-          system: [
-            "Write a concise retrieval-oriented summary for this graph community.",
-            "Highlight the shared theme, the most central entities, and the key relationships operators should follow first.",
-            `Frame the summary for this workspace domain and scope:\n${args.context.scope}`,
-          ].join("\n"),
-          prompt: [
-            `Community label: ${label}`,
-            `Level: ${community.level}`,
-            `Entities: ${memberLabels.join(", ")}`,
-            `Relationships: ${edgeLabels.join("; ") || "none"}`,
-          ].join("\n"),
-          model: args.context.model,
-          maxOutputTokens: 220,
-          textGeneration: args.context.textGeneration,
-          deploymentProfile: args.context.deploymentProfile,
-          signal: args.context.signal,
-        });
-        console.log(
-          `[ai-usage] community-summary model=${args.context.model} input_tokens=${generated.usage.inputTokens} output_tokens=${generated.usage.outputTokens}`,
-        );
-        result.inputTokens += generated.usage.inputTokens;
-        result.outputTokens += generated.usage.outputTokens;
-        summary = generated.text.trim() || summary;
-      } catch (error) {
-        if (args.context.signal?.aborted) throw error;
-        // Keep the heuristic summary when the optional LLM path is unavailable.
-      }
+      pending.push({
+        record,
+        prompt: [
+          `Community label: ${label}`,
+          `Level: ${community.level}`,
+          `Entities: ${memberLabels.join(", ")}`,
+          `Relationships: ${edgeLabels.join("; ") || "none"}`,
+        ].join("\n"),
+      });
     }
-    result.summarized += 1;
-    records.push({ id: randomUUID(), level: community.level, label, summary, memberHash: community.memberHash, nodeIds: community.nodeIds, childHashes: community.childHashes });
+  }
+
+  // Summaries are independent calls; a few at a time instead of one after another.
+  let llmFailures = 0;
+  await runBounded(pending.length, COMMUNITY_SUMMARY_CONCURRENCY, async (index) => {
+    const { record, prompt } = pending[index]!;
+    try {
+      const generated = await generateOpenRouterText({
+        operation: "community-summary",
+        apiKey: args.context.apiKey!,
+        privacyMode: args.context.privacyMode,
+        system: [
+          "Write a concise retrieval-oriented summary for this graph community.",
+          "Highlight the shared theme, the most central entities, and the key relationships operators should follow first.",
+          `Frame the summary for this workspace domain and scope:\n${args.context.scope}`,
+        ].join("\n"),
+        prompt,
+        model: args.context.model,
+        maxOutputTokens: 220,
+        textGeneration: args.context.textGeneration,
+        deploymentProfile: args.context.deploymentProfile,
+        signal: args.context.signal,
+      });
+      console.log(
+        `[ai-usage] community-summary model=${args.context.model} input_tokens=${generated.usage.inputTokens} output_tokens=${generated.usage.outputTokens}`,
+      );
+      result.inputTokens += generated.usage.inputTokens;
+      result.outputTokens += generated.usage.outputTokens;
+      const text = generated.text.trim();
+      if (text) {
+        record.summary = text;
+        record.summarySource = "llm";
+      }
+    } catch (error) {
+      if (args.context.signal?.aborted) throw error;
+      // Keep the heuristic summary when the optional LLM path is unavailable.
+      llmFailures += 1;
+    }
+  });
+  if (llmFailures > 0) {
+    console.warn(`[graph-communities] workspace=${workspaceId} model=${args.context.model} llm_fallback communities=${llmFailures}/${pending.length}`);
   }
 
   const idByHash = new Map(records.map((record) => [record.memberHash, record.id]));
@@ -286,6 +313,7 @@ export async function refreshWorkspaceCommunities(args: {
         ${client.array(records.map((record) => record.memberHash))}::text[],
         ${client.array(records.map((record) => JSON.stringify({
           childCommunityIds: record.childHashes.map((hash) => idByHash.get(hash)).filter(Boolean),
+          ...(record.summarySource ? { summarySource: record.summarySource } : {}),
         })))}::text[]
       ) as community(id, level, label, summary, member_count, member_hash, metadata)
     `;

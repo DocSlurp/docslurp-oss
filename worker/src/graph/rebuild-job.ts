@@ -215,6 +215,8 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
           });
           progress.processed += 1;
           progress.windows += graph.windows;
+          // Stored with a fallback hash, so the next stale rebuild retries the model.
+          if (graph.llmFailed) console.warn(`[graph-job] llm_fallback job=${job.id} document=${document.id} model=${job.model}`);
           if (graph.source === "llm") {
             // Price card: knowledge graph per started 10 pages, once per document per rebuild job.
             const pages = Math.max(1, Number(document.page_count) || 0);
