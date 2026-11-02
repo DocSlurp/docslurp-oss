@@ -97,6 +97,7 @@ const PRIVACY_RANK = { standard: 0, "local-only": 1, "strict-privacy": 2 } as co
  * A function classifies on the before/after values (direction matters for PII, privacy and toggles).
  */
 export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> = {
+  speedBoost: "new-uploads",
   // Existing vectors would be incompatible with new queries/chunks.
   embedding: "reindex-required",
   chunkOverlap: "reindex-required",

@@ -4,6 +4,9 @@ export const WORKSPACE_CHAT_MODELS = [
   { id: "deepseek/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash", description: "Efficient reasoning" },
   { id: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol", description: "Complex reasoning" },
   { id: "openai/gpt-6-luna", label: "GPT-6 Luna", description: "Fast, focused answers" },
+  { id: "z-ai/glm-5.3-flash:nitro", label: "GLM 5.3 Flash (Nitro)", description: "Throughput routing; variable provider cost" },
+  { id: "deepseek/deepseek-v4.1-flash:nitro", label: "DeepSeek V4.1 Flash (Nitro)", description: "Throughput routing; variable provider cost" },
+  { id: "openai/gpt-6-luna:nitro", label: "GPT-6 Luna (Nitro)", description: "Throughput routing; variable provider cost" },
 ] as const;
 
 export type WorkspaceChatModelId = (typeof WORKSPACE_CHAT_MODELS)[number]["id"];
@@ -23,4 +26,9 @@ export function resolveWorkspaceChatModel(
     WORKSPACE_CHAT_MODELS.find((candidate) => candidate.id === model)?.id ??
     DEFAULT_WORKSPACE_CHAT_MODEL
   );
+}
+
+/** Only these reviewed variants inherit base-model policy; never strip arbitrary suffixes. */
+export function nitroBaseModel(model: string): string | undefined {
+  return model.endsWith(":nitro") && isWorkspaceChatModelId(model) ? model.slice(0, -6) : undefined;
 }

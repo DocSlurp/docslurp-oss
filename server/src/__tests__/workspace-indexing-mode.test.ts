@@ -233,6 +233,8 @@ describe("estimateModeSwitch", () => {
     await seedDoc("t-est-b", "t-est", "gold", 8, 3);
     const estimate = await svc.estimateModeSwitch("t-est", "full");
     expect(estimate).toMatchObject({ pages: 5, job: "full-index" });
+    expect(await svc.estimateModeSwitch("t-est", "full", false)).toEqual(estimate);
+    expect((await svc.estimateModeSwitch("t-est", "full", true)).estimatedCredits).toBeCloseTo(estimate.estimatedCredits! * 4);
     expect(estimate.estimatedCredits).toBeCloseTo(5 * svc.fullIndexCreditsPerPage());
     expect(await svc.estimateModeSwitch("t-est", "map")).toMatchObject({ pages: 0, job: "none" });
     const visual = await svc.estimateModeSwitch("t-est", "visual");

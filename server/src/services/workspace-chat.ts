@@ -1,3 +1,4 @@
+import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForWorkspace, loadWorkspacePrivacyMode, openRouterCall, privacyModeOf, privateTextModelForWorkspace } from "../lib/privacy.js";
@@ -1001,7 +1002,7 @@ export function capOutputTokens(requested: number | undefined, cap: number | nul
 }
 
 export async function chatWorkspace(args: ChatWorkspaceArgs): Promise<WorkspaceChatResponse> {
-  const turn = beginChatTurn();
+  const turn = beginChatTurn({ speedBoost: args.speedBoost });
   try {
     const response = await turn.run(() => chatWorkspaceInTurn(args));
     turn.delivered();
@@ -1015,6 +1016,7 @@ export async function chatWorkspace(args: ChatWorkspaceArgs): Promise<WorkspaceC
 }
 
 async function chatWorkspaceInTurn(args: {
+  speedBoost?: boolean;
   workspaceId: string;
   userId: string;
   query: string;
@@ -1054,6 +1056,7 @@ async function chatWorkspaceInTurn(args: {
   answerIngestReport?: boolean;
 }): Promise<WorkspaceChatResponse> {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
+  args = { ...args, speedBoost: currentChatTurn()?.speedBoost === true };
   // The key's chat output cap (browser keys default to 1000) bounds the model's max output, whatever the request asks.
   args = { ...args, maxOutputTokens: capOutputTokens(args.maxOutputTokens, apiKeyOutputCap(args.actor)) };
   // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
@@ -1065,8 +1068,9 @@ async function chatWorkspaceInTurn(args: {
   // Looked up only when the request asks for an eval model or raised limits.
   const isAdmin = chatTurnNeedsEvalAccess(args.model, args.agent) && await chatEvalAccess(args.actor, args.workspaceId);
   const resolved = resolveChatModelRequest({ requested: args.model, isAdmin });
+  if (args.speedBoost === true && await loadWorkspacePrivacyMode(args.workspaceId) !== "standard") throw new ChatModelNotAllowedError();
   const policy: ChatTurnPolicy = {
-    model: resolved.model, failover: resolved.source !== "eval",
+    model: resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true), failover: args.speedBoost !== true && resolved.source !== "eval",
     requestedModel: args.model?.trim() || null,
     limits: resolveChatAgentLimits(args.agent, isAdmin),
   };
@@ -1075,7 +1079,7 @@ async function chatWorkspaceInTurn(args: {
     return await answerIngestReportTurn(args);
   }
   // Every chat turn calls a model: refuse before spending (402 when blocked).
-  await assertCanSpend(null, args.workspaceId, { kind: args.spendKind ?? "interactive" });
+  await assertCanSpend(null, args.workspaceId, { kind: args.spendKind ?? "interactive", speedBoost: args.speedBoost });
   const sessionId = await ensureChatSession({
     workspaceId: args.workspaceId,
     userId: args.userId,

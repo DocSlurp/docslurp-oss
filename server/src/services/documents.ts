@@ -1484,7 +1484,7 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
 export async function bulkReprocessDocuments(
   documentIds: string[],
   userId: string,
-  options: { useWorkspacePipeline?: boolean } = {},
+  options: { useWorkspacePipeline?: boolean; speedBoost?: boolean } = {},
 ): Promise<BulkReprocessResult> {
   const result: BulkReprocessResult = { runs: [], failed: [], warnings: [] };
   if (documentIds.length === 0) {
@@ -1551,6 +1551,7 @@ export async function bulkReprocessDocuments(
         userId,
         workspaceId: first.workspace_id,
         kind: "bulk-reprocess",
+        speedBoost: options.speedBoost === true,
         // A partial source run's stage selection must not carry into a full re-run.
         pipeline: withoutStageSelection(first.pipeline ?? defaultPipelineFeatures),
         sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },

@@ -262,3 +262,24 @@ describe("upload tags", () => {
     expect(fakes.runs[0].files[0].tags).toEqual(["research"]);
   });
 });
+
+describe("explicit Speed boost admission", () => {
+  it.each([undefined, "false", "true"])("bulk upload treats %s as a request choice, never a workspace default", async flag => {
+    const { app, fakes } = setup([fakeWorkspace({ id: "ws-1", orgId: "org-1", pipeline: { ...defaultPipelineFeatures, speedBoost: true } })]);
+    const response = await app.request("/uploads/bulk", bulk([text("boost.txt")], { workspace: "ws-1", ...(flag === undefined ? {} : { speedBoost: flag }), pipeline: JSON.stringify({ speedBoost: true }) }));
+    expect(response.status).toBe(201);
+    expect(fakes.runs[0].pipeline.speedBoost).toBe(flag === "true");
+  });
+  it.each(["yes", "1", "TRUE", ""])("rejects ambiguous multipart speedBoost=%s before admission", async flag => {
+    const { app, fakes } = setup();
+    const response = await app.request("/uploads/bulk", bulk([text("boost.txt")], { workspace: "ws-1", speedBoost: flag }));
+    expect(response.status).toBe(400);
+    expect(fakes.runs).toHaveLength(0);
+  });
+  it("rejects string JSON speedBoost before URL fetching", async () => {
+    const { app, fakes } = setup();
+    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/a.txt"], speedBoost: "true" }));
+    expect(response.status).toBe(422);
+    expect(fakes.runs).toHaveLength(0);
+  });
+});

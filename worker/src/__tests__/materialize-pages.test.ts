@@ -134,6 +134,31 @@ beforeEach(async () => {
 });
 
 describe("materializePageRange", () => {
+  it.each([false, true])("bills materialized pages from the immutable run boost snapshot (%s), once", async speedBoost => {
+    const runId = `materialized-boost-${speedBoost}`;
+    await sql`insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+      values (${runId}, 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', ${sql.json({ speedBoost })})`;
+    const h = harness({ 1: LONG, 2: "" });
+    h.run.id = runId;
+    h.usage.runId = runId;
+    const range = { ...input(h, [1, 2], { ...defaultPipelineFeatures, speedBoost }), runId };
+    const first = await claimAndMaterialize(h.deps, range);
+    expect(first.costCredits).toBeCloseTo((0.005 + 0.25) * (speedBoost ? 4 : 1), 6);
+    const firstRows = await sql`select id, cost_cents, metadata from usage_events where run_id = ${runId}`;
+    const billed = firstRows.reduce((sum, row) => sum + Number(row.cost_cents), 0);
+    expect(billed).toBeCloseTo(first.costCredits, 6);
+    await claimAndMaterialize(h.deps, range);
+    const repeated = await sql`select id, cost_cents from usage_events where run_id = ${runId}`;
+    expect(repeated.reduce((sum, row) => sum + Number(row.cost_cents), 0)).toBeCloseTo(billed, 6);
+    // Provider usage stays in the pipeline ledger and retains actual dollars.
+    const usage = h.usage.checkpoint();
+    const provider = usage.events.find(event => event.metric === "page-analysis");
+    expect(provider?.costCents).toBe(0);
+    expect(provider?.metadata?.providerCostCents).toBe(2);
+    expect(provider?.inputTokens).toBe(1000);
+    expect(provider?.outputTokens).toBe(200);
+  });
+
   it("uses the text layer and skips OCR for text pages", async () => {
     const h = harness({ 1: LONG, 2: LONG + " second" });
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));

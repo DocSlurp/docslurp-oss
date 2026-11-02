@@ -48,7 +48,6 @@ import {
 } from "./organizations.js";
 import {
   admitRunSpend,
-  assertCanSpend,
   SpendBlockedError,
 } from "./billing/spend-guard.js";
 import { resumeSpendPausedRunOutcome } from "./spend-paused-runs.js";
@@ -534,7 +533,7 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string },
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean },
 ): Promise<{ run: WorkspaceRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
@@ -557,6 +556,7 @@ export async function reprocessRun(
   // A reprocess of a partial run starts from that run's full feature set.
   const pipelineConfig: PipelineFeatures = {
     ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
+    speedBoost: options?.speedBoost === true,
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
@@ -578,6 +578,7 @@ export async function reprocessRun(
     workspaceId: original.workspaceId,
     kind: original.kind,
     priority: original.priority ?? 0,
+    speedBoost: options?.speedBoost === true,
     pipeline: pipelineConfig,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
   });
@@ -661,9 +662,25 @@ export async function retryRun(
     throw new Error("Forbidden");
   }
 
-  // A retried run spends again: admit it like a new one (no insert).
-  await admitRunSpend(run.orgId, run.workspaceId, async () => undefined);
-  const outcome = await runLifecycle.retry(run);
+  // All retries retain their immutable original mode. Admission, checkpoint reset,
+  // queued transition and lease acquisition commit together; Temporal starts only afterward.
+  let outcome: RunRetryOutcome;
+  {
+    const notRetryable = Symbol("retry-no-longer-eligible");
+    try {
+      const prepared = await admitRunSpend(run.orgId, run.workspaceId, async tx => {
+        const status = await runLifecycle.prepareRetry(run, tx);
+        // Abort admission before its post-callback lease acquisition. A stale or
+        // clean completed run must not retain credits for work it cannot retry.
+        if (status === "not-retryable") throw notRetryable;
+        return status;
+      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id, readmission: true });
+      outcome = { status: prepared, start: await runLifecycle.start(run, { restartExisting: true }) };
+    } catch (error) {
+      if (error !== notRetryable) throw error;
+      outcome = { status: "not-retryable" };
+    }
+  }
   if (outcome.status === "not-retryable") return { run, outcome };
   return { run: (await getRun(run.id, userId)) ?? run, outcome };
 }
@@ -692,9 +709,8 @@ export async function controlRun(
   }
 
   if (input.action === "resume") {
-    // Resuming continues spending; a run paused for credits or budget stays
-    // paused until the org may spend again.
-    await assertCanSpend(run.orgId, run.workspaceId);
+    // The spend-paused path performs its own spend and lease checks.
+    // Ordinary operator resume checks eligibility inside admission below.
     // A spend-paused run is still in flight: resume it in place. With credit
     // leases it resumes only if it gets a lease; a refusal must not fall
     // through to the operator resume below.
@@ -711,6 +727,21 @@ export async function controlRun(
         code,
       );
     }
+  }
+  if (input.action === "recover" || input.action === "resume") {
+    const unchanged = Symbol("control-no-longer-eligible");
+    try {
+      await admitRunSpend(run.orgId, run.workspaceId, async tx => {
+        const changed = await runLifecycle.control(run, input, tx);
+        if (!changed) throw unchanged;
+        return changed;
+      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id, readmission: true });
+    } catch (error) {
+      if (error !== unchanged) throw error;
+      return getRun(run.id, userId);
+    }
+    if (input.action === "resume") await runLifecycle.signalResume(run.id).catch(() => {});
+    return getRun(run.id, userId);
   }
   const changedRunId = await runLifecycle.control(run, input);
   return changedRunId ? getRun(changedRunId, userId) : null;

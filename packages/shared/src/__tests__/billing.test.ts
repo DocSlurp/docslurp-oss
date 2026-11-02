@@ -40,7 +40,7 @@ import {
   unitChargeMetadata,
   workerSlotsFor,
 } from "../billing.js";
-import { WORKSPACE_CHAT_MODELS } from "../workspace-chat-models.js";
+import { WORKSPACE_CHAT_MODELS, nitroBaseModel } from "../workspace-chat-models.js";
 
 const GB = 1024 ** 3;
 
@@ -98,7 +98,7 @@ describe("price card", () => {
   });
 
   it("maps every catalog chat model to an explicit tier, so none falls through to premium by omission", () => {
-    const bare = (id: string) => id.slice(id.lastIndexOf("/") + 1);
+    const bare = (id: string) => { const base = nitroBaseModel(id) ?? id; return base.slice(base.lastIndexOf("/") + 1); };
     expect(WORKSPACE_CHAT_MODELS.filter(({ id }) => !Object.keys(CHAT_MODEL_TIERS).some((key) =>
       key.endsWith("*") ? bare(id).startsWith(key.slice(0, -1)) : key === bare(id))).map(({ id }) => id)).toEqual([]);
     expect(chatModelTier("openai/gpt-6-luna")).toBe("standard");

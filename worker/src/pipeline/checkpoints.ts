@@ -292,7 +292,7 @@ export async function runDocumentStage(
         stageName,
         pushPerformance: (event) => state.pendingPerformance.push(event),
         pushUsage: (event) => state.usageLedger.enqueue(event),
-      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders }, () => run(attempt.strategy)));
+      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => run(attempt.strategy)));
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
       const latched = latchedTeardownError();
       if (latched) throw latched;

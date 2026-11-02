@@ -103,6 +103,7 @@ export type WorkspaceIntakeAudit = {
 };
 
 export interface WorkspaceIntakeRequest {
+  speedBoost?: boolean;
   tags?: string[];
   userId: string;
   orgId?: string | null;
@@ -226,6 +227,7 @@ export interface WorkspaceIntakeRecords {
     autoNamed: boolean;
   }): Promise<WorkspaceRecord>;
   createRun(args: {
+    speedBoost?: boolean;
     userId: string;
     workspaceId: string;
     kind: WorkspaceIntakeKind;
@@ -629,6 +631,7 @@ export async function intakeIntoWorkspace(
     // Per-request mode wins over the workspace's; both are pinned to full while the flag is off.
     pipeline = {
       ...pipeline,
+      speedBoost: request.speedBoost === true,
       indexingMode: effectiveIndexingMode(request.indexingMode ?? pipeline.indexingMode),
     };
     // Per-request overrides (quality, indexingMode) are merged unvalidated above: refuse Fast with visual mode
@@ -639,6 +642,7 @@ export async function intakeIntoWorkspace(
         userId: request.userId,
         workspaceId: workspace.id,
         kind: request.kind,
+        speedBoost: request.speedBoost === true,
         pipeline,
         apiKeyId: request.apiKeyId,
         runId: request.runId,

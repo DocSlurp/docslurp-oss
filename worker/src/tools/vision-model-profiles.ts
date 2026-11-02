@@ -1,3 +1,4 @@
+import { nitroBaseModel } from "@docslurp/shared";
 /**
  * Per-model overrides for hosted page transcription, keyed by the exact
  * OpenRouter model id. Models without an entry keep the generic defaults.
@@ -169,7 +170,7 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
 };
 
 export function visionModelProfile(model: string | undefined): VisionModelProfile | undefined {
-  return model ? VISION_MODEL_PROFILES[model] : undefined;
+  return model ? VISION_MODEL_PROFILES[nitroBaseModel(model) ?? model] : undefined;
 }
 
 /** The template key to use for `model`: the profile default replaces an unset or `<OCR>` prompt. */
@@ -181,6 +182,8 @@ export function visionPromptKeyForModel(prompt: string | undefined, model: strin
 
 /** Request-body fragment with the profile's OpenRouter routing, or nothing. */
 export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterRoute } {
+  // Nitro chooses throughput-ranked providers, not the baseline profile order.
+  if (model && nitroBaseModel(model)) return {};
   const provider = visionModelProfile(model)?.openRouterProvider;
   if (!provider) return {};
   return "only" in provider

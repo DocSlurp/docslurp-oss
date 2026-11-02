@@ -2,19 +2,21 @@ import type { Sql } from "postgres";
 import {
   BILLABLE_UNIT_METRICS,
   UNIT_CHARGE_PROVIDER,
+  speedBoostMultiplier,
   compilePipelinePlan,
   deferredProfilesEnabled,
   pageCredits,
   qualityAllowsPageReading,
   unitChargeMetadata,
   type CompiledPipelinePlan,
+  type PipelineFeatures,
   type PipelineRunStage,
 } from "@docslurp/shared";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { billableCents, type PipelineUsageBatch, type PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { pipelineTransaction } from "./transaction-pipeline.js";
-import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements } from "./usage-event-store.js";
+import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements, type RunUsageState } from "./usage-event-store.js";
 
 /**
  * Ingest page charges (PRICE_CARD). Pages a vision/OCR model read are charged
@@ -132,7 +134,8 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       }
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
       const richCredits = pageCredits("rich", richPages) * multiplier;
-      charges = { fastPages, richPages, multiplier, credits: fastCredits + richCredits };
+      charges = { fastPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
+        credits: (fastCredits + richCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
       const base = { workspaceId: state.run.workspaceId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
       // The insert and its pending debit (for exactly the rows it inserted) are one statement.
       const usage = runUsageEventStatements({ client, state, usageEvents: [
@@ -266,12 +269,18 @@ export async function billLockedMaterializedPages(
   const rateCents = pageCredits("fast", 1);
   await client`select id from workspace_runs where id = ${runId} for update`;
   const candidates = moved ? requested.filter((page) => moved.has(page)) : requested;
-  const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null }[]>`
+  const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null; pipeline: PipelineFeatures }[]>`
     select r.id, coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id,
-      r.user_id, r.workspace_id, r.stats from workspace_runs r where r.id = ${runId}
+      r.user_id, r.workspace_id, r.stats, r.pipeline from workspace_runs r where r.id = ${runId}
   `;
   if (!row) throw new Error(`run not found: ${runId}`);
-  const state = { run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} } } as unknown as WorkflowState;
+  // This path has no WorkflowState: take pricing from the locked run snapshot,
+  // never a caller's mutable workspace configuration or a fabricated ledger.
+  speedBoostMultiplier(row.pipeline.speedBoost);
+  const state: RunUsageState = {
+    run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} },
+    usageLedger: { speedBoost: row.pipeline.speedBoost === true },
+  };
   const owned = candidates.length === 0 ? [] : (await client<{ page_number: number }[]>`
     update document_page_states s
     set fee_billed_run = ${runId}, fee_billed_at = case when s.fee_billed_run = ${runId} then coalesce(s.fee_billed_at, now()) else now() end

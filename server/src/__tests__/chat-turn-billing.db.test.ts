@@ -355,3 +355,25 @@ describe("nested chat turns", () => {
     expect(context.claimChatTurnAnswerId()).toBeNull();
   });
 });
+
+
+it("charges a boosted answer exactly once in its tenant and refunds its four-times credits", async () => {
+  const turn = billing.beginChatTurn({ speedBoost: true });
+  await turn.run(async () => {
+    const args = { userId: "u1", scope: { orgId: FREE, workspaceId: workspaceOf(FREE) },
+      charge: { id: "boosted-answer-id", metric: "chat-answer" as const, amount: 1, unit: "answer", credits: 12 } };
+    await usage.recordUnitCharge(args);
+    await usage.recordUnitCharge(args);
+    await usage.recordUsageEvent({ userId: "u1", scope: args.scope,
+      usage: { provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "chat", inputTokens: 100, outputTokens: 20, costCents: 0.7 } });
+  });
+  const [charged] = await sql`select sum(cost_cents)::double precision as credits from usage_attribution where org_id=${FREE}`;
+  expect(charged.credits).toBe(48);
+  const [other] = await sql`select count(*)::int as count from usage_attribution where org_id=${PAID}`;
+  expect(other.count).toBe(0);
+  await turn.failed("error");
+  await turn.failed("error");
+  const [refunded] = await sql`select sum(cost_cents)::double precision as credits, sum(coalesce((metadata->>'providerCostCents')::numeric,0))::double precision as provider from usage_attribution where org_id=${FREE}`;
+  expect(refunded.credits).toBe(0);
+  expect(refunded.provider).toBe(0.7);
+});

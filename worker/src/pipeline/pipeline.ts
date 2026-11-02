@@ -93,7 +93,7 @@ export class WorkflowState {
   stage: string;
   artifacts: Record<string, string>;
   artifactLedger: DocumentArtifactLedger;
-  readonly usageLedger = new PipelineUsageEventLedger();
+  readonly usageLedger: PipelineUsageEventLedger;
   /**
    * Chunk ids the embed stage dropped (a retry that produced fewer chunks),
    * per document: the index stage deletes their LanceDB rows again once the
@@ -129,6 +129,7 @@ export class WorkflowState {
   shard: { artifacts: Record<string, string> } | null = null;
 
   constructor(run: WorkspaceRun, documents: Document[]) {
+    this.usageLedger = new PipelineUsageEventLedger(run.pipeline.speedBoost === true);
     this.run = {
       ...run,
       stats: cloneJsonMap(run.stats),

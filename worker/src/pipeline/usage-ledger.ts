@@ -2,6 +2,8 @@ import { recordUsageReceipt, usageTraceContext } from "@docslurp/shared/observab
 import { randomUUID } from "node:crypto";
 import {
   BILLABLE_UNIT_METRICS,
+  applySpeedBoostUnitCharge,
+  speedBoostMultiplier,
   UNIT_CHARGE_PROVIDER,
   isUnitChargeEvent,
   pageCredits,
@@ -52,6 +54,14 @@ export interface PipelineUsageBatch {
  * completes (db/page-base-fee.ts) and media minutes by the media stage.
  */
 export class PipelineUsageEventLedger {
+  readonly speedBoost: boolean;
+
+  constructor(speedBoost: boolean = false) {
+    speedBoostMultiplier(speedBoost);
+    this.speedBoost = speedBoost;
+    Object.defineProperty(this, "speedBoost", { writable: false, configurable: false });
+  }
+
   private readonly pending: UsageEvent[] = [];
   private readonly lifetime = { inputTokens: 0, outputTokens: 0, costCents: 0 };
   private pendingBillable = 0;
@@ -225,7 +235,10 @@ export class PipelineUsageEventLedger {
   }
 
   private buffer(event: UsageEvent): UsageEvent {
-    const priced = (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event) : event;
+    const priced = applySpeedBoostUnitCharge(
+      (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event) : event,
+      this.speedBoost,
+    );
     const stamped = { ...priced, id: event.id ?? randomUUID(), metadata: { ...usageTraceContext(), ...priced.metadata } };
     recordUsageReceipt(stamped);
     this.pending.push(stamped);

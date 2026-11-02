@@ -1,3 +1,5 @@
+import { nitroBaseModel } from "./workspace-chat-models.js";
+export { nitroBaseModel } from "./workspace-chat-models.js";
 /**
  * OpenRouter host routing: which upstream providers may serve a request, and
  * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`
@@ -29,6 +31,19 @@ const PRICE_ROUTED_QUANTIZATIONS = ["fp8", "fp16", "bf16", "fp32"] as const;
 export interface OpenRouterProviderPolicy {
   /** False when the organization or workspace turned off China-based providers. */
   allowChinaProviders: boolean;
+  /** Explicit per-request or immutable run opt-in; unsupported models remain unchanged. */
+  speedBoost?: boolean;
+}
+
+/** Only reviewed routing variants can be selected by the Speed boost option. */
+export function isSpeedBoostEligible(model: string): boolean {
+  return nitroBaseModel(model) !== undefined || nitroBaseModel(`${model}:nitro`) !== undefined;
+}
+
+/** Unsupported models retain their existing route; admission may require eligibility explicitly. */
+export function speedBoostModel(model: string, enabled: boolean | undefined): string {
+  if (enabled === false && model.endsWith(":nitro")) throw new Error("Explicit Nitro models require speedBoost: true");
+  return enabled === true && !nitroBaseModel(model) && isSpeedBoostEligible(model) ? `${model}:nitro` : model;
 }
 
 /** A restricted request that no allowed provider could serve; it is never sent. */
@@ -47,6 +62,12 @@ export function isPriceRoutedModel(model: string): boolean {
 
 /** The price-routing `provider` preferences for `model`, or undefined to leave routing to OpenRouter. */
 export function openRouterProviderPreferences(model: string): Record<string, unknown> | undefined {
+  if (model.endsWith(":nitro")) {
+    const base = nitroBaseModel(model);
+    if (!base) throw new Error("Unsupported OpenRouter Nitro model");
+    return { sort: "throughput", ...(isPriceRoutedModel(base) ? { quantizations: [...PRICE_ROUTED_QUANTIZATIONS] } : {}),
+      max_price: { prompt: 1, completion: 5 }, allow_fallbacks: true };
+  }
   return isPriceRoutedModel(model)
     ? { sort: "price", quantizations: [...PRICE_ROUTED_QUANTIZATIONS], allow_fallbacks: true }
     : undefined;
@@ -91,6 +112,19 @@ export function withOpenRouterProviderPreferences<T extends Record<string, unkno
   const preferences = openRouterProviderPreferences(model);
   const own = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? body.provider as Record<string, unknown> : undefined;
   const merged = preferences || own ? { ...preferences, ...own } : undefined;
+  if (nitroBaseModel(model) && merged) {
+    // Request preferences may narrow, but cannot remove or raise the endpoint ceiling.
+    const price = own?.max_price as Record<string, unknown> | undefined;
+    const cap = (value: unknown, ceiling: number) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(value, ceiling) : ceiling;
+    merged.max_price = { prompt: cap(price?.prompt, 1), completion: cap(price?.completion, 5) };
+    merged.sort = "throughput";
+    if (isPriceRoutedModel(nitroBaseModel(model)!)) {
+      const requested = stringList(own?.quantizations);
+      const allowed = [...PRICE_ROUTED_QUANTIZATIONS].filter((value) => !requested || requested.includes(value));
+      if (!allowed.length) throw new Error("No supported Nitro quantization remains");
+      merged.quantizations = allowed;
+    }
+  }
   const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
   if (!routed || (routed === own && !preferences)) return body;
   return { ...body, provider: routed };
@@ -147,6 +181,12 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): t
     if (!body) {
       if (restricted) throw new ProviderRegionRefusedError("China-based providers are turned off and this request body cannot carry a provider restriction");
       return baseFetch(input, init);
+    }
+    // Never rewrite embedding, audio or other non-generation model identities.
+    if (["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/responses"].includes(url.pathname)
+      && typeof body.model === "string") {
+      const model = speedBoostModel(body.model, policy?.speedBoost);
+      if (model !== body.model) body = { ...body, model };
     }
     const routed = withOpenRouterProviderPreferences(body, policy);
     return routed === body ? baseFetch(input, init) : baseFetch(input, { ...init, body: JSON.stringify(routed) });

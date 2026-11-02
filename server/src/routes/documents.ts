@@ -54,6 +54,7 @@ import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/con
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 
 const bulkSchema = z.object({
+  speedBoost: z.boolean().optional(),
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
   documentIds: z.array(z.string()).min(1),
   tags: documentTagsSchema.optional()
@@ -170,7 +171,7 @@ export const documentsRoutes = new Hono()
     });
     return c.json({ documents });
   })
-  .post("/:documentId/full-index", async (c) => {
+  .post("/:documentId/full-index", zValidator("json", z.object({ speedBoost: z.boolean().optional() }).default({}), validationHook), async (c) => {
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
     const userId = c.get("sessionUser").id;
     const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
@@ -194,10 +195,11 @@ export const documentsRoutes = new Hono()
     if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
     try {
       const inline = await inlineEstimate(
-        () => estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] }),
+        () => estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] }),
         `/v1/documents/${viewer.document.id}/full-index/estimate`,
       );
       const result = await requestFullIndex({
+        speedBoost: c.req.valid("json").speedBoost === true,
         orgId: workspace.orgId,
         workspaceId: workspace.id,
         documentIds: [viewer.document.id],
@@ -215,7 +217,7 @@ export const documentsRoutes = new Hono()
       throw error;
     }
   })
-  .post("/:documentId/full-index/estimate", async (c) => {
+  .post("/:documentId/full-index/estimate", zValidator("json", z.object({ speedBoost: z.boolean().optional() }).default({}), validationHook), async (c) => {
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
     const userId = c.get("sessionUser").id;
     const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
@@ -242,7 +244,7 @@ export const documentsRoutes = new Hono()
     }
     const access = await getWorkspaceAccess(workspace.id, userId);
     if (!access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
-    const estimate = await estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] });
+    const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] });
     return c.json({ estimate, billing: billingState() });
   })
   .get("/index", async (c) => {
@@ -528,12 +530,12 @@ export const documentsRoutes = new Hono()
     // Same selection as the workspace-scoped twin when the documents live in one workspace.
     const bulkWorkspaceId = await singleWorkspaceOf(body.documentIds, userId);
     const bulkInline = await inlineEstimate(
-      () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
+      () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, speedBoost: body.speedBoost === true, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
       `/v1/workspaces/${bulkWorkspaceId ?? "{workspaceId}"}/documents/bulk/estimate`,
     );
     let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
     try {
-      bulk = await bulkReprocessDocuments(body.documentIds, userId);
+      bulk = await bulkReprocessDocuments(body.documentIds, userId, { speedBoost: body.speedBoost === true });
     } catch (error) {
       if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
       // Every group refused (for example Fast with visual indexing); a partial refusal is reported in `failed`.

@@ -10,7 +10,7 @@ if (!remote) {
   stop = database.stop;
 }
 try {
-  for (const name of ['starter-credit', 'fractional-usage-costs']) await import(`./${name}.mjs`);
+  for (const name of ['starter-credit', 'fractional-usage-costs', 'run-control-admission']) await import(`./${name}.mjs`);
 } finally {
   await stop?.();
 }

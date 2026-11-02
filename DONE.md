@@ -1,3 +1,7 @@
+## Explicit chat and ingestion Speed boost (2026-11-01)
+
+- API omission/false preserves baseline routing and credits; explicit true routes eligible GLM, DeepSeek and Luna generation through Nitro and charges 4× service credits. Preserve actual provider expenses separately. Persist immutable run intent and scale tenant-scoped reservations/leases and estimates. Reject direct Nitro configuration without opt-in. SDK supports explicit flags.
+
 ## Opt-in geo accepted-source lifecycle (2026-11-02)
 
 - Commit accepted geo values with structured checkpoints; fence stale attempts, publish authorized corrections atomically, and retain tenant scope. Full-migration PostGIS rollback/concurrency tests and non-spatial PGlite regressions pass. Search integration and independent council remain separate gates.
@@ -196,4 +200,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and Doppler embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
 
+- Added optional, bounded OpenRouter Nitro chat variants for GLM, DeepSeek and Luna, preserving base answer tiers and actual provider receipt accounting. Draft evaluation; missing receipts require manual reconciliation (see docs/openrouter-nitro.md).
 - 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.

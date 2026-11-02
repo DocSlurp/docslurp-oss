@@ -119,3 +119,29 @@ describe("retained version storage", () => {
     expect(billed.monthlyCredits).toBeGreaterThan(0);
   });
 });
+
+it("upload estimates require explicit boost even when the workspace snapshot was boosted", async () => {
+  const args = { files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace: { orgId: "o1", pipeline: { ...defaultPipelineFeatures, speedBoost: true } }, env: BILLED };
+  const omitted = await work.estimateUpload(args);
+  const off = await work.estimateUpload({ ...args, speedBoost: false });
+  const on = await work.estimateUpload({ ...args, speedBoost: true });
+  expect(omitted).toEqual(off);
+  expect(on.estimate.credits!.low).toBe(off.estimate.credits!.low * 4);
+  expect(on.estimate.credits!.high).toBe(off.estimate.credits!.high * 4);
+  expect(on.estimate.seconds).toEqual(off.estimate.seconds);
+});
+
+it('scales both video and audio-only alternative credits only for explicit boost', async () => {
+ const args = { files: [{ name: 'clip.mp4', size: 100, durationSeconds: 600 }], workspace: { pipeline: defaultPipelineFeatures, orgId:'o1' }, env: BILLED };
+ const base = await work.estimateUpload(args);
+ expect(await work.estimateUpload({ ...args, speedBoost: false })).toEqual(base);
+ const boosted = await work.estimateUpload({ ...args, speedBoost: true });
+ expect(base.media?.lighter).toBeTruthy();
+ for (const bound of ['low', 'high'] as const) {
+  expect(boosted.media!.credits[bound]).toBeCloseTo(base.media!.credits[bound] * 4);
+
+ }
+ expect(boosted.media!.lighter!.credits).toBeCloseTo(base.media!.lighter!.credits * 4);
+ expect(boosted.media!.lighter!.savedCredits).toBeCloseTo(base.media!.lighter!.savedCredits * 4);
+ expect(boosted.media!.lighter!.pipeline).toEqual(base.media!.lighter!.pipeline);
+});
