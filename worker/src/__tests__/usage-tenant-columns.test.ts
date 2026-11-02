@@ -4,7 +4,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { persistRunUsageEvents, persistScopedUsageEvents } from "../db/usage-event-store.js";
-import type { WorkflowState } from "../pipeline/pipeline.js";
+import type { RunUsageState } from "../db/usage-event-store.js";
 import { applyRemainingMigrations, createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -113,9 +113,10 @@ describe("worker usage writers", () => {
   });
 
   it("stamps run usage with the run's org, workspace and API key", async () => {
-    const state = {
+    const state: RunUsageState = {
+      usageLedger: { speedBoost: false },
       run: { id: "run-a", userId: "u1", orgId: "org-1", workspaceId: "ws-a", stats: { apiKeyId: "key-run" } },
-    } as unknown as WorkflowState;
+    };
     const cost = await persistRunUsageEvents({
       client: sql,
       state,
