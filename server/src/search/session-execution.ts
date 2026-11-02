@@ -1,3 +1,5 @@
+import { GeoSearchError } from "./geo-scope.js";
+import { isSearchBoundError } from "./query-bounds.js";
 import { retrievalScope } from "./retrieval-scope.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
 import { qualifyCommunitySummary } from "./community-context.js";
@@ -416,8 +418,9 @@ export async function finalizeSearchSessionExecution(
         usedWholeCorpusFallback = calibratedResults.length > 0;
         finalResultSource = usedWholeCorpusFallback ? "whole-corpus" : "none";
       }
-    } catch {
-      // Search should still return zero-result diagnostics if fallback fails.
+    } catch (error) {
+      if (isSearchBoundError(error) || error instanceof GeoSearchError) throw error;
+      // Ordinary fallback failures may still produce zero-result diagnostics.
     }
   }
 

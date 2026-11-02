@@ -313,3 +313,19 @@ describe("explicit candidate windows and ordering through session execution", ()
     expect(new Set(prompt.results.map(r => r.citation.documentId))).toEqual(new Set(relevance.results.map(r => r.citation.documentId)));
   });
 });
+
+
+describe("fallback failures retain spatial and query bounds",()=>{
+ it.each(["timeout","abort","geo"])("propagates %s before result persistence",async kind=>{
+  const {SearchStatementTimeoutError,SearchAbortedError}=await import("../search/query-bounds.js");
+  const {GeoSearchError}=await import("../search/geo-scope.js");
+  const {finalizeSearchSessionExecution}=await import("../search/session-execution.js");
+  const error=kind==="timeout"?new SearchStatementTimeoutError(100):kind==="abort"?new SearchAbortedError():new GeoSearchError("Stale geometry",409);
+  const persist=vi.fn();
+  const journal={sessionId:"s",persist,usageEvents:()=>[],diagnostics:()=>({}),recordDiagnostic:vi.fn(),adoptUsage:vi.fn()};
+  await expect(finalizeSearchSessionExecution({query:"q",userId:"u",session:journal,options:{},workspaceId:"w",
+   availability:availability("complete"),chunks:[],effectiveQuery:"q",selfQueryReasons:[],
+   wholeCorpusFallback:async()=>{throw error;}} as never)).rejects.toBe(error);
+  expect(persist).not.toHaveBeenCalled();
+ });
+});

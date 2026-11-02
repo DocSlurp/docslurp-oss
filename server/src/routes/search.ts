@@ -208,6 +208,8 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   } catch (error) {
     const usage = await failChatTurn(turn, chatTurnFailureReason(error, signal));
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
+    const failure = expectedSearchFailure(error);
+    if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message, usage ? { usage } : undefined);
     throw usage ? withApiErrorDetails(error, { usage }) : error;
   }
   // The answer was generated for this client: it is charged even if the

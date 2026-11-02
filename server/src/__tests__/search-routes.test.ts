@@ -248,6 +248,17 @@ describe("searchRoutes", () => {
     } finally { delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS; clearSearchResponseCacheForTests(); }
   });
 
+  it.each([400,409,503] as const)("preserves spatial error status %s on non-streaming chat",async status=>{
+    const {GeoSearchError}=await import("../search/geo-scope.js");
+    chatWorkspace.mockRejectedValueOnce(new GeoSearchError("Spatial request refused",status));
+    const guarded=new Hono();
+    guarded.use("*",async(c,next)=>{c.set("requestId","geo-error-test");await next();});
+    guarded.use("*",publicErrorMiddleware); guarded.route("/",app);
+    const response=await guarded.request("/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({q:"road",workspace:"ws-2",filters:{geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}}})});
+    expect(response.status).toBe(status);
+    expect(apiErrorEnvelopeSchema.safeParse(await response.json()).success).toBe(true);
+  });
+
   it("searches the default workspace when POST /search omits workspace", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search", {
