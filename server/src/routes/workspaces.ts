@@ -1570,7 +1570,7 @@ export const workspacesRoutes = new Hono()
   )
   .post(
     "/:workspaceId/indexing-mode/estimate",
-    zValidator("json", z.object({ mode: indexingModeSchema }), validationHook),
+    zValidator("json", z.object({ mode: indexingModeSchema, speedBoost: z.boolean().optional() }), validationHook),
     async (c) => {
       if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
       const userId = c.get("sessionUser").id;
@@ -1584,7 +1584,7 @@ export const workspacesRoutes = new Hono()
         }
         if (!apiKeyCanUseWorkspace(actor.apiKey, workspace)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
-      return c.json(await estimateModeSwitch(workspace.id, c.req.valid("json").mode));
+      return c.json(await estimateModeSwitch(workspace.id, c.req.valid("json").mode, c.req.valid("json").speedBoost === true));
     },
   )
   .post(

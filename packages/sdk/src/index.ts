@@ -1196,8 +1196,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   const wsPath = (ref: string | undefined) => `/v1/workspaces/${encodeURIComponent(ref?.trim() || clientWorkspace)}`;
 
   /** What switching a workspace to `mode` would cost. */
-  function estimateIndexingMode(mode: IndexingMode, input: { workspace?: string } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
-    return request(`${wsPath(input.workspace)}/indexing-mode/estimate`, jsonRequest("POST", { mode }), requestOptions);
+  function estimateIndexingMode(mode: IndexingMode, input: { workspace?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+    return request(`${wsPath(input.workspace)}/indexing-mode/estimate`, jsonRequest("POST", { mode, speedBoost: input.speedBoost }), requestOptions);
   }
 
   async function getRunProgress(runId: string, options?: RequestOptions): Promise<RunProgressSnapshot> {
@@ -1965,7 +1965,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     estimateIndexingMode,
     /** Alias of {@link estimateIndexingMode}. */
-    setIndexingModeEstimate(mode: IndexingMode, input: { workspace?: string } = {}, requestOptions?: RequestOptions) {
+    setIndexingModeEstimate(mode: IndexingMode, input: { workspace?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions) {
       return estimateIndexingMode(mode, input, requestOptions);
     },
   };

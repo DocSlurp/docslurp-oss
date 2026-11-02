@@ -521,11 +521,21 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   async function control(
     run: Pick<WorkspaceRun, "id" | "status" | "priority" | "controlState" | "error">,
     input: { action: RunControlAction; priority?: number },
+    transaction?: TransactionSql,
   ): Promise<string | null> {
+    const query = transaction ?? sql;
+    if (transaction && (input.action === "resume" || input.action === "recover")) {
+      const [current] = await query<{ status: WorkspaceRun["status"]; control_state: string | null; priority: number; error: string | null }[]>`
+        select status, control_state, priority, error from workspace_runs where id = ${run.id} for update
+      `;
+      if (!current || (input.action === "recover" ? current.control_state !== "dead-letter" :
+        !["paused", "pause_requested"].includes(current.control_state ?? "") || ["blocked", "completed", "failed"].includes(current.status))) return null;
+      run = { ...run, status: current.status, controlState: current.control_state, priority: current.priority, error: current.error };
+    }
     const planned = planRunControlUpdate(run, input);
 
     if (input.action === "reprioritize") {
-      const [row] = await sql<{ id: string }[]>`
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set priority = ${planned.priority ?? run.priority},
             updated_at = now()
@@ -536,7 +546,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "recover") {
-      const [row] = await sql<{ id: string }[]>`
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set
           status = 'queued',
@@ -562,8 +572,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "resume") {
-      await signals.resume(run.id).catch(() => {});
-      const [row] = await sql<{ id: string }[]>`
+      if (!transaction) await signals.resume(run.id).catch(() => {});
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set control_state = ${planned.controlState ?? null},
             control_requested_at = null,
@@ -580,7 +590,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
 
     if (input.action === "pause") {
       await signals.pause(run.id).catch(() => {});
-      const [row] = await sql<{ id: string }[]>`
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set control_state = ${planned.controlState ?? null},
             control_requested_at = now(),
@@ -597,7 +607,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     // Cancel: in-flight runs are cancelled through Temporal; queued or paused
     // runs fail immediately.
     if (!planned.immediate) await signals.cancel(run.id);
-    const [row] = await sql<{ id: string }[]>`
+    const [row] = await query<{ id: string }[]>`
       update workspace_runs
       set control_state = ${planned.controlState ?? null},
           control_requested_at = now(),
@@ -612,7 +622,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     return row?.id ?? null;
   }
 
-  return { start, retry, prepareRetry, fail, control };
+  return { start, retry, prepareRetry, fail, control, signalResume: signals.resume };
 }
 
 export type RunLifecycle = ReturnType<typeof createRunLifecycle>;

@@ -132,6 +132,7 @@ function billingMode(): ModeEstimate["billing"] {
 export async function estimateModeSwitch(
   workspaceId: string,
   to: IndexingMode,
+  speedBoost = false,
 ): Promise<ModeEstimate> {
   const [ws] = await sql<{ pipeline: PipelineFeatures | null }[]>`select pipeline from workspaces where id = ${workspaceId}`;
   const route = ws?.pipeline?.visualPages?.route ?? "auto";
@@ -139,7 +140,7 @@ export async function estimateModeSwitch(
   if (from === to || !deferredProfilesEnabled()) return { pages: 0, estimatedCredits: priceOrNull(0), billing: billingMode(), job: "none" };
   if (to === "full") {
     const pages = (await unindexedPages(workspaceId)).reduce((sum, row) => sum + row.unindexed, 0);
-    return { pages, estimatedCredits: priceOrNull(round(pages * fullIndexCreditsPerPage())), billing: billingMode(), job: pages > 0 ? "full-index" : "none" };
+    return { pages, estimatedCredits: priceOrNull(round(pages * fullIndexCreditsPerPage() * speedBoostMultiplier(speedBoost))), billing: billingMode(), job: pages > 0 ? "full-index" : "none" };
   }
   if (from === "full") return { pages: 0, estimatedCredits: priceOrNull(0), billing: billingMode(), job: "none" };
   const [row] = await sql<PageCountRow[]>`
@@ -155,7 +156,7 @@ export async function estimateModeSwitch(
   const pages = row?.pages ?? 0;
   // Page-image embedding is the expensive pass: estimate it with the embedder the workspace's route resolves to (private Jina at its token price, else Gemini list price plus markup) so
   // the confirmation shows a real number. Mapping is priced by usage events (fees default to 0).
-  const estimatedCredits = priceOrNull(to === "visual" ? round(estimatePageEmbedCredits(pages, route)) : 0);
+  const estimatedCredits = priceOrNull(to === "visual" ? round(estimatePageEmbedCredits(pages, route) * speedBoostMultiplier(speedBoost)) : 0);
   return { pages, estimatedCredits, billing: billingMode(), job: pages > 0 ? (to === "visual" ? "embed-pages" : "build-maps") : "none" };
 }
 

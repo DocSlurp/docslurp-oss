@@ -730,6 +730,21 @@ export async function controlRun(
       );
     }
   }
+  if (input.action === "recover" || input.action === "resume") {
+    const unchanged = Symbol("control-no-longer-eligible");
+    try {
+      await admitRunSpend(run.orgId, run.workspaceId, async tx => {
+        const changed = await runLifecycle.control(run, input, tx);
+        if (!changed) throw unchanged;
+        return changed;
+      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id });
+    } catch (error) {
+      if (error !== unchanged) throw error;
+      return getRun(run.id, userId);
+    }
+    if (input.action === "resume") await runLifecycle.signalResume(run.id).catch(() => {});
+    return getRun(run.id, userId);
+  }
   const changedRunId = await runLifecycle.control(run, input);
   return changedRunId ? getRun(changedRunId, userId) : null;
 }
