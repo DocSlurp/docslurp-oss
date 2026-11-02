@@ -1,3 +1,4 @@
+import { applySpeedBoostUnitCharge } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import type { JSONValue, PendingQuery, Sql } from "postgres";
@@ -5,6 +6,12 @@ import type { JSONValue, PendingQuery, Sql } from "postgres";
 import type { UsageEvent } from "../models.js";
 import { billableCents } from "../pipeline/usage-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
+
+/** Minimal immutable run snapshot needed to scope and price persisted events. */
+export type RunUsageState = {
+  run: Pick<WorkflowState["run"], "id" | "userId" | "orgId" | "workspaceId" | "stats">;
+  usageLedger: Pick<WorkflowState["usageLedger"], "speedBoost">;
+};
 
 function toJson(sql: Sql<Record<string, unknown>>, value: unknown) {
   return sql.json(JSON.parse(JSON.stringify(value ?? {})) as JSONValue);
@@ -40,7 +47,7 @@ function stringOrNull(value: unknown): string | null {
 }
 
 /** The scope every Usage Event of a run is stamped with at write time. */
-export function runUsageScope(state: WorkflowState): {
+export function runUsageScope(state: RunUsageState): {
   orgId: string | null;
   workspaceId: string | null;
   apiKeyId: string | null;
@@ -52,9 +59,11 @@ export function runUsageScope(state: WorkflowState): {
   };
 }
 
-function runUsageRows(client: Sql<Record<string, unknown>>, state: WorkflowState, usageEvents: UsageEvent[]) {
+function runUsageRows(client: Sql<Record<string, unknown>>, state: RunUsageState, usageEvents: UsageEvent[]) {
   const scope = runUsageScope(state);
-  return usageEvents.map((usage) => ({
+  return usageEvents.map((event) => {
+    const usage = applySpeedBoostUnitCharge(event, state.usageLedger.speedBoost);
+    return ({
     id: usage.id ?? randomUUID(),
     user_id: state.run.userId,
     run_id: state.run.id,
@@ -74,7 +83,8 @@ function runUsageRows(client: Sql<Record<string, unknown>>, state: WorkflowState
     output_tokens: usage.outputTokens ?? 0,
     // runId keeps the event classified as ingest spend after the run is deleted.
     metadata: toJson(client, { ...persistedMetadata(usage), runId: state.run.id }),
-  }));
+  });
+  });
 }
 
 /**
@@ -106,7 +116,7 @@ const USAGE_EVENT_COLUMNS = [
  */
 export async function persistRunUsageEvents(args: {
   client: Sql<Record<string, unknown>>;
-  state: WorkflowState;
+  state: RunUsageState;
   usageEvents: UsageEvent[];
 }): Promise<number> {
   const { client, state, usageEvents } = args;
@@ -150,7 +160,7 @@ export async function persistRunUsageEvents(args: {
  */
 export function runUsageEventStatements(args: {
   client: Sql<Record<string, unknown>>;
-  state: WorkflowState;
+  state: RunUsageState;
   usageEvents: UsageEvent[];
 }): { statements: PendingQuery<any>[]; cost: (results: readonly unknown[][]) => number } {
   const { client, state, usageEvents } = args;
@@ -279,7 +289,7 @@ export async function persistScopedUsageEvents(args: {
  */
 export async function debitRunUsageCredits(args: {
   client: Sql<Record<string, unknown>>;
-  state: WorkflowState;
+  state: RunUsageState;
   costCents: number;
 }): Promise<void> {
   const { client, costCents, state } = args;

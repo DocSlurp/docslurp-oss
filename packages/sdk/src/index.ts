@@ -143,7 +143,9 @@ export type UpdateWorkspaceInput = JsonObject & {
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
-export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
+export type UploadEstimateInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean; files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -339,6 +341,8 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   /** Canonical ID for a single-file or streamed upload. Use UploadFileInput.canonicalId for several files. */
@@ -367,6 +371,8 @@ export type UploadOptions = RequestOptions & {
 };
 
 export type UploadInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   files: Array<Blob | File | UploadFileInput>;
@@ -435,6 +441,8 @@ export type ExtractRecord = {
 export type ExtractResponse = UploadResponse & { extract: ExtractRecord };
 
 export type UploadUrlsInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   idempotencyKey?: string;
@@ -529,6 +537,8 @@ export function formatSearchContext(response: SearchResponse): string {
 
 export type ChatInput = {
   filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   q: string;
   sessionId?: string;
   /** Browser (publishable) keys: the `sessionToken` from the previous answer, required to continue `sessionId`. */
@@ -612,10 +622,12 @@ export type DeletedDocument = JsonObject & {
 };
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
-export type ReprocessRunInput = { stageFrom?: string; stages?: string[] };
+export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
+  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  speedBoost?: boolean;
   action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
   documentIds: string[];
   tags?: string[];
@@ -623,7 +635,7 @@ export type BulkDocumentsInput = {
 /** Per action: `{ runs, failed, warnings, job? }` (reprocess), `{ updated, documentIds }` (tags), `{ deleted, documentIds }` or `{ artifacts }`. */
 export type BulkDocumentsResult = JsonObject;
 /** Names an ingest report recommendation, optionally scoped like the report it came from. */
-export type IngestRecommendationInput = { recommendationId: string; runId?: string; documentIds?: string[] };
+export type IngestRecommendationInput = { recommendationId: string; runId?: string; documentIds?: string[]; speedBoost?: boolean };
 export type IngestRecommendationReprocessResult = JsonObject & { runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null };
 export type IngestRecommendationApplyResult = JsonObject & { recommendationId: string; patch: JsonObject | null; pipeline: JsonObject };
 
@@ -1192,8 +1204,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   const wsPath = (ref: string | undefined) => `/v1/workspaces/${encodeURIComponent(ref?.trim() || clientWorkspace)}`;
 
   /** What switching a workspace to `mode` would cost. */
-  function estimateIndexingMode(mode: IndexingMode, input: { workspace?: string } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
-    return request(`${wsPath(input.workspace)}/indexing-mode/estimate`, jsonRequest("POST", { mode }), requestOptions);
+  function estimateIndexingMode(mode: IndexingMode, input: { workspace?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+    return request(`${wsPath(input.workspace)}/indexing-mode/estimate`, jsonRequest("POST", { mode, speedBoost: input.speedBoost }), requestOptions);
   }
 
   async function getRunProgress(runId: string, options?: RequestOptions): Promise<RunProgressSnapshot> {
@@ -1356,9 +1368,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     };
   }
 
-  /** Pipeline overrides an upload sends: only the processing quality today. */
-  function pipelineFields(metadata: { quality?: QualityMode }): { pipeline?: { quality: QualityMode } } {
-    return metadata.quality ? { pipeline: { quality: metadata.quality } } : {};
+  /** Quality is a pipeline override; Speed boost is an explicit request-level opt-in. */
+  function pipelineFields(metadata: { quality?: QualityMode; speedBoost?: boolean }): { pipeline?: { quality: QualityMode }; speedBoost?: boolean } {
+    return { ...(metadata.quality ? { pipeline: { quality: metadata.quality } } : {}),
+      ...(metadata.speedBoost !== undefined ? { speedBoost: metadata.speedBoost } : {}) };
   }
 
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
@@ -1415,6 +1428,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
     if (metadata.quality) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
+    if (metadata.speedBoost !== undefined) fields.speedBoost = String(metadata.speedBoost);
     for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
@@ -1700,9 +1714,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
     /** Cost of fully indexing one document (`{ documentId }`) or a workspace (`{ workspace?, documentIds? }`). */
-    fullIndexEstimate(input: { documentId: string } | { workspace?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
-      if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, {}, requestOptions);
-      return estimateAt(`${wsPath(input.workspace)}/full-index/estimate`, { documentIds: input.documentIds }, requestOptions);
+    fullIndexEstimate(input: { documentId: string; speedBoost?: boolean } | { workspace?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, { speedBoost: input.speedBoost }, requestOptions);
+      return estimateAt(`${wsPath(input.workspace)}/full-index/estimate`, { documentIds: input.documentIds, speedBoost: input.speedBoost }, requestOptions);
     },
     rebuildGraphEstimate(input: { workspace?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       const { workspace, ...body } = input;
@@ -1822,6 +1836,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
+      if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
       let completed = false;
       // The session grant goes in a header, never the URL.
       const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
@@ -1947,18 +1962,18 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     /** Indexes every unindexed page of a workspace (or the given documents) in the background. */
-    fullIndex(input: { workspace?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
-      return request<FullIndexResponse>(`${wsPath(input.workspace)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds }), requestOptions);
+    fullIndex(input: { workspace?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`${wsPath(input.workspace)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds, speedBoost: input.speedBoost }), requestOptions);
     },
 
     /** Indexes one document in full. */
-    fullIndexDocument(documentId: string, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
-      return request<FullIndexResponse>(`/v1/documents/${encodeURIComponent(documentId)}/full-index`, { method: "POST" }, requestOptions);
+    fullIndexDocument(documentId: string, requestOptions?: RequestOptions & { speedBoost?: boolean }): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`/v1/documents/${encodeURIComponent(documentId)}/full-index`, jsonRequest("POST", { speedBoost: requestOptions?.speedBoost }), requestOptions);
     },
 
     estimateIndexingMode,
     /** Alias of {@link estimateIndexingMode}. */
-    setIndexingModeEstimate(mode: IndexingMode, input: { workspace?: string } = {}, requestOptions?: RequestOptions) {
+    setIndexingModeEstimate(mode: IndexingMode, input: { workspace?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions) {
       return estimateIndexingMode(mode, input, requestOptions);
     },
   };

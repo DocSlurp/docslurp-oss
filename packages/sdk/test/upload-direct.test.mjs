@@ -178,3 +178,11 @@ test('large unknown streams keep at most three storage PUTs active', async () =>
   assert.equal(api.maximum(), 3);
   assert.equal(api.calls.filter(call => call.url.startsWith('https://storage.invalid/')).length, 20);
 });
+
+test("direct upload sessions carry Speed boost without a quality override", async () => {
+  const api = fakeApi();
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: api.fetch });
+  await client.upload({ data: new Blob(["document"]), filename: "doc.txt" }, { speedBoost: true });
+  const session = api.calls.find(call => call.url.endsWith("/direct/sessions"));
+  assert.equal(JSON.parse(session.body).speedBoost, true);
+});

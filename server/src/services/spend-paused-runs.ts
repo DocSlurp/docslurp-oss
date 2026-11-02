@@ -87,7 +87,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
         // Fail closed on lease errors: retain the pause and retry the sweep.
         const grant = await grantRunCreditLease(client, { runId, orgId: row.org_id, workspaceId: row.workspace_id });
         if (!grant) throw new Error("Credit lease response missing");
-        if (grant.remaining <= 0) {
+        if (grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
           blockedReason = grant.blockReason ?? row.pause_reason;
           throw new Error("Resume lease refused");
         }

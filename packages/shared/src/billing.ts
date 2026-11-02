@@ -1,3 +1,4 @@
+import { nitroBaseModel } from "./workspace-chat-models.js";
 import { z } from "zod";
 
 import { PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
@@ -266,7 +267,8 @@ export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
 
 /** Tier of a chat model id (`provider/model`, bare `model`, or a `workspace:` alias resolved by the caller). */
 export function chatModelTier(model: string | null | undefined): ChatAnswerTier {
-  const raw = (model ?? "").trim().toLowerCase();
+  const selected = (model ?? "").trim().toLowerCase();
+  const raw = nitroBaseModel(selected) ?? selected;
   if (!raw) return "premium";
   const bare = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
   const exact = CHAT_MODEL_TIERS[bare];
@@ -329,6 +331,32 @@ export function isBillableUnitMetric(metric: string | null | undefined): metric 
 
 /** Provider recorded on billable unit events. */
 export const UNIT_CHARGE_PROVIDER = "docslurp";
+
+/** The opt-in acceleration price is fixed server policy, never a client multiplier. */
+export function speedBoostMultiplier(speedBoost: boolean | undefined = false): 1 | 4 {
+  if (typeof speedBoost !== "boolean") throw new Error("speedBoost must be a boolean");
+  return speedBoost ? 4 : 1;
+}
+
+/** Apply a trusted request/run snapshot once, without changing provider-dollar receipts. */
+export function applySpeedBoostUnitCharge<T extends {
+  provider?: string; costCents: number; metric?: string | null; metadata?: Record<string, unknown> | null;
+}>(event: T, speedBoost: boolean | undefined = false): T {
+  const multiplier = speedBoostMultiplier(speedBoost);
+  if (event.provider !== UNIT_CHARGE_PROVIDER || !isUnitChargeEvent(event)) return event;
+  const previous = event.metadata?.speedBoostCharge;
+  const applied = previous && typeof previous === "object" ? previous as Record<string, unknown> : null;
+  const base = applied?.version === 1 && typeof applied.baseCredits === "number"
+    && Number.isFinite(applied.baseCredits) && applied.baseCredits >= 0
+    && (applied.multiplier === 1 || applied.multiplier === 4)
+    && event.costCents === applied.baseCredits * applied.multiplier
+      ? applied.baseCredits : event.costCents;
+  if (!Number.isFinite(base) || base < 0) throw new Error("Invalid unit credits");
+  if (multiplier === 1 && !applied) return event;
+  return { ...event, costCents: base * multiplier,
+    metadata: { ...event.metadata, speedBoost: speedBoost === true,
+      speedBoostCharge: { version: 1, baseCredits: base, multiplier } } };
+}
 
 /** Metadata every billable unit event carries. */
 export function unitChargeMetadata(extra: Record<string, unknown> = {}): Record<string, unknown> {

@@ -79,6 +79,7 @@ export const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) =>
 });
 
 const ingestUrlSchema = z.object({
+  speedBoost: z.boolean().optional(),
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
   workspace: workspaceInputSchema.optional(),
@@ -105,6 +106,7 @@ export const directUploadFileSchema = z.object({
 });
 
 const createDirectSessionSchema = z.object({
+  speedBoost: z.boolean().optional(),
   indexingMode: indexingModeSchema.optional(),
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
@@ -265,7 +267,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         // the workspace confirm creates (none: a self-titled one).
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the workspace pipeline and its template locks.
-        const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
+        const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
         const session = await createDirectUploadSession({
           userId,
           orgId,
@@ -391,6 +393,9 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const canonicalIds = parseCanonicalIds(files, body);
       const paths = parseSourcePaths(files, body);
       const pipeline = parseFormWorkspaceIntakePipeline(body.pipeline);
+      const parsedBoost = z.enum(["true", "false"]).optional().safeParse(body.speedBoost);
+      if (!parsedBoost.success) throw new WorkspaceIntakeError("speedBoost must be true or false", 400);
+      const speedBoost = parsedBoost.data === "true";
       result = await createBulkWorkspaceIntake({
         userId,
         orgId,
@@ -400,6 +405,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
+        speedBoost,
         files,
         canonicalIds,
         tags: parseFormDocumentTags(body.tags),
@@ -448,6 +454,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
           allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
+          speedBoost: body.speedBoost === true,
           tags: body.tags,
           urls: body.urls.map((entry) => typeof entry === "string" ? entry : entry.url),
           canonicalIds: body.urls.map((entry) => typeof entry === "string" ? null : entry.canonicalId ?? null),
@@ -507,6 +514,7 @@ export async function directUploadTarget(
 }
 
 const uploadEstimateSchema = z.object({
+  speedBoost: z.boolean().optional(),
   files: z.array(z.object({
     name: z.string().min(1).max(1024),
     size: z.number().int().nonnegative(),
@@ -543,7 +551,7 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
-    const { estimate, media } = await estimateUpload({ files: body.files, workspace });
+    const { estimate, media } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance.
     return c.json({ estimate, media, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
   },

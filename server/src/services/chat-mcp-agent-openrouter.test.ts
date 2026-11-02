@@ -25,16 +25,17 @@ function openRouterStream(model: string): Response {
   return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
-it("reports the routed OpenRouter build as resolvedModel, not the requested alias", async () => {
+it.each(["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash:nitro", "z-ai/glm-5.3-flash:nitro", "openai/gpt-6-luna:nitro"])("records the actual routed charge for %s", async (model) => {
   const fetchMock = vi.fn(async () => openRouterStream("deepseek/deepseek-v4.1-flash-20261017"));
   vi.stubGlobal("fetch", fetchMock);
   const result = await runChatMcpAgent({
     actor: { type: "session", userId: "user", sessionId: "s", user: { id: "user", name: "User", email: "" } },
     workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
-    privacyMode: "standard", model: "deepseek/deepseek-v4.1-flash", maxOutputTokens: 100,
+    privacyMode: "standard", model, maxOutputTokens: 100,
   });
   expect(fetchMock).toHaveBeenCalledOnce();
-  expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).model).toBe("deepseek/deepseek-v4.1-flash");
+  expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).model).toBe(model);
+  if (model.endsWith(":nitro")) expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).provider).toMatchObject({ sort: "throughput", max_price: { prompt: 1, completion: 5 } });
   expect(result.answer).toBe("Hello there.");
   expect(result.debug).toMatchObject({ resolvedModel: "deepseek/deepseek-v4.1-flash-20261017", resolvedProvider: "DeepSeek",
     stepUsage: [{ step: 0, model: "deepseek/deepseek-v4.1-flash-20261017", inputTokens: 120, outputTokens: 6 }] });

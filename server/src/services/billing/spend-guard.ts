@@ -1,20 +1,22 @@
 import { reportPublicError } from "../../lib/public-errors.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../../lib/upgrade-links.js";
-import { publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
+import { PipelineSpeedBoostRequiredError, publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { TransactionSql } from "postgres";
 
 import {
   chatCreditOverdraft,
+  speedBoostMultiplier,
   chatCreditReserve,
   isBillingExemptOrg,
   resolveChatCreditReserveConfig,
   type ChatCreditReserveConfig,
 } from "@docslurp/shared";
 
+import { currentChatTurn } from "../../lib/chat-turn-context.js";
 import { sql, type SqlClient } from "../../db.js";
-import { creditLeasesEnabled, grantRunCreditLease } from "./credit-leases.js";
+import { creditLeaseConfig, creditLeasesEnabled, grantRunCreditLease } from "./credit-leases.js";
 import { fleetSupportsNow, taskQueueForOrgKey } from "../worker-fleet.js";
 
 /**
@@ -267,6 +269,8 @@ export interface SpendCheckOptions {
   client?: Client;
   kind?: SpendKind;
   hold?: boolean;
+  /** Validated operation opt-in; nested chat calls inherit the outer turn. */
+  speedBoost?: boolean;
 }
 
 export async function assertCanSpend(
@@ -295,7 +299,12 @@ async function spendDecision(
   options: SpendCheckOptions,
 ): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean; details?: Record<string, unknown> } | null> {
   const kind = options.kind ?? "job";
-  const config = resolveChatCreditReserveConfig();
+  const current = currentChatTurn();
+  speedBoostMultiplier(options.speedBoost);
+  if (current && options.speedBoost !== undefined && current.speedBoost !== options.speedBoost) throw new Error("Nested spend cannot change speedBoost");
+  const multiplier = speedBoostMultiplier(current?.speedBoost ?? options.speedBoost);
+  const baseConfig = resolveChatCreditReserveConfig();
+  const config = { ...baseConfig, holdCredits: baseConfig.holdCredits * multiplier };
   const status = await loadSpendStatus(orgId, workspaceId, { client: options.client });
   const reason = spendBlockReason(status, kind, config)
     ?? (kind === "interactive" && status ? await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config) : null);
@@ -305,17 +314,31 @@ async function spendDecision(
       chatReserveCredits: status ? chatCreditReserve(status.funded, config) : 0 } } : null;
 }
 
+/** A queued run with mandatory leases must own usable credit in this transaction. */
+export async function requireRunCreditLease(
+  tx: TransactionSql,
+  run: { runId: string; orgId: string; workspaceId: string },
+): Promise<void> {
+  const grant = await grantRunCreditLease(tx, run);
+  if (!grant || grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
+    throw new SpendBlockedError("Run admission could not acquire a usable credit lease", "credit_exhausted");
+  }
+}
+
 /**
  * Run admission: serialise the org's admissions on an advisory lock, check
  * spend with the per-run reservation, and call `admit` (which must insert the
- * run with the same client) inside that transaction.
+ * run with the same client) inside that transaction. Readmission callbacks run
+ * first under the org and scoped run locks: they must throw for an ineligible
+ * no-op and must never publish external signals. Refusal rolls their writes back.
  */
 export async function admitRunSpend<T>(
   orgId: string,
   workspaceId: string,
   admit: (client: TransactionSql) => Promise<T>,
-  options: { leaseRunId?: string } = {},
+  options: { leaseRunId?: string; speedBoost?: boolean; readmission?: boolean } = {},
 ): Promise<T> {
+  const multiplier = speedBoostMultiplier(options.speedBoost);
   const guarded = !spendGuardsSkipped();
   // Leases need every worker that may run the job to consume them
   // (services/worker-fleet.ts). Admission is a request path, so it reads the
@@ -323,32 +346,75 @@ export async function admitRunSpend<T>(
   // grants the lease at its first checkpoint.
   const leases = guarded && creditLeasesEnabled()
     && fleetSupportsNow("billing.credit-leases", taskQueueForOrgKey(orgId).taskQueue);
+  if (leases && multiplier > 1 && !options.leaseRunId?.trim()) {
+    throw new Error("Boosted run admission requires a lease run ID");
+  }
   return (await sql.begin(async (tx) => {
-    if (guarded) {
+    if (guarded || options.readmission) {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+    }
+    // Verify the persisted tenant scope before allowing the transactional
+    // lifecycle callback to touch an existing run.
+    let admitted: T;
+    let ownReservation = 0;
+    if (options.readmission) {
+      const [existing] = await tx`
+        select pipeline from workspace_runs where id = ${options.leaseRunId ?? ""}
+          and org_id = ${orgId} and workspace_id = ${workspaceId} for update
+      `;
+      if (!existing) throw new SpendBlockedError("Run does not belong to this workspace", "plan_not_entitled");
+      if ((existing.pipeline?.speedBoost === true) !== (options.speedBoost === true)) {
+        throw new SpendBlockedError("Run mode cannot change during readmission", "plan_not_entitled");
+      }
+      // Eligibility and its writes are atomic with admission; a no-op throws
+      // before billing and a spend refusal rolls every write back.
+      admitted = await admit(tx);
+      const [reservation] = leases ? await tx`
+        select coalesce(sum(greatest(granted-consumed,0)),0) as amount from credit_leases
+        where holder_kind='run' and holder_id=${options.leaseRunId!}
+          and org_id=${orgId} and workspace_id=${workspaceId}
+          and status='active' and expires_at>now() and not credit_exempt
+      ` : await tx`
+        select case when pipeline->'speedBoost'='true'::jsonb
+          then greatest(0, ${runAdmissionReserveCredits()} * 4 - spent_cents)
+          else greatest(0, ${runAdmissionReserveCredits()} - (input_cost_cents+output_cost_cents)) end as amount
+        from workspace_runs where id=${options.leaseRunId!}
+          and org_id=${orgId} and workspace_id=${workspaceId} and status in ('queued','processing')
+          and coalesce(control_state, '') not in ('paused', 'cancelled', 'cancel_requested', 'dead-letter')
+      `;
+      ownReservation = Number(reservation?.amount ?? 0);
+    }
+    if (guarded) {
       const status = await loadSpendStatus(orgId, workspaceId, {
         client: tx,
         // Leases replace the per-run reservation: `reserved` holds them all.
         runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
       });
-      const reason = spendBlockReason(status);
+      // Existing runs reserve their own immutable multiplier in SQL. Reserve the
+      // new boosted run before insertion; base admissions retain their prior rule.
+      const requiredReserve = multiplier > 1
+        ? (leases ? creditLeaseConfig().minCredits : runAdmissionReserveCredits()) * multiplier
+        : 0;
+      const checked = status ? {
+        ...status,
+        reserved: options.readmission
+          // Lease acquisition below validates the existing lease or funds a new
+          // one. Only this verified run's live reservation is reusable.
+          ? Math.max(0, status.reserved - ownReservation) + (leases ? 0 : requiredReserve)
+          : status.reserved + requiredReserve,
+      } : null;
+      const reason = spendBlockReason(checked);
       if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { spendKind: "job",
         availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
         chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
     }
-    const admitted = await admit(tx);
-    // The run's first lease, under the same advisory lock (re-entrant).
-    // A failed grant never blocks admission: the savepoint keeps the
-    // transaction usable and the worker grants the lease at its first checkpoint.
+    if (!options.readmission) admitted = await admit(tx);
+    // Failure aborts this transaction, including the queued run and any partial
+    // lease writes. A worker checkpoint cannot repair unreserved admission.
     if (leases && options.leaseRunId) {
-      const runId = options.leaseRunId;
-      try {
-        await tx.savepoint((sp) => grantRunCreditLease(sp, { runId, orgId, workspaceId }));
-      } catch (error) {
-        console.warn(`[credit-leases] run=${runId} admission lease failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      await requireRunCreditLease(tx, { runId: options.leaseRunId, orgId, workspaceId });
     }
-    return admitted;
+    return admitted!;
   })) as T;
 }
 
@@ -368,15 +434,17 @@ export async function admissionBlock(
   tx: TransactionSql,
   orgId: string,
   workspaceId: string,
+  options: { speedBoost?: boolean } = {},
 ): Promise<{ code: SpendBlockedCode; message: string } | null> {
   if (spendGuardsSkipped()) return null;
   await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
-  return spendBlockReason(
-    await loadSpendStatus(orgId, workspaceId, {
-      client: tx,
-      runReserveCredits: creditLeasesEnabled() ? 0 : runAdmissionReserveCredits(),
-    }),
-  );
+  const multiplier = speedBoostMultiplier(options.speedBoost);
+  const leases = creditLeasesEnabled();
+  const status = await loadSpendStatus(orgId, workspaceId, {
+    client: tx, runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
+  });
+  return spendBlockReason(status && multiplier > 1 ? { ...status, reserved: status.reserved
+    + (leases ? creditLeaseConfig().minCredits : runAdmissionReserveCredits()) * multiplier } : status);
 }
 
 /** JSON 402 body for a blocked spend, with billing links on hosted deployments. */
@@ -391,6 +459,7 @@ export function spendBlockedResponse(c: Context, error: SpendBlockedError) {
 
 /** Hono onError: 402 for blocked spend, Hono's defaults otherwise. */
 export function spendAwareErrorHandler(error: Error, c: Context) {
+  if (error instanceof PipelineSpeedBoostRequiredError) return c.json({ error: error.message, code: error.code }, 400);
   if (isSpendBlockedError(error)) return spendBlockedResponse(c, error);
   reportPublicError(error, { requestId: c.get("requestId") ?? "", status: error instanceof HTTPException ? error.status : 500 });
   if (error instanceof HTTPException) return c.json({ error: publicErrorForStatus(error.status) }, error.status);

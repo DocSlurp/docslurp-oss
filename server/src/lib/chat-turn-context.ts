@@ -1,3 +1,4 @@
+import { speedBoostMultiplier } from "@docslurp/shared";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 
@@ -26,6 +27,8 @@ export interface ChatTurnEventRecord {
 
 export interface ChatTurnContext {
   readonly id: string;
+  /** Validated outer-request choice; nested turns inherit it. */
+  readonly speedBoost: boolean;
   status: ChatTurnStatus;
   /** Whether events written after a failure are non-billable (CHAT_REFUND_UNDELIVERED_TURNS). */
   refundOnFailure: boolean;
@@ -39,15 +42,19 @@ export interface ChatTurnContext {
 
 const chatTurnStorage = new AsyncLocalStorage<ChatTurnContext>();
 
-export function createChatTurnContext(options: { id?: string; refundOnFailure: boolean }): ChatTurnContext {
-  return {
+export function createChatTurnContext(options: { id?: string; refundOnFailure: boolean; speedBoost?: boolean }): ChatTurnContext {
+  speedBoostMultiplier(options.speedBoost);
+  const turn: ChatTurnContext = {
     id: options.id ?? randomUUID(),
+    speedBoost: options.speedBoost === true,
     status: "open",
     refundOnFailure: options.refundOnFailure,
     inflight: new Set(),
     events: [],
     answerIdClaimed: false,
   };
+  Object.defineProperty(turn, "speedBoost", { writable: false, configurable: false });
+  return turn;
 }
 
 export function runInChatTurnContext<T>(turn: ChatTurnContext, run: () => T): T {

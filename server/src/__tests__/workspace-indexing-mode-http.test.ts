@@ -60,6 +60,7 @@ beforeEach(() => {
   startRun.mockClear();
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   delete process.env.DOCSLURP_DEFERRED_PROFILES;
   await sql`delete from workspaces where id like 't-%'`;
 });
@@ -292,4 +293,51 @@ describe("stored extractor settings the strict schemas reject (round 4 M2)", () 
     const stored = (await sql<{ p: unknown }[]>`select pipeline -> 'documentExtraction' -> 'options' as p from workspaces where id = 't-strict-x'`)[0]?.p;
     expect(JSON.stringify(stored ?? {})).not.toContain("/tmp/attacker");
   });
+});
+
+it.each(["workspaces", "documents"])("full-index %s validates, estimates and persists explicit opt-in", async (kind) => {
+  vi.stubEnv("DOCSLURP_BILL_TEST", "true");
+  for (const [index, speedBoost] of [undefined, false, true].entries()) {
+    const ws = `t-boost-${kind}-${index}`, doc = `${ws}-doc`;
+    await seedWorkspace(ws, "gold", "map", { speedBoost: true });
+    await seedDoc(doc, ws, "gold", 3, 0);
+    const path = `/v1/${kind}/${kind === "workspaces" ? ws : doc}/full-index`;
+    const plain = await app.request(`${path}/estimate`, json("POST", {}));
+    expect(plain.status).toBe(200);
+    const base = await plain.json() as { estimate: { credits: { low: number; high: number } | null } };
+    const body = speedBoost === undefined ? {} : { speedBoost };
+    const estimateResponse = await app.request(`${path}/estimate`, json("POST", body));
+    expect(estimateResponse.status).toBe(200);
+    const estimate = await estimateResponse.json() as typeof base;
+    expect(base.estimate.credits).not.toBeNull();
+    if (base.estimate.credits) {
+      expect(estimate.estimate.credits!.low).toBeCloseTo(base.estimate.credits.low * (speedBoost ? 4 : 1));
+      expect(estimate.estimate.credits!.high).toBeCloseTo(base.estimate.credits.high * (speedBoost ? 4 : 1));
+    }
+    for (const suffix of ["", "/estimate"]) expect((await app.request(`${path}${suffix}`, json("POST", { speedBoost: "true" }))).status).toBe(400);
+    const response = await app.request(path, json("POST", body));
+    expect(response.status).toBe(202);
+    const result = await response.json() as { runId: string };
+    const [run] = await sql<{ pipeline: { speedBoost: boolean } }[]>`select pipeline from workspace_runs where id = ${result.runId}`;
+    expect(run.pipeline.speedBoost).toBe(speedBoost === true);
+  }
+});
+
+it("full-index reserves boosted credits before creating a run", async () => {
+  vi.stubEnv("SKIP_RUN_BUDGET_GUARDS_IN_DEV", "false");
+  vi.stubEnv("WORKER_CREDIT_LEASES", "off");
+  await seedWorkspace("t-fi-reserve", "gold", "map");
+  await seedDoc("t-fi-reserve-doc", "t-fi-reserve", "gold", 3, 0);
+  const previous = process.env.RUN_ADMISSION_RESERVE_CREDITS;
+  process.env.RUN_ADMISSION_RESERVE_CREDITS = "300";
+  try {
+    const boosted = await app.request("/v1/workspaces/t-fi-reserve/full-index", json("POST", { speedBoost: true }));
+    expect(boosted.status).toBe(402);
+    const [count] = await sql<{ count: number }[]>`select count(*)::int as count from workspace_runs where workspace_id = 't-fi-reserve'`;
+    expect(count.count).toBe(1); // Only the seeded source run exists.
+    expect((await app.request("/v1/workspaces/t-fi-reserve/full-index", json("POST", { speedBoost: false }))).status).toBe(202);
+  } finally {
+    if (previous === undefined) delete process.env.RUN_ADMISSION_RESERVE_CREDITS;
+    else process.env.RUN_ADMISSION_RESERVE_CREDITS = previous;
+  }
 });

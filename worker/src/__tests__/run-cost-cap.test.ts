@@ -194,6 +194,27 @@ describe("run cost cap figure", () => {
     expect(spent).toBeLessThan(cap + shards.length * unit + 1e-9);
   });
 
+  it("counts boosted credits before and after persistence, without changing provider costs or double-charging retries", async () => {
+    const boostPipeline = JSON.stringify({ ...defaultPipelineFeatures, speedBoost: true, maxCostCents: 1 });
+    await db.query(`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+      values ('r-boost','o1','u1','w','bulk-upload','processing','embed',$1::jsonb)`, [boostPipeline]);
+    const state = WorkflowState.create(await store.loadRun("r-boost"), []);
+    state.run.pipeline.speedBoost = false; // persisted opt-in was captured before mutable stage state changes
+    state.usageLedger.record({ provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "page-analysis",
+      inputTokens: 100, outputTokens: 50, costCents: 0.37, metadata: { documentId: "boost-doc", pageNumber: 1 } });
+    const charge = state.usageLedger.snapshot().find(event => event.metric === "ingest-page-rich")!;
+    expect(runSpentCents(state)).toBe(1);
+    expect(isCostCapExceeded(state)).toBe(true);
+    await store.updateProgress(state);
+    expect(await spentCents("r-boost")).toBe(1);
+    expect(await billedLedgerCents("r-boost")).toBe(1);
+    expect(await scalar(`select (metadata->>'providerCostCents')::text as v from usage_attribution where run_id='r-boost' and metric='page-analysis'`)).toBe(0.37);
+    state.usageLedger.enqueue(charge);
+    await store.updateProgress(state);
+    expect(await spentCents("r-boost")).toBe(1);
+    expect(await scalar(`select count(*)::text as v from usage_attribution where run_id='r-boost' and metric='ingest-page-rich' and org_id='o1' and workspace_id='w'`)).toBe(1);
+  });
+
   it("ignores the deprecated run-row counters", async () => {
     await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, input_cost_cents, output_cost_cents)
       values ('r-old', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(10)}', 40, 40)`);

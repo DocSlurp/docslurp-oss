@@ -1,4 +1,5 @@
-import { resolveSupportedModelIdWithWarning, withServedProviderRegion } from "@docslurp/shared";
+import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
+import { nitroBaseModel, speedBoostModel, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
@@ -349,7 +350,8 @@ async function runRouteVisionRequest(
   // Billing follows the request's effective destination (`routeBaseUrl`), never the provider name.
   const billing = visionRouteBilling(route, args.cfg);
   const model = isPrivate ? route.modelUri : route.model;
-  let served = servedRoute(route, args.cfg, model);
+  const routedModel = !isPrivate && isOpenRouterBaseUrl(route.baseUrl) ? speedBoostModel(model, currentProviderPolicy().speedBoost === true) : model;
+  let served = servedRoute(route, args.cfg, routedModel);
   try {
     const result = await sendRouteVisionRequest(route, prompt, args, billing, model, (usageModel) => {
       served = { ...served, model: usageModel };
@@ -553,7 +555,7 @@ export async function runVisionRequest(args: {
   /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
   maxPrice?: VisionMaxPrice | null;
 }): Promise<VisionRequestResult> {
-  args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
+  args = { ...args, model: isOpenRouterBaseUrl(args.baseUrl) ? speedBoostModel(resolveSupportedModelIdWithWarning(args.model), currentProviderPolicy().speedBoost === true) : resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
     {
       name: "worker.vision",
@@ -684,7 +686,7 @@ export async function runVisionRequest(args: {
           "content-type": "application/json",
           ...(args.apiKey ? { authorization: `Bearer ${args.apiKey}` } : {}),
         },
-        body,
+        body: isOpenRouter && nitroBaseModel(args.model) ? withOpenRouterProviderPreferences(body, currentProviderPolicy()) : body,
         model: args.model,
         providerLabel: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
         openRouter: isOpenRouter,

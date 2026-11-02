@@ -215,3 +215,46 @@ describe("interactive overdraft", () => {
     await expect(admit("run-a")).resolves.toBeDefined();
   });
 });
+
+
+describe("Speed boost admission", () => {
+  it("reserves each mixed run's own immutable opt-in and rejects malformed or changed flags", async () => {
+    await balance(200);
+    await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+      values ('base-run','o1','u1','w','bulk-upload','queued','queued','{}'),
+        ('boost-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":true}')`;
+    const status = await guard.loadSpendStatus("o1", "w", { runReserveCredits: 1 });
+    expect(status?.reserved).toBe(5);
+    await sql`update workspace_runs set spent_cents=1 where id='boost-run'`;
+    expect((await guard.loadSpendStatus("o1", "w", { runReserveCredits: 1 }))?.reserved).toBe(4);
+    await expect(sql`update workspace_runs set pipeline='{"speedBoost":false}' where id='boost-run'`).rejects.toThrow("immutable");
+    await expect(sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+      values ('malformed-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":"true"}')`).rejects.toThrow("boolean");
+    expect((await guard.loadSpendStatus("wrong-org", "w", { runReserveCredits: 1 }))).toBeNull();
+    await leases.grantRunCreditLease(sql as never, { runId: "base-run", orgId: "o1", workspaceId: "w" });
+    await leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "o1", workspaceId: "w" });
+    const grants = await sql<{holder_id:string; granted:number}[]>`select holder_id,granted from credit_leases order by holder_id`;
+    expect(grants).toEqual([{holder_id:"base-run",granted:10},{holder_id:"boost-run",granted:40}]);
+    await expect(leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "wrong-org", workspaceId: "w" })).rejects.toThrow("not in org");
+  });
+
+  it("requires the boosted run reservation before insertion while omitted mode remains unchanged", async () => {
+    process.env.WORKER_CREDIT_LEASES = "off";
+    try {
+      await balance(103);
+      const insert = vi.fn();
+      await expect(guard.admitRunSpend("o1", "w", insert, { speedBoost: true })).rejects.toMatchObject({code:"credit_exhausted"});
+      expect(insert).not.toHaveBeenCalled();
+      await expect(admit("ordinary-run")).resolves.toBeDefined();
+    } finally { process.env.WORKER_CREDIT_LEASES = "on"; }
+  });
+
+  it("takes four-times interactive holds without enlarging the overdraft allowance", async () => {
+    await balance(0);
+    const attempts = await Promise.allSettled(Array.from({length:6}, () => guard.assertCanSpend("o1","w",{kind:"interactive",speedBoost:true})));
+    expect(attempts.filter(result => result.status === "fulfilled")).toHaveLength(5);
+    const [held] = await sql`select sum(credits)::double precision as credits from interactive_spend_holds where org_id='o1'`;
+    expect(held.credits).toBe(100);
+    await expect(guard.assertCanSpend("wrong-org","w",{kind:"interactive",speedBoost:true})).rejects.toMatchObject({code:"plan_not_entitled"});
+  });
+});

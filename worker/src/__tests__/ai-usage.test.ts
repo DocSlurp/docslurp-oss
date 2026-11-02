@@ -233,3 +233,26 @@ describe("worker AI usage Module", () => {
     expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
   });
 });
+
+
+describe("Speed boost worker accounting", () => {
+  it("multiplies the billable page once, preserves provider cost, and keeps retries idempotent", () => {
+    const ledger = new PipelineUsageEventLedger(true);
+    ledger.runId = "boost-run";
+    const input = { provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "page-analysis",
+      inputTokens: 100, outputTokens: 50, costCents: 0.37, metadata: { documentId: "boost-doc", pageNumber: 1 } };
+    ledger.record(input);
+    ledger.record(input);
+    const charges = ledger.snapshot().filter(event => event.metric === "ingest-page-rich");
+    expect(charges).toHaveLength(1);
+    expect(charges[0]).toMatchObject({ costCents: 1, metadata: { speedBoost: true } });
+    expect(ledger.pendingBillableCents).toBe(1);
+    expect(ledger.snapshot().filter(event => event.metric === "page-analysis").every(event => event.metadata?.providerCostCents === 0.37)).toBe(true);
+    expect(Reflect.set(ledger, "speedBoost", false)).toBe(false);
+    const first = ledger.checkpoint();
+    expect(ledger.checkpoint().events).toEqual(first.events);
+    first.commit();
+    first.commit();
+    expect(ledger.pendingBillableCents).toBe(0);
+  });
+});

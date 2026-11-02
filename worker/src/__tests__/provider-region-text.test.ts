@@ -45,3 +45,28 @@ describe("pipeline text calls and the China-provider policy", () => {
     expect(qwen!.provider).toBeUndefined();
   });
 });
+
+
+it("explicit boost routes text and retains actual receipt cost", async () => {
+  let body: Record<string, any> = {};
+  vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return Response.json({ id: "g", object: "chat.completion", created: 0, model: "z-ai/glm-5.3-flash", provider: "Together",
+      choices: [{ index: 0, message: { role: "assistant", content: "Summary." }, finish_reason: "stop" }],
+      output: [{ type: "message", id: "m", role: "assistant", content: [{ type: "output_text", text: "Summary.", annotations: [] }] }],
+      usage: { input_tokens: 3, output_tokens: 1, cost: 0.01 } });
+  }));
+  const result = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false, speedBoost: true }, () => generateOpenRouterText({ apiKey: "k", model: "z-ai/glm-5.3-flash", operation: "document-summary", prompt: "Summarize.", maxOutputTokens: 16, privacyMode: "standard" }));
+  expect(body).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", provider: { sort: "throughput", max_price: { prompt: 1, completion: 5 } } });
+  expect(body.provider.only).toEqual([...NON_CHINA_PROVIDER_SLUGS]);
+  expect(result.usage).toMatchObject({ costCents: 1, metadata: { costSource: "provider", routedModel: "z-ai/glm-5.3-flash:nitro" } });
+});
+
+
+it("refuses direct Nitro before network access when the run did not opt in", async () => {
+  const send = vi.fn(); vi.stubGlobal("fetch", send);
+  const call = () => generateOpenRouterText({ apiKey: "k", model: "z-ai/glm-5.3-flash:nitro", operation: "document-summary", prompt: "Summarize.", maxOutputTokens: 16, privacyMode: "standard" });
+  await expect(runWithProviderRateScope({ orgId: "org", allowChinaProviders: true }, call)).rejects.toThrow("speedBoost");
+  await expect(call()).rejects.toThrow("speedBoost");
+  expect(send).not.toHaveBeenCalled();
+});

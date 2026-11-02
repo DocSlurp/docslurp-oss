@@ -73,6 +73,7 @@ export function searchFormError(input: Record<string, unknown>): string | undefi
     : `With queries, put ${stray.join(", ")} inside each queries item; only concurrency may accompany queries.`;
 }
 export const workspaceChatInputSchema = z.object({
+  speedBoost: z.boolean().optional(),
   q: query,
   workspace: workspaceRef,
   orgId: id.optional(),

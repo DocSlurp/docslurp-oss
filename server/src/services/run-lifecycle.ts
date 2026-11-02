@@ -1,3 +1,4 @@
+import type { TransactionSql } from "postgres";
 import {
   compilePipelinePlan,
   getPipelineStageOrder,
@@ -267,8 +268,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   }
 
   /** Atomically move a failed Run back to queued, keeping completed checkpoints and paid work. */
-  async function resumeFailed(runId: string): Promise<boolean> {
-    const [row] = await sql.begin(async (tx) => {
+  async function resumeFailed(runId: string, transaction?: TransactionSql): Promise<boolean> {
+    const transition = async (tx: TransactionSql) => {
       const [locked] = await tx<{ status: string }[]>`
         select status from workspace_runs where id = ${runId} for update
       `;
@@ -306,7 +307,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         where id = ${runId} and status = 'failed'
         returning id
       `;
-    });
+    };
+    const [row] = transaction ? await transition(transaction) : await sql.begin(transition);
     return Boolean(row);
   }
 
@@ -318,9 +320,9 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
    * checkpoints from the earliest failed stage onward are cleared so stage
    * groups do not skip that work; earlier stages stay completed.
    */
-  async function resumeCompletedWithFailures(run: RunLifecycleRun): Promise<boolean> {
+  async function resumeCompletedWithFailures(run: RunLifecycleRun, transaction?: TransactionSql): Promise<boolean> {
     const stageOrder: readonly string[] = getPipelineStageOrder(run.pipeline);
-    const [row] = await sql.begin(async (tx) => {
+    const transition = async (tx: TransactionSql) => {
       const [locked] = await tx<{ status: string; failed: number }[]>`
         select status,
                (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null) as failed
@@ -374,8 +376,20 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         where id = ${run.id} and status = 'completed'
         returning id
       `;
-    });
+    };
+    const [row] = transaction ? await transition(transaction) : await sql.begin(transition);
     return Boolean(row);
+  }
+
+  /** Prepare retry inside the caller's admission transaction; never start a workflow before commit. */
+  async function prepareRetry(run: RunLifecycleRun & { status: RunStatus }, transaction: TransactionSql): Promise<"resumed" | "restarted" | "not-retryable"> {
+    if (run.status === "failed") return await resumeFailed(run.id, transaction) ? "resumed" : "not-retryable";
+    if (run.status === "completed") return await resumeCompletedWithFailures(run, transaction) ? "resumed" : "not-retryable";
+    if (run.status === "queued") {
+      const [current] = await transaction<{ status: string }[]>`select status from workspace_runs where id = ${run.id} for update`;
+      return current?.status === "queued" ? "restarted" : "not-retryable";
+    }
+    return "not-retryable";
   }
 
   /**
@@ -507,11 +521,21 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   async function control(
     run: Pick<WorkspaceRun, "id" | "status" | "priority" | "controlState" | "error">,
     input: { action: RunControlAction; priority?: number },
+    transaction?: TransactionSql,
   ): Promise<string | null> {
+    const query = transaction ?? sql;
+    if (transaction && (input.action === "resume" || input.action === "recover")) {
+      const [current] = await query<{ status: WorkspaceRun["status"]; control_state: string | null; priority: number; error: string | null }[]>`
+        select status, control_state, priority, error from workspace_runs where id = ${run.id} for update
+      `;
+      if (!current || (input.action === "recover" ? current.control_state !== "dead-letter" :
+        !["paused", "pause_requested"].includes(current.control_state ?? "") || ["blocked", "completed", "failed"].includes(current.status))) return null;
+      run = { ...run, status: current.status, controlState: current.control_state, priority: current.priority, error: current.error };
+    }
     const planned = planRunControlUpdate(run, input);
 
     if (input.action === "reprioritize") {
-      const [row] = await sql<{ id: string }[]>`
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set priority = ${planned.priority ?? run.priority},
             updated_at = now()
@@ -522,7 +546,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "recover") {
-      const [row] = await sql<{ id: string }[]>`
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set
           status = 'queued',
@@ -548,8 +572,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "resume") {
-      await signals.resume(run.id).catch(() => {});
-      const [row] = await sql<{ id: string }[]>`
+      if (!transaction) await signals.resume(run.id).catch(() => {});
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set control_state = ${planned.controlState ?? null},
             control_requested_at = null,
@@ -566,7 +590,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
 
     if (input.action === "pause") {
       await signals.pause(run.id).catch(() => {});
-      const [row] = await sql<{ id: string }[]>`
+      const [row] = await query<{ id: string }[]>`
         update workspace_runs
         set control_state = ${planned.controlState ?? null},
             control_requested_at = now(),
@@ -583,7 +607,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     // Cancel: in-flight runs are cancelled through Temporal; queued or paused
     // runs fail immediately.
     if (!planned.immediate) await signals.cancel(run.id);
-    const [row] = await sql<{ id: string }[]>`
+    const [row] = await query<{ id: string }[]>`
       update workspace_runs
       set control_state = ${planned.controlState ?? null},
           control_requested_at = now(),
@@ -598,7 +622,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     return row?.id ?? null;
   }
 
-  return { start, retry, fail, control };
+  return { start, retry, prepareRetry, fail, control, signalResume: signals.resume };
 }
 
 export type RunLifecycle = ReturnType<typeof createRunLifecycle>;

@@ -1,4 +1,5 @@
 import {
+  speedBoostMultiplier,
   compilePipelinePlan,
   effectiveIndexingMode,
   estimateUploadMedia,
@@ -30,6 +31,7 @@ export async function estimateRunReprocess(args: {
   if (!run) return null;
   const features: PipelineFeatures = {
     ...(JSON.parse(JSON.stringify(withoutStageSelection(run.pipeline))) as PipelineFeatures),
+    speedBoost: args.options?.speedBoost === true,
     ...(args.options?.stages?.length ? { stageSubset: [...args.options.stages] } : {}),
     ...(args.options?.stageFrom && !args.options?.stages?.length ? { restartFromStage: args.options.stageFrom } : {}),
   };
@@ -50,6 +52,7 @@ export async function estimateRunReprocess(args: {
  * restricts the selection (the workspace-scoped estimate route).
  */
 export async function estimateDocumentReprocess(args: {
+  speedBoost?: boolean;
   documentIds: string[];
   userId: string;
   workspaceId?: string;
@@ -68,6 +71,7 @@ export async function estimateDocumentReprocess(args: {
   for (const row of rows) {
     // Same lenient read as the mutation: drop stored extractor settings the strict schemas now reject.
     const base = sanitizeStoredPipeline((row.pipeline ?? {}) as PipelineFeatures, `a run in workspace ${row.workspace_id}`);
+    base.speedBoost = args.speedBoost === true;
     const features = row.indexing_mode ? { ...base, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) } : base;
     const key = `${row.workspace_id}:${JSON.stringify(features)}`;
     const group = groups.get(key) ?? { orgId: row.org_id, features, documents: 0, pages: 0 };
@@ -97,6 +101,7 @@ export const ASSUMED_BYTES_PER_PAGE = 75 * 1024;
  * by duration (`media`, also included in `estimate.credits`); everything else by page.
  */
 export async function estimateUpload(args: {
+  speedBoost?: boolean;
   files: Array<UploadMediaFile & { pages?: number }>;
   workspace: { pipeline: PipelineFeatures; orgId: string };
   env?: EstimateEnv;
@@ -107,8 +112,16 @@ export async function estimateUpload(args: {
     0,
   );
   const media = estimateUploadMedia(args.files, { videoFrames: args.workspace.pipeline.mediaVideo?.enabled !== false });
+  if (media) {
+    const multiplier = speedBoostMultiplier(args.speedBoost);
+    media.credits = { low: media.credits.low * multiplier, high: media.credits.high * multiplier };
+    if (media.lighter) {
+      media.lighter.credits *= multiplier;
+      media.lighter.savedCredits *= multiplier;
+    }
+  }
   const documents = estimateWork({
-    features: args.workspace.pipeline,
+    features: { ...args.workspace.pipeline, speedBoost: args.speedBoost === true },
     stages: compilePipelinePlan(args.workspace.pipeline).stageOrder,
     documents: paged.length,
     pages,

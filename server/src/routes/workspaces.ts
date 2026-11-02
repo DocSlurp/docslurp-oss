@@ -156,6 +156,7 @@ const WORKSPACE_CHAT_STREAM_KEEPALIVE_MS = 10000;
 type WorkspaceChatResponseValue = Awaited<ReturnType<typeof chatWorkspace>>;
 
 type WorkspaceChatPostBody = {
+  speedBoost?: boolean;
   messages?: WorkspaceChatUIMessage[];
   sessionId?: string;
   model?: string;
@@ -266,6 +267,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
   }
 
   const body = await c.req.json<WorkspaceChatPostBody>();
+  if (body.speedBoost !== undefined && typeof body.speedBoost !== "boolean") return apiStatusError(c, 400, "speedBoost must be a boolean");
   const scope = parseChatScope(body);
   if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
   const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -400,7 +402,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
               } });
             },
             sessionId: body.sessionId,
-            model: body.model,
+            model: body.model, speedBoost: body.speedBoost === true,
             ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
             ...(scope.filters ? { filters: scope.filters } : {}),
             onSearchActivity: (activity) => {
@@ -777,7 +779,7 @@ export const workspacesRoutes = new Hono()
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
-      const result = await reprocessIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
+      const result = await reprocessIngestRecommendation({ workspace, userId, speedBoost: body.speedBoost === true, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
       await appendAuditLog({
         orgId: workspace.orgId,
         userId,
@@ -1272,6 +1274,7 @@ export const workspacesRoutes = new Hono()
   .post("/:workspaceId/chat", async (c) => {
     const body = await c.req.json<{
       q?: string;
+      speedBoost?: boolean;
       sessionId?: string;
       model?: string;
       retrievalOnly?: boolean;
@@ -1283,6 +1286,7 @@ export const workspacesRoutes = new Hono()
     if (!body.q) {
       return apiStatusError(c, 400, "Missing q");
     }
+    if (body.speedBoost !== undefined && typeof body.speedBoost !== "boolean") return apiStatusError(c, 400, "speedBoost must be a boolean");
     const scope = parseChatScope(body);
     if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
 
@@ -1305,7 +1309,7 @@ export const workspacesRoutes = new Hono()
         answerIngestReport: getRequestActor(c).type === "session",
         agent: composerAgentModes(body, getRequestActor(c)),
         sessionId: body.sessionId,
-        model: body.model,
+        model: body.model, speedBoost: body.speedBoost === true,
         ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
         ...(scope.filters ? { filters: scope.filters } : {}),
       });
@@ -1452,7 +1456,7 @@ export const workspacesRoutes = new Hono()
           });
           if ("policy" in resolved) {
             prepared = await prepareModeSwitchJobs({
-              workspace: modeChange, to: requestedMode.data, indexAll: raw?.indexAll === true, actor, policy: resolved.policy,
+              workspace: modeChange, speedBoost: raw?.speedBoost === true, to: requestedMode.data, indexAll: raw?.indexAll === true, actor, policy: resolved.policy,
             });
           }
         } catch (error) {
@@ -1566,7 +1570,7 @@ export const workspacesRoutes = new Hono()
   )
   .post(
     "/:workspaceId/indexing-mode/estimate",
-    zValidator("json", z.object({ mode: indexingModeSchema }), validationHook),
+    zValidator("json", z.object({ mode: indexingModeSchema, speedBoost: z.boolean().optional() }), validationHook),
     async (c) => {
       if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
       const userId = c.get("sessionUser").id;
@@ -1580,12 +1584,12 @@ export const workspacesRoutes = new Hono()
         }
         if (!apiKeyCanUseWorkspace(actor.apiKey, workspace)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
-      return c.json(await estimateModeSwitch(workspace.id, c.req.valid("json").mode));
+      return c.json(await estimateModeSwitch(workspace.id, c.req.valid("json").mode, c.req.valid("json").speedBoost === true));
     },
   )
   .post(
     "/:workspaceId/full-index",
-    zValidator("json", z.object({ documentIds: z.array(z.string().min(1)).max(500).optional() }).default({}), validationHook),
+    zValidator("json", z.object({ speedBoost: z.boolean().optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }).default({}), validationHook),
     async (c) => {
       if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
       const userId = c.get("sessionUser").id;
@@ -1609,10 +1613,11 @@ export const workspacesRoutes = new Hono()
       if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
       try {
         const inline = await inlineEstimate(
-          () => estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds }),
+          () => estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds }),
           `/v1/workspaces/${workspace.id}/full-index/estimate`,
         );
         const result = await requestFullIndex({
+          speedBoost: c.req.valid("json").speedBoost === true,
           orgId: workspace.orgId,
           workspaceId: workspace.id,
           documentIds: c.req.valid("json").documentIds,
@@ -1633,7 +1638,7 @@ export const workspacesRoutes = new Hono()
   )
   .post(
     "/:workspaceId/full-index/estimate",
-    zValidator("json", z.object({ documentIds: z.array(z.string().min(1)).max(500).optional() }).default({})),
+    zValidator("json", z.object({ speedBoost: z.boolean().optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }).default({})),
     async (c) => {
       if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
       const userId = c.get("sessionUser").id;
@@ -1659,13 +1664,14 @@ export const workspacesRoutes = new Hono()
       if (!resolved.policy.allowFullIndexRequest) {
         return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
       }
-      const estimate = await estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds });
+      const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds });
       return c.json({ estimate, billing: billingState() });
     },
   )
   .post(
     "/:workspaceId/documents/bulk/estimate",
     zValidator("json", z.object({
+      speedBoost: z.boolean().optional(),
       action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
       documentIds: z.array(z.string()).min(1),
       tags: z.array(z.string()).optional(),
@@ -1678,7 +1684,7 @@ export const workspacesRoutes = new Hono()
       if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       const body = c.req.valid("json");
       const estimate = body.action === "reprocess"
-        ? await estimateDocumentReprocess({ documentIds: body.documentIds, userId, workspaceId: workspace.id })
+        ? await estimateDocumentReprocess({ speedBoost: body.speedBoost === true, documentIds: body.documentIds, userId, workspaceId: workspace.id })
         : null;
       return c.json({ estimate, billing: billingState() });
     },

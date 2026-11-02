@@ -1,6 +1,7 @@
 import {
   defaultPipelineFeatures,
   estimateIngest,
+  speedBoostMultiplier,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   QUALITY_MODE_ORDER,
@@ -311,7 +312,7 @@ function estimateScenario(args: {
   const historyForQuality = args.history.byQuality[args.quality];
   // Customer price in credits (= cents) from PRICE_CARD: a text-only corpus at the low end, the signal mix at the high end.
   const priced = (mix: Partial<PageMix>) =>
-    estimateIngest({ pages: args.estimatedPages, documents: args.documentCount, mix, profile: args.quality }).credits.totalCredits;
+    estimateIngest({ pages: args.estimatedPages, documents: args.documentCount, mix, profile: args.quality }).credits.totalCredits * speedBoostMultiplier(args.pipeline.speedBoost);
   const minCents = priced({ text: 1 });
   const maxCents = Math.max(minCents, priced(signalPageMix(args.signals)));
 
@@ -380,7 +381,7 @@ export function buildRunProcessingPreview(args: {
     (total, source) => total + source.sizeBytes,
     0,
   );
-  const pipeline = request.pipeline ?? defaultPipelineFeatures;
+  const pipeline = { ...(request.pipeline ?? defaultPipelineFeatures), speedBoost: request.speedBoost === true };
   const history = summarizePreviewHistory(args.historyRows ?? []);
   const signals = estimateComplexitySignals(sources);
 

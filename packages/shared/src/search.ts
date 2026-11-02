@@ -197,6 +197,7 @@ export type RunProcessingPreviewUrl = z.infer<
 
 export const runProcessingPreviewRequestSchema = z
   .object({
+    speedBoost: z.boolean().optional(),
     /** Workspace ID, slug or name (see parseWorkspaceInput); omitted means the org's default workspace. */
     workspace: z.string().trim().min(1).max(256).optional(),
     pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),

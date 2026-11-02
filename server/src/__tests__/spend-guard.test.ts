@@ -1,3 +1,4 @@
+import { nativeApiErrors } from "../lib/api-error.js";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +12,7 @@ const {
   spendBlockReason,
   SpendBlockedError,
 } = await import("../services/billing/spend-guard.js");
-const { resolveChatCreditReserveConfig } = await import("@docslurp/shared");
+const { PipelineSpeedBoostRequiredError, resolveChatCreditReserveConfig } = await import("@docslurp/shared");
 
 // Defaults: $3 reserve/overdraft for funded orgs, $1 for starter orgs, 5-credit holds.
 const config = resolveChatCreditReserveConfig({});
@@ -164,4 +165,20 @@ describe("assertCanSpend", () => {
     expect(response.status).toBe(402);
     expect(await response.json()).toEqual({ error: "This feature is temporarily unavailable. Please try again later.", code: "credit_exhausted" });
   });
+});
+
+it("rejects configured Nitro without opt-in as a client error", async () => {
+  const app = new Hono().get("/", () => { throw new PipelineSpeedBoostRequiredError(); });
+  app.onError(spendAwareErrorHandler);
+  const response = await app.request("/");
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ code: "speed_boost_required" });
+});
+
+it("preserves the opt-in client error through native API middleware", async () => {
+  const app = new Hono();
+  app.use("*", nativeApiErrors);
+  app.get("/v1/test", () => { throw new PipelineSpeedBoostRequiredError(); });
+  app.onError(spendAwareErrorHandler);
+  expect((await app.request("/v1/test")).status).toBe(400);
 });

@@ -546,15 +546,15 @@ export function createProviderRateStoreFromEnv(env: NodeJS.ProcessEnv = process.
 // Limiter
 // ---------------------------------------------------------------------------
 
-const scopeStorage = new AsyncLocalStorage<{ orgId: string | null; allowChinaProviders: boolean }>();
+const scopeStorage = new AsyncLocalStorage<{ orgId: string | null; allowChinaProviders: boolean; speedBoost: boolean }>();
 
 /**
  * Attributes provider calls inside `fn` to an org for the fair-share buckets,
  * and carries the run's China-provider policy (org AND workspace) to every
  * provider request. Only an explicit `allowChinaProviders: true` allows them.
  */
-export function runWithProviderRateScope<T>(scope: { orgId: string | null | undefined; allowChinaProviders?: boolean }, fn: () => Promise<T>): Promise<T> {
-  return scopeStorage.run({ orgId: scope.orgId ?? null, allowChinaProviders: scope.allowChinaProviders === true }, fn);
+export function runWithProviderRateScope<T>(scope: { orgId: string | null | undefined; allowChinaProviders?: boolean; speedBoost?: boolean }, fn: () => Promise<T>): Promise<T> {
+  return scopeStorage.run({ orgId: scope.orgId ?? null, allowChinaProviders: scope.allowChinaProviders === true, speedBoost: scope.speedBoost === true }, fn);
 }
 
 /**
@@ -573,8 +573,8 @@ export async function workspaceProviderScope(
 }
 
 /** The current job's provider policy; outside a job scope China-based providers are not allowed (fail closed). */
-export function currentProviderPolicy(): { allowChinaProviders: boolean } {
-  return { allowChinaProviders: scopeStorage.getStore()?.allowChinaProviders === true };
+export function currentProviderPolicy(): { allowChinaProviders: boolean; speedBoost: boolean } {
+  return { allowChinaProviders: scopeStorage.getStore()?.allowChinaProviders === true, speedBoost: scopeStorage.getStore()?.speedBoost === true };
 }
 
 // Worker provider requests (OpenRouter text, vision, embeddings; direct decision endpoints) read the job's policy.
