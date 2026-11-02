@@ -200,6 +200,10 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
   } else {
     table = getDb(uri).then(async (db) => {
       const opened = await openLanceTable(name, () => db.openTable(name), lanceNamespace(uri));
+      if ((await opened.schema()).metadata.has("embedding_functions")) {
+        opened.close();
+        throw new Error("LanceDB search refuses persisted embedding_functions metadata");
+      }
       const { config } = lanceSession();
       if (config.prewarmIndex || config.prewarmData) {
         lastPrewarm.set(key, Date.now());

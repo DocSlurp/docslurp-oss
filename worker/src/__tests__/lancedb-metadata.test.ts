@@ -45,7 +45,13 @@ it("refuses persisted provider metadata before real built-in construction during
         new arrow.Field("id", new arrow.Utf8()), new arrow.Field("text", new arrow.Utf8()),
         new arrow.Field("vector", new arrow.FixedSizeList(2, new arrow.Field("item", new arrow.Float32()))),
       ], new Map([["embedding_functions", metadata]]));
-      (await db.createEmptyTable(name, schema)).close();
+      const fixture = await db.createEmptyTable(name, schema);
+      const {makeArrowTable} = require(path.join(path.dirname(lanceEntry), "arrow.js"));
+      const records = makeArrowTable([{id:"existing",text:"persisted",vector:[1,0]}], {schema});
+      const bytes = Buffer.from(await arrow.RecordBatchFileWriter.writeAll(records).toUint8Array());
+      await Reflect.get(fixture, "inner").add(bytes,"append");
+      expect(await fixture.countRows()).toBe(1);
+      fixture.close();
       db.close();
       const reopened = await connect(dir);
       const table = await reopened.openTable(name);
