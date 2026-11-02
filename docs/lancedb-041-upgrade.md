@@ -19,14 +19,14 @@ The release embeds Lance 14.0.2. Its release notes identify lazy listing
 iterators, stricter remote option validation and embedding metadata trust
 changes. No process-wide remote-code or endpoint approvals were added.
 Existing Node callers use tableNames(); the SDK build passes, but the full
-caller/signature and runtime install audit remains pending. Published Node
+caller/signature audit remains pending. Published Node
 and Python packages disable experimental local computed functions/views.
 
 Python's published package description requires Haswell AVX2/FMA/F16C on
 x86_64. Pre-Haswell hosts need the separate lancedb-compat distribution;
 the two distributions must not be installed together. Source builds require
-Rust and protoc; none were initiated. Deployment CPU/wheel compatibility
-has not yet been verified.
+Rust and protoc; none were initiated. The selected Linux wheel was verified below; deployment CPU compatibility
+has not yet been certified.
 
 Native Node runtime inspection found no GeoArrow/RTree-named top-level
 exports and no RTree factory on Index. Index factories observed: ivfPq,
@@ -34,22 +34,61 @@ ivfRq, ivfFlat, btree, bitmap, labelList, fm, fts, hnswPq, hnswSq.
 SQL geo predicate availability remains unverified; Rust support does not
 establish Node support. No geo architecture changes are included.
 
-## Validation
+## Current validation (2026-11-01)
 
-- Frozen pnpm install passed (lifecycle scripts disabled).
-- Shared and SDK TypeScript builds passed.
-- Server lancedb, lancedb-query-tuning, lancedb-open: 23 tests passed.
-- Local native Node synthetic-vector smoke passed create, btree index,
-  tenant-filtered vector query, update, delete and reopen (one row remained).
-- Python lock hash validator passed; diff whitespace check passed.
-- Pending: Python import/smoke, 0.40-created dataset read/write compatibility,
-  downgrade test, worker and SDK adapter tests, full affected typechecks/builds,
-  exact Node/Python dependency and target-platform audit, SQL geo predicates.
+After merging origin/main at 3af11eca, focused native worker metadata/writer/retry
+and server LanceDB suites passed: 30 tests in four files. Worker typecheck and
+worker build (including shared build) passed. These checks include the new
+worker refusal below; older suite totals later in this report are historical,
+not final-head reruns.
 
-No schema/index migration is introduced by this patch. Whether existing data
-requires any migration is not yet established by compatibility testing.
-Do not assume downgrade safety after writes with the new library; retain a
-pre-upgrade snapshot and validate restoration before deployment.
+The numeric worker writer now refuses any persisted `embedding_functions` schema
+metadata before hydration or mergeInsert. This adapter owns precomputed vectors;
+it has no reason to initialize embedding providers from storage. Rejection is
+non-retryable and closes the table/connection. No trust bypass was added.
+
+Durable regression: `worker/src/__tests__/lancedb-metadata.test.ts`. It persists
+and reopens five schemas (malformed JSON, empty configurations, unknown function,
+real OpenAI and Hugging Face names), then calls `writeLanceDbRecords` with numeric
+vectors. Installed built-in constructors are wrapped with throwing Proxy
+tripwires, Hugging Face init has a loader tripwire, and fetch/http/https/socket
+calls are blocked. All tripwire counts remain zero. These are empty persisted
+tables; populated metadata tables and server/SDK adapter coverage remain open.
+The production registry is empty unless the public embedding registry API is
+called; that API initializes OpenAI and Hugging Face. The test explicitly covers
+that initialized state. Library parseFunctions constructs registered providers
+before examining whether supplied rows already contain vectors.
+
+Downloaded the changed artifact directly from the PyPI 0.41.0 registry URL:
+`lancedb-0.41.0-cp310-abi3-manylinux_2_28_x86_64.whl`.
+SHA-256: `e3da8fbde2c916d41fc324a91a25b3f57a7b8ac5eb2981d5fb8fd0914901c44e`.
+The downloaded bytes matched both registry JSON and committed LanceDB lock hashes.
+Installed that wheel into a disposable uv environment and imported 0.41.0 on
+CPython 3.13.7, Linux x86_64, glibc 2.44. Dependencies resolved to Arrow26 and
+pydantic2.14.2; this is wheel verification, not a complete locked worker install.
+No unchanged GPU stack was downloaded. Scratch was removed.
+
+## Supported deployment requirements
+
+Production Node images use Node24/Debian trixie. Native Node adapters require
+Node >=22; HTTP-only SDK supports >=20. Python standard wheels require CPython
+>=3.10; production lock resolution targets Python3.11. Linux Python wheels
+require glibc >=2.28 on x86_64 or aarch64. Standard x86_64 wheels require Haswell
+AVX2/FMA/F16C; do not deploy them to older CPUs. The separate lancedb-compat
+distribution is not approved by these locks and must not coexist with lancedb.
+This local x86_64 import does not certify production CPU flags or ARM execution.
+
+## Outstanding gates
+
+- Populated hostile metadata through actual server/SDK numeric adapters.
+- Expanded Python provider constructor/code-loader instrumentation and malformed
+  metadata variants through the real worker adapter.
+- Lock-compatible Python dependency import verification (CPU lock resolution
+  passed previously; the isolated import above used newer pydantic).
+- Fresh independent council on the final changes. No merge approval is claimed.
+
+No schema/index migration is introduced. Retain a pre-upgrade snapshot;
+synthetic downgrade evidence below is not general rollback certification.
 
 ## Threat model and merge gate
 
