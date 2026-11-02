@@ -16,6 +16,7 @@ beforeAll(async () => {
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn(async () => null) }));
   vi.doMock("../search/eligibility-hint.js", () => ({ notifySearchEligibilityChanged: vi.fn(async () => {}) }));
   ({ reindexDocumentCorrection } = await import("../services/document-review.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
@@ -35,6 +36,16 @@ beforeAll(async () => {
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 describe("human-correction reindex", () => {
+  it("preserves omitted structured corrections and clears explicit null", async () => {
+    const { saveDocumentCorrection } = await import("../services/document-review.js");
+    await saveDocumentCorrection({ docId: "d", userId: "u", structuredData: { location: "corrected" } });
+    await saveDocumentCorrection({ docId: "d", userId: "u", notes: "Only notes changed" });
+    const [preserved] = await sql`select corrected_structured_data from document_corrections where document_id = 'd'`;
+    expect(preserved.corrected_structured_data).toEqual({ location: "corrected" });
+    await saveDocumentCorrection({ docId: "d", userId: "u", structuredData: null, markdown: "Corrected page one." });
+    const [cleared] = await sql`select corrected_structured_data from document_corrections where document_id = 'd'`;
+    expect(cleared.corrected_structured_data).toBeNull();
+  });
   it("clears kept model reads of the document and keeps their billing decision", async () => {
     const result = await reindexDocumentCorrection({ docId: "d", userId: "u" });
     expect(result).toMatchObject({ documentId: "d" });

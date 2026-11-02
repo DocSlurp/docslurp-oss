@@ -822,7 +822,9 @@ export async function saveDocumentCorrection(args: {
     on conflict (document_id) do update
     set user_id = excluded.user_id,
         corrected_markdown = excluded.corrected_markdown,
-        corrected_structured_data = excluded.corrected_structured_data,
+        corrected_structured_data = case when ${args.structuredData !== undefined}
+          then excluded.corrected_structured_data
+          else document_corrections.corrected_structured_data end,
         notes = excluded.notes,
         updated_at = now()
   `;
