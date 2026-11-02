@@ -1,3 +1,10 @@
+class UnsafeLanceMetadataError extends Error {}
+async function assertNumericLanceTable(table: {schema(): Promise<{metadata: Map<string,string>}>}): Promise<void> {
+  if ((await table.schema()).metadata.has("embedding_functions")) {
+    throw new UnsafeLanceMetadataError("Offline search refuses persisted embedding_functions metadata");
+  }
+}
+
 export type SearchResult = {
   text: string;
   score: number;
@@ -224,7 +231,10 @@ async function searchOfflineBundleWithLanceDb(
   try {
     const lancedb = await import("@lancedb/lancedb");
     const db = await lancedb.connect(args.path);
+    try {
     const table = await db.openTable(args.tableName);
+    try {
+    await assertNumericLanceTable(table);
     const vector = await embedOfflineText(query, args.embedding);
     const rows = await table.vectorSearch(vector).column("vector").limit(args.limit).toArray() as Array<{
       text: string;
@@ -247,7 +257,10 @@ async function searchOfflineBundleWithLanceDb(
         headingPath: readHeadingPath(row.headingPathJson)
       }
     }));
-  } catch {
+    } finally { table.close(); }
+    } finally { db.close(); }
+  } catch (error) {
+    if (error instanceof UnsafeLanceMetadataError) throw error;
     return [];
   }
 }
@@ -260,6 +273,7 @@ async function writeOfflineBundleToLanceDb(args: {
   const lancedb = await import("@lancedb/lancedb");
   const db = await lancedb.connect(args.path);
 
+  try {
   const rows = args.records.map((record) => ({
     id: record.id,
     vector: record.embedding,
@@ -274,11 +288,15 @@ async function writeOfflineBundleToLanceDb(args: {
   const tableNames = await db.tableNames();
   if (tableNames.includes(args.tableName)) {
     const table = await db.openTable(args.tableName);
-    await table.add(rows, { mode: "overwrite" });
-    return;
+    try {
+      await assertNumericLanceTable(table);
+      await table.add(rows, { mode: "overwrite" });
+      return;
+    } finally { table.close(); }
   }
 
-  await db.createTable(args.tableName, rows);
+  (await db.createTable(args.tableName, rows)).close();
+  } finally { db.close(); }
 }
 
 async function embedOfflineText(value: string, options: OfflineEmbeddingConfig): Promise<number[]> {

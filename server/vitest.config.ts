@@ -34,6 +34,7 @@ export default defineConfig({
       "@docslurp/shared/chat-voice": shared("chat-voice"),
       "@docslurp/shared/workspace-chat-ui": shared("workspace-chat-ui"),
       "@docslurp/shared": shared("index"),
+      "@docslurp/sdk/embed": resolve(__dirname, "../packages/sdk/src/embed/index.tsx"),
       "@docslurp/sdk/search-adapters": resolve(__dirname, "../packages/sdk/src/search-adapters.ts"),
       "@docslurp/sdk": resolve(__dirname, "../packages/sdk/src/index.ts"),
     },

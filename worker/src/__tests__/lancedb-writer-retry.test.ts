@@ -10,7 +10,7 @@ const merge = {
   whenNotMatchedInsertAll: vi.fn().mockReturnThis(),
   execute,
 };
-const table = { mergeInsert: vi.fn(() => merge), close: vi.fn() };
+const table = { schema: vi.fn().mockResolvedValue({ metadata: new Map() }), mergeInsert: vi.fn(() => merge), close: vi.fn() };
 const db = { tableNames: vi.fn(), createTable: vi.fn(), openTable: vi.fn(), close: vi.fn() };
 const records = [{ id: "a", documentId: "doc-a", chunkIndex: 0, text: "first", vector: [0.1, 0.2], metadata: {} }];
 const missing = new Error("Table 'org_test' was not found  Caused by: Dataset at path org_test.lance was not found");
