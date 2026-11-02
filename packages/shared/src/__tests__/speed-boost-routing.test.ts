@@ -31,3 +31,31 @@ it("refuses direct Nitro for explicitly unboosted calls but preserves standalone
   expect(() => speedBoostModel("z-ai/glm-5.3-flash:nitro", false)).toThrow("speedBoost");
   expect(speedBoostModel("z-ai/glm-5.3-flash:nitro", undefined)).toBe("z-ai/glm-5.3-flash:nitro");
 });
+
+it("retries a Nitro 404 once on the base model's normal route", async () => {
+  setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false, speedBoost: true }));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const send = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+    JSON.parse(init!.body as string).model.endsWith(":nitro") ? new Response("no endpoints", { status: 404 }) : Response.json({ ok: true }));
+  const wrapped = createOpenRouterRoutingFetch(send);
+  const response = await wrapped("https://openrouter.ai/api/v1/chat/completions", { body: JSON.stringify({ model: "z-ai/glm-5.3-flash" }) });
+  expect(response.status).toBe(200);
+  expect(send).toHaveBeenCalledTimes(2);
+  const retry = JSON.parse(send.mock.calls[1]![1]!.body as string);
+  expect(retry.model).toBe("z-ai/glm-5.3-flash");
+  expect(retry.provider.sort).not.toBe("throughput");
+  expect(retry.provider.only.length).toBeGreaterThan(0);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining("nitro_fallback"));
+  warn.mockRestore();
+});
+
+it("does not retry other Nitro failures or non-Nitro 404s", async () => {
+  setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: true, speedBoost: true }));
+  const send = vi.fn(async () => new Response("", { status: 500 }));
+  const wrapped = createOpenRouterRoutingFetch(send);
+  expect((await wrapped("https://openrouter.ai/api/v1/chat/completions", { body: JSON.stringify({ model: "z-ai/glm-5.3-flash" }) })).status).toBe(500);
+  expect(send).toHaveBeenCalledTimes(1);
+  send.mockImplementation(async () => new Response("", { status: 404 }));
+  expect((await wrapped("https://openrouter.ai/api/v1/chat/completions", { body: JSON.stringify({ model: "unknown/model" }) })).status).toBe(404);
+  expect(send).toHaveBeenCalledTimes(2);
+});
