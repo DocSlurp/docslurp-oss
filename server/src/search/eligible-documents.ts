@@ -277,9 +277,13 @@ export function loadCachedSearchAvailability(args: { workspaceId: string; runId?
 
 /** Filters native search resolves from the cached set; anything else (chunk-level) uses the Postgres path. */
 export function nativeScopeSupported(filters: SearchFilters | undefined): boolean {
-  return !filters?.language && !filters?.headingPath?.length
-    && filters?.pageRange?.from === undefined && filters?.pageRange?.to === undefined
-    && filters?.dateRange?.from === undefined && filters?.dateRange?.to === undefined;
+  // Explicit capabilities: a newly introduced filter must never silently widen
+  // native retrieval before this adapter implements its semantics.
+  const supported = new Set([
+    "documentId", "documentIds", "runId", "workspaceId", "filenameContains", "mimeTypes", "tags",
+  ]);
+  return Object.entries(filters ?? {}).every(([key, value]) =>
+    value === undefined || supported.has(key));
 }
 
 type LikeToken = { kind: "char"; value: string } | { kind: "one" } | { kind: "any" };
