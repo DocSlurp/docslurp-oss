@@ -12,6 +12,7 @@ vi.mock("../services/billing/spend-guard.js",async original=>({...await original
 const { retryRun } = await import("../services/runs.js");
 beforeEach(()=>{
   vi.clearAllMocks();
+  mocks.run.pipeline.speedBoost = true;
   mocks.admit.mockImplementation(async (_org,_workspace,callback)=>{const result=await callback({});await mocks.lease();return result;});
 });
 it("rolls back the no-op retry before lease acquisition or workflow start",async()=>{
@@ -27,4 +28,16 @@ it("propagates real admission failures without starting work",async()=>{
   mocks.lease.mockRejectedValueOnce(failure);
   await expect(retryRun('retry-r','user')).rejects.toBe(failure);
   expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("reserves a lease before starting a retry with speedBoost=%s", async speedBoost => {
+  mocks.run.pipeline.speedBoost = speedBoost;
+  mocks.prepare.mockResolvedValue("resumed");
+  mocks.start.mockImplementation(async () => {
+    expect(mocks.lease).toHaveBeenCalledTimes(1);
+    return { status: "started" };
+  });
+  await retryRun("retry-r", "user");
+  expect(mocks.admit.mock.calls[0]![3]).toEqual({ speedBoost, leaseRunId: "retry-r" });
+  expect(mocks.start).toHaveBeenCalledTimes(1);
 });

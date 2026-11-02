@@ -663,10 +663,10 @@ export async function retryRun(
     throw new Error("Forbidden");
   }
 
-  // Boosted retries retain their immutable original mode. Admission, checkpoint reset,
+  // All retries retain their immutable original mode. Admission, checkpoint reset,
   // queued transition and lease acquisition commit together; Temporal starts only afterward.
   let outcome: RunRetryOutcome;
-  if (run.pipeline.speedBoost === true) {
+  {
     const notRetryable = Symbol("retry-no-longer-eligible");
     try {
       const prepared = await admitRunSpend(run.orgId, run.workspaceId, async tx => {
@@ -675,15 +675,12 @@ export async function retryRun(
         // clean completed run must not retain credits for work it cannot retry.
         if (status === "not-retryable") throw notRetryable;
         return status;
-      }, { speedBoost: true, leaseRunId: run.id });
+      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id });
       outcome = { status: prepared, start: await runLifecycle.start(run, { restartExisting: true }) };
     } catch (error) {
       if (error !== notRetryable) throw error;
       outcome = { status: "not-retryable" };
     }
-  } else {
-    await admitRunSpend(run.orgId, run.workspaceId, async () => undefined);
-    outcome = await runLifecycle.retry(run);
   }
   if (outcome.status === "not-retryable") return { run, outcome };
   return { run: (await getRun(run.id, userId)) ?? run, outcome };
