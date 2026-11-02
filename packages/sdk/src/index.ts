@@ -461,7 +461,14 @@ export type UploadUrlsInput = {
 /** @deprecated Use UploadUrlsInput. */
 export type IngestUrlInput = UploadUrlsInput;
 
+/** Explicitly opted-in GeoJSON column filter. Coordinates are [longitude, latitude]. */
+export type GeoPredicate =
+  | {field:string;op:"radius";center:[number,number];radiusMeters:number}
+  | {field:string;op:"bbox";bbox:[number,number,number,number]}
+  | {field:string;op:"intersects"|"within";geometry:{type:"Polygon";coordinates:[number,number][][]}|{type:"MultiPolygon";coordinates:[number,number][][][]}};
+
 export type SearchInput = {
+  geo?: GeoPredicate;
   /** Independent per-adapter and fused candidate cap, 1..200. Omitted preserves server defaults. */
   candidateDepth?: number;
   /** Keep ranked search order, or pack the same selected passages for a prompt. */
@@ -529,6 +536,7 @@ export function formatSearchContext(response: SearchResponse): string {
 }
 
 export type ChatInput = {
+  filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
   /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
   speedBoost?: boolean;
   q: string;
@@ -1829,6 +1837,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
+      if (target.filters !== undefined) {
+        const filters = JSON.stringify(target.filters);
+        if (filters.length > 16384) throw new Error("Chat stream filters exceed 16384 characters; use chat() for larger requests");
+        params.set("filters", filters);
+      }
       let completed = false;
       // The session grant goes in a header, never the URL.
       const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};

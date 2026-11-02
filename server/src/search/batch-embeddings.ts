@@ -34,7 +34,7 @@ export async function prefetchBatchQueryEmbeddings(
   signal?: AbortSignal,
 ): Promise<{ prefetched: number; calls: number }> {
   const byWorkspace = new Map<string, typeof items>();
-  for (const item of items) byWorkspace.set(item.workspaceId, [...(byWorkspace.get(item.workspaceId) ?? []), item]);
+  for (const item of items.filter(item => !item.options.filters?.geo)) byWorkspace.set(item.workspaceId, [...(byWorkspace.get(item.workspaceId) ?? []), item]);
   let prefetched = 0;
   let calls = 0;
   await Promise.all([...byWorkspace].map(async ([workspaceId, group]) => {

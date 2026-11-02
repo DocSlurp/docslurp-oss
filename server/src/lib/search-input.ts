@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { chatAgentLimitsInputSchema, chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
+import { geoPredicateSchema, chatAgentLimitsInputSchema, chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
 import { parseFilters } from "../search/filters.js";
 
 const id = z.string().trim().min(1).max(256);
@@ -15,6 +15,7 @@ const query = z.string().trim().min(1).max(16000).refine((value) => value.replac
 const workspaceRef = id.optional().describe("Workspace ID, slug or name (names match by slug, so \"Legal Contracts\" finds legal-contracts). Omitted: the organization default workspace.");
 
 export const searchInputSchema = z.object({
+  geo: geoPredicateSchema.optional(),
   q: query,
   /** Omitted: the organization's default workspace. */
   workspace: workspaceRef,
@@ -98,14 +99,14 @@ export function searchOptions(body: SearchInput & { workspaceId: string }) {
     runId: body.runId,
     limit: body.limit,
     variant: body.variant,
-    filters: parseFilters({
+    filters: { ...parseFilters({
       documentId: body.documentId ?? "", runId: body.runId ?? "",
       workspaceId: body.workspaceId, filenameContains: body.filenameContains ?? "",
       mimeTypes: body.mimeTypes ?? "", tags: body.tags ?? "",
       pageFrom: body.pageFrom ?? "", pageTo: body.pageTo ?? "",
       language: body.language ?? "", heading: body.heading ?? "",
       dateFrom: body.dateFrom ?? "", dateTo: body.dateTo ?? "",
-    }),
+    }), ...(body.geo ? {geo:body.geo} : {}) },
     useHyDE: body.hyde, useRerank: body.rerank,
     candidateDepth: body.candidateDepth, resultOrder: body.resultOrder,
     useMmr: body.mmr, mmrLambda: body.mmrLambda,

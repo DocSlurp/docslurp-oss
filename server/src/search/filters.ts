@@ -1,8 +1,12 @@
+import type { GeoPredicate } from "@docslurp/shared";
 /**
  * Parse and validate search filter predicates for metadata-filtered ANN search.
  */
 
 export interface SearchFilters {
+  geo?: GeoPredicate;
+  /** Internal digest set only by authorized spatial scope resolution. */
+  geoSchemaDigest?: string;
   documentId?: string;
   documentIds?: string[];
   runId?: string;

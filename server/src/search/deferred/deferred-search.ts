@@ -43,6 +43,7 @@ export interface DeferredDocument {
 
 export const defaultDeferredSearchDeps: DeferredSearchDeps = {
   async listDeferredDocuments(workspaceId, documentIds) {
+    if (documentIds?.length === 0) return [];
     type Row = { id: string; indexing_mode: string; page_count: number; indexed: number };
     const rows = documentIds && documentIds.length > 0
       ? await sql<Row[]>`
@@ -97,8 +98,10 @@ export interface DeferredSearchArgs {
 
 function scopedDocumentIds(options: SearchOptions): string[] | undefined {
   const filters = options.filters;
-  const ids = [...(filters?.documentIds ?? []), ...(filters?.documentId ? [filters.documentId] : [])];
-  return ids.length > 0 ? [...new Set(ids)] : undefined;
+  if (filters?.documentIds !== undefined) {
+    return [...new Set(filters.documentIds)].filter(id => !filters.documentId || id === filters.documentId);
+  }
+  return filters?.documentId ? [filters.documentId] : undefined;
 }
 
 /** Interleave ranked lists so each locator's best pages survive the per-query cap. */
@@ -147,7 +150,16 @@ export async function runDeferredPageSearch(
   const { journal, workspaceId } = args;
   try {
     const startedAt = deps.now();
-    const docs = await deps.listDeferredDocuments(workspaceId, scopedDocumentIds(args.options));
+    const selected = scopedDocumentIds(args.options);
+    if (selected?.length === 0) return null;
+    // Spatial queries use accepted current structured projections. Cold-page locators
+    // cannot maintain that revision fence throughout model/materialization work.
+    if (args.options.filters?.geo) {
+      journal.recordDiagnostic("deferredSkipped", { reason: "spatial-scope" });
+      return null;
+    }
+    const docs = (await deps.listDeferredDocuments(workspaceId, selected))
+      .filter(doc => selected === undefined || selected.includes(doc.id));
     if (docs.length === 0) return null;
     const documentIdsInScope = docs.map((d) => d.id);
 
@@ -218,7 +230,7 @@ export async function runDeferredPageSearch(
     if (visualDocs.length > 0 && images.list.length === 0) fallbackUsed = true;
     if (degraded) journal.recordDiagnostic("deferredDegraded", { degraded: true });
 
-    const candidates = interleave(lists, cap);
+    const candidates = interleave(lists.map(list => list.filter(candidate => documentIdsInScope.includes(candidate.documentId))), cap);
     const stats = await deps.materialize({
       orgId: args.orgId, userId: args.userId, workspaceId, sessionId: journal.sessionId,
       candidates, policy, onEvent: args.onEvent, signal: args.signal, startedAt,

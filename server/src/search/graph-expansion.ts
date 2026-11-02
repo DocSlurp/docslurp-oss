@@ -1,3 +1,4 @@
+import { boundedSearchQuery, isSearchBoundError } from "./query-bounds.js";
 import { retrievalScope } from "./retrieval-scope.js";
 import type { SearchFilters } from "./filters.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
@@ -15,8 +16,9 @@ export async function expandGraphTextQuery(args: {
     return args.textQuery;
   }
 
+  const query: typeof boundedSearchQuery = args.filters?.geo ? boundedSearchQuery : async build => await build(sql);
   try {
-    const entityRows = await sql<
+    const entityRows = await query(client => client<
       { entity_name: string; mention_count: number }[]
     >`
       select ce.entity_name, sum(ce.mention_count)::int as mention_count
@@ -35,7 +37,7 @@ export async function expandGraphTextQuery(args: {
       group by ce.entity_name
       order by mention_count desc
       limit 8
-    `;
+    `);
     const entityTerms = entityRows
       .map((row) => row.entity_name)
       .filter(
@@ -45,7 +47,8 @@ export async function expandGraphTextQuery(args: {
       .join(" ");
 
     return entityTerms ? `${args.textQuery} ${entityTerms}` : args.textQuery;
-  } catch {
+  } catch (error) {
+    if (isSearchBoundError(error)) throw error;
     return args.textQuery;
   }
 }

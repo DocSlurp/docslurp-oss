@@ -50,8 +50,9 @@ export const geoAnnotationSchema = z.discriminatedUnion("encoding", [
   z.object({ version: z.literal(1).default(1), encoding: z.literal("lat-lon"), latitude: pointer, longitude: pointer }).strict().refine(v => v.latitude !== v.longitude),
 ]);
 export type GeoAnnotation = z.infer<typeof geoAnnotationSchema>;
-const area = geoGeometrySchema.refine(g => g.type === "Polygon" || g.type === "MultiPolygon", "Area must be Polygon or MultiPolygon");
-/** Future predicate contract only; not wired into search/chat routes. */
+const { $schema: _areaDraft, ...areaWireSchema } = z.toJSONSchema(z.union([geometry.options[2], geometry.options[3]]));
+const area = geoGeometrySchema.refine(g => g.type === "Polygon" || g.type === "MultiPolygon", "Area must be Polygon or MultiPolygon").meta(areaWireSchema);
+/** Shared spatial predicate for search and chat. */
 export const geoPredicateSchema = z.discriminatedUnion("op", [
   z.object({ field: z.string().min(1).max(128), op: z.literal("radius"), center: geoPositionSchema, radiusMeters: z.number().finite().min(0).max(20040000) }).strict(),
   z.object({ field: z.string().min(1).max(128), op: z.literal("bbox"), bbox: z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90), z.number().min(-180).max(180), z.number().min(-90).max(90)]).refine(b => b[1] <= b[3]) }).strict(),

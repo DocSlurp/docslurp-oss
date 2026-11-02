@@ -1,3 +1,4 @@
+import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
   defaultWorkspaceSearchSettings,
   normalizePipelineFeatures,
@@ -97,6 +98,10 @@ export async function resolveSearchSetup(
       })),
       loadWorkspaceIndexing(normalizedScope.workspaceId),
     ]);
+  }
+  if (options.filters?.geo) {
+    options = {...options, filters: await resolveGeoDocumentScope(normalizedScope, options.filters, workspaceIndexing.pipeline.outputSchema, options.runId),
+      summarySeed:false, enableCommunityExpansion:false};
   }
   const session = createSearchSessionJournal({
     rootSessionId: options.rootSessionId,

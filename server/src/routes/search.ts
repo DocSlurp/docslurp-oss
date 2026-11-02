@@ -1,3 +1,5 @@
+import { GeoSearchError } from "../search/geo-scope.js";
+import { geoPredicateSchema } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
@@ -206,6 +208,8 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   } catch (error) {
     const usage = await failChatTurn(turn, chatTurnFailureReason(error, signal));
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
+    const failure = expectedSearchFailure(error);
+    if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message, usage ? { usage } : undefined);
     throw usage ? withApiErrorDetails(error, { usage }) : error;
   }
   // The answer was generated for this client: it is charged even if the
@@ -246,7 +250,15 @@ async function workspaceChatStreamHandler(c: Context) {
   if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
   }
-  const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
+  let filters: unknown;
+  const rawFilters = c.req.query("filters");
+  if (rawFilters !== undefined) {
+    try {
+      if (rawFilters.length > 16384) throw new Error("Filters too large");
+      filters = JSON.parse(rawFilters);
+    } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
+  }
+  const parsed = workspaceChatInputSchema.safeParse({ filters, q: c.req.query("q"),
     workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
     sessionId: c.req.query("sessionId"),
     sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
@@ -299,9 +311,9 @@ async function workspaceChatStreamHandler(c: Context) {
         workspaceId,
         userId,
         query,
-        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
+        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: AbortSignal.any([c.req.raw.signal, abort.signal]),
         sessionId, sessionToken,
-        model, speedBoost: parsed.data.speedBoost
+        model, speedBoost: parsed.data.speedBoost, filters: parsed.data.filters
       }));
       await pendingEvents;
       await stream.writeSSE({
@@ -328,9 +340,10 @@ async function workspaceChatStreamHandler(c: Context) {
 
 type SearchData = ReturnType<typeof publicSearchResponse>;
 type BatchResult = { ok: true; data: SearchData } | { ok: false; error: { code: string; message: string; status: number } };
-type SearchFailure = { code: string; apiCode: ApiErrorCode; message: string; status: 400 | 403 | 404 };
+type SearchFailure = { code: string; apiCode: ApiErrorCode; message: string; status: 400 | 403 | 404 | 409 | 503 };
 /** `code` is the per-item batch code; `apiCode` is the envelope code of a whole-request failure. */
 function expectedSearchFailure(error: unknown): SearchFailure | null {
+  if (error instanceof GeoSearchError) return {code:"GEO_UNAVAILABLE",apiCode:"invalid_request",message:error.message,status:error.status};
   if (error instanceof InvalidRetrievalQueryError) {
     return { code: "INVALID_RETRIEVAL_QUERY", apiCode: "invalid_request", message: error.message, status: 400 };
   }
@@ -348,7 +361,7 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
   }
   return null;
 }
-function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 499 | 500 | 503 } {
+function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 409 | 499 | 500 | 503 } {
   // Load shedding and disconnects are expected outcomes, not internal failures: keep them out of error reports.
   if (error instanceof SearchCapacityError) return { code: "SEARCH_UNAVAILABLE", message: "Search capacity is full; retry shortly", status: 503 };
   if (error instanceof Error && error.name === "AbortError") return { code: "REQUEST_ABORTED", message: "Request aborted before search finished", status: 499 };
@@ -376,7 +389,7 @@ export function clearSearchResponseCacheForTests(): void {
 
 async function retrieve(body: SearchInput & { workspaceId: string }, userId: string, deferred?: DeferredRequestContext): Promise<SearchData> {
   // A capability changes the policy a cached answer was produced under: never share across it.
-  const ttl = deferred?.policy ? 0 : searchCacheTtlMs();
+  const ttl = deferred?.policy || body.geo ? 0 : searchCacheTtlMs();
   const key = JSON.stringify([userId, currentRequestApiKeyId(), { ...body, q: body.q.trim().replace(/\s+/g, " ") }]);
   const cached = ttl > 0 ? searchCache.get(key) : undefined;
   if (cached && Date.now() - cached.at < ttl) {
@@ -445,6 +458,14 @@ export const searchRoutes = new Hono()
       dateFrom: c.req.query("dateFrom") ?? "",
       dateTo: c.req.query("dateTo") ?? "",
     });
+
+    const rawGeo = c.req.query("geo");
+    if (rawGeo !== undefined) {
+      try {
+        if (rawGeo.length > 262144) throw new Error("too large");
+        filters.geo = geoPredicateSchema.parse(JSON.parse(rawGeo));
+      } catch { return apiErrorResponse(c,400,"invalid_request","Invalid spatial predicate"); }
+    }
 
     const deferred = await deferredRequestContext(c, workspaceId);
     if ("response" in deferred) return deferred.response;

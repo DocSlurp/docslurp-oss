@@ -1,3 +1,4 @@
+import { GeoSearchError, resolveGeoDocumentScope } from "../search/geo-scope.js";
 import type { ScopeSignal } from "../search/scope-relevance.js";
 import { randomUUID } from "node:crypto";
 import { qualifyCommunitySummary } from "../search/community-context.js";
@@ -453,14 +454,19 @@ export async function loadWorkspaceWholeCorpusContext(args: {
     },
   };
 
+  const loadQuery: typeof boundedSearchQuery = args.filters?.geo ? boundedSearchQuery : async build => await build(sql);
   try {
     const access = await getWorkspaceAccess(args.workspaceId, args.userId);
     if (!access) {
       return emptyContext;
     }
 
+    if (args.filters?.geo) {
+      const [workspace] = await boundedSearchQuery(client => client`select pipeline from workspaces where id=${access.workspaceId} and org_id=${access.orgId}`);
+      args = {...args,filters:await resolveGeoDocumentScope(access,args.filters,(workspace?.pipeline as {outputSchema?:unknown})?.outputSchema,args.runId)};
+    }
     const scope = retrievalScope({ workspaceId: access.workspaceId, filters: args.filters, runId: args.runId });
-    const [summary] = await sql<WholeCorpusSummaryRow[]>`
+    const [summary] = await loadQuery(client => client<WholeCorpusSummaryRow[]>`
       select
         count(distinct c.document_id)::int as document_count,
         count(*)::int as chunk_count,
@@ -471,7 +477,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       where d.workspace_id = ${access.workspaceId}
         and ${lexicalSearchableDocument("d")}
         and ${scope.chunk()}
-    `;
+    `);
 
     const stats = {
       documentCount: summary?.document_count ?? 0,
@@ -484,7 +490,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
     // If no chunks exist yet (embed stage not yet run), fall back to page-level context.
     // This happens when a document was page-indexed but not yet chunk-embedded.
     if (stats.chunkCount === 0) {
-      const [pageSummary] = await sql<
+      const [pageSummary] = await loadQuery(client => client<
         { page_count: number; char_estimate: number }[]
       >`
         select count(*)::int as page_count,
@@ -494,11 +500,11 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         where d.workspace_id = ${access.workspaceId}
           and ${lexicalSearchableDocument("d")}
         and ${scope.page()}
-      `;
+      `);
       const pageCount = pageSummary?.page_count ?? 0;
       const pageChars = pageSummary?.char_estimate ?? 0;
       if (pageCount > 0 && pageChars <= limits.maxChars) {
-        const pageRows = await sql<ProgressivePageRow[]>`
+        const pageRows = await loadQuery(client => client<ProgressivePageRow[]>`
           select p.id, p.document_id, p.run_id, p.page_number, p.text,
                  p.token_estimate, d.filename, 0::int as rank
           from document_pages p
@@ -508,7 +514,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         and ${scope.page()}
           order by d.filename asc, p.page_number asc
           limit ${limits.maxChunks}
-        `;
+        `);
         const results = pageRows.map((row, index) =>
           searchChunkToResult(mapProgressivePageRow(row, 1 / (1 + index))),
         );
@@ -563,7 +569,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       };
     }
 
-    const rows = await sql<ChunkRow[]>`
+    const rows = await loadQuery(client => client<ChunkRow[]>`
       select
         c.id,
         c.document_id,
@@ -583,7 +589,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         and ${scope.chunk()}
       order by d.filename asc, c.chunk_index asc
       limit ${limits.maxChunks}
-    `;
+    `);
 
     const results = rows.map((row, index) =>
       searchChunkToResult(mapChunk(row, 1 / (1 + index))),
@@ -594,7 +600,8 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       results,
       stats,
     };
-  } catch {
+  } catch (error) {
+    if (isSearchBoundError(error) || error instanceof GeoSearchError) throw error;
     return emptyContext;
   }
 }
@@ -770,7 +777,8 @@ async function vectorSearch(
   // Walk deduped_from to that owner so copies are searchable, then map hits to
   // the copy's chunk with the same chunk index. A copy in another workspace
   // has its own rows in this workspace's database and is hit directly.
-  const docRows = await sql<{ id: string; owner_id: string }[]>`
+  const query: typeof boundedSearchQuery = options.filters?.geo ? boundedSearchQuery : async build => await build(sql);
+  const docRows = await query(client => client<{ id: string; owner_id: string }[]>`
     with recursive current_docs as (
       select distinct d.id from documents d
       join vector_indexes v on v.document_id = d.id
@@ -799,7 +807,7 @@ async function vectorSearch(
         : sql`owner.index_config_hash is distinct from ${serving.hash.value}`
       : sql`true`}
     order by chain.id, chain.depth desc
-  `;
+  `);
   const scopedRows = docRows;
   const documentIds = scopedRows.map((row) => row.id);
   if (documentIds.length === 0) return [];
@@ -854,7 +862,8 @@ async function hydrateHitsFromPostgres(
     ? []
     : (copiesByOwner.get(hit.documentId) ?? []).map((documentId) => ({ hit: hit.id, document_id: documentId, chunk_index: hit.chunkIndex })));
   const whereClause = buildChunkSearchWhere(options.filters, options.runId);
-  const rows = await sql<(ChunkRow & { hit_id: string })[]>`
+  const query: typeof boundedSearchQuery = options.filters?.geo ? boundedSearchQuery : async build => await build(sql);
+  const rows = await query(client => client<(ChunkRow & { hit_id: string })[]>`
     select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
            c.page_number, c.token_estimate, c.metadata, d.filename,
            0::int as rank, c.id as hit_id
@@ -872,7 +881,7 @@ async function hydrateHitsFromPostgres(
     join documents d on d.id = c.document_id
     where d.workspace_id = ${workspaceId}
       and ${whereClause}
-  `;
+  `);
   for (const row of rows) rowsByHit.set(row.hit_id, [...(rowsByHit.get(row.hit_id) ?? []), row]);
   return rowsByHit;
 }
@@ -1046,7 +1055,7 @@ async function nativeTextSearch(
         documentIds: scope.searchDocumentIds, limit,
       });
     } catch (error) {
-      if (isSearchAborted(error)) throw error;
+      if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
       countSearchEvent("nativeLexicalError");
       return null;
     }
@@ -1280,7 +1289,7 @@ async function textSearch(
       }
     }
   } catch (error) {
-    if (isSearchAborted(error)) throw error;
+    if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
     // The statement timeout degrades this search to its other branches (dense,
     // pages); the chat pending-search retry reads `lexicalTimeout` and stops.
     countSearchEvent("lexicalTimeout");
@@ -1290,11 +1299,11 @@ async function textSearch(
 }
 
 /** A branch whose statement hit the search timeout contributes nothing; the search continues. */
-async function degradeOnTimeout<T>(branch: string, fallback: T, run: () => Promise<T>): Promise<T> {
+async function degradeOnTimeout<T>(branch: string, fallback: T, run: () => Promise<T>, failClosed = false): Promise<T> {
   try {
     return await run();
   } catch (error) {
-    if (!isSearchStatementTimeout(error)) throw error;
+    if (failClosed || !isSearchStatementTimeout(error)) throw error;
     countSearchEvent(`${branch}Timeout`);
     console.warn(`[search] ${branch} branch timed out after ${searchStatementTimeoutMs()}ms; continuing without it`);
     return fallback;
@@ -1358,7 +1367,7 @@ async function progressivePageSearch(
         and progressive_pages.ts_content @@ websearch_to_tsquery('english', ${query})
       order by ts_rank_cd(progressive_pages.ts_content, websearch_to_tsquery('english', ${query})) desc
       limit ${limit}
-  `));
+  `), Boolean(options.filters?.geo));
 
   return rows.map((row) => mapProgressivePageRow(row, 1 / (80 + row.rank)));
 }
@@ -1398,7 +1407,7 @@ async function completedPageSearch(args: {
       mapProgressivePageRow(row, 1 / (80 + row.rank)),
     );
   } catch (error) {
-    if (isSearchAborted(error)) throw error;
+    if (isSearchAborted(error) || (args.options.filters?.geo && isSearchBoundError(error))) throw error;
     if (isSearchStatementTimeout(error)) countSearchEvent("completedPagesTimeout");
     // websearch_to_tsquery may fail on degenerate inputs; skip silently.
     return [];
@@ -1410,6 +1419,7 @@ async function communitySummarySearch(
   workspaceId: string,
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
+  if (options.filters?.geo) return [];
   const limit = options.limit ?? 20;
   const rows = await degradeOnTimeout<CommunitySummaryRow[]>("community", [], () => boundedSearchQuery((client) => client<CommunitySummaryRow[]>`
     select
@@ -1530,7 +1540,7 @@ async function graphNeighborSearch(
     `);
     return mapRankedChunkRows(rows);
   } catch (error) {
-    if (isSearchAborted(error)) throw error;
+    if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
     if (isSearchStatementTimeout(error)) countSearchEvent("graphTimeout");
     return [];
   }

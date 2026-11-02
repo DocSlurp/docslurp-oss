@@ -1,3 +1,4 @@
+import { geoPredicateSchema } from "./geo.js";
 import { workspaceSettingsProposalSchema } from "./workspace-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -559,6 +560,7 @@ const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
 
 /** Composer filters for one chat request, mapped onto the search filters. */
 export const chatSearchFiltersSchema = z.object({
+  geo: geoPredicateSchema.optional(),
   documentIds: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   mimeTypes: z.array(z.string().trim().min(1).max(200)).max(24).optional(),
   tags: documentTagsSchema.optional(),

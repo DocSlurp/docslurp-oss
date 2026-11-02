@@ -1075,7 +1075,7 @@ async function chatWorkspaceInTurn(args: {
     limits: resolveChatAgentLimits(args.agent, isAdmin),
   };
   // "/status" and "how did my files process?" are answered from the ingest report, without a model.
-  if (args.answerIngestReport && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
+  if (args.answerIngestReport && !args.filters?.geo && args.filters?.documentIds?.length !== 0 && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
     return await answerIngestReportTurn(args);
   }
   // Every chat turn calls a model: refuse before spending (402 when blocked).
@@ -1214,7 +1214,7 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
   const report = await loadIngestReport({
     workspace,
     canEdit: Boolean(access && canEditWorkspace(access, args.userId)),
-    documentIds: args.filters?.documentIds?.length ? args.filters.documentIds.slice(0, 100) : null,
+    documentIds: args.filters?.documentIds?.slice(0, 100) ?? null,
     focusPages: ingestReportFocusPages(args.query),
   });
   const answer = summarizeIngestReport(report);
@@ -1276,10 +1276,10 @@ async function chatWorkspaceTurn(
     searchConfiguration = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
     searchSettings = searchConfiguration.settings;
   }
-  const filterDocumentIds = args.filters?.documentIds?.length ? args.filters.documentIds : undefined;
+  const filterDocumentIds = args.filters?.documentIds;
   // Type, tag and date filters only exist in retrieval; whole-corpus and stored-summary paths can't honour them.
   const narrowingFilters = Boolean(
-    args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
+    args.filters?.documentIds !== undefined || args.filters?.geo || args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
   );
   const history = args.history ?? await listRecentTurns(sessionId, 20);
   if (workspace && !publicClientKey && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
@@ -1344,13 +1344,16 @@ async function chatWorkspaceTurn(
       `
     : [];
   const documentIds = filterDocumentIds ?? (namedDocuments.length ? namedDocuments.map(doc => doc.id) : undefined);
-  const wholeCorpus = await loadWorkspaceWholeCorpusContext({
+  const wholeCorpus = narrowingFilters ? {
+    eligible:false, reason:null, results:[],
+    stats:{documentCount:0,chunkCount:0,tokenEstimate:0,charEstimate:0,...wholeCorpusContextLimits},
+  } : await loadWorkspaceWholeCorpusContext({
     workspaceId: args.workspaceId,
     userId: args.userId,
-    filters: { documentIds },
+    filters: { documentIds, ...(args.filters?.geo ? {geo:args.filters.geo} : {}) },
   });
   const wholeCorpusDebug = buildWholeCorpusDebug({
-    attempted: true,
+    attempted: !narrowingFilters,
     eligible: wholeCorpus.eligible,
     documentCount: wholeCorpus.stats.documentCount,
     chunkCount: wholeCorpus.stats.chunkCount,
@@ -1656,6 +1659,7 @@ async function chatWorkspaceTurn(
     graphHops: searchSettings.retrievalDefaults.graphHops,
     filters: {
       workspaceId: args.workspaceId,
+      ...(args.filters?.geo ? {geo:args.filters.geo} : {}),
       ...(documentIds ? { documentIds } : {}),
       ...(args.filters?.mimeTypes?.length ? { mimeTypes: args.filters.mimeTypes } : {}),
       ...(args.filters?.tags?.length ? { tags: args.filters.tags } : {}),
@@ -1726,7 +1730,7 @@ async function chatWorkspaceTurn(
     historyTurns: history.length,
     searchConfigured: Boolean(searchConfiguration),
     webTools: false,
-    filtered: Boolean(documentIds?.length || narrowingFilters),
+    filtered: Boolean(documentIds !== undefined || narrowingFilters),
   });
   if (scopeDecision.decline) {
     return await answerScopeDecline({ args, responseId, sessionId, searchSessionId: retrieved.sessionId, availability,

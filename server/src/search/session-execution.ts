@@ -1,3 +1,5 @@
+import { GeoSearchError } from "./geo-scope.js";
+import { boundedSearchQuery, isSearchBoundError } from "./query-bounds.js";
 import { retrievalScope } from "./retrieval-scope.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
 import { qualifyCommunitySummary } from "./community-context.js";
@@ -416,8 +418,9 @@ export async function finalizeSearchSessionExecution(
         usedWholeCorpusFallback = calibratedResults.length > 0;
         finalResultSource = usedWholeCorpusFallback ? "whole-corpus" : "none";
       }
-    } catch {
-      // Search should still return zero-result diagnostics if fallback fails.
+    } catch (error) {
+      if (isSearchBoundError(error) || error instanceof GeoSearchError) throw error;
+      // Ordinary fallback failures may still produce zero-result diagnostics.
     }
   }
 
@@ -487,6 +490,7 @@ export async function finalizeSearchSessionExecution(
 }
 
 async function attachParentText(results: SearchResult[], input: SearchSessionExecutionInput): Promise<void> {
+  const query: typeof boundedSearchQuery = input.filters?.geo ? boundedSearchQuery : async build => await build(sql);
   const scope = retrievalScope({ workspaceId: input.workspaceId, filters: input.filters, runId: input.options.runId });
   results = results.filter(result => result.citation.source === "document");
   const keyMap = new Map<string, { documentId: string; pageNumber: number }>();
@@ -506,7 +510,7 @@ async function attachParentText(results: SearchResult[], input: SearchSessionExe
     pageNumbers.push(key.pageNumber);
   }
 
-  const rows = await sql<
+  const rows = await query(client => client<
     { document_id: string; page_number: number; text: string }[]
   >`
     select p.document_id, p.page_number, p.text
@@ -516,13 +520,13 @@ async function attachParentText(results: SearchResult[], input: SearchSessionExe
       and p.page_number = any(${sql.array(pageNumbers, 23)})
       and ${scope.page()}
       and ${lexicalSearchableDocument("d")}
-  `;
+  `);
 
   const lookup = new Map(
     rows.map((row) => [`${row.document_id}:${row.page_number}`, row.text]),
   );
   const missing = results.filter(result => !lookup.has(`${result.citation.documentId}:${result.citation.pageNumber}`));
-  const neighborRows = missing.length ? await sql<{ document_id: string; chunk_index: number; text: string; page_numbers: number[] }[]>`
+  const neighborRows = missing.length ? await query(client => client<{ document_id: string; chunk_index: number; text: string; page_numbers: number[] }[]>`
     select hit.document_id, hit.chunk_index, left(string_agg(neighbor.text, E'\n\n' order by neighbor.chunk_index), 30000) as text, array_agg(distinct neighbor.page_number) filter (where neighbor.page_number is not null) as page_numbers
     from jsonb_to_recordset(${sql.json(missing.map(result => ({ document_id: result.citation.documentId, chunk_index: result.citation.chunkIndex, page_number: result.citation.pageNumber })))}::jsonb)
       as hit(document_id text, chunk_index int, page_number int)
@@ -539,7 +543,7 @@ async function attachParentText(results: SearchResult[], input: SearchSessionExe
       order by c.chunk_index limit 24
     ) neighbor on true
     group by hit.document_id, hit.chunk_index
-  ` : [];
+  `) : [];
   const neighbors = new Map(neighborRows.map(row => [`${row.document_id}:${row.chunk_index}`, row]));
   for (const result of missing) {
     const parent = neighbors.get(`${result.citation.documentId}:${result.citation.chunkIndex}`);

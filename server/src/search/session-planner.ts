@@ -196,7 +196,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     });
     effectiveOptions = {
       ...options,
-      filters: withWorkspaceScope(derived.filters, workspaceId),
+      filters: withWorkspaceScope({...derived.filters, ...(options.filters?.geo ? {geo:options.filters.geo,geoSchemaDigest:options.filters.geoSchemaDigest,documentIds:options.filters.documentIds} : {})}, workspaceId),
     };
     selfQueryReasons = derived.reasons;
   }
@@ -230,7 +230,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   // An explicit document selection already defines the retrieval scope. Summary
   // seeds must never replace it with unrelated documents.
   const hasDocumentSelection = Boolean(
-    effectiveOptions.filters?.documentId || effectiveOptions.filters?.documentIds?.length,
+    effectiveOptions.filters?.documentId || effectiveOptions.filters?.documentIds !== undefined,
   );
   const seedVector = effectiveOptions.summarySeed && !hasDocumentSelection ? await queryVector : null;
   if (seedVector) {
