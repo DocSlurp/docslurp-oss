@@ -1,3 +1,4 @@
+import type { GeoFinalSource } from "../db/geo-final-source.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import { createHash } from "node:crypto";
 
@@ -46,6 +47,7 @@ export async function runDocuments<T>(
 }
 
 export interface DocumentStageResult {
+  geoFinalSource?: GeoFinalSource;
   artifactUri?: string;
   stats?: Record<string, unknown>;
   message?: string;
@@ -321,7 +323,7 @@ export async function runDocumentStage(
       );
 
       if (state.store) {
-        await state.store.completeDocumentStage(state, document.id, stageName, artifactUri, stats);
+        await state.store.completeDocumentStage(state, document.id, stageName, artifactUri, stats, result.geoFinalSource);
         if (needsDocumentProgressCheckpoint(state)) await state.store.updateProgress(state);
         await state.store.appendEvent(
           buildRunProgressEvent(state, {

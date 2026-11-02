@@ -1,3 +1,4 @@
+import type { GeoAttempt, GeoFinalSource } from "../db/geo-final-source.js";
 import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
 import type { StageState, WorkspaceRunEvent } from "../models.js";
 import type { Document, ParserEvaluation, PerformanceEvent, WorkspaceRun } from "../models.js";
@@ -12,6 +13,7 @@ import {
 } from "./run-ledger.js";
 
 export interface CheckpointStore {
+  beginGeoAttempt?(state: WorkflowState, documentId: string, schema: Record<string, unknown>): Promise<GeoAttempt | undefined>;
   updateProgress(state: WorkflowState): Promise<void>;
   startRunStage(state: WorkflowState, stage: string): Promise<void>;
   completeRunStage(
@@ -29,7 +31,8 @@ export interface CheckpointStore {
     documentId: string,
     stage: string,
     artifactUri: string,
-    stats: Record<string, unknown>
+    stats: Record<string, unknown>,
+    geoFinalSource?: GeoFinalSource,
   ): Promise<void>;
   failDocumentStage(
     state: WorkflowState,
