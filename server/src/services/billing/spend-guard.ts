@@ -375,11 +375,12 @@ export async function admitRunSpend<T>(
           and org_id=${orgId} and workspace_id=${workspaceId}
           and status='active' and expires_at>now() and not credit_exempt
       ` : await tx`
-        select case when pipeline->>'speedBoost'='true'
+        select case when pipeline->'speedBoost'='true'::jsonb
           then greatest(0, ${runAdmissionReserveCredits()} * 4 - spent_cents)
           else greatest(0, ${runAdmissionReserveCredits()} - (input_cost_cents+output_cost_cents)) end as amount
         from workspace_runs where id=${options.leaseRunId!}
           and org_id=${orgId} and workspace_id=${workspaceId} and status in ('queued','processing')
+          and coalesce(control_state, '') not in ('paused', 'cancelled', 'cancel_requested', 'dead-letter')
       `;
       ownReservation = Number(reservation?.amount ?? 0);
     }
