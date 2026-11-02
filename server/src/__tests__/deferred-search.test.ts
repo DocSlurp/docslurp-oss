@@ -260,6 +260,26 @@ describe("runDeferredPageSearch", () => {
     ...over,
   }) as never;
 
+  it.each([
+    {documentIds:[]}, {documentId:"d1",documentIds:["d2"]},
+    {documentIds:[],geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}},
+    {documentIds:["d1"],geoSchemaDigest:"stale",geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}},
+  ])("does no deferred work for empty or spatial scope %j", async filters => {
+    const d=deps() as unknown as Record<string, ReturnType<typeof vi.fn>>;
+    expect(await runDeferredPageSearch(searchArgs(journal(),{options:{filters}}),d as never)).toBeNull();
+    for (const name of ["listDeferredDocuments","locateMap","listModels","embed","locateImages","materialize","canSpend"]) expect(d[name]).not.toHaveBeenCalled();
+  });
+
+  it("intersects singular and plural IDs and rejects out-of-scope locator candidates",async()=>{
+    const locateMap=vi.fn(async()=>({pages:[{documentId:"d2",page:1,nodeTitle:"outside"}],routerUsed:false,confident:true}));
+    const materialize=vi.fn(async()=>({temperature:"hot",candidatePages:0,indexedCandidatePages:0,materializedPages:0,pendingPages:0,materializeMs:0,creditsSpent:0,routerUsed:false,fallbackUsed:false,stoppedBy:null}));
+    const listDeferredDocuments=vi.fn(async()=>[{id:"d1",mode:"map",pageCount:10,indexedPages:0},{id:"d2",mode:"map",pageCount:10,indexedPages:0}]);
+    await runDeferredPageSearch(searchArgs(journal(),{options:{filters:{documentId:"d1",documentIds:["d1","d2"]}}}),deps({locateMap,materialize,listDeferredDocuments}));
+    expect(listDeferredDocuments).toHaveBeenCalledWith("ws-1",["d1"]);
+    expect(locateMap).toHaveBeenCalledWith(expect.objectContaining({documentIds:["d1"]}));
+    expect(materialize).toHaveBeenCalledWith(expect.objectContaining({candidates:[]}));
+  });
+
   it("returns null with no deferred documents in scope", async () => {
     const d = deps({ listDeferredDocuments: vi.fn(async () => []) });
     expect(await runDeferredPageSearch(searchArgs(journal()), d)).toBeNull();

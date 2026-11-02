@@ -66,6 +66,30 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   await expect(resolve(tenant,{geo:{field:'site',op:'within',geometry:{type:'Polygon',coordinates:[[[0,0],[2,2],[0,2],[2,0],[0,0]]]}}},schema)).rejects.toThrow('topology');
   await expect(resolve(tenant,{geo:radius},{type:'object',properties:{site:{type:'object'}}})).rejects.toThrow('opted-in');
  });
+ it("aborted spatial resolution never starts SQL",async()=>{
+  const {withSearchSignal}=await import("../search/query-bounds.js");
+  const controller=new AbortController(); controller.abort();
+  await expect(withSearchSignal(controller.signal,()=>resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:"AbortError"});
+ });
+ it.each(["timeout","abort"])("spatial selection obeys %s while blocked in PostgreSQL",async(mode)=>{
+  const {withSearchSignal}=await import("../search/query-bounds.js");
+  const blocker=await db.reserve();
+  const previous=process.env.SEARCH_STATEMENT_TIMEOUT_MS;
+  const controller=new AbortController();
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+   await blocker`begin`;
+   await blocker`lock table geo_projection_features in access exclusive mode`;
+   process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
+   if(mode==="abort") timer=setTimeout(()=>controller.abort(),200);
+   const started=Date.now();
+   await expect(withSearchSignal(controller.signal,()=>resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
+   expect(Date.now()-started).toBeLessThan(3000);
+  } finally {
+   clearTimeout(timer); await blocker`rollback`; blocker.release();
+   if(previous===undefined)delete process.env.SEARCH_STATEMENT_TIMEOUT_MS;else process.env.SEARCH_STATEMENT_TIMEOUT_MS=previous;
+  }
+ });
  it("a revision mutation cannot reuse prior readiness or a resolved scope",async()=>{
   const filters:SearchFilters=await resolve(tenant,{geo:radius},schema);
   await db`update documents set projection_revision=projection_revision+1 where id='near'`;

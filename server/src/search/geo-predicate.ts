@@ -1,4 +1,5 @@
 import { geoPredicateSchema, type GeoPredicate } from "@docslurp/shared";
+import { boundedSearchQuery } from "./query-bounds.js";
 import { sql } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 
@@ -30,9 +31,9 @@ export function spatialPredicate(input: GeoPredicate, geom: SqlFragment): SqlFra
 export async function validateSpatialPredicate(input: unknown): Promise<GeoPredicate> {
   const predicate = geoPredicateSchema.parse(input);
   if (predicate.op === "within" || predicate.op === "intersects") {
-    const [row] = await sql<{ valid: boolean }[]>`
+    const [row] = await boundedSearchQuery(client => client<{ valid: boolean }[]>`
       select ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(${JSON.stringify(predicate.geometry)}),4326)) as valid
-    `;
+    `);
     if (!row?.valid) throw new Error("Invalid geo query polygon topology");
   }
   return predicate;
