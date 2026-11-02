@@ -36,6 +36,7 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import { latchedTeardownError } from "../sandbox/session-context.js";
@@ -483,14 +484,19 @@ export function createStageExecution(deps: {
       );
       const startedAt = Date.now();
 
-      // Run the stage with the orchestrator's cancellation signal
+      // Run the stage with the orchestrator's cancellation signal. Run-level
+      // stages (graph-enrich, page-range shards) call providers directly, so
+      // they need the run's provider scope just as per-document stages get it
+      // in runDocumentStage: without it every request is attributed to no org
+      // and restricted to non-China providers, whatever the run allows.
       await withObservation({ name: `worker.stage.${stageName}`,
         metadata: { runId, workspaceId: state.run.workspaceId, orgId: state.run.orgId,
           temporalAttempt: runtime.attempt, stage: stageName },
       }, () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId },
-        () => runWithProgressTracker(tracker, () => pageRanges
-          ? stage.runPageRanges!(state, pageRanges, stageSignal)
-          : stage.run(state, stageSignal))));
+        () => runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
+          () => runWithProgressTracker(tracker, () => pageRanges
+            ? stage.runPageRanges!(state, pageRanges, stageSignal)
+            : stage.run(state, stageSignal)))));
 
       const durationMs = Date.now() - startedAt;
       if (pageRanges) {
