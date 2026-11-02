@@ -777,7 +777,8 @@ async function vectorSearch(
   // Walk deduped_from to that owner so copies are searchable, then map hits to
   // the copy's chunk with the same chunk index. A copy in another workspace
   // has its own rows in this workspace's database and is hit directly.
-  const docRows = await sql<{ id: string; owner_id: string }[]>`
+  const query: typeof boundedSearchQuery = options.filters?.geo ? boundedSearchQuery : async build => await build(sql);
+  const docRows = await query(client => client<{ id: string; owner_id: string }[]>`
     with recursive current_docs as (
       select distinct d.id from documents d
       join vector_indexes v on v.document_id = d.id
@@ -806,7 +807,7 @@ async function vectorSearch(
         : sql`owner.index_config_hash is distinct from ${serving.hash.value}`
       : sql`true`}
     order by chain.id, chain.depth desc
-  `;
+  `);
   const scopedRows = docRows;
   const documentIds = scopedRows.map((row) => row.id);
   if (documentIds.length === 0) return [];
@@ -861,7 +862,8 @@ async function hydrateHitsFromPostgres(
     ? []
     : (copiesByOwner.get(hit.documentId) ?? []).map((documentId) => ({ hit: hit.id, document_id: documentId, chunk_index: hit.chunkIndex })));
   const whereClause = buildChunkSearchWhere(options.filters, options.runId);
-  const rows = await sql<(ChunkRow & { hit_id: string })[]>`
+  const query: typeof boundedSearchQuery = options.filters?.geo ? boundedSearchQuery : async build => await build(sql);
+  const rows = await query(client => client<(ChunkRow & { hit_id: string })[]>`
     select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
            c.page_number, c.token_estimate, c.metadata, d.filename,
            0::int as rank, c.id as hit_id
@@ -879,7 +881,7 @@ async function hydrateHitsFromPostgres(
     join documents d on d.id = c.document_id
     where d.workspace_id = ${workspaceId}
       and ${whereClause}
-  `;
+  `);
   for (const row of rows) rowsByHit.set(row.hit_id, [...(rowsByHit.get(row.hit_id) ?? []), row]);
   return rowsByHit;
 }

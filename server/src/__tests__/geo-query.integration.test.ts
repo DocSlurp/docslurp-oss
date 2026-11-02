@@ -91,6 +91,37 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
    if(previous===undefined)delete process.env.SEARCH_STATEMENT_TIMEOUT_MS;else process.env.SEARCH_STATEMENT_TIMEOUT_MS=previous;
   }
  });
+ it.each(["parent","neighbor","graph"].flatMap(target=>["timeout","abort"].map(mode=>({target,mode}))))("$target expansion obeys $mode",async({target,mode})=>{
+  const {withSearchSignal}=await import("../search/query-bounds.js");
+  const {expandGraphTextQuery}=await import("../search/graph-expansion.js");
+  const {finalizeSearchSessionExecution,searchResultsToChunks}=await import("../search/session-execution.js");
+  const filters=await resolve(tenant,{geo:radius},schema);
+  const baseline=await search.hybridSearch("budget","q-u",{filters:{workspaceId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:false,queryRewrite:false,selfQuery:false});
+  expect(baseline.results.length).toBeGreaterThan(0);
+  const blocker=await db.reserve();
+  const previous=process.env.SEARCH_STATEMENT_TIMEOUT_MS;
+  const controller=new AbortController();
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+   await blocker`begin`;
+   if(target==="parent")await blocker`lock table document_pages in access exclusive mode`;
+   else if(target==="neighbor")await blocker`lock table document_chunks in access exclusive mode`;
+   else await blocker`lock table chunk_entities in access exclusive mode`;
+   process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
+   if(mode==="abort")timer=setTimeout(()=>controller.abort(),200);
+   const work=async()=>{
+    if(target==="graph")return expandGraphTextQuery({enabled:true,query:"budget",textQuery:"budget",workspaceId:"q-w",filters});
+    if(target==="parent")return search.hybridSearch("budget","q-u",{filters:{workspaceId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:true,queryRewrite:false,selfQuery:false});
+    return finalizeSearchSessionExecution({query:"budget",userId:"q-u",workspaceId:"q-w",filters,options:{parentRetrieval:true},chunks:searchResultsToChunks(baseline.results),availability:baseline.availability,effectiveQuery:"budget",selfQueryReasons:[],session:{sessionId:"parent-test",persist:vi.fn(),usageEvents:()=>[],diagnostics:()=>({})}} as never);
+   };
+   const started=Date.now();
+   await expect(withSearchSignal(controller.signal,work)).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
+   expect(Date.now()-started).toBeLessThan(3000);
+  }finally{
+   clearTimeout(timer);await blocker`rollback`;blocker.release();
+   if(previous===undefined)delete process.env.SEARCH_STATEMENT_TIMEOUT_MS;else process.env.SEARCH_STATEMENT_TIMEOUT_MS=previous;
+  }
+ });
  it("a revision mutation cannot reuse prior readiness or a resolved scope",async()=>{
   const filters:SearchFilters=await resolve(tenant,{geo:radius},schema);
   await db`update documents set projection_revision=projection_revision+1 where id='near'`;
