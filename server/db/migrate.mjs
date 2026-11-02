@@ -4,6 +4,7 @@
 // serializes concurrent migrators (several app instances, release + app), so
 // two processes never apply the same migration at once.
 import path from "node:path";
+import { migratePostgis } from "./migrate-postgis.mjs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
@@ -104,6 +105,7 @@ try {
   // Grants for the least-privilege roles, when they exist (server/db/roles.mjs).
   // Still under the migration lock, so the new tables are granted before any
   // runtime role can be handed code that uses them.
+  if (process.env.POSTGIS_MIGRATIONS === "1") await migratePostgis(client);
   const reconciled = await reconcileRoleGrants(client);
   if (reconciled.length === 0) console.log(`[migrate] no least-privilege roles found; ${migrator} remains the only role in use`);
   console.log(`[migrate] complete in ${Date.now() - started}ms`);
