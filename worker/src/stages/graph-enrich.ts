@@ -209,34 +209,27 @@ export class GraphEnrichStage implements Stage {
             textGeneration: pipeline.textGeneration,
             deploymentProfile: this.config.textGenerationProfile,
             signal,
+            onUsage: (usage, details) => {
+              state.usageLedger.record({
+                ...textUsageLabels(communityModel),
+                metric: "community-summary",
+                amount: usage.inputTokens + usage.outputTokens,
+                unit: "token",
+                costCents: usage.costCents ?? textFallbackCost({
+                  model: communityModel,
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                  costPer1kInputTokens: this.config.costPer1kInputTokens,
+                  costPer1kOutputTokens: this.config.costPer1kOutputTokens,
+                }).costCents,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                metadata: { ...usage.metadata, workspaceId, ...details },
+              });
+            },
           },
         })
       : null;
-    if (communities && (communities.inputTokens > 0 || communities.outputTokens > 0)) {
-      state.usageLedger.record({
-          ...textUsageLabels(communityModel),
-          metric: "community-summary",
-          amount: communities.inputTokens + communities.outputTokens,
-          unit: "token",
-          costCents: textFallbackCost({
-              model: communityModel,
-              inputTokens: communities.inputTokens,
-              outputTokens: communities.outputTokens,
-              costPer1kInputTokens: this.config.costPer1kInputTokens,
-              costPer1kOutputTokens: this.config.costPer1kOutputTokens,
-            }).costCents,
-          inputTokens: communities.inputTokens,
-          outputTokens: communities.outputTokens,
-          metadata: {
-            workspaceId: state.run.workspaceId,
-            communities: communities.communities,
-            summarized: communities.summarized,
-            reused: communities.reused,
-          },
-        },
-      );
-    }
-
     const artifactKey = `${runArtifactRoot(state.run, state.run.userId)}/graph/workspace-graph.json`;
     await this.storage.putJson(artifactKey, {
       config: graphConfig,

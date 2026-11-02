@@ -17,8 +17,11 @@ it.each([
     filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example System handles documents." }],
     context: { config: defaultGraphConfig, scope: "Synthetic workspace", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage },
   });
-  expect(graph).toMatchObject({ source: "heuristic", llmFailed: true, windows: 0, inputTokens: 100, outputTokens: 1600 });
-  expect(onUsage).toHaveBeenCalledExactlyOnceWith({ inputTokens: 100, outputTokens: 1600 }, expect.objectContaining({ finishReason, window: 1 }));
+  // A cut-off answer is retried at 3,200 and 6,400 tokens; each attempt is recorded.
+  const attempts = finishReason === "length" ? 3 : 1;
+  expect(graph).toMatchObject({ source: "heuristic", llmFailed: true, windows: 0, inputTokens: 100 * attempts, outputTokens: 1600 * attempts });
+  expect(onUsage).toHaveBeenCalledTimes(attempts);
+  expect(onUsage).toHaveBeenCalledWith({ inputTokens: 100, outputTokens: 1600 }, expect.objectContaining({ finishReason, window: 1 }));
   expect(warning).toHaveBeenCalledWith(expect.stringContaining(`finishReason=${finishReason}`));
 });
 
@@ -76,4 +79,32 @@ it("flags a provider failure on every window, but not a run without a model", as
     .toMatchObject({ source: "heuristic", llmFailed: true });
   expect(await extractDocumentGraph({ filename: "synthetic.html", chunks, context }))
     .toMatchObject({ source: "heuristic", llmFailed: false });
+});
+
+it("retries a cut-off window with a larger budget before falling back", async () => {
+  vi.mocked(generateOpenRouterText).mockReset();
+  vi.mocked(generateOpenRouterText)
+    .mockResolvedValueOnce({ text: '{"entities":[{"name":"Acme"', finishReason: "length", usage: { inputTokens: 100, outputTokens: 1600 } })
+    .mockResolvedValueOnce({ text: '{"entities":[{"name":"Acme","type":"organization","confidence":0.9}],"relationships":[]}', finishReason: "stop", usage: { inputTokens: 100, outputTokens: 40 } });
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const onUsage = vi.fn();
+  const graph = await extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Acme supplies documents." }],
+    context: { config: defaultGraphConfig, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage },
+  });
+  expect(graph).toMatchObject({ source: "llm", llmFailed: false, windows: 1, inputTokens: 200, outputTokens: 1640 });
+  expect(vi.mocked(generateOpenRouterText).mock.calls.map(([call]) => call.maxOutputTokens)).toEqual([1600, 3200]);
+  expect(onUsage).toHaveBeenCalledTimes(2);
+});
+
+it("stops expanding at the ceiling", async () => {
+  vi.mocked(generateOpenRouterText).mockReset();
+  vi.mocked(generateOpenRouterText).mockResolvedValue({ text: '{"entities":[', finishReason: "length", usage: { inputTokens: 10, outputTokens: 10 } });
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const graph = await extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Acme supplies documents." }],
+    context: { config: defaultGraphConfig, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard" },
+  });
+  expect(graph).toMatchObject({ source: "heuristic", llmFailed: true });
+  expect(vi.mocked(generateOpenRouterText).mock.calls.map(([call]) => call.maxOutputTokens)).toEqual([1600, 3200, 6400]);
 });

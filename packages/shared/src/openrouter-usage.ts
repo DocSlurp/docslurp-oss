@@ -125,6 +125,10 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
   "anthropic/claude-sonnet-5.5": { effort: "minimal" },
   // 2026-10-20 probes: both `{ enabled: false }` and effort `none` return HTTP 200 with zero reasoning tokens.
   "nvidia/nemotron-3.5-super-vl": { enabled: false },
+  // 2026-11-02 probes: `{ enabled: false }` returns HTTP 200 with zero reasoning tokens. Unset, the default
+  // pipeline model spends a 1,600-token graph-extraction budget on reasoning and returns no answer.
+  "qwen/qwen3.5-flash-02-23": { enabled: false },
+  "qwen/qwen3.6-flash": { enabled: false },
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {
@@ -162,13 +166,21 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
       return baseFetch(input, { ...init, body: JSON.stringify({ ...body, reasoning: floor }) });
     }
     const floor = lowestOpenRouterReasoning(typeof body.model === "string" ? body.model : undefined);
+    const original = init.body;
     body.reasoning = { ...body.reasoning };
     delete body.reasoning.effort;
     delete body.reasoning.enabled;
     delete body.reasoning_effort;
     if (floor && "effort" in floor) body.reasoning.effort = floor.effort;
     else body.reasoning.enabled = false;
-    return baseFetch(input, { ...init, body: JSON.stringify(body) });
+    const response = await baseFetch(input, { ...init, body: JSON.stringify(body) });
+    if (floor || response.status !== 400) return response;
+    // A model without a verified floor may require reasoning; send the request as the caller built it.
+    const detail = await response.clone().text().catch(() => "");
+    if (!/reasoning is mandatory/i.test(detail)) return response;
+    console.warn(`[openrouter] reasoning_floor_rejected model=${String(body.model)}; retrying with the provider default`);
+    await response.body?.cancel().catch(() => undefined);
+    return baseFetch(input, { ...init, body: original });
   };
 }
 

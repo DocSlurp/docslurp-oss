@@ -137,7 +137,7 @@ export async function generateOpenRouterText(args: {
       type: "generation",
       model: args.model,
       input: { system, prompt: args.prompt },
-      metadata: { ...textMetadata("openrouter", { ...args, maxOutputTokens: settings.maxOutputTokens }), textGenerationProfile: settings.profile, reasoningEffort: settings.reasoningEffort },
+      metadata: { ...textMetadata("openrouter", { ...args, maxOutputTokens: settings.maxOutputTokens }), textGenerationProfile: settings.profile, reasoningEffort: settings.reasoningEffort ?? "none" },
       result: (result) => ({
         ...aiResultDetails(result),
         metadata: {
@@ -151,7 +151,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch), settings.reasoningEffort)),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch), settings.reasoningEffort ?? "none")),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });

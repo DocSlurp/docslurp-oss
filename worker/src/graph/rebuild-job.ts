@@ -277,38 +277,41 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
       workspaceId: job.workspace_id,
       call: openRouterTextCall("community-summary", communityModel),
     }) ? textModelApiKey(config.openRouterApiKey, communityModel) : undefined;
-    const communities = await refreshWorkspaceCommunities({
-      sql,
-      workspaceId: job.workspace_id,
-      userId: job.user_id,
-      runId: null,
-      context: {
-        scope,
-        model: communityModel,
-        apiKey: communityApiKey,
-        privacyMode: pipeline.privacyMode,
-        textGeneration: pipeline.textGeneration,
-        deploymentProfile: config.textGenerationProfile,
-      },
-    });
-    const costCents = textFallbackCost({
-      model: communityModel,
-      inputTokens: communities.inputTokens,
-      outputTokens: communities.outputTokens,
-      costPer1kInputTokens: config.costPer1kInputTokens,
-      costPer1kOutputTokens: config.costPer1kOutputTokens,
-    }).costCents;
-    if (communities.inputTokens > 0 || communities.outputTokens > 0) {
-      usage.push({
-        ...textUsageLabels(communityModel),
-        metric: "community-summary",
-        inputTokens: communities.inputTokens,
-        outputTokens: communities.outputTokens,
-        costCents,
-        metadata: { communities: communities.communities, summarized: communities.summarized, reused: communities.reused },
+    try {
+      await refreshWorkspaceCommunities({
+        sql,
+        workspaceId: job.workspace_id,
+        userId: job.user_id,
+        runId: null,
+        context: {
+          scope,
+          model: communityModel,
+          apiKey: communityApiKey,
+          privacyMode: pipeline.privacyMode,
+          textGeneration: pipeline.textGeneration,
+          deploymentProfile: config.textGenerationProfile,
+          onUsage: (eventUsage, details) => {
+            usage.push({
+              ...textUsageLabels(communityModel),
+              metric: "community-summary",
+              inputTokens: eventUsage.inputTokens,
+              outputTokens: eventUsage.outputTokens,
+              costCents: eventUsage.costCents ?? textFallbackCost({
+                model: communityModel,
+                inputTokens: eventUsage.inputTokens,
+                outputTokens: eventUsage.outputTokens,
+                costPer1kInputTokens: config.costPer1kInputTokens,
+                costPer1kOutputTokens: config.costPer1kOutputTokens,
+              }).costCents,
+              metadata: { ...eventUsage.metadata, ...details },
+            });
+          },
+        },
       });
+    } finally {
+      // Calls that completed before a failure are still persisted.
+      await persistJobUsage(sql, job, usage);
     }
-    await persistJobUsage(sql, job, usage);
     const usageCost = usage.reduce((sum, event) => sum + (event.costCents ?? 0), 0);
     await sql`
       update graph_jobs

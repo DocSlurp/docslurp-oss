@@ -66,6 +66,15 @@ counts as stale: a stage retry, a later run or a `stale` rebuild extracts it
 again with the model. The stage logs `[graph-enrich] ... llm_fallback
 documents=N/M` and records the `graph-llm-fallback-documents` run metric.
 
+Model calls start at the model's lowest reasoning setting (unless the workspace
+sets a reasoning effort), so the output budget goes to the answer. A window
+whose answer is cut off (`finishReason=length`) is retried with double the
+output budget, up to 6,400 tokens; a cut-off community summary is retried once
+at 440. Every attempt is recorded as usage, so a rebuild's `maxCostCents` can
+be overshot by at most one batch's retries. Graph calls in a run follow the
+run's provider policy (China-based providers, Speed boost), like every other
+stage.
+
 Within a run, the `graph-enrich` stage extracts `WORKER_GRAPH_JOB_CONCURRENCY`
 documents at a time (default 4); graph writes still serialize per workspace.
 

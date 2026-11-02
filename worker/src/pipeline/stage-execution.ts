@@ -8,6 +8,7 @@ import { ApplicationFailure } from "@temporalio/common";
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
 import { captureProcessStats, pushProcessStatsDelta } from "../lib/perf-context.js";
+import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type {
   CompleteRunInput,
   FailRunInput,
@@ -488,9 +489,12 @@ export function createStageExecution(deps: {
         metadata: { runId, workspaceId: state.run.workspaceId, orgId: state.run.orgId,
           temporalAttempt: runtime.attempt, stage: stageName },
       }, () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId },
-        () => runWithProgressTracker(tracker, () => pageRanges
-          ? stage.runPageRanges!(state, pageRanges, stageSignal)
-          : stage.run(state, stageSignal))));
+        // Run-level provider calls (graph extraction, community summaries) carry the run's org and China-provider
+        // policy, as per-document stages do; without it they fail closed to non-China providers only.
+        () => runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
+          () => runWithProgressTracker(tracker, () => pageRanges
+            ? stage.runPageRanges!(state, pageRanges, stageSignal)
+            : stage.run(state, stageSignal)))));
 
       const durationMs = Date.now() - startedAt;
       if (pageRanges) {
