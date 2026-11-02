@@ -1,3 +1,4 @@
+import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { dbTraceStatementHook } from "../lib/db-trace.js";
@@ -476,6 +477,10 @@ async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId:
 }
 
 export class Store {
+  async beginGeoAttempt(state: WorkflowState, documentId: string, schema: Record<string, unknown>) {
+    if (!state.run.workspaceId || !state.run.orgId) throw new Error("Geo extraction requires tenant scope");
+    return beginGeoAttempt(this.sql, {documentId, workspaceId:state.run.workspaceId, orgId:state.run.orgId, runId:state.run.id}, schema);
+  }
   private readonly sql: Sql<Record<string, unknown>>;
   capacityLeaseStore(providerIds: string[]) { return new PostgresCapacityLeaseStore(this.sql, (id) => this.loadRun(id).catch(() => null), providerIds); }
   /** Raw client for stages that write their own tables (deferred indexing). */
@@ -1557,7 +1562,11 @@ export class Store {
     stage: string,
     artifactUri: string,
     stats: Record<string, unknown>,
+    geoFinalSource?: GeoFinalSource,
   ): Promise<void> {
+    if (geoFinalSource && (stage !== "structured-extract" || geoFinalSource.documentId !== documentId ||
+      geoFinalSource.runId !== state.run.id || geoFinalSource.workspaceId !== state.run.workspaceId ||
+      geoFinalSource.orgId !== state.run.orgId)) throw new Error("Geo checkpoint scope mismatch");
     const completesDocument = stage === "index";
     const vectors = completesDocument
       ? state.vectorIndexes.filter((vector) => vector.documentId === documentId)
@@ -1594,6 +1603,14 @@ export class Store {
         ]);
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
       });
+    } else if (geoFinalSource) {
+      const source = geoFinalSource;
+      await retryTransaction(`complete-geo-stage run=${state.run.id}`, () => pipelineTransaction(this.sql, client => [
+        client`select commit_geo_final_source(${source.documentId},${source.workspaceId},${source.orgId},
+          ${source.revision}::bigint,${source.runId},${source.schemaDigest},${source.resultDigest},
+          ${this.toJson(source.features)}::jsonb)`,
+        stageStateUpdate(client),
+      ]).then(() => undefined));
     } else {
       // Another stage's checkpoint row cannot change what `indexedInRun` reads (the 'index' row),
       // so the stage state and the document status land in one statement: one commit, one round trip.

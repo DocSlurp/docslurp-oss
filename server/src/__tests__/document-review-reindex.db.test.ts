@@ -58,4 +58,17 @@ describe("human-correction reindex", () => {
       { page_number: 2, read_billed_run: "m1", read_text: null },
     ]);
   });
+  it("refuses cross-user corrections and rolls back geo edits without spatial capability", async () => {
+    const { saveDocumentCorrection } = await import("../services/document-review.js");
+    await sql`insert into "user" (id,name,email) values('outsider','Other','other@example.com')`;
+    expect(await saveDocumentCorrection({docId:"d",userId:"outsider",structuredData:{site:{type:"Point",coordinates:[0,0]}}})).toBeNull();
+    await sql`update workspaces set pipeline=${sql.json({outputSchema:{type:"object",properties:{site:{type:"object",format:"geojson"}}}})}::jsonb where id='w'`;
+    const [before] = await sql`select projection_revision from documents where id='d'`;
+    await expect(saveDocumentCorrection({docId:"d",userId:"u",structuredData:{site:{type:"Point",coordinates:[0,0]}}})).rejects.toThrow("spatial migrations");
+    const [after] = await sql`select projection_revision from documents where id='d'`;
+    expect(after).toEqual(before);
+    const [correction] = await sql`select corrected_structured_data from document_corrections where document_id='d'`;
+    expect(correction.corrected_structured_data).toBeNull();
+  });
+
 });

@@ -1,3 +1,4 @@
+import { publishGeoCorrection } from "./geo-correction.js";
 import { randomUUID } from "node:crypto";
 import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
 
@@ -796,7 +797,10 @@ export async function saveDocumentCorrection(args: {
     await setDocumentTags(args.docId, args.userId, args.tags);
   }
 
-  await sql`
+  await sql.begin(async tx => {
+    const transaction = tx as unknown as typeof sql;
+    await transaction`select id from workspaces where id=${document.workspace_id} and org_id=${document.org_id} for share`;
+  const [savedCorrection] = await transaction`
     insert into document_corrections (
       id,
       document_id,
@@ -814,7 +818,7 @@ export async function saveDocumentCorrection(args: {
       ${document.run_id},
       ${args.userId},
       ${args.markdown ?? null},
-      ${args.structuredData ? sql.json(JSON.parse(JSON.stringify(args.structuredData))) : null}::jsonb,
+      ${args.structuredData ? transaction.json(JSON.parse(JSON.stringify(args.structuredData))) : null}::jsonb,
       ${args.notes ?? null},
       now(),
       now()
@@ -827,7 +831,13 @@ export async function saveDocumentCorrection(args: {
           else document_corrections.corrected_structured_data end,
         notes = excluded.notes,
         updated_at = now()
+    returning corrected_structured_data
   `;
+    const corrected = args.structuredData !== undefined ? args.structuredData : savedCorrection.corrected_structured_data as Record<string, unknown> | null;
+    if (args.structuredData !== undefined || corrected !== null) await publishGeoCorrection(transaction, {
+      documentId: args.docId, workspaceId: document.workspace_id, orgId: document.org_id,
+    }, corrected);
+  });
 
   return await getCorrectionWorkbench(args.docId, args.userId);
 }

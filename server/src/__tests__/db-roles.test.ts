@@ -66,7 +66,7 @@ describe("worker table classification", () => {
     const unclassified = relations.filter((name) => !allowed.includes(name) && !deniedNames.includes(name));
     expect(unclassified, "add new tables to WORKER_TABLES or WORKER_DENIED_TABLES in server/db/roles.mjs").toEqual([]);
     expect(allowed.filter((name) => deniedNames.includes(name))).toEqual([]);
-    expect([...allowed, ...deniedNames].filter((name) => !relations.includes(name)), "remove dropped tables").toEqual([]);
+    expect([...allowed, ...deniedNames].filter((name) => !relations.includes(name) && !WORKER_TABLES[name]?.optional), "remove dropped tables").toEqual([]);
   });
 
   it("keeps auth, credential and billing tables out of the worker's reach", () => {
@@ -108,7 +108,9 @@ describe("worker role", () => {
   });
 
   it("has exactly the declared privileges on allowed tables", async () => {
+    const relations = await publicRelations();
     for (const [table, spec] of Object.entries(WORKER_TABLES)) {
+      if (spec.optional && !relations.includes(table)) continue;
       for (const privilege of ["select", "insert", "update", "delete"]) {
         const { rows: [row] } = await db.query<{ granted: boolean }>(
           "select has_table_privilege($1, $2, $3) as granted",
