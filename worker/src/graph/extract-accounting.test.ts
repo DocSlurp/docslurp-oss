@@ -99,3 +99,17 @@ it("stops after a route-level provider refusal, but keeps reading windows after 
     expect(vi.mocked(generateOpenRouterText).mock.calls.length).toBeGreaterThan(1);
   }
 });
+
+it("marks a graph cut short by a route-level refusal after a partial success as failed, so it stays stale", async () => {
+  const { APICallError } = await import("ai");
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.mocked(generateOpenRouterText).mockReset()
+    .mockResolvedValueOnce({ text: '{"entities":[{"name":"Example System","type":"concept","confidence":1}],"relationships":[]}', finishReason: "stop", usage: { inputTokens: 10, outputTokens: 5 } })
+    .mockRejectedValue(new APICallError({ message: "Insufficient credits", url: "https://openrouter.ai/api/v1/chat/completions", requestBodyValues: {}, statusCode: 402, isRetryable: false }));
+  const graph = await extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example System ".repeat(3000) }],
+    context: { config: { ...defaultGraphConfig, depth: "standard" }, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} },
+  });
+  expect(generateOpenRouterText).toHaveBeenCalledTimes(2);
+  expect(graph).toMatchObject({ source: "llm", llmFailed: true, windows: 1 });
+});

@@ -123,6 +123,8 @@ export async function extractDocumentGraph(args: {
   let inputTokens = 0;
   let outputTokens = 0;
   const llmAttempted = Boolean(context.useLlm && context.apiKey && windows.length);
+  // Set when a route-level refusal skipped the remaining windows.
+  let stoppedEarly = false;
 
   if (llmAttempted) {
     let llmGraph: DocumentGraphExtraction = { entities: [], relationships: [] };
@@ -150,7 +152,7 @@ export async function extractDocumentGraph(args: {
         console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error ${operationErrorSummary(failure)}`);
         // The SDK already retried 429s and 5xx. A route-level refusal (an
         // unservable model or route, auth, credit) fails every later window too.
-        if (isRouteLevelProviderFailure(failure)) break;
+        if (isRouteLevelProviderFailure(failure)) { stoppedEarly = index < windows.length - 1; break; }
         continue;
       }
       inputTokens += result.usage.inputTokens;
@@ -191,7 +193,8 @@ export async function extractDocumentGraph(args: {
   return {
     ...graph,
     source,
-    llmFailed: llmAttempted && source === "heuristic",
+    // A graph cut short (credit ran out mid-document) stays stale, so it is extracted again later.
+    llmFailed: llmAttempted && (source === "heuristic" || stoppedEarly),
     windows: windowsRead,
     inputTokens,
     outputTokens,
