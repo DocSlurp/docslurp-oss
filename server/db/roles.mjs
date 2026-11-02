@@ -297,17 +297,31 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
 
 /**
  * Throws unless the connected role can run migrations: it must be able to
- * create in schema public and own the existing tables. Catches a
+ * create in schema public and own the existing application tables. PostGIS
+ * extension members remain owned by their privileged installer. Catches a
  * MIGRATION_DATABASE_URL left unset after DATABASE_URL moved to a restricted role.
  */
 export async function assertMigrationOwner(client) {
   const { rows: [row] } = await client.query(`
+    with application_tables as (
+      select t.tableowner from pg_tables t
+      join pg_namespace n on n.nspname = t.schemaname
+      join pg_class c on c.relnamespace = n.oid and c.relname = t.tablename
+      where t.schemaname = 'public' and not exists (
+        select 1 from pg_depend d
+        join pg_extension e on e.oid = d.refobjid
+        where d.classid = 'pg_class'::regclass and d.objid = c.oid
+          and d.objsubid = 0 and d.refclassid = 'pg_extension'::regclass
+          and d.deptype = 'e' and e.extname = 'postgis'
+      )
+    )
     select current_user as role,
       (select rolsuper from pg_roles where rolname = current_user) as superuser,
       has_schema_privilege(current_user, 'public', 'CREATE') as can_create,
-      (select count(*)::int from pg_tables t
-        where t.schemaname = 'public' and not pg_has_role(current_user, t.tableowner, 'USAGE')) as foreign_tables,
-      (select min(t.tableowner) from pg_tables t where t.schemaname = 'public') as owner
+      (select count(*)::int from application_tables t
+        where not pg_has_role(current_user, t.tableowner, 'USAGE')) as foreign_tables,
+      (select min(t.tableowner) from application_tables t
+        where not pg_has_role(current_user, t.tableowner, 'USAGE')) as owner
   `);
   if (row.superuser) return row.role;
   if (!row.can_create || row.foreign_tables > 0) {

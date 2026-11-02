@@ -162,3 +162,16 @@ describe("reconcileRoleGrants", () => {
     expect(await denied(worker, "select 1 from api_keys")).toBe(true);
   });
 });
+
+
+describe("migration ownership preflight", () => {
+  it("does not exempt a foreign-owned table merely named spatial_ref_sys", async () => {
+    await db.exec("create role migration_candidate nologin; grant create on schema public to migration_candidate");
+    await db.exec("create table spatial_ref_sys (id int)");
+    try {
+      await expect(as("migration_candidate", () => assertMigrationOwner(db))).rejects.toThrow(/MIGRATION_DATABASE_URL/);
+    } finally {
+      await db.exec("drop table spatial_ref_sys; revoke create on schema public from migration_candidate; drop role migration_candidate");
+    }
+  });
+});
