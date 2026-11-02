@@ -1,4 +1,4 @@
-import { resolveGeoDocumentScope } from "../search/geo-scope.js";
+import { GeoSearchError, resolveGeoDocumentScope } from "../search/geo-scope.js";
 import type { ScopeSignal } from "../search/scope-relevance.js";
 import { randomUUID } from "node:crypto";
 import { qualifyCommunitySummary } from "../search/community-context.js";
@@ -454,6 +454,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
     },
   };
 
+  const loadQuery: typeof boundedSearchQuery = args.filters?.geo ? boundedSearchQuery : async build => await build(sql);
   try {
     const access = await getWorkspaceAccess(args.workspaceId, args.userId);
     if (!access) {
@@ -461,11 +462,11 @@ export async function loadWorkspaceWholeCorpusContext(args: {
     }
 
     if (args.filters?.geo) {
-      const [workspace] = await sql`select pipeline from workspaces where id=${access.workspaceId} and org_id=${access.orgId}`;
+      const [workspace] = await boundedSearchQuery(client => client`select pipeline from workspaces where id=${access.workspaceId} and org_id=${access.orgId}`);
       args = {...args,filters:await resolveGeoDocumentScope(access,args.filters,(workspace?.pipeline as {outputSchema?:unknown})?.outputSchema,args.runId)};
     }
     const scope = retrievalScope({ workspaceId: access.workspaceId, filters: args.filters, runId: args.runId });
-    const [summary] = await sql<WholeCorpusSummaryRow[]>`
+    const [summary] = await loadQuery(client => client<WholeCorpusSummaryRow[]>`
       select
         count(distinct c.document_id)::int as document_count,
         count(*)::int as chunk_count,
@@ -476,7 +477,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       where d.workspace_id = ${access.workspaceId}
         and ${lexicalSearchableDocument("d")}
         and ${scope.chunk()}
-    `;
+    `);
 
     const stats = {
       documentCount: summary?.document_count ?? 0,
@@ -489,7 +490,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
     // If no chunks exist yet (embed stage not yet run), fall back to page-level context.
     // This happens when a document was page-indexed but not yet chunk-embedded.
     if (stats.chunkCount === 0) {
-      const [pageSummary] = await sql<
+      const [pageSummary] = await loadQuery(client => client<
         { page_count: number; char_estimate: number }[]
       >`
         select count(*)::int as page_count,
@@ -499,11 +500,11 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         where d.workspace_id = ${access.workspaceId}
           and ${lexicalSearchableDocument("d")}
         and ${scope.page()}
-      `;
+      `);
       const pageCount = pageSummary?.page_count ?? 0;
       const pageChars = pageSummary?.char_estimate ?? 0;
       if (pageCount > 0 && pageChars <= limits.maxChars) {
-        const pageRows = await sql<ProgressivePageRow[]>`
+        const pageRows = await loadQuery(client => client<ProgressivePageRow[]>`
           select p.id, p.document_id, p.run_id, p.page_number, p.text,
                  p.token_estimate, d.filename, 0::int as rank
           from document_pages p
@@ -513,7 +514,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         and ${scope.page()}
           order by d.filename asc, p.page_number asc
           limit ${limits.maxChunks}
-        `;
+        `);
         const results = pageRows.map((row, index) =>
           searchChunkToResult(mapProgressivePageRow(row, 1 / (1 + index))),
         );
@@ -568,7 +569,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       };
     }
 
-    const rows = await sql<ChunkRow[]>`
+    const rows = await loadQuery(client => client<ChunkRow[]>`
       select
         c.id,
         c.document_id,
@@ -588,7 +589,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         and ${scope.chunk()}
       order by d.filename asc, c.chunk_index asc
       limit ${limits.maxChunks}
-    `;
+    `);
 
     const results = rows.map((row, index) =>
       searchChunkToResult(mapChunk(row, 1 / (1 + index))),
@@ -599,7 +600,8 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       results,
       stats,
     };
-  } catch {
+  } catch (error) {
+    if (isSearchBoundError(error) || error instanceof GeoSearchError) throw error;
     return emptyContext;
   }
 }

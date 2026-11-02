@@ -1340,13 +1340,16 @@ async function chatWorkspaceTurn(
       `
     : [];
   const documentIds = filterDocumentIds ?? (namedDocuments.length ? namedDocuments.map(doc => doc.id) : undefined);
-  const wholeCorpus = await loadWorkspaceWholeCorpusContext({
+  const wholeCorpus = narrowingFilters ? {
+    eligible:false, reason:null, results:[],
+    stats:{documentCount:0,chunkCount:0,tokenEstimate:0,charEstimate:0,...wholeCorpusContextLimits},
+  } : await loadWorkspaceWholeCorpusContext({
     workspaceId: args.workspaceId,
     userId: args.userId,
     filters: { documentIds, ...(args.filters?.geo ? {geo:args.filters.geo} : {}) },
   });
   const wholeCorpusDebug = buildWholeCorpusDebug({
-    attempted: true,
+    attempted: !narrowingFilters,
     eligible: wholeCorpus.eligible,
     documentCount: wholeCorpus.stats.documentCount,
     chunkCount: wholeCorpus.stats.chunkCount,

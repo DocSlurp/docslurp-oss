@@ -566,7 +566,7 @@ describe("chatWorkspace", () => {
         filters:{documentIds:[],...(withGeo?{geo}:{})}});
       expect(runChatMcpAgent).not.toHaveBeenCalled();
       expect(hybridSearch).toHaveBeenCalledWith(expect.any(String),"user-1",expect.objectContaining({filters:expect.objectContaining({documentIds:[],...(withGeo?{geo}:{})})}));
-      expect(loadWorkspaceWholeCorpusContext).toHaveBeenCalledWith(expect.objectContaining({filters:expect.objectContaining({documentIds:[]})}));
+      expect(loadWorkspaceWholeCorpusContext).not.toHaveBeenCalled();
       expect(response.citations).toEqual([]);
       expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
     } finally { delete process.env.OPENROUTER_API_KEY; }

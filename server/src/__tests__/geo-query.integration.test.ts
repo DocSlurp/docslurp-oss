@@ -71,7 +71,7 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   const controller=new AbortController(); controller.abort();
   await expect(withSearchSignal(controller.signal,()=>resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:"AbortError"});
  });
- it.each(["timeout","abort"])("spatial selection obeys %s while blocked in PostgreSQL",async(mode)=>{
+ it.each([{mode:"timeout",loader:false},{mode:"abort",loader:false},{mode:"timeout",loader:true},{mode:"abort",loader:true}])("spatial loader=$loader obeys $mode while blocked in PostgreSQL",async({mode,loader})=>{
   const {withSearchSignal}=await import("../search/query-bounds.js");
   const blocker=await db.reserve();
   const previous=process.env.SEARCH_STATEMENT_TIMEOUT_MS;
@@ -79,11 +79,12 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   let timer:ReturnType<typeof setTimeout>|undefined;
   try {
    await blocker`begin`;
-   await blocker`lock table geo_projection_features in access exclusive mode`;
+   if(loader) await blocker`lock table document_chunks in access exclusive mode`;
+   else await blocker`lock table geo_projection_features in access exclusive mode`;
    process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
    if(mode==="abort") timer=setTimeout(()=>controller.abort(),200);
    const started=Date.now();
-   await expect(withSearchSignal(controller.signal,()=>resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
+   await expect(withSearchSignal<unknown>(controller.signal,()=>loader ? search.loadWorkspaceWholeCorpusContext({workspaceId:"q-w",userId:"q-u",filters:{geo:radius}}) : resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
    expect(Date.now()-started).toBeLessThan(3000);
   } finally {
    clearTimeout(timer); await blocker`rollback`; blocker.release();
