@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { defaultPipelineFeatures } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
@@ -14,6 +15,12 @@ beforeAll(async () => {
   stop = pg?.stop ?? (async () => {});
   sql = postgres(databaseUrl ?? pg!.url, { max: databaseUrl ? 2 : 1, prepare: false, onnotice: () => {} }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../services/organizations.js", async () => ({
+    ...await vi.importActual<object>("../services/organizations.js"),
+    listAccessibleWorkspaceIds: async () => ["admission-w1", "admission-w2"],
+    getWorkspaceAccess: async () => ({}),
+    canContributeToWorkspace: () => true,
+  }));
   vi.doMock("../services/worker-fleet.js", () => ({ fleetSupportsNow: () => true, taskQueueForOrgKey: () => ({ taskQueue: "test" }) }));
   vi.doMock("../services/billing/credit-leases.js", async () => {
     const actual = await vi.importActual<typeof import("../services/billing/credit-leases.js")>("../services/billing/credit-leases.js");
@@ -88,5 +95,103 @@ describe("mandatory run admission leases", () => {
     expect(Number(lease!.granted)).toBe(5);
     const [outstanding] = await sql`select org_outstanding_credit_leases('admission-org') as credits`;
     expect(Number(outstanding!.credits)).toBe(5);
+  });
+});
+
+describe("transactional readmission", () => {
+  async function readmit(id: string, callback = async (_tx: postgres.TransactionSql) => "restarted") {
+    return guard.admitRunSpend("admission-org", "admission-w1", callback,
+      { leaseRunId: id, speedBoost: true, readmission: true });
+  }
+
+  it("reuses its own valid lease when another boosted minimum would be refused", async () => {
+    await sql`update organizations set credit_balance_cents=105 where id='admission-org'`;
+    await admit("own");
+    await expect(readmit("own")).resolves.toBe("restarted");
+    expect(await sql`select id from credit_leases where holder_id='own'`).toHaveLength(1);
+  });
+
+  it("does not borrow an expired lease or another workspace's lease", async () => {
+    await sql`update organizations set credit_balance_cents=105 where id='admission-org'`;
+    await admit("own");
+    await sql`update credit_leases set expires_at=now()-interval '1 minute' where holder_id='own'`;
+    await sql`update organizations set credit_balance_cents=100 where id='admission-org'`;
+    await expect(readmit("own")).rejects.toMatchObject({ code: "credit_exhausted" });
+    const callback = vi.fn(async () => "bad");
+    await expect(guard.admitRunSpend("wrong-org", "admission-w1", callback,
+      { leaseRunId: "own", speedBoost: true, readmission: true })).rejects.toMatchObject({code:"plan_not_entitled"});
+    await expect(guard.admitRunSpend("admission-org", "admission-w2", callback,
+      { leaseRunId: "own", speedBoost: true, readmission: true })).rejects.toMatchObject({code:"plan_not_entitled"});
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it.each(["retry", "recover", "resume"])("evaluates real lifecycle %s eligibility before exhausted credits", async action => {
+    const { createRunLifecycle } = await import("../services/run-lifecycle.js");
+    const publish = vi.fn();
+    const lifecycle = createRunLifecycle({ sql, startWorkflow: publish, failureThreshold: 3,
+      signals: { resume: publish, cancel: publish, pause: publish } });
+    await admit("noop");
+    await sql`update workspace_runs set status='completed', control_state=null where id='noop'`;
+    await sql`delete from credit_leases where holder_id='noop'`;
+    await sql`update organizations set credit_balance_cents=0 where id='admission-org'`;
+    const unchanged = Symbol("unchanged");
+    const run = {id:"noop",status:"completed" as const,priority:0,controlState:null,error:null,pipeline:defaultPipelineFeatures};
+    await expect(readmit("noop", async tx => {
+      const result = action === "retry" ? await lifecycle.prepareRetry(run, tx)
+        : await lifecycle.control(run, {action: action as "recover" | "resume"}, tx);
+      if (result === "not-retryable" || result === null) throw unchanged;
+      return "changed";
+    })).rejects.toBe(unchanged);
+    expect(publish).not.toHaveBeenCalled();
+    expect(await sql`select id from credit_leases where holder_id='noop'`).toHaveLength(0);
+    expect((await sql`select status from workspace_runs where id='noop'`)[0]?.status).toBe("completed");
+  });
+
+  it.skipIf(!databaseUrl)("serializes mixed admissions without releasing another run's credits", async () => {
+    await sql`update organizations set credit_balance_cents=112 where id='admission-org'`;
+    await admit("base", false);
+    const before = await sql`select granted,consumed from credit_leases where holder_id='base'`;
+    const outcomes = await Promise.allSettled([admit("boost-a"), admit("boost-b"), admit("base-b", false)]);
+    const [held] = await sql`select org_outstanding_credit_leases('admission-org') as amount`;
+    expect(Number(held!.amount)).toBeLessThanOrEqual(12);
+    expect(await sql`select granted,consumed from credit_leases where holder_id='base'`).toEqual(before);
+    expect(outcomes.some(result => result.status === "rejected")).toBe(true);
+    await expect(guard.admitRunSpend("admission-org", "admission-w1", async () => "ok",
+      { leaseRunId: "base", speedBoost: false, readmission: true })).resolves.toBe("ok");
+  });
+
+  it("rolls readmission back when a lease grant is refused", async () => {
+    await admit("refused-existing");
+    failure = "refused";
+    await expect(readmit("refused-existing", async tx => {
+      await tx`update workspace_runs set status='processing' where id='refused-existing'`;
+      return "changed";
+    })).rejects.toMatchObject({code:"credit_exhausted"});
+    expect((await sql`select status from workspace_runs where id='refused-existing'`)[0]?.status).toBe("queued");
+  });
+
+  it.each(["retry", "recover", "resume"])("runs.ts %s is a no-op at zero credit without mocking admission", async action => {
+    await admit("service-noop");
+    await sql`update workspace_runs set status=${action === 'resume' ? 'processing' : 'completed'},control_state=null where id='service-noop'`;
+    await sql`delete from credit_leases where holder_id='service-noop'`;
+    await sql`update organizations set credit_balance_cents=0 where id='admission-org'`;
+    const { retryRun, controlRun } = await import("../services/runs.js");
+    if (action === "retry") {
+      expect((await retryRun("service-noop", "admission-user"))?.outcome.status).toBe("not-retryable");
+    } else {
+      expect((await controlRun("service-noop", "admission-user", {action: action as "recover" | "resume"}))?.status).toBe(action === "resume" ? "processing" : "completed");
+    }
+    expect(await sql`select id from credit_leases where holder_id='service-noop'`).toHaveLength(0);
+  });
+
+  it("rolls lifecycle mutations back on actual spend refusal", async () => {
+    await admit("rollback");
+    await sql`delete from credit_leases where holder_id='rollback'`;
+    await sql`update organizations set credit_balance_cents=0 where id='admission-org'`;
+    await expect(readmit("rollback", async tx => {
+      await tx`update workspace_runs set status='processing' where id='rollback'`;
+      return "changed";
+    })).rejects.toMatchObject({code:"credit_exhausted"});
+    expect((await sql`select status from workspace_runs where id='rollback'`)[0]?.status).toBe("queued");
   });
 });

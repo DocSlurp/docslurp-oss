@@ -48,7 +48,6 @@ import {
 } from "./organizations.js";
 import {
   admitRunSpend,
-  assertCanSpend,
   SpendBlockedError,
 } from "./billing/spend-guard.js";
 import { resumeSpendPausedRunOutcome } from "./spend-paused-runs.js";
@@ -675,7 +674,7 @@ export async function retryRun(
         // clean completed run must not retain credits for work it cannot retry.
         if (status === "not-retryable") throw notRetryable;
         return status;
-      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id });
+      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id, readmission: true });
       outcome = { status: prepared, start: await runLifecycle.start(run, { restartExisting: true }) };
     } catch (error) {
       if (error !== notRetryable) throw error;
@@ -710,9 +709,8 @@ export async function controlRun(
   }
 
   if (input.action === "resume") {
-    // Resuming continues spending; a run paused for credits or budget stays
-    // paused until the org may spend again.
-    await assertCanSpend(run.orgId, run.workspaceId);
+    // The spend-paused path performs its own spend and lease checks.
+    // Ordinary operator resume checks eligibility inside admission below.
     // A spend-paused run is still in flight: resume it in place. With credit
     // leases it resumes only if it gets a lease; a refusal must not fall
     // through to the operator resume below.
@@ -737,7 +735,7 @@ export async function controlRun(
         const changed = await runLifecycle.control(run, input, tx);
         if (!changed) throw unchanged;
         return changed;
-      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id });
+      }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id, readmission: true });
     } catch (error) {
       if (error !== unchanged) throw error;
       return getRun(run.id, userId);

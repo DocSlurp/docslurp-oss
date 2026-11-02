@@ -20,7 +20,7 @@ it("rolls back the no-op retry before lease acquisition or workflow start",async
   expect((await retryRun('retry-r','user'))?.outcome).toEqual({status:'not-retryable'});
   expect(mocks.lease).not.toHaveBeenCalled();
   expect(mocks.start).not.toHaveBeenCalled();
-  expect(mocks.admit.mock.calls[0]![3]).toEqual({speedBoost:true,leaseRunId:'retry-r'});
+  expect(mocks.admit.mock.calls[0]![3]).toEqual({speedBoost:true,leaseRunId:'retry-r',readmission:true});
 });
 it("propagates real admission failures without starting work",async()=>{
   mocks.prepare.mockResolvedValue('resumed');
@@ -38,6 +38,6 @@ it.each([false, true])("reserves a lease before starting a retry with speedBoost
     return { status: "started" };
   });
   await retryRun("retry-r", "user");
-  expect(mocks.admit.mock.calls[0]![3]).toEqual({ speedBoost, leaseRunId: "retry-r" });
+  expect(mocks.admit.mock.calls[0]![3]).toEqual({ speedBoost, leaseRunId: "retry-r", readmission: true });
   expect(mocks.start).toHaveBeenCalledTimes(1);
 });

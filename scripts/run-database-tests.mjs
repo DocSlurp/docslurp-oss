@@ -19,6 +19,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Test file -> the variables it reads. "db" gets a fresh database URL, "redis" the Redis URL. */
 export const GATED = {
+  "server/src/__tests__/run-control-native.db.test.ts": { db: ["RUN_CONTROL_TEST_DATABASE_URL"] },
   "server/src/__tests__/config-change.db.test.ts": { db: ["CONFIG_CHANGE_TEST_DATABASE_URL"] },
   "server/src/__tests__/full-index-leases.db.test.ts": { db: ["FULL_INDEX_TEST_DATABASE_URL"] },
   "server/src/__tests__/run-admission-leases.db.test.ts": { db: ["RUN_ADMISSION_TEST_DATABASE_URL"] },
