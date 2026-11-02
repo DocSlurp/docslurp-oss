@@ -117,3 +117,22 @@ describe("document shard checkpoints", () => {
     expect(row!.shard_demand).toBe(0);
   });
 });
+
+describe("scaler demand for runs between activities", () => {
+  it("count a processing run whose lease lapsed within the grace window, not one long dead", async () => {
+    await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('lease', 'Lease', 'lease', 'u1', 8, 1000)`;
+    await sql`insert into workspaces(id, org_id, user_id, name) values ('wl', 'lease', 'u1', 'L')`;
+    // A run waiting in the task queue for its next activity has no worker renewing its lease.
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
+      ('run-waiting', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '2 minutes'),
+      ('run-dead', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '20 minutes')`;
+    const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };
+    const demand = async (graceSeconds?: number) => {
+      const snapshot = await queryWorkerScalerSnapshot(sql, graceSeconds === undefined ? params : { ...params, staleLeaseGraceSeconds: graceSeconds });
+      return parseOrgDemand(snapshot.org_demand).find((org) => org.orgKey === "lease")?.demand ?? 0;
+    };
+    expect(await demand()).toBe(1);
+    expect(await demand(0)).toBe(0);
+    expect(await demand(30 * 60)).toBe(2);
+  });
+});

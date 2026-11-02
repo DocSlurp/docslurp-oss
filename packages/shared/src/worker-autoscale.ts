@@ -124,6 +124,14 @@ export interface WorkerScalerQueryParams {
   defaultOrgSlots: number;
   /** DOCSLURP_LOADTEST_MAX_MACHINES. */
   loadtestMaxMachines: number;
+  /**
+   * DOCSLURP_SCALER_STALE_LEASE_GRACE_SECONDS (default 900). A processing run's
+   * lease is renewed only while one of its activities runs, so it lapses while
+   * the next activity waits in the task queue for a slot or a retry. Such a run
+   * still needs a worker; dropping it from demand at lease expiry scaled the
+   * fleet to zero under it. It stops counting this long after its lease lapses.
+   */
+  staleLeaseGraceSeconds?: number;
 }
 
 export function resolveWorkerScalerQueryParams(env: NodeJS.ProcessEnv = process.env): WorkerScalerQueryParams {
@@ -131,6 +139,7 @@ export function resolveWorkerScalerQueryParams(env: NodeJS.ProcessEnv = process.
     pageFanout: Math.max(1, Math.min(128, Number.parseInt(env.WORKER_PAGE_CONCURRENCY ?? "1", 10) || 1)),
     defaultOrgSlots: Math.max(1, Number.parseInt(env.WORKER_DEFAULT_ORG_SLOTS ?? "50", 10) || 50),
     loadtestMaxMachines: Math.max(1, Number.parseInt(env.DOCSLURP_LOADTEST_MAX_MACHINES ?? "125", 10) || 125),
+    staleLeaseGraceSeconds: Math.max(0, Number.parseInt(env.DOCSLURP_SCALER_STALE_LEASE_GRACE_SECONDS ?? "900", 10) || 0),
   };
 }
 
@@ -167,6 +176,7 @@ export const EMPTY_WORKER_SCALER_SNAPSHOT: WorkerScalerSnapshot = {
 
 /** One read of queue state and per-org slot demand. */
 export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerScalerQueryParams): Promise<WorkerScalerSnapshot> {
+  const graceSeconds = Math.max(0, Math.floor(params.staleLeaseGraceSeconds ?? 900));
   const rows = await sql`
     select
       count(*) filter (
@@ -203,7 +213,7 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
             left join organizations o on o.id = r.org_id
             where (r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
               or (r.status = 'processing' and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')
-                and coalesce(r.lease_expires_at, now()) >= now())
+                and coalesce(r.lease_expires_at, now()) >= now() - (${graceSeconds} * interval '1 second'))
             union all
             select p.org_id as org_key, coalesce(o.worker_slots, ${params.defaultOrgSlots}) as slots,
               0 as shard_demand, 2 as fanout_cap, 1 as page_demand
@@ -232,7 +242,7 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
       count(*) filter (
         where status = 'processing'
           and coalesce(control_state, '') not in ('paused', 'cancel_requested', 'cancelled')
-          and coalesce(lease_expires_at, now()) >= now()
+          and coalesce(lease_expires_at, now()) >= now() - (${graceSeconds} * interval '1 second')
       )::int as worker_active,
       coalesce(sum(pages_processed), 0)::int as pages_processed_total,
       extract(epoch from (
