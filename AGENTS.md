@@ -15,6 +15,35 @@ This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and 
 
 Keep new code in the package that owns it. `server/` must not import from outside the workspace packages it declares.
 
+## Prefer native Mastra agent features
+
+When implementing or changing agent behavior, prefer Mastra's native features:
+Memory, Signals, Tools, durable agents, background tasks, AgentController,
+subagents, channels, and guardrails/processors. Use these for the capabilities
+they provide before introducing custom agent loops, execution queues, memory
+stores, task controllers, replay journals, or orchestration primitives.
+
+Before choosing an implementation, inspect the installed Mastra version and its
+APIs and read the current official documentation for the relevant feature. Use
+native persistence and observe/reconnect support for durable agent execution;
+keep DocSlurp's tenant authorization, billing/usage accounting, application
+projections, and external-workflow integration in thin adapters around it.
+Verify required disconnect/reconnect, cancellation, restart, task ownership,
+and isolation behavior with tests; a native feature does not replace those
+application guarantees.
+
+If a native feature cannot meet a requirement, record the specific gap, the
+version/API checked, and why a small adapter or supported upgrade is insufficient
+in the design or PR before adding a custom primitive. Reassess existing custom
+agent code when touching that capability rather than expanding a duplicate runtime.
+
+Official references: [Mastra docs](https://mastra.ai/docs) (Memory, Signals, Tools),
+[durable agents](https://mastra.ai/docs/harness/durable-agents),
+[background tasks](https://mastra.ai/docs/harness/background-tasks),
+[AgentController](https://mastra.ai/docs/harness/agent-controller),
+[channels](https://mastra.ai/docs/channels), and
+[guardrails](https://mastra.ai/docs/agents/guardrails).
+
 ## Security-Sensitive Boundaries (mandatory)
 
 These rules are mandatory and override speed and convenience. When in doubt, treat a change as security-sensitive.
