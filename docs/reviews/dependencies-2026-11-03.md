@@ -22,3 +22,5 @@ Resolutions: explicit legacy compiler API alias; updated Better Auth guard/contr
 ## Validation
 
 Core typecheck and build passed. Shared suite: 946 passed. SDK: 126 passed, 1 skipped. Core scripts: 136 passed, including integrity judge tests. Auth candidate suite: 120 passed, 1 skipped. Malformed PDF: 3 passed. Full server/worker results are recorded in the pull request; the broad suites are not claimed green here.
+
+Final local reconciliation: the broad worker run reported 2,732 passed, 71 skipped, three failed tests and one setup timeout. The failures used the combined app install, which does not apply core's Postgres parameter-cache patch. Installing core with `pnpm install --frozen-lockfile` and rerunning all three affected files passed 15/15 tests. The broad server run reported 3,570 passed, 83 skipped and 15 failures in two mock-based files while dependency relinking was in progress; those files passed 29/29 with the stable install. These broad runs are not clean full-suite passes. Database credit/ledger tests passed; native Postgres contention tests were skipped without the opt-in environment.
