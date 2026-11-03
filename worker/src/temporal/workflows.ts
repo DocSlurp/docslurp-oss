@@ -35,7 +35,7 @@ import {
 import type { MaterializePagesInput } from "@docslurp/shared";
 import type { Activities } from "./activities.js";
 import { mergeMaterializeResults, splitMaterializeRanges, type MaterializeResult } from "./materialize-ranges.js";
-import { bundlePageTasks, runPageFanOut, slotBackoffMs } from "./page-fanout.js";
+import { bundlePageTasks, createAdmissionBudget, runPageFanOut, slotBackoffMs } from "./page-fanout.js";
 import { planDocumentShards } from "./document-shards.js";
 import { planStageGroupEnd } from "./stage-groups.js";
 import { resolvePipelineWorkflowStageOrder } from "./pipeline-workflow-plan.js";
@@ -186,12 +186,27 @@ export const cancelSignal = defineSignal("cancel");
 export const pauseSignal = defineSignal("pause");
 export const resumeSignal = defineSignal("resume");
 
+/** Count commands, not just denials: all lanes and stage loops share this closure.
+ * 2,048 attempts reserve <= 24,576 events at 12 events per activity/timer
+ * cycle, leaving over half the default 51,200 event ceiling for normal work,
+ * draining, finalization and workflow tasks. No per-lane allowance or reset.
+ */
+function admissionBudget(): () => void {
+  const enabled = patched("admission-history-budget-v1");
+  return enabled ? createAdmissionBudget(() => ApplicationFailure.nonRetryable(
+    "Admission history budget exhausted; retry the run after capacity recovers",
+    "AdmissionExhausted",
+  )) : () => {};
+
+}
+
 // ── Workflow ──
 
 export async function documentPipeline(
   input: PipelineWorkflowInput
 ): Promise<PipelineWorkflowOutput> {
   const stageOrder = resolvePipelineWorkflowStageOrder(input, patched);
+  const admit = admissionBudget();
   // Workflow-local state (survives replays)
   let progress: RunProgress = {
     stage: "init",
@@ -238,6 +253,7 @@ export async function documentPipeline(
   const withStageSlot = async <T>(call: () => Promise<T>): Promise<T> => {
     for (let denials = 0; ; denials++) {
       try {
+        admit();
         return await call();
       } catch (error) {
         if (!input.slotGate || !isSlotUnavailable(error) || cancelled) throw error;
@@ -246,37 +262,41 @@ export async function documentPipeline(
     }
   };
 
-  // Initialize the run: load docs, set processing status
-  const initResult = await (scaling?.quick ?? quickActivities).initPipelineRun({
-    runId: input.runId,
-    totalStages: stageOrder.length,
-  });
-  let artifacts = initResult.artifacts;
-
-  /** Document shards this run dispatches for a stage (fewer than two: none). */
-  const shardPlan = (stageName: string): string[][] => {
-    const sharding = input.documentSharding;
-    if (!sharding || !scaling || !SHARDABLE_STAGES.includes(stageName)) return [];
-    // Only the documents this stage works on; the stage pass takes the rest as no-ops.
-    const types = initResult.documentMimeTypes;
-    const picked = initResult.documentIds.flatMap((id, index) => !types || stageWorksOn(stageName, types[index]) ? [index] : []);
-    return planDocumentShards(
-      picked.map((index) => initResult.documentIds[index]!),
-      initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
-      sharding,
-    );
-  };
-  // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
-  const groupable = scaling && input.groupableStages ? new Set<string>(input.groupableStages) : null;
-  // Recorded in workflow input: runs started without it never plan page-range shards.
-  const pageRangeStages = input.pageRangeSharding && scaling
-    ? new Set(input.pageRangeSharding.stages.filter((stage) => PAGE_RANGE_SHARDABLE_STAGES.includes(stage)))
-    : null;
-  const needsPreWork = (stageName: string): boolean =>
-    (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
-    || (pageRangeStages?.has(stageName) ?? false);
-
+  const cleanupInit = patched("pipeline-init-lifecycle-v1");
+  let initialized = false;
   try {
+    // Initialize the run: load docs, set processing status
+    const initResult = await (scaling?.quick ?? quickActivities).initPipelineRun({
+      ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
+      runId: input.runId,
+      totalStages: stageOrder.length,
+    });
+    initialized = true;
+    let artifacts = initResult.artifacts;
+
+    /** Document shards this run dispatches for a stage (fewer than two: none). */
+    const shardPlan = (stageName: string): string[][] => {
+      const sharding = input.documentSharding;
+      if (!sharding || !scaling || !SHARDABLE_STAGES.includes(stageName)) return [];
+      // Only the documents this stage works on; the stage pass takes the rest as no-ops.
+      const types = initResult.documentMimeTypes;
+      const picked = initResult.documentIds.flatMap((id, index) => !types || stageWorksOn(stageName, types[index]) ? [index] : []);
+      return planDocumentShards(
+        picked.map((index) => initResult.documentIds[index]!),
+        initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
+        sharding,
+      );
+    };
+    // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
+    const groupable = scaling && input.groupableStages ? new Set<string>(input.groupableStages) : null;
+    // Recorded in workflow input: runs started without it never plan page-range shards.
+    const pageRangeStages = input.pageRangeSharding && scaling
+      ? new Set(input.pageRangeSharding.stages.filter((stage) => PAGE_RANGE_SHARDABLE_STAGES.includes(stage)))
+      : null;
+    const needsPreWork = (stageName: string): boolean =>
+      (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
+      || (pageRangeStages?.has(stageName) ?? false);
+
     // Execute each stage sequentially
     for (let i = 0; i < stageOrder.length; i++) {
       // Handle pause/cancel signals
@@ -334,7 +354,7 @@ export async function documentPipeline(
 
       // The opt-in value is recorded in workflow input: existing histories retain their command sequence.
       if (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1 && scaling && input.pageChildBatchSize) {
-        const plan = await scaling.standard.prepareVisionPageBatches({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts });
+        const plan = await scaling.standard.prepareVisionPageBatches({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts, ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}) });
         const batchSize = Math.max(50, Math.min(2_000, input.pageChildBatchSize));
         const batches = Math.ceil(plan.total / batchSize);
         // Two children overlap so one batch's tail does not idle the run's window.
@@ -372,7 +392,7 @@ export async function documentPipeline(
         if (childFailure) throw childFailure;
         if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
       } else if (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) {
-        const tasks = await prepareVisionPageTasks({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts });
+        const tasks = await prepareVisionPageTasks({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts, ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}) });
         const bundleSize = Math.max(1, Math.min(8, input.pageBundleSize ?? 1));
         const bundles: typeof tasks[] = [];
         for (const task of tasks) {
@@ -410,6 +430,7 @@ export async function documentPipeline(
           const shardActivities = shardActivityProxies(input.activityTaskQueue);
           await scaling.quick.setRunShardDemand({ runId: input.runId, shards: plan.shards.length });
           await runPageFanOut({
+            beforeDispatch: admit,
             bundles: plan.shards.map((pageRanges, shardIndex) => ({ pageRanges, shardIndex })),
             concurrency: plan.shards.length,
             run: async ({ pageRanges, shardIndex }) => {
@@ -449,6 +470,7 @@ export async function documentPipeline(
           const shardActivities = shardActivityProxies(input.activityTaskQueue);
           await scaling.quick.setRunShardDemand({ runId: input.runId, shards: shards.length });
           await runPageFanOut({
+            beforeDispatch: admit,
             bundles: shards.map((documentIds, shardIndex) => ({ documentIds, shardIndex })),
             concurrency: shards.length,
             run: async ({ documentIds, shardIndex }) => {
@@ -542,15 +564,18 @@ export async function documentPipeline(
       rssBytes: 0,
     };
 
-    await (scaling?.quick ?? quickActivities).completePipelineRun({ runId: input.runId });
+    await (scaling?.quick ?? quickActivities).completePipelineRun({ runId: input.runId, ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}) });
 
     return { runId: input.runId, usage };
   } catch (error) {
+    // Old failed-init histories ended without a cleanup activity.
+    if (!initialized && !cleanupInit) throw error;
     // Record failure in DB (best-effort — don't let this throw mask the real error)
     const message =
       rootCause(error) ?? (error instanceof Error ? error.message : String(error));
     await CancellationScope.nonCancellable(() => (scaling?.quick ?? quickActivities)
       .failPipelineRun({
+        ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
         runId: input.runId,
         stage: progress.stage,
         message,
@@ -569,6 +594,7 @@ export async function documentPipeline(
  * offset; they never travel through the parent's history.
  */
 export async function visionPageBatch(input: VisionPageBatchInput): Promise<UsageSummary> {
+  const admit = admissionBudget();
   let paused = false;
   let cancelled = false;
   let usage: UsageSummary = { inputTokens: 0, outputTokens: 0, costCents: 0 };
@@ -582,6 +608,7 @@ export async function visionPageBatch(input: VisionPageBatchInput): Promise<Usag
   const bundleSize = Math.max(1, Math.min(8, input.pageBundleSize));
   const bundles = bundlePageTasks(tasks.map((task) => (input.slotGate ? { ...task, slotGate: true } : task)), bundleSize);
   await runPageFanOut({
+            beforeDispatch: admit,
     bundles,
     concurrency: Math.max(1, Math.floor(Math.min(128, input.pageConcurrency) / Math.min(2, bundleSize))),
     run: (bundle) => bundle.length > 1

@@ -42,7 +42,6 @@ import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } f
 import { latchedTeardownError } from "../sandbox/session-context.js";
 import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
 import {
-  buildRunCompletedEvent,
   buildRunProgressEvent,
   buildRunStartedEvent,
 } from "./run-ledger.js";
@@ -205,8 +204,8 @@ export function createStageExecution(deps: {
    * before anything loads the Run, so executed stages read them as if this
    * run had produced them. Nothing is executed or billed for reused stages.
    */
-  async function seedReusedStages(runId: string, plan: ReturnType<typeof compilePipelinePlan>): Promise<void> {
-    const seeded = await store.seedReusedStageOutputs(runId, plan.reusedStages);
+  async function seedReusedStages(runId: string, plan: ReturnType<typeof compilePipelinePlan>, owner: import("../db/execution-ownership.js").ExecutionOwner): Promise<void> {
+    const seeded = await store.seedReusedStageOutputs(runId, plan.reusedStages, owner);
     if (seeded.unavailable.length > 0) {
       const details = seeded.unavailable.slice(0, 5).map((gap) => `${gap.documentId} ${gap.reason}`).join("; ");
       // Not retryable: the source outputs will not come back.
@@ -235,7 +234,7 @@ export function createStageExecution(deps: {
     let state = await loadRunState(store, input.runId, loadOptions);
     const plan = compilePipelinePlan(state.run.pipeline);
     if (plan.reusedStages.length > 0) {
-      await seedReusedStages(input.runId, plan);
+      await seedReusedStages(input.runId, plan, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
       state = await loadRunState(store, input.runId, loadOptions);
       stageStates = undefined;
     }
@@ -252,7 +251,7 @@ export function createStageExecution(deps: {
     state.run.status = "processing";
     state.totalStages = input.totalStages;
     state.refreshStats();
-    await store.updateProgress(state);
+    await store.updateProgress(state, { executionGeneration: input.executionGeneration });
 
     // Log cost forecast
     const forecast = forecastRunCost(documents, state.run.pipeline);
@@ -686,14 +685,7 @@ export function createStageExecution(deps: {
         ),
       );
 
-    await store
-      .triggerWebhooks(runId, event)
-      .catch((err) =>
-        console.error(
-          "webhook trigger failed:",
-          err instanceof Error ? err.message : String(err),
-        ),
-      );
+
   }
 
   /** Mark a Run completed, emit run.completed, and notify emails/webhooks. */
@@ -711,7 +703,7 @@ export function createStageExecution(deps: {
       const noun = failed.length === 1 ? "document" : "documents";
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
-      await store.failRun(input.runId, first?.[0] ?? state.stage, message);
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -719,11 +711,7 @@ export function createStageExecution(deps: {
     console.log(
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
-    await store.completeRun(state);
-
-    await store.appendEvent(
-      buildRunCompletedEvent(state, "pipeline completed"),
-    );
+    await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
 
     await notifyTerminal(input.runId, "run.completed");
   }
@@ -742,7 +730,8 @@ export function createStageExecution(deps: {
       `[temporal] run=${input.runId} stage=${stage} status=failed message=${input.message}`,
     );
 
-    await store.failRun(input.runId, stage, input.message);
+    const state = await loadRunState(store, input.runId);
+    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
 
     await notifyTerminal(input.runId, "run.failed");
   }

@@ -1,8 +1,10 @@
+import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
+import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { dbTraceStatementHook } from "../lib/db-trace.js";
-import { pipelineTransaction } from "./transaction-pipeline.js";
+import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
@@ -33,7 +35,7 @@ import {
   collectOrphanedStorageKeys,
   keyFromStorageUri,
 } from "../tools/storage.js";
-import { RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
+import { insertWorkspaceRunEvents, RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
 import { graphFallbackScope, workspaceTemplates } from "@docslurp/shared";
 import { queryWorkerScalerSnapshot, type ScalerSql, type WorkerScalerQueryParams, type WorkerScalerSnapshot } from "@docslurp/shared";
 import {
@@ -477,6 +479,8 @@ async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId:
 }
 
 export class Store {
+  /** Use inside the transaction that performs init or terminal writes. */
+  readonly assertExecutionOwnership = assertExecutionOwnership;
   async beginGeoAttempt(state: WorkflowState, documentId: string, schema: Record<string, unknown>) {
     if (!state.run.workspaceId || !state.run.orgId) throw new Error("Geo extraction requires tenant scope");
     return beginGeoAttempt(this.sql, {documentId, workspaceId:state.run.workspaceId, orgId:state.run.orgId, runId:state.run.id}, schema);
@@ -721,7 +725,24 @@ export class Store {
     `;
   }
 
-  async updateProgress(state: WorkflowState): Promise<void> {
+  async updateProgress(state: WorkflowState, init?: { executionGeneration?: string }): Promise<void> {
+    if (init) {
+      // Init has no paid usage to settle. Refuse the entire write when obsolete,
+      // terminal, or cancelled, rather than allowing a late snapshot to revive it.
+      const [row] = await this.sql<{ id: string }[]>`
+        update workspace_runs set status = 'processing',
+          stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
+          artifacts = ${this.toJson(state.artifacts)}::jsonb, updated_at = now()
+        where id = ${state.run.id} and org_id = ${state.run.orgId ?? null}
+          and workspace_id = ${state.run.workspaceId ?? null}
+          and execution_generation is not distinct from ${init.executionGeneration ?? null}
+          and status in ('queued', 'processing')
+          and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')
+        returning id
+      `;
+      if (!row) throw new StaleExecutionError();
+      return;
+    }
     await this.writeProgress(state);
   }
 
@@ -800,6 +821,7 @@ export class Store {
     state: WorkflowState,
     prelude: ((client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[]) | undefined,
     options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean },
+    transaction?: { client: Sql<Record<string, unknown>>; afterCommit: Array<() => void> },
   ): Promise<ProgressWrite> {
     state.run.artifacts = state.artifacts;
     const usageBatch = state.usageLedger.checkpoint();
@@ -840,7 +862,7 @@ export class Store {
     // reset per attempt and the usage batch commits only after success.
     // The independent writes go out as one pipelined transaction (one round
     // trip, transaction-pipeline.ts); only the credit lease needs a result.
-    await retryTransaction(`checkpoint run=${state.run.id}`, async () => {
+    const write = async () => {
       spendCheckDue = false;
       unspentSinceCheck = true;
       leaseConsumed = false;
@@ -853,7 +875,7 @@ export class Store {
       let controlIndex = -1;
       let preloadIndex = -1;
       const insertedCost = (results: readonly unknown[]) => usageCost(results.slice(usageFrom, usageTo) as unknown[][]);
-      const results = await pipelineTransaction(this.sql, (client) => {
+      const results = await (transaction ? pipelineInTransaction : pipelineTransaction)(transaction?.client ?? this.sql, (client) => {
         const statements: PendingQuery<any>[] = [];
         if (prelude) statements.push(...prelude(client));
 
@@ -964,8 +986,11 @@ export class Store {
         if (runRows[0]) preloaded = { run: mapRun(runRows[0]), documents: documentRows.map(mapDocument), stageStates: stageRows };
       }
       if (controlIndex >= 0) controlRequested = CONTROL_REQUEST_STATES.includes((results[controlIndex] as { control_state: string | null }[])[0]?.control_state ?? "");
-    });
+    };
+    if (transaction) await write();
+    else await retryTransaction(`checkpoint run=${state.run.id}`, write);
 
+    const commit = () => {
     // Synchronously together: the committed events leave the pending sum as
     // spent_cents takes them, so runSpentCents never counts them twice or 0 times.
     usageBatch.commit();
@@ -983,6 +1008,12 @@ export class Store {
     state.vectorIndexes = without(state.vectorIndexes, vectors);
     state.pendingPerformance = without(state.pendingPerformance, performance);
     state.pendingParserEvaluations = without(state.pendingParserEvaluations, parserEvaluations);
+    };
+    if (transaction) {
+      transaction.afterCommit.push(commit);
+      return { unspentSinceCheck };
+    }
+    commit();
     if (spendCheckDue) await enforceRunSpend(this.sql, state.run, "checkpoint-interval");
     if (leaseConsumed) {
       // The stage boundary handles its lease after the stage.completed event.
@@ -1092,117 +1123,156 @@ export class Store {
     for (const statement of this.parserEvaluationStatements(client, parserEvaluations)) await statement;
   }
 
-  async completeRun(state: WorkflowState): Promise<void> {
-    state.run.status = "completed";
-    state.run.processedDocuments = state.run.totalDocuments;
-    state.run.pagesProcessed = state.run.pagesTotal;
-    state.stage = "completed";
-    for (const document of state.documents) {
-      const hasFailedStage = Array.from(state.documentStages.get(document.id)?.values() ?? [])
-        .some((stage) => stage.status === "failed");
-      if (!["failed", "cancelled", PII_BLOCKED_DOCUMENT_STATUS].includes(document.status) && !hasFailedStage) {
-        document.status = "completed";
-      }
-    }
-    state.refreshStats();
-    await this.updateProgress(state);
-
-    await recordPageBaseFee(this.sql, state);
-
-    let replacements: CanonicalReplacement[] = [];
-    const cutover = state.run.kind === "full-index"
-      ? await this.sql.begin(async (tx) => {
-        const client = tx as unknown as typeof this.sql;
-        // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
-        // (see backfill-adoption.ts) before anything below, and must not supersede the source version.
-        const adopted = new Set(await adoptBackfillDocuments(client, state.run.id));
+  async completeRun(state: WorkflowState, owner: ExecutionOwner = { runId: state.run.id, orgId: state.run.orgId!, workspaceId: state.run.workspaceId! }): Promise<void> {
+    if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.workspaceId !== state.run.workspaceId) throw new StaleExecutionError();
+    // Resolve schema capabilities before reserving the terminal transaction connection.
+    await this.creditLeases.active();
+    if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
+    const afterCommit: Array<() => void> = [];
+    const snapshot = { run: { ...state.run }, stage: state.stage, statuses: state.documents.map(document => document.status) };
+    try {
+      await this.finalizeRun(owner, "completed", async (client, logicalId) => {
+        state.run.status = "completed";
+        state.run.processedDocuments = state.run.totalDocuments;
+        state.run.pagesProcessed = state.run.pagesTotal;
+        state.stage = "completed";
+        for (const document of state.documents) {
+          const hasFailedStage = Array.from(state.documentStages.get(document.id)?.values() ?? [])
+            .some((stage) => stage.status === "failed");
+          if (!["failed", "cancelled", PII_BLOCKED_DOCUMENT_STATUS].includes(document.status) && !hasFailedStage) {
+            document.status = "completed";
+          }
+        }
+        state.refreshStats();
+        await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
+        await recordPageBaseFee(client, state, { afterCommit });
+        const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
-        return await supersededInThisTransaction(client, completed.filter((id) => !adopted.has(id)));
-      })
-      // Independent statements go out in one burst; the supersede read needs the completed ids.
-      : await pipelineTransaction(this.sql, (client) => completeRunDocumentStatements(client, state.run.id),
-        async (client, [, , completed]) => {
-          replacements = await supersededInThisTransaction(client, completed.map((row) => row.id));
-        }).then(() => replacements);
-    await this.announceReplacements(state, cutover);
-
-    await this.sql`
-      update workspace_runs
-      set
-        status = 'completed',
-        stage = 'completed',
-        processed_documents = total_documents,
-        pages_processed = pages_total,
-        lease_expires_at = null,
-        updated_at = now()
-      where id = ${state.run.id}
-    `;
+        const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
+        await this.announceReplacements(state, replacements, client, logicalId);
+        await client`update workspace_runs set status = 'completed', stage = 'completed',
+          processed_documents = total_documents, pages_processed = pages_total,
+          lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
+        await insertWorkspaceRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
+        await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
+      });
+    } catch (error) {
+      Object.assign(state.run, snapshot.run);
+      state.stage = snapshot.stage;
+      state.documents.forEach((document, index) => { document.status = snapshot.statuses[index]!; });
+      if (error instanceof StaleExecutionError) await this.settleLateUsage(state, owner);
+      throw error;
+    }
+    for (const commit of afterCommit) commit();
   }
 
-  async failRun(runId: string, stage: string, message: string): Promise<void> {
-    const [current] = await this.sql<
-      {
-        user_id: string;
-        stats: JsonMap | null;
-        failure_count: number;
-      }[]
-    >`
-      select user_id, stats, coalesce(failure_count, 0) as failure_count
-      from workspace_runs
-      where id = ${runId}
-      limit 1
-    `;
-
-    if (!current) {
-      return;
+  private async settleLateUsage(state: WorkflowState, owner: ExecutionOwner): Promise<void> {
+    // Settle real usage without applying the obsolete progress snapshot.
+    const batch = state.usageLedger.checkpoint();
+    if (batch.events.length) {
+      await this.sql.begin(async tx => {
+        const client = tx as unknown as typeof this.sql;
+        const [run] = await client`select id from workspace_runs where id = ${owner.runId}
+          and org_id = ${owner.orgId} and workspace_id = ${owner.workspaceId} for update`;
+        if (!run) throw new StaleExecutionError();
+        const costCents = await persistRunUsageEvents({ client, state, usageEvents: batch.events });
+        await debitRunUsageCredits({ client, state, costCents });
+      });
+      batch.commit();
     }
+  }
 
-    const plan = planRunFailure({
-      failureCount: current.failure_count,
-      stats: current.stats,
-      stage,
-      message,
-      threshold: this.poisonRunFailureThreshold,
+  /** Ownership lock and receipt share the caller's terminal mutations and commit. */
+  async finalizeRun(owner: ExecutionOwner, outcome: "failed" | "completed",
+    write: (client: Sql<Record<string, unknown>>, logicalId: string) => Promise<void>): Promise<void> {
+    await this.sql.begin(async (tx) => {
+      await assertExecutionOwnership(tx, owner);
+      const logicalId = JSON.stringify(["run-terminal", owner.runId, owner.executionGeneration ?? null]);
+      const [existing] = await tx`select id from run_terminal_receipts where id = ${logicalId}`;
+      if (existing) return;
+      const [eligible] = await tx`select id from workspace_runs where id = ${owner.runId}
+        and status in ('queued', 'processing')
+        and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
+      if (!eligible) throw new StaleExecutionError();
+      const [receipt] = await tx`
+        insert into run_terminal_receipts (id, run_id, execution_generation, outcome)
+        values (${logicalId}, ${owner.runId}, ${owner.executionGeneration ?? null}, ${outcome})
+        on conflict (id) do nothing returning id
+      `;
+      if (!receipt) return;
+      await write(tx as unknown as Sql<Record<string, unknown>>, logicalId);
     });
-    const nextFailureCount = plan.failureCount;
-    const deadLettered = plan.deadLettered;
-    const nextStats = plan.stats as JsonMap;
+  }
 
-    const [row] = await this.sql<{ user_id: string; stats: JsonMap | null }[]>`
-      update workspace_runs
-      set
-        status = 'failed',
-        stage = ${stage},
-        error = ${message},
-        lease_expires_at = now(),
-        failure_count = ${nextFailureCount},
-        dead_lettered_at = case when ${deadLettered} then now() else dead_lettered_at end,
-        dead_letter_reason = case when ${deadLettered} then ${message} else dead_letter_reason end,
-        control_state = case when ${deadLettered} then 'dead-letter' else control_state end,
-        stats = ${this.toJson(nextStats)}::jsonb,
-        updated_at = now()
-      where id = ${runId}
-      returning user_id, stats
-    `;
+  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner): Promise<void> {
+    if (owner.runId !== runId) throw new StaleExecutionError();
+    await this.finalizeRun(owner, "failed", async (client, logicalId) => {
+      const [current] = await client<
+        {
+          user_id: string;
+          stats: JsonMap | null;
+          failure_count: number;
+        }[]
+      >`
+        select user_id, stats, coalesce(failure_count, 0) as failure_count
+        from workspace_runs
+        where id = ${runId}
+        limit 1
+      `;
 
-    if (!row) {
-      return;
-    }
+      if (!current) {
+        return;
+      }
 
-    await this.sql`select retire_replaced_pending_documents(${runId})`;
-    await this.failProcessingDocumentStages(runId, stage, message);
-    await this.failUnfinishedDocumentsForRun(runId);
+      const plan = planRunFailure({
+        failureCount: current.failure_count,
+        stats: current.stats,
+        stage,
+        message,
+        threshold: this.poisonRunFailureThreshold,
+      });
+      const nextFailureCount = plan.failureCount;
+      const deadLettered = plan.deadLettered;
+      const nextStats = plan.stats as JsonMap;
 
-    await this.appendEvent({
-      userId: row.user_id,
-      runId,
-      stageName: stage,
-      eventType: "run.failed",
-      status: "failed",
-      message: plan.eventMessage,
-      progress: {},
-      stats: row.stats ?? {},
-      payload: plan.eventPayload,
+      const [row] = await client<{ user_id: string; stats: JsonMap | null }[]>`
+        update workspace_runs
+        set
+          status = 'failed',
+          stage = ${stage},
+          error = ${message},
+          lease_expires_at = now(),
+          failure_count = ${nextFailureCount},
+          dead_lettered_at = case when ${deadLettered} then now() else dead_lettered_at end,
+          dead_letter_reason = case when ${deadLettered} then ${message} else dead_letter_reason end,
+          control_state = case when ${deadLettered} then 'dead-letter' else control_state end,
+          stats = ${this.toJson(nextStats)}::jsonb,
+          updated_at = now()
+        where id = ${runId}
+        returning user_id, stats
+      `;
+
+      if (!row) {
+        return;
+      }
+
+      await client`select retire_replaced_pending_documents(${runId})`;
+      await this.failProcessingDocumentStages(runId, stage, message, client);
+      await this.failUnfinishedDocumentsForRun(runId, client);
+
+      await insertWorkspaceRunEvents({ sql: client, events: [{
+        id: logicalId,
+        userId: row.user_id,
+        runId,
+        stageName: stage,
+        eventType: "run.failed",
+        status: "failed",
+        message: plan.eventMessage,
+        progress: {},
+        stats: row.stats ?? {},
+        payload: plan.eventPayload,
+      }] });
+      await this.triggerWebhooks(runId, "run.failed", client, logicalId);
     });
   }
 
@@ -1226,8 +1296,9 @@ export class Store {
     runId: string,
     stage: string,
     message: string,
+    client: Sql<Record<string, unknown>> = this.sql,
   ): Promise<void> {
-    await this.sql`
+    await client`
       update document_run_stage_states
       set status = 'failed',
           error = ${message},
@@ -1237,7 +1308,7 @@ export class Store {
         and status = 'processing'
     `;
 
-    await this.sql`
+    await client`
       update documents d
       set status = 'failed',
           updated_at = now()
@@ -1255,8 +1326,8 @@ export class Store {
    * the breaking stage was marked just before). Untouched Documents go back to
    * queued so "Retry failed documents" resumes them from their checkpoints.
    */
-  private async failUnfinishedDocumentsForRun(runId: string): Promise<void> {
-    await this.sql`
+  private async failUnfinishedDocumentsForRun(runId: string, client: Sql<Record<string, unknown>> = this.sql): Promise<void> {
+    await client`
       update documents d
       set status = case
             when d.superseded_at is not null then 'cancelled'
@@ -1309,7 +1380,7 @@ export class Store {
   }
 
   /** Marks a run stage processing and checkpoints run progress in the same transaction. */
-  async startRunStage(state: WorkflowState, stage: string): Promise<void> {
+  async startRunStage(state: WorkflowState, stage: string, owner?: ExecutionOwner): Promise<void> {
     state.setRunStage({
       runId: state.run.id,
       stageName: stage,
@@ -1324,7 +1395,7 @@ export class Store {
     });
     state.refreshStats();
 
-    await this.writeProgress(state, (client) => [
+    const prelude = (client: Sql<Record<string, unknown>>) => [
       client`
         insert into workspace_run_stage_states (run_id, stage_name, status, attempts, stats, started_at, updated_at)
         values (${state.run.id}, ${stage}, 'processing', 1, '{}'::jsonb, now(), now())
@@ -1338,7 +1409,27 @@ export class Store {
       `,
       // The stage's own pass starts once its shards are done.
       client`update workspace_runs set shard_demand = 0 where id = ${state.run.id} and shard_demand <> 0`,
-    ]);
+    ];
+    if (owner) {
+      if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.workspaceId !== state.run.workspaceId) throw new StaleExecutionError();
+      await this.creditLeases.active();
+      if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
+      const afterCommit: Array<() => void> = [];
+      try {
+        await this.sql.begin(async tx => {
+          await assertPlanningOwnership(tx, owner);
+          await this.writeProgressNow(state, prelude, {}, { client: tx as unknown as typeof this.sql, afterCommit });
+        });
+      } catch (error) {
+        if (error instanceof StaleExecutionError) {
+          await this.settleLateUsage(state, owner);
+        }
+        throw error;
+      }
+      for (const commit of afterCommit) commit();
+    } else {
+      await this.writeProgress(state, prelude);
+    }
 
     await this.appendEvent({
       userId: state.run.userId,
@@ -1842,9 +1933,10 @@ export class Store {
   }
 
   /** Emits document.replaced once a newer canonical version has taken over in search. */
-  private async announceReplacements(state: WorkflowState, replacements: CanonicalReplacement[]): Promise<void> {
+  private async announceReplacements(state: WorkflowState, replacements: CanonicalReplacement[], client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
     for (const replacement of replacements) {
-      await this.appendEvent({
+      await insertWorkspaceRunEvents({ sql: client, events: [{
+        id: logicalId ? `${logicalId}:replacement:${replacement.documentId}` : randomUUID(),
         userId: state.run.userId,
         runId: state.run.id,
         documentId: replacement.documentId,
@@ -1857,9 +1949,9 @@ export class Store {
           replacedDocumentIds: replacement.replacedDocumentIds,
         },
         payload: { ...replacement },
-      });
+      }] });
     }
-    await this.triggerDocumentWebhooks(state, replacements);
+    await this.triggerDocumentWebhooks(state, replacements, client, logicalId);
   }
 
   private vectorIndexStatements(
@@ -1917,8 +2009,8 @@ export class Store {
    * Records run webhook events in the outbox. The API delivers them with its
    * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
    */
-  async triggerWebhooks(runId: string, event: string): Promise<void> {
-    await this.enqueueWebhookEvent(event, this.sql`
+  async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
+    await this.enqueueWebhookEvent(event, client`
       select r.user_id, jsonb_build_object(
         'event', ${event}::text,
         'runId', r.id,
@@ -1932,12 +2024,14 @@ export class Store {
       ) as payload
       from workspace_runs r
       where r.id = ${runId}
-    `);
+    `, client, logicalId);
   }
 
   private async triggerDocumentWebhooks(
     state: WorkflowState,
     replacements: CanonicalReplacement[],
+    client: Sql<Record<string, unknown>> = this.sql,
+    logicalId?: string,
   ): Promise<void> {
     for (const replacement of replacements) {
       const payload = {
@@ -1946,9 +2040,9 @@ export class Store {
         workspaceId: state.run.workspaceId,
         ...replacement,
       };
-      await this.enqueueWebhookEvent("document.replaced", this.sql`
+      await this.enqueueWebhookEvent("document.replaced", client`
         select ${state.run.userId}::text as user_id, ${this.toJson(payload)}::jsonb as payload
-      `);
+      `, client, logicalId ? `${logicalId}:replacement:${replacement.documentId}` : undefined);
     }
   }
 
@@ -1956,12 +2050,14 @@ export class Store {
   private async enqueueWebhookEvent(
     event: string,
     source: postgres.PendingQuery<postgres.Row[]>,
+    client: Sql<Record<string, unknown>> = this.sql,
+    logicalId?: string,
   ): Promise<void> {
-    await this.sql`
+    await client`
       with source as (${source}),
       queued as (
         insert into webhook_outbox (id, user_id, event_type, payload)
-        select gen_random_uuid()::text, source.user_id, ${event}, source.payload
+        select coalesce(${logicalId ?? null}::text, gen_random_uuid()::text), source.user_id, ${event}, source.payload
         from source
         where exists (
           select 1 from webhooks w
@@ -2788,9 +2884,17 @@ export class Store {
   async seedReusedStageOutputs(
     runId: string,
     reusedStages: readonly string[],
+    owner: ExecutionOwner,
   ): Promise<{ seededDocuments: number; unavailable: Array<{ documentId: string; reason: string }> }> {
     if (reusedStages.length === 0) return { seededDocuments: 0, unavailable: [] };
     return await this.sql.begin(async (tx) => {
+      if (owner.runId !== runId) throw new StaleExecutionError();
+      await assertExecutionOwnership(tx, owner);
+      const [eligible] = await tx<{ id: string }[]>`
+        select id from workspace_runs where id = ${runId}
+          and status in ('queued', 'processing')
+          and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
+      if (!eligible) throw new StaleExecutionError();
       const client = tx as unknown as typeof this.sql;
       const docs = await client<{
         id: string;

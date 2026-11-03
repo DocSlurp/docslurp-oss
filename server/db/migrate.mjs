@@ -4,6 +4,7 @@
 // serializes concurrent migrators (several app instances, release + app), so
 // two processes never apply the same migration at once.
 import path from "node:path";
+import { assertGenerationRollout } from "./generation-rollout.mjs";
 import { migratePostgis } from "./migrate-postgis.mjs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -91,6 +92,7 @@ try {
   // Fail clearly when the URL is a restricted runtime role (docslurp_app,
   // docslurp_worker) instead of the owner: set MIGRATION_DATABASE_URL.
   const migrator = await assertMigrationOwner(client);
+  await assertGenerationRollout(client);
   // Call the installed binary directly: images and hosts may not have pnpm on PATH.
   // It is a root devDependency, so it sits in the nearest node_modules/.bin at or
   // above this repo: /app/core/... in the private app image installs it at /app.

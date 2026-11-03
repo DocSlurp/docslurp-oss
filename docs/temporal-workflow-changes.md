@@ -154,3 +154,27 @@ the previous image's capabilities.
    replaces machines in place, so pinned runs would stall. `PINNED` requires two worker
    apps (or machine groups) that alternate per release, with the old one drained once it
    has no pinned runs left.
+
+### Admission exhaustion
+
+`admission-history-budget-v1` gives each new pipeline or page-child history a
+shared allowance of 2,048 admission activity dispatches. Successes consume the
+same allowance as denials; all page/shard lanes and stage loops share it. It is
+not multiplied by concurrency, reset per stage, or based on requested bundle
+size: singleton bundles count individually. Thus even a 2,000-singleton child
+has only 48 spare attempts. This deliberately favors a predictable bound over
+indefinite waiting under contention.
+
+At 12 events per activity/backoff cycle the allowance consumes 24,576 events,
+leaving more than half the default 51,200-event ceiling for loading, workflow
+tasks, finalization and draining. This bounds admission-generated history, not
+arbitrary external signal storms or payload bytes; operators with lower server
+limits need a correspondingly lower versioned allowance. Parent child-scheduling
+and payload cardinality remain separate limits.
+
+Exhaustion raises nonretryable `AdmissionExhausted`, stops further dispatch and
+drains in-flight lanes. Pending pages are not marked successful; the parent
+uses its existing failure finalizer. Retry the failed run explicitly after
+capacity recovers; this does not automatically retry the workflow or introduce
+Continue-As-New/terminal transaction ownership changes. Existing histories
+without the patch retain their original commands and unbounded wait behavior.

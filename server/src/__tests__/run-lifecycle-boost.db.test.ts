@@ -25,6 +25,7 @@ it("rolls back boosted retry state when admission fails, then starts only after 
     values ('retry-r','retry-o','retry-u','retry-w','upload','failed','extract-markdown',now(),${sql.json(JSON.parse(JSON.stringify(pipeline)))})`;
   await sql`insert into documents (id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
     values ('retry-d','retry-o','retry-u','retry-w','retry-r','a.txt','text/plain','a','failed')`;
+  const [original] = await sql`select execution_generation from workspace_runs where id='retry-r'`;
   const startWorkflow = vi.fn(async () => {});
   const lifecycle = createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow, failureThreshold: 3 });
   const run = { id: 'retry-r', pipeline, status: 'failed' as const };
@@ -33,15 +34,18 @@ it("rolls back boosted retry state when admission fails, then starts only after 
     expect(startWorkflow).not.toHaveBeenCalled();
     throw new Error('lease refused');
   })).rejects.toThrow('lease refused');
-  expect((await sql`select status,pipeline from workspace_runs where id='retry-r'`)[0]).toMatchObject({status:'failed',pipeline:{speedBoost:true}});
+  expect((await sql`select status,pipeline,execution_generation from workspace_runs where id='retry-r'`)[0]).toMatchObject({status:'failed',pipeline:{speedBoost:true},execution_generation:original.execution_generation});
   expect((await sql`select status from documents where id='retry-d'`)[0].status).toBe('failed');
   await sql.begin(async tx => {
     expect(await lifecycle.prepareRetry(run, tx)).toBe('resumed');
     expect(startWorkflow).not.toHaveBeenCalled();
   });
-  expect((await sql`select status from workspace_runs where id='retry-r'`)[0].status).toBe('queued');
+  const [retried] = await sql`select status,execution_generation from workspace_runs where id='retry-r'`;
+  expect(retried.status).toBe('queued');
+  expect(retried.execution_generation).toEqual(expect.any(String));
+  expect(retried.execution_generation).not.toBe(original.execution_generation);
   await lifecycle.start(run, { restartExisting: true });
-  expect(startWorkflow).toHaveBeenCalledExactlyOnceWith('retry-r',pipeline,{restartExisting:true});
+  expect(startWorkflow).toHaveBeenCalledExactlyOnceWith('retry-r',pipeline,{restartExisting:true,executionGeneration:retried.execution_generation});
 });
 
 it("rechecks queued retry eligibility under the transaction lock", async () => {

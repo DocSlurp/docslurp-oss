@@ -21,9 +21,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
-      values ('up', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{"indexingMode":"map"}', 1),
-             ('bf', 'o1', 'u1', 'w', 'full-index', 'processing', 'page-embed', '{"indexingMode":"visual","stageSubset":["page-embed"]}', 1);
+    insert into workspace_runs (execution_generation, id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      values (null, 'up', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{"indexingMode":"map"}', 1),
+             (null, 'bf', 'o1', 'u1', 'w', 'full-index', 'processing', 'page-embed', '{"indexingMode":"visual","stageSubset":["page-embed"]}', 1);
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, indexing_mode, created_at)
       values ('src', 'o1', 'u1', 'w', 'up', 'a.pdf', 'application/pdf', 'k1', 'completed', 4, 'c1', 1, 'map', '2026-01-01');
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id, indexing_mode, created_at)
@@ -93,8 +93,8 @@ async function completeRun(runId: string) {
 /** A second source/temp pair with its own backfill run, so scenarios do not interfere. */
 async function seedPair(tag: string, pages = 3) {
   await db.exec(`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
-      values ('bf-${tag}', 'o1', 'u1', 'w', 'full-index', 'processing', 'page-embed', '{"indexingMode":"visual","stageSubset":["page-embed"]}', 1);
+    insert into workspace_runs (execution_generation, id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      values (null, 'bf-${tag}', 'o1', 'u1', 'w', 'full-index', 'processing', 'page-embed', '{"indexingMode":"visual","stageSubset":["page-embed"]}', 1);
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, indexing_mode, created_at)
       values ('src-${tag}', 'o1', 'u1', 'w', 'up', '${tag}.pdf', 'application/pdf', 'k-${tag}', 'completed', ${pages}, 'c-${tag}', 1, 'map', '2026-01-01');
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id, indexing_mode, created_at)

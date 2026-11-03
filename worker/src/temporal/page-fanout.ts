@@ -17,6 +17,8 @@ import type { UsageSummary } from "./shared.js";
 
 export interface PageFanOutOptions<B> {
   bundles: B[];
+  /** Shared workflow-wide admission budget; throws before scheduling work. */
+  beforeDispatch?: () => void;
   concurrency: number;
   run: (bundle: B) => Promise<UsageSummary>;
   onUsage: (usage: UsageSummary) => void;
@@ -69,6 +71,7 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
       inFlight += 1;
       stats.dispatched += 1;
       try {
+        options.beforeDispatch?.();
         const usage = await options.run(bundle);
         inFlight -= 1;
         consecutiveDenials = 0;
@@ -115,4 +118,10 @@ export function bundlePageTasks<T extends { documentId: string }>(tasks: T[], si
     else bundles.push([task]);
   }
   return bundles;
+}
+
+/** A shared command allowance, including successes; never reset per lane/stage. */
+export function createAdmissionBudget(exhausted: () => Error, attempts = 2_048): () => void {
+  let remaining = attempts;
+  return () => { if (remaining-- <= 0) throw exhausted(); };
 }

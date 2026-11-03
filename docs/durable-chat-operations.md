@@ -1,7 +1,7 @@
 # Durable chat operations (issue 319)
 
 This is an opt-in execution path, disabled by default. Apply migration
-`0112_chat_operations`, run a dedicated executor with
+`0114_chat_operations`, run a dedicated executor with
 `pnpm --filter @docslurp/server exec tsx scripts/chat-operation-executor.ts`, and
 set `DOCSLURP_DURABLE_CHAT=1` on the API. Do not enable without the executor.
 No provider calls run in an HTTP request or WebSocket callback.

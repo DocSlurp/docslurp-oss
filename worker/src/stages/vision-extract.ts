@@ -149,14 +149,17 @@ export class VisionExtractStage implements Stage {
     private readonly rasters: PdfRasterCache,
   ) {}
 
-  async planPageTasks(state: WorkflowState, signal?: AbortSignal) {
+  async planPageTasks(state: WorkflowState, signal?: AbortSignal, progress?: (phase: string, completed?: number) => void) {
+    const checkpoint = () => { signal?.throwIfAborted(); progress?.("planning-pages", tasks.length); };
     const tasks: import("../temporal/shared.js").VisionPageTask[] = [];
+    checkpoint();
     // Budget-capped runs retain sequential admission, rather than oversubscribing a cap.
     if (!state.run.pipeline.visionFallback || (state.run.pipeline.maxCostCents ?? 0) > 0) return tasks;
     // Fast never reads a page; pages without a text layer were kept as page images (render-images).
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) return tasks;
     if (!(await this.visionAllowed(state))) return tasks;
     for (const document of healthyDocuments(state)) {
+      checkpoint();
       if (document.mimeType.startsWith("text/") || state.documentStages.get(document.id)?.get(this.name)?.status === "completed") continue;
       const vision = state.run.pipeline.vision;
       // Active page router: one task per page served by exactly one VLM group, on that group's model
@@ -164,6 +167,7 @@ export class VisionExtractStage implements Stage {
       // executor-only pages, which are local and cheap). Orchestration is unchanged for the workflow:
       // activities only return a different task list, which replayed histories never re-evaluate.
       const routed = await this.loadRoutedExecution(state, document);
+      checkpoint();
       if (routed) {
         // Non-standard privacy modes gate every group's model per call; keep that on the sequential path.
         if (state.run.pipeline.privacyMode !== "standard") continue;
@@ -175,6 +179,10 @@ export class VisionExtractStage implements Stage {
           .filter(([page, groups]) => groups.length === 1 && !routed.execution.fallbackPages.includes(page))
           .sort(([a], [b]) => a - b);
         for (const [pageNumber, [group]] of fanOut) {
+          if (tasks.length % 100 === 0) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            checkpoint();
+          }
           tasks.push({
             runId: state.run.id,
             documentId: document.id,
@@ -186,9 +194,14 @@ export class VisionExtractStage implements Stage {
         continue;
       }
       const routing = await this.checkNeedsVision(document, maxInt(1, document.pageCount), state, signal);
+      checkpoint();
       if (!routing.needed) continue;
       const pages = [...routing.selectedPages].sort((a, b) => a - b);
       for (const pageNumber of pages) {
+        if (tasks.length % 100 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          checkpoint();
+        }
         tasks.push({
           runId: state.run.id, documentId: document.id, pageNumber, pageCount: pages.length, vision,
           ...(routing.hints.inkCheckPages.has(pageNumber) ? { inkCheck: true } : {}),
@@ -196,6 +209,7 @@ export class VisionExtractStage implements Stage {
         });
       }
     }
+    checkpoint();
     return tasks.length > 1 ? tasks : [];
   }
 

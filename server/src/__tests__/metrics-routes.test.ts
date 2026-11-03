@@ -1,7 +1,10 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const sqlMock = Object.assign(vi.fn(), { json: vi.fn((value: unknown) => value) });
+const sqlMock = Object.assign(vi.fn(), {
+  json: vi.fn((value: unknown) => value),
+  begin: async (callback: (tx: unknown) => Promise<unknown>): Promise<unknown> => callback(sqlMock),
+});
 const startPipelineWorkflowMock = vi.fn(async () => undefined);
 
 vi.mock("../db.js", () => ({
@@ -291,7 +294,7 @@ describe("healthRoutes /metrics", () => {
     sqlMock
       .mockResolvedValueOnce([staleRun])
       // Lifecycle verifies publication before recording the confirmed start.
-      .mockResolvedValueOnce([{ id: staleRun.id }])
+      .mockResolvedValueOnce([{ id: staleRun.id, execution_generation: "recovery-generation" }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
@@ -313,7 +316,7 @@ describe("healthRoutes /metrics", () => {
     const body = await response.text();
 
     expect(response.status).toBe(200);
-    expect(startPipelineWorkflowMock).toHaveBeenCalledWith("run-stale", defaultPipelineFeatures);
+    expect(startPipelineWorkflowMock).toHaveBeenCalledWith("run-stale", defaultPipelineFeatures, { executionGeneration: "recovery-generation" });
     expect(body).toContain("docslurp_worker_target_machines 1");
     expect((sqlMock.mock.calls[2][0] as TemplateStringsArray).join("")).toContain("workflow_started_at = now()");
     const savedStats = sqlMock.mock.calls[3][1];
