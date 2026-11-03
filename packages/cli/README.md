@@ -148,27 +148,29 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 
 | Command | What it does | Options |
 | --- | --- | --- |
-| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace <id|slug|name>` (created if no workspace matches), or `--new-workspace`; `--template`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
-| `ingest-url <urls...>` | Fetch and ingest URLs, then print the workspace and run IDs | Same workspace options as `upload`, `--watch` |
-| `extract <files...|urls...>` | Upload files or ingest URLs (not both) whose files and outputs are deleted when the retention window ends; prints the extract ID and deletion time | Same options as `upload`; `--retention-days <n>` (longer than the free 48 hours is charged as storage), `--no-email`, `--download <markdown|all>` |
+| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace <id\|slug\|name>` (created if no workspace matches), or `--new-workspace`; `--template`; `--quality <fast\|auto\|good>`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
+| `ingest-url <urls...>` | Fetch and ingest URLs, then print the workspace and run IDs | Same workspace options as `upload`, `--quality`, `--watch` |
+| `extract <files...\|urls...>` | Upload files or ingest URLs (not both) whose files and outputs are deleted when the retention window ends; prints the extract ID and deletion time | Same options as `upload`; `--retention-days <n>` (longer than the free 48 hours is charged as storage), `--no-email`, `--download <markdown\|all>` |
 | `extract-status <extract-id>` | Print an extract's status, pages, download state and deletion time | `--json` |
-| `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (server key with `artifacts`) | None |
-| `full-index` | Index every remaining page of a workspace (or one document) | `--workspace`, `--document`, `--estimate`, `--watch` |
-| `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch` |
+| `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (a server key with `artifacts`, or a login with `read`) | None |
+| `full-index` | Index every remaining page of a workspace (or one document) | `--workspace`, `--document`, `--estimate`, `--watch`, `--json` |
+| `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch`, `--json` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
 | `status <run-id>` | Print progress for a run | `--watch` |
 | `runs` | List the runs you can access | None |
-| `search <query>` | Retrieve cited passages from a workspace | `--workspace`, `--json` or `--context` |
+| `search <query>` | Retrieve cited passages from a workspace | `--workspace`, `--min-score <0..1>` (relevance floor; `0` turns it off), `--json` or `--context` |
 | `search --queries-file <file>` | Run up to 20 questions in one request | `--workspace`, `--concurrency`, `--json` or `--context` |
 | `chat <question>` | Write a cited answer | `--workspace`, `--session`, `--json` |
-| `mcp-server` | Serve DocSlurp agent tools over stdio | `--api-url`, `--api-key` |
+| `mcp-server` (alias `mcp`) | Serve DocSlurp agent tools over stdio | `--api-url`, `--api-key` |
+| `login`, `logout`, `whoami`, `auth status`, `auth token`, `exec` | Sign in and manage the stored login; see [Sign in](#sign-in) | `--profile`, `--api-url`; `--json` (whoami, auth status) |
 | `migrate-algolia-synonyms <export.json>` | Convert Algolia synonym records to a glossary, locally | `--out <glossary.json>` |
 | `import-search-compat <export.json>` | Normalize and import Algolia, Elastic or legacy search configuration | `--workspace`, `--source`, `--out` |
 | `--license` | Print the license and notice | None |
 
-- Only **search, chat and extract-status** support `--json`; upload, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
+- `--json` works on search, chat, extract-status, jobs get, whoami, auth status, full-index, reprocess and any `--estimate`. Upload, ingest-url, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
 - `--context` and `--json` can't be combined.
 - Search is scoped to a workspace (the default one unless you set another). `--run` is not supported.
+- `--quality` sets processing quality for that upload: `fast` reads only the text layer (scanned pages stay images and aren't searchable), `auto` reads each page the cheapest faithful way, and `good` reads every page with a vision model. Without it, the workspace's setting applies (`auto` unless changed).
 
 ### Connection and timeout settings
 
@@ -181,7 +183,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `--workspace <id\|slug\|name>` | `DOCSLURP_WORKSPACE` | `default`, your organization's default workspace. On `upload`/`ingest-url` a name that matches no workspace creates it; `--new-workspace` or `--template` without `--workspace` creates a self-titled one. |
 | `--timeout <seconds>` | None | 30 seconds per API request; 300 seconds per watch |
 
-Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to upload, status, runs, search and chat, not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests.
+Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to every API command, including upload, status, runs, search, chat and `jobs watch` (300 seconds by default), but not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests.
 
 Set the key in the environment rather than with `--api-key`, so it doesn't show up in your shell history or process list. For local development, set `DOCSLURP_URL=http://localhost:4321` and run `docslurp login` against it.
 
@@ -198,12 +200,12 @@ docslurp migrate-algolia-synonyms synonyms.json --out glossary.json
 
 See [agent setup](https://docslurp.io/docs/mcp) and [Algolia compatibility](https://docslurp.io/docs/algolia).
 
-`import-search-compat` takes `--source algolia`, `elastic` or `legacy-parser`, or detects the source from the file. `--out` saves the normalized JSON **and still imports it when a key is set**. To normalize without importing, pass an empty key:
+`import-search-compat` takes `--source algolia`, `elastic` or `legacy-parser`, or detects the source from the file. `--out` saves the normalized JSON **and still imports it whenever a credential resolves**: `--api-key`, `DOCSLURP_API_KEY`, `DOCSLURP_TOKEN` or a stored login. An empty `--api-key ''` does not skip the import. To normalize without importing, run it with no credential, for example with both variables cleared and a profile that has no login:
 
 ```bash
-docslurp import-search-compat export.json \
+DOCSLURP_API_KEY= DOCSLURP_TOKEN= docslurp import-search-compat export.json \
   --workspace 'your-workspace-slug' --source algolia \
-  --api-key '' --out normalized.json
+  --profile normalize-only --out normalized.json
 ```
 
 ## Sign in
@@ -274,6 +276,8 @@ docslurp exec --workspace contracts -- python agent.py
 
 Commands exit with **0** on success and **1** when a command fails or a watched run stops, fails or times out. A successful search with no hits still exits 0. Errors go to stderr, so scripts should check both the exit status and the returned data.
 
+HTTP failures print a reviewed message for known error codes, plus a support request ID when the server sent one; raw response text is never shown. With `--json`, a failed request writes `{ "error": { "status", "code", "message", "requestId", "retryAfterSeconds" } }` to stderr (optional fields may be absent) and exits nonzero.
+
 Pre-release: pin the version you validate in CI. Licensed under SSPL-1.0, with an Apache-2.0 grant for each version three years after release. See [LICENSE](LICENSE).
 
 ## Primary sponsor
@@ -281,6 +285,3 @@ Pre-release: pin the version you validate in CI. Licensed under SSPL-1.0, with a
 [![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
 
 [17th Street Labs](https://17thstreetlabs.com) is DocSlurp’s primary sponsor.
-
-
-HTTP failures use reviewed messages based on known error codes and include a support request ID when available. With `--json`, HTTP failures are written to stderr as `{ "error": { "status", "code", "message", "requestId", "retryAfterSeconds" } }` (optional fields may be absent), and the command exits nonzero. Raw response diagnostics are never included. Successful command output keeps its existing format.

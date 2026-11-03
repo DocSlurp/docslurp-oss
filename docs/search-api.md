@@ -1,6 +1,6 @@
 # Search and chat API
 
-`POST /v1/search` (or `GET /v1/search` with query parameters) returns ranked passages with citations. It doesn't generate an answer. The response is `{results, sessionId, availability, noMatch, relevanceFloor, usage}`.
+`POST /v1/search` (or `GET /v1/search` with query parameters) returns ranked passages with citations. It doesn't generate an answer. The response is `{results, sessionId, availability, noMatch, relevanceFloor, usage}`, plus `timings` and, for [on-demand indexing](deferred-indexing.md), `deferred` when present.
 
 Each result has a `score` (rank-based, so the top hit is always near 1) and a `relevance` from 0 to 1: the strength of the match itself, the best of the embedding similarity (rescaled above the embedding model's unrelated-text baseline) and the share of query terms found in the passage. Unlike `score`, `relevance` does not depend on the other hits, so it is comparable across queries.
 
@@ -8,7 +8,7 @@ Each result has a `score` (rank-based, so the top hit is always near 1) and a `r
 - `workspace`: omit it, or pass `default`, for your organization's default workspace. Otherwise pass a workspace ID, slug or name: `Legal Contracts` and `legal-contracts` name the same workspace, and former slugs keep working. A value that matches none of your workspaces answers `404 workspace_not_found` naming the slug it looked for ([Workspaces](https://docslurp.io/docs/http#workspaces)).
 - `limit`: an integer from 1 to 100.
 - `minScore`: the relevance floor, 0 to 1 (default 0.1, or the workspace's retrieval default; `SEARCH_MIN_SCORE` sets the server default; 0 turns it off). Results with a lower raw `relevance` are dropped. When the workspace is searchable but search returns nothing, `results` is empty and the response carries `noMatch: true` with `relevanceFloor: {minScore, dropped}`. That is either because nothing cleared the floor (`dropped` > 0) or because nothing was retrieved at all, for example a filter that matches nothing (`dropped` is 0). A caller can use it to say "no good match" instead of answering from weak passages. `/v1/chat` does this automatically.
-- Filters: `documentId`, `runId`, `filenameContains`, `pageFrom`, `pageTo`, and comma-separated `tags` or `mimeTypes`.
+- Filters: `documentId`, `runId`, `filenameContains`, `pageFrom`, `pageTo`, `language`, `heading` (a heading path, segments separated by `/`), `dateFrom`/`dateTo` (ISO 8601, compared with when the passage was indexed), comma-separated `tags` or `mimeTypes`, and a spatial `geo` predicate ([geo search](geo-search.md); a JSON string on `GET`).
 - Retrieval flags such as `rerank`, `hyde` or `graphExpansion`: anything you omit (including `limit`) uses the workspace's retrieval defaults, and anything you pass wins.
 
 Search only returns each document's current version; older versions are archived for reading ([versions and retention](document-versions.md)). During a re-index after a config change, documents are served from their previous index until each is rebuilt ([config-change jobs](config-change-jobs.md)).
@@ -68,7 +68,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 The batch contains 1–20 queries; concurrency is an integer from 1 to 8, defaulting to 4 (inside chat, the turn's `agent.searchConcurrency` caps it). The entire envelope is validated before any retrieval starts. The response is `{results: [...]}`, preserving query order even when requests complete out of order. Each result is either `{ok: true, data}`, where `data` is a full search response, or `{ok: false, error: {code, message, status}}`. A valid batch returns HTTP 200 even when individual items fail. Invalid envelopes return HTTP 400.
 
-Every item independently checks the API key's `search` scope and organization/workspace access. Item error codes include `FORBIDDEN` (403), `WORKSPACE_NOT_FOUND` (404), `INVALID_SEARCH_SCOPE` (400), `SEARCH_FAILED` (500), and `SEARCH_UNAVAILABLE` (503, the process-wide search limit is full; retry shortly). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
+Every item independently checks the API key's `search` scope and organization/workspace access. Item error codes include `FORBIDDEN` (403), `WORKSPACE_NOT_FOUND` (404), `INVALID_SEARCH_SCOPE` (400), `INVALID_RETRIEVAL_QUERY` (400), `SEARCH_FAILED` (500), and `SEARCH_UNAVAILABLE` (503, the process-wide search limit is full; retry shortly). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
 ## Errors
 
@@ -80,12 +80,14 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_workspaces_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
-- Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Uploads and extracts: `unsupported_type`, `remote_format_disabled`, `file_too_large`, `unreadable_source`, `extract_not_found`, `extract_expired`, `retention_exceeds_cap`, `download_not_ready`, `download_failed`.
+- Web tools and privacy: `web_disabled`, `web_scope_required`, `url_blocked`, `privacy_mode_blocked`.
 - Workspaces and runs: `workspace_forbidden`, `workspace_scope_forbidden` (a key limited to specific workspaces tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
+- Admin billing: `credit_request_rejected`, `credit_reconciliation_required`, `idempotency_conflict`.
 - Anything else: `unavailable` and `internal`.
 
 `message` is reviewed copy for people and may change. `details` is optional and holds only `issues` (the request fields that failed validation) and limit metadata: `retryAfterSeconds`, `category`, `policy`, `limitCents`, `spentCents` on 429s, and `maxBytes` (with `directUpload` on multipart uploads) on 413s. Rate-limit responses also keep `Retry-After`, `RateLimit-Policy` and `RateLimit`. Quote `requestId` in support requests. The SDK exposes `DocSlurpApiError.code` and `.requestId`. Per-item batch errors inside a successful `200` keep their own `{code, message, status}` shape (above).
@@ -94,11 +96,15 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, sessionToken?, model?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations)); an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, sessionToken?, model?, speedBoost?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations); `speedBoost`: see [speed boost](openrouter-nitro.md)); an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; unknown fields are rejected, and all fields are checked before model calls. The response is `{id, sessionId, sessionToken?, searchSessionId, answer, finishReason?, citations, evidenceSpans, availability, usage, runtime, debug}`.
+
+`filters` narrows retrieval: `documentIds` (up to 50), `mimeTypes` (up to 24), `tags`, `dateFrom`/`dateTo` (`YYYY-MM-DD`, indexed on or after / on or before that UTC day) and `geo`. Any filter sends the turn down the [direct-answer](#direct-answers) path so the filter is guaranteed to apply.
+
+**Streaming.** `GET /v1/chat/stream` takes `q`, `workspace`, `sessionId`, `model`, `speedBoost` and `filters` (URL-encoded JSON, up to 16,384 characters) as query parameters and answers with server-sent events: `status` (`{stage, message}`), then `message` (the full `/v1/chat` response), then `done` (`{id, sessionId, sessionToken?, searchSessionId}`). It does not stream answer tokens and does not take `retrieval` or `agent`. The SDK's `chatStream` reads it. For token-by-token deltas, use `/v1/chat/completions` with `stream: true`. `POST /v1/chat` is the non-streaming fallback for both.
 
 ### Model
 
-Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any workspace chat catalog model (`z-ai/glm-5.3-flash`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6.1-sol`, `openai/gpt-6-luna`) is accepted from anyone. Any other value returns HTTP 400 with code `model_not_allowed`; the server never substitutes the default for a model you named. The same check applies to the streaming chat route (before the stream opens) and the dashboard chat routes.
+Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any workspace chat catalog model (`z-ai/glm-5.3-flash`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6.1-sol`, `openai/gpt-6-luna`) is accepted from anyone. The `:nitro` variants of `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4.1-flash` and `openai/gpt-6-luna` need `speedBoost: true` ([speed boost](openrouter-nitro.md)). Any other value returns HTTP 400 with code `model_not_allowed`; the server never substitutes the default for a model you named. The same check applies to the streaming chat route (before the stream opens) and the dashboard chat routes.
 
 Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose workspace is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The workspace's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
 
@@ -123,7 +129,7 @@ curl -N https://docslurp.io/v1/chat/completions \
 
 ### Agent limits
 
-When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on and no document, type, tag or date filters), `agent` bounds that turn:
+When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on, no document, type, tag, date or `geo` filters, and an API key that also has the `search` scope; a `chat`-only key always gets a direct answer), `agent` bounds that turn:
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
@@ -135,7 +141,7 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 #### Settings suggestions are app-only
 
-Settings suggestions, settings proposals with **Apply**, and search settings changed by a chat message ("turn on reranking") are features of the DocSlurp app's signed-in chat. They are not part of the API. API keys of any type (server and publishable), the OpenAI-compatible endpoint, MCP and the SDK never get the `getWorkspaceSettings` or `proposeWorkspaceSettings` tools, suggestions mode, or settings changes from messages, so a product built on DocSlurp cannot expose them to its own users. `agent.suggestions` is accepted and ignored, and `debug.modes.suggestions` is always `false`. To change settings from your own code, use `PATCH /v1/workspaces/:id` with a server key that has `workspaces:manage`. See [Workspace settings from chat](agent-workspace-settings.md).
+Settings suggestions, settings proposals with **Apply**, and search settings changed by a chat message ("turn on reranking") are features of the DocSlurp app's signed-in chat. They are not part of the API. API keys of any type (server and publishable), the OpenAI-compatible endpoint, MCP and the SDK never get the `getWorkspaceSettings` or `proposeWorkspaceSettings` tools, suggestions mode, or settings changes from messages, so a product built on DocSlurp cannot expose them to its own users. `agent.suggestions` is accepted and ignored, and `debug.modes.suggestions` is always `false`. To change workspace settings (name, slug, `systemPrompt`, `pipeline`, budget, retention) from your own code, use `PATCH /v1/workspaces/:id` with a server key that has `workspaces:manage`. Search and chat settings (`PATCH /v1/workspaces/:id/search-settings`: retrieval defaults, chat instructions, answer style, citations) need a signed-in session; API keys can't change them. See [Workspace settings from chat](agent-workspace-settings.md).
 
 Settings are configuration, not document evidence, so the agent never attaches a `[n]` citation to a statement about them. Answers also never include visible self-corrections: the agent works calculations out before it writes.
 
@@ -225,7 +231,7 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
 
 ### Chat instructions
 
-Each workspace has one chat instructions text (`chat.searchInstructions` in `PATCH /v1/workspaces/:id/search-settings`, up to 4,000 characters). It is added to the chat system message for every answer in the workspace: the app, `/v1/chat`, `/v1/chat/completions`, MCP, the SDK and the embed widget.
+Each workspace has one chat instructions text (`chat.searchInstructions` in `PATCH /v1/workspaces/:id/search-settings`, up to 4,000 characters; signed-in session only). It is added to the chat system message for every answer in the workspace: the app, `/v1/chat`, `/v1/chat/completions`, MCP, the SDK and the embed widget.
 
 The system message is always composed in this order:
 
@@ -314,11 +320,13 @@ The TypeScript SDK supports direct `for await (const hit of client.search(input)
 
 ## Search caches
 
-Two in-process caches cut repeated-query latency. Both are per server process and per organization; an entry is never visible to another organization.
+In-process caches cut repeated-query latency. Each is per server process and never shared across organizations.
+
+- **Response cache** (on, 30 seconds). An identical `POST /v1/search` (single or each batch item) from the same user and API key, within `SEARCH_RESPONSE_CACHE_TTL_MS` (default 30000, `0` disables), returns the earlier response with zero `usage`. Only responses with `availability.status: "complete"` and no pending on-demand pages are kept; `geo` searches, capability-token requests and `GET /v1/search` are never cached. Workspace and key checks still run on every request.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Workspaces in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
 - **Vector-result cache** (off by default). Keyed by organization, the workspace database's location and table version, the query-vector hash, document scope, `limit` and ANN tuning, so a write to a table produces a new key. Results from a partially failed search are not cached. Enable with `SEARCH_RESULT_CACHE_MAX_ENTRIES` (default 0) and tune `SEARCH_RESULT_CACHE_TTL_SECONDS` (default 30). A hit can be as stale as the LanceDB read-consistency interval (`LANCEDB_READ_CONSISTENCY_SECONDS`, default 30 s) plus the TTL.
-- **Privacy and tracing.** `strict-privacy` never reads or writes either cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
+- **Privacy and tracing.** `strict-privacy` never reads or writes the embedding or vector-result cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
 
 Hits and misses appear as `embedCacheHit`/`embedCacheMiss` and `resultCacheHit`/`resultCacheMiss` counters in search timings, in the session diagnostics (`embeddingCache`), as `[search-cache]` log lines, and as `embed.cache` and `lancedb.result_cache` spans (`docslurp.cache.hit`).
 
@@ -362,7 +370,8 @@ MMR changes which passages are returned, not only their order. No retrieval-qual
 Workspace search settings can explicitly select DeepInfra's pointwise
 `Qwen/Qwen3-Reranker-0.6B`. Omitted provider settings continue to use local BM25.
 With the operator's `DEEPINFRA_API_KEY` configured, an authorized workspace owner
-can opt in through `PATCH /v1/workspaces/:workspaceId/search-settings`:
+can opt in through `PATCH /v1/workspaces/:workspaceId/search-settings` from a
+signed-in session:
 
 ```json
 {

@@ -2,11 +2,11 @@
 
 Everything on this page is **planned**: none of these are installable packages yet, and no package names or release dates are promised. Native HTTP and the shared widget are building blocks, not proof of a finished integration; delivery is tracked in the repository's `TODO.md`. Shipped integrations live in the [Search & CMS integration guide](https://docslurp.io/docs/search-integrations).
 
-Today, use the native [HTTP API](https://docslurp.io/docs/http) from any language, or the documented widget/component for an existing frontend. The integrations directory keeps native interfaces first, followed by search adapters, CMS platforms, frameworks, documentation sites and language clients.
+Today, use the native [HTTP API](https://docslurp.io/docs/http) from any language, or the documented widget/component for an existing frontend. The integrations directory keeps native interfaces first, followed by search adapters, frameworks and plugins, CMS platforms, documentation sites and language clients.
 
 ## CMS platforms
 
-The eight CMS targets are WordPress, Shopify, Wix, Squarespace, Joomla, Webflow, Drupal and Strapi. WordPress's source plugin is implemented; the remaining seven need dedicated connectors. This list combines widely used platforms with a headless CMS target, rather than claiming a strict top-eight ranking. [W3Techs adoption data](https://w3techs.com/technologies/overview/content_management) was reviewed on October 7, 2026. Astro is covered separately as a framework with a native component.
+The eight CMS targets are WordPress, Shopify, Wix, Squarespace, Joomla, Webflow, Drupal and Strapi. WordPress has a search plugin (a shortcode with a server-side proxy) but no content sync yet; the remaining seven need dedicated connectors. This list combines widely used platforms with a headless CMS target, rather than claiming a strict top-eight ranking. [W3Techs adoption data](https://w3techs.com/technologies/overview/content_management) was reviewed on October 7, 2026. Astro is covered separately as a framework with a native component.
 
 Every content connector must cover initial ingestion, update/delete propagation, canonical URLs, publication state and appropriate viewer access. Do not silently index drafts, private pages or member content into public search.
 

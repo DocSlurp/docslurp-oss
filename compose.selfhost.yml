@@ -12,7 +12,7 @@ x-server-environment: &server-environment
   PORT: "8787"
   HOST: 0.0.0.0
   BETTER_AUTH_URL: ${SELFHOST_URL:?Set SELFHOST_URL}
-  # Only honoured for a plain http://localhost origin; scripts/selfhost-init.mjs leaves it false.
+  # Only honoured for a plain http://localhost origin; the .env.selfhost template sets it true for local trials.
   DOCSLURP_ALLOW_INSECURE_LOCAL_AUTH_ORIGIN: ${DOCSLURP_ALLOW_INSECURE_LOCAL_AUTH_ORIGIN:-false}
   BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Missing auth secret}
   OAUTH_TOKEN_ENCRYPTION_KEY: ${OAUTH_TOKEN_ENCRYPTION_KEY:?Missing OAuth encryption key}

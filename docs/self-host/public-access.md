@@ -49,8 +49,9 @@ in front of the app:
 Forwarded headers are never read from a peer outside this set, so a client that
 reaches the origin directly cannot choose its own address. `CF-Connecting-IP` is
 honoured only for peers in Cloudflare's published ranges (pinned in
-[`packages/shared/src/cloudflare-ips.ts`](../../packages/shared/src/cloudflare-ips.ts); refresh with
-`node scripts/update-cloudflare-ips.mjs`). Your proxy must overwrite, not
+[`packages/shared/src/cloudflare-ips.ts`](../../packages/shared/src/cloudflare-ips.ts), with the
+fetch date in `CLOUDFLARE_IPS_FETCHED_ON`; the generator script it names is not in this repository,
+so compare against <https://www.cloudflare.com/ips/> yourself). Your proxy must overwrite, not
 append to, any client-supplied `X-Forwarded-For`/`X-Real-IP`. To refuse
 requests that skip the proxy, set `REQUIRE_TRUSTED_PROXY=true` (default off;
 health and metrics paths stay open).

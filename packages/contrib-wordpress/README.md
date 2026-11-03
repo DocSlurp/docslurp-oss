@@ -6,15 +6,15 @@ A WordPress plugin that adds a `[docslurp_search]` shortcode backed by DocSlurp 
 
 ## Install
 
-1. Build the SDK and run `node scripts/package-wordpress-search.mjs` from the repository root.
-2. Zip the `docslurp-search` directory (not its parent tests directory), upload it in WordPress Plugins, and activate it.
-3. In Settings → DocSlurp Search, enter the HTTPS API origin, a workspace of deliberately public content, and a search-only **server** key.
+1. Zip the `docslurp-search` directory (not its parent tests directory): `cd packages/contrib-wordpress && zip -r docslurp-search.zip docslurp-search`. It ships a prebuilt copy of the SDK widget, so there is no build step.
+2. Upload the zip in WordPress Plugins and activate it.
+3. In Settings → DocSlurp Search, enter the HTTPS API origin (default `https://docslurp.io`), a workspace ID, slug or name of deliberately public content (blank uses the organization's default workspace), and a search-only **server** key (`dslp_priv_…`). A browser key (`dslp_pub_…`) is rejected and the previous key kept.
 4. Add `[docslurp_search]` to a page/post Shortcode block. The server key stays out of shortcode HTML and browser requests.
 5. Test Unicode, no-match/error states, public source links, mobile layout, and host-level proxy rate limiting on your WordPress installation.
 
 No automatic post ingestion/synchronization, membership gating, or global replacement of WordPress built-in search is included. Ingest published content through the native SDK/URL API and wait for indexing. Do not connect private posts to a public shortcode.
 
-The REST proxy fixes workspace/limit, strips internal fields, rejects unsupported inputs, uses safe HTTPS requests without redirects, and returns generic upstream errors. Transient throttles are best-effort; configure CDN/host limits and DocSlurp key budgets. Rotate the protected WordPress option key through your normal secret process.
+The REST proxy (`POST /wp-json/docslurp/v1/search`, body `{ "q": "…" }`) fixes the workspace and a limit of 6 results, accepts queries of at most 500 characters, disables query expansion, strips internal fields, uses safe HTTPS requests without redirects, and returns generic upstream errors. Transient throttles (30 searches per visitor IP and 120 in total per minute) are best-effort; configure CDN/host limits and DocSlurp key budgets. Rotate the protected WordPress option key through your normal secret process.
 
 Validation (isolated PHP 8.3, no WordPress database required):
 
@@ -23,7 +23,7 @@ docker run --rm --network none -v "$PWD/packages/contrib-wordpress:/wordpress:ro
   php:8.3-cli-alpine php -l /wordpress/docslurp-search/docslurp-search.php
 docker run --rm --network none -v "$PWD/packages/contrib-wordpress:/wordpress:ro" \
   php:8.3-cli-alpine php /wordpress/tests/plugin-test.php
-node scripts/package-wordpress-search.mjs --check
+pnpm --filter @docslurp/sdk test   # checks the bundled widget matches the SDK build
 ```
 
-The hook/proxy checks are not evidence of a deployed WordPress installation. Verify the plugin on your host/theme before production use. PHP 8+ is recommended. The bundled JavaScript is generated from the SDK widget; never edit it independently.
+The hook/proxy checks are not evidence of a deployed WordPress installation. Verify the plugin on your host/theme before production use. PHP 8+ is recommended. The bundled `search-widget.js` is the SDK build of `@docslurp/sdk/widget` (`packages/sdk/dist/search-widget.js`) followed by one `defineDocSlurpSearch();` call; never edit it independently.

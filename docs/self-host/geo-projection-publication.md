@@ -1,10 +1,10 @@
 # Geo projection publication lifecycle
 
-Geo costs require an explicit column opt-in: JSON Schema `{ "type": "object", "format": "geojson" }` becomes structured type `geo`. Ordinary object columns and detection suggestions do not create accepted-source rows or spatial indexes. Schema validation and provider metadata removal are described in `../geo-foundation.md`.
+Geo costs require an explicit column opt-in: JSON Schema `{ "type": "object", "format": "geojson" }` becomes structured type `geo`. Ordinary object columns and detection suggestions do not create accepted-source rows or spatial indexes. Schema validation and provider metadata removal are described in [Geo foundation](../geo-foundation.md).
 
 ## Installation
 
-Install PostGIS through your operator-supported database procedure, then run the normal migration runner with `POSTGIS_MIGRATIONS=1`. Ordinary migration 0110 has no spatial types and works with PGlite. Optional spatial migrations run under an advisory lock with a checksum ledger. An opted-in extraction refuses before model work if the spatial publisher is absent; a geo correction rolls back if it is absent. There is no scan or weaker-index fallback.
+Install PostGIS through your operator-supported database procedure (the Compose `postgres:17-bookworm` image has none; see [PostGIS](postgis.md)), then run the normal migration runner with `POSTGIS_MIGRATIONS=1`. Ordinary migration 0110 has no spatial types and works with PGlite. Optional spatial migrations run under an advisory lock with a checksum ledger. An opted-in extraction refuses before model work if the spatial publisher is absent; a geo correction rolls back if it is absent. There is no scan or weaker-index fallback.
 
 ## Accepted source and revision contract
 
@@ -20,7 +20,7 @@ Field paths are RFC6901 pointers to top-level fields (`a/b` becomes `/a~1b`). `c
 
 ## Retrieval and threat model
 
-Readers must join `ready_geo_projection_generations` with `geo_projection_features`, constrain org/workspace, and intersect normal authorized document eligibility. Raw feature rows can be stale. Do not cache geo eligibility without revision-aware invalidation. This lifecycle PR does not implement search/chat predicates; their separate integration remains required.
+Readers must join `ready_geo_projection_generations` with `geo_projection_features`, constrain org/workspace, and intersect normal authorized document eligibility. Raw feature rows can be stale. Do not cache geo eligibility without revision-aware invalidation. Search and chat apply these joins in `server/src/search/geo-scope.ts` and `server/src/search/retrieval-scope.ts`; see [Spatial search](../geo-search.md).
 
 Publication locks workspace then document, checks exact scope and revision, and uses parameterized SQL. Scope foreign keys prevent cross-workspace features. PostGIS refuses unsupported types, invalid topology, nonfinite/out-of-range coordinates and oversized geometry. The worker's database role explicitly grants access to the projection tables; no credentials or untrusted-file parsing boundary changes are introduced. A compromised trusted database writer is outside this validation guarantee; these functions are not a privilege-escalating security-definer API.
 
@@ -28,4 +28,4 @@ Publication locks workspace then document, checks exact scope and revision, and 
 
 `worker/src/__tests__/geo-final-source.test.ts` covers ordinary-column opt-out, policy/malformed rejection, zero coordinates and optional null. `geo-revision.db.test.ts` applies all ordinary migrations in PGlite and tests progress versus source revisions, tenant/stale refusal and absent PostGIS rollback. Existing checkpoint/enrichment regressions also run.
 
-`scripts/postgis/lifecycle-test.sh` creates a digest-pinned, network-isolated disposable PostgreSQL/PostGIS database, applies the complete ordinary and spatial migration journals, and tests successful publication, identical retries, topology rollback, explicit-null corrections, scoped refusal and deletion cascade. Two independent PostgreSQL backends demonstrate a delayed stale publisher refusing after a competing revision commits. This is not production platform validation or exhaustive concurrency coverage. Independent council review remains required before merge.
+`scripts/postgis/lifecycle-test.sh` creates a digest-pinned, network-isolated disposable PostgreSQL/PostGIS database, applies the complete ordinary and spatial migration journals, and tests successful publication, identical retries, topology rollback, explicit-null corrections, scoped refusal and deletion cascade. Two independent PostgreSQL backends demonstrate a delayed stale publisher refusing after a competing revision commits. This is not production platform validation or exhaustive concurrency coverage.

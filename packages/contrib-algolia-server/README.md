@@ -2,7 +2,7 @@
 
 [Package docs](https://docslurp.io/docs/packages/contrib-algolia-server) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/contrib-algolia-server) · [npm](https://www.npmjs.com/package/@docslurp/contrib-algolia-server)
 
-Sync Algolia-style settings, synonyms, rules and imports into DocSlurp from a backend job, migration script or API adapter. `createDocSlurpAlgoliaServerClient()` wraps [`@docslurp/contrib-search-compat/algolia`](https://docslurp.io/docs/packages/contrib-search-compat) and adds `searchIndex`, `syncSettings`, `syncSynonyms` and `syncRules`. Use it with a server key; writes are refused for browser keys.
+Sync Algolia-style settings, synonyms, rules and imports into DocSlurp from a backend job, migration script or API adapter. `createDocSlurpAlgoliaServerClient()` wraps [`@docslurp/contrib-search-compat/algolia`](https://docslurp.io/docs/packages/contrib-search-compat) and adds `searchIndex`, `syncSettings`, `syncSynonyms` and `syncRules`. Use it with a server key: writes need the `workspaces:manage` scope, which only organization owners and admins can grant, and are refused for browser keys.
 
 ## Install and use
 
@@ -15,7 +15,7 @@ import { createDocSlurpAlgoliaServerClient } from "@docslurp/contrib-algolia-ser
 
 const client = createDocSlurpAlgoliaServerClient({
   apiUrl: "https://docslurp.io",
-  clientKey: process.env.DOCSLURP_API_KEY!, // A server key. The option is named clientKey.
+  clientKey: process.env.DOCSLURP_API_KEY!, // A server key with the workspaces:manage scope. The option is named clientKey.
 });
 
 const res = await client.searchIndex("product-manuals", { query: "invoice" });
