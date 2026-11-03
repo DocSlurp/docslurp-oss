@@ -3,6 +3,8 @@ import type { RealtimeResource } from "@docslurp/shared";
 export type DashboardResource = Exclude<RealtimeResource, { kind: "operation" }>;
 export interface RealtimeBackend {
   authorize(userId: string, resource: DashboardResource): Promise<string | null>;
+  /** One fresh scoped decision per input, in order; no cached grants. */
+  authorizeMany?(userId: string, resources: DashboardResource[]): Promise<Array<string | null>>;
   /** Collection payloads must reauthorize their constituents before delivery. */
   authorizeDelivery?(userId: string, resource: DashboardResource, data: unknown): Promise<boolean>;
   project(userId: string, resource: DashboardResource): Promise<unknown>;

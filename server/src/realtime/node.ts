@@ -1,3 +1,4 @@
+import type { DashboardResource } from "./broker.js";
 import { randomUUID } from "node:crypto";
 import type { Server, IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
@@ -11,6 +12,8 @@ export interface RealtimeHostOptions {
   enabled: boolean;
   allowedOrigins: readonly string[];
   authenticate(headers: Headers, signal?: AbortSignal): Promise<RealtimeSession | null>;
+  /** Revalidates a server-authenticated identity without reparsing its cookie. */
+  revalidate?(session: RealtimeSession, signal: AbortSignal): Promise<RealtimeSession | null>;
   backend: RealtimeBackend;
   operations?: RealtimeOperationProvider;
   operationsForSession?: (headers: Headers, session: RealtimeSession) => RealtimeOperationProvider | undefined;
@@ -130,7 +133,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           };
           const live = async () => {
             if (controller.signal.aborted) return false;
-            sessionCheck ??= options.authenticate(headers, controller.signal).finally(() => { sessionCheck = undefined; });
+            sessionCheck ??= (options.revalidate ? options.revalidate(session, controller.signal) : options.authenticate(headers, controller.signal)).finally(() => { sessionCheck = undefined; });
             const current = await sessionCheck;
             const valid = current?.userId === session.userId && current?.sessionId === session.sessionId;
             if (!valid) close();
@@ -228,10 +231,18 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
             verifying = true;
             void live().then(async valid => {
               if (!valid) return;
-              for (const [id, sub] of subscriptions) {
-                if (sub.resource.kind !== "operation" && !await options.backend.authorize(session.userId, sub.resource)) {
-                  await revokeSubscription(id, sub.generation, sub.resource, 0);
-                }
+              // Capture generations before awaiting: a late sweep cannot revoke
+              // a replacement subscription. Delivery still checks access afresh.
+              const pending = [...subscriptions].filter(
+                (entry): entry is [string, typeof entry[1] & { resource: DashboardResource }] => entry[1].resource.kind !== "operation");
+              const resources = pending.map(([, sub]) => sub.resource);
+              const allowed = options.backend.authorizeMany
+                ? await options.backend.authorizeMany(session.userId, resources)
+                : await Promise.all(resources.map(resource => options.backend.authorize(session.userId, resource)));
+              if (allowed.length !== pending.length) throw new Error("authorization_incomplete");
+              for (let index = 0; index < pending.length; index++) {
+                const [id, sub] = pending[index]!;
+                if (!allowed[index]) await revokeSubscription(id, sub.generation, sub.resource, 0);
               }
               resourcesVerifiedAt = Date.now();
             }).catch(() => close(1011, "authorization_failed")).finally(() => { verifying = false; });

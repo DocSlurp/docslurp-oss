@@ -84,3 +84,17 @@ it("reauthorizes constituent private workspaces after activity projection", asyn
   expect(await backend.authorize("member",resource)).toBe("org");
   expect(await backend.authorizeDelivery!("member",resource,activity)).toBe(false);
 });
+
+it("batches mixed resource authorization in input order and observes membership changes without cached grants", async () => {
+  const resources = [
+    {kind:"activity",orgId:"org"}, {kind:"billing",orgId:"org"},
+    {kind:"run",runId:"run-a"}, {kind:"workspace",workspaceId:"foreign-w"},
+    {kind:"viewer",documentId:"missing"}, {kind:"suggestions",workspaceId:"workspace"},
+  ] as const;
+  await sql`insert into workspace_members(workspace_id,user_id,role) values('workspace','member','member') on conflict do nothing`;
+  expect(await backend.authorizeMany!("member",[...resources])).toEqual(["org",null,"org",null,null,"org"]);
+  await sql`delete from workspace_members where workspace_id='workspace' and user_id='member'`;
+  expect(await backend.authorizeMany!("member",[...resources])).toEqual(["org",null,null,null,null,null]);
+  expect(await backend.authorizeMany!("stranger",[...resources])).toEqual([null,null,null,"foreign",null,null]);
+  await expect(backend.authorizeMany!("member",Array(33).fill(resources[0]))).rejects.toThrow("subscription_limit");
+});

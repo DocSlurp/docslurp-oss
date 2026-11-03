@@ -1,3 +1,4 @@
+import { revalidateRealtimeSession } from "./session.js";
 import type { Server } from "node:http";
 import { attachRealtimeServer } from "./node.js";
 import { realtimeBackend } from "./backend.js";
@@ -21,6 +22,7 @@ export function attachFirstPartyRealtime(server: Server, options: { operations?:
     backend: realtimeBackend,
     operations: options.operations,
     authenticate: authenticateRealtimeSession,
+    revalidate: revalidateRealtimeSession,
     operationsForSession: (headers, session) => {
       if (options.operations || process.env.DOCSLURP_DURABLE_CHAT !== "1") return options.operations;
       return createChatOperationProvider(async userId => {

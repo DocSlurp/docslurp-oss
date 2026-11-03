@@ -198,3 +198,25 @@ describe("real Node realtime Upgrade", () => {
   });
 
 });
+
+it("uses one bounded resource batch per sweep and still revokes an individual topic", async () => {
+  const f=await fixture();
+  let permitted=true;
+  f.backend.authorizeMany=vi.fn(async(_user,resources)=>resources.map(()=>permitted?ORG:null));
+  const {ws,frames}=await connect(f.url);
+  for(let n=0;n<10;n++)subscribe(ws,`run-${n}`,{kind:"run",runId:RUN});
+  await vi.waitFor(()=>expect(frames.filter(frame=>frame.type==="snapshot")).toHaveLength(10));
+  await vi.waitFor(()=>expect(f.backend.authorizeMany).toHaveBeenCalled());
+  expect(vi.mocked(f.backend.authorizeMany).mock.calls.some(([,resources])=>resources.length===10)).toBe(true);
+  permitted=false;
+  await vi.waitFor(()=>expect(frames.filter(frame=>frame.type==="error"&&frame.code==="access_revoked")).toHaveLength(10));
+});
+it("fails closed when a batched resource sweep stalls despite healthy session checks", async () => {
+  const f=await fixture();const {ws,frames}=await connect(f.url);
+  subscribe(ws);await vi.waitFor(()=>expect(frames.some(frame=>frame.type==="snapshot")).toBe(true));
+  let release!:()=>void;
+  f.backend.authorizeMany=vi.fn(()=>new Promise(resolve=>{release=()=>resolve([ORG]);}));
+  const closed=new Promise<string>(resolve=>ws.once("close",(_code,reason)=>resolve(reason.toString())));
+  expect(await closed).toBe("authorization_timeout");
+  release?.();
+});

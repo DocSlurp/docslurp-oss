@@ -2,7 +2,6 @@ import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readWorkspaceSuggestions } from "../services/workspace-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
 import { sql } from "../db.js";
-import { getWorkspaceAccess } from "../services/organizations.js";
 import { workspaceUsageTotals, runUsageCostSummaries } from "../services/usage-attribution.js";
 import { getBillingOverview } from "../services/billing/overview.js";
 import { getWorkspace } from "../services/workspaces.js";
@@ -10,27 +9,48 @@ import { listDocumentIndexEntries, getRealtimeViewerPayload } from "../services/
 import { mapWorkspaceRun, type WorkspaceRunRow } from "../services/run-records.js";
 import { buildRunProgressSnapshot } from "../services/runs.js";
 
+/** One statement and one MVCC boundary for a socket's bounded resource sweep.
+ * This matches getWorkspaceAccess, including explicitly shared personal workspaces.
+ * It is session-only; API key allowlists never enter this adapter.
+ */
+async function authorizeMany(userId: string, resources: DashboardResource[]): Promise<Array<string | null>> {
+  if (resources.length > 32) throw new Error("subscription_limit");
+  if (!resources.length) return [];
+  const inputs = resources.map((r, index) => ({ ...r, index }));
+  const rows = await sql<{ index: number; org_id: string | null }[]>`
+    with requested as (
+      select * from jsonb_to_recordset(${sql.json(inputs)})
+        as x(index int, kind text, "orgId" text, "workspaceId" text, "runId" text, "documentId" text)
+    )
+    select x.index,
+      case when x.kind in ('activity','billing','economics') then
+        case when om.user_id is not null and
+          (x.kind='activity' or om.role in ('owner','admin')) then o.id end
+      else case when w.id is not null and (
+        (om.user_id is not null and (w.user_id=${userId} or wm.user_id is not null
+          or om.role in ('owner','admin') or w.is_default))
+        or (wm.user_id is not null and o.is_personal)
+      ) then w.org_id end end as org_id
+    from requested x
+    left join workspace_runs r on x.kind='run' and r.id=x."runId"
+    left join documents d on x.kind='viewer' and d.id=x."documentId"
+    left join workspaces w on w.id=case when x.kind='run' then r.workspace_id
+      when x.kind='viewer' then d.workspace_id else x."workspaceId" end
+    left join organizations o on o.id=case when x.kind in ('activity','billing','economics')
+      then x."orgId" else w.org_id end
+    left join org_memberships om on om.org_id=o.id and om.user_id=${userId}
+    left join workspace_members wm on wm.workspace_id=w.id and wm.user_id=${userId}
+    order by x.index`;
+  if (rows.length !== resources.length) throw new Error("authorization_incomplete");
+  return rows.map(row => row.org_id);
+}
 async function authorize(userId: string, resource: DashboardResource): Promise<string | null> {
-  if (resource.kind === "activity" || resource.kind === "billing" || resource.kind === "economics") {
-    const [membership] = await sql<{ role: string }[]>`select role from org_memberships where user_id = ${userId} and org_id = ${resource.orgId}`;
-    if (!membership || ((resource.kind === "billing" || resource.kind === "economics") && !["owner", "admin"].includes(membership.role))) return null;
-    return resource.orgId;
-  }
-  let workspaceId: string;
-  if (resource.kind === "viewer") {
-    const [document] = await sql<{ workspace_id: string }[]>`select workspace_id from documents where id=${resource.documentId}`;
-    if (!document) return null;
-    workspaceId = document.workspace_id;
-  } else if (resource.kind === "run") {
-    const [run] = await sql<{ workspace_id: string }[]>`select workspace_id from workspace_runs where id = ${resource.runId}`;
-    if (!run) return null;
-    workspaceId = run.workspace_id;
-  } else workspaceId = resource.workspaceId;
-  return (await getWorkspaceAccess(workspaceId, userId))?.orgId ?? null;
+  return (await authorizeMany(userId, [resource]))[0] ?? null;
 }
 
 export const realtimeBackend: RealtimeBackend = {
   authorize,
+  authorizeMany,
   async authorizeDelivery(userId, resource, data) {
     if (resource.kind !== "activity") return !!await authorize(userId, resource);
     if (!data || typeof data !== "object" || !("runs" in data) || !Array.isArray(data.runs)) return false;

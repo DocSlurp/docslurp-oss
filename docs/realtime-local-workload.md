@@ -72,3 +72,41 @@ one-second revision reconciliation outweigh savings in these small workloads.
 Production canary, actual mounted browser traffic and proxy idle/drain behavior
 remain separate manual gates. Native execution migration must retain this
 baseline and repeat the same workload; HTTP-count reduction alone is insufficient.
+
+## Matched application workload: batched authorization (2026-11-03)
+
+The independent application harness froze its workload before this change
+(budget SHA256 9c02e1b143adc171002728e1801d8ad710d70b8700bccc4971db94db9bf81218).
+A copy ran against this core without modifying the application checkout.
+Instrumentation added SQL fingerprints/counts, without parameter values.
+Raw candidate and matched legacy measurements are retained in
+[realtime-matched-load-20261103.json](realtime-matched-load-20261103.json).
+The source core HEAD in that file is the parent merge commit; the candidate also
+included the batch authorization changes recorded with this report.
+
+| Phase | Legacy SQL reads | Prior socket reads | Batched socket reads |
+| --- | ---: | ---: | ---: |
+| Idle, 32 seconds | 89 | 896 | 64 |
+| Ten-run progress | 722 | 1220 | 694 |
+| 100 completion events | 1215 | 250 | 280 |
+| Offline completion/reconnect | 100 | 211 | 155 |
+
+Idle attribution is exactly 32 revision reads and 32 authorization batches.
+The old sweep separately resolved each of 17 resources every second; run
+authorization also read its workspace identity. The replacement uses one fresh
+statement for the bounded subscription set. There is no grant cache to invalidate.
+Delivery reauthorization and activity constituent authorization remain fresh.
+Generation checks and the independent resource-verification timeout remain.
+
+This harness injects session authentication, so it cannot attribute BetterAuth,
+MFA or administrator queries. The first-party adapter now validates an already
+authenticated socket's session with one live query checking owner, expiry,
+deleted user, second factor and current organization MFA enforcement. Upgrade
+continues through BetterAuth. Per-socket overlapping checks share only the
+in-flight promise; no settled session grant is cached. Separate migrated database
+tests exercise expiry, wrong owner, MFA changes and deletion.
+
+Candidate p95 propagation was 795 ms for progress, 646 ms for burst and 1427 ms
+for reconnect. Idle CPU was 267 ms versus legacy 601 ms. Reconnect SQL remains
+above legacy and is an open capacity gate; this run does not establish production
+acceptance. No paid provider, production workload or deployment was used.
