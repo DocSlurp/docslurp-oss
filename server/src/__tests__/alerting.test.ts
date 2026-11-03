@@ -109,6 +109,14 @@ describe("alert rules", () => {
     expect(byId(dbDown, "queued-run-age").state).toBe("unknown");
   });
 
+  it("distinguishes rejected database writes from connectivity failures without naming a provider", () => {
+    const error = "cannot execute INSERT in a read-only transaction";
+    const readonly = byId(evaluateAlertRules(healthy({ database: { ok: false, error } }), DEFAULT_ALERT_THRESHOLDS), "database-unreachable");
+    expect(readonly).toMatchObject({ state: "firing", summary: "App database is read-only; writes are failing" });
+    const disconnected = byId(evaluateAlertRules(healthy({ database: { ok: false, error: "connection refused" } }), DEFAULT_ALERT_THRESHOLDS), "database-unreachable");
+    expect(disconnected).toMatchObject({ state: "firing", summary: "App database health check failed" });
+  });
+
   it("only evaluates local checks on a non-leader instance", () => {
     const checks = evaluateAlertRules(healthy({ database: { ok: true, queue: null, migrations: null }, temporal: null }), DEFAULT_ALERT_THRESHOLDS);
     expect(checks.map((check) => check.id).sort()).toEqual(["database-unreachable", "http-5xx-rate"]);
