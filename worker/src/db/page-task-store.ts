@@ -21,10 +21,12 @@ export class PageTaskStore {
   }
 
   /** Stores full tasks so child workflows can load bounded batches by offset. */
-  async enqueueWithPayload(tasks: VisionPageTask[]): Promise<number> {
+  async enqueueWithPayload(tasks: VisionPageTask[], progress?: (completed: number) => void): Promise<number> {
     if (tasks.length) {
-      for (let index = 0; index < tasks.length; index += 1_000) {
-        const slice = tasks.slice(index, index + 1_000);
+      const batchSize = progress ? 100 : 1_000;
+      for (let index = 0; index < tasks.length; index += batchSize) {
+        progress?.(index);
+        const slice = tasks.slice(index, index + batchSize);
         await this.sql`insert into page_work_tasks ${this.sql(slice.map(task => ({
           run_id: task.runId, document_id: task.documentId, page_number: task.pageNumber,
           payload: this.sql.json(stripTaskFlags(task) as unknown as JSONValue),
@@ -33,6 +35,7 @@ export class PageTaskStore {
           where page_work_tasks.payload is null`;
       }
     }
+    progress?.(tasks.length);
     const runId = tasks[0]?.runId;
     return runId ? this.countWithPayload(runId) : 0;
   }

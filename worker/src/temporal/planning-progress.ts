@@ -1,5 +1,7 @@
 /** Keep cancellation observable during I/O, but never keep stalled planning alive forever.
- * Checkpoints renew the 60s progress window; in-flight I/O must settle before retry.
+ * Checkpoints renew the 60s progress window. Heartbeat timeout can start a retry
+ * while old I/O is outstanding: callers must use idempotent writes. Cancellation
+ * checkpoints prevent subsequent work, but cannot revoke an in-flight write.
  */
 export async function withPlanningProgress<T>(
   signal: AbortSignal,

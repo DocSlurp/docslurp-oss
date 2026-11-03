@@ -269,11 +269,7 @@ export function createActivities(deps: ActivityDependencies) {
         if (!tasks.length) return { total: 0 };
         state.stage = "vision-extract";
         await store.startRunStage(state, state.stage);
-        let total = 0;
-        for (let offset = 0; offset < tasks.length; offset += 100) {
-          progress("persisting", offset);
-          total = await store.pageTasks.enqueueWithPayload(tasks.slice(offset, offset + 100));
-        }
+        const total = await store.pageTasks.enqueueWithPayload(tasks, (offset) => progress("persisting", offset));
         return { total };
       });
     },
