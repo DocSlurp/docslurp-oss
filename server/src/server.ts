@@ -6,6 +6,7 @@ import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
+import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -320,6 +321,9 @@ export function ensureApiStartup(): Promise<void> {
       }
 
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
+      // Boolean env flags this process booted with (MEDIA_REMOTE_ENABLED, AI_RATE_LIMIT_ENABLED, ...); unset ones
+      // use code defaults. Console only (SigNoz via Fly logs): the startup event below can export to PostHog.
+      console.log(`[api] env-flags ${formatEnvFlags(envFlags())}`);
       // Loud when limits are per instance (no Redis) or disabled.
       logRateLimitBackendAtStartup();
       // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
