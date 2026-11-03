@@ -143,3 +143,44 @@ so connection churn must be included in the coordinator's capacity gate. These
 numbers prove the local failure cases, not production proxy/network behavior or
 full workload-budget acceptance. No paid providers, production traffic, feature
 activation or deployment were used for this verification.
+
+## CI database role and trigger locking repair
+
+CI run 41737838621 had two distinct causes: the role drift guard found four
+unclassified relations, and database job 126271520215 timed out in the existing
+retry-first pending supersession test. The latter was caused by unrelated
+same-organization writes contending on the realtime revision row, not by the
+retirement code's Run-lock policy. Its three-second timeout is unchanged.
+
+Migration 0120 replaces that write hotspot with transaction-owned counters and
+nonblocking compaction, preserving the aggregate revision reader contract and
+commit-only notifications. Ingestion workers are explicitly denied all chat
+identity/output/dependency tables and the aggregate API view; only the counter
+storage needed by invoker triggers is granted. Tests exercise actual run,
+document and materialization writes as the worker, negative permissions, repeated
+write coalescing, compaction, and concurrent out-of-order commit/rollback. No
+SECURITY DEFINER function or relaxed CI skip/timeout/budget was introduced.
+This migration/permission delta requires the coordinator's security review before
+merge. The reviewed native recovery implementation is unchanged.
+
+The audit additionally found native-schema grants missing from role reconciliation.
+The application role now receives usage/DML/sequence access to the migrated
+`docslurp_mastra` schema without CREATE; ingestion-worker and PUBLIC grants there
+are revoked. A negative test grants the worker access deliberately, reconciles,
+and verifies it is denied again. The full server run also exposed a stale
+suggestion-route fixture: it lacked the shared projection's workspace-access
+result. The fixture now models authorized access and adds a denial-before-read
+case; production authorization behavior was not changed.
+
+Local verification of this delta: all 34 registered database/Redis integration
+files passed with zero skipped tests against PostgreSQL 17 and Redis 7. The
+original pending-supersession suite passed all three tests, retaining its original
+three-second statement timeout. The focused permissions, suggestions and revision
+suite passed 27 tests. The full server suite (`vitest run --bail=0`, which only
+disables early stopping) passed 3,674 tests across 346 files; its usual 104 gated
+tests were skipped there and the registered service-backed suites ran separately
+through the database harness above. Server `tsc --noEmit`, the shared-package
+build, and the database migration/credit checks passed. The standalone database
+script's optional native contention branch was not enabled in that invocation;
+the real PostgreSQL harness ran the registered contention suites without skips.
+Remote CI and the coordinator's final council remain separate gates.

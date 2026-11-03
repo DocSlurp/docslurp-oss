@@ -80,6 +80,39 @@ describe("worker table classification", () => {
 });
 
 describe("worker role", () => {
+  it("denies chat operations, output and dependency discovery for every DML privilege", async () => {
+    for (const table of ["chat_operations", "chat_operation_events", "chat_run_dependencies", "realtime_revisions"]) {
+      for (const privilege of ["select", "insert", "update", "delete"]) {
+        const { rows: [row] } = await db.query<{ granted: boolean }>(
+          "select has_table_privilege($1,$2,$3) as granted", [worker, `public.${table}`, privilege]);
+        expect(row?.granted, `${privilege} ${table}`).toBe(false);
+      }
+      expect(await denied(worker, `select * from ${table}`)).toBe(true);
+      if(table!=="realtime_revisions") expect(await denied(worker, `delete from ${table}`)).toBe(true);
+    }
+  });
+
+  it("publishes ingestion revisions through invoker triggers without chat access", async () => {
+    await db.exec(`insert into "user"(id,name,email) values('role-realtime','Test','role-realtime@example.test');
+      insert into organizations(id,name,slug,created_by_user_id) values('role-realtime','Test','role-realtime','role-realtime');
+      insert into workspaces(id,org_id,user_id,name) values('role-realtime','role-realtime','role-realtime','Test');
+      insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage)
+        values('role-realtime-run','role-realtime','role-realtime','role-realtime','upload','processing','extract');
+      insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+        values('role-realtime-doc','role-realtime','role-realtime','role-realtime','role-realtime-run','test.txt','text/plain','fixture','queued');`);
+    const read = async () => (await db.query<{revision:string}>("select revision::text from realtime_revisions where org_id='role-realtime'")).rows[0]!.revision;
+    const before = BigInt(await read());
+    await as(worker, () => db.exec("update workspace_runs set stage='index' where id='role-realtime-run'"));
+    await as(worker, () => db.exec("update documents set status='processing' where id='role-realtime-doc'"));
+    // Exercises the separate deferred-materialization trigger as the worker.
+    await as(worker, () => db.exec(`insert into document_page_states(document_id,page_number,state)
+      values('role-realtime-doc',1,'indexed')`));
+    expect(BigInt(await read())).toBe(before + 3n);
+    const { rows } = await db.query<{prosecdef:boolean}>(`select prosecdef from pg_proc where proname in
+      ('realtime_changed','realtime_record_change','realtime_materialization_changed','realtime_search_session_changed')`);
+    expect(rows).toHaveLength(4);
+    expect(rows.every(row=>!row.prosecdef)).toBe(true);
+  });
   it("can read terminal receipts but cannot rewrite or delete them", async () => {
     expect(await denied(worker, "select id from run_terminal_receipts")).toBe(false);
     expect(await denied(worker, "update run_terminal_receipts set outcome = 'completed'")).toBe(true);
@@ -133,6 +166,21 @@ describe("worker role", () => {
 });
 
 describe("app role", () => {
+  it("uses native chat storage without DDL while ingestion access is denied and revoked", async () => {
+    const table="docslurp_mastra.mastra_background_tasks";
+    for(const privilege of ["select","insert","update","delete"]) {
+      const {rows:[row]}=await db.query<{allowed:boolean;denied:boolean}>(
+        "select has_table_privilege($1,$3,$4) as allowed,has_table_privilege($2,$3,$4) as denied",
+        [app,worker,table,privilege]);
+      expect(row).toEqual({allowed:true,denied:false});
+    }
+    expect(await denied(app,`select id from ${table}`)).toBe(false);
+    expect(await denied(app,"create table docslurp_mastra.app_ddl(id text)")).toBe(true);
+    expect(await denied(worker,`select id from ${table}`)).toBe(true);
+    await db.exec(`grant usage on schema docslurp_mastra to ${worker}; grant select on ${table} to ${worker}`);
+    await reconcileRoleGrants(db,{log:silent});
+    expect(await denied(worker,`select id from ${table}`)).toBe(true);
+  });
   it("has DML on every table but no DDL", async () => {
     expect(await denied(app, "select count(*) from api_keys")).toBe(false);
     expect(await denied(app, `update "user" set name = name`)).toBe(false);

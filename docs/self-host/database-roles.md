@@ -43,3 +43,20 @@ Rolling back is the reverse: point `DATABASE_URL` back at the owner. The roles a
 Neither runtime role runs DDL. The server and workers use `LISTEN`/`NOTIFY`, advisory locks (`pg_advisory_lock`, `pg_advisory_xact_lock`) and `to_regclass`/`information_schema` checks, none of which need ownership. Triggers and functions are `SECURITY INVOKER`, so the worker's list includes the tables its writes reach through triggers (for example `workspace_corpus_stats` and `credit_ledger`). Foreign-key cascades run as the table owner and need no grant.
 
 The server's database watchdog counts its own pool's backends in `pg_stat_activity`. Postgres shows a role the state of its own sessions, so the server's pool and probe must use the same role.
+
+Realtime publication keeps the ingestion worker separate from the native chat
+executor (the latter is a server process using the application database role).
+The ingestion worker has no access to `chat_operations`, `chat_operation_events`,
+`chat_run_dependencies` or the API's aggregate `realtime_revisions` view. Its run,
+document, usage and page-state writes invoke ordinary `SECURITY INVOKER` triggers.
+Those triggers need DML on `realtime_revision_counters`: insert a transaction's
+counter, read committed counters, fold their sum into a checkpoint and delete the
+folded rows. This table contains organization IDs and numeric counters, not chat
+payloads or credentials. No definer function or blanket schema grant is added.
+
+When the migrated `docslurp_mastra` schema exists, reconciliation grants the
+application role schema usage and DML/sequence access there, including default
+privileges for later owner-created tables. It still revokes CREATE. Public and
+ingestion-worker schema/table/sequence grants are revoked; a stale direct worker
+grant is removed on the next reconciliation. The native chat executor must use
+the application role, not ingestion-worker credentials.

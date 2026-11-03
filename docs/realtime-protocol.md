@@ -275,3 +275,18 @@ provider migration or flag activation is performed by these changes. The chosen
 Redis persistence, memory/eviction policy and production proxy must be validated
 before activation. See realtime-mastra-assessment.md for installed API evidence
 and the distinction between existing workspace chat logic and native ownership.
+
+### Revision publication and ingestion lock independence
+
+Migration 0120 preserves `realtime_revisions` as an aggregate read view while
+writers insert one counter per organization/transaction. Independent transactions
+no longer update a shared organization row. A nonblocking advisory try-lock allows
+one publisher to fold up to 256 already-committed counters into a checkpoint;
+other publishers append without waiting. Active transaction rows are invisible to
+that compactor, and committed rows are never written again by their producer.
+All counter changes and NOTIFY remain transactional, so rollback removes both the
+change and notification. Readers see a monotonic committed sum, including when
+transactions commit out of order. Normal sequential publication retains only the
+checkpoint and current transaction counter. Long transactions can defer compaction;
+monitor outstanding counter rows and include them in capacity testing rather than
+claiming a fixed row bound under arbitrary transaction duration/concurrency.
