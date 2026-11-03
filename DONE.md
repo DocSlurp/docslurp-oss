@@ -202,3 +202,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Added optional, bounded OpenRouter Nitro chat variants for GLM, DeepSeek and Luna, preserving base answer tiers and actual provider receipt accounting. Draft evaluation; missing receipts require manual reconciliation (see docs/openrouter-nitro.md).
 - 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.
+
+- Offer a costed chat settings proposal for verified empty retrieval indexes even with Suggestions off. The existing card lets users opt into re-indexing and ask again; no processing starts from model text. Ordinary zero-hit queries do not establish a missing index.
