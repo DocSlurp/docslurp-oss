@@ -11,16 +11,19 @@ export async function withPlanningProgress<T>(
   let lastProgress = Date.now();
   let details = { phase: "loading", completed: 0 };
   let heartbeatError: unknown;
+  let expired = false;
+  const isExpired = () => (expired ||= Date.now() - lastProgress >= 60_000);
   const checkpoint = (phase: string, completed = 0) => {
     signal.throwIfAborted();
     if (heartbeatError) throw heartbeatError;
+    if (isExpired()) throw new Error("Planning progress deadline exceeded");
     lastProgress = Date.now();
     details = { phase, completed };
     heartbeat(details);
   };
   checkpoint("loading");
   const timer = setInterval(() => {
-    if (signal.aborted || heartbeatError || Date.now() - lastProgress >= 60_000) return;
+    if (signal.aborted || heartbeatError || isExpired()) return;
     try { heartbeat(details); } catch (error) { heartbeatError = error; }
   }, 10_000);
   try {

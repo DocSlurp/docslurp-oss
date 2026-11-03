@@ -5,12 +5,14 @@ afterEach(() => vi.useRealTimers());
 it("bounds stalled I/O heartbeats and clears its timer", async () => {
   vi.useFakeTimers();
   const heartbeat = vi.fn();
-  await withPlanningProgress(new AbortController().signal, heartbeat, async (progress) => {
+  const persist = vi.fn();
+  await expect(withPlanningProgress(new AbortController().signal, heartbeat, async (progress) => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(heartbeat).toHaveBeenCalledTimes(6);
     progress("persisting", 100);
-    expect(heartbeat).toHaveBeenLastCalledWith({phase:"persisting", completed:100});
-  });
+    persist();
+  })).rejects.toThrow("Planning progress deadline exceeded");
+  expect(persist).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 });
 it("stops on cancellation before another persistence step", async () => {
