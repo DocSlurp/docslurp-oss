@@ -10,8 +10,14 @@ export interface RealtimeBackend {
 export const realtimeMetrics = {
   connections: 0, subscriptions: 0, snapshots: 0, projectionQueries: 0,
   revisionQueries: 0, coalesced: 0, errors: 0, resyncs: 0,
-  queuedBytes: 0, projectionMs: 0, rejected: 0,
+  queuedBytes: 0, projectionMs: 0, rejected: 0, notifications: 0, opened: 0, fallbackRequests: 0,
 };
+export const realtimeCloseReasons: Record<string, number> = Object.fromEntries([
+  "access_revoked", "resync_required", "projection_unavailable", "text_only", "rate_limit",
+  "generation_limit", "subscription_limit", "invalid_frame", "authorization_timeout",
+  "authorization_failed", "heartbeat_timeout", "transport_error", "server_restart",
+].map(reason => [reason, 0]));
+export const realtimeProjectionBuckets = [10, 50, 100, 250, 500, 1_000, 2_000, Infinity].map(le => ({ le, count: 0 }));
 type Observer = ((data: unknown, revision: number) => Promise<void>) & { failed?: () => void };
 type Entry = {
   userId: string; resource: DashboardResource; orgId: string;
@@ -62,7 +68,7 @@ export class RealtimeBroker {
     };
   }
   private async start() {
-    this.unlisten = await this.backend.listen(() => { realtimeMetrics.coalesced++; });
+    this.unlisten = await this.backend.listen(() => { realtimeMetrics.notifications++; });
     if (this.closed) { await this.unlisten(); return; }
     this.timer = setInterval(() => { void this.tick(); }, this.intervalMs);
     this.timer.unref();
@@ -86,12 +92,15 @@ export class RealtimeBroker {
             // second snapshot even if its notification was lost.
             if (!await this.backend.authorize(entry.userId, entry.resource)) throw new Error("forbidden");
             realtimeMetrics.projectionQueries++;
+            realtimeMetrics.coalesced += Math.max(0, entry.observers.size - 1);
             const data = await this.backend.project(entry.userId, entry.resource);
             entry.version = version;
             entry.revision++;
             await Promise.all([...entry.observers].map(observer => observer(data, entry.revision)));
             realtimeMetrics.snapshots++;
-            realtimeMetrics.projectionMs += Date.now() - began;
+            const elapsed = Date.now() - began;
+            realtimeMetrics.projectionMs += elapsed;
+            for (const bucket of realtimeProjectionBuckets) if (elapsed <= bucket.le) bucket.count++;
           } catch { entry.dirty = true; realtimeMetrics.errors++; for (const observer of entry.observers) observer.failed?.(); }
         }));
       }

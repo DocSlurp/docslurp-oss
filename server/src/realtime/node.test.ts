@@ -109,4 +109,17 @@ describe("real Node realtime Upgrade", () => {
     f.update({ runs: [] });
     await vi.waitFor(() => expect(second.frames.some(frame => frame.data?.runs?.length === 0)).toBe(true));
   });
+  it("bounds oversized snapshots with an explicit reconnect/resync close", async () => {
+    const f = await fixture(); const { ws } = await connect(f.url);
+    const closed = new Promise<{code:number;reason:string}>(resolve => ws.once("close",(code,reason) => resolve({code,reason:reason.toString()})));
+    f.update({ text: "x".repeat(600_000) }); subscribe(ws);
+    expect(await closed).toEqual({code:1013,reason:"resync_required"});
+  });
+  it("delivers ten distinct watched runs on one socket", async () => {
+    const f = await fixture(); const { ws,frames } = await connect(f.url);
+    for(let n=0;n<10;n++) subscribe(ws,`distinct-${n}`,{kind:"run",runId:`00000000-0000-4000-8000-${String(n+10).padStart(12,"0")}`});
+    await vi.waitFor(() => expect(frames.filter(frame => frame.type === "snapshot")).toHaveLength(10));
+    expect(f.backend.listen).toHaveBeenCalledTimes(1); expect(f.backend.project).toHaveBeenCalledTimes(10);
+  });
+
 });

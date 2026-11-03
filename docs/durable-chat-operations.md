@@ -28,9 +28,10 @@ Session-authenticated HTTP endpoints under `/v1/chat/operations`:
 `RealtimeOperationProvider`. Pass a callback that revalidates the **current
 socket's session**, including revocation, not a user lookup or cached actor.
 Close/abort only detaches observation. Every delivery checks workspace and
-owner again. Descendants are individually authorized. The provider reconciles
-SQL every second, including missed notifications; the socket host remains
-responsible for connection/subscription limits and session revalidation.
+owner again. Descendants are individually authorized. The integrated provider uses one shared tree-signature sweep per second, including
+missed notifications and offline descendant changes, then coalesces identical
+user/operation/cursor reads. The socket host bounds connections/subscriptions and
+revalidates the actual socket session. See `realtime-protocol.md`.
 Lifecycle snapshots include terminal errors even with no remaining text.
 
 The SQL row is the queue owner. Claiming creates a unique execution attempt and

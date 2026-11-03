@@ -1,3 +1,7 @@
+## Opt-in first-party realtime transport and durable chat integration (2026-11-03)
+
+- Add the session-only Node Upgrade adapter, mounted-host export, bounded shared dashboard projections, commit-visible revision reconciliation, durable operation provider hookup and shared tree reconciliation. Preserve parent job/child run identities and existing HTTP mutation/cancellation ownership. Flags remain off pending app integration, independent council review and measured canary gates; see `docs/realtime-protocol.md`.
+
 ## Explicit chat and ingestion Speed boost (2026-11-01)
 
 - API omission/false preserves baseline routing and credits; explicit true routes eligible GLM, DeepSeek and Luna generation through Nitro and charges 4× service credits. Preserve actual provider expenses separately. Persist immutable run intent and scale tenant-scoped reservations/leases and estimates. Reject direct Nitro configuration without opt-in. SDK supports explicit flags.

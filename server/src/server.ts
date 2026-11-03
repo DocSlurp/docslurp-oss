@@ -1,3 +1,4 @@
+import { realtimeMetrics } from "./realtime/broker.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
@@ -137,6 +138,10 @@ export function createApiApp(): Hono {
   app.use("*", serviceCors(env.corsAllowedOrigins));
   app.use("/dashboard/*", sessionAuth);
   app.use("/v1/*", sessionAuth);
+  app.use("/v1/*", async (c, next) => {
+    if (c.req.method === "GET" && c.req.header("X-Docslurp-Realtime-Fallback") === "1") realtimeMetrics.fallbackRequests++;
+    await next();
+  });
   // Records which client surface (web, SDK, CLI, MCP, ...) each user reaches us through.
   app.use("/v1/*", clientSurfaceMiddleware);
   app.use("/compat/*", clientSurfaceMiddleware);

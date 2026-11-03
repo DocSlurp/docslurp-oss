@@ -3,7 +3,7 @@ import type { Server, IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { parseRealtimeClientFrame, REALTIME_LIMITS as LIMITS, type RealtimeResource } from "@docslurp/shared";
-import { RealtimeBroker, realtimeMetrics, type RealtimeBackend } from "./broker.js";
+import { RealtimeBroker, realtimeMetrics, realtimeCloseReasons, type RealtimeBackend } from "./broker.js";
 import type { RealtimeOperationProvider } from "../services/realtime-operation.js";
 
 export interface RealtimeSession { userId: string; sessionId: string }
@@ -13,6 +13,7 @@ export interface RealtimeHostOptions {
   authenticate(headers: Headers): Promise<RealtimeSession | null>;
   backend: RealtimeBackend;
   operations?: RealtimeOperationProvider;
+  operationsForSession?: (headers: Headers, session: RealtimeSession) => RealtimeOperationProvider | undefined;
   /** Test/host injection; production defaults are the published limits. */
   authorizationRecheckMs?: number;
   reconcileMs?: number;
@@ -52,7 +53,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
     if (pending + wss.clients.size >= 512) return reject(socket, 503);
     pending++;
     let settled = false;
-    const finish = () => { if (!settled) { settled = true; pending--; } };
+    const finish = () => { settled = true; };
     const timeout = setTimeout(() => { finish(); reject(socket, 408); socket.destroy(); }, 5_000);
     socket.once("close", finish);
     void options.authenticate(headers).then(session => {
@@ -73,6 +74,8 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           transferred = true;
           socket.removeListener("close", releaseReservation);
           realtimeMetrics.connections++;
+          realtimeMetrics.opened++;
+          const operations = options.operationsForSession?.(headers, session) ?? options.operations;
           const controller = new AbortController();
           controllers.add(controller);
           const subscriptions = new Map<string, { generation: number; resource: RealtimeResource; close(): void | Promise<void> }>();
@@ -85,7 +88,9 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           let pong = true;
           let aliveAt = Date.now();
           const close = (code = 1008, reason = "access_revoked") => {
+            if (controller.signal.aborted) return;
             controller.abort();
+            if (Object.hasOwn(realtimeCloseReasons, reason)) realtimeCloseReasons[reason]++;
             ws.close(code, reason);
             const timer = setTimeout(() => ws.terminate(), 1_000); timer.unref();
           };
@@ -147,12 +152,15 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
               } };
               subscriptions.set(frame.subscriptionId, subscription);
               try {
-                const deliverFrame = (type: string, data: unknown, revision: number) => deliver(frame.subscriptionId, frame.generation, frame.resource, type, revision, data);
+                let operationRevision = 0;
+                const deliverFrame = (type: string, data: unknown, revision: number) =>
+                  deliver(frame.subscriptionId, frame.generation, frame.resource, type,
+                    frame.resource.kind === "operation" ? ++operationRevision : revision, data);
                 if (frame.resource.kind === "operation") {
-                  if (!options.operations) throw new Error("operation_unavailable");
-                  const observer = await options.operations.subscribe({ userId: session.userId, resource: frame.resource, signal: abort.signal,
+                  if (!operations) throw new Error("operation_unavailable");
+                  const observer = await operations.subscribe({ userId: session.userId, resource: frame.resource, signal: abort.signal,
                     observer: { snapshot: (data, seq) => deliverFrame("snapshot", data, seq), append: (data, seq) => deliverFrame("upsert", data, seq),
-                      resync: (data, seq, code) => deliverFrame("resync-required", { state: data, code }, seq) } });
+                      resync: (data, seq, code) => deliverFrame(code === "operation_unavailable" ? "error" : "resync-required", { state: data, code }, seq) } });
                   dispose = () => observer.close();
                 } else dispose = await broker.subscribe(session.userId, frame.resource, Object.assign(
                   (data: unknown, revision: number) => deliverFrame("snapshot", data, revision),
@@ -197,16 +205,17 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           });
         });
       } catch { releaseReservation(); socket.destroy(); }
-    }).catch(() => reject(socket, 503)).finally(() => { finish(); clearTimeout(timeout); socket.removeListener("close", finish); });
+    }).catch(() => { if (!socket.destroyed) reject(socket, 503); }).finally(() => { pending--; finish(); clearTimeout(timeout); socket.removeListener("close", finish); });
   };
   server.on("upgrade", upgrade);
   return {
     metrics: realtimeMetrics,
     async close() {
+      if (draining) return;
       draining = true;
       server.off("upgrade", upgrade);
       for (const controller of controllers) controller.abort();
-      for (const ws of wss.clients) { ws.close(1012, "server_restart"); setTimeout(() => ws.terminate(), 1_000).unref(); }
+      for (const ws of wss.clients) { realtimeCloseReasons.server_restart++; ws.close(1012, "server_restart"); setTimeout(() => ws.terminate(), 1_000).unref(); }
       await broker.close();
       wss.close();
     },

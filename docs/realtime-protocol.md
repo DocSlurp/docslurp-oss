@@ -1,9 +1,9 @@
 # Realtime protocol v1 (implementation contract)
 
-Status: contract only; the WebSocket host and projections are not yet implemented.
-Do not retire SSE or polling based on this document.
+Status: Node host, projections, durable-operation hookup and integration tests implemented.
+Disabled by default; browser migration, council review and canary measurements remain release gates.
 
-The first-party Node host will expose `/v1/realtime`, behind an opt-in feature
+The first-party Node host exposes `/v1/realtime`, behind an opt-in feature
 flag. Astro must attach the same upgrade adapter to its actual HTTP server.
 Use one socket per tab; reference-count subscribers in the existing page store.
 Uploads, mutations, generation initiation and cancellation remain HTTP operations.
@@ -20,7 +20,7 @@ Subscribe example:
 Unsubscribe carries the same subscription ID and generation, without resource.
 Heartbeat is `{"v":1,"type":"heartbeat"}`. Unknown fields and versions fail.
 Resources are activity/orgId, run/runId, workspace/workspaceId,
-documents/workspaceId/page, billing/orgId, and operation/operationId/after.
+documents/workspaceId/page, billing/orgId, economics/orgId/page, and operation/operationId/after.
 Documents use bounded pages; `after` is the last applied operation sequence.
 
 Server resource frames carry v, type, subscriptionId, generation, resource,
@@ -60,19 +60,19 @@ Do not derive allowed Origin from an untrusted Host or forwarding header.
 
 Limits: 8 KiB inbound frames, 120 messages/minute, 32 subscriptions/socket,
 512 KiB snapshots, 1 MiB queued output, 15-second heartbeat. Connection admission
-also needs process-wide and per-user bounds. Slow consumers force resync/close;
+is bounded to 512 active/pending connections per host and eight per user. Slow consumers force resync/close;
 never truncate terminal/delete semantics. Metrics contain counts/timing only.
 
 ## Coverage gate
 
 | Projection | Required committed changes | Current WS coverage |
 | --- | --- | --- |
-| Activity/jobs | Run creation, lifecycle, parent/child membership | Pending |
-| Run | Progress, completion, cancellation, retries | Pending |
-| Documents | Creation, update, deletion, ordering | Pending |
-| Workspace | Settings, membership, deletion | Pending |
-| Billing | Attributed spend, credits, permissions | Pending |
-| Operations | Output, descendants, attempts, terminal results | Separate durable owner |
+| Activity/jobs | Run creation, lifecycle, parent/child membership | workspace_runs trigger |
+| Run | Progress, completion, cancellation, retries | Run, event, run/document/page stage and performance triggers |
+| Documents | Creation, update, deletion, ordering | Document, tag and summary triggers |
+| Workspace | Settings, membership, deletion | Workspace, search settings, org/workspace membership triggers |
+| Billing/economics | Attributed spend, credits, permissions | Usage, organizations, credit ledger/pending debit/lease/hold triggers |
+| Operations | Output, descendants, attempts, terminal results | Shared tree signature sweep, authorized durable snapshots/replay |
 
 Polling removal is blocked until all relevant rows have publication and negative
 integration tests. Required host checks include real standalone and Astro Upgrade,
@@ -82,13 +82,14 @@ measurements establish p95 propagation at or below two seconds within fixed budg
 
 ## Integration update: Node adapter and payloads (2026-11-03)
 
-Implementation is in progress on `feat/realtime-core-319`, PR 278. The real Node
-adapter is implemented and socket/database integration tests are running.
+Implementation lives on `feat/realtime-core-319`, PR 278. Real Node Upgrade and
+migrated-database integration tests exercise the exported host entrypoint.
 Import `attachFirstPartyRealtime` from `@docslurp/server/realtime`, then call
 `const realtime = attachFirstPartyRealtime(nodeServer, { operations })` once on
 the actual Node HTTP server. Call `await realtime.close()` during draining.
-`operations` is the optional exported RealtimeOperationProvider. No provider
-means operation subscriptions fail closed. Standalone `main.ts` attaches it.
+`operations` optionally overrides the exported RealtimeOperationProvider. Otherwise,
+`DOCSLURP_DURABLE_CHAT=1` wires the integrated durable provider to the actual socket
+session. With that flag off, operation subscriptions fail closed. Standalone `main.ts` attaches it.
 Enable server-side with `REALTIME_ENABLED=true`; exact allowed Origins come from
 `CORS_ALLOWED_ORIGINS`. No Upgrade support is implied by mounting `apiApp.fetch`.
 
@@ -111,3 +112,52 @@ Do not append that window repeatedly. Older history remains an explicit HTTP rea
 A resource error evicts that subscription's data (including removed runs/workspaces).
 Collection snapshots replace missing members. Dashboard snapshots may skip revisions;
 only append-only operation output uses durable replay sequence semantics.
+
+
+## Consistency, reconciliation and operational limits
+
+Migration `0112_chat_operations` owns the durable queue; `0113_realtime_revisions`
+adds dashboard publication. Dashboard revisions update in the writer's transaction
+and roll back with it. Multiple writes to the same organization in one transaction
+produce one revision. PostgreSQL delivers the shared notification only at commit.
+One batched organization-revision query per second per active host reconciles even
+when every notification is lost. Expensive projections run only on changed revisions
+or fresh subscriptions, keyed by user and resource; eight execute concurrently.
+The organization revision row serializes concurrent writers for that organization;
+production contention and latency must be measured before canary promotion.
+
+Operations share one bounded tree-signature query per second rather than a timer
+and full recovery read per subscription. Signatures include descendants and the
+organization authorization revision. Changed trees load bounded recovery state;
+identical user/operation/cursor reads share a result during that sweep (up to 128
+cached recovery pages), while each observer still revalidates its own session.
+Task summaries use one bounded query and authorize each distinct workspace.
+Wire revisions for operation frames are independent of durable output sequences:
+child-only changes must remain visible when the parent's sequence stays fixed.
+Use `data.events[].sequence` and `data.watermark` for durable replay, never the wire
+revision. A `resync-required` operation frame contains `{state,code}` where state is
+the authoritative recovery snapshot: apply its watermark, then tail newer output.
+Do not blindly repeat an expired cursor. An operation `error` evicts the subscription.
+
+Run snapshots omit executor queries/reconciliation and workspace reads do not
+self-title as a side effect. Run snapshots cap stage rows at 1,000 and per-document
+page-progress entries at 2,000; over-limit snapshots close with an explicit resync
+reason rather than silently omit state. Economics runtimeMs is the sum of completed
+runs' created-to-updated wall time (includes queue/retry time), not CPU time or pure
+parser throughput. Economics usage is all-time attributed workspace spend.
+
+`/metrics` exports fixed-label realtime connection/subscription gauges, queued bytes,
+projection reads/time, revision queries, notifications, shared-read coalescing,
+resyncs, errors, fixed disconnect reasons and rejected admission counts.
+REST recovery requests should send `X-Docslurp-Realtime-Fallback: 1` to increment
+the authenticated fallback-request counter. It retains the existing metrics bearer
+policy. Projection-read counts are not a claim about SQL statements inside each
+projection; correlate with existing database telemetry for workload comparisons.
+
+Core tests cover real Upgrade, multiple subscriptions, missed notification and
+snapshot races, cross-tenant/role denial, malformed/oversized frames, admission limits,
+revoked/expired cached sessions, observer detach, another-host recovery, offline child
+discovery and authoritative deletion. These are local integration results, not a
+production proxy-idle or throughput acceptance result. The mounted Astro host,
+matched browser/CPU/memory/SQL baseline, production proxy idle/drain and canary gates
+remain coordinator/app integration work. Both flags remain off by default.

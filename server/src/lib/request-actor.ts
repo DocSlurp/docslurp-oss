@@ -256,6 +256,7 @@ export function assertActorWorkspaceOrgScope(
 export async function loadActorScopedWorkspace(
   workspaceRef: string,
   actor: RequestActor,
+  options: { refineNames?: boolean } = {},
 ): Promise<WorkspaceRecord | null> {
   // A blank reference (e.g. a missing stored ID) is never the default workspace here.
   if (!workspaceRef?.trim()) return null;
@@ -268,7 +269,7 @@ export async function loadActorScopedWorkspace(
         ? (await findWorkspaceForInput(ref, actorWorkspaceScope(actor)))?.id
         : undefined;
   if (!workspaceId) return null;
-  const workspace = await getWorkspace(workspaceId, actor.userId);
+  const workspace = await getWorkspace(workspaceId, actor.userId, options);
   if (!workspace) {
     return null;
   }
