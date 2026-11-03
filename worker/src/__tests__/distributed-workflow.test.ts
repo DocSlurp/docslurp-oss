@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ activities: {} as Record<string, any> }));
+const mocks = vi.hoisted(() => ({ cleanupInit: false, activities: {} as Record<string, any> }));
 vi.mock("@temporalio/workflow", () => ({
-  patched: () => false,
+  patched: (id: string) => id === "pipeline-init-lifecycle-v1" && mocks.cleanupInit,
   proxyActivities: () => new Proxy({}, { get: (_, key: string) => (...args: unknown[]) => mocks.activities[key](...args) }),
   defineQuery: (name:string) => name, defineSignal: (name:string) => name,
   CancellationScope: { nonCancellable: async (fn: () => Promise<unknown>) => fn() },
@@ -13,6 +13,7 @@ import { documentPipeline } from "../temporal/workflows.js";
 const zero = {inputTokens:0,outputTokens:0,costCents:0};
 describe("page workflow scheduling", () => {
   beforeEach(() => {
+    mocks.cleanupInit = false;
     Object.assign(mocks.activities, {
       initPipelineRun: vi.fn(async()=>({artifacts:{},documentIds:["doc"]})),
       runPipelineStage: vi.fn(async()=>({artifacts:{},usage:zero})),
@@ -64,5 +65,24 @@ describe("page workflow scheduling", () => {
     mocks.activities.failPipelineRun.mockImplementation(async()=>{expect(active).toBe(0);});
     await documentPipeline({runId:"run",pipeline:{} as never,stageOrder:["vision-extract"],pageConcurrency:10}).catch(()=>{});
     expect(mocks.activities.failPipelineRun).toHaveBeenCalled();expect(mocks.activities.runPipelineStage).not.toHaveBeenCalled();
+  });
+});
+
+describe("initialization lifecycle", () => {
+  it.each([false, true])("preserves old init failure history (patch=%s)", async (enabled) => {
+    mocks.cleanupInit = enabled;
+    const failure = new Error("init failed");
+    mocks.activities.initPipelineRun = vi.fn().mockRejectedValue(failure);
+    mocks.activities.failPipelineRun = vi.fn().mockRejectedValue(new Error("cleanup failed"));
+    await expect(documentPipeline({runId:"run",pipeline:{} as never,stageOrder:[]})).rejects.toBe(failure);
+    expect(mocks.activities.failPipelineRun).toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+  it("cleans up cancelled initialization without replacing cancellation", async () => {
+    mocks.cleanupInit = true;
+    const cancellation = new Error("cancelled");
+    mocks.activities.initPipelineRun = vi.fn().mockRejectedValue(cancellation);
+    mocks.activities.failPipelineRun = vi.fn().mockResolvedValue(undefined);
+    await expect(documentPipeline({runId:"run",pipeline:{} as never,stageOrder:[]})).rejects.toBe(cancellation);
+    expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
   });
 });

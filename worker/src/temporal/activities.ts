@@ -1,3 +1,4 @@
+import { withPlanningProgress } from "./planning-progress.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
@@ -237,26 +238,44 @@ export function createActivities(deps: ActivityDependencies) {
     async prepareVisionPageTasks(input: StageInput): Promise<VisionPageTask[]> {
       const stage = stageMap.get("vision-extract");
       if (!(stage instanceof VisionExtractStage)) return [];
-      const state = await loadRunState(store, input.runId, { totalStages: input.totalStages });
-      const tasks = await stage.planPageTasks(state, Context.current().cancellationSignal);
-      if (tasks.length) {
-        state.stage = "vision-extract";
-        await store.startRunStage(state, state.stage);
-        await store.pageTasks.enqueue(tasks);
-      }
-      return tasks;
+      const context = Context.current();
+      return withPlanningProgress(context.cancellationSignal, (details) => context.heartbeat(details), async (progress) => {
+        const state = await loadRunState(store, input.runId, { totalStages: input.totalStages });
+        progress("planning");
+        const tasks = await stage.planPageTasks(state, context.cancellationSignal, progress);
+        progress("starting-stage", tasks.length);
+        if (tasks.length) {
+          state.stage = "vision-extract";
+          await store.startRunStage(state, state.stage);
+          for (let offset = 0; offset < tasks.length; offset += 100) {
+            progress("persisting", offset);
+            await store.pageTasks.enqueue(tasks.slice(offset, offset + 100));
+          }
+        }
+        return tasks;
+      });
     },
 
     /** Plans page tasks and stores them (with payload) for child workflows; returns only the count. */
     async prepareVisionPageBatches(input: StageInput): Promise<VisionPageBatchPlan> {
       const stage = stageMap.get("vision-extract");
       if (!(stage instanceof VisionExtractStage)) return { total: 0 };
-      const state = await loadRunState(store, input.runId, { totalStages: input.totalStages });
-      const tasks = await stage.planPageTasks(state, Context.current().cancellationSignal);
-      if (!tasks.length) return { total: 0 };
-      state.stage = "vision-extract";
-      await store.startRunStage(state, state.stage);
-      return { total: await store.pageTasks.enqueueWithPayload(tasks) };
+      const context = Context.current();
+      return withPlanningProgress(context.cancellationSignal, (details) => context.heartbeat(details), async (progress) => {
+        const state = await loadRunState(store, input.runId, { totalStages: input.totalStages });
+        progress("planning");
+        const tasks = await stage.planPageTasks(state, context.cancellationSignal, progress);
+        progress("starting-stage", tasks.length);
+        if (!tasks.length) return { total: 0 };
+        state.stage = "vision-extract";
+        await store.startRunStage(state, state.stage);
+        let total = 0;
+        for (let offset = 0; offset < tasks.length; offset += 100) {
+          progress("persisting", offset);
+          total = await store.pageTasks.enqueueWithPayload(tasks.slice(offset, offset + 100));
+        }
+        return { total };
+      });
     },
 
     async loadVisionPageBatch(input: { runId: string; offset: number; limit: number }): Promise<VisionPageTask[]> {

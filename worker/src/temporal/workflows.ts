@@ -246,37 +246,40 @@ export async function documentPipeline(
     }
   };
 
-  // Initialize the run: load docs, set processing status
-  const initResult = await (scaling?.quick ?? quickActivities).initPipelineRun({
-    runId: input.runId,
-    totalStages: stageOrder.length,
-  });
-  let artifacts = initResult.artifacts;
-
-  /** Document shards this run dispatches for a stage (fewer than two: none). */
-  const shardPlan = (stageName: string): string[][] => {
-    const sharding = input.documentSharding;
-    if (!sharding || !scaling || !SHARDABLE_STAGES.includes(stageName)) return [];
-    // Only the documents this stage works on; the stage pass takes the rest as no-ops.
-    const types = initResult.documentMimeTypes;
-    const picked = initResult.documentIds.flatMap((id, index) => !types || stageWorksOn(stageName, types[index]) ? [index] : []);
-    return planDocumentShards(
-      picked.map((index) => initResult.documentIds[index]!),
-      initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
-      sharding,
-    );
-  };
-  // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
-  const groupable = scaling && input.groupableStages ? new Set<string>(input.groupableStages) : null;
-  // Recorded in workflow input: runs started without it never plan page-range shards.
-  const pageRangeStages = input.pageRangeSharding && scaling
-    ? new Set(input.pageRangeSharding.stages.filter((stage) => PAGE_RANGE_SHARDABLE_STAGES.includes(stage)))
-    : null;
-  const needsPreWork = (stageName: string): boolean =>
-    (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
-    || (pageRangeStages?.has(stageName) ?? false);
-
+  const cleanupInit = patched("pipeline-init-lifecycle-v1");
+  let initialized = false;
   try {
+    // Initialize the run: load docs, set processing status
+    const initResult = await (scaling?.quick ?? quickActivities).initPipelineRun({
+      runId: input.runId,
+      totalStages: stageOrder.length,
+    });
+    initialized = true;
+    let artifacts = initResult.artifacts;
+
+    /** Document shards this run dispatches for a stage (fewer than two: none). */
+    const shardPlan = (stageName: string): string[][] => {
+      const sharding = input.documentSharding;
+      if (!sharding || !scaling || !SHARDABLE_STAGES.includes(stageName)) return [];
+      // Only the documents this stage works on; the stage pass takes the rest as no-ops.
+      const types = initResult.documentMimeTypes;
+      const picked = initResult.documentIds.flatMap((id, index) => !types || stageWorksOn(stageName, types[index]) ? [index] : []);
+      return planDocumentShards(
+        picked.map((index) => initResult.documentIds[index]!),
+        initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
+        sharding,
+      );
+    };
+    // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
+    const groupable = scaling && input.groupableStages ? new Set<string>(input.groupableStages) : null;
+    // Recorded in workflow input: runs started without it never plan page-range shards.
+    const pageRangeStages = input.pageRangeSharding && scaling
+      ? new Set(input.pageRangeSharding.stages.filter((stage) => PAGE_RANGE_SHARDABLE_STAGES.includes(stage)))
+      : null;
+    const needsPreWork = (stageName: string): boolean =>
+      (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
+      || (pageRangeStages?.has(stageName) ?? false);
+
     // Execute each stage sequentially
     for (let i = 0; i < stageOrder.length; i++) {
       // Handle pause/cancel signals
@@ -546,6 +549,8 @@ export async function documentPipeline(
 
     return { runId: input.runId, usage };
   } catch (error) {
+    // Old failed-init histories ended without a cleanup activity.
+    if (!initialized && !cleanupInit) throw error;
     // Record failure in DB (best-effort — don't let this throw mask the real error)
     const message =
       rootCause(error) ?? (error instanceof Error ? error.message : String(error));
