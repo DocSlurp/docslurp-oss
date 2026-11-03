@@ -116,3 +116,13 @@ expires. A 240 KiB streamed answer completes and recovers without duplicate stor
 answer text or an oversized recovery envelope. Embedding tests cover cancellation
 during model/spend lookup and before/during provider dispatch. No provider calls or
 production traffic were used; the ephemeral database was removed afterward.
+
+A subsequent adversarial recheck cleared the above repairs and identified map
+routing as a sibling cancellation gap. Router calls now receive the owner signal,
+check it after spend admission, and pass it to generation. Deferred search checks
+cancellation even when the map locator degrades a provider error. The audit also
+added checks before materialization run/workflow creation, so cancellation during
+spend admission or run creation does not launch a new paid workflow. Already
+accepted workflows retain their independent ownership. The three affected routing,
+deferred-search and workspace-chat suites pass 139 tests under strict rejection
+handling, including the new spend/create/dispatch races.

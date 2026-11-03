@@ -140,8 +140,8 @@ function emptyStats(over: Partial<DeferredSearchStats>): DeferredSearchStats {
  * vectors of deferred-mode documents, materialize only those pages (bounded by
  * the policy), then return chunks restricted to the candidate documents with
  * the pages the locators picked ranked first. Returns null when the scope has
- * no deferred documents. Never throws: any failure degrades to the normal
- * retrieval path with a diagnostic.
+ * no deferred documents. Provider failures degrade to normal retrieval with a diagnostic; explicit
+ * cancellation propagates to the execution owner.
  */
 export async function runDeferredPageSearch(
   args: DeferredSearchArgs,
@@ -149,6 +149,7 @@ export async function runDeferredPageSearch(
 ): Promise<DeferredSearchResult | null> {
   const { journal, workspaceId } = args;
   try {
+    args.signal?.throwIfAborted();
     const startedAt = deps.now();
     const selected = scopedDocumentIds(args.options);
     if (selected?.length === 0) return null;
@@ -186,9 +187,10 @@ export async function runDeferredPageSearch(
     const spend = () => (spendOk ??= deps.canSpend(args.orgId, workspaceId));
     let routerCall: MapRouterCall | undefined;
     if (args.openRouterApiKey && policy.mapRouter !== "off") {
-      const llm = createMapRouterCall({ apiKey: args.openRouterApiKey, privacyMode: args.privacyMode, journal });
+      const llm = createMapRouterCall({ apiKey: args.openRouterApiKey, privacyMode: args.privacyMode, journal, signal: args.signal });
       routerCall = async (input) => {
         if (!(await spend())) throw new Error("router skipped: cannot spend");
+        args.signal?.throwIfAborted();
         return llm(input);
       };
     }
@@ -216,6 +218,7 @@ export async function runDeferredPageSearch(
         : Promise.resolve({ pages: [], routerUsed: false, confident: true }),
       locateImages(visualDocs).catch(() => { args.signal?.throwIfAborted(); return { list: [] as Candidate[], degraded: true }; }),
     ]);
+    args.signal?.throwIfAborted();
     const mapList: Candidate[] = map.pages.map((p) => ({ documentId: p.documentId, page: p.page, locator: "map-node" as const }));
     let degraded = images.degraded;
     let lists = [mapList, images.list];
@@ -244,7 +247,7 @@ export async function runDeferredPageSearch(
     if (stats.materializedPages > 0) deps.invalidateVectors(workspaceId);
     if (stats.temperature === "hot" || candidates.length === 0) return { chunks: [], stats, documentIds: documentIdsInScope };
 
-    if (args.signal?.aborted) return { chunks: [], stats, documentIds: documentIdsInScope };
+    args.signal?.throwIfAborted();
     const documentIds = [...new Set(candidates.map((c) => c.documentId))];
     const restricted: SearchOptions = {
       ...args.options,

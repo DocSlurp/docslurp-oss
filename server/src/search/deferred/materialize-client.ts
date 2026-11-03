@@ -211,9 +211,11 @@ export async function materializeForQuery(
     pages.sort((a, b) => a - b);
     let runId: string | null = null;
     try {
+      args.signal?.throwIfAborted();
       runId = await deps.createRun({
         orgId: args.orgId, userId: args.userId, workspaceId: args.workspaceId, documentId, documents: 1, pages: pages.length,
       });
+      args.signal?.throwIfAborted();
       const outcome = await deps.startWorkflow(
         {
           runId, documentId, pages, reason: "query", sessionId: args.sessionId,
@@ -228,6 +230,7 @@ export async function materializeForQuery(
       console.warn(`[deferred-search] materialize start failed document=${documentId}: ${message}`);
       args.recordDiagnostic?.("deferredStartFailure", { documentId, message });
       if (runId) await deps.failRun(runId, message).catch(() => undefined);
+      args.signal?.throwIfAborted();
       failedDocs.add(documentId);
       args.onEvent?.({ type: "materialize-failed", documentId, pages });
     }
