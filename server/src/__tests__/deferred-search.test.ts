@@ -138,6 +138,16 @@ describe("materializeForQuery", () => {
     expect(diagnostics).toEqual(["deferredStartFailure"]);
   });
 
+  it.each(["spend", "create"])("does not launch materialization after cancellation during %s", async boundary => {
+    const controller = new AbortController();
+    const {deps, started} = fakeDeps({});
+    if (boundary === "spend") vi.mocked(deps.canSpend).mockImplementation(async () => {controller.abort(); return true;});
+    else vi.mocked(deps.createRun).mockImplementation(async () => {controller.abort(); return "cancelled-run";});
+    await expect(materializeForQuery({...base, candidates:[{documentId:"d1",page:1}],signal:controller.signal},deps)).rejects.toMatchObject({name:"AbortError"});
+    expect(started).toHaveLength(0);
+    if (boundary === "create") expect(deps.failRun).toHaveBeenCalled();
+  });
+
   it("stops polling when the client aborts", async () => {
     const { deps } = fakeDeps({}, { indexAfterPolls: 99 });
     const controller = new AbortController();
@@ -301,6 +311,19 @@ describe("runDeferredPageSearch", () => {
     const result = await runDeferredPageSearch(args, d);
     expect(result!.chunks).toEqual([]);
     expect(args.search.textSearch).not.toHaveBeenCalled();
+  });
+
+  it("propagates cancellation while map-router spend admission is pending", async () => {
+    const controller = new AbortController();
+    const locateMap = vi.fn(async ({routerCall}: { routerCall: (input: {query: string; nodes: []}) => Promise<string[]> }) => {
+      await expect(routerCall({query:"q",nodes:[]})).rejects.toMatchObject({name:"AbortError"});
+      // The real map locator degrades router errors; the enclosing search must still abort.
+      return {pages:[],routerUsed:false,confident:false};
+    });
+    const materialize = vi.fn();
+    const d = deps({ locateMap, materialize, canSpend: vi.fn(async () => {controller.abort(); return true;}) });
+    await expect(runDeferredPageSearch(searchArgs(journal(), {signal:controller.signal,openRouterApiKey:"test"}), d)).rejects.toMatchObject({name:"AbortError"});
+    expect(materialize).not.toHaveBeenCalled();
   });
 
   it.each(["listModels", "canSpend"])("does not dispatch image embeddings after cancellation during %s", async boundary => {

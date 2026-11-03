@@ -44,15 +44,18 @@ export function createMapRouterCall(args: {
   privacyMode: PrivacyMode;
   journal: UsageRecorder;
   model?: string;
+  signal?: AbortSignal;
 }): MapRouterCall {
   const model = args.model ?? SEARCH_OPENROUTER_MODEL;
   return async (input) => {
+    args.signal?.throwIfAborted();
     const result = await generateOpenRouterText({
       operation: "api.search.map-router",
       apiKey: args.apiKey,
       privacyMode: args.privacyMode,
       model,
       maxOutputTokens: 200,
+      signal: args.signal,
       prompt: buildMapRouterPrompt(input),
     });
     args.journal.record({ provider: "openrouter", model, metric: "map-router", ...result.usage });

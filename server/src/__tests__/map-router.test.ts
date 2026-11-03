@@ -118,6 +118,22 @@ describe("map router call", () => {
     expect(parseRouterNodeIds("{broken")).toEqual([]);
   });
 
+  it.each(["before", "during"])("honors cancellation %s map routing", async phase => {
+    vi.mocked(ai.generateOpenRouterText).mockReset();
+    const controller = new AbortController();
+    vi.mocked(ai.generateOpenRouterText).mockImplementation(async args => {
+      expect(args.signal).toBe(controller.signal);
+      const pending = new Promise<never>((_resolve, reject) => args.signal!.addEventListener("abort", () => reject(args.signal!.reason), { once: true }));
+      controller.abort();
+      return pending;
+    });
+    if (phase === "before") controller.abort();
+    const call = createMapRouterCall({ apiKey: "k", privacyMode: "standard", journal: { record: vi.fn() }, signal: controller.signal });
+    await expect(call({ query: "q", nodes: [] })).rejects.toMatchObject({ name: "AbortError" });
+    expect(ai.generateOpenRouterText).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
+    vi.mocked(ai.generateOpenRouterText).mockReset();
+  });
+
   it("records usage as metric map-router with a 200 token cap", async () => {
     vi.mocked(ai.generateOpenRouterText).mockResolvedValueOnce({
       text: '{"nodeIds":["doc-1:n2"]}',
