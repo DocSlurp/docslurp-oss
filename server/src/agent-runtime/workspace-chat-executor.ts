@@ -91,7 +91,7 @@ export function createWorkspaceChatExecutor(manager:BackgroundTaskManager,pubsub
     try {
       await check();
       if(await workspaceChatDisabledBody(binding.workspace_id,binding.user_id))throw new Error("chat_disabled");
-      const result=await withNativeChatRunOwner({...binding,nativeTaskId:task.id,nativeOwnerId:manager.ownerId},
+      const result=await withNativeChatRunOwner({...binding,sessionId:actor.sessionId,signal,nativeTaskId:task.id,nativeOwnerId:manager.ownerId},
         ()=>withDeferredContext({signal},()=>chatWorkspace({
           workspaceId:binding.workspace_id,userId:binding.user_id,query:String(binding.input.q),
           sessionId:binding.input.sessionId as string|undefined,model:binding.input.model as string|undefined,

@@ -646,7 +646,7 @@ export async function listEditableWorkspaceIds(userId: string): Promise<string[]
   return withinRequestKeyAllowlist(rows.map((row) => row.workspace_id));
 }
 
-export async function getWorkspaceAccess(workspaceId: string, userId: string, client: typeof sql = sql): Promise<WorkspaceAccess | null> {
+export async function getWorkspaceAccess(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<WorkspaceAccess | null> {
   const [row] = await client<{
     workspace_id: string;
     org_id: string;

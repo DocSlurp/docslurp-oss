@@ -2,12 +2,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type postgres from "postgres";
 import { sql } from "../db.js";
+import { getWorkspaceAccess } from "./organizations.js";
+import { revalidateRealtimeSession } from "../realtime/session.js";
 import type { Operation } from "./chat-operations.js";
 
 // Server-only execution context: never accept operation identity from a tool argument.
-type RunOwner = Pick<Operation, "id" | "user_id" | "org_id"> & {attempt_id?:string|null;nativeTaskId?:string;nativeOwnerId?:string};
+type RunOwner = Pick<Operation, "id" | "user_id" | "org_id"> & {sessionId:string;signal:AbortSignal;attempt_id?:string|null;nativeTaskId?:string;nativeOwnerId?:string};
 const owner = new AsyncLocalStorage<RunOwner>();
-export function withChatRunOwner<T>(task: Operation, work: () => Promise<T>) { return owner.run(task, work); }
+export function withChatRunOwner<T>(task: Operation & {signal:AbortSignal}, work: () => Promise<T>) { return owner.run({...task,sessionId:String(task.input.authSessionId)}, work); }
 
 export function withNativeChatRunOwner<T>(task: RunOwner & {nativeTaskId:string;nativeOwnerId:string}, work:()=>Promise<T>) {return owner.run(task,work);}
 
@@ -40,6 +42,13 @@ export async function acceptChatRunDependency<T>(scope: {
       const [count] = await tx`select (select count(*) from chat_operations where root_id=${root.id}) +
         (select count(*) from chat_run_dependencies d join chat_operations c on c.id=d.operation_id where c.root_id=${root.id}) as n`;
       if (Number(count!.n)>=64 || !scope.pages.length || scope.pages.length>256) throw new Error("dependency_limit");
+    }
+    if (task) {
+      task.signal.throwIfAborted();
+      const session = await revalidateRealtimeSession({userId:task.user_id,sessionId:task.sessionId}, task.signal, tx);
+      const access = session && await getWorkspaceAccess(scope.workspaceId, task.user_id, tx);
+      if (!access || access.orgId !== scope.orgId) throw new Error("dependency_access_revoked");
+      task.signal.throwIfAborted();
     }
     const result = await allocate(tx);
     if (task) await tx`insert into chat_run_dependencies(id,operation_id,run_id,document_id,pages)

@@ -52,3 +52,9 @@ Dashboard matched idle SQL fell896→43 versus legacy89; progress826 versus722,
 burst140 versus1215 and reconnect154 versus100. Raw workload, CPU/RSS/query
 attribution and limitations are in realtime-local-workload.md. Do not infer full
 capacity acceptance from the idle fix. Flags remain off; no merge/deployment.
+
+## Final adversarial review repairs (2026-11-03)
+
+Review of frozen `f10b6e86` identified a high-severity gap: shared materialization acceptance checked task lease/cancellation but not the originating session or current workspace authority after waiting for the root lock. Both execution adapters now carry the trusted session identity and abort signal. Acceptance uses the same transaction to revalidate the session and existing workspace-access policy immediately before allocation, and checks abort before dispatch. Existing accepted shared work retains its documented independent lifecycle.
+
+Validation: eight dependency tests pass on isolated PostgreSQL 17 with five connections. Deterministic contention tests hold the root lock, confirm acceptance is waiting, revoke the session or org membership (or abort), then release the lock; each produces zero allocated runs and dependency records. Server TypeScript passes. The disposable database was removed. Independent security recheck remains required.
