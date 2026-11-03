@@ -1,5 +1,5 @@
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
-import { assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
+import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
@@ -1357,7 +1357,7 @@ export class Store {
   }
 
   /** Marks a run stage processing and checkpoints run progress in the same transaction. */
-  async startRunStage(state: WorkflowState, stage: string): Promise<void> {
+  async startRunStage(state: WorkflowState, stage: string, owner?: ExecutionOwner): Promise<void> {
     state.setRunStage({
       runId: state.run.id,
       stageName: stage,
@@ -1372,7 +1372,7 @@ export class Store {
     });
     state.refreshStats();
 
-    await this.writeProgress(state, (client) => [
+    const prelude = (client: Sql<Record<string, unknown>>) => [
       client`
         insert into workspace_run_stage_states (run_id, stage_name, status, attempts, stats, started_at, updated_at)
         values (${state.run.id}, ${stage}, 'processing', 1, '{}'::jsonb, now(), now())
@@ -1386,7 +1386,39 @@ export class Store {
       `,
       // The stage's own pass starts once its shards are done.
       client`update workspace_runs set shard_demand = 0 where id = ${state.run.id} and shard_demand <> 0`,
-    ]);
+    ];
+    if (owner) {
+      if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.workspaceId !== state.run.workspaceId) throw new StaleExecutionError();
+      await this.creditLeases.active();
+      if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
+      const afterCommit: Array<() => void> = [];
+      try {
+        await this.sql.begin(async tx => {
+          await assertPlanningOwnership(tx, owner);
+          await this.writeProgressNow(state, prelude, {}, { client: tx as unknown as typeof this.sql, afterCommit });
+        });
+      } catch (error) {
+        if (error instanceof StaleExecutionError) {
+          // Paid receipts survive a stale planner, but its progress snapshot does not.
+          const batch = state.usageLedger.checkpoint();
+          if (batch.events.length) {
+            await this.sql.begin(async tx => {
+              const client = tx as unknown as typeof this.sql;
+              const [run] = await client`select id from workspace_runs where id = ${owner.runId}
+                and org_id = ${owner.orgId} and workspace_id = ${owner.workspaceId} for update`;
+              if (!run) throw new StaleExecutionError();
+              const costCents = await persistRunUsageEvents({ client, state, usageEvents: batch.events });
+              await debitRunUsageCredits({ client, state, costCents });
+            });
+            batch.commit();
+          }
+        }
+        throw error;
+      }
+      for (const commit of afterCommit) commit();
+    } else {
+      await this.writeProgress(state, prelude);
+    }
 
     await this.appendEvent({
       userId: state.run.userId,

@@ -27,3 +27,14 @@ export async function assertExecutionOwnership(tx: TransactionSql, owner: Execut
   `;
   if (!row) throw new StaleExecutionError();
 }
+
+
+/** Planning may mutate only a live execution, including on same-owner retries. */
+export async function assertPlanningOwnership(tx: TransactionSql, owner: ExecutionOwner): Promise<void> {
+  await assertExecutionOwnership(tx, owner);
+  const [row] = await tx`
+    select id from workspace_runs where id = ${owner.runId}
+      and status in ('queued', 'processing')
+      and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
+  if (!row) throw new StaleExecutionError();
+}

@@ -17,6 +17,7 @@ export type StageName = (typeof STAGE_ORDER)[number];
 // ── Activity input/output types ──
 
 export interface StageInput {
+  executionGeneration?: string;
   stageName: string;
   runId: string;
   totalStages: number;

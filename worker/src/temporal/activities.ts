@@ -246,10 +246,10 @@ export function createActivities(deps: ActivityDependencies) {
         progress("starting-stage", tasks.length);
         if (tasks.length) {
           state.stage = "vision-extract";
-          await store.startRunStage(state, state.stage);
+          await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
           for (let offset = 0; offset < tasks.length; offset += 100) {
             progress("persisting", offset);
-            await store.pageTasks.enqueue(tasks.slice(offset, offset + 100));
+            await store.pageTasks.enqueue(tasks.slice(offset, offset + 100), { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
           }
         }
         return tasks;
@@ -268,8 +268,8 @@ export function createActivities(deps: ActivityDependencies) {
         progress("starting-stage", tasks.length);
         if (!tasks.length) return { total: 0 };
         state.stage = "vision-extract";
-        await store.startRunStage(state, state.stage);
-        const total = await store.pageTasks.enqueueWithPayload(tasks, (offset) => progress("persisting", offset));
+        await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+        const total = await store.pageTasks.enqueueWithPayload(tasks, (offset) => progress("persisting", offset), { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
         return { total };
       });
     },

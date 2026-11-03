@@ -354,7 +354,7 @@ export async function documentPipeline(
 
       // The opt-in value is recorded in workflow input: existing histories retain their command sequence.
       if (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1 && scaling && input.pageChildBatchSize) {
-        const plan = await scaling.standard.prepareVisionPageBatches({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts });
+        const plan = await scaling.standard.prepareVisionPageBatches({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts, ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}) });
         const batchSize = Math.max(50, Math.min(2_000, input.pageChildBatchSize));
         const batches = Math.ceil(plan.total / batchSize);
         // Two children overlap so one batch's tail does not idle the run's window.
@@ -392,7 +392,7 @@ export async function documentPipeline(
         if (childFailure) throw childFailure;
         if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
       } else if (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) {
-        const tasks = await prepareVisionPageTasks({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts });
+        const tasks = await prepareVisionPageTasks({ stageName, runId: input.runId, totalStages: stageOrder.length, artifacts, ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}) });
         const bundleSize = Math.max(1, Math.min(8, input.pageBundleSize ?? 1));
         const bundles: typeof tasks[] = [];
         for (const task of tasks) {
