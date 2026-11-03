@@ -46,6 +46,8 @@ export interface UsageSummary {
 }
 
 export interface InitRunInput {
+  /** Absent only for pre-generation workflow histories. */
+  executionGeneration?: string;
   runId: string;
   totalStages: number;
 }
@@ -154,10 +156,14 @@ export const SHARDABLE_STAGES: readonly string[] = [
 ];
 
 export interface CompleteRunInput {
+  /** Absent only for pre-generation workflow histories. */
+  executionGeneration?: string;
   runId: string;
 }
 
 export interface FailRunInput {
+  /** Absent only for pre-generation workflow histories. */
+  executionGeneration?: string;
   runId: string;
   stage: string;
   message: string;
@@ -172,6 +178,8 @@ export interface FailRunInput {
 // ── Workflow input/output types ──
 
 export interface PipelineWorkflowInput {
+  /** Absent only for pre-generation workflow histories. */
+  executionGeneration?: string;
   runId: string;
   pipeline: PipelineFeatures;
   stageOrder?: StageName[];

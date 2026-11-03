@@ -2340,6 +2340,7 @@ export const workspaceRuns = pgTable(
       .default(sql`now() + interval '5 minutes'`),
     // Null until a Temporal workflow start is confirmed; run-start recovery
     // retries queued runs without one (0029_run_workflow_start_tracking).
+    executionGeneration: text("execution_generation").default(sql`gen_random_uuid()::text`),
     workflowStartedAt: timestamp("workflow_started_at", {
       withTimezone: true,
       mode: "string",

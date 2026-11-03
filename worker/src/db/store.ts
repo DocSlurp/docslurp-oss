@@ -1,3 +1,4 @@
+import { assertExecutionOwnership, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
@@ -477,6 +478,8 @@ async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId:
 }
 
 export class Store {
+  /** Use inside the transaction that performs init or terminal writes. */
+  readonly assertExecutionOwnership = assertExecutionOwnership;
   async beginGeoAttempt(state: WorkflowState, documentId: string, schema: Record<string, unknown>) {
     if (!state.run.workspaceId || !state.run.orgId) throw new Error("Geo extraction requires tenant scope");
     return beginGeoAttempt(this.sql, {documentId, workspaceId:state.run.workspaceId, orgId:state.run.orgId, runId:state.run.id}, schema);
@@ -721,7 +724,24 @@ export class Store {
     `;
   }
 
-  async updateProgress(state: WorkflowState): Promise<void> {
+  async updateProgress(state: WorkflowState, init?: { executionGeneration?: string }): Promise<void> {
+    if (init) {
+      // Init has no paid usage to settle. Refuse the entire write when obsolete,
+      // terminal, or cancelled, rather than allowing a late snapshot to revive it.
+      const [row] = await this.sql<{ id: string }[]>`
+        update workspace_runs set status = 'processing',
+          stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
+          artifacts = ${this.toJson(state.artifacts)}::jsonb, updated_at = now()
+        where id = ${state.run.id} and org_id = ${state.run.orgId ?? null}
+          and workspace_id = ${state.run.workspaceId ?? null}
+          and execution_generation is not distinct from ${init.executionGeneration ?? null}
+          and status in ('queued', 'processing')
+          and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')
+        returning id
+      `;
+      if (!row) throw new StaleExecutionError();
+      return;
+    }
     await this.writeProgress(state);
   }
 

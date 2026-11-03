@@ -267,6 +267,7 @@ export async function documentPipeline(
   try {
     // Initialize the run: load docs, set processing status
     const initResult = await (scaling?.quick ?? quickActivities).initPipelineRun({
+      ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
       runId: input.runId,
       totalStages: stageOrder.length,
     });
@@ -563,7 +564,7 @@ export async function documentPipeline(
       rssBytes: 0,
     };
 
-    await (scaling?.quick ?? quickActivities).completePipelineRun({ runId: input.runId });
+    await (scaling?.quick ?? quickActivities).completePipelineRun({ runId: input.runId, ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}) });
 
     return { runId: input.runId, usage };
   } catch (error) {
@@ -574,6 +575,7 @@ export async function documentPipeline(
       rootCause(error) ?? (error instanceof Error ? error.message : String(error));
     await CancellationScope.nonCancellable(() => (scaling?.quick ?? quickActivities)
       .failPipelineRun({
+        ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
         runId: input.runId,
         stage: progress.stage,
         message,

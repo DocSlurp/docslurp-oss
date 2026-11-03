@@ -7,7 +7,7 @@ import "../env.js";
  * and query pipeline workflows.
  */
 
-import { Client, Connection, WorkflowExecutionAlreadyStartedError, type WorkflowExecutionStatusName } from "@temporalio/client";
+import { Client, Connection, WorkflowNotFoundError, WorkflowExecutionAlreadyStartedError, type WorkflowExecutionStatusName } from "@temporalio/client";
 import {
   WorkflowIdConflictPolicy,
   WorkflowIdReusePolicy,
@@ -381,7 +381,7 @@ export function pipelineStageOrderForStart(pipeline: PipelineFeatures, flagEnabl
 export async function startPipelineWorkflow(
   runId: string,
   pipeline: PipelineFeatures,
-  options?: { restartExisting?: boolean }
+  options?: { restartExisting?: boolean; executionGeneration?: string }
 ): Promise<void> {
   const client = await getClient();
   const scope = await runSlotScope(runId);
@@ -395,20 +395,33 @@ export async function startPipelineWorkflow(
   const capabilities = configured.WORKER_INDEX_BEFORE_ENRICH || configured.WORKER_GROUP_ADJACENT_STAGES
     ? await effectiveFleetCapabilities(route.taskQueue)
     : null;
+  let restartExisting = options?.restartExisting;
+  if (options?.executionGeneration) {
+    try {
+      const existing = await client.workflow.getHandle(`${WORKFLOW_ID_PREFIX}${runId}`).describe();
+      // A retry of an accepted intent must not terminate or rerun that execution,
+      // even if the response/SQL acknowledgement was lost.
+      if (existing.memo?.executionGeneration === options.executionGeneration) return;
+      restartExisting = true;
+    } catch (error) {
+      if (!(error instanceof WorkflowNotFoundError)) throw error;
+    }
+  }
   await client.workflow.start("documentPipeline", {
     taskQueue: route.taskQueue,
     workflowId: `${WORKFLOW_ID_PREFIX}${runId}`,
-    args: [{ runId, pipeline, stageOrder: resolveWorkflowStageOrder(pipeline, process.env, capabilities),
+    args: [{ runId, pipeline, ...(options?.executionGeneration ? { executionGeneration: options.executionGeneration } : {}), stageOrder: resolveWorkflowStageOrder(pipeline, process.env, capabilities),
       pageBundleSize: Math.max(1, Math.min(8, Number.parseInt(process.env.WORKER_PAGE_BUNDLE_SIZE ?? "1", 10) || 1)),
       pageConcurrency, ...resolveWorkflowScalingInput(process.env, route, scope, capabilities) }],
     ...(priority ? { priority } : {}),
     // Let queued runs survive worker deploys and heavy-doc retries without
     // leaving SQL state stranded in "processing" when Temporal closes them.
     workflowExecutionTimeout,
-    workflowIdReusePolicy: options?.restartExisting
+    ...(options?.executionGeneration ? { memo: { executionGeneration: options.executionGeneration } } : {}),
+    workflowIdReusePolicy: restartExisting
       ? WorkflowIdReusePolicy.ALLOW_DUPLICATE
       : undefined,
-    workflowIdConflictPolicy: options?.restartExisting
+    workflowIdConflictPolicy: restartExisting
       ? WorkflowIdConflictPolicy.TERMINATE_EXISTING
       : undefined,
   });

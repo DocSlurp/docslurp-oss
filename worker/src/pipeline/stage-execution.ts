@@ -252,7 +252,7 @@ export function createStageExecution(deps: {
     state.run.status = "processing";
     state.totalStages = input.totalStages;
     state.refreshStats();
-    await store.updateProgress(state);
+    await store.updateProgress(state, { executionGeneration: input.executionGeneration });
 
     // Log cost forecast
     const forecast = forecastRunCost(documents, state.run.pipeline);
