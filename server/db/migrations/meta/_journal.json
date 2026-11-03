@@ -827,6 +827,13 @@
       "when": 1793750400004,
       "tag": "0117_chat_run_dependencies",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1793750400005,
+      "tag": "0118_native_mastra",
+      "breakpoints": true
     }
   ]
 }
