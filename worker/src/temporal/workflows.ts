@@ -35,7 +35,7 @@ import {
 import type { MaterializePagesInput } from "@docslurp/shared";
 import type { Activities } from "./activities.js";
 import { mergeMaterializeResults, splitMaterializeRanges, type MaterializeResult } from "./materialize-ranges.js";
-import { bundlePageTasks, runPageFanOut, slotBackoffMs } from "./page-fanout.js";
+import { bundlePageTasks, createAdmissionBudget, runPageFanOut, slotBackoffMs } from "./page-fanout.js";
 import { planDocumentShards } from "./document-shards.js";
 import { planStageGroupEnd } from "./stage-groups.js";
 import { resolvePipelineWorkflowStageOrder } from "./pipeline-workflow-plan.js";
@@ -186,12 +186,27 @@ export const cancelSignal = defineSignal("cancel");
 export const pauseSignal = defineSignal("pause");
 export const resumeSignal = defineSignal("resume");
 
+/** Count commands, not just denials: all lanes and stage loops share this closure.
+ * 2,048 attempts reserve <= 24,576 events at 12 events per activity/timer
+ * cycle, leaving over half the default 51,200 event ceiling for normal work,
+ * draining, finalization and workflow tasks. No per-lane allowance or reset.
+ */
+function admissionBudget(): () => void {
+  const enabled = patched("admission-history-budget-v1");
+  return enabled ? createAdmissionBudget(() => ApplicationFailure.nonRetryable(
+    "Admission history budget exhausted; retry the run after capacity recovers",
+    "AdmissionExhausted",
+  )) : () => {};
+
+}
+
 // ── Workflow ──
 
 export async function documentPipeline(
   input: PipelineWorkflowInput
 ): Promise<PipelineWorkflowOutput> {
   const stageOrder = resolvePipelineWorkflowStageOrder(input, patched);
+  const admit = admissionBudget();
   // Workflow-local state (survives replays)
   let progress: RunProgress = {
     stage: "init",
@@ -238,6 +253,7 @@ export async function documentPipeline(
   const withStageSlot = async <T>(call: () => Promise<T>): Promise<T> => {
     for (let denials = 0; ; denials++) {
       try {
+        admit();
         return await call();
       } catch (error) {
         if (!input.slotGate || !isSlotUnavailable(error) || cancelled) throw error;
@@ -413,6 +429,7 @@ export async function documentPipeline(
           const shardActivities = shardActivityProxies(input.activityTaskQueue);
           await scaling.quick.setRunShardDemand({ runId: input.runId, shards: plan.shards.length });
           await runPageFanOut({
+            beforeDispatch: admit,
             bundles: plan.shards.map((pageRanges, shardIndex) => ({ pageRanges, shardIndex })),
             concurrency: plan.shards.length,
             run: async ({ pageRanges, shardIndex }) => {
@@ -452,6 +469,7 @@ export async function documentPipeline(
           const shardActivities = shardActivityProxies(input.activityTaskQueue);
           await scaling.quick.setRunShardDemand({ runId: input.runId, shards: shards.length });
           await runPageFanOut({
+            beforeDispatch: admit,
             bundles: shards.map((documentIds, shardIndex) => ({ documentIds, shardIndex })),
             concurrency: shards.length,
             run: async ({ documentIds, shardIndex }) => {
@@ -574,6 +592,7 @@ export async function documentPipeline(
  * offset; they never travel through the parent's history.
  */
 export async function visionPageBatch(input: VisionPageBatchInput): Promise<UsageSummary> {
+  const admit = admissionBudget();
   let paused = false;
   let cancelled = false;
   let usage: UsageSummary = { inputTokens: 0, outputTokens: 0, costCents: 0 };
@@ -587,6 +606,7 @@ export async function visionPageBatch(input: VisionPageBatchInput): Promise<Usag
   const bundleSize = Math.max(1, Math.min(8, input.pageBundleSize));
   const bundles = bundlePageTasks(tasks.map((task) => (input.slotGate ? { ...task, slotGate: true } : task)), bundleSize);
   await runPageFanOut({
+            beforeDispatch: admit,
     bundles,
     concurrency: Math.max(1, Math.floor(Math.min(128, input.pageConcurrency) / Math.min(2, bundleSize))),
     run: (bundle) => bundle.length > 1

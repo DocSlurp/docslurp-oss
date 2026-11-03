@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ cleanupInit: false, activities: {} as Record<string, any> }));
-vi.mock("@temporalio/workflow", () => ({
-  patched: (id: string) => id === "pipeline-init-lifecycle-v1" && mocks.cleanupInit,
+const mocks = vi.hoisted(() => ({ budget: false, cleanupInit: false, activities: {} as Record<string, any> }));
+vi.mock("@temporalio/workflow", async () => ({
+  ActivityFailure: (await import("@temporalio/common")).ActivityFailure,
+  sleep: async () => {},
+  patched: (id: string) => (id === "pipeline-init-lifecycle-v1" && mocks.cleanupInit) || (id === "admission-history-budget-v1" && mocks.budget),
   proxyActivities: () => new Proxy({}, { get: (_, key: string) => (...args: unknown[]) => mocks.activities[key](...args) }),
   defineQuery: (name:string) => name, defineSignal: (name:string) => name,
   CancellationScope: { nonCancellable: async (fn: () => Promise<unknown>) => fn() },
   ActivityCancellationType: { WAIT_CANCELLATION_COMPLETED: "WAIT_CANCELLATION_COMPLETED" },
   setHandler: vi.fn(), condition: async () => {},
-  ApplicationFailure: {nonRetryable:(message:string)=>new Error(message)}, rootCause:(e:unknown)=>e,
+  ApplicationFailure: (await import("@temporalio/common")).ApplicationFailure, rootCause:(e:unknown)=>e,
 }));
 import { documentPipeline } from "../temporal/workflows.js";
 const zero = {inputTokens:0,outputTokens:0,costCents:0};
@@ -86,3 +88,20 @@ describe("initialization lifecycle", () => {
     expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
   });
 });
+
+ it("bounds stage slot denial loops and finalizes failure", async () => {
+   const { ActivityFailure, ApplicationFailure, RetryState } = await import("@temporalio/common");
+   const { WORKER_SLOT_UNAVAILABLE } = await import("../temporal/shared.js");
+   mocks.budget = true;
+   mocks.activities.initPipelineRun = vi.fn().mockResolvedValue({ artifacts: {}, documentIds: [] });
+   mocks.activities.failPipelineRun = vi.fn().mockResolvedValue(undefined);
+   mocks.activities.runPipelineStage = vi.fn().mockRejectedValue(new ActivityFailure(
+     "denied", "runPipelineStage", "1", RetryState.NON_RETRYABLE_FAILURE, "worker",
+     ApplicationFailure.nonRetryable("full", WORKER_SLOT_UNAVAILABLE),
+   ));
+   await expect(documentPipeline({runId:"run", pipeline:{} as never, stageOrder:["parse"], slotGate:true}))
+     .rejects.toMatchObject({type:"AdmissionExhausted", nonRetryable:true});
+   expect(mocks.activities.runPipelineStage).toHaveBeenCalledTimes(2048);
+   expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
+   mocks.budget = false;
+ });
