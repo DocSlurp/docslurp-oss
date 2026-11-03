@@ -234,3 +234,29 @@ describe("process guards and fatal logging", () => {
     expect(log.mock.calls[0]![0]).toMatch(/^\[worker-fatal\] reason=config phase=main exiting=1/);
   });
 });
+
+
+describe("forced shutdown", () => {
+  const expired = () => Object.assign(new Error("shutdown deadline expired"), { name: "GracefulShutdownPeriodExpiredError" });
+  it("classifies wrapped force expiry as fatal", () => {
+    expect(classifyWorkerFailure(new Error("worker failed", { cause: expired() })))
+      .toEqual({ fatal: true, reason: "shutdown-expired" });
+  });
+  it("arms termination before a hung connection close and never creates another session", async () => {
+    const onFatal = vi.fn();
+    const createSession = vi.fn(async () => ({
+      run: async () => { throw expired(); },
+      shutdown: vi.fn(),
+      close: () => new Promise<void>(() => {}),
+    }));
+    void superviseTemporalWorkers({ createSession, signal: new AbortController().signal, onFatal });
+    await vi.waitFor(() => expect(onFatal).toHaveBeenCalledOnce());
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+  it("surfaces force expiry even when a sibling never settles", async () => {
+    await expect(runWorkerGroup([
+      { run: async () => { throw expired(); }, shutdown() {} },
+      { run: () => new Promise<void>(() => {}), shutdown() {} },
+    ])).rejects.toMatchObject({ name: "GracefulShutdownPeriodExpiredError" });
+  });
+});
