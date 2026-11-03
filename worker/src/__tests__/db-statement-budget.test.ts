@@ -212,6 +212,14 @@ async function measureRun(store: Store, run: (store: Store, runId: string) => Pr
 // Budgets sit ~10% above today's counts: the wire counter splits a burst if the CPU stalls between writes.
 const ROUND_TRIPS_PER_PAGE_BUDGET = 20;
 const STATEMENTS_PER_PAGE_BUDGET = 24;
+// 2026-11-03: atomic terminal ownership/receipt/lifecycle checks and outbox
+// persistence add fixed run-finalization work. Measured with patched postgres:
+// 206 flights, 241 statements, 13 notify-bearing statements for this 10-page run.
+// Keep the original per-page slope; explicitly budget the fixed safety overhead
+// instead of removing transaction barriers to satisfy the old baseline.
+const TERMINAL_ROUND_TRIP_ALLOWANCE = 6;
+const TERMINAL_STATEMENT_ALLOWANCE = 1;
+const TERMINAL_NOTIFY_STATEMENT_ALLOWANCE = 3;
 // The same stages as one stage group: 14.9 after.
 const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;
 
@@ -244,11 +252,11 @@ describe("database statement budget per page", () => {
       expect(perPage.transactions).toBeLessThanOrEqual(15);
       // Serial round trips: a pipelined transaction or a statement with cached parameter types is one;
       // sql.begin costs BEGIN, each awaited statement and COMMIT; an uncached statement with parameters is two.
-      expect(wire.flights / PAGES).toBeLessThanOrEqual(ROUND_TRIPS_PER_PAGE_BUDGET);
-      expect(perPage.statements).toBeLessThanOrEqual(STATEMENTS_PER_PAGE_BUDGET);
+      expect(wire.flights).toBeLessThanOrEqual(PAGES * ROUND_TRIPS_PER_PAGE_BUDGET + TERMINAL_ROUND_TRIP_ALLOWANCE);
+      expect(counter.statements).toBeLessThanOrEqual(PAGES * STATEMENTS_PER_PAGE_BUDGET + TERMINAL_STATEMENT_ALLOWANCE);
       // Includes the byte-limited chunks in the terminal event flush and the
       // terminal webhook-outbox statement, independently of timed delivery.
-      expect(counter.notifies).toBeLessThanOrEqual(10);
+      expect(counter.notifies).toBeLessThanOrEqual(10 + TERMINAL_NOTIFY_STATEMENT_ALLOWANCE);
       // Billing on the hot path only appends pending debits: no statement debits,
       // locks or updates the org's organizations row (it stalled one org at 576 slots).
       expect(counter.pendingDebits).toBeGreaterThan(0);
