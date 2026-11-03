@@ -125,3 +125,15 @@ spend admission or run creation does not launch a new paid workflow. Already
 accepted workflows retain their independent ownership. The three affected routing,
 deferred-search and workspace-chat suites pass 139 tests under strict rejection
 handling, including the new spend/create/dispatch races.
+
+The integrated reliability review identified two more owner-boundary defects:
+completed parents bypassed the active-tree cap, and lease comparisons used
+transaction-start time after lock waits. Admission now counts distinct roots with
+any active descendant and also checks reactivation of settled trees. Append and
+heartbeat fencing use wall-clock time. All 17 recovery database tests passed on
+isolated PostgreSQL, including lock waits spanning lease expiry and failed renewal.
+
+The user subsequently required preferring native Mastra agent features. This
+custom executor remains disabled and is being reassessed for replacement by native
+Mastra durable agents/background tasks. These repair results preserve evidence;
+they do not justify retaining a duplicate agent runtime where Mastra supplies it.

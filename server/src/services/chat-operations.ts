@@ -35,10 +35,13 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
       const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations where root_id=${root.id}`;
       if (count >= CHAT_OPERATION_LIMITS.tasks) throw new OperationConflict("Task tree limit");
       rootId = root.id;
-    } else {
-      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations where user_id=${args.userId} and parent_id is null and status in ('queued','running','waiting')`;
-      if (count >= CHAT_OPERATION_LIMITS.activeRoots) throw new OperationConflict("Active operation limit");
     }
+    // Parent completion does not release a tree's capacity while children run.
+    // Apply the same bound when a child would reactivate a settled tree.
+    const [{ count, alreadyActive }] = await tx<{ count: number; alreadyActive: boolean }[]>`
+      select count(distinct root_id)::int as count, coalesce(bool_or(root_id=${rootId}),false) as "alreadyActive"
+      from chat_operations where user_id=${args.userId} and status in ('queued','running','waiting')`;
+    if (!alreadyActive && count >= CHAT_OPERATION_LIMITS.activeRoots) throw new OperationConflict("Active operation limit");
     const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input)
       values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.workspaceId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}) returning *`;
     if (args.parentId) await tx`update chat_operations set deadline=(select deadline from chat_operations where id=${rootId}), expires_at=(select expires_at from chat_operations where id=${rootId}) where id=${id}`;
@@ -58,7 +61,7 @@ export async function claimChatOperation() {
     ) insert into chat_operation_events select id,sequence,'cancelled','{"code":"cancelled_or_deadline"}'::jsonb from changed`;
     const [row] = await tx<Operation[]>`select * from chat_operations where status='queued' and expires_at > now() order by created_at for update skip locked limit 1`;
     if (!row) return null;
-    const [claimed] = await tx<Operation[]>`update chat_operations set status='running', attempt_id=${randomUUID()}, lease_until=now()+interval '30 seconds' where id=${row.id} returning *`;
+    const [claimed] = await tx<Operation[]>`update chat_operations set status='running', attempt_id=${randomUUID()}, lease_until=clock_timestamp()+interval '30 seconds' where id=${row.id} returning *`;
     return claimed!;
   });
 }
@@ -89,7 +92,7 @@ export async function appendChatOperation(id: string, attempt: string, kind: str
         else jsonb_set(snapshot,array[${kind}::text],${tx.json(storedPayload as never)}) end,
       status=case when ${terminalError} and (cancel_requested or deadline <= clock_timestamp())
         then 'cancelled' else coalesce(${status ?? null}, status) end
-      where id=${id} and attempt_id=${attempt} and status='running' and lease_until > now()
+      where id=${id} and attempt_id=${attempt} and status='running' and lease_until > clock_timestamp()
         and (${terminalError} or (not cancel_requested and deadline > clock_timestamp()))
         and (output_bytes+${Buffer.byteLength(encoded)} <= ${CHAT_OPERATION_LIMITS.outputBytes} or ${kind === "error"})
       returning *`;
@@ -100,8 +103,8 @@ export async function appendChatOperation(id: string, attempt: string, kind: str
 }
 
 export async function heartbeatChatOperation(id: string, attempt: string) {
-  const [row] = await sql`update chat_operations set lease_until=now()+interval '30 seconds'
-    where id=${id} and attempt_id=${attempt} and status='running' and lease_until > now() and not cancel_requested and deadline > now() returning id`;
+  const [row] = await sql`update chat_operations set lease_until=clock_timestamp()+interval '30 seconds'
+    where id=${id} and attempt_id=${attempt} and status='running' and lease_until > clock_timestamp() and not cancel_requested and deadline > clock_timestamp() returning id`;
   return !!row;
 }
 

@@ -193,7 +193,7 @@ it("retains a near-limit successful streamed result without charging its text tw
 });
 
 
-it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadline"])("fences append contending on the root lock with %s", async reason => {
+it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadline", "lease"])("fences append contending on the root lock with %s", async reason => {
   const task = await launch(`concurrent_${reason}`);
   const claim = await ops.claimChatOperation();
   let locked!: () => void;
@@ -203,6 +203,7 @@ it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadli
   const holder = sql.begin(async tx => {
     await tx`select id from chat_operations where id=${task.id} for update`;
     if (reason === "deadline") await tx`update chat_operations set deadline=clock_timestamp()+interval '200 milliseconds' where id=${task.id}`;
+    if (reason === "lease") await tx`update chat_operations set lease_until=clock_timestamp()+interval '200 milliseconds' where id=${task.id}`;
     locked(); await release;
   });
   await ready;
@@ -216,8 +217,46 @@ it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadli
     const append = ops.appendChatOperation(task.id, claim!.attempt_id!, "result", {answer:"late"}, "completed");
     const rejected = expect(append).rejects.toThrow();
     await waiting(reason === "cancel" ? 2 : 1);
-    if (reason === "deadline") await sql`select pg_sleep(0.25)`;
+    if (reason === "deadline" || reason === "lease") await sql`select pg_sleep(0.25)`;
     unlock(); await holder; await cancelling; await rejected;
     expect((await ops.readChatOperation("u", task.id, 0))?.operation.status).not.toBe("completed");
   } finally { unlock(); await holder; }
+});
+
+
+it("counts active descendants after parent completion and bounds reactivation", async () => {
+  const settled = await launch("settled_root");
+  await sql`update chat_operations set status='completed' where id=${settled.id}`;
+  const roots: string[] = [];
+  for (let n=0;n<8;n++) {
+    const root = await launch(`active_tree_${n}`);
+    roots.push(root.id);
+    await launch(`active_child_${n}`, root.id);
+    await sql`update chat_operations set status='completed' where id=${root.id}`;
+  }
+  await expect(launch("ninth_active_root")).rejects.toThrow("Active operation limit");
+  await expect(launch("reactivating_child", settled.id)).rejects.toThrow("Active operation limit");
+  await expect(launch("existing_tree_child", roots[0])).resolves.toMatchObject({root_id:roots[0]});
+});
+
+it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL)("does not renew a lease that expires while heartbeat waits on the row", async () => {
+  const task = await launch("heartbeat_lock_wait");
+  const claim = await ops.claimChatOperation();
+  let locked!: () => void; const ready = new Promise<void>(resolve => {locked=resolve;});
+  let unlock!: () => void; const release = new Promise<void>(resolve => {unlock=resolve;});
+  const holder = sql.begin(async tx => {
+    await tx`update chat_operations set lease_until=clock_timestamp()+interval '200 milliseconds' where id=${task.id}`;
+    locked(); await release;
+  });
+  await ready;
+  try {
+    const renewal = ops.heartbeatChatOperation(task.id, claim!.attempt_id!);
+    await vi.waitFor(async () => {
+      const [row] = await sql`select count(*)::int as n from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query like '%chat_operations%'`;
+      expect(row.n).toBeGreaterThanOrEqual(1);
+    });
+    await sql`select pg_sleep(0.25)`;
+    unlock(); await holder;
+    expect(await renewal).toBe(false);
+  } finally {unlock(); await holder;}
 });
