@@ -29,3 +29,9 @@ Merging core or app changes never deploys production. Production deploys are man
 After moving release configuration, dispatch `npm-auth.yml` on main to verify token authentication, then dispatch `release-npm.yml` with `dry_run=true` to verify the complete non-publishing path. The dry run must succeed before creating a release tag. A repository migration does not authorize package publishing or a production deployment.
 
 The release environment permits only main and v* tags. Organization-owned contributions use the existing CLA exemption; external contributor setup is documented in [cla-setup.md](cla-setup.md).
+
+## Execution-generation rollout
+
+Migration 0112 requires coordinated downtime, not a rolling release. Follow the
+[enforced migration preconditions and drain procedure](generation-rollout.md)
+before deploying a fleet that uses execution generations.
