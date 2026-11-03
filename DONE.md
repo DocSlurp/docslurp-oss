@@ -1,3 +1,7 @@
+## Compatible npm dependency upgrades (2026-11-03)
+
+- Update current stable packages, including SimpleWebAuthn 14 and TypeScript 7 in independent SDK/CLI packages; retain documented peer/API compatibility holds. See `docs/reviews/dependencies-2026-11-03.md` for council findings and validation limits.
+
 ## Explicit chat and ingestion Speed boost (2026-11-01)
 
 - API omission/false preserves baseline routing and credits; explicit true routes eligible GLM, DeepSeek and Luna generation through Nitro and charges 4× service credits. Preserve actual provider expenses separately. Persist immutable run intent and scale tenant-scoped reservations/leases and estimates. Reject direct Nitro configuration without opt-in. SDK supports explicit flags.

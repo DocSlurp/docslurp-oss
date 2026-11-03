@@ -2,7 +2,7 @@
 
 DocSlurp's authentication policy relies on Better Auth's documented plugin and hook API wherever it can. A few policies need more than that API offers, so they depend on native behaviour. This file lists those seams. Read it before any Better Auth upgrade.
 
-Reviewed release: `1.7.14` (`REVIEWED_BETTER_AUTH_VERSION` in `server/src/lib/auth-compat.ts`).
+Reviewed release: `1.7.15` (`REVIEWED_BETTER_AUTH_VERSION` in `server/src/lib/auth-compat.ts`).
 
 ## Rules
 
