@@ -15,7 +15,7 @@ import {
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { billableCents, type PipelineUsageBatch, type PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { retryTransaction } from "./transaction-retry.js";
-import { pipelineTransaction } from "./transaction-pipeline.js";
+import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements, type RunUsageState } from "./usage-event-store.js";
 
 /**
@@ -76,13 +76,13 @@ export type RunPageCharges = { fastPages: number; richPages: number; multiplier:
  * run, so a retry charges nothing twice), excluding content-deduplicated,
  * failed and media documents and pages a vision/OCR read already charged Rich.
  */
-export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState): Promise<RunPageCharges> {
+export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
   let charges: RunPageCharges = { fastPages: 0, richPages: 0, multiplier, credits: 0 };
   const pagesRead = qualityAllowsPageReading(state.run.pipeline.quality);
-  const charged = await retryTransaction(`page-charges run=${state.run.id}`, async () => {
+  const write = async () => {
     let total = 0;
-    await pipelineTransaction(sql, (client) => [
+    await (transaction ? pipelineInTransaction : pipelineTransaction)(sql, (client) => [
       // FOR NO KEY UPDATE: serializes charge recording without blocking FK checks on child rows.
       client<{ spent_cents: number | string }[]>`select spent_cents from workspace_runs where id = ${state.run.id} for no key update`,
       // A full-index run re-indexes documents whose pages may already have paid through query
@@ -157,8 +157,11 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       total = (Number(locked?.spent_cents ?? 0) || 0) + inserted;
     });
     return total;
-  });
-  state.run.spentCents = charged;
+  };
+  const charged = transaction ? await write() : await retryTransaction(`page-charges run=${state.run.id}`, write);
+  const commit = () => { state.run.spentCents = charged; };
+  if (transaction) transaction.afterCommit.push(commit);
+  else commit();
   return charges;
 }
 

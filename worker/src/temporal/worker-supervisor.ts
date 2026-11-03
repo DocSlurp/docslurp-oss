@@ -34,7 +34,7 @@ import { causeChain, isTransientNetworkError } from "../lib/transient-errors.js"
 
 export { isTransientNetworkError };
 
-export type FatalWorkerReason = "config" | "auth" | "schema-behind" | "native-crash" | "startup" | "teardown-unverified";
+export type FatalWorkerReason = "config" | "auth" | "schema-behind" | "native-crash" | "startup" | "teardown-unverified" | "shutdown-expired";
 
 export class FatalWorkerError extends Error {
   readonly reason: FatalWorkerReason;
@@ -64,6 +64,7 @@ export function classifyWorkerFailure(error: unknown): WorkerFailureClass {
   for (const link of causeChain(error)) {
     if (link instanceof FatalWorkerError) return { fatal: true, reason: link.reason };
     const name = link instanceof Error ? link.name : "";
+    if (name === "GracefulShutdownPeriodExpiredError") return { fatal: true, reason: "shutdown-expired" };
     const message = describe(link);
     const code = typeof link === "object" && link !== null ? (link as { code?: unknown }).code : undefined;
     if (typeof code === "string" && SCHEMA_BEHIND_CODES.has(code)) return { fatal: true, reason: "schema-behind" };
@@ -119,6 +120,8 @@ export interface SuperviseOptions<S extends SupervisedSession> {
   random?: () => number;
   now?: () => number;
   log?: (line: string) => void;
+  /** Arm process termination before potentially hanging cleanup. */
+  onFatal?: (error: unknown) => void;
 }
 
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -161,7 +164,10 @@ export async function superviseTemporalWorkers<S extends SupervisedSession>(opti
       throw new Error("Temporal worker run() returned without a shutdown request");
     } catch (error) {
       const verdict = classifyWorkerFailure(error);
-      if (verdict.fatal) throw error instanceof FatalWorkerError ? error : new FatalWorkerError(verdict.reason, describe(error), { cause: error });
+      if (verdict.fatal) {
+        options.onFatal?.(error);
+        throw error instanceof FatalWorkerError ? error : new FatalWorkerError(verdict.reason, describe(error), { cause: error });
+      }
       if (signal.aborted) {
         log(`[temporal-worker] status=stopped-with-error reason=${verdict.reason}`);
         return;
@@ -195,14 +201,18 @@ export async function runWorkerGroup(workers: ReadonlyArray<{ run(): Promise<voi
       try { worker.shutdown(); } catch { /* already stopping */ }
     }
   };
-  await Promise.allSettled(workers.map((worker) => Promise.resolve().then(() => worker.run()).catch((error) => {
-    if (!failed) {
+  let rejectFatal!: (error: unknown) => void;
+  const fatal = new Promise<never>((_, reject) => { rejectFatal = reject; });
+  const drained = Promise.allSettled(workers.map((worker) => Promise.resolve().then(() => worker.run()).catch((error) => {
+    if (!failed || classifyWorkerFailure(error).fatal) {
       failed = true;
       firstError = error;
     }
     shutdownAll();
+    if (classifyWorkerFailure(error).fatal) rejectFatal(error);
     throw error;
   })));
+  await Promise.race([drained, fatal]);
   if (failed) throw firstError;
 }
 

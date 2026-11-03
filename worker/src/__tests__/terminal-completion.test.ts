@@ -23,11 +23,12 @@ async function complete(statuses: string[]) {
   const sql = Object.assign(vi.fn(async () => []), {
     begin: async (callback: (tx: unknown) => Promise<unknown>) => await callback(sql),
     reserve: async () => reserved,
+    json: (value: unknown) => value,
     array: (values: unknown[]) => values,
   });
   const persisted: Array<{ stats: unknown; statuses: string[]; processedDocuments: number; pagesProcessed: number }> = [];
   const store = Object.assign(Object.create(Store.prototype), {
-    sql, loadRun: vi.fn(async () => run), loadDocumentsForRun: vi.fn(async () => docs),
+    sql, creditLeases: { active: async () => false }, finalizeRun: async (_owner: unknown, _outcome: unknown, write: (client: unknown, id: string) => Promise<void>) => write(sql, "terminal"), loadRun: vi.fn(async () => run), loadDocumentsForRun: vi.fn(async () => docs),
     hydrateState: vi.fn(async (state: WorkflowState) => {
       for (const name of getPipelineStageOrder(run.pipeline)) {
         state.runStages.set(name, { status: "completed" } as never);
@@ -40,7 +41,7 @@ async function complete(statuses: string[]) {
         state.documentStages.set(doc.id, new Map([["page-index", { status: "failed" } as never]]));
       }
     }),
-    updateProgress: vi.fn(async (state: WorkflowState) => { persisted.push({ stats: structuredClone(state.run.stats), statuses: state.documents.map(doc => doc.status), processedDocuments: state.run.processedDocuments, pagesProcessed: state.run.pagesProcessed }); }),
+    writeProgressNow: vi.fn(async (state: WorkflowState) => { persisted.push({ stats: structuredClone(state.run.stats), statuses: state.documents.map(doc => doc.status), processedDocuments: state.run.processedDocuments, pagesProcessed: state.run.pagesProcessed }); }),
     appendEvent: vi.fn(), triggerRunEmails: vi.fn(async () => {}), triggerWebhooks: vi.fn(async () => {}),
   }) as Store;
   const activities = createActivities({ store, storage: {} as never, config: {} as never,

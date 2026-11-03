@@ -1,3 +1,4 @@
+import { assertPlanningOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { randomUUID } from "node:crypto";
 import type { Sql, JSONValue } from "postgres";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -13,7 +14,12 @@ export class PageTaskStore {
     private readonly creditLeases?: RunCreditLeases,
   ) {}
 
-  async enqueue(tasks: VisionPageTask[]) {
+  async enqueue(tasks: VisionPageTask[], owner?: ExecutionOwner) {
+    if (owner) return this.sql.begin(async tx => {
+      await assertPlanningOwnership(tx, owner);
+      if (tasks.some(task => task.runId !== owner.runId)) throw new StaleExecutionError();
+      await new PageTaskStore(tx as unknown as Sql<Record<string, unknown>>).enqueue(tasks);
+    });
     if (!tasks.length) return;
     await this.sql`insert into page_work_tasks ${this.sql(tasks.map(task => ({
       run_id: task.runId, document_id: task.documentId, page_number: task.pageNumber,
@@ -21,10 +27,20 @@ export class PageTaskStore {
   }
 
   /** Stores full tasks so child workflows can load bounded batches by offset. */
-  async enqueueWithPayload(tasks: VisionPageTask[]): Promise<number> {
+  async enqueueWithPayload(tasks: VisionPageTask[], progress?: (completed: number) => void, owner?: ExecutionOwner): Promise<number> {
     if (tasks.length) {
-      for (let index = 0; index < tasks.length; index += 1_000) {
-        const slice = tasks.slice(index, index + 1_000);
+      const batchSize = progress ? 100 : 1_000;
+      for (let index = 0; index < tasks.length; index += batchSize) {
+        progress?.(index);
+        const slice = tasks.slice(index, index + batchSize);
+        if (owner) {
+          await this.sql.begin(async tx => {
+            await assertPlanningOwnership(tx, owner);
+            if (slice.some(task => task.runId !== owner.runId)) throw new StaleExecutionError();
+            await new PageTaskStore(tx as unknown as Sql<Record<string, unknown>>).enqueueWithPayload(slice);
+          });
+          continue;
+        }
         await this.sql`insert into page_work_tasks ${this.sql(slice.map(task => ({
           run_id: task.runId, document_id: task.documentId, page_number: task.pageNumber,
           payload: this.sql.json(stripTaskFlags(task) as unknown as JSONValue),
@@ -33,6 +49,7 @@ export class PageTaskStore {
           where page_work_tasks.payload is null`;
       }
     }
+    progress?.(tasks.length);
     const runId = tasks[0]?.runId;
     return runId ? this.countWithPayload(runId) : 0;
   }

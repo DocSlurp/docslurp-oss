@@ -118,8 +118,8 @@ only append-only operation output uses durable replay sequence semantics.
 
 ## Consistency, reconciliation and operational limits
 
-Migration `0112_chat_operations` owns the durable queue; `0113_realtime_revisions`
-adds dashboard publication; `0114_realtime_viewer_suggestions` adds the remaining
+Migration `0114_chat_operations` owns the durable queue; `0115_realtime_revisions`
+adds dashboard publication; `0116_realtime_viewer_suggestions` adds the remaining
 viewer/suggestion sources and ensures triggers read scope columns only. Dashboard revisions update in the writer's transaction
 and roll back with it. Multiple writes to the same organization in one transaction
 produce one revision. PostgreSQL delivers the shared notification only at commit.

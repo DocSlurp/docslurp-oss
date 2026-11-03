@@ -137,7 +137,9 @@ describe("workspace knowledge graph persistence", () => {
     await sql`update workspace_runs set artifacts = ${sql.json({ "source:embeddings": artifactUri })} where id = 'run-source'`;
     await sql`update documents set reused_from_document_id = 'source' where id = 'copy'`;
     await sql`delete from document_chunks where document_id = 'copy'`;
-    expect(await store.seedReusedStageOutputs("run-copy", ["embed"]))
+    await sql`update workspace_runs set status = 'queued' where id = 'run-copy'`;
+    const [ownership] = await sql`select org_id, workspace_id, execution_generation from workspace_runs where id = 'run-copy'`;
+    expect(await store.seedReusedStageOutputs("run-copy", ["embed"], { runId: "run-copy", orgId: ownership!.org_id, workspaceId: ownership!.workspace_id, executionGeneration: ownership!.execution_generation ?? undefined }))
       .toEqual({ seededDocuments: 1, unavailable: [] });
     if (purgeSource) await sql`delete from document_chunks where document_id = 'source'`;
 

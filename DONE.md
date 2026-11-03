@@ -210,3 +210,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Offer a costed chat settings proposal for verified empty retrieval indexes even with Suggestions off. The existing card lets users opt into re-indexing and ask again; no processing starts from model text. Ordinary zero-hit queries do not establish a missing index.
 
 - Added opt-in durable chat operation queue, output journal, authorized recovery adapter and scoped task cancellation for issue 319; legacy client migration and full acceptance remain open (docs/durable-chat-operations.md).
+- Make successful Temporal finalization atomic with the ownership-fenced terminal receipt, progress, usage/page charges, document cutover, completion events and webhook intents; retain pending usage on rollback (2026-11-03). Council review pending in #277.

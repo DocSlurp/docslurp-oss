@@ -83,7 +83,7 @@ export interface RunLifecycleDeps {
   startWorkflow: (
     runId: string,
     pipeline: PipelineFeatures,
-    options?: { restartExisting?: boolean },
+    options?: { restartExisting?: boolean; executionGeneration?: string },
   ) => Promise<void>;
   signals?: {
     cancel(runId: string): Promise<void>;
@@ -182,12 +182,12 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
    * run-start recovery loop leaves the Run alone. Best-effort: a failed write
    * only means recovery re-issues an idempotent start later.
    */
-  async function markWorkflowStarted(runId: string): Promise<void> {
+  async function markWorkflowStarted(runId: string, generation: string | null, sql: SqlClient | TransactionSql = deps.sql): Promise<void> {
     try {
       await sql`
         update workspace_runs
         set workflow_started_at = now(), workflow_start_next_at = null
-        where id = ${runId}
+        where id = ${runId} and execution_generation is not distinct from ${generation}
       `;
     } catch (error) {
       console.warn(`[run-start] could not record workflow start run=${runId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -195,7 +195,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   }
 
   /** Mark the start unconfirmed and schedule the next recovery attempt with backoff. */
-  async function markWorkflowStartPending(runId: string): Promise<void> {
+  async function markWorkflowStartPending(runId: string, generation: string | null, sql: SqlClient | TransactionSql = deps.sql): Promise<void> {
     try {
       await sql`
         update workspace_runs
@@ -207,7 +207,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
             ${startRetryBackoff.baseMs}::double precision * power(2, least(workflow_start_attempts, 16))
           ) * interval '1 millisecond'
         where id = ${runId}
-          and status = 'queued'
+          and status = 'queued' and execution_generation is not distinct from ${generation}
       `;
     } catch (error) {
       console.warn(`[run-start] could not record deferred workflow start run=${runId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -223,12 +223,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
    */
   async function start(
     run: RunLifecycleRun,
-    options?: { restartExisting?: boolean },
+    options?: { restartExisting?: boolean; executionGeneration?: string },
   ): Promise<RunStartOutcome> {
-    const [ready] = await sql<{ id: string }[]>`
-      select id from workspace_runs where id = ${run.id} and creation_ready_at is not null
-    `;
-    if (!ready) return { status: "deferred", reason: "Run creation has not been published for processing." };
     // Recovery passes the raw stored row: drop extractor settings the strict schemas now reject, then validate.
     // A pipeline that still does not compile will never start, so the Run fails once instead of retrying forever.
     const pipeline = sanitizeStoredPipeline(run.pipeline, `run ${run.id}`);
@@ -246,25 +242,33 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       });
       throw error;
     }
-    let outcome: RunStartOutcome;
-    try {
-      await deps.startWorkflow(run.id, pipeline, options);
-      outcome = { status: "started" };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!options?.restartExisting && message.toLowerCase().includes("already started")) {
-        outcome = { status: "already-started" };
-      } else if (isTemporalConnectionUnavailable(error)) {
-        console.warn(`[temporal] deferred workflow start for run=${run.id}: ${message}`);
-        await markWorkflowStartPending(run.id);
-        return { status: "deferred", reason: TEMPORAL_DEFERRED_RUN_MESSAGE };
-      } else {
-        await markWorkflowStartPending(run.id);
-        throw error;
+    // Serialize dispatch with restart preparation. A delayed caller reads the
+    // current intent under lock and cannot dispatch an older generation.
+    return await sql.begin(async (tx) => {
+      const [ready] = await tx<{ id: string; execution_generation: string | null }[]>`
+        select id, execution_generation from workspace_runs where id = ${run.id} and creation_ready_at is not null for update
+      `;
+      if (!ready) return { status: "deferred", reason: "Run creation has not been published for processing." };
+      let outcome: RunStartOutcome;
+      try {
+        await deps.startWorkflow(run.id, pipeline, { ...options, ...(ready.execution_generation ? { executionGeneration: ready.execution_generation } : {}) });
+        outcome = { status: "started" };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!options?.restartExisting && message.toLowerCase().includes("already started")) {
+          outcome = { status: "already-started" };
+        } else if (isTemporalConnectionUnavailable(error)) {
+          console.warn(`[temporal] deferred workflow start for run=${run.id}: ${message}`);
+          await markWorkflowStartPending(run.id, ready.execution_generation, tx);
+          return { status: "deferred", reason: TEMPORAL_DEFERRED_RUN_MESSAGE };
+        } else {
+          await markWorkflowStartPending(run.id, ready.execution_generation, tx);
+          throw error;
+        }
       }
-    }
-    await markWorkflowStarted(run.id);
-    return outcome;
+      await markWorkflowStarted(run.id, ready.execution_generation, tx);
+      return outcome;
+    });
   }
 
   /** Atomically move a failed Run back to queued, keeping completed checkpoints and paid work. */
@@ -301,6 +305,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       return await tx<{ id: string }[]>`
         update workspace_runs
         set status = 'queued', control_state = null, control_requested_at = null,
+            execution_generation = gen_random_uuid()::text,
+            workflow_started_at = null, workflow_start_attempts = 0, workflow_start_next_at = null,
             stage = 'queued', error = null, failure_count = 0,
             dead_lettered_at = null, dead_letter_reason = null,
             lease_expires_at = null, last_heartbeat_at = null, updated_at = now()
@@ -368,6 +374,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       return await tx<{ id: string }[]>`
         update workspace_runs
         set status = 'queued', control_state = null, control_requested_at = null,
+            execution_generation = gen_random_uuid()::text,
+            workflow_started_at = null, workflow_start_attempts = 0, workflow_start_next_at = null,
             stage = 'queued', error = null, failure_count = 0,
             processed_documents = greatest(0, total_documents - ${locked.failed}),
             stats = coalesce(stats, '{}'::jsonb) - 'failedDocuments' - 'failedDocumentStages',
@@ -550,6 +558,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         update workspace_runs
         set
           status = 'queued',
+          execution_generation = gen_random_uuid()::text,
           stage = 'queued',
           control_state = null,
           control_requested_at = null,
