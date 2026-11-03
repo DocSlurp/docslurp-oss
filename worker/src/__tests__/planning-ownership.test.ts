@@ -36,6 +36,42 @@ afterAll(async () => {
 
 
 describe("planning ownership", () => {
+  it("retries payload enqueue without replacing payloads or completed task state", async () => {
+    await db.exec("update workspace_runs set execution_generation = 'A' where id = 'r1'");
+    await db.exec(`insert into documents(id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+      values ('d1', 'o1', 'u1', 'w', 'r1', 'test.pdf', 'application/pdf', 'raw/test.pdf', 'processing')`);
+    const owner = { runId: "r1", orgId: "o1", workspaceId: "w", executionGeneration: "A" };
+    const tasks = Array.from({ length: 101 }, (_, index) => ({ runId: "r1", documentId: "d1", pageNumber: index + 1 } as import("../temporal/shared.js").VisionPageTask));
+    await store.pageTasks.enqueue(tasks, owner);
+    expect(await store.pageTasks.enqueueWithPayload(tasks, () => {}, owner)).toBe(101);
+    await db.exec("update page_work_tasks set status = 'completed', result = '{\"text\":\"done\"}', attempts = 1 where page_number = 1");
+    const before = (await db.query("select * from page_work_tasks order by page_number")).rows;
+    expect(await store.pageTasks.enqueueWithPayload(tasks, () => {}, owner)).toBe(101);
+    expect((await db.query("select * from page_work_tasks order by page_number")).rows).toEqual(before);
+    expect(await store.pageTasks.loadBatch("r1", 0, 101)).toEqual(tasks);
+  });
+
+  it("settles billed receipts once while rejecting stale planner progress", async () => {
+    await db.exec("update workspace_runs set execution_generation = 'A' where id = 'r1'");
+    const state = await loadRunState(store, "r1", { hydrate: false });
+    state.usageLedger.enqueue({ provider: "docslurp", model: "rich", metric: "ingest-page-rich", amount: 1,
+      unit: "page", costCents: 2, metadata: { unitCharge: true } });
+    await db.exec("update workspace_runs set execution_generation = 'B' where id = 'r1'");
+    const progress = async () => (await db.query("select status, stage, artifacts, stats, pages_processed, execution_generation from workspace_runs where id = 'r1'")).rows;
+    const before = await progress();
+    const owner = { runId: "r1", orgId: "o1", workspaceId: "w", executionGeneration: "A" };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(store.startRunStage(state, "vision-extract", owner)).rejects.toThrow("ownership");
+      expect(await progress()).toEqual(before);
+      expect((await db.query("select * from workspace_run_stage_states")).rows).toEqual([]);
+      const receipts = (await db.query("select cost_cents, org_id, workspace_id from usage_events where run_id = 'r1'")).rows;
+      expect(receipts).toEqual([{ cost_cents: "2.000000000000", org_id: "o1", workspace_id: "w" }]);
+      expect(Number((await db.query<{ spent_cents: string }>("select spent_cents from workspace_runs where id = 'r1'")).rows[0]!.spent_cents)).toBe(2);
+      expect(Number((await db.query<{ credits: string }>("select sum(credits) as credits from credit_debits_pending where run_id = 'r1'")).rows[0]!.credits)).toBe(2);
+      expect(state.usageLedger.checkpoint().events).toHaveLength(0);
+    }
+  });
+
   it("rejects stale generations and terminal owners without changing persisted progress", { timeout: 60000 }, async () => {
     const owner = { runId: "r1", orgId: "o1", workspaceId: "w", executionGeneration: "A" };
     await db.exec("update workspace_runs set execution_generation = 'A' where id = 'r1'");

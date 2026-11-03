@@ -35,7 +35,7 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
-    insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
+    insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 10000);
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
   `);
   const served = await serveOnRandomPort(db);
@@ -226,6 +226,24 @@ describe("partial reprocess", () => {
     const [ownership] = await sql`select execution_generation from workspace_runs where id = 'run-re'`;
     await expect(store.seedReusedStageOutputs("run-re", plan.reusedStages, { runId: "run-re", orgId: "o1", workspaceId: "w", executionGeneration: ownership!.execution_generation ?? undefined })).rejects.toThrow("ownership");
     expect(await sql`select id from document_chunks where document_id = 're'`).toHaveLength(1);
+  }, 60_000);
+
+  it("rejects reused-stage seeding by a superseded generation before any mutation", async () => {
+    await seedSourceRun(defaultPipelineFeatures);
+    const pipeline = { ...defaultPipelineFeatures, restartFromStage: "page-index" };
+    await seedPartialRun(pipeline);
+    await sql`update workspace_runs set execution_generation = 'replacement' where id = 'run-re'`;
+    const snapshot = async () => ({
+      runs: await sql`select * from workspace_runs order by id`,
+      documents: await sql`select * from documents order by id`,
+      stages: await sql`select * from document_run_stage_states order by run_id, document_id, stage_name`,
+      pages: await sql`select * from document_pages order by id`,
+      chunks: await sql`select * from document_chunks order by id`,
+    });
+    const before = await snapshot();
+    await expect(store.seedReusedStageOutputs("run-re", compilePipelinePlan(pipeline).reusedStages,
+      { runId: "run-re", orgId: "o1", workspaceId: "w", executionGeneration: "test-generation" })).rejects.toThrow("ownership");
+    expect(await snapshot()).toEqual(before);
   }, 60_000);
 
   it("retention skips a source run while a partial run reuses it, and run start re-checks after a purge", async () => {
