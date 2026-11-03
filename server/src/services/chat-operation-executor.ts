@@ -1,3 +1,4 @@
+import { withChatRunOwner } from "./chat-run-dependencies.js";
 import { env } from "../config.js";
 import { sql } from "../db.js";
 import { withDeferredContext } from "../search/deferred/deferred-context.js";
@@ -42,12 +43,12 @@ export async function executeChatOperation(task: Operation) {
     const actor = await check();
     const disabled = await workspaceChatDisabledBody(task.workspace_id, task.user_id);
     if (disabled) throw new Error("chat_disabled");
-    const result = await withDeferredContext({ signal: abort.signal }, () => chatWorkspace({ workspaceId: task.workspace_id, userId: task.user_id, query: String(task.input.q),
+    const result = await withChatRunOwner(task, () => withDeferredContext({ signal: abort.signal }, () => chatWorkspace({ workspaceId: task.workspace_id, userId: task.user_id, query: String(task.input.q),
       sessionId: task.input.sessionId as string | undefined, model: task.input.model as string | undefined,
       actor, allowAgentTools: env.publicChatAgentEnabled, allowConfiguration: false, signal: abort.signal,
       onTextDelta: text => append("text", { text }),
       onToolActivity: event => { void append("tool", event); }, onEvidence: event => { void append("evidence", event); },
-    }));
+    })));
     await pending;
     if (abort.signal.aborted) throw abort.signal.reason;
     await appendChatOperation(task.id, attempt, "result", result, "completed");

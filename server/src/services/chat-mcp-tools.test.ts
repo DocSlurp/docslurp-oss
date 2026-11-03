@@ -49,7 +49,7 @@ describe("chat MCP tools", () => {
   });
 
   it("does not offer ingestion tools that fetch URLs or start paid work (G-04)", () => {
-    const t = setup(["search", "upload", "completeUpload", "listWorkspaces"]);
+    const t = setup(["search", "upload", "extract", "completeUpload", "listWorkspaces"]);
     expect(Object.keys(t.tools)).toEqual(["search"]);
   });
 

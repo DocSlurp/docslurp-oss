@@ -41,7 +41,9 @@ class OperationHub {
         select c.root_id, c.user_id,
           md5(string_agg(c.id || ':' || c.sequence::text || ':' || c.status || ':' || coalesce(c.attempt_id,'') || ':' ||
             c.cancel_requested::text || ':' || c.tree_cancel_requested::text, ',' order by c.id)) || ':' ||
-            coalesce(max(r.revision),0)::text as version
+            coalesce(max(r.revision),0)::text || ':' ||
+            (select count(*)::text || ':' || count(*) filter(where d.created_at+interval '15 minutes'<now())::text
+              from chat_run_dependencies d join chat_operations owner on owner.id=d.operation_id where owner.root_id=c.root_id) as version
         from chat_operations c left join realtime_revisions r on r.org_id=c.org_id
         where c.root_id=any(${sql.array(roots)}) and c.expires_at>now()
         group by c.root_id,c.user_id`;

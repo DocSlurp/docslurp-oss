@@ -192,3 +192,48 @@ broker coalescing, and reconcile commit-visible revisions. Publication covers
 query_suggestions, search-session queries, document/page/chunk changes, document
 stages, tags, run state and attributed usage. Keep the old component timers only
 while the feature flag is off or the shared transport owns REST fallback.
+
+## External work discovery (migration 0117; architecture reassessment pending)
+
+Operation recovery now includes `dependencies` alongside executable chat `tasks`.
+Each dependency has stable `id`, `parent_id`, `root_id`, `run_id`, workspace/org
+scope, `status`, run execution-generation `attempt_id`, maximum `page_attempts`,
+`stage`, `control_state`, `ready_pages`, `failed_pages`, document/page `result_ref`,
+and `revision`. References grant no access: every dependency workspace is
+reauthorized before the recovery response. Fetch artifacts through the existing
+authorized document endpoints. The global operation reconciler includes new
+links and deadline transitions; committed page ledger changes advance the org
+revision. No per-dependency browser or backend timer is created.
+
+`treeSettled` includes these dependencies even after the parent answer completes.
+A deduplicated run placeholder is not a completed result: its attempt is null
+and it waits for the authoritative shared page ledger. Failed pages do not hide
+other pending pages. After the existing 15-minute workflow deadline an unresolved
+dependency reports `interrupted`, without starting another paid execution.
+
+Ownership is explicitly `shared`, cancellation is `observe_only`. Chat Stop
+cancels chat tasks and refuses future dependency acceptance under the root lock;
+already accepted materialization serves the corpus, possibly multiple queries,
+and stays under its independent Temporal owner, page locks, spend caps and
+workflow timeout. It is not cancelled by socket cleanup, parent completion or
+chat cancellation. There is no silently detached agent task. Outstanding links
+count against the eight active-root limit; chat tasks plus links share the
+64-node tree limit and each link has at most 256 pages. History follows the
+root's seven-day retention; underlying corpus results follow document retention.
+
+`withChatRunOwner` and `acceptChatRunDependency` are server-only adapter seams.
+Acceptance and run allocation commit atomically; input tool arguments cannot
+supply operation identity. Recovery never launches work. A process dying between
+allocation and Temporal dispatch leaves an interrupted dependency after the
+bounded owner deadline; this is not claimed to be uninterrupted execution.
+
+Path audit: `chat-mcp-tools.ts` excludes upload, extract, completeUpload,
+ingestWebsite and fullIndex. The missing extract exclusion was repaired because
+it violated the existing no-paid-ingestion tool policy. `mcp-catalog.ts` offers
+no render/export launch tool. Rendering starts from `document-page-render.ts`
+and exports from `document-exports.ts`/`extracts.ts`, under independent HTTP/job
+owners; these are not launched by chat. Deferred search's
+`materialize-client.ts` is the actual chat-to-Temporal path and now uses the seam.
+No arbitrary subagent launch pathway exists. Do not invent such work to satisfy
+a task-tree display. Native Mastra lifecycle replacement is being reassessed;
+this adapter checkpoint is not final issue319 acceptance.

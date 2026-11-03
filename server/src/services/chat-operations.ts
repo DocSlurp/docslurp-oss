@@ -32,11 +32,12 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
       const [root] = await tx<Operation[]>`select * from chat_operations where id=${parent.root_id} for update`;
       const [currentParent] = await tx<Operation[]>`select * from chat_operations where id=${parent.id}`;
       if (!root || root.tree_cancel_requested || currentParent!.cancel_requested || currentParent!.status === "interrupted") throw new OperationConflict("Tree cancelled or interrupted");
-      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations where root_id=${root.id}`;
+      const [{ count }] = await tx<{ count: number }[]>`select ((select count(*) from chat_operations where root_id=${root.id}) +
+        (select count(*) from chat_run_dependencies d join chat_operations c on c.id=d.operation_id where c.root_id=${root.id}))::int as count`;
       if (count >= CHAT_OPERATION_LIMITS.tasks) throw new OperationConflict("Task tree limit");
       rootId = root.id;
     } else {
-      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations where user_id=${args.userId} and parent_id is null and status in ('queued','running','waiting')`;
+      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations where user_id=${args.userId} and parent_id is null and (status in ('queued','running','waiting') or chat_root_has_active_dependencies(id))`;
       if (count >= CHAT_OPERATION_LIMITS.activeRoots) throw new OperationConflict("Active operation limit");
     }
     const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input)

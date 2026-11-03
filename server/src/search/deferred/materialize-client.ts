@@ -9,6 +9,7 @@ import {
   type MaterializePagesInput,
 } from "@docslurp/shared";
 
+import { acceptChatRunDependency } from "../../services/chat-run-dependencies.js";
 import { sql } from "../../db.js";
 import { startMaterializeWorkflow } from "../../lib/temporal.js";
 import { canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
@@ -25,7 +26,7 @@ export interface PageState {
 export interface MaterializeDeps {
   loadPageStates(pairs: Array<{ documentId: string; page: number }>): Promise<Map<string, PageState>>;
   canSpend(orgId: string, workspaceId: string): Promise<boolean>;
-  createRun(args: { orgId: string; userId: string; workspaceId: string; documentId: string; documents: number; pages: number }): Promise<string>;
+  createRun(args: { orgId: string; userId: string; workspaceId: string; documentId: string; documents: number; pages: number; pageNumbers?: number[] }): Promise<string>;
   /** Marks a run whose workflow start was deduplicated; the winning workflow owns the real work. */
   closeDedupedRun(runId: string): Promise<void>;
   /** Marks a run whose workflow could not be started. */
@@ -89,13 +90,15 @@ export const defaultMaterializeDeps: MaterializeDeps = {
       left join workspaces w on w.id = ${args.workspaceId}
     `;
     const pipeline = sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`);
-    await sql`
+    return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
+    await tx`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.workspaceId}, 'materialize', 'processing', 'materialize',
-             ${args.documents}, ${args.pages}, ${sql.json(pipeline as never)}, now(),
+             ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
              now() + interval '15 minutes', now(), null)
     `;
-    return id;
+    return { runId: id, value: id };
+    });
   },
   async closeDedupedRun(runId) {
     await sql`
@@ -213,7 +216,7 @@ export async function materializeForQuery(
     try {
       args.signal?.throwIfAborted();
       runId = await deps.createRun({
-        orgId: args.orgId, userId: args.userId, workspaceId: args.workspaceId, documentId, documents: 1, pages: pages.length,
+        orgId: args.orgId, userId: args.userId, workspaceId: args.workspaceId, documentId, documents: 1, pages: pages.length, pageNumbers: pages,
       });
       args.signal?.throwIfAborted();
       const outcome = await deps.startWorkflow(

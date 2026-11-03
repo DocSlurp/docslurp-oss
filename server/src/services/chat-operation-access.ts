@@ -1,3 +1,4 @@
+import { readChatRunDependencies } from "./chat-run-dependencies.js";
 import { sql } from "../db.js";
 import { loadActorScopedWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { operationHub } from "../realtime/operation-hub.js";
@@ -20,8 +21,9 @@ export async function authorizedChatOperationSnapshot(actor: RequestActor, id: s
     select id,root_id,parent_id,user_id,workspace_id,org_id,status,attempt_id,sequence,cancel_requested,tree_cancel_requested
     from chat_operations where root_id=${recovery.operation.root_id} and user_id=${actor.userId}
       and expires_at>now() order by created_at,id limit 64`;
+  const dependencies = await readChatRunDependencies(recovery.operation.root_id, actor.userId);
   const scopes = new Map<string, string>();
-  for (const task of tasks) {
+  for (const task of [...tasks, ...dependencies]) {
     if (!scopes.has(task.workspace_id)) {
       const workspace = await loadActorScopedWorkspace(task.workspace_id, actor, { refineNames: false });
       if (!workspace) throw new Error("operation_forbidden");
@@ -29,7 +31,7 @@ export async function authorizedChatOperationSnapshot(actor: RequestActor, id: s
     }
     if (scopes.get(task.workspace_id) !== task.org_id) throw new Error("operation_forbidden");
   }
-  return { ...recovery, tasks, treeSettled: tasks.every(task => ["completed","failed","cancelled","interrupted"].includes(task.status)) };
+  return { ...recovery, tasks, dependencies, treeSettled: dependencies.every(task => ["completed","failed","cancelled","interrupted"].includes(task.status)) && tasks.every(task => ["completed","failed","cancelled","interrupted"].includes(task.status)) };
 }
 
 /** Socket host must supply a callback that revalidates the live session (including revocation).

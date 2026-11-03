@@ -820,6 +820,13 @@
       "when": 1793750400003,
       "tag": "0116_realtime_viewer_suggestions",
       "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1793750400004,
+      "tag": "0117_chat_run_dependencies",
+      "breakpoints": true
     }
   ]
 }
