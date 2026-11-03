@@ -303,6 +303,19 @@ describe("runDeferredPageSearch", () => {
     expect(args.search.textSearch).not.toHaveBeenCalled();
   });
 
+  it.each(["listModels", "canSpend"])("does not dispatch image embeddings after cancellation during %s", async boundary => {
+    const controller = new AbortController();
+    const embed = vi.fn(async () => new Float32Array(4));
+    const d = deps({
+      listDeferredDocuments: vi.fn(async () => [{ id: "d1", mode: "visual", pageCount: 100, indexedPages: 10 }]),
+      listModels: vi.fn(async () => { if (boundary === "listModels") controller.abort(); return ["gemini-embedding-2"]; }),
+      canSpend: vi.fn(async () => { if (boundary === "canSpend") controller.abort(); return true; }),
+      embed,
+    });
+    await expect(runDeferredPageSearch(searchArgs(journal(), { signal: controller.signal }), d)).rejects.toMatchObject({ name: "AbortError" });
+    expect(embed).not.toHaveBeenCalled();
+  });
+
   it("falls back (fallbackUsed) and records degraded when the page embedder returns null", async () => {
     const j = journal();
     const d = deps({
