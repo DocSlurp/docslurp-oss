@@ -29,6 +29,23 @@ async function withStore<T>(fn: (store: Store) => Promise<T>): Promise<T> {
 }
 
 describe("late run checkpoints", () => {
+  it.each(["cancelled", "failed", "completed"])("refuses completion after external %s while settling usage once", async status => {
+    const id = `external-${status}`;
+    await db.query(`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline,total_documents)
+      values ($1,'terminal-o','terminal-u','terminal-w','upload','processing','embed','{}',0)`, [id]);
+    await withStore(async store => {
+      const state = await loadRunState(store, id);
+      const token = (await db.query<{ execution_generation: string }>("select execution_generation from workspace_runs where id=$1", [id])).rows[0]!.execution_generation;
+      const owner = { runId: id, orgId: "terminal-o", workspaceId: "terminal-w", executionGeneration: token };
+      state.usageLedger.record({ provider: "openai", model: "text-embedding-3-small", metric: "embedding-tokens", inputTokens: 7, costCents: 0.01, logOutputTokens: false });
+      await db.query("update workspace_runs set status=$2, stage=$2 where id=$1", [id, status]);
+      for (let i = 0; i < 2; i++) await expect(store.completeRun(state, owner)).rejects.toThrow("ownership");
+      expect((await db.query("select status from workspace_runs where id=$1", [id])).rows).toEqual([{ status }]);
+      expect((await db.query("select id from run_terminal_receipts where run_id=$1", [id])).rows).toHaveLength(0);
+      expect((await db.query("select id from webhook_outbox where payload->>'runId'=$1", [id])).rows).toHaveLength(0);
+      expect((await db.query("select id from usage_events where run_id=$1", [id])).rows).toHaveLength(1);
+    });
+  });
   it.each(["failed", "completed"])("preserves a concurrent %s outcome while settling paid usage", async (terminal) => {
     const id = `terminal-${terminal}`;
     await db.query(`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline,total_documents)

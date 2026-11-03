@@ -1160,9 +1160,26 @@ export class Store {
       Object.assign(state.run, snapshot.run);
       state.stage = snapshot.stage;
       state.documents.forEach((document, index) => { document.status = snapshot.statuses[index]!; });
+      if (error instanceof StaleExecutionError) await this.settleLateUsage(state, owner);
       throw error;
     }
     for (const commit of afterCommit) commit();
+  }
+
+  private async settleLateUsage(state: WorkflowState, owner: ExecutionOwner): Promise<void> {
+    // Settle real usage without applying the obsolete progress snapshot.
+    const batch = state.usageLedger.checkpoint();
+    if (batch.events.length) {
+      await this.sql.begin(async tx => {
+        const client = tx as unknown as typeof this.sql;
+        const [run] = await client`select id from workspace_runs where id = ${owner.runId}
+          and org_id = ${owner.orgId} and workspace_id = ${owner.workspaceId} for update`;
+        if (!run) throw new StaleExecutionError();
+        const costCents = await persistRunUsageEvents({ client, state, usageEvents: batch.events });
+        await debitRunUsageCredits({ client, state, costCents });
+      });
+      batch.commit();
+    }
   }
 
   /** Ownership lock and receipt share the caller's terminal mutations and commit. */
@@ -1171,6 +1188,12 @@ export class Store {
     await this.sql.begin(async (tx) => {
       await assertExecutionOwnership(tx, owner);
       const logicalId = JSON.stringify(["run-terminal", owner.runId, owner.executionGeneration ?? null]);
+      const [existing] = await tx`select id from run_terminal_receipts where id = ${logicalId}`;
+      if (existing) return;
+      const [eligible] = await tx`select id from workspace_runs where id = ${owner.runId}
+        and status in ('queued', 'processing')
+        and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
+      if (!eligible) throw new StaleExecutionError();
       const [receipt] = await tx`
         insert into run_terminal_receipts (id, run_id, execution_generation, outcome)
         values (${logicalId}, ${owner.runId}, ${owner.executionGeneration ?? null}, ${outcome})
@@ -1399,19 +1422,7 @@ export class Store {
         });
       } catch (error) {
         if (error instanceof StaleExecutionError) {
-          // Paid receipts survive a stale planner, but its progress snapshot does not.
-          const batch = state.usageLedger.checkpoint();
-          if (batch.events.length) {
-            await this.sql.begin(async tx => {
-              const client = tx as unknown as typeof this.sql;
-              const [run] = await client`select id from workspace_runs where id = ${owner.runId}
-                and org_id = ${owner.orgId} and workspace_id = ${owner.workspaceId} for update`;
-              if (!run) throw new StaleExecutionError();
-              const costCents = await persistRunUsageEvents({ client, state, usageEvents: batch.events });
-              await debitRunUsageCredits({ client, state, costCents });
-            });
-            batch.commit();
-          }
+          await this.settleLateUsage(state, owner);
         }
         throw error;
       }
