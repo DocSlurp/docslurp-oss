@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const within = (root, path) => { const rel = relative(root, path); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); };
