@@ -42,7 +42,6 @@ import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } f
 import { latchedTeardownError } from "../sandbox/session-context.js";
 import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
 import {
-  buildRunCompletedEvent,
   buildRunProgressEvent,
   buildRunStartedEvent,
 } from "./run-ledger.js";
@@ -686,15 +685,7 @@ export function createStageExecution(deps: {
         ),
       );
 
-    if (event === "run.failed") return;
-    await store
-      .triggerWebhooks(runId, event)
-      .catch((err) =>
-        console.error(
-          "webhook trigger failed:",
-          err instanceof Error ? err.message : String(err),
-        ),
-      );
+
   }
 
   /** Mark a Run completed, emit run.completed, and notify emails/webhooks. */
@@ -720,11 +711,7 @@ export function createStageExecution(deps: {
     console.log(
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
-    await store.completeRun(state);
-
-    await store.appendEvent(
-      buildRunCompletedEvent(state, "pipeline completed"),
-    );
+    await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
 
     await notifyTerminal(input.runId, "run.completed");
   }

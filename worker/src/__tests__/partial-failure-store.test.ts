@@ -7,7 +7,7 @@ import { loadRunState } from "../pipeline/stage-execution.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-vi.mock("../db/page-base-fee.js", () => ({ recordPageBaseFee: vi.fn() }));
+
 
 let db: PGlite;
 let server: PGLiteSocketServer;
@@ -61,6 +61,43 @@ async function statuses(runId: string) {
 }
 
 describe("partial Document failure in the store", () => {
+  it("commits success once after acknowledgement loss and fences stale and tenant owners", async () => {
+    await seedRun("success-retry");
+    await db.exec("update workspace_runs set execution_generation = 'g1' where id = 'success-retry'");
+    const owner = { runId: "success-retry", orgId: "o1", workspaceId: "w", executionGeneration: "g1" };
+    await withStore(async store => {
+      await store.completeRun(await loadRunState(store, owner.runId), owner);
+      await store.completeRun(await loadRunState(store, owner.runId), owner);
+      for (const mismatch of [{ executionGeneration: "old" }, { orgId: "other" }, { workspaceId: "other" }]) {
+        await expect(store.completeRun(await loadRunState(store, owner.runId), { ...owner, ...mismatch })).rejects.toThrow("ownership");
+      }
+    });
+    for (const table of ["run_terminal_receipts", "workspace_run_events"]) {
+      expect((await db.query(`select id from ${table} where run_id = 'success-retry'`)).rows).toHaveLength(1);
+    }
+    expect((await db.query("select id from webhook_outbox where payload->>'runId' = 'success-retry'")).rows).toHaveLength(1);
+    expect((await db.query("select id from usage_events where id = 'fast:success-retry'")).rows).toHaveLength(1);
+  });
+
+  it("rolls back success documents, billing, receipt and event when webhook persistence fails", async () => {
+    await seedRun("success-rollback");
+    await withStore(async store => {
+      const state = await loadRunState(store, "success-rollback");
+      state.usageLedger.enqueue({ id: "rollback-usage", provider: "local", model: "compute", metric: "compute", amount: 1, unit: "second", costCents: 2 });
+      const pending = state.usageLedger.pendingBillableCents;
+      const spy = vi.spyOn(store, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
+      await expect(store.completeRun(state)).rejects.toThrow("outbox unavailable");
+      expect(state.usageLedger.pendingBillableCents).toBe(pending);
+      spy.mockRestore();
+    });
+    expect(Object.values(await statuses("success-rollback"))).toEqual(["processing", "processing", "queued"]);
+    for (const table of ["run_terminal_receipts", "workspace_run_events", "usage_events"]) {
+      expect((await db.query(`select id from ${table} where run_id = 'success-rollback'`)).rows).toHaveLength(0);
+    }
+    expect((await db.query("select status from workspace_runs where id = 'success-rollback'")).rows).toEqual([{ status: "processing" }]);
+    await withStore(async store => store.completeRun(await loadRunState(store, "success-rollback")));
+  });
+
   it("deduplicates an acknowledged-lost commit and rejects stale or cross-tenant owners", async () => {
     await seedRun("receipt-retry");
     await db.exec("update workspace_runs set execution_generation = 'g1' where id = 'receipt-retry'");
@@ -171,9 +208,8 @@ describe("partial Document failure in the store", () => {
     expect(run!.stats).toMatchObject({ failedDocuments: 1, failedDocumentStages: 1 });
 
     // The run.completed webhook carries the failure count.
-    await withStore(async (store) => { await store.triggerWebhooks("run-ok", "run.completed"); });
     const outbox = await db.query<{ payload: Record<string, unknown> }>(
-      `select payload from webhook_outbox where event_type = 'run.completed'`);
+      `select payload from webhook_outbox where event_type = 'run.completed' and payload->>'runId' = 'run-ok'`);
     expect(outbox.rows[0]!.payload).toMatchObject({ runId: "run-ok", status: "completed", failedDocuments: 1 });
   });
 });

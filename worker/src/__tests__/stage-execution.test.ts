@@ -324,7 +324,7 @@ describe("Stage Execution", () => {
 
     expect(store.runStatus).toBe("completed");
     expect(store.calls.find((call) => call.startsWith("completeRun:"))).not.toBe("completeRun:0");
-    expect(store.events.map((event) => event.eventType)).toEqual(["run.completed"]);
+    expect(store.events).toEqual([]); // The store owns the transactional completion event.
     expect(store.notifications).toEqual(["email:run.completed"]);
   });
 

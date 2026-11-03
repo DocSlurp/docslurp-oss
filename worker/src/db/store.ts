@@ -1,9 +1,10 @@
+import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { dbTraceStatementHook } from "../lib/db-trace.js";
-import { pipelineTransaction } from "./transaction-pipeline.js";
+import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
@@ -820,6 +821,7 @@ export class Store {
     state: WorkflowState,
     prelude: ((client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[]) | undefined,
     options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean },
+    transaction?: { client: Sql<Record<string, unknown>>; afterCommit: Array<() => void> },
   ): Promise<ProgressWrite> {
     state.run.artifacts = state.artifacts;
     const usageBatch = state.usageLedger.checkpoint();
@@ -860,7 +862,7 @@ export class Store {
     // reset per attempt and the usage batch commits only after success.
     // The independent writes go out as one pipelined transaction (one round
     // trip, transaction-pipeline.ts); only the credit lease needs a result.
-    await retryTransaction(`checkpoint run=${state.run.id}`, async () => {
+    const write = async () => {
       spendCheckDue = false;
       unspentSinceCheck = true;
       leaseConsumed = false;
@@ -873,7 +875,7 @@ export class Store {
       let controlIndex = -1;
       let preloadIndex = -1;
       const insertedCost = (results: readonly unknown[]) => usageCost(results.slice(usageFrom, usageTo) as unknown[][]);
-      const results = await pipelineTransaction(this.sql, (client) => {
+      const results = await (transaction ? pipelineInTransaction : pipelineTransaction)(transaction?.client ?? this.sql, (client) => {
         const statements: PendingQuery<any>[] = [];
         if (prelude) statements.push(...prelude(client));
 
@@ -984,8 +986,11 @@ export class Store {
         if (runRows[0]) preloaded = { run: mapRun(runRows[0]), documents: documentRows.map(mapDocument), stageStates: stageRows };
       }
       if (controlIndex >= 0) controlRequested = CONTROL_REQUEST_STATES.includes((results[controlIndex] as { control_state: string | null }[])[0]?.control_state ?? "");
-    });
+    };
+    if (transaction) await write();
+    else await retryTransaction(`checkpoint run=${state.run.id}`, write);
 
+    const commit = () => {
     // Synchronously together: the committed events leave the pending sum as
     // spent_cents takes them, so runSpentCents never counts them twice or 0 times.
     usageBatch.commit();
@@ -1003,6 +1008,12 @@ export class Store {
     state.vectorIndexes = without(state.vectorIndexes, vectors);
     state.pendingPerformance = without(state.pendingPerformance, performance);
     state.pendingParserEvaluations = without(state.pendingParserEvaluations, parserEvaluations);
+    };
+    if (transaction) {
+      transaction.afterCommit.push(commit);
+      return { unspentSinceCheck };
+    }
+    commit();
     if (spendCheckDue) await enforceRunSpend(this.sql, state.run, "checkpoint-interval");
     if (leaseConsumed) {
       // The stage boundary handles its lease after the stage.completed event.
@@ -1112,51 +1123,46 @@ export class Store {
     for (const statement of this.parserEvaluationStatements(client, parserEvaluations)) await statement;
   }
 
-  async completeRun(state: WorkflowState): Promise<void> {
-    state.run.status = "completed";
-    state.run.processedDocuments = state.run.totalDocuments;
-    state.run.pagesProcessed = state.run.pagesTotal;
-    state.stage = "completed";
-    for (const document of state.documents) {
-      const hasFailedStage = Array.from(state.documentStages.get(document.id)?.values() ?? [])
-        .some((stage) => stage.status === "failed");
-      if (!["failed", "cancelled", PII_BLOCKED_DOCUMENT_STATUS].includes(document.status) && !hasFailedStage) {
-        document.status = "completed";
-      }
-    }
-    state.refreshStats();
-    await this.updateProgress(state);
-
-    await recordPageBaseFee(this.sql, state);
-
-    let replacements: CanonicalReplacement[] = [];
-    const cutover = state.run.kind === "full-index"
-      ? await this.sql.begin(async (tx) => {
-        const client = tx as unknown as typeof this.sql;
-        // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
-        // (see backfill-adoption.ts) before anything below, and must not supersede the source version.
-        const adopted = new Set(await adoptBackfillDocuments(client, state.run.id));
+  async completeRun(state: WorkflowState, owner: ExecutionOwner = { runId: state.run.id, orgId: state.run.orgId!, workspaceId: state.run.workspaceId! }): Promise<void> {
+    if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.workspaceId !== state.run.workspaceId) throw new StaleExecutionError();
+    // Resolve schema capabilities before reserving the terminal transaction connection.
+    await this.creditLeases.active();
+    if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
+    const afterCommit: Array<() => void> = [];
+    const snapshot = { run: { ...state.run }, stage: state.stage, statuses: state.documents.map(document => document.status) };
+    try {
+      await this.finalizeRun(owner, "completed", async (client, logicalId) => {
+        state.run.status = "completed";
+        state.run.processedDocuments = state.run.totalDocuments;
+        state.run.pagesProcessed = state.run.pagesTotal;
+        state.stage = "completed";
+        for (const document of state.documents) {
+          const hasFailedStage = Array.from(state.documentStages.get(document.id)?.values() ?? [])
+            .some((stage) => stage.status === "failed");
+          if (!["failed", "cancelled", PII_BLOCKED_DOCUMENT_STATUS].includes(document.status) && !hasFailedStage) {
+            document.status = "completed";
+          }
+        }
+        state.refreshStats();
+        await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
+        await recordPageBaseFee(client, state, { afterCommit });
+        const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
-        return await supersededInThisTransaction(client, completed.filter((id) => !adopted.has(id)));
-      })
-      // Independent statements go out in one burst; the supersede read needs the completed ids.
-      : await pipelineTransaction(this.sql, (client) => completeRunDocumentStatements(client, state.run.id),
-        async (client, [, , completed]) => {
-          replacements = await supersededInThisTransaction(client, completed.map((row) => row.id));
-        }).then(() => replacements);
-    await this.announceReplacements(state, cutover);
-
-    await this.sql`
-      update workspace_runs
-      set
-        status = 'completed',
-        stage = 'completed',
-        processed_documents = total_documents,
-        pages_processed = pages_total,
-        lease_expires_at = null,
-        updated_at = now()
-      where id = ${state.run.id}
-    `;
+        const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
+        await this.announceReplacements(state, replacements, client, logicalId);
+        await client`update workspace_runs set status = 'completed', stage = 'completed',
+          processed_documents = total_documents, pages_processed = pages_total,
+          lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
+        await insertWorkspaceRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
+        await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
+      });
+    } catch (error) {
+      Object.assign(state.run, snapshot.run);
+      state.stage = snapshot.stage;
+      state.documents.forEach((document, index) => { document.status = snapshot.statuses[index]!; });
+      throw error;
+    }
+    for (const commit of afterCommit) commit();
   }
 
   /** Ownership lock and receipt share the caller's terminal mutations and commit. */
@@ -1884,9 +1890,10 @@ export class Store {
   }
 
   /** Emits document.replaced once a newer canonical version has taken over in search. */
-  private async announceReplacements(state: WorkflowState, replacements: CanonicalReplacement[]): Promise<void> {
+  private async announceReplacements(state: WorkflowState, replacements: CanonicalReplacement[], client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
     for (const replacement of replacements) {
-      await this.appendEvent({
+      await insertWorkspaceRunEvents({ sql: client, events: [{
+        id: logicalId ? `${logicalId}:replacement:${replacement.documentId}` : randomUUID(),
         userId: state.run.userId,
         runId: state.run.id,
         documentId: replacement.documentId,
@@ -1899,9 +1906,9 @@ export class Store {
           replacedDocumentIds: replacement.replacedDocumentIds,
         },
         payload: { ...replacement },
-      });
+      }] });
     }
-    await this.triggerDocumentWebhooks(state, replacements);
+    await this.triggerDocumentWebhooks(state, replacements, client, logicalId);
   }
 
   private vectorIndexStatements(
@@ -1980,6 +1987,8 @@ export class Store {
   private async triggerDocumentWebhooks(
     state: WorkflowState,
     replacements: CanonicalReplacement[],
+    client: Sql<Record<string, unknown>> = this.sql,
+    logicalId?: string,
   ): Promise<void> {
     for (const replacement of replacements) {
       const payload = {
@@ -1988,9 +1997,9 @@ export class Store {
         workspaceId: state.run.workspaceId,
         ...replacement,
       };
-      await this.enqueueWebhookEvent("document.replaced", this.sql`
+      await this.enqueueWebhookEvent("document.replaced", client`
         select ${state.run.userId}::text as user_id, ${this.toJson(payload)}::jsonb as payload
-      `);
+      `, client, logicalId ? `${logicalId}:replacement:${replacement.documentId}` : undefined);
     }
   }
 
