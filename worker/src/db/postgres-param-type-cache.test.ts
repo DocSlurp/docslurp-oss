@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { startPgWireProxy } from "../test/pg-wire-proxy.mjs";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -31,6 +31,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await sql?.end();
   await proxy?.close();
+  // Socket close schedules PGlite handler cleanup with setImmediate. Wait for
+  // that cleanup before stop() clears the handler set and db.close() frees WASM.
+  if (server) await vi.waitFor(() => expect(server.getStats().activeConnections).toBe(0));
   await server?.stop();
   await db?.close();
 });

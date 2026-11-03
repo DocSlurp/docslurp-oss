@@ -590,6 +590,10 @@ async function main(): Promise<void> {
     // Recreate the connection and workers after any non-fatal stop (connection loss, poller
     // failure, a worker run() that returned unasked); only fatal states throw out of here.
     await superviseTemporalWorkers({
+      onFatal: () => {
+        process.exitCode = 1;
+        setTimeout(() => process.exit(1), 2_000).unref();
+      },
       createSession,
       signal: controller.signal,
       onSession: (session) => { activeSession = session; },

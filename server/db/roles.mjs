@@ -68,6 +68,7 @@ export const WORKER_TABLES = Object.freeze({
   org_teardown_failures: { privileges: ["select", "insert"], evidence: "worker/src/sandbox/source-quarantine.ts (recordOrgFailure insert ... returning; orgFailures count); operators delete rows" },
   page_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts page stage state" },
   page_work_tasks: { privileges: DML, evidence: "worker/src/db/page-task-store.ts" },
+  run_terminal_receipts: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts finalizeRun reads and inserts immutable generation receipts" },
   parser_eval_results: { privileges: ["insert"], evidence: "worker/src/db/store.ts parser evaluations" },
   performance_log: { privileges: DML, evidence: "worker/src/db/store.ts perf log and pruning" },
   pii_detections: { privileges: DML, evidence: "worker/src/stages/pii-detect.ts" },

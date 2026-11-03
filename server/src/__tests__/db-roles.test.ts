@@ -80,6 +80,11 @@ describe("worker table classification", () => {
 });
 
 describe("worker role", () => {
+  it("can read terminal receipts but cannot rewrite or delete them", async () => {
+    expect(await denied(worker, "select id from run_terminal_receipts")).toBe(false);
+    expect(await denied(worker, "update run_terminal_receipts set outcome = 'completed'")).toBe(true);
+    expect(await denied(worker, "delete from run_terminal_receipts")).toBe(true);
+  });
   it("is denied select and update on every denied table", async () => {
     for (const table of Object.keys(WORKER_DENIED_TABLES)) {
       expect(await denied(worker, `select 1 from public."${table}" limit 1`), `select ${table}`).toBe(true);

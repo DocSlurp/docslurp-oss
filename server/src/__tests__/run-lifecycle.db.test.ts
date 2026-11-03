@@ -159,11 +159,17 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
         values (${runId}, 'fetch', 'completed'), (${runId}, 'parse', 'failed')
       `;
 
+      const [original] = await sql`select execution_generation from workspace_runs where id = ${runId}`;
       const startWorkflow = vi.fn(async () => {});
       const outcome = await lifecycle(sql, startWorkflow).retry({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
 
       expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
-      expect(startWorkflow).toHaveBeenCalledWith(runId, defaultPipelineFeatures, { restartExisting: true });
+      const [retried] = await sql`select execution_generation from workspace_runs where id = ${runId}`;
+      expect(retried.execution_generation).toEqual(expect.any(String));
+      expect(retried.execution_generation).not.toBe(original.execution_generation);
+      expect(startWorkflow).toHaveBeenCalledExactlyOnceWith(runId, defaultPipelineFeatures, {
+        restartExisting: true, executionGeneration: retried.execution_generation,
+      });
       const [row] = await sql`select status, stage, error, failure_count, control_state, dead_letter_reason from workspace_runs where id = ${runId}`;
       expect(row).toEqual({ status: "queued", stage: "queued", error: null, failure_count: 0, control_state: null, dead_letter_reason: null });
       expect(await sql`select stage_name from workspace_run_stage_states where run_id = ${runId}`).toEqual([{ stage_name: "fetch" }]);
