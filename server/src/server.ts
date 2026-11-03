@@ -6,6 +6,7 @@ import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
+import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -320,6 +321,9 @@ export function ensureApiStartup(): Promise<void> {
       }
 
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
+      // Boolean env flags this process booted with (MEDIA_REMOTE_ENABLED, AI_RATE_LIMIT_ENABLED, ...); unset ones use code defaults.
+      const bootFlags = formatEnvFlags(envFlags());
+      console.log(`[api] env-flags ${bootFlags}`);
       // Loud when limits are per instance (no Redis) or disabled.
       logRateLimitBackendAtStartup();
       // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
@@ -334,6 +338,7 @@ export function ensureApiStartup(): Promise<void> {
         body: "API startup complete",
         attributes: {
           startup_migrations_enabled: shouldRunStartupMigrations(),
+          env_flags: bootFlags,
         },
       });
     })().catch((error: unknown) => {

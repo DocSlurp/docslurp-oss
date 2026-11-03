@@ -15,6 +15,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@docslurp/shared/error-reporting": path.resolve(__dirname, "../packages/shared/src/error-reporting.ts"),
+      "@docslurp/shared/env-flags": path.resolve(__dirname, "../packages/shared/src/env-flags.ts"),
       "@docslurp/shared/observability": path.resolve(__dirname, "../packages/shared/src/observability.ts"),
       "@docslurp/shared/lancedb-s3-cache": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-cache.ts"),
       "@docslurp/shared/lancedb-s3-trace": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-trace.ts"),

@@ -26,6 +26,10 @@
       "types": "./dist/temporal-connection.d.ts",
       "import": "./dist/temporal-connection.js"
     },
+    "./env-flags": {
+      "types": "./dist/env-flags.d.ts",
+      "import": "./dist/env-flags.js"
+    },
     "./observability": {
       "types": "./dist/observability.d.ts",
       "import": "./dist/observability.js"

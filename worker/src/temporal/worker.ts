@@ -1,4 +1,5 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
+import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
 /**
  * Temporal worker entry point.
@@ -556,6 +557,8 @@ async function main(): Promise<void> {
     `dbPoolMax=${cfg.workerDbPoolMax} ` +
     `maintenance=${cfg.workerRunMaintenance} maintenanceLeader=${maintenanceLeader}`
   );
+  // Boolean env flags this worker booted with (MEDIA_REMOTE_ENABLED, PAGE_ROUTER_MODE, ...); unset ones use code defaults.
+  console.log(`[temporal-worker] env-flags ${formatEnvFlags(envFlags())}`);
 
   // Capability handshake (db/worker-capabilities.ts): register before polling
   // so the app never counts this worker's pollers as an unknown older build.
