@@ -87,8 +87,8 @@ flowchart TB
     temporal["temporal"]
     subgraph workerproc["Worker process"]
       worker["worker: same environment as server"]
-      subgraph sandbox["Sandbox provider: untrusted file parsing, no network"]
-        parser["Parser child: allowlisted env only, no secrets"]
+      subgraph sandbox["Sandbox provider: untrusted file parsing, no network, shared kernel"]
+        parser["Parser child: allowlisted env, no secrets in env"]
       end
     end
     subgraph data["Data stores"]
@@ -117,7 +117,7 @@ Only the reverse proxy faces the internet. The Compose file publishes one host p
 
 The `server` and `worker` services share one environment block in `compose.selfhost.yml`, plus whatever is in `.env.selfhost`. Both therefore hold `DATABASE_URL`, the storage credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), `BETTER_AUTH_SECRET`, `OAUTH_TOKEN_ENCRYPTION_KEY`, `CREDENTIALS_ENCRYPTION_KEY`, `SECRETS_ENCRYPTION_KEY`, `METRICS_SECRET` and any AI provider keys. Treat a worker compromise as a server compromise. The one-shot `migrate` service gets only `DATABASE_URL`. `postgres`, `minio` and `temporal` get the database password or storage credentials they need to run.
 
-The parser sandbox is the boundary that matters for untrusted files. A parser runs as a child of the worker with an allowlisted environment, so it holds none of the secrets above, and it has no network (bubblewrap blocks all of it; landlock blocks TCP connect and bind, and runs only on kernels that expose Landlock ABI v9). With the Modal provider the parser runs on Modal's infrastructure instead of the worker host. [Security](security.md#parser-sandbox) lists what the sandbox isolates and which commands skip it.
+The parser sandbox narrows what an untrusted file can reach, but it is not a VM boundary. A parser runs as a child of the worker with an allowlisted environment, so the secrets above are not in its environment, and it has no network (bubblewrap blocks all of it; landlock blocks TCP connect and bind, and runs only on kernels that expose Landlock ABI v9). It still shares the kernel and container with a worker that holds every secret, so an escape reaches them, and in-process parsers run inside the worker itself. With the Modal provider command-line parsers run on Modal's infrastructure instead of the worker host. [Security](security.md#what-the-sandbox-does-not-give-you) explains what the sandbox does not cover and which commands skip it.
 
 ## Compose topology
 

@@ -38,7 +38,7 @@ Your server key is used only during the build. It never ends up in the generated
 import docslurpDocsIndex from '@docslurp/contrib-astro/build';
 
 integrations: [docslurpDocsIndex({
-  routes: ['/docs', '/docs/getting-started'], // List every public page to index.
+  routes: ['/docs', '/docs/getting-started'], // Every public page to index: lowercase paths under /docs.
   site: 'https://docs.example.com',           // Origin used for canonical page URLs.
   apiUrl: 'https://docslurp.io',
   apiKey: process.env.DOCSLURP_API_KEY,       // Server key with the ingest scope.
@@ -46,19 +46,17 @@ integrations: [docslurpDocsIndex({
 })]
 ```
 
-Without `apiKey`, the build still writes `.docslurp/docs-index.json` and skips the upload. With a key, any indexing failure fails the build. A successful upload writes `docslurp-docs-search.json` (`{ "workspace": "<workspace ID>" }`) to the client output, so your search component can find it. Use `renderEnv` to pass environment variables that only the page renderer needs.
+Without `apiKey`, the build still writes `.docslurp/docs-index.json` and skips the upload. With a key, any indexing failure fails the build. A successful upload writes `docslurp-docs-search.json` (`{ "workspace": "<workspace ID>" }`) to the client output, so your search component can find it. Use `renderEnv` to pass environment variables that only the page renderer needs. `apiUrl` and `site` default to `https://docslurp.io` and `workspace` to `DocSlurp documentation`, so set `site` and `workspace` for your own docs.
 
 Pages are indexed as text: the upload asks for `{ visionFallback: false, preserveImages: false, summarize: true }`, so rendered HTML skips page images and vision and gets per-page summaries. Pass `pipeline` with other pipeline overrides to change that.
 
 To index a site after it deploys (for example when the build has no API key), crawl the live pages instead:
 
 ```bash
-DOCSLURP_API_KEY=... DOCSLURP_DOCS_WORKSPACE_ID=<workspace id> \
+DOCSLURP_API_KEY=... DOCSLURP_DOCS_WORKSPACE_ID=<workspace ID, slug or name> \
   node node_modules/@docslurp/contrib-astro/index-docs.mjs --site https://docs.example.com --routes routes.json --output .docslurp/docs-index.json
 ```
 
-`--routes` is a file or URL with a JSON array of paths. Only those paths on the site's own origin are fetched, and redirects are refused. Elements marked `data-search-exclude` (repeated boilerplate) are left out of the index.
+Set `DOCSLURP_URL` for a self-hosted service (default `https://docslurp.io`). `--routes` is a file or URL with a JSON array of `/docs` paths. Only those paths on the site's own origin are fetched, and redirects are refused. Elements marked `data-search-exclude` (repeated boilerplate) are left out of the index.
 
 This integration does not render protected pages, discover dynamic routes, delete documents for removed pages, or support other Astro adapters, so list your public documentation routes explicitly. Keep public documentation in its own organization, and use keys from that organization for both indexing and search.
-
-For how DocSlurp indexes its own website, see [Dogfood docs search](https://github.com/DocSlurp/docslurp-oss/blob/main/docs/docs-search.md).

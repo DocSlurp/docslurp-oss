@@ -50,12 +50,12 @@ await client.clickedObjectIDsAfterSearch({ indexName: "product-manuals", queryID
 
 ### Sync settings, synonyms and rules from your server
 
-Reads such as `getSettings` work with a browser key. Writes need a server key, so run them from a backend job or migration script, never in the browser:
+Reads such as `getSettings` work with a browser key. Writes (`setSettings`, `saveSynonyms`, `saveRules`, `importIndex`) need a server key with the `workspaces:manage` scope, which only organization owners and admins can grant, and the key owner must be able to edit the workspace. Run them from a backend job or migration script, never in the browser:
 
 ```ts
 const admin = docslurpAlgoliaClient({
   apiUrl: "https://docslurp.io",
-  clientKey: process.env.DOCSLURP_API_KEY!, // A server key with the search scope. The option is named clientKey.
+  clientKey: process.env.DOCSLURP_API_KEY!, // A server key with the workspaces:manage scope. The option is named clientKey.
 });
 
 const settings = await admin.getSettings({ indexName: "product-manuals" });
@@ -70,6 +70,9 @@ await admin.saveRules({ indexName: "product-manuals", rules: [{ objectID: "rule-
 - Legacy `index.search("query", { hitsPerPage: 10 })` and `index.search({ query: "query", hitsPerPage: 10 })` both work.
 - InstantSearch-style `client.search([{ indexName, params: { query } }])` is converted to the API's flat request shape. The current `{ requests }` form works too, with up to 10 requests.
 - The client follows common Algolia request and response shapes, but ranking comes from DocSlurp retrieval, not Algolia's ranking.
+- `filters` and `facetFilters` support `tags`, `mime_type`, `filename`, `language`, `heading`, `documentId` and `runId` clauses joined with `AND`, and `numericFilters` supports `page`. Other clauses are ignored, not rejected, so test the filters you rely on.
+- Facet counts and `searchForFacetValues` cover `filename` only, counted within the retrieved results. Highlight tags return the passage text without match markup.
+- `searchSingleIndex` with an empty `query` returns HTTP 400; batched requests with an empty query or an unknown index name return zero hits.
 
 ## Meilisearch
 

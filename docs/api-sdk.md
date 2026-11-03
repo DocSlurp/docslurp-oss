@@ -247,18 +247,24 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
 | Raw run/stage/document events | `GET /v1/runs/:runId/events/stream` | `streamRun` | Use SDK/HTTP |
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
-| List runs | `GET /v1/runs` | Use HTTP | `runs` |
+| List runs | `GET /v1/runs` | `listRuns` | `runs` |
+| Account activity (SSE) | `GET /v1/runs/activity/stream` | `streamActivity` | Use SDK/HTTP |
 | Workspace state | `GET /v1/workspaces/:workspace/state` | `getWorkspaceState` | Use SDK/HTTP |
 | Ingest report | `GET /v1/workspaces/:workspace/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
 | List workspaces | `GET /v1/workspaces` | `listWorkspaces()` | Use HTTP |
 | Read workspace | `GET /v1/workspaces/:workspace` | `getWorkspace(id)` | Use HTTP |
-| Rename workspace | `PATCH /v1/workspaces/:workspace` (session or `workspaces:manage` key) | Use HTTP | Use HTTP |
+| Update or rename workspace | `PATCH /v1/workspaces/:workspace` (session or `workspaces:manage` key) | `updateWorkspace(id, { slug })` | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
+| Grounded chat over SSE | `GET /v1/chat/stream` | `chatStream` | Use SDK/HTTP |
+| OpenAI-compatible chat | `POST /v1/chat/completions`, `GET /v1/models` ([chat](https://docslurp.io/docs/chat)) | Use an OpenAI SDK | Use HTTP |
+| List documents | `GET /v1/documents` | `listDocuments` | Use SDK/HTTP |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
+| Read structured fields | `GET /v1/documents/:id/structured` | Use HTTP | Use HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
-| Export as a zip | `POST /v1/exports`, poll `GET /v1/exports/:id`, then `GET /v1/exports/:id/download` | Use HTTP | Use HTTP |
+| Export as a zip | `POST /v1/exports`, poll `GET /v1/exports/:id`, then `GET /v1/exports/:id/download`; `GET /v1/exports` lists yours | Use HTTP | Use HTTP |
+| Who am I | `GET /v1/whoami` | Use HTTP | `whoami` |
 | Retention | `PATCH /v1/organizations/:orgId` or `/v1/workspaces/:workspace` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
 | Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
 | Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
@@ -360,7 +366,9 @@ to retain a session ID and control recovery yourself.
 `POST /v1/uploads/bulk` remains available for multipart/form-data through the
 API, with a default 25 MB limit (`MAX_MULTIPART_UPLOAD_BYTES`). This is a separate
 transport from object-storage multipart. In the SDK, select it with
-`directUpload: false`.
+`directUpload: false`. A larger request gets `413 payload_too_large` whose
+`details` carry `maxBytes` and `directUpload.maxFileBytes`, the per-file limit
+for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB).
 
 Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
 for the reconciler, Token authentication, bucket filter and deployment order.
@@ -951,8 +959,8 @@ Progress, workspace state and organization GETs count against the read rate limi
 Limits depend on deployment, account profile and each key's settings, so read them from responses instead of hard-coding them. Every limit that applied to a request is listed in the IETF [`RateLimit-Policy` and `RateLimit`](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) fields (`q` = quota, `w` = window seconds, `r` = remaining, `t` = seconds until reset), and `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset` (Unix seconds) describe the tightest one:
 
 ```http
-RateLimit-Policy: "ip-search";q=240;w=60, "ip-burst";q=200;w=10, "free-search";q=60;w=60, "key-requests-1h";q=1000;w=3600
-RateLimit: "ip-search";r=231;t=42, "ip-burst";r=197;t=7, "free-search";r=52;t=42, "key-requests-1h";r=12;t=1630
+RateLimit-Policy: "ip-search";q=240;w=60, "ip-burst";q=200;w=10, "account-search";q=600;w=60, "key-requests-1h";q=1000;w=3600
+RateLimit: "ip-search";r=231;t=42, "ip-burst";r=197;t=7, "account-search";r=592;t=42, "key-requests-1h";r=12;t=1630
 X-RateLimit-Limit: 1000
 X-RateLimit-Remaining: 12
 X-RateLimit-Reset: 1791504000
@@ -962,7 +970,7 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Layer | Policy names | Applies to |
 | --- | --- | --- |
 | Per client IP | `ip-<category>`, `ip-burst` | Every request. Categories: `upload`, `search`, `chat-ai`, `read`, `write`, `webhook`. |
-| Per key or signed-in user | `<table>-<category>` | The per-category limit of the organization's table (`free-…` for starter organizations, `paid-…` once it has bought credits), capped by the key's requests per minute if it has one. |
+| Per key or signed-in user | `account-<category>` (`self-hosted-<category>` on self-hosted servers) | The per-category limit of the account table below, the same for every organization, capped by the key's requests per minute if it has one. |
 | Custom key windows | `key-requests-<window>` | All endpoints together, e.g. 1,000 requests per hour. |
 | Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Credits the key's work was charged (pages, storage, searches, chat answers) in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. If the spend can't be read (a database problem), those requests get a 503 `unavailable` with `Retry-After` instead of going through unchecked. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
@@ -1036,6 +1044,9 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 | Structured fields (`outputSchema`) | 1 per started 10 pages per document |
 | Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
 | Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
+| Web search (web tools) | 1 per search; a deep search, or one that returns page content, counts as 2 |
+| Web page read (fetch or crawl) | 0.25 per page |
+| Site map | 1 per started 50 discovered URLs |
 
 Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
 
@@ -1077,9 +1088,9 @@ await client.search({ q: "revenue outlook", tags: "finance,FY26" });
 
 JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/uploads/bulk` accepts a `tags` field containing a JSON array. Tags are case-sensitive, trimmed, and deduplicated: up to 24 labels per request, each 1–100 characters, with no commas or NUL characters. Tags are saved with the document before processing starts, returned in the upload response, and preserved when reprocessing documents.
 
-`GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
+`GET /v1/workspaces/:workspace/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
 
-Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
+Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/:docId/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
 
 ## Export documents as a zip
 
