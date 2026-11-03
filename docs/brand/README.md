@@ -17,12 +17,12 @@ The DocSlurp mark is a cup that is also a page: a folded corner, Markdown lines 
 | `docslurp-mark-mono.svg`, `docslurp-mark-mono-white.svg` | Single colour (Ink or white) for print, embossing and monochrome UI |
 | `docslurp-lockup.svg` | Mark with the “DocSlurp” wordmark; follows the viewer's colour scheme like the mark |
 | `docslurp-lockup-dark.svg`, `docslurp-lockup-white.svg` | Fixed ink or paper-and-white lockup, for when you know the background |
-| `favicon.svg` | Browser tab icon; follows the browser's colour scheme |
-| `favicon.ico`, `favicon-16.png`, `favicon-32.png` | Raster tab icons (`.ico` holds 16, 32 and 48 px), drawn from the rounded app icon so they read on light and dark tab strips |
+| `favicon.svg` | Browser tab icon: the primary maskable icon |
+| `favicon.ico`, `favicon-16.png`, `favicon-32.png` | Raster tab icons (`.ico` holds 16, 32 and 48 px), drawn from the maskable icon; the Deck square reads on light and dark tab strips |
 | `apple-touch-icon.png` | iOS home screen, 180 px |
-| `icon-192.png`, `icon-512.png`, `docslurp-app-icon.svg` | App and PWA icons: the paper cup on a full-bleed Deck square |
-| `docslurp-app-icon-rounded.svg` | The same icon with rounded corners, for avatars and the raster favicons |
-| `icon-maskable-512.png`, `docslurp-app-icon-maskable.svg` | PWA `maskable` icon, with the mark inside the 80% safe zone |
+| `icon-192.png`, `icon-512.png`, `docslurp-app-icon.svg` | App, PWA and plugin icons; identical to the maskable icon |
+| `docslurp-app-icon-rounded.svg` | A larger cup with rounded corners, for avatars |
+| `icon-maskable-512.png`, `docslurp-app-icon-maskable.svg` | Primary icon: the paper cup inside the 80% maskable safe zone on a full-bleed Deck square. Favicons, app, PWA and plugin icons (`plugins/docslurp/.claude-plugin/icon.png`) all use it |
 | `palette.json` | Brand colours |
 
 On GitHub, where the page theme can differ from the system setting, pick the variant with `<picture>`:
@@ -60,12 +60,12 @@ The wordmark is “Doc” in Schibsted Grotesk Medium and “Slurp” in Schibst
 ```sh
 cd docs/brand
 node generate.mjs
-for n in 16 32 48; do rsvg-convert -w $n -h $n docslurp-app-icon-rounded.svg -o favicon-$n.png; done
+for n in 16 32 48; do rsvg-convert -w $n -h $n docslurp-app-icon-maskable.svg -o favicon-$n.png; done
 magick favicon-16.png favicon-32.png favicon-48.png favicon.ico && rm favicon-48.png
-rsvg-convert -w 180 -h 180 docslurp-app-icon.svg -o apple-touch-icon.png
-rsvg-convert -w 192 -h 192 docslurp-app-icon.svg -o icon-192.png
-rsvg-convert -w 512 -h 512 docslurp-app-icon.svg -o icon-512.png
+rsvg-convert -w 180 -h 180 docslurp-app-icon-maskable.svg -o apple-touch-icon.png
+for n in 192 512; do rsvg-convert -w $n -h $n docslurp-app-icon-maskable.svg -o icon-$n.png; done
 rsvg-convert -w 512 -h 512 docslurp-app-icon-maskable.svg -o icon-maskable-512.png
+rsvg-convert -w 1024 -h 1024 docslurp-app-icon-maskable.svg -o ../../plugins/docslurp/.claude-plugin/icon.png
 ```
 
 To change the wordmark, re-outline it with `outline-wordmark.py` (needs Python with `fonttools`, `brotli` and `uharfbuzz`) from the variable Schibsted Grotesk font in `@fontsource-variable/schibsted-grotesk`:

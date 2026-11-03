@@ -215,3 +215,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Added opt-in durable chat operation queue, output journal, authorized recovery adapter and scoped task cancellation for issue 319; legacy client migration and full acceptance remain open (docs/durable-chat-operations.md).
 - Make successful Temporal finalization atomic with the ownership-fenced terminal receipt, progress, usage/page charges, document cutover, completion events and webhook intents; retain pending usage on rollback (2026-11-03). Council review pending in #277.
+- Make the maskable app icon the primary icon: `favicon.svg`, raster favicons, apple-touch, PWA and Claude plugin icons are all rendered from `docslurp-app-icon-maskable.svg`.
