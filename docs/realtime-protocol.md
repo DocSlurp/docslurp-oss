@@ -79,3 +79,35 @@ integration tests. Required host checks include real standalone and Astro Upgrad
 proxy idle timeout, graceful draining, revocation, overflow and reconnect races.
 Canary remains disabled until independent council review and matched workload
 measurements establish p95 propagation at or below two seconds within fixed budgets.
+
+## Integration update: Node adapter and payloads (2026-11-03)
+
+Implementation is in progress on `feat/realtime-core-319`, PR 278. The real Node
+adapter is implemented and socket/database integration tests are running.
+Import `attachFirstPartyRealtime` from `@docslurp/server/realtime`, then call
+`const realtime = attachFirstPartyRealtime(nodeServer, { operations })` once on
+the actual Node HTTP server. Call `await realtime.close()` during draining.
+`operations` is the optional exported RealtimeOperationProvider. No provider
+means operation subscriptions fail closed. Standalone `main.ts` attaches it.
+Enable server-side with `REALTIME_ENABLED=true`; exact allowed Origins come from
+`CORS_ALLOWED_ORIGINS`. No Upgrade support is implied by mounting `apiApp.fetch`.
+
+The following final projection contracts supersede the earlier generic examples:
+
+| Resource | `snapshot.data` | Bound |
+| --- | --- | --- |
+| activity/orgId | `{ runs: WorkspaceRun[], truncated: boolean }` | 200 runs, active first then latest update |
+| run/runId | WorkspaceRunProgressSnapshot, including recentEvents | Latest 100 lifecycle events; no durable event-history claim |
+| workspace/workspaceId | WorkspaceRecord (`workspaceSchema`) | One workspace |
+| documents/workspaceId/page | DocumentIndexResponse | 50 documents/page; page 0–1000 |
+| billing/orgId | BillingOverview (`billingOverviewSchema`) | Owner/admin only |
+| economics/orgId/page | `{ workspaces: [{workspaceId,name,documentCount,pageCount,sourceBytes,activeRuns,pagesProcessed,runtimeMs,usage}], page,hasMore }` | 50 workspaces/page; owner/admin only; usage from attribution service |
+
+WorkspaceRun gains optional `jobId` (effective parent ID, run ID when no parent).
+Keep each child's own run ID/status/progress under that parent. Activity is a
+bounded inventory, not all historical runs. The run snapshot's recentEvents
+is an authoritative bounded replacement window, not an append-only journal.
+Do not append that window repeatedly. Older history remains an explicit HTTP read.
+A resource error evicts that subscription's data (including removed runs/workspaces).
+Collection snapshots replace missing members. Dashboard snapshots may skip revisions;
+only append-only operation output uses durable replay sequence semantics.

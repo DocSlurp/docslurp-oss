@@ -1,3 +1,4 @@
+import { attachFirstPartyRealtime } from "./realtime/index.js";
 import { serve } from "@hono/node-server";
 import { apiApp, drainSearchSessionWrites, ensureApiStartup } from "./server.js";
 
@@ -16,7 +17,10 @@ const server = serve({ fetch: apiApp.fetch, port, hostname: process.env.HOST ?? 
   console.log(`[docslurp-server] listening on http://${info.address}:${info.port}`);
 });
 
+const realtime = attachFirstPartyRealtime(server as import("node:http").Server);
+
 function shutdown(): void {
+  void realtime.close();
   // Write-behind search sessions carry usage events: commit them before exiting.
   const closed = new Promise<void>((resolve) => server.close(() => resolve()));
   void Promise.all([closed.then(() => drainSearchSessionWrites(4_000)), drainSearchSessionWrites(4_500)])

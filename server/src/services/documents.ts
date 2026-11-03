@@ -762,6 +762,7 @@ export async function listDocumentIndexEntries(args: {
   tags?: string[];
   q?: string;
   limit?: number;
+  offset?: number;
   /** Include older versions replaced by a newer document with the same canonical ID. */
   includeSuperseded?: boolean;
 }): Promise<{
@@ -867,8 +868,8 @@ export async function listDocumentIndexEntries(args: {
      left join document_tags dt on dt.document_id = d.id
      where ${whereClause}
      group by d.id, w.name, orgs.name, ds.summary
-     order by ${searchOrderClause}
-     limit ${limit}
+     order by ${searchOrderClause}, d.id
+     limit ${limit} offset ${Math.max(0, Math.min(args.offset ?? 0, 50_000))}
   `;
 
   const totalCount = summaryRow?.total_count ?? 0;
@@ -876,7 +877,7 @@ export async function listDocumentIndexEntries(args: {
     documents: rows.map(mapDocumentIndexEntry),
     totalCount,
     limit,
-    truncated: totalCount > limit
+    truncated: totalCount > limit + Math.max(0, Math.min(args.offset ?? 0, 50_000))
   };
 }
 

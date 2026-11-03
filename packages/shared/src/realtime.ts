@@ -14,6 +14,7 @@ export const realtimeResourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: z.uuid() }).strict(),
   z.object({ kind: z.literal("documents"), workspaceId: z.uuid(), page: z.number().int().min(0).max(1000).default(0) }).strict(),
   z.object({ kind: z.literal("billing"), orgId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("economics"), orgId: z.uuid(), page: z.number().int().min(0).max(1000).default(0) }).strict(),
   z.object({ kind: z.literal("operation"), operationId: z.uuid(), after: sequence.default(0) }).strict(),
 ]);
 const envelope = { v: z.literal(REALTIME_VERSION), subscriptionId: id, generation: sequence };

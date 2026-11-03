@@ -181,6 +181,7 @@ export function createApiApp(): Hono {
   app.route("/v1/waitlist", waitlistRoutes);
   app.route("/v1/organizations", organizationsRoutes);
   app.route("/v1/organizations", ssoRoutes);
+  app.get("/v1/realtime", c => c.json({ error: "WebSocket Upgrade required" }, process.env.REALTIME_ENABLED === "true" ? 426 : 404));
   app.route("/v1/runs", runsRoutes);
   app.route("/v1/jobs", jobsRoutes);
   app.route("/v1/workspaces", workspacesRoutes);
