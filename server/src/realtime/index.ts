@@ -33,16 +33,25 @@ export function attachFirstPartyRealtime(server: Server, options: { operations?:
 }
 
 /** Explicit database liveness defeats stale Better Auth cookie caches. */
-async function authenticateRealtimeActor(headers: Headers) {
+async function authenticateRealtimeActor(headers: Headers, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   if (headers.has("authorization") || headers.has("x-api-key")) return null;
-  const actor = await resolveBetterAuthSessionActor(headers);
+  const actor = await resolveBetterAuthSessionActor(headers, { signal });
+  signal?.throwIfAborted();
   if (!actor) return null;
-  const [session] = await sql`select id from session where id = ${actor.sessionId}
+  const query = sql`select id from session where id = ${actor.sessionId}
     and "userId" = ${actor.userId} and "expiresAt" > now()`;
-  return session ? actor : null;
+  const cancel = () => { void Promise.resolve(query.cancel()).catch(() => {}); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    signal?.throwIfAborted();
+    const [session] = await query;
+    signal?.throwIfAborted();
+    return session ? actor : null;
+  } finally { signal?.removeEventListener("abort", cancel); }
 }
 
-export async function authenticateRealtimeSession(headers: Headers) {
-  const actor = await authenticateRealtimeActor(headers);
+export async function authenticateRealtimeSession(headers: Headers, signal?: AbortSignal) {
+  const actor = await authenticateRealtimeActor(headers, signal);
   return actor ? { userId: actor.userId, sessionId: actor.sessionId } : null;
 }

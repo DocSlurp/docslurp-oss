@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { attachRealtimeServer } from "./node.js";
+import { attachRealtimeServer, type RealtimeHostOptions } from "./node.js";
 import type { RealtimeBackend } from "./broker.js";
 
 const ORIGIN = "https://app.example.test";
@@ -10,13 +10,14 @@ const ORG = "00000000-0000-4000-8000-000000000001";
 const RUN = "00000000-0000-4000-8000-000000000002";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function fixture() {
+async function fixture(overrides: Partial<RealtimeHostOptions> = {}) {
   let valid = true;
   let access = true;
   let revision = "1";
   let data: unknown = { runs: [{ id: RUN, status: "processing" }] };
   const backend: RealtimeBackend = {
     authorize: vi.fn(async (_user, resource) => access && (resource.kind !== "activity" || resource.orgId === ORG) ? ORG : null),
+    authorizeDelivery: vi.fn(async () => access),
     project: vi.fn(async () => data),
     revisions: vi.fn(async () => new Map([[ORG, revision]])),
     listen: vi.fn(async () => async () => {}),
@@ -24,7 +25,7 @@ async function fixture() {
   const server = createServer((_req, res) => { res.end("HTTP still available"); });
   const adapter = attachRealtimeServer(server, { enabled: true, allowedOrigins: [ORIGIN], backend,
     authenticate: async headers => valid && headers.get("cookie") === "session=owner" ? { userId: "owner", sessionId: "s1" } : null,
-    authorizationRecheckMs: 100, reconcileMs: 20 });
+    authorizationRecheckMs: 100, reconcileMs: 20, ...overrides });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/v1/realtime`;
   cleanups.push(async () => { await adapter.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
@@ -126,6 +127,74 @@ describe("real Node realtime Upgrade", () => {
     const f = await fixture();
     for (let n=0; n<8; n++) await connect(f.url);
     expect(await rejected(f.url,{origin:ORIGIN,cookie:"session=owner"})).toBe(429);
+  });
+
+  it("rejects activity captured before constituent workspace revocation", async () => {
+    const f = await fixture();
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => {release=resolve;});
+    vi.mocked(f.backend.project).mockImplementation(async () => { await hold; return { runs: [{id:RUN,workspaceId:"private"}] }; });
+    const {ws,frames} = await connect(f.url); subscribe(ws);
+    await vi.waitFor(() => expect(f.backend.project).toHaveBeenCalled());
+    vi.mocked(f.backend.authorizeDelivery!).mockResolvedValue(false);
+    release();
+    await vi.waitFor(() => expect(frames.some(frame => frame.code === "access_revoked")).toBe(true));
+    expect(frames.some(frame => frame.type === "snapshot")).toBe(false);
+  });
+
+  it("expires stalled resource verification despite successful unrelated session checks", async () => {
+    const f = await fixture(); const {ws,frames} = await connect(f.url); subscribe(ws);
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
+    const original = f.backend.authorize;
+    let release!: (value: string) => void;
+    const stalled = new Promise<string>(resolve => {release=resolve;});
+    f.backend.authorize = vi.fn(async (user, resource) => resource.kind === "activity" ? stalled : original(user, resource));
+    const keepAlive = setInterval(() => subscribe(ws, "healthy", {kind:"run",runId:RUN}, Date.now()), 20);
+    try { await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED)); }
+    finally { clearInterval(keepAlive); release(ORG); }
+  });
+
+  it("releases timed-out upgrade reservations and cancels cooperative authentication", async () => {
+    let healthy = false;
+    let aborted = 0;
+    const f = await fixture({ authenticationTimeoutMs: 10, authenticate: async (_headers, signal) => {
+      if (healthy) return {userId:"owner",sessionId:"s1"};
+      return await new Promise((_resolve, reject) => signal!.addEventListener("abort", () => {aborted++;reject(signal!.reason);}, {once:true}));
+    }});
+    for (let batch=0; batch<17; batch++) {
+      const codes = await Promise.all(Array.from({length:32}, () => rejected(f.url,{origin:ORIGIN,cookie:"session=owner"})));
+      expect(codes.every(code => code === 408)).toBe(true);
+    }
+    expect(aborted).toBe(544);
+    healthy = true;
+    const {ws} = await connect(f.url);
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+  }, 15_000);
+
+  it("bounds abandoned work when an authentication provider ignores cancellation", async () => {
+    const signals: AbortSignal[] = [];
+    const authenticate = vi.fn(async (_headers: Headers, signal?: AbortSignal) => {
+      signals.push(signal!); return await new Promise<null>(() => {});
+    });
+    const f = await fixture({authenticationTimeoutMs:10, authenticate});
+    for (let n=0;n<32;n++) expect(await rejected(f.url,{origin:ORIGIN,cookie:`session=${n}`})).toBe(408);
+    expect(await rejected(f.url,{origin:ORIGIN,cookie:"session=overflow"})).toBe(503);
+    expect(authenticate).toHaveBeenCalledTimes(32);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  });
+
+  it("does not let stale collection revocation remove a newer subscription generation", async () => {
+    const f = await fixture({authorizationRecheckMs:1000});
+    let release!: (value: boolean) => void;
+    const hold = new Promise<boolean>(resolve => {release=resolve;});
+    vi.mocked(f.backend.authorizeDelivery!).mockReturnValue(hold);
+    const {ws,frames} = await connect(f.url); subscribe(ws,"switch");
+    await vi.waitFor(() => expect(f.backend.authorizeDelivery).toHaveBeenCalled());
+    subscribe(ws,"switch",{kind:"run",runId:RUN},2);
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === "ack" && frame.generation === 2)).toBe(true));
+    release(false);
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot" && frame.generation === 2)).toBe(true));
+    expect(frames.some(frame => frame.type === "error" && frame.generation === 2)).toBe(false);
   });
 
 });

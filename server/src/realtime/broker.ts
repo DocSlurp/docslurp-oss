@@ -3,6 +3,8 @@ import type { RealtimeResource } from "@docslurp/shared";
 export type DashboardResource = Exclude<RealtimeResource, { kind: "operation" }>;
 export interface RealtimeBackend {
   authorize(userId: string, resource: DashboardResource): Promise<string | null>;
+  /** Collection payloads must reauthorize their constituents before delivery. */
+  authorizeDelivery?(userId: string, resource: DashboardResource, data: unknown): Promise<boolean>;
   project(userId: string, resource: DashboardResource): Promise<unknown>;
   revisions(orgIds: string[]): Promise<Map<string, string>>;
   listen(wake: () => void): Promise<() => Promise<void>>;

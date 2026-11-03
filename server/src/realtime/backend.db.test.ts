@@ -73,3 +73,14 @@ it("revokes billing on downgrade and workspace access on membership removal", as
   await sql`delete from org_memberships where user_id='owner' and org_id='org'`;
   expect(await backend.authorize("owner", { kind: "run", runId: "run-a" })).toBeNull();
 });
+
+
+it("reauthorizes constituent private workspaces after activity projection", async () => {
+  await sql`insert into workspace_members(workspace_id,user_id,role) values('workspace','member','member')`;
+  const resource = {kind:"activity",orgId:"org"} as const;
+  const activity = await backend.project("member",resource);
+  expect(await backend.authorizeDelivery!("member",resource,activity)).toBe(true);
+  await sql`delete from workspace_members where workspace_id='workspace' and user_id='member'`;
+  expect(await backend.authorize("member",resource)).toBe("org");
+  expect(await backend.authorizeDelivery!("member",resource,activity)).toBe(false);
+});

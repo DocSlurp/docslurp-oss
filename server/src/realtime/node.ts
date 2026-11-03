@@ -10,13 +10,14 @@ export interface RealtimeSession { userId: string; sessionId: string }
 export interface RealtimeHostOptions {
   enabled: boolean;
   allowedOrigins: readonly string[];
-  authenticate(headers: Headers): Promise<RealtimeSession | null>;
+  authenticate(headers: Headers, signal?: AbortSignal): Promise<RealtimeSession | null>;
   backend: RealtimeBackend;
   operations?: RealtimeOperationProvider;
   operationsForSession?: (headers: Headers, session: RealtimeSession) => RealtimeOperationProvider | undefined;
   /** Test/host injection; production defaults are the published limits. */
   authorizationRecheckMs?: number;
   reconcileMs?: number;
+  authenticationTimeoutMs?: number;
 }
 function headersFrom(request: IncomingMessage): Headers {
   const headers = new Headers();
@@ -39,6 +40,17 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
   const users = new Map<string, number>();
   const admissions = new Map<string, { started: number; count: number }>();
   let pending = 0;
+  // Hold slots until the underlying call settles, even if its peer times out.
+  // Providers should cancel on signal; non-cooperative providers cannot accumulate
+  // unlimited abandoned promises by repeatedly reconnecting.
+  let authenticationWork = 0;
+  const authenticate = async (headers: Headers, signal: AbortSignal) => {
+    signal.throwIfAborted();
+    if (authenticationWork >= 32) throw new Error("authentication_capacity");
+    authenticationWork++;
+    try { return await options.authenticate(headers, signal); }
+    finally { authenticationWork--; }
+  };
   let draining = false;
   const controllers = new Set<AbortController>();
   const upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -57,10 +69,16 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
     if (pending + wss.clients.size >= 512) return reject(socket, 503);
     pending++;
     let settled = false;
-    const finish = () => { settled = true; };
-    const timeout = setTimeout(() => { finish(); reject(socket, 408); socket.destroy(); }, 5_000);
+    const authAbort = new AbortController();
+    const finish = () => {
+      if (settled) return;
+      settled = true; pending--; clearTimeout(timeout);
+      socket.removeListener("close", finish);
+      authAbort.abort();
+    };
+    const timeout = setTimeout(() => { finish(); reject(socket, 408); socket.destroy(); }, options.authenticationTimeoutMs ?? 5_000);
     socket.once("close", finish);
-    void options.authenticate(headers).then(session => {
+    void authenticate(headers, authAbort.signal).then(session => {
       if (settled || socket.destroyed) return;
       if (!session) { reject(socket, 401); return; }
       const now = Date.now();
@@ -101,6 +119,8 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           let verifying = false;
           let pong = true;
           let aliveAt = Date.now();
+          let resourcesVerifiedAt = Date.now();
+          let sessionCheck: Promise<RealtimeSession | null> | undefined;
           const close = (code = 1008, reason = "access_revoked") => {
             if (controller.signal.aborted) return;
             controller.abort();
@@ -110,7 +130,8 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           };
           const live = async () => {
             if (controller.signal.aborted) return false;
-            const current = await options.authenticate(headers);
+            sessionCheck ??= options.authenticate(headers, controller.signal).finally(() => { sessionCheck = undefined; });
+            const current = await sessionCheck;
             const valid = current?.userId === session.userId && current?.sessionId === session.sessionId;
             if (!valid) close();
             else aliveAt = Date.now();
@@ -128,11 +149,20 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           };
           const frameFor = (id: string, generation: number, resource: RealtimeResource, type: string, revision: number, data?: unknown, code?: string) =>
             ({ v: 1, type, subscriptionId: id, generation, resource, epoch, revision, data, code });
+          const revokeSubscription = async (id: string, generation: number, resource: RealtimeResource, revision: number) => {
+            const sub = subscriptions.get(id);
+            if (!sub || sub.generation !== generation) return;
+            subscriptions.delete(id);
+            send(frameFor(id, generation, resource, "error", revision, undefined, "access_revoked"));
+            await sub.close();
+          };
           const deliver = async (id: string, generation: number, resource: RealtimeResource, type: string, revision: number, data: unknown) => {
             if (subscriptions.get(id)?.generation !== generation || !await live()) return;
             if (resource.kind !== "operation" && !await options.backend.authorize(session.userId, resource)) {
-              send(frameFor(id, generation, resource, "error", revision, undefined, "access_revoked"));
-              await subscriptions.get(id)?.close(); subscriptions.delete(id); return;
+              await revokeSubscription(id, generation, resource, revision); return;
+            }
+            if (resource.kind === "activity" && (!options.backend.authorizeDelivery || !await options.backend.authorizeDelivery(session.userId, resource, data))) {
+              await revokeSubscription(id, generation, resource, revision); return;
             }
             if (subscriptions.get(id)?.generation !== generation || controller.signal.aborted) return;
             send(frameFor(id, generation, resource, type, revision, data));
@@ -193,17 +223,17 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           });
           const verifyTimer = setInterval(() => {
             // A stalled authorization backend cannot prolong an old decision.
-            if (Date.now() - aliveAt > (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs)) return close(1011, "authorization_timeout");
+            if (Date.now() - Math.min(aliveAt, resourcesVerifiedAt) > (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs)) return close(1011, "authorization_timeout");
             if (verifying) return;
             verifying = true;
             void live().then(async valid => {
               if (!valid) return;
               for (const [id, sub] of subscriptions) {
                 if (sub.resource.kind !== "operation" && !await options.backend.authorize(session.userId, sub.resource)) {
-                  send(frameFor(id, sub.generation, sub.resource, "error", 0, undefined, "access_revoked"));
-                  await sub.close(); subscriptions.delete(id);
+                  await revokeSubscription(id, sub.generation, sub.resource, 0);
                 }
               }
+              resourcesVerifiedAt = Date.now();
             }).catch(() => close(1011, "authorization_failed")).finally(() => { verifying = false; });
           }, Math.min(1_000, (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs) / 2));
           const heartbeat = setInterval(() => {
@@ -223,7 +253,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           });
         });
       } catch { releaseReservation(); socket.destroy(); }
-    }).catch(() => { if (!socket.destroyed) reject(socket, 503); }).finally(() => { pending--; finish(); clearTimeout(timeout); socket.removeListener("close", finish); });
+    }).catch(() => { if (!socket.destroyed) reject(socket, 503); }).finally(finish);
   };
   server.on("upgrade", upgrade);
   return {

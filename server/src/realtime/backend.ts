@@ -31,6 +31,22 @@ async function authorize(userId: string, resource: DashboardResource): Promise<s
 
 export const realtimeBackend: RealtimeBackend = {
   authorize,
+  async authorizeDelivery(userId, resource, data) {
+    if (resource.kind !== "activity") return !!await authorize(userId, resource);
+    if (!data || typeof data !== "object" || !("runs" in data) || !Array.isArray(data.runs)) return false;
+    const ids = new Set<string>();
+    for (const run of data.runs) {
+      if (!run || typeof run !== "object" || typeof run.workspaceId !== "string") return false;
+      ids.add(run.workspaceId);
+    }
+    if (ids.size > 200) return false;
+    const visible = await sql<{ id: string }[]>`select w.id from workspaces w
+      join org_memberships om on om.org_id=w.org_id and om.user_id=${userId}
+      where w.org_id=${resource.orgId} and w.id=any(${sql.array([...ids])})
+        and (w.user_id=${userId} or w.is_default or om.role in ('owner','admin')
+          or exists(select 1 from workspace_members wm where wm.workspace_id=w.id and wm.user_id=${userId}))`;
+    return visible.length === ids.size && !!await authorize(userId, resource);
+  },
   async revisions(orgIds) {
     const rows = await sql<{ org_id: string; revision: string }[]>`select org_id, revision::text from realtime_revisions where org_id = any(${sql.array(orgIds)})`;
     return new Map(rows.map(row => [row.org_id, row.revision]));
