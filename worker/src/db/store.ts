@@ -2841,9 +2841,17 @@ export class Store {
   async seedReusedStageOutputs(
     runId: string,
     reusedStages: readonly string[],
+    owner: ExecutionOwner,
   ): Promise<{ seededDocuments: number; unavailable: Array<{ documentId: string; reason: string }> }> {
     if (reusedStages.length === 0) return { seededDocuments: 0, unavailable: [] };
     return await this.sql.begin(async (tx) => {
+      if (owner.runId !== runId) throw new StaleExecutionError();
+      await assertExecutionOwnership(tx, owner);
+      const [eligible] = await tx<{ id: string }[]>`
+        select id from workspace_runs where id = ${runId}
+          and status in ('queued', 'processing')
+          and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
+      if (!eligible) throw new StaleExecutionError();
       const client = tx as unknown as typeof this.sql;
       const docs = await client<{
         id: string;

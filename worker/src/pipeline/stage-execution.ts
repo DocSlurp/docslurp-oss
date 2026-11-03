@@ -204,8 +204,8 @@ export function createStageExecution(deps: {
    * before anything loads the Run, so executed stages read them as if this
    * run had produced them. Nothing is executed or billed for reused stages.
    */
-  async function seedReusedStages(runId: string, plan: ReturnType<typeof compilePipelinePlan>): Promise<void> {
-    const seeded = await store.seedReusedStageOutputs(runId, plan.reusedStages);
+  async function seedReusedStages(runId: string, plan: ReturnType<typeof compilePipelinePlan>, owner: import("../db/execution-ownership.js").ExecutionOwner): Promise<void> {
+    const seeded = await store.seedReusedStageOutputs(runId, plan.reusedStages, owner);
     if (seeded.unavailable.length > 0) {
       const details = seeded.unavailable.slice(0, 5).map((gap) => `${gap.documentId} ${gap.reason}`).join("; ");
       // Not retryable: the source outputs will not come back.
@@ -234,7 +234,7 @@ export function createStageExecution(deps: {
     let state = await loadRunState(store, input.runId, loadOptions);
     const plan = compilePipelinePlan(state.run.pipeline);
     if (plan.reusedStages.length > 0) {
-      await seedReusedStages(input.runId, plan);
+      await seedReusedStages(input.runId, plan, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
       state = await loadRunState(store, input.runId, loadOptions);
       stageStates = undefined;
     }

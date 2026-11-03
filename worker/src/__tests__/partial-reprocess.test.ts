@@ -103,6 +103,7 @@ async function seedPartialRun(pipeline: PipelineFeatures, reusedFrom: string | n
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
     values ('run-re', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as unknown as postgres.JSONValue)}, 1, 2)
   `;
+  await sql`update workspace_runs set execution_generation = 'test-generation' where id = 'run-re'`;
   await sql`
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count,
       previous_version_id, reused_from_document_id)
@@ -146,12 +147,12 @@ async function runWorkflow(stages: Stage[], pipeline: PipelineFeatures) {
   const stageOrder = resolvePipelineWorkflowStageOrder({ stageOrder: compilePipelinePlan(pipeline).stageOrder });
   const execution = createStageExecution({ store, stages, config });
   const runtime = { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, heartbeatIntervalMs: 3_600_000 };
-  let { artifacts } = await execution.startRun({ runId: "run-re", totalStages: stageOrder.length });
+  let { artifacts } = await execution.startRun({ runId: "run-re", executionGeneration: "test-generation", totalStages: stageOrder.length });
   for (const stageName of stageOrder) {
     const result = await execution.runStage({ stageName, runId: "run-re", totalStages: stageOrder.length, artifacts }, runtime);
     artifacts = { ...artifacts, ...result.artifacts };
   }
-  await execution.completeRun({ runId: "run-re" });
+  await execution.completeRun({ runId: "run-re", executionGeneration: "test-generation" });
   return { stageOrder, artifacts };
 }
 
@@ -220,9 +221,10 @@ describe("partial reprocess", () => {
     const [marked] = await sql<{ lexical: boolean }[]>`select lexical_searchable_at is not null as lexical from documents where id = 're'`;
     expect(marked?.lexical).toBe(true);
 
-    // Seeding is idempotent: a retried run start copies nothing twice.
+    // A delayed init may not mutate a terminal run, even with its original token.
     const plan = compilePipelinePlan(pipeline);
-    await store.seedReusedStageOutputs("run-re", plan.reusedStages);
+    const [ownership] = await sql`select execution_generation from workspace_runs where id = 'run-re'`;
+    await expect(store.seedReusedStageOutputs("run-re", plan.reusedStages, { runId: "run-re", orgId: "o1", workspaceId: "w", executionGeneration: ownership!.execution_generation ?? undefined })).rejects.toThrow("ownership");
     expect(await sql`select id from document_chunks where document_id = 're'`).toHaveLength(1);
   }, 60_000);
 
@@ -252,7 +254,7 @@ describe("partial reprocess", () => {
       await sql`update workspace_runs set status = 'queued' where id = 'run-re'`;
       const { stages, executed } = recordingStages();
       const execution = createStageExecution({ store, stages, config });
-      await expect(execution.startRun({ runId: "run-re", totalStages: 2 }))
+      await expect(execution.startRun({ runId: "run-re", executionGeneration: "test-generation", totalStages: 2 }))
         .rejects.toThrow(/purged by retention.*Reprocess every stage instead/);
       expect(executed).toEqual([]);
     } finally {
@@ -267,7 +269,7 @@ describe("partial reprocess", () => {
     const { stages, executed } = recordingStages();
     const execution = createStageExecution({ store, stages, config });
 
-    await expect(execution.startRun({ runId: "run-re", totalStages: 2 })).rejects.toThrow(/has no source document/);
+    await expect(execution.startRun({ runId: "run-re", executionGeneration: "test-generation", totalStages: 2 })).rejects.toThrow(/has no source document/);
     expect(executed).toEqual([]);
   }, 60_000);
 });
