@@ -1,3 +1,4 @@
+import { startNativeRecovery } from "./recovery.js";
 import { StrictCachingPubSub, boundedNativeCacheScript } from "./strict-pubsub.js";
 import type { BackgroundTaskManager } from "@mastra/core/background-tasks";
 import { Agent } from "@mastra/core/agent";
@@ -63,7 +64,8 @@ export async function createNativeChatHost(options: {
         defaultRetries: { maxRetries: 0 }, cleanup: { completedTtlMs: 7 * 86400000, failedTtlMs: 7 * 86400000 } },
     });
     if (options.configureBackgroundTasks) options.configureBackgroundTasks(mastra.backgroundTaskManager!, pubsub);
+    const stopRecovery = options.worker ? startNativeRecovery(mastra.backgroundTaskManager!, options.pool) : undefined;
     return { mastra, agent, storage, memory, pubsub, cache,
-      async close() { await mastra.shutdown(); await transport.close(); await client.quit(); } };
+      async close() { await stopRecovery?.(); await mastra.shutdown({ drainTimeout: 5000 }); await transport.close(); await client.quit(); } };
   } catch (error) { await client.quit().catch(() => {}); throw error; }
 }

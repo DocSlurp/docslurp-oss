@@ -102,11 +102,16 @@ frames; ordinary events stop at 1.5 MiB. Native global orchestration topics are
 not duplicated into the replay cache (Redis Streams owns their bounded queue).
 An early adapter test applied the cap to the shared orchestration topic and
 failed; that policy was corrected, then cross-host replay and quota tests passed.
-The native background manager's installed `recoverStaleTasks` marks expired
-zero-retry tasks failed and redrives pending tasks. Worker hosts use that native
-behavior with `maxRetries=0`; API hosts are producer-only. This removes the need
-for a parallel custom lease sweeper. Durable-agent automatic recovery remains
-off because it can repeat model/tool calls and requires an explicit retry policy.
+Mastra 1.81's native startup recovery marks expired zero-retry tasks failed and
+redrives pending tasks, but its recurring pin sweep ignores unowned pending rows.
+An empty startup scan also schedules no future running-lease scan. The public
+manager API has no recurring full-recovery option (`recoverStaleTasks` is private).
+`recovery.ts` therefore uses supported native `getStorage/listTasks/updateTask`
+compare-and-set and pending-only `restart` APIs, every two seconds, one page of
+64 tasks at a time, without overlapping sweeps. It does not implement a queue,
+claim leases, retry execution or call private native APIs. This adapter is needed
+until native recurring recovery covers both cases. API hosts remain producers.
+Durable-agent automatic recovery remains off because it can repeat paid calls.
 
 ## Integrated runtime and remaining acceptance
 
@@ -138,7 +143,8 @@ exported first-party adapter to its actual Node server; it does not rebuild the
 app or validate a production bundle/pin or proxy. Provider calls are mocked.
 
 The worker-crash integration test SIGKILLs a separate native worker process,
-waits its real 30-second lease expiry, and starts another host. The accepted text
+with a second host already running before the owner claims any task. After the
+real 30-second lease expiry, the accepted text
 remains recoverable; native recovery marks the zero-retry task failed with an
 interruption reason and never invokes the executor again. No clock or lease-row
 mutation substitutes for process loss in this test.
@@ -158,3 +164,11 @@ running tasks. The idempotent-acceptance adapter therefore locks a native pendin
 row while calling that supported API, so a concurrent claim cannot turn a harmless
 pending redispatch into an active paid restart. It never resets lifecycle state
 or creates another native task; native claim fencing still deduplicates dispatch.
+
+The recurring adapter also checks persisted binding scope, root cancellation and
+wall-clock deadline under the existing root lock before pending redispatch.
+Unavailable/expired/cancelled bindings become native terminal failures without
+executor invocation. Running lease recovery uses the native expected status,
+owner and exact lease expiry CAS, so a concurrent heartbeat or completion wins.
+The scan continues after an empty result; neither POST retries nor worker restarts
+are required. Native claim fencing deduplicates repeated pending notifications.

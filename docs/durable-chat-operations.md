@@ -123,3 +123,26 @@ spend admission or run creation does not launch a new paid workflow. Already
 accepted workflows retain their independent ownership. The three affected routing,
 deferred-search and workspace-chat suites pass 139 tests under strict rejection
 handling, including the new spend/create/dispatch races.
+
+## Worker shutdown policy (native runtime)
+
+SIGTERM/SIGINT deliberately interrupt active native chat work immediately. They
+are not a 300-second answer-completion drain. Mastra 1.81 `shutdown()` aborts
+active controllers, persists cancellation/terminal state and allows up to its
+five-second settlement window before transport teardown. Accepted output remains
+available to authorized recovery; no model/tool execution is automatically retried.
+A cancelled native task during worker shutdown is an interrupted answer, not proof
+that the user pressed Stop. If graceful settlement fails, the surviving worker's
+recurring lease reconciliation marks the expired execution failed/interrupted.
+SIGKILL has no settlement opportunity and always relies on that lease path.
+
+Host configuration should send SIGTERM and allow at least 30 seconds before
+SIGKILL for shutdown/storage/transport cleanup; that timeout is cleanup allowance,
+not a promise to finish generation. Restarted observers retain partial output and
+show the authoritative terminal state. Rolling replacement may interrupt active
+answers; keep the feature off until this product policy and production Redis
+persistence are approved. Browser disconnect/unsubscribe still only detach.
+
+The local process integration suite tests SIGTERM and SIGKILL separately with a
+surviving worker already running before acceptance, retained partial output,
+terminal state, zero retry count and zero survivor executor invocations.

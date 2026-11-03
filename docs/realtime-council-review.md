@@ -58,3 +58,33 @@ capacity acceptance from the idle fix. Flags remain off; no merge/deployment.
 Review of frozen `f10b6e86` identified a high-severity gap: shared materialization acceptance checked task lease/cancellation but not the originating session or current workspace authority after waiting for the root lock. Both execution adapters now carry the trusted session identity and abort signal. Acceptance uses the same transaction to revalidate the session and existing workspace-access policy immediately before allocation, and checks abort before dispatch. Existing accepted shared work retains its documented independent lifecycle.
 
 Validation: eight dependency tests pass on isolated PostgreSQL 17 with five connections. Deterministic contention tests hold the root lock, confirm acceptance is waiting, revoke the session or org membership (or abort), then release the lock; each produces zero allocated runs and dependency records. Server TypeScript passes. The disposable database was removed. Independent security recheck remains required.
+
+## Recurring native recovery and shutdown delta (2026-11-03)
+
+Preserves trusted-session and locked materialization reauthorization at a413bb75.
+Reliability findings addressed: a live idle worker now discovers unowned pending
+work after lost dispatch, and rescans running leases first created after its own
+startup. Mastra 1.81 lacks a public recurring full-recovery entrypoint; the bounded
+adapter uses public native storage CAS and pending-only restart, not private APIs
+or a replacement queue. Expired/cancelled bindings settle without execution.
+Native running-task recovery never invokes the executor or consumes paid retries.
+
+Shutdown policy is immediate interruption with retained output, explicitly not a
+300-second completion drain. Native SIGTERM settlement is tested separately from
+SIGKILL lease recovery. Host cleanup allowance should be at least 30 seconds;
+Mastra's settlement budget is explicitly five seconds. App host configuration is
+owned by the app change, and no flags or deployments are enabled here.
+
+Validation: 15 tests passed across five suites under strict unhandled-rejection
+handling, including eight real PostgreSQL17/Redis7 runtime/process tests. The
+surviving worker starts before the future owner; live work remains running across
+multiple recovery ticks; SIGKILL yields failed/interrupted and SIGTERM cancelled,
+both preserving text with retryCount=0 and no survivor executor invocation.
+Pending dispatch tests use no repeated POST/restart, including expiry and root
+cancellation with zero executor calls. Authorization/output regression suites and
+server TypeScript checking pass. No paid providers or production services used.
+
+Final independent delta review is still required. Production Redis persistence,
+proxy/rolling-deployment behavior and capacity acceptance remain separate gates.
+The two-second per-worker native list scan adds bounded SQL work even when idle;
+prior dashboard-only matched-load evidence does not include this new worker scan.
