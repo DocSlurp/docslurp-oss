@@ -146,3 +146,14 @@ persistence are approved. Browser disconnect/unsubscribe still only detach.
 The local process integration suite tests SIGTERM and SIGKILL separately with a
 surviving worker already running before acceptance, retained partial output,
 terminal state, zero retry count and zero survivor executor invocations.
+
+The executor entrypoint starts a process-wide five-second exit deadline on the
+first SIGTERM/SIGINT, covering startup, recovery cancellation, native shutdown and
+global pool cleanup. Host shutdown starts native interruption concurrently with
+recovery abort. Its five-second budget destroys tracked Redis writers/readers;
+recovery owns separately abortable SQL/Redis resources with a three-second attempt
+limit. The main native pool bounds acquisition to one second and statements to
+four seconds. If the process deadline wins, retained output stays recoverable and
+unsettled execution becomes interrupted after lease expiry; no paid retry occurs.
+The 30-second platform kill allowance remains a safety margin, not extra time for
+generation. See the bounded-I/O evidence in `realtime-council-review.md`.

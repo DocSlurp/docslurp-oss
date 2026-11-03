@@ -106,7 +106,7 @@ Mastra 1.81's native startup recovery marks expired zero-retry tasks failed and
 redrives pending tasks, but its recurring pin sweep ignores unowned pending rows.
 An empty startup scan also schedules no future running-lease scan. The public
 manager API has no recurring full-recovery option (`recoverStaleTasks` is private).
-`recovery.ts` therefore uses supported native `getStorage/listTasks/updateTask`
+`recovery.ts` therefore uses supported native `getStorage/getTask/updateTask`
 compare-and-set and pending-only `restart` APIs, every two seconds, one page of
 64 tasks at a time, without overlapping sweeps. It does not implement a queue,
 claim leases, retry execution or call private native APIs. This adapter is needed
@@ -160,10 +160,10 @@ Mastra1.81 BackgroundTaskManager.enqueue persists before dispatch. A process can
 die between those steps. Worker startup recovers pending tasks, but a running
 worker does not necessarily rescan when no known lease schedules another sweep.
 The public restart API re-dispatches pending tasks, but also permits restarting
-running tasks. The idempotent-acceptance adapter therefore locks a native pending
-row while calling that supported API, so a concurrent claim cannot turn a harmless
-pending redispatch into an active paid restart. It never resets lifecycle state
-or creates another native task; native claim fencing still deduplicates dispatch.
+running tasks. The recovery adapter therefore locks a native pending row while calling that
+supported API, so a concurrent claim cannot turn pending redispatch into an active
+paid restart. HTTP idempotent retries now only return the existing handle; they
+do not perform another lock-held restart. Native claim fencing deduplicates dispatch.
 
 The recurring adapter also checks persisted binding scope, root cancellation and
 wall-clock deadline under the existing root lock before pending redispatch.
@@ -172,3 +172,43 @@ executor invocation. Running lease recovery uses the native expected status,
 owner and exact lease expiry CAS, so a concurrent heartbeat or completion wins.
 The scan continues after an empty result; neither POST retries nor worker restarts
 are required. Native claim fencing deduplicates repeated pending notifications.
+
+## Bounded recovery I/O (review repair)
+
+Installed Mastra 1.81 `restart` and background storage APIs do not take an
+AbortSignal. `restart` reads state and concurrency through other pool connections
+before publishing; a SQL transaction's SET LOCAL cannot bound those operations.
+A lock-held call through the long-lived host is therefore unsafe. Recovery now
+creates a producer-only native manager with attempt-owned PostgreSQL and native
+Redis Streams resources. It uses the supported PostgresStore `pool`, Mastra
+`pubsub`, RedisStreams `client`, and node-redis `commandOptions.abortSignal`
+injection points. No private native recovery/dispatch method is invoked.
+
+Each attempt has a three-second deadline. Pool acquisition/connect is 500 ms,
+server statements are one second, driver queries 1.2 seconds. Abort destroys the
+owned PostgreSQL connections (including blocked native CAS), ends the pool,
+aborts Redis commands and destroys its writer. Offline queuing/reconnect is off
+for this short-lived dispatch transport. Future publish entry checks the signal.
+The transaction remains locked until dispatch completes or its owned I/O is
+aborted. Native `restart` cannot read a newly running state after lock release.
+A write already accepted before a network failure may be unacknowledged; this is
+not an exactly-once claim. Its native pending dispatch and claim fencing remain
+idempotent, and executor authorization/cancellation is checked before paid work.
+
+The unbounded native startup scan is disabled; this adapter covers pending,
+pinned and running native rows with zero retries. Selection uses an ID keyset,
+64 candidates per attempt, with a fixed creation-time horizon for each pass.
+Statuses changing or rows disappearing cannot shift an offset; later ingress
+cannot extend that pass indefinitely. Contended rows are attempted again on the
+next pass. This assumes native server-issued creation times, not client-controlled
+backdating. Latency still grows with the finite eligible backlog; there is no
+constant-time recovery guarantee for unlimited tenants/tasks. A 130-task real-DB
+test removes terminal rows, adds new tasks and holds an early row lock while
+checking later-page settlement and eventual revisit of the blocked row.
+
+Shutdown starts native interruption and cancels recovery concurrently under one
+five-second host budget. At its deadline all tracked Redis writers/readers are
+aborted/destroyed; no sweep wait can delay starting native shutdown. The worker's
+native database pool also has bounded acquisition/statements/driver queries.
+Tests cover paused Redis, exhausted executor pool, blocked native CAS, and
+SIGTERM process exit while those faults remain in effect.

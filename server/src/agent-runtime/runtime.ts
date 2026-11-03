@@ -11,7 +11,8 @@ let producer: Promise<Awaited<ReturnType<typeof createRuntime>>> | undefined;
 async function createRuntime(worker: boolean) {
   const redisUrl=process.env.MASTRA_REDIS_URL ?? process.env.API_RATE_LIMIT_REDIS_URL;
   if(!redisUrl)throw new Error("native_chat_shared_transport_required");
-  const pool=new Pool({connectionString:env.databaseUrl,max:4});
+  const pool=new Pool({connectionString:env.databaseUrl,max:4,connectionTimeoutMillis:1000,
+    statement_timeout:4000,query_timeout:4500,idle_in_transaction_session_timeout:4000});
   try {
     const host=await createNativeChatHost({pool,redisUrl,worker,namespace:process.env.MASTRA_NAMESPACE,
       configureBackgroundTasks: worker ? (manager,pubsub)=>manager.registerStaticExecutor(
@@ -39,6 +40,7 @@ export async function runNativeChatWorker(signal:AbortSignal) {
   timer.unref();
   try {
     await cleanup();
+    console.info("[native-chat] worker_ready");
     if(!signal.aborted)await new Promise<void>(resolve=>signal.addEventListener("abort",()=>resolve(),{once:true}));
   } finally {clearInterval(timer);await host.close();}
 }

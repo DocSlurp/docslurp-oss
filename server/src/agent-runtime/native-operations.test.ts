@@ -13,7 +13,6 @@ it("uses native persistent identity for lost ACK recovery and rejects revoked ob
   const policy:NativeOperationPolicy={
     authorize:async id=>{if(!allowed||id!=="op")throw new Error("forbidden");return {id,rootId:id,userId:"u",orgId:"o",workspaceId:"w",deadline:new Date(Date.now()+60000)};},
     serializeAcceptance:async(_binding,work)=>{const preceding=tail;let release!:()=>void;tail=new Promise(resolve=>{release=resolve;});await preceding;try{return await work();}finally{release();}},
-    redispatchPending:async()=>{},
     recordCancellation:async()=>{},
   };
   try {

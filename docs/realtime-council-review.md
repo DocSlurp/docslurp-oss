@@ -88,3 +88,58 @@ Final independent delta review is still required. Production Redis persistence,
 proxy/rolling-deployment behavior and capacity acceptance remain separate gates.
 The two-second per-worker native list scan adds bounded SQL work even when idle;
 prior dashboard-only matched-load evidence does not include this new worker scan.
+
+## Recovery I/O and process shutdown repair
+
+Both independent findings are addressed: lock-held native restart could wait on
+another pool or Redis indefinitely; native CAS could block outside SET LOCAL;
+shutdown awaited the sweep before starting its own budget. Recovery now uses
+attempt-owned native producer/storage/Redis resources with a three-second deadline,
+500 ms connection acquisition, one-second SQL statements, abortable Redis commands
+and connection destruction. Native claim/restart fencing is retained. The old
+HTTP pending redispatch path is removed; retries return the original handle.
+Native shutdown starts concurrently with recovery cancellation. A five-second
+host deadline destroys Redis I/O, and the actual executor entrypoint separately
+enforces the same encompassing process exit deadline, including global clients.
+This is interruption, not a completion drain or an automatic paid retry.
+
+Keyset selection replaces offset pagination. A fixed creation-time horizon bounds
+each pass against continued ingress; contended candidates advance the cursor and
+are revisited next pass. A real-DB 130-task test holds the first row, deletes
+completed rows and adds arrivals while verifying later-page progress and revisit.
+
+Validation uses isolated PostgreSQL17 and Redis7, strict unhandled-rejection mode,
+and the registered database CI harness (no skipped native integration files).
+Real Redis CLIENT PAUSE tests cover handshake outage and a paused write that times
+out without SIGTERM: cancellation unblocks, the same worker makes later progress,
+and resuming Redis produces no late dispatch. Other process tests exhaust the
+executor pool and block native CAS with an external row lock. Prior pending/lost
+ACK, surviving-worker SIGKILL, explicit Stop, tenant authorization and retained
+output regressions remain included. Final independent council review, production
+bundle/capacity/Redis/proxy prerequisites and authorized rollout remain coordinator
+gates; this repair does not activate either feature flag.
+
+Final local verification for this delta: 23 distinct tests passed—16 native
+integration tests (native-host 2, runtime 6, worker/process 8) through the database
+CI runner with zero skips, plus 7 policy/idempotency/output regressions. Server
+TypeScript and public-history checks pass. The actual executor entrypoint test
+imports the production script, observes worker readiness, sends SIGTERM, and
+measures exit, rather than substituting a fixture's process cleanup.
+
+Measured final process evidence (milliseconds, isolated local services):
+
+| Fault / process | Host close | Recovery SQL connections gone / process observation |
+| --- | ---: | ---: |
+| Redis paused (all commands) | 5005 | 5038 |
+| Redis writes paused; prior attempt timed out and later sweep progressed | 3039 | 3083 |
+| Executor pool exhausted | 974 | 1013 |
+| Native CAS blocked by external row lock | 90 | 1003 |
+| Actual executor entrypoint, SIGTERM | — | exit 1084 |
+
+PostgreSQL may retain a disconnected blocked waiter until its one-second server
+statement timeout fires; the test checks that it disappears within that bound.
+The bounded recovery pool is recreated per attempt (at most three connections),
+so connection churn must be included in the coordinator's capacity gate. These
+numbers prove the local failure cases, not production proxy/network behavior or
+full workload-budget acceptance. No paid providers, production traffic, feature
+activation or deployment were used for this verification.
