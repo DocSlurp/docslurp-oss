@@ -227,7 +227,11 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           const verifyTimer = setInterval(() => {
             // A stalled authorization backend cannot prolong an old decision.
             if (Date.now() - Math.min(aliveAt, resourcesVerifiedAt) > (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs)) return close(1011, "authorization_timeout");
-            if (verifying) return;
+            // Keep the watchdog independent of the query cadence. A two-second
+            // fresh sweep fits the five-second revocation deadline; delivery
+            // still rechecks immediately, without using these idle decisions.
+            if (verifying || Date.now()-resourcesVerifiedAt < Math.min(2_000,
+              (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs)/2)) return;
             verifying = true;
             void live().then(async valid => {
               if (!valid) return;

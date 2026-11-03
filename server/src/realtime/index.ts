@@ -26,9 +26,10 @@ export function attachFirstPartyRealtime(server: Server, options: { operations?:
     operationsForSession: (headers, session) => {
       if (options.operations || process.env.DOCSLURP_DURABLE_CHAT !== "1") return options.operations;
       return createChatOperationProvider(async userId => {
-        const actor = await authenticateRealtimeActor(headers);
-        if (!actor || actor.userId !== userId || actor.userId !== session.userId || actor.sessionId !== session.sessionId) return null;
-        return actor;
+        if(userId!==session.userId||!await revalidateRealtimeSession(session,AbortSignal.timeout(5000)))return null;
+        // The session identity came from authenticated Upgrade. Native operation
+        // policy needs scope, not repeated cookie parsing/admin decoration.
+        return {type:"session" as const,...session,user:{id:session.userId,email:"",name:""}};
       });
     },
   });

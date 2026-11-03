@@ -193,7 +193,7 @@ query_suggestions, search-session queries, document/page/chunk changes, document
 stages, tags, run state and attributed usage. Keep the old component timers only
 while the feature flag is off or the shared transport owns REST fallback.
 
-## External work discovery (migration 0117; architecture reassessment pending)
+## External work discovery (migrations 0117–0119; native lifecycle)
 
 Operation recovery now includes `dependencies` alongside executable chat `tasks`.
 Each dependency has stable `id`, `parent_id`, `root_id`, `run_id`, workspace/org
@@ -235,5 +235,43 @@ and exports from `document-exports.ts`/`extracts.ts`, under independent HTTP/job
 owners; these are not launched by chat. Deferred search's
 `materialize-client.ts` is the actual chat-to-Temporal path and now uses the seam.
 No arbitrary subagent launch pathway exists. Do not invent such work to satisfy
-a task-tree display. Native Mastra lifecycle replacement is being reassessed;
+a task-tree display. Native Mastra BackgroundTaskManager now owns first-party operation lifecycle;
 this adapter checkpoint is not final issue319 acceptance.
+
+## Native operation adapter (integrated, flags disabled)
+
+POST /v1/chat/operations binds idempotency and trusted tenant scope, then enqueues
+exactly one native BackgroundTaskManager task under that binding. The separately
+supervised executor registers a static workspace-chat tool. Neither the socket nor
+the HTTP response owns its abort signal. New operations do not use the legacy SQL
+claim loop. Native PostgresStore owns task state/results and native indexed
+PubSub/cache owns replay; DocSlurp adds authorization, output quotas and explicit
+resync responses.
+
+The public operation envelope retains id, root_id, workspace_id, org_id, status,
+attempt_id, sequence and snapshot. Every task summary carries its own workspace_id
+and root_id; dependencies retain independent shared-run attempt/status/result
+references. treeSettled is false while any native child or shared materialization
+is active, even if the answer is completed. Public sequence is native event index
+plus one, including text, tool and terminal events. Final native results retain
+citations and tool outcomes after replay-cache expiry. Missing active history is
+an explicit recovery failure, never a new generation.
+
+The shared operation sweep uses one SQL signature query across watched roots and
+bounded native retained-list length reads per task, independent of socket count.
+It reads output only for changed signatures/cursors and coalesces same-user reads.
+No per-socket SQL reconciliation timer was introduced.
+
+The idle resource watchdog remains independent of query completion. Fresh session
+and batched resource sweeps run within the five-second revocation bound; normal
+delivery still authorizes immediately. First-party session revalidation uses one
+live SQL policy query after the initial BetterAuth Upgrade. No settled grants are
+cached, so membership changes require no cache-invalidation guess.
+
+Runtime requirements: migrations through 0119 and an explicitly configured durable
+shared Redis connection (MASTRA_REDIS_URL, falling back to API_RATE_LIMIT_REDIS_URL).
+REST-only rate-limit Redis credentials are not sufficient. No infrastructure,
+provider migration or flag activation is performed by these changes. The chosen
+Redis persistence, memory/eviction policy and production proxy must be validated
+before activation. See realtime-mastra-assessment.md for installed API evidence
+and the distinction between existing workspace chat logic and native ownership.

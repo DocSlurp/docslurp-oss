@@ -5,8 +5,11 @@ import { sql } from "../db.js";
 import type { Operation } from "./chat-operations.js";
 
 // Server-only execution context: never accept operation identity from a tool argument.
-const owner = new AsyncLocalStorage<Pick<Operation, "id" | "attempt_id" | "user_id" | "org_id">>();
+type RunOwner = Pick<Operation, "id" | "user_id" | "org_id"> & {attempt_id?:string|null;nativeTaskId?:string;nativeOwnerId?:string};
+const owner = new AsyncLocalStorage<RunOwner>();
 export function withChatRunOwner<T>(task: Operation, work: () => Promise<T>) { return owner.run(task, work); }
+
+export function withNativeChatRunOwner<T>(task: RunOwner & {nativeTaskId:string;nativeOwnerId:string}, work:()=>Promise<T>) {return owner.run(task,work);}
 
 /** Acceptance and run allocation commit together under the root cancellation lock.
  * Already accepted page work is a shared dependency, not a cancellable child.
@@ -22,7 +25,13 @@ export async function acceptChatRunDependency<T>(scope: {
       if (task.user_id !== scope.userId || task.org_id !== scope.orgId) throw new Error("dependency_forbidden");
       const [root] = await tx`select r.id from chat_operations c join chat_operations r on r.id=c.root_id
         where c.id=${task.id} for update of r`;
-      const [active] = await tx`select id from chat_operations where id=${task.id} and attempt_id=${task.attempt_id}
+      const [active] = task.nativeTaskId ? await tx`
+        select c.id from chat_operations c join docslurp_mastra.mastra_background_tasks t on t.tool_call_id=c.id
+        where c.id=${task.id} and c.runtime='mastra' and not c.cancel_requested and c.deadline>clock_timestamp()
+          and t.id=${task.nativeTaskId} and t."ownerId"=${task.nativeOwnerId!}
+          and t.status='running' and t."leaseExpiresAtZ">clock_timestamp()
+          and not exists(select 1 from chat_operations where id=${root?.id ?? ""} and tree_cancel_requested)
+        for share of t` : await tx`select id from chat_operations where id=${task.id} and attempt_id=${task.attempt_id ?? null}
         and status='running' and not cancel_requested and deadline>clock_timestamp() and lease_until>clock_timestamp()
         and not exists(select 1 from chat_operations where id=${root?.id ?? ""} and tree_cancel_requested)`;
       const [document] = await tx`select d.id from documents d join workspaces w on w.id=d.workspace_id

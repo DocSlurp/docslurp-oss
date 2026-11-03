@@ -1,3 +1,4 @@
+import type postgres from "postgres";
 import { sql } from "../db.js";
 import type { RealtimeSession } from "./node.js";
 
@@ -5,9 +6,9 @@ import type { RealtimeSession } from "./node.js";
  * client-supplied id. One live query checks revocation, expiry and current MFA
  * policy; administrator decoration is irrelevant to socket authority.
  */
-export async function revalidateRealtimeSession(session: RealtimeSession, signal: AbortSignal): Promise<RealtimeSession | null> {
+export async function revalidateRealtimeSession(session: RealtimeSession, signal: AbortSignal, client: postgres.Sql | postgres.TransactionSql = sql): Promise<RealtimeSession | null> {
   signal.throwIfAborted();
-  const query = sql`select s.id from session s join "user" u on u.id=s."userId"
+  const query = client`select s.id from session s join "user" u on u.id=s."userId"
     where s.id=${session.sessionId} and s."userId"=${session.userId}
       and s."expiresAt">clock_timestamp() and u.deleted_at is null
       and (not coalesce(u."twoFactorEnabled",false) or s."mfaVerified" is true)

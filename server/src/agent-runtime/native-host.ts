@@ -1,4 +1,5 @@
 import { StrictCachingPubSub, boundedNativeCacheScript } from "./strict-pubsub.js";
+import type { BackgroundTaskManager } from "@mastra/core/background-tasks";
 import { Agent } from "@mastra/core/agent";
 import { EventedAgent } from "@mastra/core/agent/durable";
 import { Mastra } from "@mastra/core/mastra";
@@ -16,7 +17,8 @@ import type { Pool } from "pg";
 export async function createNativeChatHost(options: {
   pool: Pool;
   redisUrl: string;
-  createAgent(memory: Memory): Agent;
+  createAgent?(memory: Memory): Agent;
+  configureBackgroundTasks?(manager: BackgroundTaskManager, pubsub: StrictCachingPubSub): void;
   worker: boolean;
   namespace?: string;
 }) {
@@ -49,9 +51,9 @@ export async function createNativeChatHost(options: {
     const pubsub = new StrictCachingPubSub(transport, cache, topic => topic.startsWith("agent.stream."));
     const memory = new Memory({ storage, options: { lastMessages: 20,
       semanticRecall: false, workingMemory: { enabled: false } } });
-    const agent = new EventedAgent({ agent: options.createAgent(memory), cache, pubsub,
-      cleanupTimeoutMs: 7 * 86400000 });
-    const mastra = new Mastra({ agents: { chat: agent }, storage, cache, pubsub,
+    const agent = options.createAgent ? new EventedAgent({ agent: options.createAgent(memory), cache, pubsub,
+      cleanupTimeoutMs: 7 * 86400000 }) : undefined;
+    const mastra = new Mastra({ agents: agent ? { chat: agent } : {}, storage, cache, pubsub,
       workers: options.worker ? undefined : false,
       // A dead model invocation is not silently retried/charged on restart.
       // Explicit authorized recovery can invoke the native recover API.
@@ -60,6 +62,7 @@ export async function createNativeChatHost(options: {
         backpressure: "queue", defaultTimeoutMs: 600000, recoverStaleTasksOnStart: options.worker,
         defaultRetries: { maxRetries: 0 }, cleanup: { completedTtlMs: 7 * 86400000, failedTtlMs: 7 * 86400000 } },
     });
+    if (options.configureBackgroundTasks) options.configureBackgroundTasks(mastra.backgroundTaskManager!, pubsub);
     return { mastra, agent, storage, memory, pubsub, cache,
       async close() { await mastra.shutdown(); await transport.close(); await client.quit(); } };
   } catch (error) { await client.quit().catch(() => {}); throw error; }

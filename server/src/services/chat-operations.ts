@@ -12,7 +12,7 @@ export class OperationConflict extends Error {}
 export const terminalOperation = (status: OperationStatus) => ["completed", "failed", "cancelled", "interrupted"].includes(status);
 
 /** The caller must resolve workspace permission before launch. Root locking serializes child launch/cancel. */
-export async function launchChatOperation(args: { userId: string; workspaceId: string; orgId: string; key: string; input: Record<string, unknown>; parentId?: string }) {
+export async function launchChatOperation(args: { userId: string; workspaceId: string; orgId: string; key: string; input: Record<string, unknown>; parentId?: string; runtime?: "legacy" | "mastra" }) {
   if (!/^[a-zA-Z0-9_-]{8,128}$/.test(args.key) || Buffer.byteLength(JSON.stringify(args.input)) > 128_000) throw new OperationConflict("Invalid launch size or idempotency key");
   const { authSessionId: _authSessionId, ...semanticInput } = args.input;
   const hash = createHash("sha256").update(JSON.stringify(semanticInput)).digest("hex");
@@ -21,7 +21,7 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
     await tx`select id from "user" where id = ${args.userId} for update`;
     const [existing] = await tx<Operation[]>`select * from chat_operations where user_id=${args.userId} and workspace_id=${args.workspaceId} and idempotency_key=${args.key}`;
     if (existing) {
-      if (existing.request_hash !== hash || existing.parent_id !== (args.parentId ?? null)) throw new OperationConflict("Idempotency key reused with different input");
+      if ((existing as Operation & {runtime:string}).runtime !== (args.runtime ?? "legacy") || existing.request_hash !== hash || existing.parent_id !== (args.parentId ?? null)) throw new OperationConflict("Idempotency key reused with different input");
       return existing;
     }
     const id = randomUUID();
@@ -37,11 +37,21 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
       if (count >= CHAT_OPERATION_LIMITS.tasks) throw new OperationConflict("Task tree limit");
       rootId = root.id;
     } else {
-      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations where user_id=${args.userId} and parent_id is null and (status in ('queued','running','waiting') or chat_root_has_active_dependencies(id))`;
+      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations root where root.user_id=${args.userId} and root.parent_id is null and (
+        chat_root_has_active_dependencies(root.id) or exists (
+          select 1 from chat_operations child where child.root_id=root.id and (
+            (child.runtime='legacy' and child.status in ('queued','running','waiting'))
+            or (child.runtime='mastra' and (
+              exists(select 1 from docslurp_mastra.mastra_background_tasks t where t.tool_call_id=child.id and t.status in ('pending','running','suspended'))
+              or (child.deadline>clock_timestamp() and not child.cancel_requested and not exists(
+                select 1 from docslurp_mastra.mastra_background_tasks t where t.tool_call_id=child.id))
+            ))
+          )
+        ))`;
       if (count >= CHAT_OPERATION_LIMITS.activeRoots) throw new OperationConflict("Active operation limit");
     }
-    const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input)
-      values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.workspaceId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}) returning *`;
+    const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input, runtime)
+      values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.workspaceId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}, ${args.runtime ?? "legacy"}) returning *`;
     if (args.parentId) await tx`update chat_operations set deadline=(select deadline from chat_operations where id=${rootId}), expires_at=(select expires_at from chat_operations where id=${rootId}) where id=${id}`;
     return row!;
   });
@@ -57,7 +67,7 @@ export async function claimChatOperation() {
     await tx`with changed as (
       update chat_operations set status='cancelled',sequence=sequence+1 where status in ('queued','waiting') and (cancel_requested or deadline < now()) returning id,sequence
     ) insert into chat_operation_events select id,sequence,'cancelled','{"code":"cancelled_or_deadline"}'::jsonb from changed`;
-    const [row] = await tx<Operation[]>`select * from chat_operations where status='queued' and expires_at > now() order by created_at for update skip locked limit 1`;
+    const [row] = await tx<Operation[]>`select * from chat_operations where runtime='legacy' and status='queued' and expires_at > now() order by created_at for update skip locked limit 1`;
     if (!row) return null;
     const [claimed] = await tx<Operation[]>`update chat_operations set status='running', attempt_id=${randomUUID()}, lease_until=now()+interval '30 seconds' where id=${row.id} returning *`;
     return claimed!;

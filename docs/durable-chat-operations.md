@@ -1,7 +1,7 @@
 # Durable chat operations (issue 319)
 
-This is an opt-in execution path, disabled by default. Apply migration
-`0114_chat_operations`, run a dedicated executor with
+This is an opt-in execution path, disabled by default. Apply migrations through
+`0119_native_operation_bindings`, run a dedicated executor with
 `pnpm --filter @docslurp/server exec tsx scripts/chat-operation-executor.ts`, and
 set `DOCSLURP_DURABLE_CHAT=1` on the API. Do not enable without the executor.
 No provider calls run in an HTTP request or WebSocket callback.
@@ -34,57 +34,54 @@ user/operation/cursor reads. The socket host bounds connections/subscriptions an
 revalidates the actual socket session. See `realtime-protocol.md`.
 Lifecycle snapshots include terminal errors even with no remaining text.
 
-The SQL row is the queue owner. Claiming creates a unique execution attempt and
-30-second lease; the executor rechecks cancellation, session expiry/revocation,
-workspace membership and the 10-minute deadline every two seconds. Output and
-terminal results commit atomically with their sequence. Existing chat code owns
-spend admission, actual provider usage and billing. There is no automatic retry
-of claimed executions: expired leases become `interrupted`, preserving accepted
-output and attempt identity. A provider crash cannot resume its model loop.
-A new, explicitly authorized paid request needs a new idempotency key.
+New first-party operations use native Mastra BackgroundTaskManager, native
+PostgresStore and indexed Redis PubSub/cache. Apply migrations through
+0119, configure an existing durable shared Redis instance with MASTRA_REDIS_URL
+(or the existing API_RATE_LIMIT_REDIS_URL), and supervise the dedicated executor
+only after review/authorization. Missing shared transport fails closed. Flags
+remain disabled. See [native reassessment](realtime-mastra-assessment.md).
 
-Each user may have eight active roots; a tree has at most 64 tasks, a shared
-10-minute deadline, 512 KiB accepted output budget and a 256 KiB per-task budget.
-Child launch/cancellation locks the root. Child tasks inherit root retention and
-deadline; cross-owner, cross-workspace and detached/shared children are refused.
-Task IDs and attempt IDs are distinct. Parent completion does not settle active
-children. No retry or shared-dependency launcher is exposed yet. One sequential
-executor process executes one attempt at a time; additional executor processes
-claim disjoint work with `SKIP LOCKED`.
+The SQL operation row is now an application binding: tenant/root/workspace,
+idempotency, deadline, cancellation intent and quota counters. Native storage owns
+task/attempt state, leases, timeouts, results and zero-retry worker recovery.
+The executor reconstructs the existing workspace-chat policy and usage ledger
+from trusted scope. Its lifetime is unrelated to HTTP responses and sockets.
+Session, MFA, membership and cancellation are checked during execution; accepted
+output is fenced under the root cancellation lock and native lease before native
+cache publication. An interrupted provider execution is not silently restarted.
 
-Replay pages contain at most 256 events. Snapshots retain accumulated text,
-tool outcomes, evidence and final response; the socket adapter refuses snapshots
-over 512 KiB. Complete trees expire after seven days; cleanup never deletes a
-live tree. Expiration also bounds idempotency retention. Recovery never starts a
-provider call. The database contains scoped input and output; it contains an
-authentication session **ID**, never a cookie or provider key.
+Each user may have eight active roots, including roots with active descendants
+or shared Temporal dependencies after the answer completes. Trees have at most
+64 task/dependency references, a ten-minute deadline, 512 KiB accepted output
+budget and 256 KiB per task. Native host concurrency is bounded to eight; native
+task retries default to zero. Native attempt identity includes task ID and retry
+count. No arbitrary subagent/retry launcher exists in the current tool surface.
 
-## Existing pathways and remaining migration
+Replay pages have at most 256 indexed events. Public sequences are native indices
+plus one, including non-text events. Native cache append precedes delivery.
+Snapshots include accumulated text, tool outcomes and final citations, plus
+authoritative workspace_id/root_id and independent treeSettled. Expired/future
+cursors resync from the retained final result; missing active history is explicit
+failure. Recovery does not launch work. Native task/cache and application binding
+retention is seven days; the worker removes expired application bindings in
+bounded hourly batches. No credentials are persisted in client references.
 
-- `routes/search.ts`: with the flag enabled, session POST chat launches durable
-  operations and session SSE initiation refuses with an explicit migration
-  response. Without the flag, legacy POST/SSE remain request-owned. API-key
-  behavior is unchanged. First-party clients must understand operation handles
-  before enabling the flag. Do not retire legacy streams yet.
-- `routes/chat-completions.ts`: public OpenAI-compatible endpoint remains legacy.
-- `services/chat-mcp-agent.ts`: tool and nested retrieval calls inherit the
-  operation-owned signal when invoked by the durable executor; existing agent
-  step/turn budgets and actual-usage recording remain. Configuration mutations
-  are disabled for this path. Aborted usage receipt collection remains its
-  existing bounded accounting path, not a child task launcher.
-- Ingestion, materialization, page renders and document exports already use
-  Temporal (`lib/temporal.ts`). They are independent durable owners and are not
-  re-executed by this SQL chat queue. Linking their job/result IDs into chat task
-  summaries is still integration work.
-- There is no existing server subagent spawn tool. `launchChatOperation` supports
-  internal parent-scoped launches, but no public subagent, dependency-wait,
-  detached-child or explicit retry API is introduced here. Such launchers must
-  use this owner rather than fire-and-forget HTTP work.
+The actual chat-launched external pathway is deferred page materialization.
+Its existing run allocation links an authorized shared dependency under the
+operation root. Root cancellation refuses future launches but does not cancel
+already accepted shared corpus work. Page-ledger completion, retries, waiting and
+result references remain visible after the parent answer completes.
+Ingestion/extract, render and export HTTP jobs retain their independent Temporal
+owners. The chat tool allowlist excludes extract/upload/fullIndex; no render or
+export tool exists. There is therefore no chat-launched render/export operation
+to fabricate. Their standalone observation integration remains an explicit
+application coverage item. See realtime-protocol.md for exact source pathways.
 
-This branch does not complete issue 319. Remaining gates include app migration,
-WS host hookup, shared projection reconciliation/load measurements, independent council review, and
-production executor supervision/draining. Do not claim rolling provider
-continuation or automatic retry. No deployment is authorized by this work.
+The old queue/journal implementation and its repair history below are retained
+as evidence and a read adapter for already persisted legacy operations. New HTTP
+launches and the dedicated executor do not use its claim/lease loop. This is not
+a claim of production worker restart or proxy acceptance; final council review
+and production supervision/canary remain separate gates.
 
 ## Interim council review and repairs
 

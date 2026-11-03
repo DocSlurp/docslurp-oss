@@ -8,7 +8,7 @@ local load budgets; it is not the selected final execution architecture.
 
 ## Installed evidence
 
-`server/node_modules/@mastra/core/package.json` is **1.80.0**. Its bundled
+`server/node_modules/@mastra/core/package.json` was **1.80.0** at reassessment; main subsequently upgraded it to **1.81.0**. Its bundled
 `dist/docs/SKILL.md` and declarations were inspected, not inferred from older
 versions. Local `realtime/mastra-native.test.ts` invokes the real native Agent,
 DurableAgent, Mastra host, CachingPubSub and InMemoryStore with a mock model:
@@ -92,8 +92,10 @@ Native host verification now includes a second host over local Redis7 and the
 fully migrated database using native PostgresStore with runtime init disabled.
 The second host replays a completed answer without another model invocation.
 Native schema migration 0118 is the exact pinned PostgresStore schema export,
-verified by a reproducibility test. None of this is yet the HTTP runtime switch;
-legacy queue retirement and policy integration remain work in progress.
+verified by a reproducibility test. The HTTP runtime and dedicated worker now use BackgroundTaskManager. Native
+static executors reconstruct application policy on the worker. Earlier legacy
+queue functions remain only for historical recovery/regression evidence; the
+first-party launch path and executor entrypoint no longer use their claim loop.
 
 The per-run cache reserves 512 KiB of its 2 MiB cap for terminal error/abort/finish
 frames; ordinary events stop at 1.5 MiB. Native global orchestration topics are
@@ -105,3 +107,45 @@ zero-retry tasks failed and redrives pending tasks. Worker hosts use that native
 behavior with `maxRetries=0`; API hosts are producer-only. This removes the need
 for a parallel custom lease sweeper. Durable-agent automatic recovery remains
 off because it can repeat model/tool calls and requires an explicit retry policy.
+
+## Integrated runtime and remaining acceptance
+
+Native BackgroundTaskManager owns new first-party operations: durable enqueue,
+cross-process dispatch, leases, lifecycle, cancellation, timeout, zero-retry stale
+recovery and final result storage. Native indexed PubSub/cache owns replay.
+The existing workspace chat/retrieval implementation is invoked as a statically
+registered native background tool; its pre-existing AI SDK agent loop and usage
+ledger are not serialized as request closures or replaced by a second model call.
+Native DurableAgent/Memory capability tests remain useful, but this path does not
+claim to have migrated the existing workspace conversation history into Memory.
+No new AgentController, Signals-driven paid follow-up, subagent launcher or custom
+agent loop was added merely to exercise those APIs.
+
+The application SQL binding retains identity, tenant/workspace/root scope,
+idempotency, deadline, cancellation intent and accepted-output quota counters.
+It does not own native task leases, execution dispatch, output journal or result
+storage. Existing shared Temporal materialization references remain application
+adapters. The server-owned root lock fences cancellation against accepted output
+and new materialization; observer disconnect never acquires cancellation authority.
+
+Real local PostgreSQL17 + Redis7 integration tests now exercise HTTP lost ACK,
+one native execution, partial output after observer detach, final citations,
+recreated API-host recovery, real signed BetterAuth Upgrade on the built Astro
+Node server, explicit Stop and retained partial output, wrong-owner/revoked
+session denial, and parent completion with outstanding shared materialization.
+The mounted test imports the existing built Astro entry and attaches this core's
+exported first-party adapter to its actual Node server; it does not rebuild the
+app or validate a production bundle/pin or proxy. Provider calls are mocked.
+
+The worker-crash integration test SIGKILLs a separate native worker process,
+waits its real 30-second lease expiry, and starts another host. The accepted text
+remains recoverable; native recovery marks the zero-retry task failed with an
+interruption reason and never invokes the executor again. No clock or lease-row
+mutation substitutes for process loss in this test.
+
+Still required before activation: independently review this native delta; test
+rolling deployment with the selected production Redis durability/eviction policy; verify the production app bundle and
+proxy; provision/supervise the worker only with separate authorization. Native
+Redis replay requires persistence appropriate to the retention guarantee; an
+ephemeral rate-limit cache is insufficient. Missing retained active output fails
+explicitly instead of silently restarting a paid operation.

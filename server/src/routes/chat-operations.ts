@@ -1,3 +1,4 @@
+import { nativeOperations } from "../agent-runtime/runtime.js";
 import { sql } from "../db.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
@@ -20,7 +21,7 @@ export const chatOperationRoutes = new Hono()
     const rows = await sql<{id:string}[]>`select id from chat_operations where user_id=${actor.userId} and parent_id is null and expires_at > now() order by created_at desc limit 64`;
     const operations = [];
     for (const row of rows) {
-      try { await authorizeChatOperation(actor,row.id); const state = await readChatOperation(actor.userId,row.id,0); if (state) operations.push({id:state.operation.id,status:state.operation.status,sequence:state.operation.sequence}); } catch { /* revoked resources never enter discovery */ }
+      try { await authorizeChatOperation(actor,row.id); const state = await authorizedChatOperationSnapshot(actor,row.id,0); if (state) operations.push({id:state.operation.id,status:state.operation.status,sequence:state.operation.sequence}); } catch { /* revoked resources never enter discovery */ }
     }
     return c.json({operations});
   })
@@ -34,7 +35,9 @@ export const chatOperationRoutes = new Hono()
     const actor = getRequestActor(c);
     await authorizeChatOperation(actor, c.req.param("id"));
     const { scope } = z.object({ scope: z.enum(["task", "tree"]) }).strict().parse(await c.req.json());
-    await cancelChatOperation(actor.userId, c.req.param("id"), scope);
+    const [binding]=await sql`select runtime from chat_operations where id=${c.req.param("id")} and user_id=${actor.userId}`;
+    if(binding?.runtime==="mastra")await (await nativeOperations(async()=>actor)).cancel(c.req.param("id"),scope);
+    else await cancelChatOperation(actor.userId, c.req.param("id"), scope);
     return c.json({ accepted: true });
   });
 
@@ -61,6 +64,8 @@ export async function durableChatLaunchHandler(c: Context) {
   const id = await resolveActorWorkspaceId(actor, body.workspace);
   const workspace = await loadActorScopedWorkspace(id, actor);
   if (!workspace?.orgId || await workspaceChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
-  const task = await launchChatOperation({ userId: actor.userId, workspaceId: id, orgId: workspace.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId } });
-  return c.json({ operationId: task.id, rootId: task.root_id, status: task.status }, 202);
+  const native=await nativeOperations(async()=>actor);
+  const task = await launchChatOperation({ userId: actor.userId, workspaceId: id, orgId: workspace.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, runtime:"mastra" });
+  const accepted=await native.launch(task.id);
+  return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
 }

@@ -215,7 +215,7 @@ it("fails closed when a batched resource sweep stalls despite healthy session ch
   const f=await fixture();const {ws,frames}=await connect(f.url);
   subscribe(ws);await vi.waitFor(()=>expect(frames.some(frame=>frame.type==="snapshot")).toBe(true));
   let release!:()=>void;
-  f.backend.authorizeMany=vi.fn(()=>new Promise(resolve=>{release=()=>resolve([ORG]);}));
+  f.backend.authorizeMany=vi.fn(()=>new Promise<Array<string|null>>(resolve=>{release=()=>resolve([ORG]);}));
   const closed=new Promise<string>(resolve=>ws.once("close",(_code,reason)=>resolve(reason.toString())));
   expect(await closed).toBe("authorization_timeout");
   release?.();

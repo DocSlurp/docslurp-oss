@@ -834,6 +834,13 @@
       "when": 1793750400005,
       "tag": "0118_native_mastra",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1793750400006,
+      "tag": "0119_native_operation_bindings",
+      "breakpoints": true
     }
   ]
 }

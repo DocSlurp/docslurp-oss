@@ -29,9 +29,9 @@ it.runIf(!!process.env.NATIVE_CHAT_TEST_REDIS_URL)("replays from another native 
   };
   const a=await createNativeChatHost({pool,redisUrl:url.href,namespace,worker:true,createAgent:makeAgent});hosts.push(a);
   const b=await createNativeChatHost({pool,redisUrl:url.href,namespace,worker:false,createAgent:makeAgent});hosts.push(b);
-  const started=await a.agent.stream("fixture",{runId:randomUUID(),maxSteps:1});
+  const started=await a.agent!.stream("fixture",{runId:randomUUID(),maxSteps:1});
   expect(await started.output.text).toBe("native shared result");
-  const recovered=await b.agent.observe(started.runId,{idleTimeoutMs:5000});
+  const recovered=await b.agent!.observe(started.runId,{idleTimeoutMs:5000});
   expect(await recovered.output.text).toBe("native shared result");
   expect(executions).toBe(1);
   recovered.detach();started.cleanup();

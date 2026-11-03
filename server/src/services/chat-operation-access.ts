@@ -1,3 +1,4 @@
+import { nativeOperations } from "../agent-runtime/runtime.js";
 import { readChatRunDependencies } from "./chat-run-dependencies.js";
 import { sql } from "../db.js";
 import { loadActorScopedWorkspace, type RequestActor } from "../lib/request-actor.js";
@@ -15,6 +16,18 @@ export async function authorizeChatOperation(actor: RequestActor, id: string) {
 /** HTTP and socket recovery use identical authorized task summaries and cursor semantics. */
 export async function authorizedChatOperationSnapshot(actor: RequestActor, id: string, after: number) {
   await authorizeChatOperation(actor, id);
+  const [binding]=await sql<{runtime:string}[]>`select runtime from chat_operations where id=${id} and user_id=${actor.userId}`;
+  if(binding?.runtime==="mastra") {
+    const recovery=await (await nativeOperations(async()=>actor)).read(id,after);
+    const dependencies=await readChatRunDependencies(recovery.operation.root_id,actor.userId);
+    for(const dependency of dependencies) {
+      const workspace=await loadActorScopedWorkspace(dependency.workspace_id,actor,{refineNames:false});
+      if(workspace?.orgId!==dependency.org_id)throw new Error("operation_forbidden");
+    }
+    await authorizeChatOperation(actor,id);
+    return {...recovery,dependencies,treeSettled:recovery.treeSettled&&dependencies.every(
+      task=>["completed","failed","cancelled","interrupted"].includes(task.status))};
+  }
   const recovery = await readChatOperation(actor.userId, id, after);
   if (!recovery) throw new Error("operation_expired");
   const tasks = await sql<Omit<Operation, "input" | "request_hash" | "snapshot">[]>`

@@ -98,23 +98,7 @@ it("disconnect detaches an observer while the executor completes; another instan
   runtime.allowed=true;
 });
 
-it("HTTP initiation, lost acknowledgement, recovery and stop share one authorized identity",async()=>{
-  vi.stubEnv("DOCSLURP_DURABLE_CHAT","1");
-  const {chatOperationRoutes}=await import("../routes/chat-operations.js");
-  let actor: unknown={type:"session",userId:"u",sessionId:"browser",user:{id:"u"}};
-  const app=new Hono().use("*",async(c,next)=>{c.set("requestActor",actor as never);await next();}).route("/v1/chat/operations",chatOperationRoutes);
-  const post=()=>app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"http_lost_ack"},body:JSON.stringify({q:"hello"})});
-  expect((await app.request("/v1/chat/operations",{method:"POST",body:"x".repeat(128001)})).status).toBe(413);
-  const first=await post();expect(first.status).toBe(202);
-  const {operationId}=await first.json();expect(await (await post()).json()).toMatchObject({operationId});
-  expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(200);
-  expect((await app.request("/v1/chat/operations")).status).toBe(200);
-  expect((await app.request(`/v1/chat/operations/${operationId}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:'{"scope":"tree"}'})).status).toBe(200);
-  const state=await (await app.request(`/v1/chat/operations/${operationId}`)).json();expect(state.operation.status).toBe("cancelled");
-  actor={type:"apiKey",userId:"u"};expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(403);
-  actor={type:"session",userId:"v",sessionId:"other",user:{id:"v"}};expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(409);
-  vi.unstubAllEnvs();
-});
+// HTTP initiation/recovery/cancel now exercise native ownership in agent-runtime/runtime.integration.test.ts.
 it("cancel-one leaves accepted siblings running and output budgets fail closed",async()=>{
   const root=await launch("scope_root");const a=await launch("scope_child_a",root.id);const b=await launch("scope_child_b",root.id);
   await ops.cancelChatOperation("u",a.id,"task");
