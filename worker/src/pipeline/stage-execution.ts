@@ -686,6 +686,7 @@ export function createStageExecution(deps: {
         ),
       );
 
+    if (event === "run.failed") return;
     await store
       .triggerWebhooks(runId, event)
       .catch((err) =>
@@ -711,7 +712,7 @@ export function createStageExecution(deps: {
       const noun = failed.length === 1 ? "document" : "documents";
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
-      await store.failRun(input.runId, first?.[0] ?? state.stage, message);
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -742,7 +743,8 @@ export function createStageExecution(deps: {
       `[temporal] run=${input.runId} stage=${stage} status=failed message=${input.message}`,
     );
 
-    await store.failRun(input.runId, stage, input.message);
+    const state = await loadRunState(store, input.runId);
+    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
 
     await notifyTerminal(input.runId, "run.failed");
   }

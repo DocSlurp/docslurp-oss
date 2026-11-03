@@ -1,4 +1,4 @@
-import { assertExecutionOwnership, StaleExecutionError } from "./execution-ownership.js";
+import { assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
@@ -34,7 +34,7 @@ import {
   collectOrphanedStorageKeys,
   keyFromStorageUri,
 } from "../tools/storage.js";
-import { RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
+import { insertWorkspaceRunEvents, RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
 import { graphFallbackScope, workspaceTemplates } from "@docslurp/shared";
 import { queryWorkerScalerSnapshot, type ScalerSql, type WorkerScalerQueryParams, type WorkerScalerSnapshot } from "@docslurp/shared";
 import {
@@ -1159,70 +1159,91 @@ export class Store {
     `;
   }
 
-  async failRun(runId: string, stage: string, message: string): Promise<void> {
-    const [current] = await this.sql<
-      {
-        user_id: string;
-        stats: JsonMap | null;
-        failure_count: number;
-      }[]
-    >`
-      select user_id, stats, coalesce(failure_count, 0) as failure_count
-      from workspace_runs
-      where id = ${runId}
-      limit 1
-    `;
-
-    if (!current) {
-      return;
-    }
-
-    const plan = planRunFailure({
-      failureCount: current.failure_count,
-      stats: current.stats,
-      stage,
-      message,
-      threshold: this.poisonRunFailureThreshold,
+  /** Ownership lock and receipt share the caller's terminal mutations and commit. */
+  async finalizeRun(owner: ExecutionOwner, outcome: "failed" | "completed",
+    write: (client: Sql<Record<string, unknown>>, logicalId: string) => Promise<void>): Promise<void> {
+    await this.sql.begin(async (tx) => {
+      await assertExecutionOwnership(tx, owner);
+      const logicalId = JSON.stringify(["run-terminal", owner.runId, owner.executionGeneration ?? null]);
+      const [receipt] = await tx`
+        insert into run_terminal_receipts (id, run_id, execution_generation, outcome)
+        values (${logicalId}, ${owner.runId}, ${owner.executionGeneration ?? null}, ${outcome})
+        on conflict (id) do nothing returning id
+      `;
+      if (!receipt) return;
+      await write(tx as unknown as Sql<Record<string, unknown>>, logicalId);
     });
-    const nextFailureCount = plan.failureCount;
-    const deadLettered = plan.deadLettered;
-    const nextStats = plan.stats as JsonMap;
+  }
 
-    const [row] = await this.sql<{ user_id: string; stats: JsonMap | null }[]>`
-      update workspace_runs
-      set
-        status = 'failed',
-        stage = ${stage},
-        error = ${message},
-        lease_expires_at = now(),
-        failure_count = ${nextFailureCount},
-        dead_lettered_at = case when ${deadLettered} then now() else dead_lettered_at end,
-        dead_letter_reason = case when ${deadLettered} then ${message} else dead_letter_reason end,
-        control_state = case when ${deadLettered} then 'dead-letter' else control_state end,
-        stats = ${this.toJson(nextStats)}::jsonb,
-        updated_at = now()
-      where id = ${runId}
-      returning user_id, stats
-    `;
+  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner): Promise<void> {
+    if (owner.runId !== runId) throw new StaleExecutionError();
+    await this.finalizeRun(owner, "failed", async (client, logicalId) => {
+      const [current] = await client<
+        {
+          user_id: string;
+          stats: JsonMap | null;
+          failure_count: number;
+        }[]
+      >`
+        select user_id, stats, coalesce(failure_count, 0) as failure_count
+        from workspace_runs
+        where id = ${runId}
+        limit 1
+      `;
 
-    if (!row) {
-      return;
-    }
+      if (!current) {
+        return;
+      }
 
-    await this.sql`select retire_replaced_pending_documents(${runId})`;
-    await this.failProcessingDocumentStages(runId, stage, message);
-    await this.failUnfinishedDocumentsForRun(runId);
+      const plan = planRunFailure({
+        failureCount: current.failure_count,
+        stats: current.stats,
+        stage,
+        message,
+        threshold: this.poisonRunFailureThreshold,
+      });
+      const nextFailureCount = plan.failureCount;
+      const deadLettered = plan.deadLettered;
+      const nextStats = plan.stats as JsonMap;
 
-    await this.appendEvent({
-      userId: row.user_id,
-      runId,
-      stageName: stage,
-      eventType: "run.failed",
-      status: "failed",
-      message: plan.eventMessage,
-      progress: {},
-      stats: row.stats ?? {},
-      payload: plan.eventPayload,
+      const [row] = await client<{ user_id: string; stats: JsonMap | null }[]>`
+        update workspace_runs
+        set
+          status = 'failed',
+          stage = ${stage},
+          error = ${message},
+          lease_expires_at = now(),
+          failure_count = ${nextFailureCount},
+          dead_lettered_at = case when ${deadLettered} then now() else dead_lettered_at end,
+          dead_letter_reason = case when ${deadLettered} then ${message} else dead_letter_reason end,
+          control_state = case when ${deadLettered} then 'dead-letter' else control_state end,
+          stats = ${this.toJson(nextStats)}::jsonb,
+          updated_at = now()
+        where id = ${runId}
+        returning user_id, stats
+      `;
+
+      if (!row) {
+        return;
+      }
+
+      await client`select retire_replaced_pending_documents(${runId})`;
+      await this.failProcessingDocumentStages(runId, stage, message, client);
+      await this.failUnfinishedDocumentsForRun(runId, client);
+
+      await insertWorkspaceRunEvents({ sql: client, events: [{
+        id: logicalId,
+        userId: row.user_id,
+        runId,
+        stageName: stage,
+        eventType: "run.failed",
+        status: "failed",
+        message: plan.eventMessage,
+        progress: {},
+        stats: row.stats ?? {},
+        payload: plan.eventPayload,
+      }] });
+      await this.triggerWebhooks(runId, "run.failed", client, logicalId);
     });
   }
 
@@ -1246,8 +1267,9 @@ export class Store {
     runId: string,
     stage: string,
     message: string,
+    client: Sql<Record<string, unknown>> = this.sql,
   ): Promise<void> {
-    await this.sql`
+    await client`
       update document_run_stage_states
       set status = 'failed',
           error = ${message},
@@ -1257,7 +1279,7 @@ export class Store {
         and status = 'processing'
     `;
 
-    await this.sql`
+    await client`
       update documents d
       set status = 'failed',
           updated_at = now()
@@ -1275,8 +1297,8 @@ export class Store {
    * the breaking stage was marked just before). Untouched Documents go back to
    * queued so "Retry failed documents" resumes them from their checkpoints.
    */
-  private async failUnfinishedDocumentsForRun(runId: string): Promise<void> {
-    await this.sql`
+  private async failUnfinishedDocumentsForRun(runId: string, client: Sql<Record<string, unknown>> = this.sql): Promise<void> {
+    await client`
       update documents d
       set status = case
             when d.superseded_at is not null then 'cancelled'
@@ -1937,8 +1959,8 @@ export class Store {
    * Records run webhook events in the outbox. The API delivers them with its
    * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
    */
-  async triggerWebhooks(runId: string, event: string): Promise<void> {
-    await this.enqueueWebhookEvent(event, this.sql`
+  async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
+    await this.enqueueWebhookEvent(event, client`
       select r.user_id, jsonb_build_object(
         'event', ${event}::text,
         'runId', r.id,
@@ -1952,7 +1974,7 @@ export class Store {
       ) as payload
       from workspace_runs r
       where r.id = ${runId}
-    `);
+    `, client, logicalId);
   }
 
   private async triggerDocumentWebhooks(
@@ -1976,12 +1998,14 @@ export class Store {
   private async enqueueWebhookEvent(
     event: string,
     source: postgres.PendingQuery<postgres.Row[]>,
+    client: Sql<Record<string, unknown>> = this.sql,
+    logicalId?: string,
   ): Promise<void> {
-    await this.sql`
+    await client`
       with source as (${source}),
       queued as (
         insert into webhook_outbox (id, user_id, event_type, payload)
-        select gen_random_uuid()::text, source.user_id, ${event}, source.payload
+        select coalesce(${logicalId ?? null}::text, gen_random_uuid()::text), source.user_id, ${event}, source.payload
         from source
         where exists (
           select 1 from webhooks w

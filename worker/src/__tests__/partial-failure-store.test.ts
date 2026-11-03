@@ -15,8 +15,8 @@ let url: string;
 
 async function seedRun(runId: string) {
   await db.exec(`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
-      values ('${runId}', 'o1', 'u1', 'w', 'upload', 'processing', 'embed', '{}', 3);
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, execution_generation)
+      values ('${runId}', 'o1', 'u1', 'w', 'upload', 'processing', 'embed', '{}', 3, null);
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
       values ('${runId}-bad', 'o1', 'u1', 'w', '${runId}', 'bad.pdf', 'application/pdf', 'k1', 'processing', 2, '2026-01-01'),
              ('${runId}-mid', 'o1', 'u1', 'w', '${runId}', 'mid.pdf', 'application/pdf', 'k2', 'processing', 1, '2026-01-02'),
@@ -61,6 +61,41 @@ async function statuses(runId: string) {
 }
 
 describe("partial Document failure in the store", () => {
+  it("deduplicates an acknowledged-lost commit and rejects stale or cross-tenant owners", async () => {
+    await seedRun("receipt-retry");
+    await db.exec("update workspace_runs set execution_generation = 'g1' where id = 'receipt-retry'");
+    const owner = { runId: "receipt-retry", orgId: "o1", workspaceId: "w", executionGeneration: "g1" };
+    await withStore(async (store) => {
+      await store.failRun(owner.runId, "embed", "first", owner);
+      // Caller lost the acknowledgement: retry with a different error must not rewrite the outcome.
+      await store.failRun(owner.runId, "embed", "retry", owner);
+      for (const mismatch of [{ executionGeneration: "old" }, { orgId: "other" }, { workspaceId: "other" }]) {
+        await expect(store.failRun(owner.runId, "embed", "stale", { ...owner, ...mismatch })).rejects.toThrow("ownership");
+      }
+      await store.finalizeRun(owner, "completed", async () => { throw new Error("competing finalizer ran"); });
+    });
+    expect((await db.query("select failure_count, error from workspace_runs where id = 'receipt-retry'")).rows)
+      .toEqual([{ failure_count: 1, error: "first" }]);
+    expect((await db.query("select id from workspace_run_events where run_id = 'receipt-retry' and event_type = 'run.failed'")).rows).toHaveLength(1);
+    expect((await db.query("select id from webhook_outbox where payload->>'runId' = 'receipt-retry'")).rows).toHaveLength(1);
+  });
+
+  it("rolls back all failure writes when webhook persistence fails, then retries", async () => {
+    await seedRun("receipt-rollback");
+    const owner = { runId: "receipt-rollback", orgId: "o1", workspaceId: "w" };
+    await withStore(async (store) => {
+      const webhook = vi.spyOn(store, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
+      await expect(store.failRun(owner.runId, "embed", "failure", owner)).rejects.toThrow("outbox unavailable");
+      webhook.mockRestore();
+    });
+    expect((await db.query("select status, failure_count from workspace_runs where id = 'receipt-rollback'")).rows)
+      .toEqual([{ status: "processing", failure_count: 0 }]);
+    expect(await statuses(owner.runId)).toEqual({ bad: "processing", mid: "processing", new: "queued" });
+    expect((await db.query("select id from run_terminal_receipts where run_id = 'receipt-rollback'")).rows).toHaveLength(0);
+    expect((await db.query("select id from workspace_run_events where run_id = 'receipt-rollback'")).rows).toHaveLength(0);
+    await withStore(store => store.failRun(owner.runId, "embed", "failure", owner));
+  });
+
   it.each(["complete", "fail"] as const)("retires an unflagged replaced pending document when its active run ends: %s", async (outcome) => {
     const runId = `unflagged-${outcome}`;
     await seedRun(runId);
@@ -75,7 +110,7 @@ describe("partial Document failure in the store", () => {
     expect((await db.query<{ superseded_at: null }>("select superseded_at from documents where id = $1", [`${runId}-mid`])).rows[0]?.superseded_at).toBeNull();
     await withStore(async (store) => {
       if (outcome === "complete") await store.completeRun(await loadRunState(store, runId));
-      else await store.failRun(runId, "embed", "lost worker");
+      else await store.failRun(runId, "embed", "lost worker", { runId: runId, orgId: "o1", workspaceId: "w" });
     });
     expect(await statuses(runId)).toEqual({ bad: "cancelled", mid: "cancelled", new: outcome === "complete" ? "completed" : "queued" });
     expect((await db.query<{ replacement: string }>("select superseded_by_document_id as replacement from documents where id = $1", [`${runId}-mid`])).rows[0]?.replacement)
@@ -98,7 +133,7 @@ describe("partial Document failure in the store", () => {
     await db.exec(`update documents set status = 'cancelled' where id = 'run-history-bad';
       update documents set superseded_at = now() where id = 'run-history-mid'`);
     await withStore(async (store) => {
-      await store.failRun("run-history", "embed", "lost worker");
+      await store.failRun("run-history", "embed", "lost worker", { runId: "run-history", orgId: "o1", workspaceId: "w" });
       expect((await store.loadDocumentsForRun("run-history")).map(document => document.id)).toEqual(["run-history-new"]);
     });
     expect(await statuses("run-history")).toEqual({ bad: "cancelled", mid: "cancelled", new: "queued" });
@@ -111,7 +146,7 @@ describe("partial Document failure in the store", () => {
       await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable");
       await store.startDocumentStage(state, "run-fail-mid", "extract");
       await store.completeDocumentStage(state, "run-fail-mid", "extract", "s3://x", {});
-      await store.failRun("run-fail", "embed", "database went away");
+      await store.failRun("run-fail", "embed", "database went away", { runId: "run-fail", orgId: "o1", workspaceId: "w" });
     });
     expect(await statuses("run-fail")).toEqual({ bad: "failed", mid: "queued", new: "queued" });
   });

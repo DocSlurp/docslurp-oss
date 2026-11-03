@@ -336,7 +336,7 @@ describe("Stage Execution", () => {
 
     expect(store.runStatus).toBe("failed");
     expect(store.failures).toEqual([{ stage: "parse", message: "parser crashed" }]);
-    expect(store.notifications).toEqual(["email:run.failed", "webhook:run.failed"]);
+    expect(store.notifications).toEqual(["email:run.failed"]);
   });
 
   it("records the group stage that was running when a stage group fails", async () => {
