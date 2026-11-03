@@ -51,12 +51,14 @@ describe("retrying a completed Run", () => {
     const lifecycle = createRunLifecycle({ sql, startWorkflow, failureThreshold: 2 });
     const pipeline = { ...defaultPipelineFeatures };
     await client`update workspace_runs set creation_ready_at = now()`;
+    const [before] = await client`select execution_generation from workspace_runs where id = 'run-c'`;
 
     const outcome = await lifecycle.retry({ id: "run-c", status: "completed", pipeline });
     expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
-    expect(startWorkflow).toHaveBeenCalledWith("run-c", pipeline, { restartExisting: true });
-
-    const [run] = await client`select status, stage, processed_documents, stats from workspace_runs where id = 'run-c'`;
+    const [run] = await client`select status, stage, processed_documents, stats, execution_generation from workspace_runs where id = 'run-c'`;
+    expect(run!.execution_generation).toEqual(expect.any(String));
+    expect(run!.execution_generation).not.toBe(before!.execution_generation);
+    expect(startWorkflow).toHaveBeenCalledWith("run-c", pipeline, { restartExisting: true, executionGeneration: run!.execution_generation });
     expect(run).toMatchObject({ status: "queued", stage: "queued", processed_documents: 2, stats: { keep: true } });
     expect(run!.stats).not.toHaveProperty("failedDocuments");
     expect(await client`select id, status from documents where run_id = 'run-c' order by id`).toEqual([
