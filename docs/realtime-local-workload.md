@@ -110,3 +110,32 @@ Candidate p95 propagation was 795 ms for progress, 646 ms for burst and 1427 ms
 for reconnect. Idle CPU was 267 ms versus legacy 601 ms. Reconnect SQL remains
 above legacy and is an open capacity gate; this run does not establish production
 acceptance. No paid provider, production workload or deployment was used.
+
+## Final integrated repeat
+
+The unchanged workload/budgets were repeated after native integration and the
+bounded idle sweep cadence change. Raw evidence:
+[realtime-matched-load-final-20261103.json](realtime-matched-load-final-20261103.json).
+Core source was 61a41c13; subsequent pending-dispatch/admission fixes affect native
+chat, which this dashboard workload does not execute.
+
+| Phase | Matched legacy SQL | Final socket SQL | Socket p95 |
+| --- | ---: | ---: | ---: |
+| Idle, 32 seconds | 89 | 43 | no updates |
+| Ten-run progress | 722 | 826 | 995 ms |
+| 100 completion events | 1215 | 140 | 165 ms |
+| Offline completion/reconnect | 100 | 154 | 1456 ms |
+
+Idle authorization decisions now run every two seconds (subject to scheduler
+timing), with a separate watchdog and immediate delivery checks. Attribution:
+32 revision reads and 11 fresh authorization batches in the observed idle window.
+The fixture still substitutes session authentication; real first-party liveness
+adds one SQL statement per session sweep, independent of subscription count.
+
+Idle CPU was 108 ms versus legacy 555 ms; progress CPU 2125 versus 1670 ms;
+burst 850 versus 2534 ms; reconnect 363 versus 241 ms. Observed socket peak RSS
+was 666 MiB, within the frozen 1536 MiB cap. All observed propagation p95 values
+were under two seconds. Progress and reconnect query/CPU costs remain above the
+matched legacy path, and the earlier core-only synthetic budget failures remain
+in this document. These measurements resolve the reported idle amplification,
+not every capacity/production acceptance gate.

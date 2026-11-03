@@ -5,6 +5,7 @@ export const CHAT_OPERATION_LIMITS = { outputBytes: 262_144, treeOutputBytes: 52
 export type OperationStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
 export interface Operation {
   id: string; root_id: string; parent_id: string | null; user_id: string; workspace_id: string; org_id: string;
+  runtime?: "legacy" | "mastra";
   status: OperationStatus; attempt_id: string | null; sequence: number; snapshot: Record<string, unknown>;
   cancel_requested: boolean; tree_cancel_requested: boolean; request_hash: string; input: Record<string, unknown>;
 }
@@ -21,7 +22,7 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
     await tx`select id from "user" where id = ${args.userId} for update`;
     const [existing] = await tx<Operation[]>`select * from chat_operations where user_id=${args.userId} and workspace_id=${args.workspaceId} and idempotency_key=${args.key}`;
     if (existing) {
-      if ((existing as Operation & {runtime:string}).runtime !== (args.runtime ?? "legacy") || existing.request_hash !== hash || existing.parent_id !== (args.parentId ?? null)) throw new OperationConflict("Idempotency key reused with different input");
+      if (existing.runtime !== (args.runtime ?? "legacy") || existing.request_hash !== hash || existing.parent_id !== (args.parentId ?? null)) throw new OperationConflict("Idempotency key reused with different input");
       return existing;
     }
     const id = randomUUID();
@@ -36,8 +37,11 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
         (select count(*) from chat_run_dependencies d join chat_operations c on c.id=d.operation_id where c.root_id=${root.id}))::int as count`;
       if (count >= CHAT_OPERATION_LIMITS.tasks) throw new OperationConflict("Task tree limit");
       rootId = root.id;
-    } else {
-      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations root where root.user_id=${args.userId} and root.parent_id is null and (
+    }
+    {
+      // Excluding this root permits additional children in an already admitted
+      // tree, but a dormant root must reacquire a slot before reactivation.
+      const [{ count }] = await tx<{ count: number }[]>`select count(*)::int as count from chat_operations root where root.user_id=${args.userId} and root.parent_id is null and root.id<>${rootId} and (
         chat_root_has_active_dependencies(root.id) or exists (
           select 1 from chat_operations child where child.root_id=root.id and (
             (child.runtime='legacy' and child.status in ('queued','running','waiting'))
@@ -50,8 +54,8 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
         ))`;
       if (count >= CHAT_OPERATION_LIMITS.activeRoots) throw new OperationConflict("Active operation limit");
     }
-    const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input, runtime)
-      values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.workspaceId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}, ${args.runtime ?? "legacy"}) returning *`;
+    const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input, runtime, status)
+      values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.workspaceId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}, ${args.runtime ?? "legacy"}, ${args.runtime === "mastra" ? "waiting" : "queued"}) returning *`;
     if (args.parentId) await tx`update chat_operations set deadline=(select deadline from chat_operations where id=${rootId}), expires_at=(select expires_at from chat_operations where id=${rootId}) where id=${id}`;
     return row!;
   });

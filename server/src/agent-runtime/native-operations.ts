@@ -16,6 +16,7 @@ export interface NativeOperationPolicy {
   authorize(operationId: string): Promise<NativeOperationBinding>;
   /** Database lock shared across API instances; also checks durable cancellation intent. */
   serializeAcceptance<T>(binding: NativeOperationBinding, work: () => Promise<T>): Promise<T>;
+  redispatchPending(binding:NativeOperationBinding,taskId:string,dispatch:()=>Promise<unknown>):Promise<void>;
   recordCancellation(binding: NativeOperationBinding, scope: "task" | "tree"): Promise<void>;
 }
 const agentId="docslurp-workspace-chat";
@@ -36,13 +37,20 @@ export class NativeOperations {
     const binding=await this.policy.authorize(operationId);
     const accepted=await this.tasks(binding);
     if(accepted.length>1)throw new Error("operation_identity_conflict");
-    if(accepted[0])return {operationId:binding.id,rootId:binding.rootId,taskId:accepted[0].id,status:publicTask(accepted[0]).status};
-    return this.policy.serializeAcceptance(binding,async()=>{
+    if(accepted[0]) {
+      if(accepted[0].status==="pending")await this.policy.redispatchPending(binding,accepted[0].id,()=>this.manager.restart(accepted[0]!.id));
+      return {operationId:binding.id,rootId:binding.rootId,taskId:accepted[0].id,status:publicTask(accepted[0]).status};
+    }
+    let redispatch=false;
+    const handle=await this.policy.serializeAcceptance(binding,async()=>{
       // Lookup by durable logical identity recovers an enqueue ACK lost before
       // the HTTP response or before the caller stored the native task id.
       const existing=await this.tasks(binding);
       if(existing.length>1)throw new Error("operation_identity_conflict");
-      if(existing[0])return {operationId:binding.id,rootId:binding.rootId,taskId:existing[0].id,status:publicTask(existing[0]).status};
+      if(existing[0]) {
+        redispatch=existing[0].status==="pending";
+        return {operationId:binding.id,rootId:binding.rootId,taskId:existing[0].id,status:publicTask(existing[0]).status};
+      }
       const remaining=binding.deadline.getTime()-Date.now();
       if(remaining<=0)throw new Error("operation_deadline");
       const {task}=await this.manager.enqueue({agentId,runId:binding.rootId,
@@ -50,6 +58,8 @@ export class NativeOperations {
         args:{operationId:binding.id},timeoutMs:Math.min(600000,remaining),maxRetries:0});
       return {operationId:binding.id,rootId:binding.rootId,taskId:task.id,status:publicTask(task).status};
     });
+    if(redispatch)await this.policy.redispatchPending(binding,handle.taskId,()=>this.manager.restart(handle.taskId));
+    return handle;
   }
   async read(operationId:string,after:number) {
     const binding=await this.policy.authorize(operationId);

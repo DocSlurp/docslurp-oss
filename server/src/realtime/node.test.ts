@@ -94,7 +94,8 @@ describe("real Node realtime Upgrade", () => {
     await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED));
   });
   it("bounds subscription flooding", async () => {
-    const f = await fixture(); const { ws, frames } = await connect(f.url);
+    // This tests admission, not the 100ms watchdog used by revocation fixtures.
+    const f = await fixture({authorizationRecheckMs:1000}); const { ws, frames } = await connect(f.url);
     for (let n = 0; n < 33; n++) {
       subscribe(ws, `s${n}`);
       if (n < 32) await vi.waitFor(() => expect(frames.some(frame => frame.subscriptionId === `s${n}` && frame.type === "ack")).toBe(true));

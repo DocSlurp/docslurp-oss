@@ -30,6 +30,8 @@ it("never mistakes missing cached indices for a complete active answer",async()=
   await cache.increment(`pubsub:${operationOutputTopic(task.id)}:counter`);
   await publishOperationOutput(pubsub,task.id,{kind:"text",payload:{text:"third"}});
   await expect(readNativeOperationOutput(pubsub,task,0)).rejects.toThrow("output_history_gap");
+  expect(await readNativeOperationOutput(pubsub,{...task,status:"completed",result:{result:{answer:"authoritative"},watermark:4}},0))
+    .toMatchObject({resync:true,events:[],watermark:4,snapshot:{answer:"authoritative"}});
 });
 it("keeps terminal tool outcomes after cache expiry and distinguishes no output yet from missing output",async()=>{
   const pubsub=bus();

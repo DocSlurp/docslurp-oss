@@ -21,15 +21,18 @@ export async function publishOperationOutput(pubsub: PubSub, taskId: string, out
 export async function readNativeOperationOutput(pubsub: PubSub, task: BackgroundTask, after: number, hasAcceptedOutput = true) {
   if (!Number.isSafeInteger(after) || after < 0) throw new Error("invalid_cursor");
   const history = await pubsub.getHistory(operationOutputTopic(task.id));
-  const events = history.map(event => {
+  let events = history.map(event => {
     if (!Number.isSafeInteger(event.index) || event.index! < 0) throw new Error("unpersisted_output");
     const output = event.data as OperationOutput;
     if (!output || !["text","tool","evidence","result","error"].includes(output.kind)) throw new Error("invalid_output");
     return { sequence: event.index! + 1, kind: output.kind, payload: output.payload };
   }).sort((a,b)=>a.sequence-b.sequence);
-  if (events.length && (events[0]!.sequence !== 1 || events.some((event,index)=>index>0&&event.sequence!==events[index-1]!.sequence+1))) throw new Error("output_history_gap");
   const terminal = ["completed","failed","cancelled","timed_out"].includes(task.status);
   const stored = task.result as { result?: Record<string,unknown>; watermark?: number } | undefined;
+  if (events.length && (events[0]!.sequence !== 1 || events.some((event,index)=>index>0&&event.sequence!==events[index-1]!.sequence+1))) {
+    if(!terminal||!stored?.result)throw new Error("output_history_gap");
+    events=[]; // Native final result is authoritative when replay has a gap.
+  }
   const watermark = Math.max(events.at(-1)?.sequence ?? 0, stored?.watermark ?? 0);
   if (!events.length && hasAcceptedOutput && !stored?.result) throw new Error("output_history_unavailable");
   let text = "";

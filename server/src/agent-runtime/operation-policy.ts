@@ -40,6 +40,19 @@ export function createNativeOperationPolicy(resolveActor: () => Promise<RequestA
         return work();
       }) as ReturnType<typeof work>;
     },
+    async redispatchPending(binding,taskId,dispatch) {
+      await sql.begin(async tx=>{
+        const [root]=await tx`select id,tree_cancel_requested from chat_operations where id=${binding.rootId} and user_id=${binding.userId} for update`;
+        const [current]=await tx`select id from chat_operations where id=${binding.id} and user_id=${binding.userId}
+          and not cancel_requested and deadline>clock_timestamp() and expires_at>clock_timestamp()`;
+        if(!root||root.tree_cancel_requested||!current)return;
+        // Holding this row prevents restart()'s internal read from racing a
+        // pending -> running claim. Never call its running-task restart branch.
+        const [pending]=await tx`select id from docslurp_mastra.mastra_background_tasks
+          where id=${taskId} and tool_call_id=${binding.id} and status='pending' for update`;
+        if(pending)await dispatch();
+      });
+    },
     async recordCancellation(binding,scope) {
       await sql.begin(async tx=>{
         await tx`select id from chat_operations where id=${binding.rootId} and user_id=${binding.userId} for update`;

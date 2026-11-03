@@ -149,3 +149,12 @@ proxy; provision/supervise the worker only with separate authorization. Native
 Redis replay requires persistence appropriate to the retention guarantee; an
 ephemeral rate-limit cache is insufficient. Missing retained active output fails
 explicitly instead of silently restarting a paid operation.
+
+Mastra1.81 BackgroundTaskManager.enqueue persists before dispatch. A process can
+die between those steps. Worker startup recovers pending tasks, but a running
+worker does not necessarily rescan when no known lease schedules another sweep.
+The public restart API re-dispatches pending tasks, but also permits restarting
+running tasks. The idempotent-acceptance adapter therefore locks a native pending
+row while calling that supported API, so a concurrent claim cannot turn a harmless
+pending redispatch into an active paid restart. It never resets lifecycle state
+or creates another native task; native claim fencing still deduplicates dispatch.

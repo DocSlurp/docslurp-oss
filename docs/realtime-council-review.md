@@ -26,3 +26,29 @@ healthy session checks, 544 timed-out cooperative authentication attempts follow
 by a successful connection, and capped abandoned work for an uncooperative provider.
 The adapter also prevents a stale revocation callback removing a newer subscription
 generation. Independent final recheck remains required.
+
+## Native ownership and authorization batching delta awaiting council
+
+After the earlier reviewed security fixes, the integrated branch replaces new
+first-party chat claim/replay ownership with native Mastra1.81 background tasks,
+PostgresStore and indexed persistent PubSub/cache. Review the new agent-runtime
+adapters, migrations0118–0119, existing Temporal allocation linkage and session
+revalidation/batched authorization changes independently; earlier approvals do
+not cover this delta.
+
+Local evidence: 149 affected server tests passed with strict unhandled rejection
+handling (six optional integration tests skipped in that command), followed by
+real PostgreSQL17/Redis7 tests covering signed BetterAuth sessions on the built
+Astro host, native HTTP idempotency, API-host recreation, explicit Stop, shared
+materialization settlement and a separate worker SIGKILL with real lease expiry.
+A further targeted run passed17 tests (two legacy concurrency opt-ins skipped),
+including dropped native dispatch recovery without duplicate execution, active
+root reactivation admission, and native bindings excluded from legacy claims.
+Shared/SDK builds, final server tsc and all11 shared protocol tests passed.
+Final native replay checks also cover authoritative terminal resync after a
+retained-history gap.
+
+Dashboard matched idle SQL fell896→43 versus legacy89; progress826 versus722,
+burst140 versus1215 and reconnect154 versus100. Raw workload, CPU/RSS/query
+attribution and limitations are in realtime-local-workload.md. Do not infer full
+capacity acceptance from the idle fix. Flags remain off; no merge/deployment.

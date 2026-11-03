@@ -184,3 +184,26 @@ it.runIf(enabled)("keeps shared materialization visible after the native parent 
   recovered=await (await app.request(`/v1/chat/operations/${operationId}`)).json();
   expect(recovered.treeSettled).toBe(true);expect(recovered.dependencies[0]).toMatchObject({status:"completed",result_ref:{documentId:"native-linked-document",pages:[1]}});
 },20000);
+it.runIf(enabled)("recovers persisted pending dispatch after a lost initiation acknowledgement without a new native task",async()=>{
+  state.chat.mockReset().mockImplementation(async(args)=>{await args.onTextDelta("recovered dispatch");return {answer:"recovered dispatch",citations:[]};});
+  const host=await runtime.nativeChatRuntime();
+  const publish=host.pubsub.publish.bind(host.pubsub);
+  let lost=false;
+  const spy=vi.spyOn(host.pubsub,"publish").mockImplementation(async(topic,event,options)=>{
+    if(topic==="background-tasks"&&event.type==="task.dispatch"&&!lost){lost=true;return;}
+    return publish(topic,event,options);
+  });
+  const app=new Hono().use("*",async(c,next)=>{c.set("requestActor",actor);await next();}).route("/v1/chat/operations",routes);
+  const post=()=>app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_lost_dispatch"},
+    body:JSON.stringify({q:"dispatch fixture",workspace})});
+  try {
+    const first=await post();expect(first.status).toBe(202);
+    const {operationId}=await first.json();
+    expect(lost).toBe(true);expect(state.chat).not.toHaveBeenCalled();
+    spy.mockRestore();
+    expect(await (await post()).json()).toMatchObject({operationId});
+    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${operationId}`)).json()).operation.status).toBe("completed"),{timeout:10000});
+    expect(state.chat).toHaveBeenCalledTimes(1);
+    expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:operationId})).total).toBe(1);
+  } finally {spy.mockRestore();}
+},20000);

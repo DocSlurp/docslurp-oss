@@ -205,3 +205,18 @@ it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadli
     expect((await ops.readChatOperation("u", task.id, 0))?.operation.status).not.toBe("completed");
   } finally { unlock(); await holder; }
 });
+
+it("requires an active-root slot when adding a child to a completed root",async()=>{
+  const dormant=await launch("dormant_root");
+  const attempt=(await ops.claimChatOperation())!;
+  await ops.appendChatOperation(dormant.id,attempt.attempt_id!,"result",{answer:"finished"},"completed");
+  for(let n=0;n<8;n++)await launch(`other_root_${n}`);
+  await expect(launch("reactivate_child",dormant.id)).rejects.toThrow("Active operation limit");
+  await sql`update chat_operations set status='completed' where id=(select id from chat_operations where id<>${dormant.id} limit 1)`;
+  await expect(launch("reactivate_child",dormant.id)).resolves.toBeTruthy();
+});
+it("keeps native bindings out of even a legacy queued-status claim",async()=>{
+  const native=await ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"native_unclaimable",input:{},runtime:"mastra"});
+  expect(native.status).toBe("waiting");
+  expect(await ops.claimChatOperation()).toBeNull();
+});
