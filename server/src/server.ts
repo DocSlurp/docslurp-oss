@@ -321,9 +321,9 @@ export function ensureApiStartup(): Promise<void> {
       }
 
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
-      // Boolean env flags this process booted with (MEDIA_REMOTE_ENABLED, AI_RATE_LIMIT_ENABLED, ...); unset ones use code defaults.
-      const bootFlags = formatEnvFlags(envFlags());
-      console.log(`[api] env-flags ${bootFlags}`);
+      // Boolean env flags this process booted with (MEDIA_REMOTE_ENABLED, AI_RATE_LIMIT_ENABLED, ...); unset ones
+      // use code defaults. Console only (SigNoz via Fly logs): the startup event below can export to PostHog.
+      console.log(`[api] env-flags ${formatEnvFlags(envFlags())}`);
       // Loud when limits are per instance (no Redis) or disabled.
       logRateLimitBackendAtStartup();
       // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
@@ -338,7 +338,6 @@ export function ensureApiStartup(): Promise<void> {
         body: "API startup complete",
         attributes: {
           startup_migrations_enabled: shouldRunStartupMigrations(),
-          env_flags: bootFlags,
         },
       });
     })().catch((error: unknown) => {
