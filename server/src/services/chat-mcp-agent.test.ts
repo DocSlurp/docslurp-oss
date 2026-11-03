@@ -21,7 +21,7 @@ vi.mock("./workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
 vi.mock("./mcp-tools.js", () => ({
   createMcpDispatcher: mocks.createDispatch,
-  mcpManifest: () => ({ capabilities: mocks.manifestIds.map(id => ({ id, title: id, description: id, category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } })) }),
+  mcpManifest: () => ({ capabilities: mocks.manifestIds.map(id => ({ id, title: id, description: id, category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: id === "search" ? ["q"] : [] } })) }),
 }));
 vi.mock("@docslurp/shared", async importOriginal => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
@@ -179,7 +179,7 @@ function finish(toolCall: boolean, modelId = "provider/build-1017") {
   ];
 }
 
-function scripted(steps: Array<{ tools?: Array<{ id: string; input: unknown }>; text?: string }>) {
+function scripted(steps: Array<{ tools?: Array<{ id: string; input: unknown; name?: string }>; text?: string }>) {
   let index = 0;
   const seenToolChoice: Array<unknown> = [];
   const model = new MockLanguageModelV4({ doStream: async (options) => {
@@ -189,7 +189,7 @@ function scripted(steps: Array<{ tools?: Array<{ id: string; input: unknown }>; 
     const tools = forced ? [] : current.tools ?? [];
     return { stream: simulateReadableStream({ chunks: [
       { type: "stream-start", warnings: [] },
-      ...tools.map(tool => ({ type: "tool-call" as const, toolCallId: tool.id, toolName: "search", input: JSON.stringify(tool.input) })),
+      ...tools.map(tool => ({ type: "tool-call" as const, toolCallId: tool.id, toolName: tool.name ?? "search", input: JSON.stringify(tool.input) })),
       ...(tools.length ? [] : [{ type: "text-start" as const, id: "t" }, { type: "text-delta" as const, id: "t", delta: current.text ?? "Answer [1]." }, { type: "text-end" as const, id: "t" }]),
       ...finish(tools.length > 0),
     ], initialDelayInMs: 0, chunkDelayInMs: 0 }) };
@@ -596,7 +596,7 @@ it("ignores injected document instructions quietly instead of announcing them ev
 describe("agent modes", () => {
   const systemText = (model: MockLanguageModelV4) => JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
 
-  it("keeps suggestions off by default: proposals stay available on request, but are never volunteered", async () => {
+  it("keeps suggestions off by default: ordinary proposals stay on request with an empty-index recovery exception", async () => {
     mocks.manifestIds = ["search", "getWorkspaceSettings", "proposeWorkspaceSettings"];
     const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(model);
@@ -698,6 +698,62 @@ describe("agent modes", () => {
     expect(text).toContain("apply to that chat thread only and leave the workspace defaults unchanged");
     expect(text).toContain("when the user wants the whole workspace to change, prepare a proposal for them to Apply");
     expect(text).toContain("including a request to change it for the workspace");
+  });
+
+  it.each([false, true])("offers empty-index recovery with suggestions=%s through the trusted Apply card", async (suggestions) => {
+    mocks.manifestIds = ["search", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent({ ...args, suggestions });
+    const text = systemText(model);
+    expect(text).toContain("Empty-index recovery applies even when Suggestions mode is off");
+    expect(text).toContain("indexedChunkCount and pageIndexedDocuments are both explicitly zero");
+    expect(text).toContain("embed: true and indexVectors: true");
+    expect(text).toContain("Also re-index existing documents");
+    expect(text).toContain("check reprocessAvailable before promising existing-file recovery");
+    expect(text).toContain("When reprocessAvailable is false");
+    expect(text).toContain("A zero-result query alone is not evidence of a missing index");
+    expect(text).toContain("Only the trusted Apply action can save it");
+  });
+
+  it("streams a recovery card after empty search and settings inspection without applying it", async () => {
+    mocks.manifestIds = ["search", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const changes = { pipeline: { embed: true, indexVectors: true } };
+    const proposal = {
+      token: "sealed-test-proposal", workspaceId: "ws", expiresAt: "2099-01-01T00:00:00.000Z",
+      before: {}, after: {}, changes: [],
+      impact: { kind: "reindex-recommended", stages: ["embed", "index-vectors"], reasons: [], documents: 2, pages: 8 },
+      estimate: null, reprocessAvailable: true, reprocessRequired: false,
+    };
+    mocks.dispatch
+      .mockResolvedValueOnce(Response.json({ results: [], availability: { coverage: { indexedDocuments: 2, indexedChunkCount: 0, pageIndexedDocuments: 0 } } }))
+      .mockResolvedValueOnce(Response.json({ pipeline: { embed: false, indexVectors: false } }))
+      .mockResolvedValueOnce(Response.json({ settingsProposal: proposal }));
+    const { model } = scripted([
+      { tools: [{ id: "search", input: { q: "overview" } }] },
+      { tools: [{ id: "settings", name: "getWorkspaceSettings", input: {} }] },
+      { tools: [{ id: "repair", name: "proposeWorkspaceSettings", input: { changes } }] },
+      { text: "Select Also re-index existing documents, then Apply and re-index. Cost is not estimated." },
+    ]);
+    mocks.provider.mockReturnValue(model);
+    const onToolActivity = vi.fn();
+    await runChatMcpAgent({ ...args, suggestions: false, onToolActivity });
+    expect(onToolActivity).toHaveBeenCalledWith(expect.objectContaining({
+      name: "proposeWorkspaceSettings", status: "success", settingsProposal: proposal,
+    }));
+    expect(mocks.dispatch.mock.calls.map(([path]) => path)).toEqual([
+      "/tools/search", "/tools/getWorkspaceSettings", "/tools/proposeWorkspaceSettings",
+    ]);
+    expect(JSON.parse(mocks.dispatch.mock.calls[2]![1].body)).toEqual({ changes, workspace: "ws" });
+    expect(JSON.stringify(model.doStreamCalls.at(-1)!.prompt)).not.toContain("sealed-test-proposal");
+  });
+
+  it("does not advertise empty-index recovery when settings tools are unavailable", async () => {
+    mocks.manifestIds = ["search"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent(args);
+    expect(systemText(model)).not.toContain("Empty-index recovery applies");
   });
 
   it("turns web tools off for the turn when the request says web: false", async () => {
