@@ -204,3 +204,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.
 
 - Offer a costed chat settings proposal for verified empty retrieval indexes even with Suggestions off. The existing card lets users opt into re-indexing and ask again; no processing starts from model text. Ordinary zero-hit queries do not establish a missing index.
+
+- Added opt-in durable chat operation queue, output journal, authorized recovery adapter and scoped task cancellation for issue 319; legacy client migration and full acceptance remain open (docs/durable-chat-operations.md).
