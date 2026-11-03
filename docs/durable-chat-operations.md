@@ -84,3 +84,18 @@ This branch does not complete issue 319. Remaining gates include app migration,
 WS host hookup, shared projection reconciliation/load measurements, independent council review, and
 production executor supervision/draining. Do not claim rolling provider
 continuation or automatic retry. No deployment is authorized by this work.
+
+## Interim council review and repairs
+
+The independent adversarial review of `4271271d` found three issues: the
+non-agent provider path missed the executor abort context; cancellation could
+lose to a result append between heartbeats; and ignored evidence/tool callbacks
+could leave a derived rejected promise unhandled. The follow-up establishes the
+existing deferred execution context, enforces cancellation/deadline in the locked
+append transaction, and returns the already-observed persistence promise.
+
+Regression evidence: 88 tests across chat-operations.db and workspace-chat pass
+with `NODE_OPTIONS=--unhandled-rejections=strict`. They include cancellation during
+real non-agent retrieval/generation boundaries (mocked providers), committed
+cancel/deadline versus late result, and rejected evidence persistence. This is an
+interim repair record, not final council approval or end-to-end acceptance.

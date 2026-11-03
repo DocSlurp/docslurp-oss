@@ -136,3 +136,36 @@ it("revoking the initiating session cancels the executor, independently of trans
   expect((await ops.readChatOperation("u",task.id,0))?.operation.status).toBe("cancelled");
   expect(runtime.chat).toHaveBeenCalledTimes(1);
 });
+
+
+it.each(["cancel", "deadline"])("rejects late output and successful completion after %s commits", async reason => {
+  const task = await launch(`commit_${reason}`);
+  const claim = await ops.claimChatOperation();
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "text", { text: "accepted" });
+  if (reason === "cancel") await ops.cancelChatOperation("u", task.id, "task");
+  else await sql`update chat_operations set deadline=now()-interval '1 second' where id=${task.id}`;
+  await expect(ops.appendChatOperation(task.id, claim!.attempt_id!, "text", { text: "late" })).rejects.toThrow();
+  await expect(ops.appendChatOperation(task.id, claim!.attempt_id!, "result", { answer: "late" }, "completed")).rejects.toThrow();
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "error", { code: "execution_stopped" }, "failed");
+  const state = await ops.readChatOperation("u", task.id, 0);
+  expect(state?.operation.status).toBe("cancelled");
+  expect(state?.operation.snapshot.text).toBe("accepted");
+  expect(state?.events.some(event => event.kind === "result")).toBe(false);
+});
+
+it("consumes rejected synchronous evidence callbacks and preserves executor cancellation context", async () => {
+  await sql`insert into "session" (id,token,"userId","expiresAt") values ('evidence','evidence-token','u',now()+interval '1 hour')`;
+  const task = await ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"evidence_rejection",input:{q:"hello",authSessionId:"evidence"}});
+  const claim = await ops.claimChatOperation();
+  const { getDeferredContext } = await import("../search/deferred/deferred-context.js");
+  runtime.chat.mockImplementation(async (args: {signal: AbortSignal; onEvidence: (event: unknown) => void}) => {
+    expect(getDeferredContext()?.signal).toBe(args.signal);
+    args.onEvidence({ text: "x".repeat(262145) });
+    await new Promise<void>(resolve => args.signal.addEventListener("abort", () => resolve(), {once:true}));
+    throw args.signal.reason;
+  });
+  const { executeChatOperation } = await import("../services/chat-operation-executor.js");
+  await executeChatOperation(claim!);
+  await new Promise(resolve => setImmediate(resolve));
+  expect((await ops.readChatOperation("u", task.id, 0))?.operation.status).toBe("failed");
+});

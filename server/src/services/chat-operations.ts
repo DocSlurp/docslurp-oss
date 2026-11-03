@@ -66,6 +66,7 @@ export async function claimChatOperation() {
 /** Each accepted chunk is committed before its sequence can be returned to any observer. */
 export async function appendChatOperation(id: string, attempt: string, kind: string, payload: unknown, status?: OperationStatus) {
   const encoded = JSON.stringify(payload);
+  const terminalError = kind === "error" && (status === "failed" || status === "cancelled" || status === "interrupted");
   return sql.begin(async tx => {
     const [task] = await tx<Operation[]>`select * from chat_operations where id=${id}`;
     if (!task) throw new OperationConflict("Operation unavailable");
@@ -78,8 +79,10 @@ export async function appendChatOperation(id: string, attempt: string, kind: str
         when ${kind}='text' then jsonb_set(snapshot,'{text}',to_jsonb(coalesce(snapshot->>'text','') || coalesce(${tx.json(payload as never)}->>'text','')))
         when ${kind}='tool' then jsonb_set(snapshot,'{tools}',coalesce(snapshot->'tools','[]'::jsonb) || jsonb_build_array(${tx.json(payload as never)}))
         else jsonb_set(snapshot,array[${kind}::text],${tx.json(payload as never)}) end,
-      status=coalesce(${status ?? null}, status)
+      status=case when ${terminalError} and (cancel_requested or deadline <= clock_timestamp())
+        then 'cancelled' else coalesce(${status ?? null}, status) end
       where id=${id} and attempt_id=${attempt} and status='running' and lease_until > now()
+        and (${terminalError} or (not cancel_requested and deadline > clock_timestamp()))
         and (output_bytes+${Buffer.byteLength(encoded)} <= ${CHAT_OPERATION_LIMITS.outputBytes} or ${kind === "error"})
       returning *`;
     if (!row) throw new OperationConflict("Execution lease lost or output limit reached");
