@@ -155,8 +155,8 @@ const stages: Stage[] = [
 
 async function seedRun(runId: string): Promise<void> {
   await db.exec(`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('${runId}', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '${JSON.stringify(defaultPipelineFeatures)}', 1, ${PAGES});
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values ('${runId}', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '${JSON.stringify(defaultPipelineFeatures)}', 1, ${PAGES}, '${runId}-generation');
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('${runId}-doc', 'o1', 'u1', 'w', '${runId}', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', ${PAGES});
   `);
@@ -165,12 +165,12 @@ async function seedRun(runId: string): Promise<void> {
 async function runOneDocument(store: Store, runId: string): Promise<void> {
   const execution = createStageExecution({ store, stages, config });
   const runtime = { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, heartbeatIntervalMs: 3_600_000 };
-  await execution.startRun({ runId, totalStages: STAGES.length });
+  await execution.startRun({ runId, executionGeneration: `${runId}-generation`, totalStages: STAGES.length });
   for (const stageName of STAGES) {
     await withWorkerSlot(store, { runId, kind: "stage", enabled: true },
       () => execution.runStage({ stageName, runId, totalStages: STAGES.length, artifacts: {} }, runtime));
   }
-  await execution.completeRun({ runId });
+  await execution.completeRun({ runId, executionGeneration: `${runId}-generation` });
 }
 
 /**
@@ -180,7 +180,7 @@ async function runOneDocument(store: Store, runId: string): Promise<void> {
 async function runOneDocumentGrouped(store: Store, runId: string): Promise<void> {
   const execution = createStageExecution({ store, stages, config });
   const runtime = { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, heartbeatIntervalMs: 3_600_000 };
-  await execution.startRun({ runId, totalStages: STAGES.length });
+  await execution.startRun({ runId, executionGeneration: `${runId}-generation`, totalStages: STAGES.length });
   await withWorkerSlot(store, { runId, kind: "stage", enabled: true }, async () => {
     let preloaded: Awaited<ReturnType<typeof execution.runStage>>["preloaded"];
     let controlRequested: boolean | undefined;
@@ -193,7 +193,7 @@ async function runOneDocumentGrouped(store: Store, runId: string): Promise<void>
       preloaded = output.preloaded;
     }
   });
-  await execution.completeRun({ runId });
+  await execution.completeRun({ runId, executionGeneration: `${runId}-generation` });
 }
 
 /** Statements, transactions and serial round trips one run costs, read through the wire counter. */
