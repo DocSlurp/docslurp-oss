@@ -99,7 +99,7 @@ describe("initialization lifecycle", () => {
      "denied", "runPipelineStage", "1", RetryState.NON_RETRYABLE_FAILURE, "worker",
      ApplicationFailure.nonRetryable("full", WORKER_SLOT_UNAVAILABLE),
    ));
-   await expect(documentPipeline({runId:"run", pipeline:{} as never, stageOrder:["parse"], slotGate:true}))
+   await expect(documentPipeline({runId:"run", pipeline:{} as never, stageOrder:["extract-markdown"], slotGate:true}))
      .rejects.toMatchObject({type:"AdmissionExhausted", nonRetryable:true});
    expect(mocks.activities.runPipelineStage).toHaveBeenCalledTimes(2048);
    expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
