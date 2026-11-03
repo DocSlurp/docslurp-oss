@@ -2,6 +2,10 @@
 
 - Add the session-only Node Upgrade adapter, mounted-host export, bounded shared dashboard/suggestions/viewer projections, commit-visible revision reconciliation, durable operation provider hookup and shared tree reconciliation. Preserve parent job/child run identities and existing HTTP mutation/cancellation ownership. Flags remain off pending app integration, independent council review and measured canary gates; see `docs/realtime-protocol.md`.
 
+## Compatible npm dependency upgrades (2026-11-03)
+
+- Update current stable packages, including SimpleWebAuthn 14 and TypeScript 7 in independent SDK/CLI packages; retain documented peer/API compatibility holds. See `docs/reviews/dependencies-2026-11-03.md` for council findings and validation limits.
+
 ## Explicit chat and ingestion Speed boost (2026-11-01)
 
 - API omission/false preserves baseline routing and credits; explicit true routes eligible GLM, DeepSeek and Luna generation through Nitro and charges 4× service credits. Preserve actual provider expenses separately. Persist immutable run intent and scale tenant-scoped reservations/leases and estimates. Reject direct Nitro configuration without opt-in. SDK supports explicit flags.

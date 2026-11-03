@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 test('dedicated Algolia shim preserves v4 and v5 calls',async()=>{
   const source=await readFile(new URL('../src/algolia.ts',import.meta.url),'utf8');
   // Use the workspace TypeScript compiler without installing any third-party client.
-  const ts=(await import('typescript')).default;
+  const ts=(await import('typescript-compiler-api')).default;
   const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
   const {docslurpAlgoliaClient}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
   const calls=[];const client=docslurpAlgoliaClient({apiUrl:'https://example.test',clientKey:'key',fetch:async(url,init)=>{calls.push(JSON.parse(init.body));return Response.json({results:[],hits:[]});}});
