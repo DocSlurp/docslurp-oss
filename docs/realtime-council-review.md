@@ -184,3 +184,23 @@ build, and the database migration/credit checks passed. The standalone database
 script's optional native contention branch was not enabled in that invocation;
 the real PostgreSQL harness ran the registered contention suites without skips.
 Remote CI and the coordinator's final council remain separate gates.
+
+### Migration-safety annotation (no executable SQL change)
+
+CI run 41742548170 rejected migration 0120's table rename. At the freshly fetched
+main baseline `e6d2e6bdfdd3b8a9c2aeaff4ed7be03ea222168e`, `git grep` finds no
+`realtime_revisions` references in server, worker or packages. Migration 0115
+creates that relation only in this unreleased PR; it is not an N-1 relation being
+removed. Migration 0120 now records this evidence using the existing gate's
+documented `destructive-migration` annotation. The gate and executable SQL remain
+unchanged.
+
+For rolling compatibility, prior-main application queries do not use this new
+relation. Its ingestion writes still invoke the database trigger functions, whose
+bodies are replaced by 0120; the migrated worker grants cover their counter
+writes. Candidate readers retain the `realtime_revisions` name and columns through
+the aggregate view. The migration runner applies the migration through Drizzle's
+PostgreSQL transaction, so readers do not observe a committed rename without its
+replacement view/functions. This establishes compatibility with the previous main
+schema, not support for deploying an arbitrary intermediate commit of this PR.
+No production deployment was inspected or performed for this annotation.

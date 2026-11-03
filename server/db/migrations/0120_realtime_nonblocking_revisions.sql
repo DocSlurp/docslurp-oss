@@ -1,3 +1,4 @@
+-- destructive-migration: realtime_revisions is introduced by 0115 in this same unreleased PR278; absent from N-1 main e6d2e6bdfdd3b8a9c2aeaff4ed7be03ea222168e. The view preserves its reader contract and this migration replaces all trigger writers.
 -- Do not serialize independent ingestion transactions on one organization row.
 -- Each transaction writes its own counter; committed counters are folded without
 -- touching any other live writer. The aggregate view preserves the read contract.
