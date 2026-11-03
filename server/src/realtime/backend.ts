@@ -1,10 +1,12 @@
+import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
+import { readWorkspaceSuggestions } from "../services/workspace-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
 import { sql } from "../db.js";
 import { getWorkspaceAccess } from "../services/organizations.js";
 import { workspaceUsageTotals, runUsageCostSummaries } from "../services/usage-attribution.js";
 import { getBillingOverview } from "../services/billing/overview.js";
 import { getWorkspace } from "../services/workspaces.js";
-import { listDocumentIndexEntries } from "../services/documents.js";
+import { listDocumentIndexEntries, getRealtimeViewerPayload } from "../services/documents.js";
 import { mapWorkspaceRun, type WorkspaceRunRow } from "../services/run-records.js";
 import { buildRunProgressSnapshot } from "../services/runs.js";
 
@@ -15,7 +17,11 @@ async function authorize(userId: string, resource: DashboardResource): Promise<s
     return resource.orgId;
   }
   let workspaceId: string;
-  if (resource.kind === "run") {
+  if (resource.kind === "viewer") {
+    const [document] = await sql<{ workspace_id: string }[]>`select workspace_id from documents where id=${resource.documentId}`;
+    if (!document) return null;
+    workspaceId = document.workspace_id;
+  } else if (resource.kind === "run") {
     const [run] = await sql<{ workspace_id: string }[]>`select workspace_id from workspace_runs where id = ${resource.runId}`;
     if (!run) return null;
     workspaceId = run.workspace_id;
@@ -55,6 +61,12 @@ export const realtimeBackend: RealtimeBackend = {
           order by (r.status in ('queued','processing')) desc, r.updated_at desc, r.id limit 201`;
         const costs = await runUsageCostSummaries(runs.slice(0, 200).map(run => run.id));
         return { runs: runs.slice(0, 200).map(run => mapWorkspaceRun(run, costs.get(run.id))), truncated: runs.length > 200 };
+      }
+      case "suggestions": return realtimeSuggestionsSnapshotSchema.parse(await readWorkspaceSuggestions(userId, resource.workspaceId, { limit: 8 }));
+      case "viewer": {
+        const viewer = await getRealtimeViewerPayload(resource.documentId, userId);
+        if (!viewer) throw new Error("not_found");
+        return viewer;
       }
       case "workspace": return await getWorkspace(resource.workspaceId, userId, { refineNames: false });
       case "documents": return await listDocumentIndexEntries({ userId, orgId,

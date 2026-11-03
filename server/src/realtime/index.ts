@@ -24,21 +24,25 @@ export function attachFirstPartyRealtime(server: Server, options: { operations?:
     operationsForSession: (headers, session) => {
       if (options.operations || process.env.DOCSLURP_DURABLE_CHAT !== "1") return options.operations;
       return createChatOperationProvider(async userId => {
-        const actor = await resolveBetterAuthSessionActor(headers);
+        const actor = await authenticateRealtimeActor(headers);
         if (!actor || actor.userId !== userId || actor.userId !== session.userId || actor.sessionId !== session.sessionId) return null;
-        const current = await authenticateRealtimeSession(headers);
-        return current?.sessionId === actor.sessionId ? actor : null;
+        return actor;
       });
     },
   });
 }
 
 /** Explicit database liveness defeats stale Better Auth cookie caches. */
-export async function authenticateRealtimeSession(headers: Headers) {
+async function authenticateRealtimeActor(headers: Headers) {
   if (headers.has("authorization") || headers.has("x-api-key")) return null;
   const actor = await resolveBetterAuthSessionActor(headers);
   if (!actor) return null;
   const [session] = await sql`select id from session where id = ${actor.sessionId}
     and "userId" = ${actor.userId} and "expiresAt" > now()`;
-  return session ? { userId: actor.userId, sessionId: actor.sessionId } : null;
+  return session ? actor : null;
+}
+
+export async function authenticateRealtimeSession(headers: Headers) {
+  const actor = await authenticateRealtimeActor(headers);
+  return actor ? { userId: actor.userId, sessionId: actor.sessionId } : null;
 }

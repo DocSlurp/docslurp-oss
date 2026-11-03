@@ -46,4 +46,25 @@ describe("commit-visible realtime coverage", () => {
     await db.exec(`delete from org_memberships where org_id='realtime-org'`);
     expect(await revision()).toBe(before + 1);
   });
+  it("publishes curated/recent suggestions and page metadata only after commit", async () => {
+    let before = await revision();
+    await db.exec(`insert into query_suggestions(id,user_id,workspace_id,phrase) values('realtime-suggestion','realtime-user','realtime-workspace','Question')`);
+    expect(await revision()).toBe(before+1);
+    before = await revision();
+    await db.exec(`insert into search_sessions(id,user_id,query,metadata) values('realtime-search','realtime-user','Query','{"workspaceId":"realtime-workspace"}')`);
+    expect(await revision()).toBe(before+1);
+    await db.exec(`insert into documents(id,user_id,org_id,workspace_id,run_id,filename,mime_type,source_key,status)
+      values('realtime-page-doc','realtime-user','realtime-org','realtime-workspace','realtime-run','test.txt','text/plain','test','processing')`);
+    before = await revision();
+    await db.exec(`insert into document_pages(id,document_id,run_id,user_id,page_number,text)
+      values('realtime-page','realtime-page-doc','realtime-run','realtime-user',1,'text')`);
+    expect(await revision()).toBe(before+1);
+    before = await revision();
+    await expect(db.transaction(async tx => {
+      await tx.exec(`delete from query_suggestions where id='realtime-suggestion'`);
+      throw new Error("rollback");
+    })).rejects.toThrow("rollback");
+    expect(await revision()).toBe(before);
+  });
+
 });

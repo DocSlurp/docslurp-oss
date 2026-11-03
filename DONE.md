@@ -1,6 +1,6 @@
 ## Opt-in first-party realtime transport and durable chat integration (2026-11-03)
 
-- Add the session-only Node Upgrade adapter, mounted-host export, bounded shared dashboard projections, commit-visible revision reconciliation, durable operation provider hookup and shared tree reconciliation. Preserve parent job/child run identities and existing HTTP mutation/cancellation ownership. Flags remain off pending app integration, independent council review and measured canary gates; see `docs/realtime-protocol.md`.
+- Add the session-only Node Upgrade adapter, mounted-host export, bounded shared dashboard/suggestions/viewer projections, commit-visible revision reconciliation, durable operation provider hookup and shared tree reconciliation. Preserve parent job/child run identities and existing HTTP mutation/cancellation ownership. Flags remain off pending app integration, independent council review and measured canary gates; see `docs/realtime-protocol.md`.
 
 ## Explicit chat and ingestion Speed boost (2026-11-01)
 

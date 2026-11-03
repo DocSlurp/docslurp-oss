@@ -1,4 +1,4 @@
-import { cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
+import { realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 import path from "node:path";
 
 import {
@@ -1621,4 +1621,58 @@ export function inferMimeType(url: string, headerValue: string | null): string {
     default:
       return "application/octet-stream";
   }
+}
+
+
+/** Processing-only inspector projection. Never reads artifacts, signs URLs,
+ * generates content or fetches source/page bytes. The full viewer remains an
+ * explicit authorized HTTP bootstrap/artifact read.
+ */
+export async function getRealtimeViewerPayload(documentId: string, userId: string) {
+  const row = await getDocumentRow(documentId, userId);
+  if (!row) return null;
+  const document = mapDocument(row);
+  const stages = row.run_id ? await sql<{
+    stage_name: string; status: string; attempts: number; error: string | null; updated_at: string;
+  }[]>`select stage_name,status,attempts,error,updated_at::text from document_run_stage_states
+    where document_id=${documentId} and run_id=${row.run_id} order by stage_name limit 65` : [];
+  if (stages.length > 64) throw new Error("snapshot_too_large");
+  const [run] = row.run_id ? await sql<{
+    id: string; workspace_id: string; stage: string; status: string; updated_at: string; total_documents: number;
+  }[]>`select id,workspace_id,stage,status,updated_at::text,total_documents from workspace_runs
+    where id=${row.run_id} and workspace_id=${row.workspace_id} and org_id=${row.org_id}` : [];
+  const [pages] = await sql<{ pages: number; chunks: number }[]>`select
+    (select count(*)::int from document_pages where document_id=${documentId}) as pages,
+    (select count(*)::int from document_chunks where document_id=${documentId}) as chunks`;
+  const documentUsage = await documentUsageTotals(documentId);
+  const runUsage = run ? await runUsageTotals(run.id) : null;
+  const runCost = run ? summarizeRunUsageCost((await runUsageCostTotals(run.id))[0]) : null;
+  const fullRunUsage = run && runUsage && runCost ? {
+    ...runUsage, costCents: runCost.costCents, computeEstimated: runCost.computeEstimated,
+    totalDocuments: Math.max(1,run.total_documents),
+  } : null;
+  const basis = documentUsage.events > 0 ? "document-events" : fullRunUsage ? "run-average" : "none";
+  const estimatedDocument = basis === "document-events" ? {
+    inputTokens: documentUsage.inputTokens, outputTokens: documentUsage.outputTokens,
+    costCents: documentUsage.costCents, basis,
+  } : fullRunUsage ? {
+    inputTokens: Math.ceil(fullRunUsage.inputTokens / fullRunUsage.totalDocuments),
+    outputTokens: Math.ceil(fullRunUsage.outputTokens / fullRunUsage.totalDocuments),
+    costCents: fullRunUsage.costCents / fullRunUsage.totalDocuments, basis,
+  } : { inputTokens: 0, outputTokens: 0, costCents: 0, basis };
+  return realtimeViewerSnapshotSchema.parse({
+    document: {
+      id: document.id, workspaceId: document.workspaceId, runId: document.runId,
+      status: document.status, title: document.title?.slice(0,1024) ?? null,
+      statusReason: document.statusReason?.slice(0,2048) ?? null, pageCount: document.pageCount,
+      versionNumber: document.versionNumber ?? 1, previousVersionId: document.previousVersionId ?? null,
+      supersededAt: document.supersededAt ?? null, supersededByDocumentId: document.supersededByDocumentId ?? null,
+      updatedAt: document.updatedAt,
+    },
+    tags: document.tags,
+    stages: stages.map(stage => ({ ...stage, error: publicDocumentError(stage.error)?.slice(0,2048) ?? null })),
+    pageStats: { pageCount: Math.max(pages?.pages ?? 0,document.pageCount), chunkCount: pages?.chunks ?? 0, pageTextCount: pages?.pages ?? 0 },
+    run: run ? { id: run.id,workspaceId: run.workspace_id,stage: run.stage,status: run.status,updatedAt: run.updated_at } : null,
+    usage: { document: documentUsage, run: fullRunUsage, estimatedDocument },
+  });
 }

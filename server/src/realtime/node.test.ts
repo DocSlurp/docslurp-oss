@@ -122,4 +122,10 @@ describe("real Node realtime Upgrade", () => {
     expect(f.backend.listen).toHaveBeenCalledTimes(1); expect(f.backend.project).toHaveBeenCalledTimes(10);
   });
 
+  it("bounds concurrent connections per authenticated user", async () => {
+    const f = await fixture();
+    for (let n=0; n<8; n++) await connect(f.url);
+    expect(await rejected(f.url,{origin:ORIGIN,cookie:"session=owner"})).toBe(429);
+  });
+
 });

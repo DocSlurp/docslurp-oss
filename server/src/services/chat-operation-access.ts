@@ -53,7 +53,6 @@ export function createChatOperationProvider(resolveActor: (userId: string) => Pr
       };
       const tick = async () => {
         if (closed || input.signal.aborted) return null;
-        await authorize(input.resource.operationId);
         const actor = await resolveActor(input.userId);
         if (!actor || actor.userId !== input.userId) throw new Error("operation_forbidden");
         const recovery = await operationHub.shareRecovery(JSON.stringify([actor.userId, input.resource.operationId, cursor]),

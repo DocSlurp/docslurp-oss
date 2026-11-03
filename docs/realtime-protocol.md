@@ -60,7 +60,8 @@ Do not derive allowed Origin from an untrusted Host or forwarding header.
 
 Limits: 8 KiB inbound frames, 120 messages/minute, 32 subscriptions/socket,
 512 KiB snapshots, 1 MiB queued output, 15-second heartbeat. Connection admission
-is bounded to 512 active/pending connections per host and eight per user. Slow consumers force resync/close;
+is bounded to 512 active/pending connections per host and eight per user,
+with at most 40 authenticated connection attempts per user per minute. Slow consumers force resync/close;
 never truncate terminal/delete semantics. Metrics contain counts/timing only.
 
 ## Coverage gate
@@ -69,7 +70,8 @@ never truncate terminal/delete semantics. Metrics contain counts/timing only.
 | --- | --- | --- |
 | Activity/jobs | Run creation, lifecycle, parent/child membership | workspace_runs trigger |
 | Run | Progress, completion, cancellation, retries | Run, event, run/document/page stage and performance triggers |
-| Documents | Creation, update, deletion, ordering | Document, tag and summary triggers |
+| Documents/viewer | Creation, update, deletion, processing/page metadata | Document, page, chunk, stage, tag and summary triggers |
+| Suggestions | Curated/recent queries and corpus readiness | Query suggestion, search session, document and chunk triggers |
 | Workspace | Settings, membership, deletion | Workspace, search settings, org/workspace membership triggers |
 | Billing/economics | Attributed spend, credits, permissions | Usage, organizations, credit ledger/pending debit/lease/hold triggers |
 | Operations | Output, descendants, attempts, terminal results | Shared tree signature sweep, authorized durable snapshots/replay |
@@ -117,7 +119,8 @@ only append-only operation output uses durable replay sequence semantics.
 ## Consistency, reconciliation and operational limits
 
 Migration `0112_chat_operations` owns the durable queue; `0113_realtime_revisions`
-adds dashboard publication. Dashboard revisions update in the writer's transaction
+adds dashboard publication; `0114_realtime_viewer_suggestions` adds the remaining
+viewer/suggestion sources and ensures triggers read scope columns only. Dashboard revisions update in the writer's transaction
 and roll back with it. Multiple writes to the same organization in one transaction
 produce one revision. PostgreSQL delivers the shared notification only at commit.
 One batched organization-revision query per second per active host reconciles even
@@ -161,3 +164,31 @@ discovery and authoritative deletion. These are local integration results, not a
 production proxy-idle or throughput acceptance result. The mounted Astro host,
 matched browser/CPU/memory/SQL baseline, production proxy idle/drain and canary gates
 remain coordinator/app integration work. Both flags remain off by default.
+
+## Suggestions and open-viewer processing (integration contract)
+
+- Subscribe `{kind:"suggestions",workspaceId}`. Data uses the existing
+  `/v1/suggest?workspace=…&limit=8` shape: `suggestions`, `contextualSuggestions`,
+  optional `contextualPending`, and `semantic:{status,indexedChunkCount,
+  completedDocuments,totalDocuments}`. Arrays are capped at eight strings of
+  1,024 characters. Shared validator: `realtimeSuggestionsSnapshotSchema`.
+  It reads existing query/curated/document-heading data only; observation never
+  initiates generation or a paid model call. Prefix-specific suggestion searches
+  remain explicit HTTP requests.
+- Subscribe `{kind:"viewer",documentId}`. Data is a processing patch using the
+  inspector endpoint's field names, validated by `realtimeViewerSnapshotSchema`:
+  `document` (identity, status, title/reason, page count, version/supersession and
+  updatedAt), `tags`, `stages` (stage_name/status/attempts/error/updated_at),
+  `pageStats`, `run`, and `usage`. Stages are capped at 64; no text, page bytes,
+  storage keys, signed URLs, source objects, artifact bodies, stage stats or
+  changelog bodies are streamed. Bootstrap the existing full viewer once, then
+  merge these fields and preserve fetched artifact/source/version data. Stage
+  updates merge by stage_name. User-requested artifacts/version changes retain
+  explicit authorized HTTP reads; do not fetch the full viewer on every snapshot.
+  Removed/revoked documents produce a scoped error and clear the open viewer.
+
+Both resources authorize workspace membership before reads and delivery, share
+broker coalescing, and reconcile commit-visible revisions. Publication covers
+query_suggestions, search-session queries, document/page/chunk changes, document
+stages, tags, run state and attributed usage. Keep the old component timers only
+while the feature flag is off or the shared transport owns REST fallback.

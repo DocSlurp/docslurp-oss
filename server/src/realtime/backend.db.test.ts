@@ -8,6 +8,7 @@ beforeAll(async () => {
   const database = await startMigratedPostgres(); stop = database.stop;
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../lib/auth.js", () => ({ auth: { api: { getSession: async () => null } }, appDbPool: {} }));
   backend = (await import("./backend.js")).realtimeBackend;
   await sql`insert into "user"(id,name,email) values ('owner','Owner','owner@example.test'),('member','Member','member@example.test'),('stranger','Stranger','stranger@example.test')`;
   await sql`insert into organizations(id,name,slug,created_by_user_id) values ('org','Org','realtime-org','owner'),('foreign','Foreign','realtime-foreign','stranger')`;
@@ -39,6 +40,32 @@ it("projects bounded documents, settings, stage state and attributed billing", a
   expect(await backend.project("owner", { kind: "workspace", workspaceId: "workspace" })).toMatchObject({ id: "workspace", name: "Private" });
   expect(await backend.project("owner", { kind: "run", runId: "run-a" })).toMatchObject({ run: { id: "run-a", status: "processing", jobId: "parent" }, stages: [] });
   expect(await backend.project("owner", { kind: "billing", orgId: "org" })).toMatchObject({ orgId: "org", credits: { available: expect.any(Number) } });
+});
+it("bounds read-only suggestions and viewer metadata without leaking content or artifacts", async () => {
+  await sql`insert into documents(id,user_id,org_id,workspace_id,run_id,filename,mime_type,source_key,status)
+    values('view-doc','owner','org','workspace','run-a','viewer.txt','text/plain','private-source-secret','processing')`;
+  await sql`insert into document_run_stage_states(run_id,document_id,stage_name,status,artifact_uri,stats)
+    values('run-a','view-doc','vision-extract','processing','s3://private-artifact','{"text":"private-stage-text"}'::jsonb)`;
+  await sql`insert into document_pages(id,document_id,run_id,user_id,page_number,text)
+    values('view-page','view-doc','run-a','owner',1,'private-page-text')`;
+  for (let n=0;n<12;n++) await sql`insert into query_suggestions(id,user_id,workspace_id,phrase)
+    values(${`suggestion-${n}`},'owner','workspace',${`Question ${n}`})`;
+  await sql`insert into query_suggestions(id,user_id,workspace_id,phrase) values('protected','owner','workspace','enc:private')`;
+  const fetch = vi.spyOn(globalThis,"fetch");
+  try {
+    const suggestions = await backend.project("owner",{kind:"suggestions",workspaceId:"workspace"}) as {suggestions:string[]};
+    expect(suggestions.suggestions.length).toBeGreaterThan(0);
+    expect(suggestions.suggestions.length).toBeLessThanOrEqual(8);
+    expect(suggestions.suggestions.every(text => !text.startsWith("enc:"))).toBe(true);
+    const viewer = await backend.project("owner",{kind:"viewer",documentId:"view-doc"});
+    expect(viewer).toMatchObject({document:{id:"view-doc",status:"processing"},pageStats:{pageCount:1},stages:[{stage_name:"vision-extract",status:"processing"}]});
+    for (const secret of ["private-source-secret","private-artifact","private-stage-text","private-page-text"]) expect(JSON.stringify(viewer)).not.toContain(secret);
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(backend.project("stranger",{kind:"viewer",documentId:"view-doc"})).rejects.toThrow("forbidden");
+    await expect(backend.project("stranger",{kind:"suggestions",workspaceId:"workspace"})).rejects.toThrow("forbidden");
+    await sql`delete from documents where id='view-doc'`;
+    expect(await backend.authorize("owner",{kind:"viewer",documentId:"view-doc"})).toBeNull();
+  } finally { fetch.mockRestore(); }
 });
 it("revokes billing on downgrade and workspace access on membership removal", async () => {
   await sql`update org_memberships set role='member' where user_id='owner' and org_id='org'`;

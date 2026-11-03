@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import postgres from "postgres";
 import { WebSocket } from "ws";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -14,9 +14,13 @@ const WS = "00000000-0000-4000-8000-000000000001";
 let sessionId = "session-1";
 const actor = () => ({ type: "session" as const, userId: "owner", sessionId, user: { id: "owner", email: "owner@example.test", name: "Owner" } });
 beforeAll(async () => {
-  const database = await startMigratedPostgres(); stop = database.stop;
-  sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
+  const db = await createMigratedDatabase();
+  // postgres.js LISTEN owns one dedicated connection beside the query pool.
+  const socketServer = await serveOnRandomPort(db, { maxConnections: 2 });
+  stop = async () => { await socketServer.server.stop(); await db.close(); };
+  sql = postgres(`postgres://postgres@127.0.0.1:${socketServer.port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../lib/auth.js", () => ({ auth: { api: { getSession: async () => null } }, appDbPool: {} }));
   vi.doMock("../lib/request-actor.js", async importOriginal => ({
     ...await importOriginal<typeof import("../lib/request-actor.js")>(),
     // Deliberately stale auth cache: database liveness must still revoke it.
@@ -77,3 +81,32 @@ it("denies cached-but-expired sessions and explicit API credentials", async () =
   expect(await api.authenticateRealtimeSession(new Headers({cookie:"stale-cache"}))).toBeNull();
   expect(await api.authenticateRealtimeSession(new Headers({authorization:"Bearer test"}))).toBeNull();
 });
+
+it("pushes workspace, suggestion and viewer changes through the production adapter and SQL backend", async () => {
+  sessionId="dashboard-session";
+  await sql`insert into session(id,"userId",token,"expiresAt") values(${sessionId},'owner','dashboard-token',now()+interval '1 hour')`;
+  const documentId = "00000000-0000-4000-8000-000000000003";
+  await sql`insert into documents(id,user_id,org_id,workspace_id,filename,mime_type,source_key,status)
+    values(${documentId},'owner','org',${WS},'live.txt','text/plain','private-source','processing')`;
+  const server = await host();
+  const socket = new WebSocket(server.url, {headers:{origin:ORIGIN,cookie:"session=owner"}});
+  const frames: any[] = [];
+  socket.on("message", data => frames.push(JSON.parse(data.toString())));
+  try {
+    await new Promise<void>((resolve,reject) => {socket.once("open",resolve);socket.once("error",reject);});
+    socket.send(JSON.stringify({v:1,type:"subscribe",subscriptionId:"workspace",generation:1,resource:{kind:"workspace",workspaceId:WS}}));
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot" && frame.data?.id === WS)).toBe(true),{timeout:4_000});
+    for (const resource of [{kind:"suggestions",workspaceId:WS},{kind:"viewer",documentId}]) {
+      socket.send(JSON.stringify({v:1,type:"subscribe",subscriptionId:resource.kind,generation:1,resource}));
+    }
+    await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "viewer" && frame.data?.document?.status === "processing")).toBe(true),{timeout:3_000});
+    await sql`update workspaces set name='Committed live change' where id=${WS}`;
+    await sql`update documents set status='completed',page_count=3 where id=${documentId}`;
+    await sql`insert into query_suggestions(id,user_id,workspace_id,phrase,weight) values('ws-suggestion','owner',${WS},'Live SQL question',999)`;
+    await vi.waitFor(() => expect(frames.some(frame => frame.data?.name === "Committed live change")).toBe(true),{timeout:3_000});
+    await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "suggestions" && frame.data?.suggestions?.includes("Live SQL question"))).toBe(true),{timeout:3_000});
+    await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "viewer" && frame.data?.document?.status === "completed" && frame.data?.pageStats?.pageCount === 3)).toBe(true),{timeout:3_000});
+    await sql`delete from documents where id=${documentId}`;
+    await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "viewer" && frame.type === "error")).toBe(true),{timeout:3_000});
+  } finally {socket.terminate();await server.close();}
+},15_000);

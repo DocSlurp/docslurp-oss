@@ -18,7 +18,7 @@ export const realtimeCloseReasons: Record<string, number> = Object.fromEntries([
   "authorization_failed", "heartbeat_timeout", "transport_error", "server_restart",
 ].map(reason => [reason, 0]));
 export const realtimeProjectionBuckets = [10, 50, 100, 250, 500, 1_000, 2_000, Infinity].map(le => ({ le, count: 0 }));
-type Observer = ((data: unknown, revision: number) => Promise<void>) & { failed?: () => void };
+type Observer = ((data: unknown, revision: number) => Promise<void>) & { failed?: () => void; revoked?: () => void | Promise<void> };
 type Entry = {
   userId: string; resource: DashboardResource; orgId: string;
   observers: Set<Observer>; version?: string; revision: number; dirty: boolean;
@@ -90,7 +90,10 @@ export class RealtimeBroker {
             // Register first, then read a durable revision before the projection.
             // A concurrent commit advances the next sweep's revision, forcing a
             // second snapshot even if its notification was lost.
-            if (!await this.backend.authorize(entry.userId, entry.resource)) throw new Error("forbidden");
+            if (!await this.backend.authorize(entry.userId, entry.resource)) {
+              for (const observer of [...entry.observers]) await observer.revoked?.();
+              return;
+            }
             realtimeMetrics.projectionQueries++;
             realtimeMetrics.coalesced += Math.max(0, entry.observers.size - 1);
             const data = await this.backend.project(entry.userId, entry.resource);
@@ -101,7 +104,13 @@ export class RealtimeBroker {
             const elapsed = Date.now() - began;
             realtimeMetrics.projectionMs += elapsed;
             for (const bucket of realtimeProjectionBuckets) if (elapsed <= bucket.le) bucket.count++;
-          } catch { entry.dirty = true; realtimeMetrics.errors++; for (const observer of entry.observers) observer.failed?.(); }
+          } catch (error) {
+            entry.dirty = true; realtimeMetrics.errors++;
+            for (const observer of [...entry.observers]) {
+              if (error instanceof Error && ["not_found", "forbidden"].includes(error.message)) await observer.revoked?.();
+              else observer.failed?.();
+            }
+          }
         }));
       }
     } catch { realtimeMetrics.errors++; for (const entry of this.entries.values()) for (const observer of entry.observers) observer.failed?.(); }

@@ -12,6 +12,8 @@ export const realtimeResourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("activity"), orgId: z.uuid() }).strict(),
   z.object({ kind: z.literal("run"), runId: z.uuid() }).strict(),
   z.object({ kind: z.literal("workspace"), workspaceId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("suggestions"), workspaceId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("viewer"), documentId: z.uuid() }).strict(),
   z.object({ kind: z.literal("documents"), workspaceId: z.uuid(), page: z.number().int().min(0).max(1000).default(0) }).strict(),
   z.object({ kind: z.literal("billing"), orgId: z.uuid() }).strict(),
   z.object({ kind: z.literal("economics"), orgId: z.uuid(), page: z.number().int().min(0).max(1000).default(0) }).strict(),
@@ -36,3 +38,33 @@ export function parseRealtimeClientFrame(text: string): RealtimeClientFrame {
   if (new TextEncoder().encode(text).byteLength > REALTIME_LIMITS.frameBytes) throw new Error("frame_too_large");
   return realtimeClientFrameSchema.parse(JSON.parse(text));
 }
+
+const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const amount = z.number().finite().nonnegative();
+const stamp = z.string().min(1).max(64);
+export const realtimeSuggestionsSnapshotSchema = z.object({
+  suggestions: z.array(z.string().max(1024)).max(8),
+  contextualSuggestions: z.array(z.string().max(1024)).max(8),
+  contextualPending: z.boolean().optional(),
+  semantic: z.object({ status: z.enum(["none", "partial", "ready"]), indexedChunkCount: count,
+    completedDocuments: count, totalDocuments: count }).strict(),
+}).strict();
+const usage = z.object({ inputTokens: count, outputTokens: count, costCents: amount, events: count }).strict();
+export const realtimeViewerSnapshotSchema = z.object({
+  document: z.object({
+    id: z.string().max(128), workspaceId: z.string().max(128), runId: z.string().max(128).nullable(),
+    status: z.string().max(64), title: z.string().max(1024).nullable(), statusReason: z.string().max(2048).nullable(),
+    pageCount: count, versionNumber: count, previousVersionId: z.string().max(128).nullable(),
+    supersededAt: stamp.nullable(), supersededByDocumentId: z.string().max(128).nullable(), updatedAt: stamp,
+  }).strict(),
+  tags: z.array(z.string().max(128)).max(64),
+  stages: z.array(z.object({ stage_name: z.string().max(128), status: z.string().max(64), attempts: count,
+    error: z.string().max(2048).nullable(), updated_at: stamp }).strict()).max(64),
+  pageStats: z.object({ pageCount: count, chunkCount: count, pageTextCount: count }).strict(),
+  run: z.object({ id: z.string().max(128), workspaceId: z.string().max(128), stage: z.string().max(128),
+    status: z.string().max(64), updatedAt: stamp }).strict().nullable(),
+  usage: z.object({ document: usage, run: usage.extend({ computeEstimated: z.boolean(), totalDocuments: count }).nullable(),
+    estimatedDocument: usage.omit({ events: true }).extend({ basis: z.enum(["document-events", "run-average", "none"]) }) }).strict(),
+}).strict();
+export type RealtimeSuggestionsSnapshot = z.infer<typeof realtimeSuggestionsSnapshotSchema>;
+export type RealtimeViewerSnapshot = z.infer<typeof realtimeViewerSnapshotSchema>;

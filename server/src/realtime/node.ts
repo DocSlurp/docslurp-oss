@@ -37,6 +37,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
   const wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.frameBytes, perMessageDeflate: false });
   const epoch = randomUUID();
   const users = new Map<string, number>();
+  const admissions = new Map<string, { started: number; count: number }>();
   let pending = 0;
   let draining = false;
   const controllers = new Set<AbortController>();
@@ -59,6 +60,16 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
     void options.authenticate(headers).then(session => {
       if (settled || socket.destroyed) return;
       if (!session) { reject(socket, 401); return; }
+      const now = Date.now();
+      if (admissions.size >= 4_096) {
+        for (const [id, window] of admissions) if (now - window.started >= 60_000) admissions.delete(id);
+        if (admissions.size >= 4_096 && !admissions.has(session.userId)) { reject(socket, 503); return; }
+      }
+      let admission = admissions.get(session.userId);
+      if (!admission || now - admission.started >= 60_000) {
+        admission = { started: now, count: 0 }; admissions.set(session.userId, admission);
+      }
+      if (++admission.count > 40) { reject(socket, 429); return; }
       if ((users.get(session.userId) ?? 0) >= 8) { reject(socket, 429); return; }
       users.set(session.userId, (users.get(session.userId) ?? 0) + 1);
       let transferred = false;
@@ -164,7 +175,11 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
                   dispose = () => observer.close();
                 } else dispose = await broker.subscribe(session.userId, frame.resource, Object.assign(
                   (data: unknown, revision: number) => deliverFrame("snapshot", data, revision),
-                  { failed: () => close(1013, "projection_unavailable") }));
+                  { failed: () => close(1013, "projection_unavailable"), revoked: async () => {
+                    send(frameFor(frame.subscriptionId, frame.generation, frame.resource, "error", 0, undefined, "access_revoked"));
+                    await subscription.close();
+                    if (subscriptions.get(frame.subscriptionId) === subscription) subscriptions.delete(frame.subscriptionId);
+                  } }));
                 if (controller.signal.aborted) await subscription.close();
                 else send(frameFor(frame.subscriptionId, frame.generation, frame.resource, "ack", 0));
               } catch {
