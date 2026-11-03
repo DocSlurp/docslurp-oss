@@ -99,3 +99,19 @@ with `NODE_OPTIONS=--unhandled-rejections=strict`. They include cancellation dur
 real non-agent retrieval/generation boundaries (mocked providers), committed
 cancel/deadline versus late result, and rejected evidence persistence. This is an
 interim repair record, not final council approval or end-to-end acceptance.
+
+The independent reliability review also found final answers charged twice after
+streaming. Final events now reference the retained text; recovery reconstructs
+the original result. Large snapshot/replay combinations explicitly resynchronize
+at the authoritative watermark within the response budget. The cancellation
+recheck found deferred page-query embeddings omitted the executor signal; both
+hosted and private embedding requests now combine cancellation with their timeout,
+check before dispatch, and propagate cancellation through deferred search.
+
+Validation for these repairs: 148 tests passed against ephemeral PostgreSQL 17,
+using five client connections and strict Node unhandled-rejection handling. Tests
+hold the root lock while cancellation/result appends contend and while a deadline
+expires. A 240 KiB streamed answer completes and recovers without duplicate stored
+answer text or an oversized recovery envelope. Embedding tests cover cancellation
+during model/spend lookup and before/during provider dispatch. No provider calls or
+production traffic were used; the ephemeral database was removed afterward.

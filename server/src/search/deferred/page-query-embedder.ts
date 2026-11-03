@@ -26,10 +26,11 @@ export interface PageQueryEmbedderDeps {
  * caller degrades to text-only search instead of blocking.
  */
 export async function embedPageQuery(
-  args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode },
+  args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode; signal?: AbortSignal },
   deps: PageQueryEmbedderDeps = {},
 ): Promise<Float32Array | null> {
   try {
+    args.signal?.throwIfAborted();
     if (args.model.endsWith("jina-embeddings-v5-omni-nano") && isPrivateModelUri(args.model)) {
       return await embedWithJina(args, deps);
     }
@@ -38,13 +39,14 @@ export async function embedPageQuery(
     }
     return null;
   } catch (error) {
+    args.signal?.throwIfAborted();
     console.warn(`[page-query-embedder] model=${args.model} failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
 
 async function embedWithJina(
-  args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode },
+  args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode; signal?: AbortSignal },
   deps: PageQueryEmbedderDeps,
 ): Promise<Float32Array | null> {
   const call = await authorizePrivateModelCall({
@@ -54,12 +56,13 @@ async function embedWithJina(
     operation: "api.search.page-query-embedding",
     baseFetch: deps.fetchImpl,
   });
+  args.signal?.throwIfAborted();
   const startedAt = Date.now();
   const response = await call.fetch(`${call.baseUrl.replace(/\/+$/, "")}/embeddings`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: call.model, input: `${JINA_QUERY_PREFIX}${args.query}` }),
-    signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+    signal: args.signal ? AbortSignal.any([args.signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)]) : AbortSignal.timeout(EMBED_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`jina embeddings ${response.status}`);
   const body = (await response.json()) as { data?: Array<{ embedding?: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } };
@@ -79,7 +82,7 @@ async function embedWithJina(
 }
 
 async function embedWithGemini(
-  args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode },
+  args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode; signal?: AbortSignal },
   deps: PageQueryEmbedderDeps,
 ): Promise<Float32Array | null> {
   // Hosted: only `standard` workspaces may send query text to Google.
@@ -88,12 +91,13 @@ async function embedWithGemini(
   if (!apiKey) return null;
   const modelId = args.model.split("/").pop() ?? "gemini-embedding-2";
   // One batch request: its response carries usageMetadata (token counts) for text too.
+  args.signal?.throwIfAborted();
   const response = await instrumentFetch("google", "embedding", deps.fetchImpl ?? fetch)(`${GEMINI_ENDPOINT}/${modelId}:batchEmbedContents`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
     // No task prefix: Gemini Embedding 2 query text is embedded as-is.
     body: JSON.stringify({ requests: [{ model: `models/${modelId}`, content: { parts: [{ text: args.query }] } }] }),
-    signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+    signal: args.signal ? AbortSignal.any([args.signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)]) : AbortSignal.timeout(EMBED_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`gemini batchEmbedContents ${response.status}`);
   const body = (await response.json()) as { embeddings?: Array<{ values?: number[] }>; usageMetadata?: { promptTokenCount?: number; totalTokenCount?: number } };

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { sql } from "../db.js";
 
-export const CHAT_OPERATION_LIMITS = { outputBytes: 262_144, treeOutputBytes: 524_288, tasks: 64, activeRoots: 8, replay: 256, retentionDays: 7 } as const;
+export const CHAT_OPERATION_LIMITS = { outputBytes: 262_144, treeOutputBytes: 524_288, tasks: 64, activeRoots: 8, replay: 256, recoveryBytes: 393_216, retentionDays: 7 } as const;
 export type OperationStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
 export interface Operation {
   id: string; root_id: string; parent_id: string | null; user_id: string; workspace_id: string; org_id: string;
@@ -65,20 +65,28 @@ export async function claimChatOperation() {
 
 /** Each accepted chunk is committed before its sequence can be returned to any observer. */
 export async function appendChatOperation(id: string, attempt: string, kind: string, payload: unknown, status?: OperationStatus) {
-  const encoded = JSON.stringify(payload);
   const terminalError = kind === "error" && (status === "failed" || status === "cancelled" || status === "interrupted");
   return sql.begin(async tx => {
     const [task] = await tx<Operation[]>`select * from chat_operations where id=${id}`;
     if (!task) throw new OperationConflict("Operation unavailable");
     await tx`select id from chat_operations where id=${task.root_id} for update`;
+    const [current] = await tx<Operation[]>`select * from chat_operations where id=${id} for update`;
+    // Store the final answer once: streamed text already owns its budget and replay.
+    let storedPayload = payload;
+    if (kind === "result" && payload && typeof payload === "object" && "answer" in payload
+      && typeof payload.answer === "string" && payload.answer === current!.snapshot.text) {
+      const { answer: _answer, ...metadata } = payload;
+      storedPayload = { ...metadata, __answerFromText: true };
+    }
+    const encoded = JSON.stringify(storedPayload);
     const [{ bytes }] = await tx<{ bytes: number }[]>`select coalesce(sum(output_bytes),0)::int as bytes from chat_operations where root_id=${task.root_id}`;
     if (bytes + Buffer.byteLength(encoded) > CHAT_OPERATION_LIMITS.treeOutputBytes && kind !== "error") throw new OperationConflict("Tree output budget exhausted");
     const [row] = await tx<Operation[]>`update chat_operations set sequence=sequence+1, output_bytes=output_bytes+${Buffer.byteLength(encoded)},
       snapshot=case
-        when ${kind}='result' then snapshot || ${tx.json(payload as never)}
-        when ${kind}='text' then jsonb_set(snapshot,'{text}',to_jsonb(coalesce(snapshot->>'text','') || coalesce(${tx.json(payload as never)}->>'text','')))
-        when ${kind}='tool' then jsonb_set(snapshot,'{tools}',coalesce(snapshot->'tools','[]'::jsonb) || jsonb_build_array(${tx.json(payload as never)}))
-        else jsonb_set(snapshot,array[${kind}::text],${tx.json(payload as never)}) end,
+        when ${kind}='result' then snapshot || ${tx.json(storedPayload as never)}
+        when ${kind}='text' then jsonb_set(snapshot,'{text}',to_jsonb(coalesce(snapshot->>'text','') || coalesce(${tx.json(storedPayload as never)}->>'text','')))
+        when ${kind}='tool' then jsonb_set(snapshot,'{tools}',coalesce(snapshot->'tools','[]'::jsonb) || jsonb_build_array(${tx.json(storedPayload as never)}))
+        else jsonb_set(snapshot,array[${kind}::text],${tx.json(storedPayload as never)}) end,
       status=case when ${terminalError} and (cancel_requested or deadline <= clock_timestamp())
         then 'cancelled' else coalesce(${status ?? null}, status) end
       where id=${id} and attempt_id=${attempt} and status='running' and lease_until > now()
@@ -86,7 +94,7 @@ export async function appendChatOperation(id: string, attempt: string, kind: str
         and (output_bytes+${Buffer.byteLength(encoded)} <= ${CHAT_OPERATION_LIMITS.outputBytes} or ${kind === "error"})
       returning *`;
     if (!row) throw new OperationConflict("Execution lease lost or output limit reached");
-    await tx`insert into chat_operation_events values (${id},${row.sequence},${kind},${tx.json(payload as never)})`;
+    await tx`insert into chat_operation_events values (${id},${row.sequence},${kind},${tx.json(storedPayload as never)})`;
     return row.sequence;
   });
 }
@@ -105,8 +113,22 @@ export async function readChatOperation(userId: string, id: string, after: numbe
     if (!operation) return null;
     const events = await tx<{ sequence: number; kind: string; payload: unknown }[]>`select sequence,kind,payload from chat_operation_events where operation_id=${id} and sequence::bigint > ${after}::bigint and sequence <= ${operation.sequence} order by sequence limit ${CHAT_OPERATION_LIMITS.replay}`;
     // Expired/future cursors receive a replacement snapshot, never silently omit output.
-    const resync = after > operation.sequence || (after < operation.sequence && events[0]?.sequence !== after + 1);
-    const output = resync ? [] : events;
+    let resync = after > operation.sequence || (after < operation.sequence && events[0]?.sequence !== after + 1);
+    const hydrateResult = (value: unknown): unknown => {
+      if (!value || typeof value !== "object" || !("__answerFromText" in value) || value.__answerFromText !== true) return value;
+      const { __answerFromText: _reference, ...metadata } = value;
+      return { ...metadata, answer: operation.snapshot.text };
+    };
+    let output = resync ? [] : events.map(event => event.kind === "result" ? { ...event, payload: hydrateResult(event.payload) } : event);
+    operation.snapshot = hydrateResult(operation.snapshot) as Record<string, unknown>;
+    // A final snapshot needs only the authoritative answer, not a second text copy.
+    if (operation.snapshot.answer === operation.snapshot.text) delete operation.snapshot.text;
+    // Large replay pages recover from the authoritative watermark instead of
+    // overflowing the socket. Leave space for the bounded task-tree envelope.
+    if (Buffer.byteLength(JSON.stringify({ snapshot: operation.snapshot, events: output })) > CHAT_OPERATION_LIMITS.recoveryBytes) {
+      resync = true;
+      output = [];
+    }
     const { input: _input, request_hash: _hash, ...safe } = operation;
     return { operation: safe, events: output, resync, watermark: operation.sequence, hasMore: !resync && events.length === CHAT_OPERATION_LIMITS.replay && events.at(-1)!.sequence < operation.sequence };
   });

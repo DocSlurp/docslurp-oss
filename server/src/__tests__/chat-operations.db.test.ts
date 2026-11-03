@@ -7,8 +7,11 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let ops: typeof import("../services/chat-operations.js");
 beforeAll(async () => {
-  const database = await startMigratedPostgres(); stop = database.stop;
-  sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
+  const external = process.env.CHAT_OPERATION_TEST_DATABASE_URL;
+  if (external && new URL(external).hostname !== "127.0.0.1") throw new Error("Race tests require an isolated loopback database");
+  const database = external ? { url: external, stop: async () => {} } : await startMigratedPostgres();
+  stop = database.stop;
+  sql = postgres(database.url, { max: external ? 5 : 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../lib/request-actor.js", () => ({ getRequestActor: (c: {get:(key:string)=>unknown})=>c.get("requestActor"), resolveActorWorkspaceId:async()=>"w", loadActorScopedWorkspace: async (_id: string, actor: { userId: string }) => runtime.allowed && actor.userId === "u" ? {id:"w",orgId:"o"} : null }));
   vi.doMock("../config.js", () => ({env:{publicChatAgentEnabled:true}}));
@@ -31,7 +34,7 @@ it("deduplicates a lost launch ACK, rejects changed input and claims exactly onc
   await ops.appendChatOperation(a.id,claim!.attempt_id!,"result",{answer:"partial",citations:["page1"]},"completed");
   const recovered = await ops.readChatOperation("u",a.id,0);
   expect(recovered?.events.map(e=>e.sequence)).toEqual([1,2]);
-  expect(recovered?.operation.snapshot).toMatchObject({text:"partial",answer:"partial",citations:["page1"]});
+  expect(recovered?.operation.snapshot).toMatchObject({answer:"partial",citations:["page1"]});
   expect(await ops.readChatOperation("v",a.id,0)).toBeNull();
   expect(await ops.cancelChatOperation("v",a.id,"tree")).toBe(false);
   expect((await ops.readChatOperation("u",a.id,99))?.resync).toBe(true);
@@ -168,4 +171,53 @@ it("consumes rejected synchronous evidence callbacks and preserves executor canc
   await executeChatOperation(claim!);
   await new Promise(resolve => setImmediate(resolve));
   expect((await ops.readChatOperation("u", task.id, 0))?.operation.status).toBe("failed");
+});
+
+
+it("retains a near-limit successful streamed result without charging its text twice", async () => {
+  const task = await launch("large_completed_result");
+  const claim = await ops.claimChatOperation();
+  const answer = "x".repeat(240 * 1024);
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "text", { text: answer });
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "result", { answer, citations: [{ page: 3 }] }, "completed");
+  const state = await ops.readChatOperation("u", task.id, 1);
+  expect(state?.operation.status).toBe("completed");
+  expect(state?.operation.snapshot.answer).toBe(answer);
+  expect(state?.resync).toBe(true);
+  expect(state?.events).toEqual([]);
+  expect(state?.operation.snapshot.citations).toEqual([{ page: 3 }]);
+  expect(Buffer.byteLength(JSON.stringify(state))).toBeLessThan(512 * 1024);
+  const [stored] = await sql`select snapshot,output_bytes from chat_operations where id=${task.id}`;
+  expect(stored.snapshot.answer).toBeUndefined();
+  expect(stored.output_bytes).toBeLessThan(ops.CHAT_OPERATION_LIMITS.outputBytes);
+});
+
+
+it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadline"])("fences append contending on the root lock with %s", async reason => {
+  const task = await launch(`concurrent_${reason}`);
+  const claim = await ops.claimChatOperation();
+  let locked!: () => void;
+  const ready = new Promise<void>(resolve => { locked = resolve; });
+  let unlock!: () => void;
+  const release = new Promise<void>(resolve => { unlock = resolve; });
+  const holder = sql.begin(async tx => {
+    await tx`select id from chat_operations where id=${task.id} for update`;
+    if (reason === "deadline") await tx`update chat_operations set deadline=clock_timestamp()+interval '200 milliseconds' where id=${task.id}`;
+    locked(); await release;
+  });
+  await ready;
+  const waiting = async (count: number) => vi.waitFor(async () => {
+    const [row] = await sql`select count(*)::int as n from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query like '%chat_operations%'`;
+    expect(row.n).toBeGreaterThanOrEqual(count);
+  });
+  try {
+    const cancelling = reason === "cancel" ? ops.cancelChatOperation("u", task.id, "task") : Promise.resolve();
+    if (reason === "cancel") await waiting(1);
+    const append = ops.appendChatOperation(task.id, claim!.attempt_id!, "result", {answer:"late"}, "completed");
+    const rejected = expect(append).rejects.toThrow();
+    await waiting(reason === "cancel" ? 2 : 1);
+    if (reason === "deadline") await sql`select pg_sleep(0.25)`;
+    unlock(); await holder; await cancelling; await rejected;
+    expect((await ops.readChatOperation("u", task.id, 0))?.operation.status).not.toBe("completed");
+  } finally { unlock(); await holder; }
 });

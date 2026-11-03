@@ -133,6 +133,22 @@ describe("map router call", () => {
 });
 
 describe("embedPageQuery", () => {
+  it.each(["before", "during"])("propagates cancellation %s provider dispatch", async phase => {
+    const { embedPageQuery } = await import("../search/deferred/page-query-embedder.js");
+    const controller = new AbortController();
+    const journal = { record: vi.fn() };
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const signal = init!.signal!;
+      const pending = new Promise<Response>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once:true}));
+      controller.abort();
+      return pending;
+    });
+    if (phase === "before") controller.abort();
+    await expect(embedPageQuery({ model: "gemini-embedding-2", query: "private query", journal, privacyMode: "standard", signal: controller.signal }, { fetchImpl, geminiApiKey: "k" })).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchImpl).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
+    expect(journal.record).not.toHaveBeenCalled();
+  });
+
   it("sends Gemini text with no task prefix and degrades to null on failure", async () => {
     const { embedPageQuery } = await import("../search/deferred/page-query-embedder.js");
     const journal = { record: vi.fn() };
