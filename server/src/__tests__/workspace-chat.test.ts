@@ -1014,6 +1014,31 @@ describe("chatWorkspace", () => {
     expect(persisted).toBe(false);
   });
 
+  it.each(["retrieval", "generation"])("honors durable executor cancellation during non-agent %s", async phase => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, reason: "chunk-limit-exceeded", results: [], stats: {} });
+    const controller = new AbortController();
+    const { withDeferredContext } = await import("../search/deferred/deferred-context.js");
+    hybridSearch.mockImplementation(async () => {
+      if (phase === "retrieval") controller.abort();
+      return { sessionId: "search-1", results: [{ text: "workspace excerpt", score: 1,
+        citation: { documentId: "doc-1", filename: "doc.pdf", pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] } }] };
+    });
+    generateAnthropicDocumentText.mockImplementation(async ({ signal }: { signal: AbortSignal }) => {
+      expect(signal).toBe(controller.signal);
+      const rejected = new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      controller.abort();
+      return rejected;
+    });
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    await expect(withDeferredContext({ signal: controller.signal }, () => chatWorkspace({
+      workspaceId: "ws-1", userId: "user-1", query: "what changed?", allowAgentTools: false,
+    }))).rejects.toMatchObject({ name: "AbortError" });
+    expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(phase === "retrieval" ? 0 : 1);
+    expect(sqlMock.mock.calls.some(call => call.slice(1).includes("assistant"))).toBe(false);
+  });
+
   it("runs a nested grounded answer's model call under the calling agent turn's signal", async () => {
     sqlMock.mockResolvedValue([]);
     loadWorkspaceWholeCorpusContext.mockResolvedValue({
