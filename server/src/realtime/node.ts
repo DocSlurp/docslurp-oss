@@ -45,6 +45,9 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
     let url: URL;
     try { url = new URL(request.url ?? "", "http://realtime.invalid"); } catch { return; }
     if (url.pathname !== "/v1/realtime") return;
+    // Upgrade authentication is asynchronous; a peer reset during that gap
+    // must remain a transport close, never an unhandled socket error.
+    socket.on("error", () => socket.destroy());
     if (!options.enabled || draining) return reject(socket, 503);
     const headers = headersFrom(request);
     const origin = headers.get("origin");
