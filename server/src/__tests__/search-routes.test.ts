@@ -39,6 +39,14 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
   getWorkspace,
 }));
 
+// The response cache re-checks access and reads privacy per request; workspaces named "*strict*" are strict-privacy.
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  getWorkspaceAccessWithPipeline: vi.fn(async (workspaceId: string) => ({
+    workspaceId, orgId: "org-1", pipeline: workspaceId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
+  })),
+}));
+
 const traceparent = vi.hoisted(() => ({ value: null as string | null }));
 vi.mock("@docslurp/shared/observability", async (importOriginal) => ({
   ...await importOriginal<typeof import("@docslurp/shared/observability")>(),
@@ -216,15 +224,15 @@ describe("searchRoutes", () => {
     process.env.SEARCH_RESPONSE_CACHE_TTL_MS = "30000";
     clearSearchResponseCacheForTests();
     try {
-      hybridSearch.mockResolvedValue({
+      hybridSearch.mockImplementation(async (_q: string, _user: string, options: { filters: { workspaceId: string } }) => ({
         results: [{ id: "c1" }], sessionId: "s",
-        availability: { status: "complete", isPartial: false },
+        availability: { status: "complete", isPartial: false, scope: { workspaceId: options.filters.workspaceId, runId: null } },
         usageEvents: [{ inputTokens: 6, outputTokens: 0, costCents: 0.01, metadata: { costSource: "provider" } }],
-      });
+      }));
       const search = async (q: string, workspaceId = "ws-2"): Promise<any> =>
         (await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, workspace: workspaceId }) })).json();
       const first = await search("rate limits");
-      const second = await search("  rate   limits ");
+      const second = await search("rate limits");
       expect(hybridSearch).toHaveBeenCalledTimes(1);
       expect(first.usage.inputTokens).toBe(6);
       expect(second.results).toEqual(first.results);
@@ -232,6 +240,15 @@ describe("searchRoutes", () => {
       expect(second.timings).toEqual({ cachedMs: 0, totalMs: 0 });
       await search("rate limits", "ws-3");
       expect(hybridSearch).toHaveBeenCalledTimes(2);
+      // The key is the query as sent: different whitespace is a different search.
+      await search("  rate   limits ");
+      expect(hybridSearch).toHaveBeenCalledTimes(3);
+      expect(hybridSearch).toHaveBeenLastCalledWith("rate   limits", "user-1", expect.anything());
+      // Strict-privacy: never cached, so both identical requests run retrieval.
+      await search("rate limits", "ws-strict");
+      const strictReplay = await search("rate limits", "ws-strict");
+      expect(hybridSearch).toHaveBeenCalledTimes(5);
+      expect(strictReplay.usage.inputTokens).toBe(6);
     } finally {
       delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS;
       clearSearchResponseCacheForTests();

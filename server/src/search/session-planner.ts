@@ -1,4 +1,5 @@
 import type { PrivacyMode } from "@docslurp/shared";
+import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
 import { resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
 import {
   embedConfiguredText,
@@ -386,7 +387,7 @@ async function planIterativeMultiHop(args: {
 
 /** Why a query embedding must skip the cache, or null when it may use it. */
 export function embeddingCacheBypassReason(privacyMode: PrivacyMode, orgId: string | undefined): "strict-privacy" | "no-org" | null {
-  if (privacyMode === "strict-privacy") return "strict-privacy";
+  if (privacyModeBypassesCaches(privacyMode)) return "strict-privacy";
   if (!orgId) return "no-org";
   return null;
 }

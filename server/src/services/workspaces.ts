@@ -34,6 +34,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import {
   effectiveIndexingMode,
   validateModeChoice,
@@ -1058,6 +1059,8 @@ export async function updateWorkspace(
   });
 
   if (parsed.allowChinaProviders !== undefined) forgetWorkspaceProviderPolicy(workspaceId);
+  // Settings, pipeline and privacy changes drop cached search answers in every API process (on commit inside a transaction).
+  await notifySearchEligibilityChanged(client, [workspaceId]);
   return options.client ? current : await getWorkspace(workspaceId, userId);
 }
 

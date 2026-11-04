@@ -10,6 +10,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 
 export type SettingsRow = {
@@ -112,6 +113,8 @@ export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSet
       compat_metadata = excluded.compat_metadata,
       updated_at = now()
   `;
+  // Ranking, synonyms and retrieval defaults change answers: drop cached ones in every API process.
+  await notifySearchEligibilityChanged(client, [parsed.workspaceId]);
 }
 
 export async function getWorkspaceSearchSettingsForUser(
