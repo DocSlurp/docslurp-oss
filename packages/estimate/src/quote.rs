@@ -315,6 +315,13 @@ fn quote_mixes(card: &Card, files: &[&QuoteFile], rich_factor: f64) -> QuoteMixe
     QuoteMixes { low, high, known, unmeasured, range_low, range_high }
 }
 
+/// The bitrates durations are assumed at when a media file's length is not known, for the quote's basis text.
+fn assumed_bitrates(card: &Card) -> String {
+    let kbps = |bytes_per_minute: f64| js_round(bytes_per_minute * 8.0 / 60.0 / 1000.0);
+    let mbps = |bytes_per_minute: f64| js_round(bytes_per_minute * 8.0 / 60.0 / 100_000.0) / 10.0;
+    format!("{} kbps audio and {} Mbps video", kbps(card.media_bytes_per_minute.audio), mbps(card.media_bytes_per_minute.video))
+}
+
 fn round_up5(value: f64) -> f64 {
     (value * 100_000.0).ceil() / 100_000.0
 }
@@ -424,7 +431,11 @@ pub fn quote_upload(
                 .credits
                 .as_ref()
                 .map(|credits| CreditRange { low: credits.low + media.credits.low, high: credits.high + media.credits.high }),
-            basis: format!("{}; audio and video priced by duration", paged_estimate.basis),
+            basis: format!(
+                "{}; audio and video priced by duration{}",
+                paged_estimate.basis,
+                if media.durations_assumed { format!(" (not read from every file: assumed from size at {})", assumed_bitrates(card)) } else { String::new() }
+            ),
             ..paged_estimate
         },
     };

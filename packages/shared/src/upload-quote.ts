@@ -6,6 +6,7 @@ import {
   PRICE_CARD_VERSION,
   estimateIngest,
   isBillingEnforced,
+  MEDIA_BYTES_PER_MINUTE,
   richPagesForOutputTokens,
   speedBoostMultiplier,
   type DocumentFeature,
@@ -233,6 +234,13 @@ function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: Pag
   return { low, high, known, unmeasured, rangeLow, rangeHigh };
 }
 
+/** The bitrates durations are assumed at when a media file's length is not known, for the quote's basis text. */
+function assumedBitrates(): string {
+  const kbps = (bytesPerMinute: number) => Math.round((bytesPerMinute * 8) / 60 / 1000);
+  const mbps = (bytesPerMinute: number) => Math.round((bytesPerMinute * 8) / 60 / 100_000) / 10;
+  return `${kbps(MEDIA_BYTES_PER_MINUTE.audio)} kbps audio and ${mbps(MEDIA_BYTES_PER_MINUTE.video)} Mbps video`;
+}
+
 function roundUp5(value: number): number {
   return Math.ceil(value * 100_000) / 100_000;
 }
@@ -316,7 +324,7 @@ export function quoteUpload(args: {
       credits: pagedEstimate.credits
         ? { low: pagedEstimate.credits.low + media.credits.low, high: pagedEstimate.credits.high + media.credits.high }
         : null,
-      basis: `${pagedEstimate.basis}; audio and video priced by duration`,
+      basis: `${pagedEstimate.basis}; audio and video priced by duration${media.durationsAssumed ? ` (not read from every file: assumed from size at ${assumedBitrates()})` : ""}`,
     },
   };
 }

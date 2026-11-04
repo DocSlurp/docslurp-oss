@@ -96,7 +96,7 @@ function indexOfAsciiInsensitive(text: string, needle: string, from: number): nu
 }
 
 /** The visible text of HTML: tags, comments, scripts and styles removed. Markup is not content a page holds. */
-export function stripMarkup(text: string): string {
+export function stripHtmlMarkup(text: string): string {
   let out = "";
   let at = 0;
   while (at < text.length) {
@@ -135,7 +135,7 @@ export function stripMarkup(text: string): string {
  * only non-blank lines count, so markup and inline code do not bill as pages of reading.
  */
 export function textPageCount(text: string, options: { markup?: boolean } = {}): number {
-  const visible = options.markup ? stripMarkup(text) : text;
+  const visible = options.markup ? stripHtmlMarkup(text) : text;
   const lines = options.markup ? visible.split(/\r?\n/).filter((line) => line.trim() !== "").length : visible.split(/\r?\n/).length;
   const trimmed = visible.trim();
   let chars = trimmed.length;

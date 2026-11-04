@@ -141,6 +141,25 @@ describe("Direct Upload Session Module", () => {
     expect(result.rejected).toEqual([expect.objectContaining({ index: 1, clientId: "b", filename: "payload.exe", statusCode: 415, code: "unsupported_type" })]);
   });
 
+  it("rejects an oversized file by index while the rest of the batch is accepted", async () => {
+    sqlMock.mockReset();
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_session_files")) return [{ id: "f", session_id: "s", filename: "ok.pdf", mime_type: "application/pdf", size_bytes: 10, source_key: "k", upload_mode: "single", status: "pending", request_index: 1, client_id: "ok" }];
+      return [];
+    });
+    const result = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [
+        { clientId: "huge", filename: "huge.pdf", mimeType: "application/pdf", sizeBytes: 10 ** 13 },
+        { clientId: "ok", filename: "ok.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+      ],
+    });
+    expect(result.rejected).toEqual([expect.objectContaining({ index: 0, clientId: "huge", statusCode: 413, code: "file_too_large" })]);
+    expect(result.files).toHaveLength(1);
+  });
+
   it("fails the request, naming every file, only when nothing can be accepted", async () => {
     sqlMock.mockReset();
     const error = await createDirectUploadSession({

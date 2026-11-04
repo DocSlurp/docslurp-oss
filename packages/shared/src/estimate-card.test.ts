@@ -208,6 +208,14 @@ describe("quoteUpload with uncounted pages", () => {
     expect(quote.basis).toContain("pages not counted for 1 of 1 files");
   });
 
+  it("says when media durations were assumed from size, and not when they were read", () => {
+    const assumed = quoteUpload({ files: [{ name: "talk.mp3", size: 30_000_000 }], profile }).estimate;
+    expect(assumed.basis).toContain("audio and video priced by duration (not read from every file: assumed from size at");
+    expect(assumed.basis).toMatch(/\d+ kbps audio and [\d.]+ Mbps video/);
+    const read = quoteUpload({ files: [{ name: "talk.mp3", size: 30_000_000, durationSeconds: 600 }], profile }).estimate;
+    expect(read.basis.endsWith("audio and video priced by duration")).toBe(true);
+  });
+
   it("counted pages quote exactly their pages, with no range", () => {
     const quote = quoteUpload({ files: [{ name: "a.pdf", size: 12 * 1024 * 1024, pages: 300 }], profile }).estimate;
     expect(quote.pagesRange).toBeUndefined();
