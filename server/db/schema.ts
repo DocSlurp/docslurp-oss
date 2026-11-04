@@ -997,10 +997,8 @@ export const webhooks = pgTable(
   {
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
-    /** The organization whose runs this webhook receives, whoever started them. Nullable until the contract step (docs/rollout-expand-contract-0121-0125.md); a trigger homes rows inserted without it. */
-    orgId: text("org_id"),
-    /** Narrows delivery to one workspace of that organization; null means all of them. */
-    workspaceId: text("workspace_id"),
+    /** The organization whose runs this webhook receives, whoever started them. The only tenant scope of a webhook. */
+    orgId: text("org_id").notNull(),
     url: text().notNull(),
     secret: text().notNull(),
     events: text().array().default(["run.completed", "run.failed"]).notNull(),
@@ -1023,11 +1021,6 @@ export const webhooks = pgTable(
       columns: [table.orgId],
       foreignColumns: [organizations.id],
       name: "webhooks_org_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "webhooks_workspace_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1309,7 +1302,6 @@ export const apiKeys = pgTable(
       .defaultNow()
       .notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
-    // Enforced by api_keys_org_id_required (CHECK, NOT VALID) until the contract step drops the dead rows and sets NOT NULL.
     orgId: text("org_id").notNull(),
     materializationPolicy: jsonb("materialization_policy").default({}).notNull(),
   },

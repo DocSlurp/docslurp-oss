@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
@@ -26,11 +26,9 @@ const createWebhookSchema = z.object({
   url: z.string().url(),
   secret: z.string().min(16),
   events: z.array(z.string()).optional(),
-  /** The organization to receive events for; omitted means the personal one. */
-  orgId: z.string().min(1).optional(),
-  /** Narrow to one workspace of that organization; omitted means every workspace, which only owners and admins may do. */
-  workspaceId: z.string().min(1).optional()
-});
+  /** The organization to receive events for; omitted means the personal one. Owners and admins only. */
+  orgId: z.string().min(1).optional()
+}).strict();
 
 const testWebhookSchema = z.object({
   event: z.string().default("run.completed")
@@ -46,6 +44,17 @@ const updateWebhookSchema = z.object({
   events: z.array(z.string()).optional()
 });
 
+/** Webhooks are an organization's: `orgId` names it, and an omitted one means the caller's personal organization. */
+async function requestOrgId(userId: string, orgId: string | null | undefined): Promise<string> {
+  return orgId?.trim() || (await ensurePersonalOrganization(userId)).id;
+}
+
+function webhookScopeResponse(c: Context, error: unknown): Response | null {
+  if (error instanceof WebhookScopeError) return apiStatusError(c, 404, error.message);
+  if (error instanceof WebhookForbiddenError) return apiStatusError(c, 403, error.message);
+  return null;
+}
+
 export const webhooksRoutes = new Hono()
   .get("/catalog", async (c) => {
     return c.json({ events: webhookEventCatalog });
@@ -54,40 +63,51 @@ export const webhooksRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const webhookId = c.req.query("webhookId") ?? undefined;
     const limit = c.req.query("limit");
-    const deliveries = await listWebhookDeliveries({
-      userId,
-      webhookId,
-      limit: limit ? Number(limit) : undefined
-    });
-    return c.json({ deliveries });
+    try {
+      const deliveries = await listWebhookDeliveries({
+        userId,
+        orgId: await requestOrgId(userId, c.req.query("orgId")),
+        webhookId,
+        limit: limit ? Number(limit) : undefined
+      });
+      return c.json({ deliveries });
+    } catch (error) {
+      const scoped = webhookScopeResponse(c, error);
+      if (scoped) return scoped;
+      throw error;
+    }
   })
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
-    const webhooks = await listWebhooks(userId);
-    return c.json({ webhooks });
+    try {
+      const webhooks = await listWebhooks({ userId, orgId: await requestOrgId(userId, c.req.query("orgId")) });
+      return c.json({ webhooks });
+    } catch (error) {
+      const scoped = webhookScopeResponse(c, error);
+      if (scoped) return scoped;
+      throw error;
+    }
   })
   .post("/", zValidator("json", createWebhookSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     // Webhook routes are session-only (they do not accept API keys), so the caller is a signed-in user; the service checks that
     // user's membership and role in the organization it names.
-    const orgId = body.orgId ?? (await ensurePersonalOrganization(userId)).id;
+    const orgId = await requestOrgId(userId, body.orgId);
     let webhook;
     try {
       webhook = await createWebhook({
         userId,
         orgId,
-        workspaceId: body.workspaceId,
         url: body.url,
         secret: body.secret,
         events: body.events
       });
     } catch (error) {
-      if (error instanceof WebhookScopeError) return apiStatusError(c, 404, error.message);
-      if (error instanceof WebhookForbiddenError) return apiStatusError(c, 403, error.message);
-      return apiStatusError(c, 400, reportPublicError(error));
+      return webhookScopeResponse(c, error) ?? apiStatusError(c, 400, reportPublicError(error));
     }
     await appendAuditLog({
+      orgId: webhook.orgId,
       userId,
       action: "webhook.created",
       resourceType: "webhook",
@@ -115,13 +135,14 @@ export const webhooksRoutes = new Hono()
   })
   .delete("/:id", async (c) => {
     const userId = c.get("sessionUser").id;
-    const deleted = await deleteWebhook(c.req.param("id"), userId);
+    const deletedOrgId = await deleteWebhook(c.req.param("id"), userId);
 
-    if (!deleted) {
+    if (!deletedOrgId) {
       return apiStatusError(c, 404, "Webhook not found");
     }
 
     await appendAuditLog({
+      orgId: deletedOrgId,
       userId,
       action: "webhook.deleted",
       resourceType: "webhook",
@@ -155,6 +176,7 @@ export const webhooksRoutes = new Hono()
     }
 
     await appendAuditLog({
+      orgId: webhook.orgId,
       userId,
       action: "webhook.updated",
       resourceType: "webhook",
@@ -179,6 +201,7 @@ export const webhooksRoutes = new Hono()
     }
 
     await appendAuditLog({
+      orgId: result.webhook.orgId,
       userId,
       action: "webhook.secret.rotated",
       resourceType: "webhook",

@@ -1,94 +1,70 @@
--- Expand step for two shapes that carried no tenant. The contract step (NOT NULL, deleting what cannot be homed) is a
--- later release: docs/rollout-expand-contract-0121-0125.md.
+-- destructive-migration: single release (pre-release; production data may be reset). The organization is the only tenant scope: webhooks and api_keys rows that cannot be given exactly one organization are deleted, and org_id becomes NOT NULL on both.
 --
--- (1) api_keys without an org. validateApiKey has rejected keys with a NULL org_id since the organization model landed, so no
--- release serves them; every insert path in release N-1 (api-keys.ts createApiKey and rotateApiKey, mcp-oauth.ts createGrant) sets
--- org_id. Such keys are revoked (fail closed) and, where the owner has a personal organization, re-homed there; that
--- never grants a key access it did not have. Nothing is deleted. A NOT VALID check forbids new live rows without an org
--- (a revoked row may lack one, so updates of the dead rows keep working) while they stay for the contract step to remove.
+-- (1) Webhooks were keyed to the user who created them, so a team's webhook never fired for a teammate's runs and a user in
+-- several organizations had one webhook firing for all of them. A webhook now belongs to exactly one organization and receives
+-- that organization's run events (whoever started the run) while its creator is still an owner or admin there. There is no
+-- per-workspace scope: workspaces are an organizing tool, not a tenant.
+-- Old rows are not homed by guesswork. A webhook is moved to an organization only when its creator belongs to exactly one live
+-- organization and is an owner or admin there (the rule for creating an org webhook today). Every other webhook is deleted, with
+-- its delivery log (webhook_deliveries cascades): which of several organizations it was meant for cannot be known, and a
+-- member-created one would never deliver. No copy is kept; it would only hold signing secrets nobody can use.
 --
--- (2) Webhooks were keyed to the user who created them, so a team's webhook never fired for a teammate's runs; they now
--- belong to an organization (and optionally one of its workspaces). org_id is added NULLABLE: during the rolling
--- migrate -> worker -> app window, and on rollback, release N-1 still inserts webhooks without it. A BEFORE INSERT trigger
--- homes such a row exactly as the backfill does, so a webhook created by old code is not silently dead for new code.
--- Backfill order: the organization of the runs the webhook itself delivered for (its own delivery history, restricted to
--- organizations its creator belongs to), else the creator's personal organization, else an organization they own or
--- administer. A webhook with none of these keeps a NULL org_id and is left in place: new code does not match it, release N-1
--- still delivers it by user_id, and the contract step backs it up before removing it.
+-- (2) api_keys without an org. validateApiKey has refused keys with a NULL org_id since the organization model landed, and every
+-- insert path (api-keys.ts createApiKey and rotateApiKey, mcp-oauth.ts createGrant, whose orgId is a required string) sets it. Such a key is
+-- moved, revoked, to its owner's organization when the owner belongs to exactly one live organization (so its audit and usage
+-- history stays with that tenant), and deleted otherwise, revoked or not. Re-homing never revives a key: it stays revoked.
 --
--- Lock order (as 0063): organizations and workspaces first (what a worker transaction that updates a workspace and then reads
--- webhooks holds), then webhooks, so this migration and a worker transaction cannot deadlock. lock_timeout fails the deploy
--- instead of queueing readers of a hot table behind a long transaction; a retried deploy finishes the work.
+-- Lock order (as 0063): organizations, then webhooks, the order a worker transaction takes them, so this migration and a worker
+-- transaction cannot deadlock. lock_timeout fails the deploy instead of queueing readers of a hot table behind a long
+-- transaction; a retried deploy finishes the work. server/db/predeploy-check.mjs counts what this deletes.
 SET LOCAL lock_timeout = '10s';
 --> statement-breakpoint
-LOCK TABLE organizations, workspaces IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE organizations IN SHARE ROW EXCLUSIVE MODE;
 --> statement-breakpoint
 LOCK TABLE webhooks IN ACCESS EXCLUSIVE MODE;
 --> statement-breakpoint
 ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS org_id text REFERENCES organizations(id) ON DELETE CASCADE;
 --> statement-breakpoint
-ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS workspace_id text REFERENCES workspaces(id) ON DELETE CASCADE;
+UPDATE webhooks wh
+SET org_id = only_org.org_id
+FROM (
+  SELECT om.user_id, min(om.org_id) AS org_id, bool_and(om.role IN ('owner', 'admin')) AS administers
+  FROM org_memberships om
+  JOIN organizations o ON o.id = om.org_id AND o.deleted_at IS NULL
+  GROUP BY om.user_id
+  HAVING count(*) = 1
+) only_org
+WHERE wh.org_id IS NULL AND only_org.user_id = wh.user_id AND only_org.administers;
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION docslurp_webhook_home_org(p_webhook_id text, p_user_id text) RETURNS text
-LANGUAGE sql STABLE AS $$
-  SELECT coalesce(
-    -- the organization of the runs this webhook has delivered for, among organizations its creator belongs to
-    (SELECT r.org_id
-       FROM webhook_deliveries d
-       JOIN workspace_runs r ON r.id = d.payload ->> 'runId'
-       JOIN org_memberships om ON om.org_id = r.org_id AND om.user_id = p_user_id
-       WHERE d.webhook_id = p_webhook_id AND r.org_id IS NOT NULL
-       GROUP BY r.org_id
-       ORDER BY count(*) DESC, r.org_id
-       LIMIT 1),
-    -- else the creator's personal organization, else one they own or administer
-    (SELECT o.id
-       FROM org_memberships om
-       JOIN organizations o ON o.id = om.org_id
-       WHERE om.user_id = p_user_id AND om.role IN ('owner', 'admin')
-       ORDER BY o.is_personal DESC, om.created_at, o.id
-       LIMIT 1)
-  )
-$$;
+DELETE FROM webhooks WHERE org_id IS NULL;
 --> statement-breakpoint
-UPDATE webhooks wh SET org_id = docslurp_webhook_home_org(wh.id, wh.user_id) WHERE wh.org_id IS NULL;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION docslurp_webhooks_default_org() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.org_id IS NULL THEN
-    NEW.org_id := docslurp_webhook_home_org(NEW.id, NEW.user_id);
-  END IF;
-  RETURN NEW;
-END
-$$;
---> statement-breakpoint
-DROP TRIGGER IF EXISTS webhooks_default_org ON webhooks;
---> statement-breakpoint
-CREATE TRIGGER webhooks_default_org BEFORE INSERT ON webhooks
-  FOR EACH ROW WHEN (NEW.org_id IS NULL) EXECUTE FUNCTION docslurp_webhooks_default_org();
+ALTER TABLE webhooks ALTER COLUMN org_id SET NOT NULL;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS webhooks_org_active_idx ON webhooks (org_id) WHERE active;
 --> statement-breakpoint
 -- api_keys is read and touched on every API request: wait only briefly for its lock.
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
-UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now()) WHERE org_id IS NULL;
---> statement-breakpoint
 UPDATE api_keys k
-SET org_id = o.id
-FROM organizations o
-WHERE k.org_id IS NULL AND o.is_personal AND o.personal_owner_user_id = k.user_id;
+SET org_id = only_org.org_id, revoked_at = coalesce(k.revoked_at, now())
+FROM (
+  SELECT om.user_id, min(om.org_id) AS org_id
+  FROM org_memberships om
+  JOIN organizations o ON o.id = om.org_id AND o.deleted_at IS NULL
+  GROUP BY om.user_id
+  HAVING count(*) = 1
+) only_org
+WHERE k.org_id IS NULL AND only_org.user_id = k.user_id;
 --> statement-breakpoint
-ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_org_id_required;
+DELETE FROM api_keys WHERE org_id IS NULL;
 --> statement-breakpoint
-ALTER TABLE api_keys ADD CONSTRAINT api_keys_org_id_required CHECK (org_id IS NOT NULL OR revoked_at IS NOT NULL) NOT VALID;
+ALTER TABLE api_keys ALTER COLUMN org_id SET NOT NULL;
 --> statement-breakpoint
--- The worker's subscription check (enqueueWebhookEvent) reads these two columns; roles.mjs
--- grants them on every reconcile, and this grant covers a release that migrates before reconciling.
+-- The worker's subscription check (enqueueWebhookEvent) reads org_id; roles.mjs grants it on every reconcile, and this grant
+-- covers a release that migrates before reconciling.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
-    GRANT SELECT (org_id, workspace_id) ON public.webhooks TO docslurp_worker;
+    GRANT SELECT (org_id) ON public.webhooks TO docslurp_worker;
   END IF;
 END $$;

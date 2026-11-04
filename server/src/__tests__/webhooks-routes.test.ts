@@ -29,6 +29,7 @@ vi.mock("../lib/request-context.js", () => ({
 const { webhooksRoutes } = await import("../routes/webhooks.js");
 const {
   createWebhook,
+  listWebhooks,
   listWebhookDeliveries,
   replayWebhookDelivery,
   sendTestWebhook,
@@ -76,9 +77,24 @@ describe("webhooksRoutes", () => {
     expect(response.status).toBe(200);
     expect(listWebhookDeliveries).toHaveBeenCalledWith({
       userId: "demo-user",
+      orgId: "personal-org",
       webhookId: undefined,
       limit: 25
     });
+    await app.request("/webhooks/deliveries?orgId=team");
+    expect(listWebhookDeliveries).toHaveBeenLastCalledWith(expect.objectContaining({ orgId: "team" }));
+  });
+
+  it("lists the named organization's webhooks (personal by default) and answers 404/403 outside it", async () => {
+    vi.mocked(listWebhooks).mockReset().mockResolvedValue([]);
+    expect((await app.request("/webhooks")).status).toBe(200);
+    expect(listWebhooks).toHaveBeenLastCalledWith({ userId: "demo-user", orgId: "personal-org" });
+    expect((await app.request("/webhooks?orgId=team")).status).toBe(200);
+    expect(listWebhooks).toHaveBeenLastCalledWith({ userId: "demo-user", orgId: "team" });
+    vi.mocked(listWebhooks).mockRejectedValueOnce(new WebhookScopeError("Organization not found"));
+    expect((await app.request("/webhooks?orgId=foreign")).status).toBe(404);
+    vi.mocked(listWebhooks).mockRejectedValueOnce(new WebhookForbiddenError("Organization owner or admin access required"));
+    expect((await app.request("/webhooks?orgId=team")).status).toBe(403);
   });
 
   it("returns the recorded test delivery", async () => {
@@ -127,13 +143,19 @@ describe("webhooksRoutes", () => {
 
     it("files it under the named organization (or the personal one) for the signed-in user", async () => {
       vi.mocked(createWebhook).mockReset().mockResolvedValue({ id: "wh", secret: "x" } as never);
-      expect((await create({ orgId: "team", workspaceId: "ws-1" })).status).toBe(201);
-      expect(createWebhook).toHaveBeenLastCalledWith(expect.objectContaining({ userId: "demo-user", orgId: "team", workspaceId: "ws-1" }));
+      expect((await create({ orgId: "team" })).status).toBe(201);
+      expect(createWebhook).toHaveBeenLastCalledWith({ userId: "demo-user", orgId: "team", url: "https://example.com/hook", secret: "s".repeat(16), events: undefined });
       await create({});
       expect(createWebhook).toHaveBeenLastCalledWith(expect.objectContaining({ userId: "demo-user", orgId: "personal-org" }));
     });
 
-    it("answers 403 when a member asks for an organization-wide webhook, and 404 for an organization or workspace it cannot see", async () => {
+    it("rejects a workspace scope: webhooks belong to an organization", async () => {
+      vi.mocked(createWebhook).mockReset();
+      expect((await create({ orgId: "team", workspaceId: "ws-1" })).status).toBe(400);
+      expect(createWebhook).not.toHaveBeenCalled();
+    });
+
+    it("answers 403 when a member creates a webhook, and 404 for an organization it cannot see", async () => {
       vi.mocked(createWebhook).mockReset().mockRejectedValueOnce(new WebhookForbiddenError("Organization admin access required"));
       expect((await create({ orgId: "team" })).status).toBe(403);
       vi.mocked(createWebhook).mockRejectedValueOnce(new WebhookScopeError("Organization not found"));

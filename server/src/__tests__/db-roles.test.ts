@@ -166,7 +166,8 @@ describe("worker role", () => {
     expect(await denied(worker, `select id, email from "user"`)).toBe(false);
     expect(await denied(worker, `select name from "user"`)).toBe(true);
     expect(await denied(worker, `update "user" set email = email`)).toBe(true);
-    expect(await denied(worker, "select user_id, org_id, workspace_id, active, events from webhooks")).toBe(false);
+    expect(await denied(worker, "select org_id, active, events from webhooks")).toBe(false);
+    expect(await denied(worker, "select user_id from webhooks")).toBe(true);
     expect(await denied(worker, "select secret from webhooks")).toBe(true);
     expect(await denied(worker, "select id, workspace_id, name, type, expires_at from workspace_secrets")).toBe(false);
     expect(await denied(worker, "select encrypted_value from workspace_secrets")).toBe(true);
