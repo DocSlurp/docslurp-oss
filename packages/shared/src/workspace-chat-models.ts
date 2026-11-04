@@ -1,3 +1,5 @@
+import { normalizeHostedModelRef } from "./model-uri.js";
+
 export const WORKSPACE_CHAT_MODELS = [
   { id: "z-ai/glm-5.3-flash", label: "GLM 5.3 Flash", description: "Default efficient model" },
   { id: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5", description: "Compact Claude model" },
@@ -18,12 +20,21 @@ export function isWorkspaceChatModelId(model: unknown): model is WorkspaceChatMo
   return WORKSPACE_CHAT_MODELS.some((candidate) => candidate.id === model);
 }
 
+/**
+ * A chat `model` as sent: a catalog id or its `llm://openrouter/<id>` URI. Returns
+ * the bare id (trimmed) for policy and provider calls; unknown values pass through
+ * so the caller can refuse them.
+ */
+export function normalizeChatModelRef(model: string): string {
+  return normalizeHostedModelRef(model);
+}
+
 /** Display fallback only; request handling rejects unknown explicit models. */
 export function resolveWorkspaceChatModel(
   model: string | null | undefined,
 ): WorkspaceChatModelId {
   return (
-    WORKSPACE_CHAT_MODELS.find((candidate) => candidate.id === model)?.id ??
+    WORKSPACE_CHAT_MODELS.find((candidate) => candidate.id === (model ? normalizeChatModelRef(model) : model))?.id ??
     DEFAULT_WORKSPACE_CHAT_MODEL
   );
 }
