@@ -13,7 +13,15 @@ import {
   speedBoostMultiplier,
 } from "./billing.js";
 import { sha256Hex } from "./hash.js";
-import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS } from "./media-upload-estimate.js";
+import {
+  AUDIO_EXTENSIONS,
+  IMAGE_EXTENSIONS,
+  TEXT_EXTENSIONS,
+  TEXT_PAGE_CHARS,
+  TEXT_PAGE_LINES,
+  TEXT_PAGE_MIME_PREFIXES,
+  VIDEO_EXTENSIONS,
+} from "./media-upload-estimate.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { defaultPipelineFeatures } from "./pipeline.js";
 import { ASSUMED_BYTES_PER_PAGE, estimateProfileFor, QUOTE_HIGH_MIX, QUOTE_LOW_MIX } from "./upload-quote.js";
@@ -31,7 +39,7 @@ export const ESTIMATE_CARD_SCHEMA = 2;
  * Version of the pricing formulas (quoteUpload, estimateIngest, estimateUploadMedia, the file-type rules). Bump it
  * with any change to them, so a port built for other rules refuses the card instead of quoting with stale logic.
  */
-export const ESTIMATE_RULES = 1;
+export const ESTIMATE_RULES = 2;
 
 function cardBody() {
   return {
@@ -55,7 +63,9 @@ function cardBody() {
     /** A new hosted workspace with default settings, for quotes made without a workspace's profile. */
     defaultProfile: estimateProfileFor(defaultPipelineFeatures, { env: { DOCSLURP_BILL_INGEST: "true" } }),
     /** Extensions priced as media or as image files when the MIME type does not say (uploadMediaKind). */
-    extensions: { audio: [...AUDIO_EXTENSIONS], video: [...VIDEO_EXTENSIONS], image: [...IMAGE_EXTENSIONS] },
+    extensions: { audio: [...AUDIO_EXTENSIONS], video: [...VIDEO_EXTENSIONS], image: [...IMAGE_EXTENSIONS], text: [...TEXT_EXTENSIONS] },
+    /** Text files: MIME prefixes counted from their text, and the lines and characters per page. */
+    textPages: { mimePrefixes: [...TEXT_PAGE_MIME_PREFIXES], lines: TEXT_PAGE_LINES, chars: TEXT_PAGE_CHARS },
     /** PDF page classification thresholds the worker routes with. */
     pageRasterRouting: { ...PAGE_RASTER_ROUTING },
   };

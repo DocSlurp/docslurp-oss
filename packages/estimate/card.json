@@ -1,6 +1,6 @@
 {
  "schema": 2,
- "rules": 1,
+ "rules": 2,
  "version": "2026-10-25b",
  "creditsPerDollar": 100,
  "priceCard": {
@@ -167,7 +167,31 @@
    "tiff",
    "tif",
    "webp"
+  ],
+  "text": [
+   "txt",
+   "md",
+   "html",
+   "htm",
+   "mhtml",
+   "csv",
+   "tsv",
+   "json",
+   "jsonl",
+   "tex"
   ]
+ },
+ "textPages": {
+  "mimePrefixes": [
+   "text/",
+   "application/json",
+   "application/x-ndjson",
+   "application/xml",
+   "application/javascript",
+   "application/x-yaml"
+  ],
+  "lines": 60,
+  "chars": 3500
  },
  "pageRasterRouting": {
   "sparsePageWords": 30,
@@ -180,5 +204,5 @@
   "sparseTextFullPageImageCoverage": 0.85,
   "drawnContentMinBytesPerPage": 16384
  },
- "revision": "b2d3c5a6724274b79a838520b43053126ab921738dc41e14904a68a57f636883"
+ "revision": "922673f06cd86426059c20f2ae8ef10b15a8c33a48fbb93b7b1107b2da837eef"
 }

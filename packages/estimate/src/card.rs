@@ -13,7 +13,7 @@ use crate::error::{Error, ErrorCode};
 /// Card shape this build reads; a card with another `schema` is rejected.
 pub const CARD_SCHEMA: u32 = 2;
 /// Pricing formulas this build implements; a card for other `rules` is rejected rather than quoted with stale logic.
-pub const CARD_RULES: u32 = 1;
+pub const CARD_RULES: u32 = 2;
 
 const BUNDLED: &str = include_str!("../card.json");
 
@@ -82,6 +82,16 @@ pub struct Extensions {
     pub audio: Vec<String>,
     pub video: Vec<String>,
     pub image: Vec<String>,
+    pub text: Vec<String>,
+}
+
+/// Text files: pages counted from the text (`textPageCount` in `@docslurp/shared`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPages {
+    pub mime_prefixes: Vec<String>,
+    pub lines: f64,
+    pub chars: f64,
 }
 
 /// The worker's raster-page routing thresholds (`PAGE_RASTER_ROUTING` in `@docslurp/shared`).
@@ -123,6 +133,7 @@ pub struct Card {
     pub quote_high_mix: PageMix,
     pub default_profile: crate::quote::EstimateProfile,
     pub extensions: Extensions,
+    pub text_pages: TextPages,
     pub page_raster_routing: PageRasterRouting,
 }
 

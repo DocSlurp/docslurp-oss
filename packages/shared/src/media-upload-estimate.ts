@@ -31,9 +31,52 @@ export function uploadMediaKind(file: { name: string; type?: string | null }): U
   return null;
 }
 
-/** Whether a file is an image (MIME type `image/*`, else its extension), billed as Rich pages read whole. */
+/** Extensions of formats the API counts as text pages (TEXT_PAGE_MIME_PREFIXES) when no specific MIME type is given. */
+export const TEXT_EXTENSIONS: ReadonlySet<string> = new Set(
+  (["plain-text", "markdown", "html", "structured-csv", "structured-json", "latex"] as const).flatMap((format) => extensionsOf(format)),
+);
+
+/** Declared MIME types that say nothing about the format, so the extension decides. */
+function isGenericType(type: string): boolean {
+  return type === "" || type === "application/octet-stream";
+}
+
+/**
+ * Whether a file is an image, billed as Rich pages read whole (page-base-fee.ts reads the stored MIME type): an
+ * `image/*` type, or an image extension when the type is absent or generic.
+ */
 export function isUploadImageFile(file: { name: string; type?: string | null }): boolean {
-  return declaredType(file.type).startsWith("image/") || IMAGE_EXTENSIONS.has(extensionOf(file.name));
+  const type = declaredType(file.type);
+  return type.startsWith("image/") || (isGenericType(type) && IMAGE_EXTENSIONS.has(extensionOf(file.name)));
+}
+
+/**
+ * MIME type prefixes whose page count the API derives from the text (server/src/services/source-metadata.ts):
+ * the larger of one page per TEXT_PAGE_LINES lines and one per TEXT_PAGE_CHARS characters.
+ */
+export const TEXT_PAGE_MIME_PREFIXES = [
+  "text/",
+  "application/json",
+  "application/x-ndjson",
+  "application/xml",
+  "application/javascript",
+  "application/x-yaml",
+] as const;
+export const TEXT_PAGE_LINES = 60;
+export const TEXT_PAGE_CHARS = 3_500;
+
+/** Whether a file's pages are counted from its text: a text MIME type, or a text extension with no specific type. */
+export function isUploadTextFile(file: { name: string; type?: string | null }): boolean {
+  const type = declaredType(file.type);
+  if (TEXT_PAGE_MIME_PREFIXES.some((prefix) => type.startsWith(prefix))) return true;
+  return isGenericType(type) && TEXT_EXTENSIONS.has(extensionOf(file.name));
+}
+
+/** Pages of a text file: one per TEXT_PAGE_LINES lines or per TEXT_PAGE_CHARS characters, whichever is more. */
+export function textPageCount(text: string): number {
+  const lines = text.split(/\r?\n/).length;
+  const chars = text.trim().length;
+  return Math.max(1, Math.ceil(lines / TEXT_PAGE_LINES), Math.ceil(chars / TEXT_PAGE_CHARS));
 }
 
 export const uploadMediaEstimateSchema = z.object({

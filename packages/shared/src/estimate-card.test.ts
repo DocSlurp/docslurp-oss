@@ -11,7 +11,7 @@ import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golde
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
 import { speedBoostMultiplier } from "./billing.js";
 import { estimateProfileFor, quoteFileSchema, quoteUpload, type QuoteFile } from "./upload-quote.js";
-import { isUploadImageFile, uploadMediaKind } from "./media-upload-estimate.js";
+import { isUploadImageFile, isUploadTextFile, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
 const estimateDir = join(dirname(fileURLToPath(import.meta.url)), "../../estimate");
 const files = {
@@ -72,7 +72,7 @@ describe("quoteUpload", () => {
   ];
   const batches: QuoteFile[][] = [
     [{ name: "a.pdf", size: 2_000_000 }],
-    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000 }, { name: "c.html", size: 4_000_000 }],
+    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000 }, { name: "c.xlsx", size: 4_000_000 }],
     [{ name: "talk.mp3", size: 30_000_000 }, { name: "deck.pptx", size: 8_000_000, pages: 42 }, { name: "clip.mp4", size: 1, durationSeconds: 125 }],
   ];
 
@@ -106,6 +106,22 @@ describe("quoteUpload", () => {
     expect(photo.credits).toEqual(scannedPage.credits);
     expect(isUploadImageFile({ name: "scan", type: "image/heic" })).toBe(true);
     expect(isUploadImageFile({ name: "notes.pdf" })).toBe(false);
+  });
+
+  it("counts text files the way the API counts their pages, as text", () => {
+    const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+    const csv = quoteUpload({ files: [{ name: "rows.csv", size: 1_000_000 }], profile }).estimate;
+    expect(csv.pages).toBe(Math.ceil(1_000_000 / 3_500));
+    expect(csv.credits!.low).toBe(csv.credits!.high);
+    expect(isUploadTextFile({ name: "notes", type: "application/x-ndjson" })).toBe(true);
+    expect(isUploadTextFile({ name: "notes.md", type: "application/pdf" })).toBe(false);
+    expect(textPageCount(`${"x\n".repeat(120)}`)).toBe(3);
+    expect(textPageCount("y".repeat(7_001))).toBe(3);
+  });
+
+  it("trusts the declared MIME type over the extension, as billing does", () => {
+    expect(isUploadImageFile({ name: "scan.png", type: "application/pdf" })).toBe(false);
+    expect(isUploadImageFile({ name: "scan.png", type: "application/octet-stream" })).toBe(true);
   });
 
   it("prices every media format the worker accepts by duration", () => {

@@ -9,7 +9,7 @@ import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 import { env as apiEnv } from "../config.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
-import { s3ClientConfig } from "@docslurp/shared";
+import { s3ClientConfig, TEXT_PAGE_MIME_PREFIXES, textPageCount } from "@docslurp/shared";
 
 export type SourceMetadata = {
   pageCount: number;
@@ -72,28 +72,12 @@ export function estimateNonPdfPageCount(
     return 1;
   }
 
-  const textTypes = [
-    "text/",
-    "application/json",
-    "application/x-ndjson",
-    "application/xml",
-    "application/javascript",
-    "application/x-yaml",
-  ];
-  const shouldEstimateFromText = textTypes.some((prefix) =>
-    contentType.startsWith(prefix),
-  );
-
-  if (!shouldEstimateFromText) {
+  // The quote rules (isUploadTextFile, quoteFilePages) and the offline estimator count text pages the same way.
+  if (!TEXT_PAGE_MIME_PREFIXES.some((prefix) => contentType.startsWith(prefix))) {
     return 1;
   }
 
-  const text = Buffer.from(bytes).toString("utf8");
-  const lines = text.split(/\r?\n/).length;
-  const chars = text.trim().length;
-  const estimatedByLines = Math.ceil(lines / 60);
-  const estimatedByChars = Math.ceil(chars / 3_500);
-  return Math.max(1, estimatedByLines, estimatedByChars);
+  return textPageCount(Buffer.from(bytes).toString("utf8"));
 }
 
 const PDFINFO_ENV = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C" } as const;

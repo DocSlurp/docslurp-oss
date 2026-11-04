@@ -117,9 +117,10 @@ function checkAstroServerImports(root, appDir) {
 }
 
 // Customer files are probed only on the customer's machine. The offline estimator (`@docslurp/estimate`) parses
-// file bytes in-process, so the API, the worker and the shared contracts must never load it: on DocSlurp hosts
-// untrusted files are parsed only behind the VM boundary (CLAUDE.md, untrusted file processing).
-export function checkEstimatorBoundary(root, dirs = ["server", "worker", "packages/shared"]) {
+// file bytes in-process, so the API, the worker, the shared contracts and the SDK (a server dependency, so an SDK
+// re-export would load it into the API) must never import it: on DocSlurp hosts untrusted files are parsed only
+// behind the VM boundary (CLAUDE.md, untrusted file processing). Customers import @docslurp/estimate directly.
+export function checkEstimatorBoundary(root, dirs = ["server", "worker", "packages/shared", "packages/sdk"]) {
   const violations = [];
   for (const dir of dirs) {
     for (const file of sourceFiles(resolve(root, dir))) {

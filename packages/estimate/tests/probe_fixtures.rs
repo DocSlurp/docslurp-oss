@@ -61,3 +61,31 @@ fn a_form_drawn_thousands_of_times_stays_within_budget() {
 fn a_page_tree_cycle_returns() {
     let _ = probe_fixture("page_tree_cycle.pdf");
 }
+
+#[test]
+fn pages_without_text_but_with_any_image_bill_rich() {
+    // 20 pages, no text layer, a small logo on each: the worker bills every page Rich (page-base-fee.ts).
+    let result = probe_fixture("no_text_small_images.pdf");
+    assert_eq!(result.pages, Some(20.0));
+    assert_eq!(scanned_share(&result), 1.0);
+}
+
+#[test]
+fn object_stream_bombs_are_refused_before_loading() {
+    // Many object streams that each inflate to 15 MiB of spaces: under lopdf's per-stream limit, far over the
+    // probe's 64 MiB document budget. The probe must refuse quickly instead of decoding gigabytes.
+    let chunk = vec![b' '; 15 * 1024 * 1024];
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&chunk, 9);
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    for number in 1..=40 {
+        pdf.extend_from_slice(format!("{number} 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length {} >>\nstream\n", compressed.len()).as_bytes());
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    let started = Instant::now();
+    let result = probe(Card::bundled(), &ProbeInput::whole("bomb.pdf", None, &pdf));
+    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    assert!(result.mix.is_none());
+    assert!(result.notes.iter().any(|note| note.contains("object streams")), "{:?}", result.notes);
+}

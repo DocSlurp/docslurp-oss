@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { PRICE_CARD_VERSION, estimateProfileFor, defaultPipelineFeatures, quoteUpload } from "@docslurp/shared";
+import { PRICE_CARD_VERSION, estimateProfileFor, defaultPipelineFeatures, quoteUpload, textPageCount } from "@docslurp/shared";
 
 import { createEstimator, EstimatorError } from "../js/index.mjs";
 import { probePath, quotePaths } from "../js/node.mjs";
@@ -107,6 +107,22 @@ describe("@docslurp/estimate (wasm)", () => {
     const unknown = estimator.quote({ files: quote.estimate.pages ? [{ name: "a.pdf", size: 1, pages: 1 }, { name: "b.pdf", size: 1, pages: 1 }] : [] });
     assert.ok(quote.estimate.credits.low > unknown.estimate.credits.low);
     assert.ok(quote.estimate.credits.high - quote.estimate.credits.low < unknown.estimate.credits.high - unknown.estimate.credits.low);
+  });
+
+  it("counts text pages exactly as the API does", () => {
+    const samples = ["", "one line", "a\r\nb\n".repeat(400), `  ${"é".repeat(9_000)}\ufeff `, "x".repeat(3_500) + "\n".repeat(59)];
+    for (const text of samples) {
+      const bytes = new TextEncoder().encode(text);
+      const probe = estimator.probe({ name: "notes.txt", size: bytes.length }, bytes);
+      assert.equal(probe.kind, "text");
+      assert.equal(probe.pages, textPageCount(text), JSON.stringify(text.slice(0, 20)));
+    }
+  });
+
+  it("caps the module's memory so a hostile file traps instead of exhausting the host", async () => {
+    const module = await WebAssembly.compile(readFileSync(new URL("../dist/docslurp_estimate.wasm", import.meta.url)));
+    const instance = new WebAssembly.Instance(module, {});
+    assert.throws(() => instance.exports.memory.grow(8_193)); // 512 MiB is 8,192 pages
   });
 
   it("reads a WAV duration from its header and prices it as audio without a name hint", () => {

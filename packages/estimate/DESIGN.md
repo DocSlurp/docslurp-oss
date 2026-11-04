@@ -69,10 +69,13 @@ The `complex` page class changes only the time estimate. Probe effort goes where
 
 ## Probes: bounded and closer to the worker
 
-Hostile-input budgets **[D]**:
-- PDF: decompress each form XObject once (cache by object id); per-page budgets for decompressed bytes, form
-  invocations and operations; whole-file probe limit 128 MB (peak memory is about 2× the file size). Above the
-  limit, return the page count only if it is cheap, otherwise unknown.
+Hostile-input budgets **[D]**, tightened after the merge council (adversarial H1/M2):
+- The module's linear memory is capped at 512 MiB (`--max-memory`): anything that escapes a budget traps, and the
+  host recreates the instance, instead of exhausting the host's memory.
+- PDF: object streams are inflated in a preflight against a 64 MiB document budget before lopdf loads them (lopdf
+  only limits each stream); page content and forms share a 32 MiB document budget; each form XObject is
+  decompressed once; per-page budgets for interpreted bytes (16 MiB), form invocations and operations; whole-file
+  probe limit 64 MB. Over a budget, the probe reports the page count it can and no mix.
 - Media: all offset arithmetic in `u64` with checked operations (a WAV chunk size of `0xFFFFFFF9` wraps today).
   A faststart MP4 whose `moov` is larger than the head slice still yields `mvhd` from the head.
 
@@ -91,6 +94,15 @@ Format scope v1 **[M]**: PDF (pages + mix), media (duration), docx and pptx (pag
 `docProps/app.xml`; `zip` with `deflate-flate2`, not zopfli). Images and text formats need no probe; the rules
 above handle them.
 
+## Billing rules added after the merge council (boundary H1/H2) — rules version 2
+
+- A PDF page with no text layer and any image, however small, bills Rich in auto and good (`page-base-fee.ts` page
+  facts), so the probe classifies it scanned.
+- Text files (text MIME types, or text extensions with no specific type) bill `max(lines/60, chars/3500)` pages
+  (`server/src/services/source-metadata.ts`, now `textPageCount` in shared). Quotes use `size/3500` without a probe;
+  the probe reads text files whole (up to 32 MB) and counts exactly.
+- Image and text detection trust a specific declared MIME type over the extension, as billing reads the stored type.
+
 ## Packaging and guardrails **[A][M]**
 
 - `packages/estimate/package.json` stays `"private": true` until the release PR that adds it to
@@ -99,8 +111,9 @@ above handle them.
 - CI: a `estimate` job running `cargo test` (golden replay, classifier tests on synthetic PDFs built inside the
   tests, the fuzz corpus), the WASM build with a size budget, a JS smoke test, and a JS-vs-TS differential test
   over random inputs. The job is not path-filtered away.
-- An import guard keeps `server/`, `worker/` and `shared` from depending on `@docslurp/estimate`: probing never
-  runs on DocSlurp infrastructure.
+- An import guard keeps `server/`, `worker/`, `shared` and the SDK (a server dependency) from depending on
+  `@docslurp/estimate`: probing never runs on DocSlurp infrastructure. The app's browser bundle may import it;
+  its server-side code must not (app review rule, not yet automated).
 - The app uses the published npm package plus the card from its own server, so app builds never need Rust.
 
 ## Delivery order

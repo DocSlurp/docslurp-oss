@@ -27,3 +27,4 @@ strip = true
 
 [dev-dependencies]
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

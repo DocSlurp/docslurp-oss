@@ -65,13 +65,14 @@ test("app code may import only the server mount and the auth entry", () => {
   } finally { rmSync(root, { recursive: true }); }
 });
 
-test("keeps the offline estimator's file probes out of the API, worker and shared contracts", () => {
+test("keeps the offline estimator's file probes out of the API, worker, shared contracts and SDK", () => {
   const root = fixture({
     "server/src/a.ts": 'import { createEstimator } from "@docslurp/estimate";',
     "worker/src/b.ts": 'const probe = await import("@docslurp/estimate/node");',
     "packages/shared/src/c.ts": 'import card from "../../estimate/card.json";',
     "packages/shared/src/d.ts": 'import { quoteUpload } from "./upload-quote.js";',
-    "packages/sdk/src/e.ts": 'import { createEstimator } from "@docslurp/estimate";',
+    "packages/sdk/src/e.ts": 'export { createEstimator } from "@docslurp/estimate";',
+    "packages/cli/src/f.ts": 'import { createEstimator } from "@docslurp/estimate";',
   });
-  try { assert.equal(checkEstimatorBoundary(root).length, 3); } finally { rmSync(root, { recursive: true }); }
+  try { assert.equal(checkEstimatorBoundary(root).length, 4); } finally { rmSync(root, { recursive: true }); }
 });

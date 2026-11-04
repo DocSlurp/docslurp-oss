@@ -20,7 +20,7 @@ if (boundaryViolations.length) {
   process.exit(1);
 }
 console.log("✔ server/ import boundaries (no app/ imports, no package src/ deep imports, worker only via @docslurp/worker/testing in tests); server/db/ is covered");
-console.log("✔ server/, worker/ and packages/shared never load the offline estimator's file probes");
+console.log("✔ server/, worker/, packages/shared and packages/sdk never load the offline estimator's file probes");
 if (process.argv.includes("--boundaries")) process.exit(0);
 
 function jsTargets(exportsField, main) {

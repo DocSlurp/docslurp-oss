@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::card::{Card, PageMix};
 use crate::error::Error;
 use crate::price::{
-    estimate_ingest, estimate_upload_media, is_image_file, js_round, upload_media_kind, CreditRange, IngestEstimate,
+    estimate_ingest, estimate_upload_media, is_image_file, is_text_file, js_round, upload_media_kind, CreditRange, IngestEstimate,
     IngestInput, MediaFile, UploadMediaEstimate,
 };
 
@@ -106,12 +106,12 @@ impl QuoteFile {
         if self.name.is_empty() || self.name.chars().count() > 1024 {
             return fail("name must be 1-1024 characters".into());
         }
-        if !(self.size.is_finite() && self.size >= 0.0 && self.size.fract() == 0.0) {
-            return fail("size must be a non-negative integer".into());
+        if !(self.size.is_finite() && (0.0..=1e13).contains(&self.size) && self.size.fract() == 0.0) {
+            return fail("size must be a non-negative integer of at most 10^13".into());
         }
         if let Some(pages) = self.pages {
-            if !(pages.is_finite() && pages >= 1.0 && pages.fract() == 0.0) {
-                return fail("pages must be a positive integer".into());
+            if !(pages.is_finite() && (1.0..=1e7).contains(&pages) && pages.fract() == 0.0) {
+                return fail("pages must be a positive integer of at most 10^7".into());
             }
         }
         if let Some(seconds) = self.duration_seconds {
@@ -173,12 +173,16 @@ pub struct Quote {
     pub warnings: Vec<String>,
 }
 
-/// Pages a non-media file counts as: its known page count; else 1 for an image file and its size at the card's
-/// bytes per page for anything else (at least 1).
+/// Pages a non-media file counts as: its known page count; else 1 for an image file, its size over the card's
+/// characters per text page for a text file, and its size at the card's bytes per page for anything else (at least 1).
 pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
     let pages = file.pages.unwrap_or_else(|| {
-        if is_image_file(card, &file.name, file.mime_type.as_deref()) {
+        let mime = file.mime_type.as_deref();
+        if is_image_file(card, &file.name, mime) {
             1.0
+        } else if is_text_file(card, &file.name, mime) {
+            // Text pages count characters; bytes bound them from above for UTF-8.
+            (file.size / card.text_pages.chars).ceil()
         } else {
             (file.size / card.assumed_bytes_per_page).ceil()
         }
@@ -187,13 +191,18 @@ pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
 }
 
 const IMAGE_FILE_MIX: PageMix = PageMix::new(0.0, 0.0, 1.0);
+const TEXT_FILE_MIX: PageMix = PageMix::new(1.0, 0.0, 0.0);
 
-/// A file's known page mix and its trust: measured, or every page scanned for an image file.
+/// A file's known page mix and its trust: measured, every page scanned for an image file, or all text for a text file.
 fn known_mix(card: &Card, file: &QuoteFile) -> Option<(PageMix, f64)> {
-    if let Some(mix) = file.mix {
+    if let Some(mix) = file.mix.filter(|mix| mix.text + mix.complex + mix.scanned > 0.0) {
         return Some((mix, file.mix_confidence.unwrap_or(1.0)));
     }
-    is_image_file(card, &file.name, file.mime_type.as_deref()).then_some((IMAGE_FILE_MIX, 1.0))
+    let mime = file.mime_type.as_deref();
+    if is_image_file(card, &file.name, mime) {
+        return Some((IMAGE_FILE_MIX, 1.0));
+    }
+    is_text_file(card, &file.name, mime).then_some((TEXT_FILE_MIX, 1.0))
 }
 
 fn blended_mix(mix: &PageMix, confidence: f64, bound: &PageMix) -> PageMix {

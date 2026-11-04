@@ -306,9 +306,33 @@ pub fn upload_media_kind(card: &Card, name: &str, mime_type: Option<&str>) -> Op
     None
 }
 
-/// Port of `isUploadImageFile`: an `image/*` MIME type or an image extension.
+fn is_generic_type(mime: &str) -> bool {
+    mime.is_empty() || mime == "application/octet-stream"
+}
+
+/// Port of `isUploadImageFile`: an `image/*` MIME type, or an image extension when the type is absent or generic.
 pub fn is_image_file(card: &Card, name: &str, mime_type: Option<&str>) -> bool {
-    declared_type(mime_type).starts_with("image/") || listed(&card.extensions.image, &extension_of(name))
+    let mime = declared_type(mime_type);
+    mime.starts_with("image/") || (is_generic_type(&mime) && listed(&card.extensions.image, &extension_of(name)))
+}
+
+/// Port of `isUploadTextFile`: a text MIME type, or a text extension when the type is absent or generic.
+pub fn is_text_file(card: &Card, name: &str, mime_type: Option<&str>) -> bool {
+    let mime = declared_type(mime_type);
+    if card.text_pages.mime_prefixes.iter().any(|prefix| mime.starts_with(prefix.as_str())) {
+        return true;
+    }
+    is_generic_type(&mime) && listed(&card.extensions.text, &extension_of(name))
+}
+
+/// Port of `textPageCount`: one page per `lines` lines or per `chars` characters, whichever is more. Characters are
+/// UTF-16 code units of the text with JavaScript's `trim` applied, as the API counts them.
+pub fn text_page_count(card: &Card, bytes: &[u8]) -> f64 {
+    let text = String::from_utf8_lossy(bytes);
+    let lines = text.matches('\n').count() as f64 + 1.0;
+    let js_space = |c: char| c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{85}');
+    let chars = text.trim_matches(js_space).encode_utf16().count() as f64;
+    1f64.max((lines / card.text_pages.lines).ceil()).max((chars / card.text_pages.chars).ceil())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

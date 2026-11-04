@@ -13,7 +13,15 @@ import {
   pipelineProfileIdSchema,
 } from "./billing.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
-import { estimateUploadMedia, isUploadImageFile, uploadMediaKind, type UploadMediaEstimate, type UploadMediaFile } from "./media-upload-estimate.js";
+import {
+  estimateUploadMedia,
+  isUploadImageFile,
+  isUploadTextFile,
+  TEXT_PAGE_CHARS,
+  uploadMediaKind,
+  type UploadMediaEstimate,
+  type UploadMediaFile,
+} from "./media-upload-estimate.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 
 /*
@@ -39,12 +47,14 @@ export const pageMixSchema = z.strictObject({
 
 /** Every page scanned: an image file read whole. */
 const IMAGE_FILE_MIX: Readonly<PageMix> = { text: 0, complex: 0, scanned: 1 };
+/** Every page text: a text file. */
+const TEXT_FILE_MIX: Readonly<PageMix> = { text: 1, complex: 0, scanned: 0 };
 
 /** One file of an upload quote, as `POST /v1/uploads/estimate` accepts it. Unknown fields are ignored. */
 export const quoteFileSchema = z.object({
   name: z.string().min(1).max(1024),
-  size: z.number().int().nonnegative(),
-  pages: z.number().int().positive().optional(),
+  size: z.number().int().nonnegative().max(10 ** 13),
+  pages: z.number().int().positive().max(10_000_000).optional(),
   /** MIME type, so audio, video and images are priced as such even when the name has no extension. */
   type: z.string().max(255).optional(),
   /** Length in seconds when the client can read it; otherwise estimated from the size. */
@@ -110,18 +120,26 @@ export type QuoteFile = UploadMediaFile & {
 };
 
 /**
- * Pages a non-media file counts as: its known page count; else 1 for an image file and its size at
- * ASSUMED_BYTES_PER_PAGE for anything else (at least 1).
+ * Pages a non-media file counts as: its known page count; else 1 for an image file, its size over TEXT_PAGE_CHARS
+ * for a text file, and its size at ASSUMED_BYTES_PER_PAGE for anything else (at least 1).
  */
 export function quoteFilePages(file: { name: string; type?: string | null; size: number; pages?: number }): number {
-  const pages = file.pages ?? (isUploadImageFile(file) ? 1 : Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE));
+  const pages = file.pages
+    ?? (isUploadImageFile(file)
+      ? 1
+      // Text pages count characters (TEXT_PAGE_CHARS each); bytes bound them from above for UTF-8.
+      : isUploadTextFile(file)
+        ? Math.ceil(file.size / TEXT_PAGE_CHARS)
+        : Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE));
   return Math.max(1, Math.round(pages));
 }
 
-/** A file's known page mix and its trust: measured, or every page scanned for an image file. */
+/** A file's known page mix and its trust: measured, every page scanned for an image file, or all text for a text file. */
 function knownMix(file: QuoteFile): { mix: PageMix; confidence: number } | null {
-  if (file.mix) return { mix: file.mix, confidence: file.mixConfidence ?? 1 };
+  if (file.mix && file.mix.text + file.mix.complex + file.mix.scanned > 0) return { mix: file.mix, confidence: file.mixConfidence ?? 1 };
   if (isUploadImageFile(file)) return { mix: IMAGE_FILE_MIX, confidence: 1 };
+  // Text files have no scanned pages: their pages bill Fast in every profile that bills by page class.
+  if (isUploadTextFile(file)) return { mix: TEXT_FILE_MIX, confidence: 1 };
   return null;
 }
 

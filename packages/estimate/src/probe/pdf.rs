@@ -21,7 +21,7 @@ const MAX_SAMPLED_PAGES: usize = 24;
 /// Decompressed bytes of one content stream or form XObject.
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 /// Content bytes interpreted per page, page content and every form invocation together.
-const MAX_INTERPRETED_BYTES_PER_PAGE: usize = 32 * 1024 * 1024;
+const MAX_INTERPRETED_BYTES_PER_PAGE: usize = 16 * 1024 * 1024;
 /// Content operations interpreted per page, forms included.
 const MAX_OPERATIONS_PER_PAGE: usize = 200_000;
 /// Form XObject invocations per page.
@@ -30,6 +30,13 @@ const MAX_FORM_CALLS_PER_PAGE: usize = 2_000;
 const MAX_FORM_DEPTH: u32 = 3;
 /// Decompression limit per stream while loading the document (object and xref streams).
 const MAX_LOAD_STREAM_BYTES: usize = 16 * 1024 * 1024;
+/// Decompressed bytes of all object streams together, checked before the document is loaded: lopdf decodes and
+/// keeps every object stream at load time with only a per-stream limit.
+const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
+/// Decompressed page content and form bytes per document, cached forms included.
+const MAX_DOCUMENT_CONTENT_BYTES: usize = 32 * 1024 * 1024;
+/// Object streams inspected before loading; a document has a handful to a few thousand.
+const MAX_OBJECT_STREAMS: usize = 20_000;
 /// Estimator-only: what makes a text page `complex` (layout-aware extraction) rather than prose. Time, not credits.
 const COMPLEX_MIN_IMAGE_COVERAGE: f64 = 0.15;
 const COMPLEX_MIN_PATH_OPERATIONS: usize = 60;
@@ -50,6 +57,10 @@ pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     if !input.is_whole() {
         return result.note("PDF probes need the whole file; priced from size");
     }
+    if !object_streams_fit(input.head, MAX_OBJECT_STREAM_BYTES) {
+        return fallback_page_count(input.head, result)
+            .note("compressed object streams exceed the probe's budget; page mix not measured");
+    }
     let options = LoadOptions { max_decompressed_size: Some(MAX_LOAD_STREAM_BYTES), ..LoadOptions::default() };
     match Document::load_mem_with_options(input.head, options) {
         Ok(document) => probe_document(&card.page_raster_routing, &document, input.head.len(), result),
@@ -67,11 +78,16 @@ fn probe_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
         return result.note("encrypted PDF; page mix not measured");
     }
     let mut forms = FormCache::default();
-    let readings: Vec<PageReading> = sample_indices(pages.len(), MAX_SAMPLED_PAGES)
-        .into_iter()
-        .filter_map(|index| classify_page(routing, document, pages[index], &mut forms))
-        .collect();
-    let budget_hit = readings.iter().any(|reading| reading.exhausted);
+    let mut readings: Vec<PageReading> = Vec::new();
+    for index in sample_indices(pages.len(), MAX_SAMPLED_PAGES) {
+        if forms.document_budget_spent() {
+            break;
+        }
+        if let Some(reading) = classify_page(routing, document, pages[index], &mut forms) {
+            readings.push(reading);
+        }
+    }
+    let budget_hit = readings.iter().any(|reading| reading.exhausted) || forms.document_budget_spent();
     let drawn = !readings.is_empty()
         && readings.iter().all(|reading| reading.blank)
         && drawn_document(routing, document, file_bytes, pages.len());
@@ -136,19 +152,83 @@ fn fallback_page_count(bytes: &[u8], mut result: ProbeResult) -> ProbeResult {
     result
 }
 
-/// Decompressed form XObject content, once per object for the whole document.
+/// Decompressed form XObject content, once per object for the whole document, and the document-wide budget for
+/// decompressed content (page streams and forms).
 #[derive(Default)]
 struct FormCache {
     content: HashMap<ObjectId, Option<Rc<Vec<u8>>>>,
+    decompressed: usize,
 }
 
 impl FormCache {
-    fn get(&mut self, id: ObjectId, stream: &lopdf::Stream) -> Option<Rc<Vec<u8>>> {
-        self.content
-            .entry(id)
-            .or_insert_with(|| stream.decompressed_content_with_limit(MAX_STREAM_BYTES).ok().map(Rc::new))
-            .clone()
+    fn document_budget_spent(&self) -> bool {
+        self.decompressed >= MAX_DOCUMENT_CONTENT_BYTES
     }
+
+    /// Bytes still allowed for one stream: the per-stream limit or what is left of the document budget.
+    fn stream_limit(&self) -> usize {
+        MAX_STREAM_BYTES.min(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(self.decompressed))
+    }
+
+    fn charge(&mut self, bytes: usize) {
+        self.decompressed = self.decompressed.saturating_add(bytes);
+    }
+
+    fn get(&mut self, id: ObjectId, stream: &lopdf::Stream) -> Option<Rc<Vec<u8>>> {
+        if let Some(cached) = self.content.get(&id) {
+            return cached.clone();
+        }
+        let content = self.decompress(stream);
+        self.content.insert(id, content.clone());
+        content
+    }
+
+    fn decompress(&mut self, stream: &lopdf::Stream) -> Option<Rc<Vec<u8>>> {
+        let limit = self.stream_limit();
+        if limit == 0 {
+            return None;
+        }
+        let content = stream.decompressed_content_with_limit(limit).ok()?;
+        self.charge(content.len());
+        Some(Rc::new(content))
+    }
+}
+
+/// Whether every FlateDecode object stream (`/Type /ObjStm`) inflates within `budget` bytes in total. Scans the raw
+/// file for object stream dictionaries and inflates each with the remaining budget as its limit.
+fn object_streams_fit(bytes: &[u8], budget: usize) -> bool {
+    let mut remaining = budget;
+    let mut at = 0usize;
+    let mut seen = 0usize;
+    while let Some(found) = find_from(bytes, b"/ObjStm", at) {
+        seen += 1;
+        if seen > MAX_OBJECT_STREAMS {
+            return false;
+        }
+        at = found + 7;
+        let Some(keyword) = find_from(bytes, b"stream", at) else { break };
+        let mut start = keyword + 6;
+        if bytes.get(start) == Some(&b'\r') {
+            start += 1;
+        }
+        if bytes.get(start) == Some(&b'\n') {
+            start += 1;
+        }
+        let end = find_from(bytes, b"endstream", start).unwrap_or(bytes.len());
+        let data = &bytes[start.min(end)..end];
+        match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, remaining) {
+            Ok(inflated) => remaining -= inflated.len(),
+            Err(error) if matches!(error.status, miniz_oxide::inflate::TINFLStatus::HasMoreOutput) => return false,
+            // Not a zlib stream (another filter or damage): lopdf's per-stream limit applies to it.
+            Err(_) => remaining = remaining.saturating_sub(data.len()),
+        }
+        at = end;
+    }
+    true
+}
+
+fn find_from(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    bytes.get(from..)?.windows(needle.len()).position(|window| window == needle).map(|offset| from + offset)
 }
 
 /// Native words as the worker counts them on extracted text (`pageEvidenceWordCount`): runs of 2+ letters or
@@ -162,6 +242,8 @@ struct WordCounter {
     run_length: usize,
     /// Glyphs shown since the last text move, to tell a next-character move from a word gap.
     run_glyphs: f64,
+    /// Any non-space text shown: the page has a text layer (`text_bytes > 0` in the worker's page facts).
+    shown_text: bool,
 }
 
 impl WordCounter {
@@ -177,6 +259,9 @@ impl WordCounter {
             return;
         }
         let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
+        if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            self.shown_text = true;
+        }
         if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
             let glyphs = bytes.len() as f64 / 2.0;
             self.end_run();
@@ -226,6 +311,8 @@ struct PageStats {
     form_calls: usize,
     exhausted: bool,
     image_count: usize,
+    /// Every image drawn, however small (`image_count` in the worker's page facts counts them all).
+    any_images: usize,
     image_coverage: f64,
     largest_image_coverage: f64,
 }
@@ -347,7 +434,8 @@ struct PageReading {
 }
 
 fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache) -> Option<PageReading> {
-    let content = document.get_page_content_with_limit(page_id, MAX_STREAM_BYTES).ok()?;
+    let content = document.get_page_content_with_limit(page_id, forms.stream_limit()).ok()?;
+    forms.charge(content.len());
     let resources = page_resources(document, page_id);
     let area = page_area(document, page_id);
     let mut stats = PageStats::default();
@@ -355,7 +443,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
     Some(PageReading {
         class: classify(routing, &stats),
-        blank: stats.words.words() == 0.0 && stats.image_count == 0,
+        blank: !stats.words.shown_text && stats.any_images == 0,
         exhausted: stats.exhausted,
     })
 }
@@ -379,10 +467,11 @@ fn drawn_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
 
 fn classify(routing: &PageRasterRouting, stats: &PageStats) -> PageClass {
     let words = stats.words.words();
-    // A page with neither words nor images is blank to the worker (it bills Fast) unless the whole document is
-    // drawn content, which probe_document decides.
-    if words == 0.0 && stats.image_count == 0 {
-        return PageClass::Text;
+    if !stats.words.shown_text {
+        // No text layer: with any image the page bills Rich in auto and good (page-base-fee.ts, page facts with no
+        // text bytes and an image); without one it is blank (Fast) unless the whole document is drawn content,
+        // which probe_document decides.
+        return if stats.any_images > 0 { PageClass::Scanned } else { PageClass::Text };
     }
     let raster = (words == 0.0
         && (stats.largest_image_coverage >= routing.raster_page_min_largest_image_coverage
@@ -407,6 +496,7 @@ struct Context<'a, 'f> {
 
 impl<'a> Context<'a, '_> {
     fn record_image(&self, stats: &mut PageStats, ctm: &Matrix, width: f64, height: f64) {
+        stats.any_images += 1;
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
         if !coverage.is_finite()
@@ -509,7 +599,7 @@ impl<'a> Context<'a, '_> {
                             // still bounded by the per-page byte budget.
                             let form_content = match id {
                                 Some(id) => self.forms.get(id, xobject),
-                                None => xobject.decompressed_content_with_limit(MAX_STREAM_BYTES).ok().map(Rc::new),
+                                None => self.forms.decompress(xobject),
                             };
                             let Some(form_content) = form_content else { continue };
                             let matrix = xobject
@@ -557,8 +647,10 @@ mod tests {
     #[test]
     fn classifies_like_the_worker_router() {
         let page = |words: f64, largest: f64, total: f64, images: usize| {
-            let mut stats = PageStats { largest_image_coverage: largest, image_coverage: total, image_count: images, ..PageStats::default() };
+            let mut stats =
+                PageStats { largest_image_coverage: largest, image_coverage: total, image_count: images, any_images: images, ..PageStats::default() };
             stats.words.runs = words;
+            stats.words.shown_text = words > 0.0;
             stats
         };
         let routing = routing();
@@ -571,6 +663,10 @@ mod tests {
         let mut drawn = page(0.0, 0.0, 0.0, 0);
         drawn.path_operations = 5_000;
         assert_eq!(classify(&routing, &drawn), PageClass::Text);
+        // No text layer and any image, however small, bills Rich.
+        let mut logo_only = page(0.0, 0.0, 0.0, 0);
+        logo_only.any_images = 1;
+        assert_eq!(classify(&routing, &logo_only), PageClass::Scanned);
     }
 
     #[test]

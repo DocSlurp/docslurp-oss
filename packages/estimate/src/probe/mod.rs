@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::card::{Card, PageMix};
 use crate::quote::QuoteFile;
 
-/// PDFs and Office files up to this size are read whole; larger ones are priced from size.
-pub const WHOLE_FILE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// PDFs and Office files up to this size are read whole; larger ones are priced from size. Parsing needs about
+/// twice the file in memory, which must stay well inside the module's memory limit.
+pub const WHOLE_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// Text files up to this size are read whole to count their pages; larger ones are priced from size.
+pub const TEXT_WHOLE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Bytes read from the start of a file that is not read whole (headers, magic numbers).
 pub const HEAD_BYTES: u64 = 4 * 1024 * 1024;
 /// Bytes read from the end of a media file (MP4 `moov` boxes and Ogg final pages are often there).
@@ -147,6 +150,9 @@ pub fn read_plan(card: &Card, meta: &FileMeta) -> ReadPlan {
     if wants_whole {
         return if size <= WHOLE_FILE_MAX_BYTES { ReadPlan { head: size, tail: 0 } } else { ReadPlan { head: SNIFF_BYTES.min(size), tail: 0 } };
     }
+    if crate::price::is_text_file(card, &meta.name, meta.mime_type.as_deref()) {
+        return if size <= TEXT_WHOLE_MAX_BYTES { ReadPlan { head: size, tail: 0 } } else { ReadPlan { head: SNIFF_BYTES.min(size), tail: 0 } };
+    }
     // A file with neither extension nor type may be media: read it as media, which also sniffs PDFs.
     if is_media(card, meta) || (extension.is_empty() && mime.is_empty()) {
         if size <= HEAD_BYTES + MEDIA_TAIL_BYTES {
@@ -226,7 +232,6 @@ impl<'a> ProbeInput<'a> {
 pub fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     let head = input.head;
     let extension = input.extension();
-    let mime = input.mime();
 
     if head.starts_with(b"%PDF-") || find(head, b"%PDF-", 1024).is_some() {
         return pdf::probe(card, input);
@@ -240,22 +245,25 @@ pub fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     if let Some(result) = media::probe(input) {
         return result;
     }
-    match extension.as_str() {
-        "pdf" => pdf::probe(card, input),
-        "txt" | "md" | "markdown" | "rst" | "csv" | "tsv" | "json" | "jsonl" | "xml" | "tex" => text(&extension, 0.9),
-        "html" | "htm" | "mhtml" | "rtf" => text(&extension, 0.7),
-        _ if mime.starts_with("text/") => text(if extension.is_empty() { "text" } else { &extension }, 0.8),
-        _ => ProbeResult::new(ProbeKind::Unknown, if extension.is_empty() { "unknown" } else { &extension }, None)
-            .note("format not recognized; priced from its name, type and size"),
+    if extension == "pdf" {
+        return pdf::probe(card, input);
     }
+    if crate::price::is_text_file(card, input.name, input.mime_type) {
+        return text(card, input, if extension.is_empty() { "text" } else { &extension });
+    }
+    ProbeResult::new(ProbeKind::Unknown, if extension.is_empty() { "unknown" } else { &extension }, None)
+        .note("format not recognized; priced from its name, type and size")
 }
 
-/// Text formats have a text layer by definition; their page count is left to the server's size assumption.
-/// HTML and rich text can embed images the pipeline reads, so they are trusted less.
-fn text(format: &str, confidence: f64) -> ProbeResult {
+/// Text files: pages counted from the whole text exactly as the API counts them. Their page mix needs no probe
+/// (the quote rules treat text files as text pages).
+fn text(card: &Card, input: &ProbeInput<'_>, format: &str) -> ProbeResult {
     let mut result = ProbeResult::new(ProbeKind::Text, format, None);
-    result.mix = Some(PageMix::new(1.0, 0.0, 0.0));
-    result.mix_confidence = Some(confidence);
+    if input.is_whole() && input.size <= TEXT_WHOLE_MAX_BYTES {
+        result.pages = Some(crate::price::text_page_count(card, input.head));
+    } else {
+        result.notes.push("text file larger than the probe limit; pages estimated from size".into());
+    }
     result
 }
 
