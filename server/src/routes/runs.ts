@@ -9,7 +9,7 @@ import {
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
 
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, isPlatformAdminActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -168,7 +168,7 @@ export const runsRoutes = new Hono()
         return apiStatusError(c, 404, "Run not found");
       }
     }
-    const snapshot = await getRunProgress(c.req.param("runId"), userId);
+    const snapshot = await getRunProgress(c.req.param("runId"), userId, { operator: await isPlatformAdminActor(actor) });
 
     if (!snapshot) {
       return apiStatusError(c, 404, "Run not found");
@@ -187,13 +187,14 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 404, "Run not found");
     }
     c.header("X-Accel-Buffering", "no");
+    const operator = await isPlatformAdminActor(actor);
     const response = streamSSE(c, async stream => {
       await streamRunProgressSnapshots({
         stream,
         subscribe: invalidate => listenForRunEvents(event => { if (event.runId === runId) invalidate(); }, { runId }),
         snapshot: async () => {
           if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", "search", "artifacts"])) return null;
-          const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0 });
+          const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0, operator });
           if (!snapshot || !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor)) return null;
           return snapshot;
         },
@@ -240,6 +241,7 @@ export const runsRoutes = new Hono()
 
     c.header("Cache-Control", "no-cache");
     c.header("X-Accel-Buffering", "no");
+    const operator = await isPlatformAdminActor(actor);
 
     return streamSSE(c, async (stream) => {
       let aborted = stream.aborted;
@@ -247,7 +249,7 @@ export const runsRoutes = new Hono()
       const abortSignal = new Promise<void>(resolve => { resolveAbort = resolve; });
       stream.onAbort(() => { aborted = true; resolveAbort(); });
       async function authorizedSnapshot() {
-        const snapshot = await getRunProgress(runId, userId);
+        const snapshot = await getRunProgress(runId, userId, { operator });
         if (!snapshot || (actor.type === "apiKey" && !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor))) return null;
         return snapshot;
       }

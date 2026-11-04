@@ -2,6 +2,7 @@ import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readWorkspaceSuggestions } from "../services/workspace-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
 import { sql } from "../db.js";
+import { isConfiguredAdminUserSql } from "../lib/admin-emails.js";
 import { workspaceUsageTotals, runUsageCostSummaries } from "../services/usage-attribution.js";
 import { getBillingOverview } from "../services/billing/overview.js";
 import { getWorkspace } from "../services/workspaces.js";
@@ -79,7 +80,7 @@ export const realtimeBackend: RealtimeBackend = {
           from workspace_runs r join workspaces w on w.id = r.workspace_id
           where r.id = ${resource.runId} and r.org_id = ${orgId}`;
         if (!row) throw new Error("not_found");
-        return await buildRunProgressSnapshot(mapWorkspaceRun(row), { recentEventLimit: 100, readOnly: true });
+        return await buildRunProgressSnapshot(mapWorkspaceRun(row), { recentEventLimit: 100, readOnly: true, operator: await isConfiguredAdminUserSql(sql, userId) });
       }
       case "activity": {
         const runs = await sql<WorkspaceRunRow[]>`

@@ -357,7 +357,7 @@ describe("API-key run reads", () => {
     expect(body).toContain("event: snapshot");
     expect(body).toContain('"completed":20');
     expect(response.headers.get("cache-control")).toBe("no-cache, no-transform");
-    expect(getRunProgressMock).toHaveBeenCalledWith("run-1", "user-1", { recentEventLimit: 0 });
+    expect(getRunProgressMock).toHaveBeenCalledWith("run-1", "user-1", { recentEventLimit: 0, operator: false });
     expect(isApiKeyLiveMock).toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
   });

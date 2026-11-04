@@ -6,6 +6,7 @@ import {
   type WorkspaceRun,
   type WorkspaceRunLifecycleStatus,
   type WorkspaceRunProgressModule,
+  type WorkspaceRunProgressSnapshot,
   type WorkspaceRunProgressTone,
   type WorkspaceRunStageState,
   type WorkspaceRunTemporal,
@@ -337,4 +338,25 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
       peakRssBytes: args.peakRssBytes,
     },
   };
+}
+
+/** Raw `stats` keys that describe the worker machine rather than the customer's run. */
+const OPERATOR_STAT_KEY = /^(cpu|rss|peakRss|worker|region|machine)/i;
+
+/**
+ * Platform-operator-only diagnostics: worker CPU and RAM per run and stage, and
+ * which worker classes and regions served it. Customers (including org owners
+ * and admins) see cost, speed and page counts, not the machines behind them, so
+ * this is removed on the server for every caller that is not a platform
+ * operator rather than hidden in a client. Returns a copy; the input is not mutated.
+ */
+export function redactOperatorRunFields(snapshot: WorkspaceRunProgressSnapshot): WorkspaceRunProgressSnapshot {
+  const stats = Object.fromEntries(Object.entries(snapshot.stats).filter(([key]) => !OPERATOR_STAT_KEY.test(key)));
+  const progress = snapshot.progress && {
+    ...snapshot.progress,
+    stageRollups: snapshot.progress.stageRollups.map((rollup) => ({ ...rollup, cpuMs: 0, peakRssBytes: 0 })),
+    usageTotals: { ...snapshot.progress.usageTotals, workerClasses: [], regions: [] },
+    resourceTotals: { ...snapshot.progress.resourceTotals, cpuUserMs: 0, cpuSystemMs: 0, cpuTotalMs: 0, rssDeltaBytes: 0, peakRssBytes: 0 },
+  };
+  return { ...snapshot, stats, progress };
 }

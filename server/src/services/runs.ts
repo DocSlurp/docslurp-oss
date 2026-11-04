@@ -36,7 +36,7 @@ import { sql } from "../db.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
 import { getPipelineTemporalSnapshot } from "../lib/temporal.js";
-import { buildProgressModule } from "./progress-snapshot.js";
+import { buildProgressModule, redactOperatorRunFields } from "./progress-snapshot.js";
 import {
   buildRunProcessingPreview,
   getRunProcessingPreview,
@@ -893,6 +893,11 @@ export async function buildRunProgressSnapshot(
     recentEventLimit?: number;
     /** Observe persisted state without querying/reconciling the executor. */
     readOnly?: boolean;
+    /**
+     * The caller is a platform operator and may see worker CPU/RAM, regions and
+     * worker classes. Anyone else gets them removed here, so the default is the safe one.
+     */
+    operator?: boolean;
   },
 ): Promise<WorkspaceRunProgressSnapshot> {
   const recentEventLimit = options?.recentEventLimit ?? 100;
@@ -965,7 +970,7 @@ export async function buildRunProgressSnapshot(
     ...cost,
   });
 
-  return workspaceRunProgressSnapshotSchema.parse({
+  const snapshot = workspaceRunProgressSnapshotSchema.parse({
     // One cost on every surface: the run record carries progress.usageTotals.costCents.
     run: { ...reconciledRun, costCents: cost.costCents, computeEstimated: cost.computeEstimated, billedCostCents: cost.billedCostCents },
     stages,
@@ -975,6 +980,7 @@ export async function buildRunProgressSnapshot(
     stats,
     artifacts: reconciledRun.artifacts ?? {},
   });
+  return options?.operator === true ? snapshot : redactOperatorRunFields(snapshot);
 }
 
 export async function getRunProgress(
@@ -982,6 +988,8 @@ export async function getRunProgress(
   userId: string,
   options?: {
     recentEventLimit?: number;
+    /** Platform operator: keep the worker diagnostics (see buildRunProgressSnapshot). */
+    operator?: boolean;
   },
 ): Promise<WorkspaceRunProgressSnapshot | null> {
   const run = await getRun(runId, userId, { cost: false });
