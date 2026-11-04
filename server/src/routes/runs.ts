@@ -31,6 +31,7 @@ import {
   reprocessRun,
   retryRun
 } from "../services/runs.js";
+import { redactOperatorEvent } from "../services/progress-snapshot.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
@@ -231,7 +232,8 @@ export const runsRoutes = new Hono()
       after,
       limit: limit ? Number(limit) : undefined
     });
-    return c.json({ events });
+    // Heartbeat events carry worker CPU and RAM: operators only, like the progress snapshot.
+    return c.json({ events: await isPlatformAdminActor(actor) ? events : events.map(redactOperatorEvent) });
   })
   .get("/:runId/events/stream", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -265,7 +267,7 @@ export const runsRoutes = new Hono()
         // Validate current access before sending either events or their snapshot.
         const snapshot = await authorizedSnapshot();
         if (!snapshot || aborted) return;
-        await stream.writeSSE({ id: event.id, event: event.type, data: JSON.stringify(event) });
+        await stream.writeSSE({ id: event.id, event: event.type, data: JSON.stringify(operator ? event : redactOperatorEvent(event)) });
         await stream.writeSSE({ event: "snapshot", data: JSON.stringify(snapshot) });
       }, { runId });
 

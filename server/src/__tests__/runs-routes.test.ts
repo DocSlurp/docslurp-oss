@@ -342,6 +342,32 @@ describe("API-key run reads", () => {
     expect(await response.json()).toEqual({ events: [{ id: "event-1", type: "run.progress" }] });
     expect(listRunEventsMock).toHaveBeenCalledWith({ runId: "run-1", userId: "user-1", after: "2026-10-02T00:00:00.000Z", limit: 5 });
   });
+  const heartbeat = {
+    id: "event-hb", runId: "run-1", type: "heartbeat", stage: "extract", message: null,
+    progress: { completedDocumentStages: 3 }, stats: { rssMb: 812, pages: 12 },
+    payload: { kind: "heartbeat", metrics: { costCents: 2, rssBytes: 123456789, peakRssBytes: 234567890, cpuUserMs: 910, cpuSystemMs: 80 } },
+  };
+  it("withholds worker CPU and RAM from heartbeat events returned by polling", async () => {
+    listRunEventsMock.mockResolvedValue([heartbeat]);
+    const text = await (await keyApp().request("/runs/run-1/events")).text();
+    expect(text).not.toMatch(/rss|cpu|123456789|234567890/i);
+    expect(JSON.parse(text).events[0]).toMatchObject({ id: "event-hb", stats: { pages: 12 }, payload: { metrics: { costCents: 2 } }, progress: { completedDocumentStages: 3 } });
+  });
+  it("withholds worker CPU and RAM from heartbeat events pushed on the event stream", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    listenForRunEventsMock.mockResolvedValue({ close });
+    const response = await keyApp().request("/runs/run-1/events/stream");
+    const reader = response.body!.getReader();
+    const seen = [new TextDecoder().decode((await reader.read()).value)];
+    await vi.waitFor(() => expect(listenForRunEventsMock).toHaveBeenCalledOnce());
+    const delta = listenForRunEventsMock.mock.calls[0][0]({ ...heartbeat, runId: "run-1" });
+    seen.push(new TextDecoder().decode((await reader.read()).value), new TextDecoder().decode((await reader.read()).value));
+    await delta;
+    await reader.cancel();
+    const text = seen.join("");
+    expect(text).toContain("event: heartbeat");
+    expect(text).not.toMatch(/rss|cpu|123456789|234567890/i);
+  });
   it("sends snapshots and run deltas, then releases its listener on disconnect", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     listenForRunEventsMock.mockResolvedValue({ close });
