@@ -114,7 +114,7 @@ export interface RunCreationDeps {
 }
 
 /** Version rows read for `versionsOf` sources. */
-type SourceDocumentRow = DocumentRow & { file_size: number | string | null; metadata: Record<string, unknown> | null };
+type SourceDocumentRow = DocumentRow & { file_size: number | string | null; metadata: Record<string, unknown> | null; file_facts?: unknown };
 
 // Some drivers hand jsonb back as text; accept both so a copy never double-encodes.
 function sourceMetadata(value: unknown): Record<string, never> {
@@ -751,7 +751,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
-            status, extraction_mode, page_count, source_sha256,
+            status, extraction_mode, page_count, source_sha256, file_facts,
             deduped_from_document_id, dedup_scope, version_number, previous_version_id,
             canonical_id, source_path, file_size, metadata, indexing_mode
           )
@@ -762,12 +762,14 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${input.workspaceId},
             ${runId},
             ${filename},
-            ${file.mimeType},
+            -- The type the bytes were sniffed as (intake's one decision); the declared type is kept in file_facts.
+            ${metadata.fileFacts.mimeType},
             ${file.sourceKey},
             'queued',
             'hybrid',
             ${metadata.pageCount},
             ${metadata.sourceSha256},
+            ${sql.json(JSON.parse(JSON.stringify(metadata.fileFacts)))},
             -- Point at the vector owner, not an intermediate copy, so purge keeps
             -- the owner's vectors while any copy still uses them.
             ${dedupCandidate?.vector_owner_id ?? null},
@@ -834,7 +836,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
-            status, extraction_mode, page_count, file_size, source_sha256,
+            status, extraction_mode, page_count, file_size, source_sha256, file_facts,
             canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
           values (
@@ -848,10 +850,11 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${source.source_key},
             'queued',
             ${source.extraction_mode},
-            -- Stages size their work from page_count (the worker never rewrites it), so keep the source's.
+            -- A new version starts from the source's page_count; the worker re-counts Office and EPUB pages after conversion.
             ${source.page_count ?? 0},
             ${Number(source.file_size ?? 0) || 0},
             ${source.source_sha256 ?? null},
+            ${source.file_facts ? sql.json(source.file_facts as never) : null},
             ${canonicalId},
             ${(latest?.version_number ?? source.version_number ?? 1) + 1},
             ${latest?.id ?? source.id},

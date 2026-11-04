@@ -72,10 +72,74 @@ export function isUploadTextFile(file: { name: string; type?: string | null }): 
   return isGenericType(type) && TEXT_EXTENSIONS.has(extensionOf(file.name));
 }
 
-/** Pages of a text file: one per TEXT_PAGE_LINES lines or per TEXT_PAGE_CHARS characters, whichever is more. */
-export function textPageCount(text: string): number {
-  const lines = text.split(/\r?\n/).length;
-  const chars = text.trim().length;
+/** East Asian characters carry about three times the content of a Latin one, so each counts as this many characters toward a page. */
+export const TEXT_PAGE_CJK_WEIGHT = 3;
+
+function isCjkCodePoint(code: number): boolean {
+  return (code >= 0x3040 && code <= 0x30ff) || (code >= 0x3400 && code <= 0x4dbf) || (code >= 0x4e00 && code <= 0x9fff)
+    || (code >= 0xac00 && code <= 0xd7af) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0xff66 && code <= 0xff9f)
+    || (code >= 0x20000 && code <= 0x2fa1f);
+}
+
+function asciiLower(code: number): number {
+  return code >= 65 && code <= 90 ? code + 32 : code;
+}
+
+/** Index of lower-case ASCII `needle` in `text` ignoring ASCII case, from `from`; -1 when absent. */
+function indexOfAsciiInsensitive(text: string, needle: string, from: number): number {
+  for (let at = from; at + needle.length <= text.length; at++) {
+    let hit = true;
+    for (let offset = 0; offset < needle.length && hit; offset++) hit = asciiLower(text.charCodeAt(at + offset)) === needle.charCodeAt(offset);
+    if (hit) return at;
+  }
+  return -1;
+}
+
+/** The visible text of HTML: tags, comments, scripts and styles removed. Markup is not content a page holds. */
+export function stripMarkup(text: string): string {
+  let out = "";
+  let at = 0;
+  while (at < text.length) {
+    const open = text.indexOf("<", at);
+    if (open < 0) { out += text.slice(at); break; }
+    out += text.slice(at, open);
+    if (text.startsWith("<!--", open)) {
+      const close = text.indexOf("-->", open + 4);
+      at = close < 0 ? text.length : close + 3;
+      continue;
+    }
+    const block = ["script", "style"].find((name) => {
+      if (indexOfAsciiInsensitive(text.slice(open, open + name.length + 2), `<${name}`, 0) !== 0) return false;
+      const next = text.charAt(open + name.length + 1);
+      return next === ">" || next === "/" || next === " " || next === "\t" || next === "\n" || next === "\r" || next === "\f";
+    });
+    if (block) {
+      const close = indexOfAsciiInsensitive(text, `</${block}`, open);
+      const end = close < 0 ? -1 : text.indexOf(">", close);
+      at = end < 0 ? text.length : end + 1;
+      continue;
+    }
+    const end = text.indexOf(">", open);
+    const first = text.charCodeAt(open + 1);
+    const tagStart = first === 33 || first === 47 || first === 63 || (asciiLower(first) >= 97 && asciiLower(first) <= 122);
+    if (end < 0 || !tagStart) { out += "<"; at = open + 1; continue; }
+    out += "\n";
+    at = end + 1;
+  }
+  return out;
+}
+
+/**
+ * Pages of a text file: one per TEXT_PAGE_LINES lines or per TEXT_PAGE_CHARS characters, whichever is more. East Asian
+ * characters count TEXT_PAGE_CJK_WEIGHT each. With `markup` (HTML) the tags, scripts and styles are removed first and
+ * only non-blank lines count, so markup and inline code do not bill as pages of reading.
+ */
+export function textPageCount(text: string, options: { markup?: boolean } = {}): number {
+  const visible = options.markup ? stripMarkup(text) : text;
+  const lines = options.markup ? visible.split(/\r?\n/).filter((line) => line.trim() !== "").length : visible.split(/\r?\n/).length;
+  const trimmed = visible.trim();
+  let chars = trimmed.length;
+  for (const char of trimmed) if (isCjkCodePoint(char.codePointAt(0)!)) chars += TEXT_PAGE_CJK_WEIGHT - 1;
   return Math.max(1, Math.ceil(lines / TEXT_PAGE_LINES), Math.ceil(chars / TEXT_PAGE_CHARS));
 }
 

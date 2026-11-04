@@ -9,19 +9,29 @@ import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 import { env as apiEnv } from "../config.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
-import { s3ClientConfig, TEXT_PAGE_MIME_PREFIXES, textPageCount } from "@docslurp/shared";
+import {
+  decodeTextBytes,
+  fileFactsFor,
+  s3ClientConfig,
+  TEXT_PAGE_MIME_PREFIXES,
+  textPageCount,
+  type FileEncoding,
+  type FileFacts,
+} from "@docslurp/shared";
 
 export type SourceMetadata = {
   pageCount: number;
   sourceSha256: string;
+  /** What the bytes are, sniffed once here; the document is stored (and routed and billed) under `fileFacts.mimeType`. */
+  fileFacts: FileFacts;
 };
 
 /** The uploaded file cannot be read as the format it claims (corrupt, truncated or password-protected). A client error, not a server fault. */
 export class UnreadableSourceError extends Error {
   readonly code = "unreadable_source";
   readonly statusCode = 422;
-  constructor(readonly filename: string, readonly detail: string) {
-    super(`${filename} could not be read as a PDF: ${detail}`);
+  constructor(readonly filename: string, readonly detail: string, what = "a PDF") {
+    super(`${filename} could not be read as ${what}: ${detail}`);
     this.name = "UnreadableSourceError";
   }
 }
@@ -67,6 +77,7 @@ export function parsePdfInfoPageCount(output: string): number | null {
 export function estimateNonPdfPageCount(
   contentType: string,
   bytes: Uint8Array,
+  encoding?: FileEncoding | null,
 ): number {
   if (bytes.length === 0) {
     return 1;
@@ -77,7 +88,8 @@ export function estimateNonPdfPageCount(
     return 1;
   }
 
-  return textPageCount(Buffer.from(bytes).toString("utf8"));
+  // Decoded by the file's own encoding (a UTF-16 CSV is not UTF-8), with HTML markup removed.
+  return textPageCount(decodeTextBytes(bytes, encoding), { markup: contentType.startsWith("text/html") });
 }
 
 const PDFINFO_ENV = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C" } as const;
@@ -139,7 +151,18 @@ export async function resolveSourceMetadata(file: {
 }): Promise<SourceMetadata> {
   const bytes = await downloadSourceBytes(file.sourceKey);
   const sourceSha256 = sha256Hex(bytes);
-  if (file.mimeType === "application/pdf") {
+  const fileFacts = fileFactsFor(bytes, { filename: file.filename, declaredMimeType: file.mimeType });
+  // A declaration the bytes contradict (text declared as a PDF, a plain ZIP declared as a DOCX) is refused for this file
+  // alone (partial ingest) instead of reaching a parser that would trust the label.
+  if (fileFacts.mismatch === "unresolved") {
+    throw new UnreadableSourceError(
+      file.filename,
+      `contents are ${fileFacts.sniffedMimeType ?? "unrecognized"}, not the declared ${fileFacts.declaredMimeType ?? file.mimeType}`,
+      "the declared type",
+    );
+  }
+  const mimeType = fileFacts.mimeType;
+  if (mimeType === "application/pdf") {
     const directory = await mkdtemp(path.join(tmpdir(), "docslurp-pagecount-"));
     const tempFile = path.join(
       directory,
@@ -159,14 +182,15 @@ export async function resolveSourceMetadata(file: {
       }
       const pageCount = parsePdfInfoPageCount(output);
       if (pageCount === null) throw new UnreadableSourceError(file.filename, "page count unavailable; refusing to ingest an incomplete document");
-      return { pageCount, sourceSha256 };
+      return { pageCount, sourceSha256, fileFacts };
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
   }
 
   return {
-    pageCount: estimateNonPdfPageCount(file.mimeType, bytes),
+    pageCount: estimateNonPdfPageCount(mimeType, bytes, fileFacts.encoding),
     sourceSha256,
+    fileFacts,
   };
 }
