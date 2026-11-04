@@ -5,13 +5,15 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * Keyword search over real text in several languages, against the migrated schema (migration 0121's
- * `ts_folded` column beside the English `ts_content`). Each case is a query a user would type and the
+ * expression leg beside the English `ts_content`, with and without the GIN expression index that
+ * server/db/folded-search-index.mjs builds after the migration). Each case is a query a user would type and the
  * chunk that must be found; the English-only configuration alone failed the accent, Cyrillic-case and
  * CJK cases, and the ASCII backoff deleted every non-ASCII letter from the query.
  */
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let search: typeof import("../services/search.js");
+let foldedIndex: typeof import("../search/folded-index.js");
 
 const CORPUS: Record<string, string> = {
   en: "Refunds are not allowed after thirty days. The class action settlement covers late fees.",
@@ -29,6 +31,7 @@ beforeAll(async () => {
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));
   search = await import("../services/search.js");
+  foldedIndex = await import("../search/folded-index.js");
 
   await sql.unsafe("set session_replication_role = replica");
   const languages = Object.keys(CORPUS);
@@ -61,7 +64,20 @@ afterAll(async () => {
 const find = async (query: string) =>
   (await search.textSearch(query, "u1", { filters: { workspaceId: "ws-a" }, limit: 5 })).map((chunk) => chunk.id);
 
-describe("multilingual keyword search", () => {
+describe.each([
+  ["before the folded index is built", false],
+  ["with the folded expression index", true],
+] as const)("multilingual keyword search %s", (_label, indexed) => {
+  beforeAll(async () => {
+    if (indexed) {
+      // The same statement as folded-search-index.mjs, minus CONCURRENTLY (the test owns its database).
+      const { INDEX_EXPRESSION, INDEX_NAME } = await import("../../db/folded-search-index.mjs");
+      await sql.unsafe(`create index ${INDEX_NAME} on document_chunks using gin ((${INDEX_EXPRESSION}))`);
+    }
+    foldedIndex.resetFoldedIndexCache();
+    expect(await foldedIndex.foldedIndexReady()).toBe(indexed);
+  });
+
   it.each([
     ["English control", "refunds after thirty days", "c-en"],
     ["negation is kept", "refunds not allowed", "c-en"],
@@ -109,5 +125,25 @@ describe("multilingual keyword search", () => {
   it("builds the folded backoff from words and CJK character pairs", () => {
     expect(search.buildFoldedLexicalBackoffQuery("日本の首都")).toBe("('日' <-> '本') | ('本' <-> 'の') | ('の' <-> '首') | ('首' <-> '都')");
     expect(search.buildFoldedLexicalBackoffQuery("Müller 契約")).toBe("'muller' | ('契' <-> '約')");
+  });
+
+  if (indexed) it("serves the folded leg from the expression index", async () => {
+    const plan = await sql.begin(async (tx) => {
+      await tx.unsafe("set local enable_seqscan = off");
+      return await tx.unsafe(
+        "explain select id from document_chunks c where to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) @@ websearch_to_tsquery('simple', docslurp_fold_text('Müller'))",
+      );
+    });
+    expect(JSON.stringify(plan)).toContain("document_chunks_ts_folded_expr_idx");
+  });
+});
+
+describe("folded index settings", () => {
+  it("bounds the unindexed leg by its own timeout", async () => {
+    const { foldedUnindexedTimeoutMs } = foldedIndex;
+    expect(foldedUnindexedTimeoutMs({} as NodeJS.ProcessEnv)).toBe(2_000);
+    expect(foldedUnindexedTimeoutMs({ SEARCH_FOLDED_UNINDEXED_TIMEOUT_MS: "50" } as NodeJS.ProcessEnv)).toBe(100);
+    expect(foldedUnindexedTimeoutMs({ SEARCH_FOLDED_UNINDEXED_TIMEOUT_MS: "999999" } as NodeJS.ProcessEnv)).toBe(60_000);
+    expect(foldedUnindexedTimeoutMs({ SEARCH_FOLDED_UNINDEXED_TIMEOUT_MS: "nope" } as NodeJS.ProcessEnv)).toBe(2_000);
   });
 });

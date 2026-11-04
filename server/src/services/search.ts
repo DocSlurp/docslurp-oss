@@ -83,6 +83,7 @@ import {
   searchStatementTimeoutMs,
   withSearchSignal,
 } from "../search/query-bounds.js";
+import { FOLDED_INDEX_NAME, foldedIndexReady, foldedUnindexedTimeoutMs } from "../search/folded-index.js";
 import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 
 export { CrossWorkspaceScopeError, MissingWorkspaceScopeError, WorkspaceNotFoundError } from "../search/session-setup.js";
@@ -1160,9 +1161,11 @@ export function lexicalCandidateLimit(env: NodeJS.ProcessEnv = process.env): num
 }
 
 /**
- * `websearch`, `plain` and `tsquery` read the English-stemmed `ts_content`. `folded` and `folded-tsquery`
- * read `ts_folded` ('simple' configuration over accent-folded, CJK-split text; migration 0121), which has no
- * stop words, so negations survive, and matches accent variants and CJK substrings.
+ * `websearch`, `plain` and `tsquery` read the English-stemmed `ts_content`. `folded` and `folded-tsquery` read
+ * to_tsvector('simple', docslurp_fold_text(text)): the 'simple' configuration over accent-folded, CJK-split text
+ * (migration 0121), which has no stop words, so negations survive, and matches accent variants and CJK substrings.
+ * The expression must stay character-identical to the GIN index built by scripts/folded-search-index.mjs, or the planner
+ * cannot use it; without that index these legs scan the workspace's chunks and are cut off by the search statement timeout.
  */
 type LexicalParser = "websearch" | "plain" | "tsquery" | "folded" | "folded-tsquery";
 
@@ -1229,8 +1232,9 @@ export function rankedLexicalChunks(client: SqlClient, args: {
       `;    case "folded":
       return client<ChunkRow[]>`
         with candidates as materialized (
-          select c.id, c.ts_folded from document_chunks c join documents d on d.id = c.document_id
-          where ${where} and c.ts_folded @@ websearch_to_tsquery('simple', docslurp_fold_text(${query}))
+          select c.id, to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) as ts_folded
+          from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) @@ websearch_to_tsquery('simple', docslurp_fold_text(${query}))
           limit ${candidates}
         ), ranked as (
           select id, ts_rank_cd(ts_folded, websearch_to_tsquery('simple', docslurp_fold_text(${query}))) as score
@@ -1241,8 +1245,9 @@ export function rankedLexicalChunks(client: SqlClient, args: {
     case "folded-tsquery":
       return client<ChunkRow[]>`
         with candidates as materialized (
-          select c.id, c.ts_folded from document_chunks c join documents d on d.id = c.document_id
-          where ${where} and c.ts_folded @@ to_tsquery('simple', ${query})
+          select c.id, to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) as ts_folded
+          from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) @@ to_tsquery('simple', ${query})
           limit ${candidates}
         ), ranked as (
           select id, ts_rank_cd(ts_folded, to_tsquery('simple', ${query})) as score
@@ -1260,8 +1265,26 @@ export async function textSearch(
 ): Promise<SearchChunk[]> {
   const limit = options.limit ?? 20;
   const where = buildChunkSearchWhere(options.filters, options.runId);
-  const lexical = (parser: LexicalParser, text: string) =>
-    boundedSearchQuery((client) => rankedLexicalChunks(client, { where, parser, query: text, limit }));
+  const lexical = async (parser: LexicalParser, text: string) => {
+    if (parser !== "folded" && parser !== "folded-tsquery") {
+      return await boundedSearchQuery((client) => rankedLexicalChunks(client, { where, parser, query: text, limit }));
+    }
+    // The folded leg's GIN index is built after the migration (scripts/folded-search-index.mjs). Until then the leg
+    // scans the workspace's chunks, so it runs on a short timeout and is dropped, not retried, when it is cut off:
+    // the English results of the same search must survive it.
+    const indexed = await foldedIndexReady();
+    try {
+      return await boundedSearchQuery(
+        (client) => rankedLexicalChunks(client, { where, parser, query: text, limit }),
+        indexed ? {} : { timeoutMs: Math.min(foldedUnindexedTimeoutMs(), searchStatementTimeoutMs() || Infinity) },
+      );
+    } catch (error) {
+      if (indexed || !isSearchStatementTimeout(error)) throw error;
+      countSearchEvent("foldedUnindexedTimeout");
+      console.warn(`[search] folded keyword leg cut off after ${foldedUnindexedTimeoutMs()}ms: ${FOLDED_INDEX_NAME} is not built (docs/rollout-search-index.md)`);
+      return [] as ChunkRow[];
+    }
+  };
 
   // websearch_to_tsquery handles quoted phrases, AND/OR/-, and is more forgiving than
   // plainto_tsquery on special characters. Fall back to plainto_tsquery on parse errors.

@@ -1046,18 +1046,13 @@ export const documentChunks = pgTable(
     tsContent: tsvector("ts_content").generatedAlwaysAs(
       sql`to_tsvector('english'::regconfig, text)`,
     ),
-    tsFolded: tsvector("ts_folded").generatedAlwaysAs(
-      sql`to_tsvector('simple'::regconfig, docslurp_fold_text(text))`,
-    ),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
   },
   (table) => [
-    index("document_chunks_ts_folded_idx").using(
-      "gin",
-      table.tsFolded.asc().nullsLast().op("tsvector_ops"),
-    ),
+    // The folded keyword leg reads to_tsvector('simple', docslurp_fold_text(text)) (migration 0121). Its GIN expression
+    // index, document_chunks_ts_folded_expr_idx, is built CONCURRENTLY by scripts/folded-search-index.mjs, not by a migration.
     index("document_chunks_ts_content_idx").using(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
