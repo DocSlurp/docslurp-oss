@@ -70,7 +70,7 @@ describe("operator diagnostics nested in events and stage stats", () => {
   });
 
   it("redacts a single event for the raw event routes", () => {
-    const out = redactOperatorEvent(heartbeat as never);
+    const out = redactOperatorEvent(heartbeat);
     expect(JSON.stringify(out)).not.toMatch(/rss|cpu/i);
     expect(out.payload).toMatchObject({ kind: "heartbeat", metrics: { costCents: 2 } });
   });
