@@ -208,3 +208,22 @@ it.each([
     documentIds: ["selected"], workspaceId: "w", queryVector: [1, 0, 0],
   }));
 });
+
+it.each([
+  ["a literal %", { filenameContains: "%" }, []],
+  ["a literal _", { filenameContains: "sel_cted" }, []],
+  ["a backslash", { filenameContains: "\\" }, []],
+  ["a case-insensitive substring", { filenameContains: "SELECTED" }, ["selected"]],
+  ["an exact filename", { filenameEquals: "selected.txt" }, ["selected"]],
+  ["an exact filename never as a pattern", { filenameEquals: "%" }, []],
+  ["an exact filename is case-sensitive", { filenameEquals: "SELECTED.TXT" }, []],
+] satisfies Array<[string, SearchFilters, string[]]>)("matches filename filters with %s without LIKE wildcards widening scope", async (_name, filters, expected) => {
+  const result = await search.hybridSearch("evidence", "u", {
+    filters: { workspaceId: "w", ...filters }, queryVector: [1, 0, 0], limit: 20, minScore: 0,
+    useRerank: false, queryRewrite: false, selfQuery: false,
+    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
+    enableCommunityExpansion: false,
+  });
+  expect([...new Set(result.results.filter((hit) => hit.citation.source === "document").map((hit) => hit.citation.documentId))]).toEqual(expected);
+});

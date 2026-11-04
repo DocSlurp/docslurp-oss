@@ -149,6 +149,12 @@ export function createDocSlurpPagefind(options: SearchAdapterOptions & { workspa
     return { ...pagefind, results: pagefind.results.map(result => ({ ...result, data: async () => result.data })) };
   }, filters: async () => ({}) };
 }
+/** A URL-encoded params string or URLSearchParams would lose its filters when spread. */
+function plainRecord(value: unknown): Record<string, unknown> {
+  const prototype = value !== null && typeof value === "object" ? Object.getPrototypeOf(value) : undefined;
+  if (prototype !== Object.prototype && prototype !== null) throw new SearchCompatibilityError("Algolia request params must be a plain object; URL-encoded params strings are not supported.");
+  return value as Record<string, unknown>;
+}
 export function createDocSlurpAlgoliaClient(options: SearchAdapterOptions) {
   const request = transport(options);
   const searchSingleIndex = async ({ indexName, searchParams = {} }: { indexName: string; searchParams?: Record<string, unknown> }): Promise<AlgoliaSearchResponse> => {
@@ -157,7 +163,7 @@ export function createDocSlurpAlgoliaClient(options: SearchAdapterOptions) {
     return request<AlgoliaSearchResponse>(`/compat/algolia/1/indexes/${encodeURIComponent(indexName)}/query`, searchParams);
   };
   return { searchSingleIndex, initIndex: (indexName: string) => ({ search: (query: string, params: Record<string, unknown> = {}) => searchSingleIndex({ indexName, searchParams: { ...params, query } }) }), search: async (input: { requests: Record<string, unknown>[] } | Array<{ indexName: string; params?: Record<string, unknown> }>) => {
-    const requests = Array.isArray(input) ? input.map(entry => { record(entry); const { params, ...rest } = entry; return { ...rest, ...(params ? record(params) : {}) }; }) : record(input).requests;
+    const requests = Array.isArray(input) ? input.map(entry => { record(entry); const { params, ...rest } = entry; return { ...rest, ...(params === undefined ? {} : plainRecord(params)) }; }) : record(input).requests;
     if (!Array.isArray(requests) || requests.length > 10) throw new SearchCompatibilityError("Algolia search accepts at most 10 request objects.");
     for (const entry of requests) { record(entry); workspace(entry.indexName); }
     return request<{results: AlgoliaSearchResponse[]}>("/compat/algolia/1/indexes/*/queries", { requests });

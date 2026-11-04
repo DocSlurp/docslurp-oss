@@ -101,6 +101,19 @@ function expandQuery(query: string, glossary?: Record<string, string[]>): string
   return out.join(" ");
 }
 
+/**
+ * Legacy `{ indexName, params }` entries must carry a plain object. Spreading a
+ * URL-encoded params string or a URLSearchParams would drop its filters silently.
+ */
+function plainParams(params: unknown): Record<string, unknown> {
+  if (params === undefined) return {};
+  const prototype = params !== null && typeof params === "object" ? Object.getPrototypeOf(params) : undefined;
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new SearchCompatibilityError("Algolia request params must be a plain object; URL-encoded params strings are not supported.");
+  }
+  return params as Record<string, unknown>;
+}
+
 export function docslurpAlgoliaClient(opts: DocSlurpAlgoliaClientOptions) {
   const { apiUrl, clientKey, glossary } = opts;
   // Server keys (dslp_priv_…) must never ship to a browser; client keys are dslp_pub_….
@@ -268,7 +281,7 @@ export function docslurpAlgoliaClient(opts: DocSlurpAlgoliaClientOptions) {
     clickedObjectIDsAfterSearch,
     convertedObjectIDsAfterSearch,
     search: async (requestBody: AlgoliaMultipleQueriesRequest | AlgoliaLegacyQueries): Promise<{ results: AlgoliaSearchResponse[] }> => {
-      const requests = Array.isArray(requestBody) ? requestBody.map(({ indexName, params }) => ({ indexName, ...params })) : requestBody.requests;
+      const requests = Array.isArray(requestBody) ? requestBody.map(({ indexName, params }) => ({ indexName, ...plainParams(params) }) as AlgoliaSearchRequest & { indexName: string }) : requestBody.requests;
       return await request(`/compat/algolia/1/indexes/*/queries`, {
         method: "POST",
         body: JSON.stringify({

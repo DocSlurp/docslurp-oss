@@ -2,7 +2,7 @@ import { apiPool, sql } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 import { SEARCH_ELIGIBILITY_CHANNEL } from "./eligibility-hint.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
-import type { SearchFilters } from "./filters.js";
+import { escapeLikePattern, type SearchFilters } from "./filters.js";
 import type { HashFilter } from "./index-serving.js";
 import { loadSearchAvailability, type SearchAvailabilityRow } from "./session-setup.js";
 import { envInt, TtlLruCache } from "./ttl-lru.js";
@@ -280,7 +280,7 @@ export function nativeScopeSupported(filters: SearchFilters | undefined): boolea
   // Explicit capabilities: a newly introduced filter must never silently widen
   // native retrieval before this adapter implements its semantics.
   const supported = new Set([
-    "documentId", "documentIds", "runId", "workspaceId", "filenameContains", "mimeTypes", "tags",
+    "documentId", "documentIds", "runId", "workspaceId", "filenameContains", "filenameEquals", "mimeTypes", "tags",
   ]);
   return Object.entries(filters ?? {}).every(([key, value]) =>
     value === undefined || supported.has(key));
@@ -342,7 +342,9 @@ export function scopeEligibleDocuments(
 ): EligibleDocument[] {
   if (filters?.workspaceId && filters.workspaceId !== set.workspaceId) return [];
   const ids = new Set(filters?.documentIds ?? []);
-  const filename = filters?.filenameContains ? ilikeContainsMatcher(filters.filenameContains) : null;
+  // Same literal-substring semantics as the Postgres path (wildcards escaped).
+  const filename = filters?.filenameContains ? ilikeContainsMatcher(escapeLikePattern(filters.filenameContains)) : null;
+  const filenameEquals = filters?.filenameEquals;
   const mimeTypes = filters?.mimeTypes?.length ? new Set(filters.mimeTypes) : null;
   const tags = filters?.tags?.length ? new Set(filters.tags) : null;
   const runIds = [runId, filters?.runId].filter((id): id is string => Boolean(id));
@@ -350,6 +352,7 @@ export function scopeEligibleDocuments(
     (!filters?.documentId || document.id === filters.documentId)
     && (filters?.documentIds === undefined || ids.has(document.id))
     && (!filename || filename(document.filename))
+    && (filenameEquals === undefined || document.filename === filenameEquals)
     && (!mimeTypes || (document.mimeType !== null && mimeTypes.has(document.mimeType)))
     && (!tags || document.tags.some((tag) => tags.has(tag)))
     && runIds.every((id) => document.runId === id));

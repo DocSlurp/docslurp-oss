@@ -490,8 +490,15 @@ describe("algolia compat", () => {
       [{ filters: "tags:finance" }, { tags: ["finance"] }],
       [{ filters: "tag:finance AND mime_type:application/pdf" }, { tags: ["finance"], mimeTypes: ["application/pdf"] }],
       [{ filters: "mimeType:text/plain" }, { mimeTypes: ["text/plain"] }],
-      [{ filters: 'filename:"Q3 AND Q4 report.pdf"' }, { filenameContains: "Q3 AND Q4 report.pdf" }],
+      [{ filters: 'filename:"Q3 AND Q4 report.pdf"' }, { filenameEquals: "Q3 AND Q4 report.pdf" }],
       [{ filters: "filenameContains:report" }, { filenameContains: "report" }],
+      [{ facetFilters: ["filename:%"] }, { filenameEquals: "%" }],
+      [{ facetFilters: ["filenameContains:report_1", "filename:report_1.pdf"] }, { filenameContains: "report_1", filenameEquals: "report_1.pdf" }],
+      [{ numericFilters: ["page<=2147483647", "page>=-2147483647"] }, { pageRange: { from: -2147483647, to: 2147483647 } }],
+      [{ tagFilters: [[]], ruleContexts: [], enableRules: false }, {}],
+      [{ tagFilters: [""] }, {}],
+      [{ tagFilters: [[""]] }, {}],
+      [{ facetFilters: ["tags:a" + " ".repeat(900) + "b"] }, { tags: ["a" + " ".repeat(900) + "b"] }],
       [{ filters: "language:en and heading:Intro/Scope" }, { language: "en", headingPath: ["Intro", "Scope"] }],
       [{ filters: "documentId:doc-1 AND runId:run-1" }, { documentId: "doc-1", runId: "run-1" }],
       [{ filters: "(tags:a OR tags:b) AND language:en" }, { tags: ["a", "b"], language: "en" }],
@@ -549,7 +556,31 @@ describe("algolia compat", () => {
       [{ aroundLatLng: "40.7,-74" }, /aroundLatLng is not supported/],
       [{ insideBoundingBox: [[1, 2, 3, 4]] }, /insideBoundingBox is not supported/],
       [{ restrictSearchableAttributes: ["filename"] }, /restrictSearchableAttributes is not supported/],
-      [{ params: "filters=tags%3Aa" }, /params string is not supported/]
+      [{ params: "filters=tags%3Aa" }, /params string is not supported/],
+      [{ tagFilters: [["finance"]] }, /tagFilters is not supported/],
+      [{ ruleContexts: ["vip"] }, /ruleContexts is not supported/],
+      [{ filters: 5 }, /expected a string/],
+      [{ filters: ["tags:a"] }, /expected a string/],
+      [{ numericFilters: ["page>2147483647"] }, /out of range/],
+      [{ numericFilters: ["page=2147483648"] }, /out of range/],
+      [{ filters: "page < -2147483647" }, /out of range/],
+      [{ numericFilters: ["page>=99999999999999999999"] }, /must be integers/],
+      [{ facetfilters: ["tags:a"] }, /Unsupported search parameter "facetfilters"/],
+      [{ Filters: "tags:a" }, /Unsupported search parameter "Filters"/],
+      [{ filter: "tags:a" }, /Unsupported search parameter "filter"/],
+      [{ numericfilter: ["page>1"] }, /Unsupported search parameter "numericfilter"/],
+      [{ advancedSyntax: true }, /Unsupported search parameter "advancedSyntax"/],
+      [{ offset: 0, length: 5 }, /Unsupported search parameter "offset"/],
+      [{ similarQuery: "alpha" }, /Unsupported search parameter "similarQuery"/],
+      [{ distinct: true }, /Unsupported search parameter "distinct"/],
+      [{ ["x".repeat(5000)]: 1 }, /Unsupported search parameter "x{200}…"/],
+      [{ facetFilters: ["o".repeat(5000) + ":v"] }, /exceeds 1024 characters/],
+      [{ filters: "o".repeat(900) + ":v" }, /Unsupported filter attribute "o{200}…"/],
+      [{ filters: "tags:a AND ".repeat(1000) + "tags:a" }, /exceeds 8192 bytes/],
+      [{ filters: Array.from({ length: 101 }, () => "tags:a").join(" AND ") }, /at most 100 clauses/],
+      [{ facetFilters: Array.from({ length: 101 }, () => "tags:a") }, /at most 100 entries/],
+      [{ facetFilters: [Array.from({ length: 60 }, () => "tags:a"), Array.from({ length: 60 }, () => "tags:a")] }, /at most 100 clauses/],
+      [{ type: "facet" }, /Unsupported search parameter "type"/]
     ])("rejects %j with 400 before retrieval", async (body, message) => {
       const res = await search(body);
       expect(res.status).toBe(400);
@@ -599,6 +630,111 @@ describe("algolia compat", () => {
       });
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("UNSUPPORTED_SEARCH_OPTION");
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects whitespace-padded clauses in linear time (regex backtracking regression)", async () => {
+      const { parseAlgoliaCompatFilters } = await import("../search/algolia-compat-filters.js");
+      const padding = " ".repeat(200_000);
+      const cases: Record<string, unknown>[] = [
+        { facetFilters: [`tags:a${padding}b`] },
+        { facetFilters: [`page:${padding}1`] },
+        { numericFilters: [`page${padding}>${padding}1`] },
+        { filters: `filename:"a${padding}b"` },
+        { filters: `tags:a${padding}AND${padding}tags:b` },
+      ];
+      for (const body of cases) {
+        const started = performance.now();
+        expect(() => parseAlgoliaCompatFilters(body)).toThrow(/exceeds/);
+        expect(performance.now() - started).toBeLessThan(50);
+      }
+      // Under the caps, a long whitespace run still parses quickly.
+      const started = performance.now();
+      for (let i = 0; i < 100; i++) parseAlgoliaCompatFilters({ facetFilters: [`tags:a${" ".repeat(1000)}`, `page:${" ".repeat(1000)}1`] });
+      expect(performance.now() - started).toBeLessThan(50);
+
+      const res = await search({ facetFilters: [`tags:a${padding}b`] });
+      expect(res.status).toBe(400);
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects request bodies over 1 MB before parsing", async () => {
+      const res = await search({ facetFilters: ["tags:" + "a".repeat(1024 * 1024)] });
+      expect(res.status).toBe(413);
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    // What react-instantsearch (v7) / instantsearch.js (v4) send for a search box, refinement list and pagination.
+    const instantSearchParams = {
+      query: "alpha",
+      facets: ["tags"],
+      tagFilters: "",
+      facetFilters: [["tags:finance", "tags:legal"]],
+      highlightPreTag: "__ais-highlight__",
+      highlightPostTag: "__/ais-highlight__",
+      hitsPerPage: 20,
+      page: 0,
+      maxValuesPerFacet: 10,
+      analytics: true,
+      analyticsTags: ["web"],
+      clickAnalytics: true,
+      userToken: "anonymous-1",
+      getRankingInfo: false,
+      attributesToSnippet: ["text:20"],
+      snippetEllipsisText: "…",
+      attributesToHighlight: ["text"],
+      responseFields: ["*"],
+      enableRules: false,
+      aroundLatLngViaIP: false
+    };
+
+    it("accepts a realistic InstantSearch request on single and batch routes", async () => {
+      const single = await search(instantSearchParams);
+      expect(single.status).toBe(200);
+      const batch = await app.request("/compat/algolia/1/indexes/*/queries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ requests: [
+          { indexName: "ws-1", type: "default", ...instantSearchParams },
+          { indexName: "ws-1", ...instantSearchParams, facetFilters: [], facets: [], hitsPerPage: 0 + 1, analytics: false }
+        ] })
+      });
+      expect(batch.status).toBe(200);
+      for (const call of hybridSearchMock.mock.calls.slice(0, 2)) expect(call[2].filters).toEqual({ workspaceId: "ws-1", tags: ["finance", "legal"] });
+      expect(hybridSearchMock.mock.calls[2]![2].filters).toEqual({ workspaceId: "ws-1" });
+    });
+
+    it.each([
+      [{ tagFilters: ["finance"] }, /requests\[1\]: tagFilters is not supported/],
+      [{ aroundLatLng: "40.7,-74" }, /requests\[1\]: aroundLatLng is not supported/],
+      [{ facetfilters: ["tags:a"] }, /requests\[1\]: Unsupported search parameter "facetfilters"/],
+      [{ type: "facet" }, /requests\[1\]: Unsupported request type "facet"/]
+    ])("rejects a batch whose second request has %j", async (extra, message) => {
+      const res = await app.request("/compat/algolia/1/indexes/*/queries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ requests: [
+          { indexName: "ws-1", query: "alpha", facetFilters: [["tags:a", "tags:b"]] },
+          { indexName: "ws-1", query: "beta", ...extra }
+        ] })
+      });
+      expect(res.status).toBe(400);
+      const payload = await res.json();
+      expect(payload).toMatchObject({ code: "UNSUPPORTED_SEARCH_OPTION", status: 400 });
+      expect(payload.message).toMatch(message);
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects unknown keys and non-string filters on facet value search with the unified envelope", async () => {
+      for (const body of [{ facetQuery: "a", facetfilters: ["tags:a"] }, { facetQuery: "a", filters: 5 }]) {
+        const res = await app.request("/compat/algolia/1/indexes/ws-1/facets/filename/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+          body: JSON.stringify(body)
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ code: "UNSUPPORTED_SEARCH_OPTION", status: 400 });
+      }
       expect(hybridSearchMock).not.toHaveBeenCalled();
     });
   });

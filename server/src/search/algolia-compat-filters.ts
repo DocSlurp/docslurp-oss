@@ -8,7 +8,8 @@ import type { SearchFilters } from "./filters.js";
  * outside the supported subset is rejected instead of ignored: dropping a clause
  * would silently return broader results. Supported subset:
  *
- * - facet attributes `tags`, `mime_type`, `filename` (substring), `language`,
+ * - facet attributes `tags`, `mime_type`, `filename` (exact), `filenameContains`
+ *   (literal substring), `language`,
  *   `heading`, `documentId`, `runId`, joined with AND;
  * - OR groups only across values of one `tags` or `mime_type` attribute, since
  *   DocSlurp matches any of the listed tags or MIME types;
@@ -19,7 +20,7 @@ export class AlgoliaFilterError extends Error {
   readonly code = "UNSUPPORTED_SEARCH_OPTION";
 }
 
-type FacetAttribute = "tags" | "mime_type" | "filename" | "language" | "heading" | "documentId" | "runId";
+type FacetAttribute = "tags" | "mime_type" | "filename" | "filenameContains" | "language" | "heading" | "documentId" | "runId";
 
 const facetAliases = new Map<string, FacetAttribute>(Object.entries({
   tag: "tags",
@@ -27,7 +28,7 @@ const facetAliases = new Map<string, FacetAttribute>(Object.entries({
   mime_type: "mime_type",
   mimeType: "mime_type",
   filename: "filename",
-  filenameContains: "filename",
+  filenameContains: "filenameContains",
   language: "language",
   heading: "heading",
   documentId: "documentId",
@@ -36,20 +37,46 @@ const facetAliases = new Map<string, FacetAttribute>(Object.entries({
 const numericAliases = new Set(["page", "pageNumber", "page_number"]);
 const anyOfAttributes = new Set<FacetAttribute>(["tags", "mime_type"]);
 
-const SUPPORTED_HINT = "Supported: tags, mime_type, filename, language, heading, documentId and runId facet clauses joined with AND (OR only between values of one tags or mime_type attribute), and page numeric comparisons.";
+const SUPPORTED_HINT = "Supported: tags, mime_type, filename (exact), filenameContains (substring), language, heading, documentId and runId facet clauses joined with AND (OR only between values of one tags or mime_type attribute), and page numeric comparisons.";
 
-/** Algolia search parameters that narrow result scope but have no DocSlurp equivalent. */
-const unsupportedScopeParams = [
-  "tagFilters",
-  "aroundLatLng",
-  "aroundLatLngViaIP",
-  "aroundRadius",
-  "minimumAroundRadius",
-  "insideBoundingBox",
-  "insidePolygon",
-  "restrictSearchableAttributes",
+/** Request fields the compatibility routes apply themselves. */
+const supportedParams = [
+  "query", "page", "hitsPerPage", "filters", "facetFilters", "numericFilters", "facets",
+  "attributesToRetrieve", "highlightPreTag", "highlightPostTag", "facetQuery", "maxFacetHits",
+];
+
+/**
+ * Algolia parameters accepted and ignored because they only affect ranking,
+ * presentation or analytics: none of them can add or remove a hit.
+ */
+const rankingOnlyParams = [
+  "analytics", "analyticsTags", "clickAnalytics", "getRankingInfo", "enablePersonalization",
+  "personalizationImpact", "userToken", "enableABTest", "enableReRanking", "percentileComputation",
+  "attributesToHighlight", "attributesToSnippet", "snippetEllipsisText", "restrictHighlightAndSnippetArrays",
+  "responseFields", "maxValuesPerFacet", "sortFacetValuesBy", "facetingAfterDistinct",
+  "optionalFilters", "sumOrFiltersScores", "typoTolerance", "minWordSizefor1Typo", "minWordSizefor2Typos",
+  "allowTyposOnNumericTokens", "ignorePlurals", "removeStopWords", "queryLanguages", "naturalLanguages",
+  "decompoundQuery", "keepDiacriticsOnCharacters", "aroundPrecision",
+];
+
+/**
+ * Algolia parameters that narrow results (or select Algolia-only behaviour) and
+ * that DocSlurp cannot apply. Accepted only when empty or off, which InstantSearch
+ * sends by default (`tagFilters: ""`, `aroundLatLngViaIP: false`).
+ */
+const emptyOnlyParams = [
+  "tagFilters", "aroundLatLng", "aroundLatLngViaIP", "aroundRadius", "minimumAroundRadius",
+  "insideBoundingBox", "insidePolygon", "restrictSearchableAttributes", "ruleContexts", "enableRules",
   "params",
-] as const;
+];
+
+const allowedParams = new Set([...supportedParams, ...rankingOnlyParams, ...emptyOnlyParams]);
+
+/** Bounds keep filter parsing cheap for browser keys before any workspace lookup. */
+const MAX_FILTERS_BYTES = 8 * 1024;
+const MAX_CLAUSE_LENGTH = 1024;
+const MAX_CLAUSES = 100;
+const MAX_FILTER_ARRAY_ENTRIES = 100;
 
 type FacetAtom = { kind: "facet"; attribute: FacetAttribute; value: string; source: string };
 type NumericAtom = { kind: "numeric"; from?: number; to?: number; source: string };
@@ -63,10 +90,16 @@ function describe(clause: string) {
   return JSON.stringify(clause.length > 200 ? `${clause.slice(0, 200)}…` : clause);
 }
 
+// Postgres page_number is int4; larger bounds would fail the query instead of filtering.
+const MAX_PAGE = 2_147_483_647;
+
 function parseInteger(raw: string, clause: string) {
-  if (!/^-?\d+$/.test(raw)) fail(`Unsupported numeric filter ${describe(clause)}: page values must be integers.`);
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value)) fail(`Unsupported numeric filter ${describe(clause)}: page value is out of range.`);
+  if (raw.length > 12 || !/^-?\d+$/.test(raw)) fail(`Unsupported numeric filter ${describe(clause)}: page values must be integers.`);
+  return checkPage(Number(raw), clause);
+}
+
+function checkPage(value: number, clause: string) {
+  if (!Number.isSafeInteger(value) || value < -MAX_PAGE || value > MAX_PAGE) fail(`Unsupported numeric filter ${describe(clause)}: page value is out of range.`);
   return value;
 }
 
@@ -85,30 +118,61 @@ function unquoteValue(raw: string, clause: string) {
   return trimmed;
 }
 
-/** `page>=3`, `page = 3`, `page:3`, `page:3 TO 5`. */
+const IDENTIFIER = /^[A-Za-z_][\w.]*$/;
+const OPERATOR_CHARS = new Set(["<", ">", "=", "!"]);
+
+/**
+ * Split a clause into its attribute and the rest, at the first ":" or comparison
+ * operator, by scanning once. No regex runs over the raw clause (an unanchored
+ * whitespace run made the former pattern backtrack quadratically).
+ */
+function splitClause(clause: string): { attribute: string; operator: string; rest: string } | null {
+  let index = 0;
+  let attribute: string;
+  if (clause[0] === "\"") {
+    const close = clause.indexOf("\"", 1);
+    if (close < 0) return null;
+    attribute = clause.slice(1, close);
+    index = close + 1;
+  } else {
+    while (index < clause.length && clause[index] !== ":" && !OPERATOR_CHARS.has(clause[index]!) && !/\s/.test(clause[index]!)) index++;
+    attribute = clause.slice(0, index);
+  }
+  while (index < clause.length && /\s/.test(clause[index]!)) index++;
+  const char = clause[index];
+  if (char === ":") return { attribute, operator: ":", rest: clause.slice(index + 1).trim() };
+  if (char !== undefined && OPERATOR_CHARS.has(char)) {
+    const operator = clause[index + 1] === "=" ? `${char}=` : char;
+    return { attribute, operator, rest: clause.slice(index + operator.length).trim() };
+  }
+  return null;
+}
+
+/** `page>=3`, `page = 3`, `page:3`, `page:3 TO 5`. Returns null for a facet clause. */
 function parseNumericAtom(clause: string): NumericAtom | null {
-  const comparison = clause.match(/^\s*("?)([A-Za-z_][\w.]*)\1\s*(<=|>=|!=|=|<|>)\s*(\S+)\s*$/);
-  if (comparison) {
-    const [, , attribute, operator, raw] = comparison as unknown as [string, string, string, string, string];
-    if (!numericAliases.has(attribute)) fail(`Unsupported numeric filter attribute ${JSON.stringify(attribute)} in ${describe(clause)}. Only page supports numeric filters.`);
-    const value = parseInteger(raw, clause);
-    if (operator === "=") return { kind: "numeric", from: value, to: value, source: clause };
-    if (operator === ">=") return { kind: "numeric", from: value, source: clause };
-    if (operator === ">") return { kind: "numeric", from: value + 1, source: clause };
-    if (operator === "<=") return { kind: "numeric", to: value, source: clause };
-    if (operator === "<") return { kind: "numeric", to: value - 1, source: clause };
-    fail(`Unsupported numeric operator ${JSON.stringify(operator)} in ${describe(clause)}.`);
+  const parts = splitClause(clause.trim());
+  if (!parts) return null;
+  const { attribute, operator, rest } = parts;
+  if (operator === ":") {
+    if (!numericAliases.has(attribute)) return null;
+    const words = rest.split(/\s+/);
+    if (words.length === 3 && words[1] === "TO") {
+      return { kind: "numeric", from: parseInteger(words[0]!, clause), to: parseInteger(words[2]!, clause), source: clause };
+    }
+    if (words.length !== 1) fail(`Malformed numeric filter ${describe(clause)}: expected page:<n> or page:<from> TO <to>.`);
+    const value = parseInteger(rest, clause);
+    return { kind: "numeric", from: value, to: value, source: clause };
   }
-  const colon = clause.match(/^\s*("?)([A-Za-z_][\w.]*)\1\s*:\s*(.+?)\s*$/);
-  if (!colon || !numericAliases.has(colon[2]!)) return null;
-  const range = colon[3]!.match(/^(\S+)\s+TO\s+(\S+)$/);
-  if (range) {
-    const from = parseInteger(range[1]!, clause);
-    const to = parseInteger(range[2]!, clause);
-    return { kind: "numeric", from, to, source: clause };
+  if (!IDENTIFIER.test(attribute) || !numericAliases.has(attribute)) {
+    fail(`Unsupported numeric filter attribute ${describe(attribute)} in ${describe(clause)}. Only page supports numeric filters.`);
   }
-  const value = parseInteger(colon[3]!, clause);
-  return { kind: "numeric", from: value, to: value, source: clause };
+  if (!["=", ">=", ">", "<=", "<"].includes(operator)) fail(`Unsupported numeric operator ${describe(operator)} in ${describe(clause)}.`);
+  const value = parseInteger(rest, clause);
+  if (operator === "=") return { kind: "numeric", from: value, to: value, source: clause };
+  if (operator === ">=") return { kind: "numeric", from: value, source: clause };
+  if (operator === ">") return { kind: "numeric", from: checkPage(value + 1, clause), source: clause };
+  if (operator === "<=") return { kind: "numeric", to: value, source: clause };
+  return { kind: "numeric", to: checkPage(value - 1, clause), source: clause };
 }
 
 function parseFacetAtom(clause: string, options: { facetFilterNegation: boolean }): FacetAtom {
@@ -117,7 +181,7 @@ function parseFacetAtom(clause: string, options: { facetFilterNegation: boolean 
   const attributeName = stripAttributeQuotes(clause.slice(0, index));
   const attribute = facetAliases.get(attributeName);
   if (!attribute) {
-    fail(`Unsupported filter attribute ${JSON.stringify(attributeName)} in ${describe(clause)}. ${SUPPORTED_HINT}`);
+    fail(`Unsupported filter attribute ${describe(attributeName)} in ${describe(clause)}. ${SUPPORTED_HINT}`);
   }
   let value = unquoteValue(clause.slice(index + 1), clause);
   if (options.facetFilterNegation) {
@@ -130,9 +194,14 @@ function parseFacetAtom(clause: string, options: { facetFilterNegation: boolean 
 }
 
 function parseAtom(clause: string, options: { facetFilterNegation: boolean }): Atom {
+  checkClauseLength(clause);
   const trimmed = clause.trim();
   if (!trimmed) fail("Malformed filter: empty clause.");
   return parseNumericAtom(trimmed) ?? parseFacetAtom(trimmed, options);
+}
+
+function checkClauseLength(clause: string) {
+  if (clause.length > MAX_CLAUSE_LENGTH) fail(`Filter clause ${describe(clause)} exceeds ${MAX_CLAUSE_LENGTH} characters.`);
 }
 
 type Token = { type: "lparen" | "rparen" | "and" | "or" | "not" } | { type: "word"; text: string };
@@ -175,6 +244,7 @@ function tokenize(input: string): Token[] {
  * level are rejected.
  */
 function parseFiltersString(input: string): Atom[][] {
+  if (Buffer.byteLength(input, "utf8") > MAX_FILTERS_BYTES) fail(`filters exceeds ${MAX_FILTERS_BYTES} bytes.`);
   const tokens = tokenize(input);
   if (!tokens.length) return [];
   if (tokens.some(token => token.type === "not")) fail(`Unsupported filter operator NOT in ${describe(input)}: negation is not supported.`);
@@ -191,6 +261,7 @@ function parseFiltersString(input: string): Atom[][] {
     }
     if (!words.length) fail(`Malformed filters ${describe(input)}: expected a clause.`);
     const clause = words.join(" ");
+    checkClauseLength(clause);
     if (words.length > 1) {
       // Only numeric clauses ("page > 3", "page:1 TO 5") span several words.
       const numeric = parseNumericAtom(clause);
@@ -231,7 +302,7 @@ function parseFiltersString(input: string): Atom[][] {
   while (index < tokens.length) {
     const token = tokens[index]!;
     if (token.type === "or") fail(`Unsupported filters ${describe(input)}: combine AND and OR with parentheses, for example "language:en AND (tags:a OR tags:b)".`);
-    if (token.type !== "and") fail(`Malformed filters ${describe(input)}: unexpected ${token.type === "word" ? JSON.stringify(token.text) : token.type === "rparen" ? "\")\"" : "\"(\""}.`);
+    if (token.type !== "and") fail(`Malformed filters ${describe(input)}: unexpected ${token.type === "word" ? describe(token.text) : token.type === "rparen" ? "\")\"" : "\"(\""}.`);
     index++;
     groups.push(readGroup());
   }
@@ -246,6 +317,7 @@ function parseFilterArray(name: string, value: unknown, numeric: boolean): Atom[
   if (value === undefined || value === null) return [];
   const parse = (entry: unknown): Atom => {
     if (typeof entry !== "string") fail(`Malformed ${name}: every clause must be a string.`);
+    checkClauseLength(entry);
     if (numeric) {
       const atom = parseNumericAtom(entry.trim());
       if (!atom) fail(`Unsupported numeric filter ${describe(entry)}. Only page supports numeric filters.`);
@@ -259,8 +331,12 @@ function parseFilterArray(name: string, value: unknown, numeric: boolean): Atom[
     return [[parse(value)]];
   }
   if (!Array.isArray(value)) fail(`Malformed ${name}: expected an array of clauses.`);
+  if (value.length > MAX_FILTER_ARRAY_ENTRIES) fail(`${name} accepts at most ${MAX_FILTER_ARRAY_ENTRIES} entries.`);
+  const total = value.reduce<number>((sum, entry) => sum + (Array.isArray(entry) ? entry.length : 1), 0);
+  if (total > MAX_CLAUSES) fail(`Filters accept at most ${MAX_CLAUSES} clauses in total.`);
   return value.map((entry) => {
     if (Array.isArray(entry)) {
+      if (entry.length > MAX_FILTER_ARRAY_ENTRIES) fail(`${name} OR groups accept at most ${MAX_FILTER_ARRAY_ENTRIES} entries.`);
       if (!entry.length) fail(`Malformed ${name}: an OR group must not be empty.`);
       return entry.map(parse);
     }
@@ -309,7 +385,9 @@ function combine(groups: Atom[][]): SearchFilters {
   const value = (attribute: FacetAttribute) => facets.get(attribute)?.values;
   if (value("tags")) filters.tags = value("tags");
   if (value("mime_type")) filters.mimeTypes = value("mime_type");
-  if (value("filename")) filters.filenameContains = value("filename")![0];
+  // Algolia facet semantics: filename is an exact match; filenameContains is the explicit substring form.
+  if (value("filename")) filters.filenameEquals = value("filename")![0];
+  if (value("filenameContains")) filters.filenameContains = value("filenameContains")![0];
   if (value("language")) filters.language = value("language")![0];
   if (value("documentId")) filters.documentId = value("documentId")![0];
   if (value("runId")) filters.runId = value("runId")![0];
@@ -322,27 +400,38 @@ function combine(groups: Atom[][]): SearchFilters {
   return filters;
 }
 
-function isEmptyParam(value: unknown) {
-  return value === undefined || value === null || value === false || value === "" || (Array.isArray(value) && value.length === 0);
+function isEmptyParam(value: unknown): boolean {
+  if (value === undefined || value === null || value === false || value === "") return true;
+  // tagFilters [[]], [""] and [[""]] carry no constraint.
+  return Array.isArray(value) && value.every(isEmptyParam);
 }
 
 /**
  * Translate the filter parameters of one Algolia request, or throw
- * `AlgoliaFilterError` naming the first unsupported clause or parameter.
+ * `AlgoliaFilterError` naming the first unsupported clause or parameter. Unknown
+ * keys are rejected too: a misspelled `facetfilters` must not silently widen results.
  */
-export function parseAlgoliaCompatFilters(body: Record<string, unknown>): SearchFilters {
-  for (const param of unsupportedScopeParams) {
+export function parseAlgoliaCompatFilters(body: Record<string, unknown>, extraAllowed: readonly string[] = []): SearchFilters {
+  for (const key of Object.keys(body)) {
+    if (!allowedParams.has(key) && !extraAllowed.includes(key)) {
+      fail(`Unsupported search parameter ${describe(key)}: DocSlurp cannot apply it. Parameters that could change which results match are rejected rather than ignored.`);
+    }
+  }
+  for (const param of emptyOnlyParams) {
     if (!isEmptyParam(body[param])) {
       fail(param === "params"
         ? "The URL-encoded params string is not supported; send search parameters as JSON fields."
-        : `${param} is not supported: it narrows results and DocSlurp cannot apply it. ${SUPPORTED_HINT}`);
+        : `${param} is not supported: it changes which results match and DocSlurp cannot apply it. ${SUPPORTED_HINT}`);
     }
   }
+  if (body.type !== undefined && body.type !== "default") fail(`Unsupported request type ${describe(String(body.type))}: use the facet search route for facet values.`);
   if (body.filters !== undefined && body.filters !== null && typeof body.filters !== "string") fail("Malformed filters: expected a string.");
   const groups = [
     ...(typeof body.filters === "string" ? parseFiltersString(body.filters) : []),
     ...parseFilterArray("facetFilters", body.facetFilters, false),
     ...parseFilterArray("numericFilters", body.numericFilters, true),
   ];
+  const clauses = groups.reduce((total, group) => total + group.length, 0);
+  if (clauses > MAX_CLAUSES) fail(`Filters accept at most ${MAX_CLAUSES} clauses in total.`);
   return combine(groups);
 }

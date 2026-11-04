@@ -76,3 +76,11 @@ test('unsupported search options rejected by the server surface as SearchCompati
   const plain = createDocSlurpAlgoliaClient({apiUrl: 'https://example.test', clientKey: 'key', fetch: async () => new Response('bad gateway', {status: 502})});
   await assert.rejects(plain.searchSingleIndex({indexName: 'ws', searchParams: {query: 'q'}}), error => !(error instanceof SearchCompatibilityError) && /502/.test(error.message));
 });
+test('Algolia legacy params must be plain objects', async () => {
+  let calls = 0;
+  const client = createDocSlurpAlgoliaClient({apiUrl: 'https://example.test', clientKey: 'key', fetch: async () => {calls++; return Response.json({results: []});}});
+  for (const params of ['query=q&filters=tags%3Aa', new URLSearchParams('filters=tags:a'), ['tags:a'], null]) {
+    await assert.rejects(client.search([{indexName: 'ws', params}]), SearchCompatibilityError);
+  }
+  assert.equal(calls, 0);
+});

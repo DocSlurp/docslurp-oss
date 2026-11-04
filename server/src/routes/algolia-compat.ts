@@ -2,6 +2,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import type { WorkspaceSearchSettings } from "@docslurp/shared";
@@ -27,7 +28,8 @@ const queryBodySchema = z.object({
   query: z.string().max(10_000).optional(),
   page: z.number().int().nonnegative().optional(),
   hitsPerPage: z.number().int().min(1).max(1000).optional(),
-  filters: z.string().optional(),
+  // Type-checked by parseAlgoliaCompatFilters so every filter error shares one envelope.
+  filters: z.unknown().optional(),
   facetFilters: z.unknown().optional(),
   numericFilters: z.unknown().optional(),
   attributesToRetrieve: z.array(z.string()).optional(),
@@ -83,9 +85,9 @@ const defaultCompatSettings = {
   paginationLimitedTo: 1000
 } satisfies Record<string, unknown>;
 
-function compatFilters(body: Record<string, unknown>, label?: string): SearchFilters | Response {
+function compatFilters(body: Record<string, unknown>, label?: string, extraAllowed: readonly string[] = []): SearchFilters | Response {
   try {
-    return parseAlgoliaCompatFilters(body);
+    return parseAlgoliaCompatFilters(body, extraAllowed);
   } catch (error) {
     if (!(error instanceof AlgoliaFilterError)) throw error;
     // Same code as the Meilisearch/Typesense/Pagefind adapters, plus Algolia's message/status fields.
@@ -364,6 +366,11 @@ async function recordAnalyticsEvent(args: {
   `;
 }
 
+const searchBodyLimit = bodyLimit({
+  maxSize: 1024 * 1024,
+  onError: (c) => c.json({ code: "PAYLOAD_TOO_LARGE", error: "Request body exceeds 1 MB.", message: "Request body exceeds 1 MB.", status: 413 }, 413),
+});
+
 export const algoliaCompatRoutes = new Hono()
   .use("*", async (c, next) => {
     let header = c.req.header("Authorization");
@@ -375,6 +382,10 @@ export const algoliaCompatRoutes = new Hono()
     await next();
   })
   .use("*", apiKeyAuth)
+  // Search bodies are small; bound them before JSON parsing and filter validation.
+  .use("/1/indexes/:indexName/query", searchBodyLimit)
+  .use("/1/indexes/:indexName/facets/:facetName/query", searchBodyLimit)
+  .use("/1/indexes/*/queries", searchBodyLimit)
   .post("/1/indexes/:indexName/query", zValidator("json", queryBodySchema), async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
@@ -452,7 +463,7 @@ export const algoliaCompatRoutes = new Hono()
     // batch before any retrieval runs.
     const requestFilters: SearchFilters[] = [];
     for (const [index, request] of requests.entries()) {
-      const filters = compatFilters(request, `requests[${index}]`);
+      const filters = compatFilters(request, `requests[${index}]`, ["indexName", "type"]);
       if (filters instanceof Response) return filters;
       requestFilters.push(filters);
     }

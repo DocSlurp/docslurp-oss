@@ -2,7 +2,7 @@ import { geoProjectionFieldPointer } from "@docslurp/shared";
 import { spatialPredicate } from "./geo-predicate.js";
 import { sql } from "../db.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
-import type { SearchFilters } from "./filters.js";
+import { escapeLikePattern, type SearchFilters } from "./filters.js";
 
 /** Shared filter semantics for evidence adapters; readiness remains adapter-specific.
  * Workspace access must already be authorized. Caller filters intersect that scope.
@@ -26,7 +26,9 @@ export function retrievalScope(args: { workspaceId?: string; filters?: SearchFil
           and geo_f.field_path=${geoProjectionFieldPointer(filters.geo.field)}
           and ${spatialPredicate(filters.geo,sql`geo_f.geom`)})`);
     }
-    if (filters.filenameContains) conditions.push(sql`scope_document.filename ilike ${`%${filters.filenameContains}%`}`);
+    // Literal substring: caller text must not act as LIKE wildcards and widen the match.
+    if (filters.filenameContains) conditions.push(sql`scope_document.filename ilike ${`%${escapeLikePattern(filters.filenameContains)}%`} escape '\\'`);
+    if (filters.filenameEquals !== undefined) conditions.push(sql`scope_document.filename = ${filters.filenameEquals}`);
     if (filters.mimeTypes?.length) conditions.push(sql`scope_document.mime_type = any(${sql.array(filters.mimeTypes)})`);
     if (filters.tags?.length) conditions.push(sql`exists (select 1 from document_tags tagged where tagged.document_id = scope_document.id and tagged.tag = any(${sql.array(filters.tags)}))`);
     return sql`exists (select 1 from documents scope_document where scope_document.id = ${id} and ${andSqlFragments(conditions)})`;
