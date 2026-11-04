@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { chunkText, chunkTextWithMeta } from "../pipeline/chunking.js";
+import { estimateTokens } from "../lib/unicode-text.js";
 
 // ---------------------------------------------------------------------------
 // chunkText
@@ -151,5 +152,96 @@ describe("chunkTextWithMeta", () => {
     for (const oc of overlapChunks) {
       expect(oc.text.length).toBeLessThanOrEqual(50);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unicode and token-limit behaviour
+// ---------------------------------------------------------------------------
+
+describe("chunking non-Latin text", () => {
+  const hasLoneSurrogate = (value: string) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
+
+  it("cuts Japanese at sentence ends, not mid-sentence", () => {
+    const sentences = ["請求書の支払期限は来月末日です。", "お支払いは銀行振込でお願いします。", "ご不明な点はお問い合わせください。"];
+    const chunks = [...chunkText(sentences.join(""), 40)];
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(40);
+      expect(chunk.endsWith("。")).toBe(true);
+    }
+    expect(chunks.join("")).toBe(sentences.join(""));
+  });
+
+  it("cuts Russian at sentence ends and never inside a word", () => {
+    const text = "Москва является столицей России. Санкт-Петербург был столицей раньше. Новосибирск находится в Сибири.";
+    const chunks = [...chunkText(text, 60)];
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) expect(chunk.endsWith(".")).toBe(true);
+    expect(chunks.join(" ")).toBe(text);
+  });
+
+  it("splits a long unbroken run without separating surrogate pairs or emoji clusters", () => {
+    const family = "👨‍👩‍👧‍👦"; // ZWJ sequence, 11 UTF-16 units
+    const text = family.repeat(30) + "𠮷".repeat(40);
+    for (const max of [10, 11, 12, 25]) {
+      const chunks = [...chunkText(text, max)];
+      for (const chunk of chunks) {
+        expect(hasLoneSurrogate(chunk)).toBe(false);
+        expect(chunk.length).toBeLessThanOrEqual(Math.max(max, family.length));
+        expect(chunk.normalize("NFC")).toBe(chunk);
+      }
+      expect(chunks.join("")).toBe(text);
+    }
+  });
+
+  it("keeps a combining-mark cluster together", () => {
+    const text = ("é".repeat(7) + " ").repeat(10);
+    for (const chunk of chunkText(text, 8)) expect(chunk.startsWith("́")).toBe(false);
+  });
+
+  it("normalizes decomposed text to NFC before chunking", () => {
+    const [chunk] = [...chunkText("Müller zahlt", 100)];
+    expect(chunk).toBe("Müller zahlt");
+  });
+
+  it("keeps a fenced code block whole when it fits", () => {
+    const code = "```sh\n# build\nmake all. Then install.\nmake install\n```";
+    const text = `${"Intro sentence here. ".repeat(4)}\n\n${code}\n\n${"Closing sentence here. ".repeat(4)}`;
+    const chunks = [...chunkText(text, code.length + 10)];
+    expect(chunks.filter((chunk) => chunk.includes("make all"))).toHaveLength(1);
+    const holder = chunks.find((chunk) => chunk.includes("make all"))!;
+    expect(holder).toContain(code);
+  });
+
+  it("emits no overlap chunk when the overlap rounds to zero characters (slice(-0))", () => {
+    const text = Array.from({ length: 40 }, (_, index) => `Sentence number ${index} ends here.`).join(" ");
+    const chunks = [...chunkTextWithMeta(text, 120, { overlapFraction: 0.001 })];
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.overlapIndex === 0)).toBe(true);
+  });
+
+  it("keeps overlap on word boundaries", () => {
+    const text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima. ".repeat(6);
+    const chunks = [...chunkTextWithMeta(text, 120, { overlapFraction: 0.5 })].filter((chunk) => chunk.overlapIndex === 1);
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      for (const word of chunk.text.split(/\s+/)) expect(text).toContain(word);
+    }
+  });
+
+  it("sizes chunks in model tokens so a small context window never truncates the tail", () => {
+    const text = "Это предложение довольно длинное и содержит много слов для проверки. ".repeat(12);
+    const maxTokens = 40;
+    const chunks = [...chunkText(text, 1800, { maxTokens })];
+    expect(chunks.length).toBeGreaterThan(3);
+    for (const chunk of chunks) expect(estimateTokens(chunk)).toBeLessThanOrEqual(maxTokens);
+  });
+
+  it("budgets every Han character as a token", () => {
+    const text = "契約".repeat(300) + "。";
+    const chunks = [...chunkText(text, 1800, { maxTokens: 64 })];
+    for (const chunk of chunks) expect(estimateTokens(chunk)).toBeLessThanOrEqual(64);
+    expect(chunks.join("")).toBe(text);
   });
 });

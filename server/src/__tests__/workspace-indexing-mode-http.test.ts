@@ -242,7 +242,7 @@ describe("stored extractor settings the strict schemas reject (round 4 M2)", () 
       const body = await get.json() as { pipeline: { quality: string; documentExtraction: { options: unknown; ocr: { language: string } } } };
       expect(body.pipeline.quality).toBe("fast");
       expect(body.pipeline.documentExtraction.options).toEqual({ kreuzberg: {}, dolphin: { mode: "page" } });
-      expect(body.pipeline.documentExtraction.ocr.language).toBe("eng");
+      expect(body.pipeline.documentExtraction.ocr.language).toBe("auto");
       expect(JSON.stringify(await list.json())).not.toContain("/tmp/attacker");
       const runs = await import("../services/runs.js");
       const listed = (await runs.listRuns("u1")).filter((run) => run.id === "t-stale-run");

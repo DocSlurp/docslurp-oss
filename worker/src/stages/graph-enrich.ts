@@ -161,7 +161,8 @@ export class GraphEnrichStage implements Stage {
         llmDocuments += 1;
         // Price card: knowledge graph per started 10 pages, once per document per run, only when the
         // model extracted it (heuristic fallback graphs are free). Community summaries are included.
-        chargeDocumentFeature(state, document, "knowledgeGraph");
+        // The price follows the share of the document the model read (a deep document sampled in windows).
+        chargeDocumentFeature(state, document, "knowledgeGraph", { read: graph.charsRead, total: graph.charsTotal });
       }
 
       // Persist per document: search sees the graph grow during long runs.
@@ -184,6 +185,9 @@ export class GraphEnrichStage implements Stage {
         relationships: graph.edges.length,
         chunks: chunks.length,
         windows: graph.windows,
+        charsRead: graph.charsRead,
+        charsTotal: graph.charsTotal,
+        truncated: graph.truncated,
         source: graph.source,
         llmFailed: graph.llmFailed,
         durationMs: graph.durationMs,

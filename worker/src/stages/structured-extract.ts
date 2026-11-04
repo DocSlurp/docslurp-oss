@@ -27,6 +27,15 @@ import {
 } from "@docslurp/shared";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { runBounded } from "../lib/bounded-concurrency.js";
+import { buildEvidenceIndex, locateEvidence } from "../lib/evidence-locator.js";
+import { mergeFieldAnswers, pickField, planStructuredWindows, type RawField } from "../lib/structured-windows.js";
+import { readCanonicalDocumentArtifact, readExtractedMarkdown } from "./embedding-runtime.js";
+
+/** Characters of document text per model read, and the most reads per document (about 800 pages of prose). */
+export const STRUCTURED_WINDOW_CHARS = 100_000;
+export const STRUCTURED_MAX_WINDOWS = 8;
+const STRUCTURED_WINDOW_CONCURRENCY = 3;
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -96,17 +105,19 @@ function parseLabelValueEntries(entries: unknown[]): Record<string, RawStructure
   }));
 }
 
-function normalizedLabel(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
+/**
+ * The model's answer for a schema key: the exact key, else (for human-readable
+ * labels such as "Vessel Name") the one label whose letters and numbers match,
+ * and only when no other schema key could claim it. `請求日` and `支払期限` are
+ * different keys; an ASCII-only normalizer reduced both to "" and gave one the
+ * other's value.
+ */
 export function findStructuredField(
   fields: Record<string, RawStructuredField>,
   schemaKey: string,
+  schemaKeys?: readonly string[],
 ): RawStructuredField | undefined {
-  if (fields[schemaKey]) return fields[schemaKey];
-  const target = normalizedLabel(schemaKey);
-  return Object.entries(fields).find(([label]) => normalizedLabel(label) === target)?.[1];
+  return pickField(fields, schemaKey, schemaKeys);
 }
 
 function fieldTypeFromJsonSchema(property: Record<string, unknown>): StructuredFieldDef["type"] {
@@ -235,45 +246,13 @@ export class StructuredExtractStage implements Stage {
               state.artifactLedger.readDocument(document.id, "markdown");
             const canonicalUri =
               state.artifactLedger.readDocument(document.id, "canonical-document") ?? null;
-            let markdownText = "";
-            let canonicalDoc: CanonicalDocument | null = null;
-
-            if (markdownArtifactUri) {
-              try {
-                const k = markdownArtifactUri.replace(/^s3:\/\/[^/]+\//, "");
-                const bytes = await this.storage.getBytes(k);
-                const raw = bytes.toString("utf8");
-                if (markdownArtifactUri.endsWith(".json")) {
-                  const parsed = JSON.parse(raw) as {
-                    textArtifactUri?: string;
-                  };
-                  if (parsed.textArtifactUri) {
-                    const textKey = parsed.textArtifactUri.replace(
-                      /^s3:\/\/[^/]+\//,
-                      "",
-                    );
-                    const textBytes = await this.storage.getBytes(textKey);
-                    markdownText = textBytes.toString("utf8");
-                  }
-                } else {
-                  markdownText = raw;
-                }
-              } catch {
-                markdownText = "";
-              }
-            }
-
-            if (canonicalUri) {
-              try {
-                const k = canonicalUri.replace(/^s3:\/\/[^/]+\//, "");
-                const bytes = await this.storage.getBytes(k);
-                canonicalDoc = JSON.parse(
-                  bytes.toString("utf8"),
-                ) as CanonicalDocument;
-              } catch {
-                canonicalDoc = null;
-              }
-            }
+            // A recorded artifact that cannot be read is an error to retry, not an empty document.
+            const markdownText = markdownArtifactUri
+              ? await readExtractedMarkdown(this.storage, markdownArtifactUri)
+              : "";
+            const canonicalDoc: CanonicalDocument | null = canonicalUri
+              ? await readCanonicalDocumentArtifact(this.storage, canonicalUri)
+              : null;
 
             console.log(
               `[extract-debug] document=${document.id} markdownLength=${markdownText.length} ` +
@@ -291,167 +270,163 @@ export class StructuredExtractStage implements Stage {
             }
 
             const schemaDescription = JSON.stringify(outputSchema, null, 2);
-            const task = buildTrustedDocumentTaskPrompt({
-              instruction: [
-                "Extract structured fields from document text.",
-                extractionConfig.supportingPrompt,
-              ].filter(Boolean).join("\n\n"),
-              outputContract: `Return ONLY JSON with this shape:
+            const fieldKeys = Object.keys(schemaDef.fields);
+            // Long documents are read in page windows (map), then each field's answers are
+            // merged (reduce). The model never silently sees only the first ~30 pages.
+            const plan = planStructuredWindows({
+              markdown: markdownText,
+              pageCount,
+              windowChars: STRUCTURED_WINDOW_CHARS,
+              maxWindows: STRUCTURED_MAX_WINDOWS,
+            });
+            if (plan.truncated) {
+              console.warn(
+                `[structured-extract] document=${document.id} truncated=true pagesRead=${plan.pagesRead}/${plan.pagesTotal} windows=${plan.windows.length}`,
+              );
+            }
+            let usageInputTokens = 0;
+            let usageOutputTokens = 0;
+            let partialEnvelopeSaved = false;
+            const windowFields: Array<Record<string, RawStructuredField>> = new Array(plan.windows.length);
+
+            const readWindow = async (windowIndex: number) => {
+              const window = plan.windows[windowIndex]!;
+              const task = buildTrustedDocumentTaskPrompt({
+                instruction: [
+                  "Extract structured fields from document text.",
+                  extractionConfig.supportingPrompt,
+                ].filter(Boolean).join("\n\n"),
+                outputContract: `Return ONLY JSON with this shape:
 {
   "fields": {
     "<schemaFieldName>": { "value": <any or null>, "confidence": <0..1>, "evidence": [{ "text": "verbatim snippet from source" }] }
   }
 }
 Do not include explanations. Use short evidence snippets that appear verbatim in the document.`,
-              trustedContext: [
-                {
-                  label: "Schema (JSON describing required fields)",
-                  value: schemaDescription,
+                trustedContext: [
+                  {
+                    label: "Schema (JSON describing required fields)",
+                    value: schemaDescription,
+                  },
+                  ...(plan.windows.length > 1
+                    ? [{
+                        label: "Document part",
+                        value: `Excerpt ${windowIndex + 1} of ${plan.windows.length}` +
+                          (window.pages.length ? ` (pages ${window.pages[0]}-${window.pages.at(-1)})` : "") +
+                          ". Return null for any field this excerpt does not contain; other excerpts are read separately.",
+                      }]
+                    : []),
+                ],
+                untrustedContentLabel: "document markdown excerpt",
+                untrustedContent: window.text,
+                maxContentChars: -1,
+              });
+
+              let result: Awaited<ReturnType<typeof generateOpenRouterText>>;
+              try {
+                result = await measureOp(
+                  "structured-extract-llm-latency",
+                  () =>
+                    generateOpenRouterText({
+                      operation: "structured-extraction",
+                      apiKey: textModelApiKey(this.config.openRouterApiKey, extractionConfig.model),
+                      privacyMode: state.run.pipeline.privacyMode,
+                      model: extractionConfig.model,
+                      responseJsonSchema: { name: "structured_fields", schema: buildStructuredFieldsEnvelopeSchema(outputSchema) },
+                      maxOutputTokens: extractionConfig.maxOutputTokens,
+                      textGeneration: state.run.pipeline.textGeneration,
+                      deploymentProfile: this.config.textGenerationProfile,
+                      system: task.system,
+                      prompt: task.prompt,
+                      signal,
+                    }),
+                  { metadata: { documentId: document.id, window: windowIndex + 1 } },
+                );
+              } catch (llmError) {
+                console.error(
+                  `[extract-error] stage=${this.name} document=${document.id} window=${windowIndex + 1} ` +
+                    `llmCallFailed=${toError(llmError).message}`,
+                );
+                throw llmError;
+              }
+              windowFields[windowIndex] = parseStructuredFields(result.text || "{}");
+              const inputTokens = result.usage.inputTokens;
+              const outputTokens = result.usage.outputTokens;
+              usageInputTokens += inputTokens;
+              usageOutputTokens += outputTokens;
+              state.usageLedger.record({
+                ...textUsageLabels(extractionConfig.model),
+                metric: "structured-extract",
+                amount: inputTokens + outputTokens,
+                unit: "token",
+                costCents: result.usage.costCents ?? (
+                  (inputTokens / 1000) * this.config.costPer1kInputTokens +
+                    (outputTokens / 1000) * this.config.costPer1kOutputTokens
+                ),
+                inputTokens,
+                outputTokens,
+                metadata: {
+                  ...result.usage.metadata,
+                  documentId: document.id,
+                  window: windowIndex + 1,
+                  windows: plan.windows.length,
                 },
-              ],
-              untrustedContentLabel: "document markdown excerpt",
-              untrustedContent: markdownText,
-            });
+              });
+            };
+            await runBounded(plan.windows.length, STRUCTURED_WINDOW_CONCURRENCY, readWindow);
 
-            let result: { text: string; usage: { inputTokens: number; outputTokens: number; costCents?: number; metadata?: Record<string, unknown> } } | null = null;
-            let partialEnvelopeSaved = false;
-
-            try {
-              result = await measureOp(
-                "structured-extract-llm-latency",
-                () =>
-                  generateOpenRouterText({
-                    operation: "structured-extraction",
-                    apiKey: textModelApiKey(this.config.openRouterApiKey, extractionConfig.model),
-                    privacyMode: state.run.pipeline.privacyMode,
-                    model: extractionConfig.model,
-                    responseJsonSchema: { name: "structured_fields", schema: buildStructuredFieldsEnvelopeSchema(outputSchema) },
-                    maxOutputTokens: extractionConfig.maxOutputTokens,
-                    textGeneration: state.run.pipeline.textGeneration,
-                    deploymentProfile: this.config.textGenerationProfile,
-                    system: task.system,
-                    prompt: task.prompt,
-                    signal,
-                  }),
-                { metadata: { documentId: document.id } },
-              );
-            } catch (llmError) {
-              console.error(
-                `[extract-error] stage=${this.name} document=${document.id} ` +
-                  `llmCallFailed=${toError(llmError).message}`,
-              );
-              throw llmError;
+            const fields: Record<string, RawStructuredField> = {};
+            for (const k of fieldKeys) {
+              const answers = windowFields
+                .map((answerSet) => findStructuredField(answerSet, k, fieldKeys))
+                .filter((answer): answer is RawStructuredField => answer !== undefined);
+              if (answers.length) fields[k] = mergeFieldAnswers(answers as RawField[]) as RawStructuredField;
             }
 
-            const rawOutput = result.text || "{}";
-
-            // Coerce the model response into an envelope we control
-            const fields = parseStructuredFields(rawOutput);
-
-            // Map evidence snippets to canonical blocks for provenance where possible
-            function mapEvidence(snippet: string): {
-              pageNumber: number | null;
-              blockIds: string[];
-              regionBoxes: Array<{
-                pageNumber: number;
-                x: number;
-                y: number;
-                width: number;
-                height: number;
-                polygon: Array<{ x: number; y: number }>;
-              }>;
-              regions: Array<{
-                pageNumber: number;
-                x: number;
-                y: number;
-                width: number;
-                height: number;
-                polygon: Array<{ x: number; y: number }>;
-              }>;
-              polygons: Array<Array<{ x: number; y: number }>>;
-              regionCoordinateSpace: string | null;
-              sourceTrace: {
-                canonicalDocumentUri: string | null;
-                parserArtifactUri: string | null;
-                sourceArtifactUri: string | null;
-                blockIds: string[];
-                pageNumbers: number[];
-                extractor: string | null;
-              };
-            } {
-              if (!canonicalDoc || !snippet) {
-                return {
-                  pageNumber: null,
-                  blockIds: [],
-                  regionBoxes: [],
-                  regions: [],
-                  polygons: [],
-                  regionCoordinateSpace: null,
-                  sourceTrace: {
-                    canonicalDocumentUri: canonicalUri,
-                    parserArtifactUri:
-                      canonicalDoc?.source.parserArtifactUri ?? null,
-                    sourceArtifactUri: canonicalDoc?.source.artifactUri ?? null,
-                    blockIds: [],
-                    pageNumbers: [],
-                    extractor: canonicalDoc?.source.extractor ?? null,
-                  },
-                };
-              }
-              const lowered = snippet.slice(0, 160).toLowerCase();
-              for (const block of canonicalDoc.blocks) {
-                if (!block.text) continue;
-                if ((block.text as string).toLowerCase().includes(lowered)) {
-                  const boxes = (block.bbox ? [block.bbox] : []).map((b) => ({
+            // Locate each quotation in the canonical blocks (whitespace-insensitive, may span blocks)
+            const evidenceIndex = canonicalDoc ? buildEvidenceIndex(canonicalDoc.blocks) : null;
+            const emptyProvenance = () => ({
+              pageNumber: null as number | null,
+              blockIds: [] as string[],
+              regionBoxes: [] as Array<{ pageNumber: number; x: number; y: number; width: number; height: number; polygon: Array<{ x: number; y: number }> }>,
+              regionCoordinateSpace: null as string | null,
+              pageNumbers: [] as number[],
+            });
+            function mapEvidence(snippet: string) {
+              const found = evidenceIndex && snippet ? locateEvidence(evidenceIndex, snippet) : null;
+              const provenance = emptyProvenance();
+              for (const block of found ?? []) {
+                provenance.blockIds.push(block.id);
+                if (block.pageNumber && !provenance.pageNumbers.includes(block.pageNumber)) provenance.pageNumbers.push(block.pageNumber);
+                if (block.bbox) {
+                  const b = block.bbox;
+                  provenance.regionBoxes.push({
                     pageNumber: block.pageNumber ?? 1,
-                    x: b.x,
-                    y: b.y,
-                    width: b.width,
-                    height: b.height,
+                    x: b.x, y: b.y, width: b.width, height: b.height,
                     polygon: [
                       { x: b.x, y: b.y },
                       { x: b.x + b.width, y: b.y },
                       { x: b.x + b.width, y: b.y + b.height },
                       { x: b.x, y: b.y + b.height },
                     ],
-                  }));
-                  return {
-                    pageNumber: block.pageNumber ?? null,
-                    blockIds: [block.id],
-                    regionBoxes: boxes,
-                    regions: boxes,
-                    polygons: boxes.map((box) => box.polygon),
-                    regionCoordinateSpace:
-                      typeof block.metadata.bboxCoordinateSpace === "string"
-                        ? block.metadata.bboxCoordinateSpace
-                        : null,
-                    sourceTrace: {
-                      canonicalDocumentUri: canonicalUri,
-                      parserArtifactUri:
-                        canonicalDoc.source.parserArtifactUri ?? null,
-                      sourceArtifactUri:
-                        canonicalDoc.source.artifactUri ?? null,
-                      blockIds: [block.id],
-                      pageNumbers: block.pageNumber ? [block.pageNumber] : [],
-                      extractor: canonicalDoc.source.extractor ?? null,
-                    },
-                  };
+                  });
+                }
+                if (!provenance.regionCoordinateSpace && typeof block.metadata.bboxCoordinateSpace === "string") {
+                  provenance.regionCoordinateSpace = block.metadata.bboxCoordinateSpace;
                 }
               }
+              // One page only when every block is on it; a quotation across pages has no single page.
+              provenance.pageNumber = provenance.pageNumbers.length === 1 ? provenance.pageNumbers[0]! : null;
               return {
-                pageNumber: null,
-                blockIds: [],
-                regionBoxes: [],
-                regions: [],
-                polygons: [],
-                regionCoordinateSpace: null,
+                ...provenance,
+                regions: provenance.regionBoxes,
+                polygons: provenance.regionBoxes.map((box) => box.polygon),
                 sourceTrace: {
                   canonicalDocumentUri: canonicalUri,
-                  parserArtifactUri:
-                    canonicalDoc?.source.parserArtifactUri ?? null,
+                  parserArtifactUri: canonicalDoc?.source.parserArtifactUri ?? null,
                   sourceArtifactUri: canonicalDoc?.source.artifactUri ?? null,
-                  blockIds: [],
-                  pageNumbers: [],
+                  blockIds: provenance.blockIds,
+                  pageNumbers: provenance.pageNumbers,
                   extractor: canonicalDoc?.source.extractor ?? null,
                 },
               };
@@ -468,11 +443,18 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
               overallConfidence: 0,
               overallPolicy: "needs-review",
               fields: {},
+              coverage: {
+                windows: plan.windows.length,
+                pagesRead: plan.pagesRead,
+                pagesTotal: plan.pagesTotal,
+                charsRead: plan.charsRead,
+                charsTotal: plan.charsTotal,
+                truncated: plan.truncated,
+              },
             };
 
-            const fieldKeys = Object.keys(schemaDef.fields);
             for (const k of fieldKeys) {
-              const raw = findStructuredField(fields, k) ?? { value: null };
+              const raw = fields[k] ?? { value: null };
               const confidence =
                 typeof raw.confidence === "number"
                   ? Math.min(1, Math.max(0, raw.confidence))
@@ -481,26 +463,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 Array.isArray(raw.evidence) && raw.evidence.length > 0
                   ? String(raw.evidence[0].text || "")
                   : "";
-              const provenance = evText
-                ? mapEvidence(evText)
-                : {
-                    pageNumber: null,
-                    blockIds: [],
-                    regionBoxes: [],
-                    regions: [],
-                    polygons: [],
-                    regionCoordinateSpace: null,
-                    sourceTrace: {
-                      canonicalDocumentUri: canonicalUri,
-                      parserArtifactUri:
-                        canonicalDoc?.source.parserArtifactUri ?? null,
-                      sourceArtifactUri:
-                        canonicalDoc?.source.artifactUri ?? null,
-                      blockIds: [],
-                      pageNumbers: [],
-                      extractor: canonicalDoc?.source.extractor ?? null,
-                    },
-                  };
+              const provenance = mapEvidence(evText);
               envelope.fields[k] = {
                 value: (raw as any).value ?? null,
                 confidence,
@@ -540,6 +503,14 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                   `validationFailed=${toError(validationError).message}`,
               );
             }
+            if (plan.truncated) {
+              // A null here may only mean the value is beyond the pages read; never auto-accept such a result.
+              const warning = `not found in the first ${plan.pagesRead} of ${plan.pagesTotal} pages read; the rest of the document was not read`;
+              for (const field of Object.values(envelope.fields)) {
+                if (field.value === null || field.value === undefined) field.errors.push(warning);
+              }
+              if (overallPolicy === "auto-accept") overallPolicy = "needs-review";
+            }
             envelope.overallPolicy = overallPolicy;
             const confidences = Object.values(envelope.fields).map(
               (f) => f.confidence ?? 0,
@@ -567,28 +538,11 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
               );
             }
 
-            const inputTokens = result.usage.inputTokens;
-            const outputTokens = result.usage.outputTokens;
-            state.usageLedger.record({
-              ...textUsageLabels(extractionConfig.model),
-              metric: "structured-extract",
-              amount: inputTokens + outputTokens,
-              unit: "token",
-              costCents: result.usage.costCents ?? (
-                (inputTokens / 1000) * this.config.costPer1kInputTokens +
-                  (outputTokens / 1000) * this.config.costPer1kOutputTokens
-              ),
-              inputTokens,
-              outputTokens,
-              metadata: {
-                ...result.usage.metadata,
-                documentId: document.id,
-                overallPolicy,
-              },
-            });
+            const inputTokens = usageInputTokens;
+            const outputTokens = usageOutputTokens;
             // Price card: structured fields per started 10 pages, once per document per run
-            // (charged even on a policy reject: the extraction ran).
-            chargeDocumentFeature(state, document, "structuredFields");
+            // (charged even on a policy reject: the extraction ran), on the pages the model read.
+            chargeDocumentFeature(state, document, "structuredFields", { read: plan.pagesRead, total: plan.pagesTotal });
 
             // Fail the stage on hard reject so it enters the review queue with schema_errors
             if (overallPolicy === "reject") {
@@ -613,6 +567,8 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 outputTokens,
                 overallPolicy,
                 overallConfidence: envelope.overallConfidence,
+                pagesRead: plan.pagesRead,
+                truncated: plan.truncated,
               },
             );
 
@@ -625,6 +581,10 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 fields: Object.keys(envelope.fields).length,
                 overallPolicy,
                 overallConfidence: envelope.overallConfidence,
+                windows: plan.windows.length,
+                pagesRead: plan.pagesRead,
+                pagesTotal: plan.pagesTotal,
+                truncated: plan.truncated,
               },
             };
           },

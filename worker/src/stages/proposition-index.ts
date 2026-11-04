@@ -17,7 +17,6 @@ import {
   estimateTokens,
 } from "./embedding-runtime.js";
 import {
-  detectLanguage,
   resolveEmbeddingModel,
 } from "../embeddings/resolver.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
@@ -137,12 +136,7 @@ export class PropositionIndexStage implements Stage {
             }
 
             // Embed all propositions
-            const detectedLang = detectLanguage(extracted.text);
-            const profile = resolveEmbeddingModel(
-              this.config,
-              state.run.pipeline,
-              detectedLang,
-            );
+            const profile = resolveEmbeddingModel(this.config, state.run.pipeline);
             const embedded = await embedTextChunks({
               chunks: allPropositions.map((p) => p.text),
               profile,

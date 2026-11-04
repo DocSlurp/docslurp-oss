@@ -269,7 +269,8 @@ Scan the QR code below:
     });
 
     expect(contract.hasToC).toBe(true);
-    expect(contract.hasQRCodes).toBe(true);
+    // A page that mentions a QR code is not evidence of one.
+    expect(contract.hasQRCodes).toBe(false);
     expect(contract.headers[0].text).toBe("Table of Contents");
   });
 });

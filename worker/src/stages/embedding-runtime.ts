@@ -1,4 +1,4 @@
-import { delimitedTableMarkdown } from "../lib/delimited-table.js";
+import { decodeDelimitedBytes, delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -24,6 +24,9 @@ import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
+import { estimateTokens, normalizeNfc } from "../lib/unicode-text.js";
+import { ArtifactReadError } from "../lib/artifact-read-error.js";
+export { ArtifactReadError };
 import type { CommandRunner } from "../tools/runner.js";
 import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
 import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
@@ -137,7 +140,19 @@ export interface ContextualChunkUsage {
 const CONTEXTUAL_CHUNK_SUMMARY_LIMIT = 240;
 const CONTEXTUAL_SOURCE_LIMIT = 12_000;
 
+/**
+ * The text of a document as it is chunked, embedded and indexed. Always NFC:
+ * "ü" typed as one character and as "u" plus a combining diaeresis must find the
+ * same chunks, and a decomposed Hangul or accented text must not split a query.
+ */
 export async function extractTextForEmbedding(
+  ...args: Parameters<typeof extractTextForEmbeddingRaw>
+): ReturnType<typeof extractTextForEmbeddingRaw> {
+  const extracted = await extractTextForEmbeddingRaw(...args);
+  return { ...extracted, text: normalizeNfc(extracted.text) };
+}
+
+async function extractTextForEmbeddingRaw(
   document: Document,
   runner: CommandRunner,
   storage: ArtifactStore,
@@ -154,6 +169,9 @@ export async function extractTextForEmbedding(
   schemaArtifact?: JsonSchemaArtifact;
   canonicalDocument?: CanonicalDocument;
 }> {
+  // A recorded artifact slot is the document's text of record: it holds the
+  // vision/OCR content and, after PII redaction, the redacted text. Failing to
+  // read it is an error to retry, never a reason to re-extract the raw bytes.
   const canonicalDocument = canonicalArtifactUri
     ? await readCanonicalDocumentArtifact(storage, canonicalArtifactUri)
     : undefined;
@@ -185,9 +203,16 @@ export async function extractTextForEmbedding(
     };
   }
 
+  if (markdownText !== null) {
+    // The extraction artifact was read and holds no text: the document is
+    // empty as extracted. Re-reading the source would skip what extraction
+    // decided (page images left unread, redactions), so it stays empty.
+    return { text: "", extractor: "extract-markdown-artifact", canonicalDocument };
+  }
+
   if (isCsvLike(document)) {
     const data = await readSourceBytes(storage, document);
-    const text = delimitedTableMarkdown(data.toString("utf8"), document.filename);
+    const text = delimitedTableMarkdown(decodeDelimitedBytes(data), document.filename);
     return { text, extractor: "csv-to-markdown-table", canonicalDocument };
   }
 
@@ -263,63 +288,68 @@ export async function extractTextForEmbedding(
   throw new Error(`no extractor produced text for ${document.filename}`);
 }
 
-async function readExtractedMarkdown(
-  storage: ArtifactStore,
-  artifactUri: string,
-): Promise<string | null> {
-  try {
-    const key = artifactUri.replace(/^s3:\/\/[^/]+\//, "");
-    const data = await storage.getBytes(key);
-    if (!isUtf8(data)) {
-      return null;
-    }
-
-    const raw = data.toString("utf8");
-    if (!artifactUri.endsWith(".json")) {
-      return raw;
-    }
-
-    const parsed = JSON.parse(raw) as { textArtifactUri?: string };
-    if (!parsed.textArtifactUri) {
-      return null;
-    }
-
-    const nestedKey = parsed.textArtifactUri.replace(/^s3:\/\/[^/]+\//, "");
-    const nestedBytes = await storage.getBytes(nestedKey);
-    return isUtf8(nestedBytes) ? nestedBytes.toString("utf8") : null;
-  } catch {
-    return null;
-  }
+function artifactKeyOf(artifactUri: string): string {
+  return artifactUri.replace(/^s3:\/\/[^/]+\//, "");
 }
 
-async function readCanonicalDocumentArtifact(
+async function readUtf8Artifact(storage: ArtifactStore, artifactUri: string): Promise<string> {
+  let data: Buffer;
+  try {
+    data = await storage.getBytes(artifactKeyOf(artifactUri));
+  } catch (error) {
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
+  }
+  if (!isUtf8(data)) throw new ArtifactReadError(artifactUri, "not valid UTF-8");
+  return data.toString("utf8");
+}
+
+export async function readExtractedMarkdown(
   storage: ArtifactStore,
   artifactUri: string,
-): Promise<CanonicalDocument | undefined> {
-  try {
-    const key = keyFromStorageUri(artifactUri, storage.bucket);
-    if (!key) {
-      return undefined;
-    }
-
-    const parsed = canonicalDocumentSchema.safeParse(
-      await storage.getJson(key),
-    );
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
+): Promise<string> {
+  const raw = await readUtf8Artifact(storage, artifactUri);
+  if (!artifactUri.endsWith(".json")) {
+    return normalizeNfc(raw);
   }
+
+  let parsed: { textArtifactUri?: string };
+  try {
+    parsed = JSON.parse(raw) as { textArtifactUri?: string };
+  } catch (error) {
+    throw new ArtifactReadError(artifactUri, "manifest is not valid JSON", { cause: error });
+  }
+  if (!parsed.textArtifactUri) {
+    throw new ArtifactReadError(artifactUri, "manifest has no textArtifactUri");
+  }
+  return normalizeNfc(await readUtf8Artifact(storage, parsed.textArtifactUri));
+}
+
+export async function readCanonicalDocumentArtifact(
+  storage: ArtifactStore,
+  artifactUri: string,
+): Promise<CanonicalDocument> {
+  let json: unknown;
+  try {
+    json = await storage.getJson(artifactKeyOf(artifactUri));
+  } catch (error) {
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
+  }
+  const parsed = canonicalDocumentSchema.safeParse(json);
+  if (!parsed.success) throw new ArtifactReadError(artifactUri, "does not match the canonical document schema");
+  // Indexed text is NFC, so "ü" typed as one character or as u + combining diaeresis finds the same chunks.
+  for (const block of parsed.data.blocks) block.text = normalizeNfc(block.text);
+  return parsed.data;
 }
 
 export function buildChunks(
   text: string,
   fallback: string,
-  options?: { chunkOverlap?: boolean },
+  options?: { chunkOverlap?: boolean; maxTokens?: number },
 ): { texts: string[]; headingPaths: string[][] } {
-  const overlapOpts = options?.chunkOverlap
-    ? { overlapFraction: 0.5 }
-    : undefined;
-  const metas = [...chunkTextWithMeta(text, 1800, overlapOpts)];
+  const metas = [...chunkTextWithMeta(text, 1800, {
+    overlapFraction: options?.chunkOverlap ? 0.5 : undefined,
+    maxTokens: options?.maxTokens,
+  })];
   if (metas.length === 0) {
     return { texts: [fallback], headingPaths: [[]] };
   }
@@ -329,10 +359,7 @@ export function buildChunks(
   };
 }
 
-export function estimateTokens(text: string): number {
-  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-  return words === 0 ? 0 : Math.floor(words * 1.3);
-}
+export { estimateTokens };
 
 /** Per-batch usage for remote routes. Private routes also carry the operator-priced cost. */
 export interface RemoteEmbeddingUsage {
@@ -440,19 +467,25 @@ export async function contextualizeChunksForEmbedding(args: {
   reusedDocumentContext?: string;
   /** Already resolved (see resolveDocumentContext); skips the summary call. */
   documentContext?: DocumentContext;
+  /**
+   * The embedding model's input limit. A preamble that would push a chunk past
+   * it is shortened (context line first, then the title) so the model never
+   * truncates the chunk's own text.
+   */
+  maxInputTokens?: number;
 }): Promise<{ chunks: ContextualizedChunk[]; usage?: ContextualChunkUsage; documentContext: string }> {
   const context = args.documentContext ?? await resolveDocumentContext(args);
 
   return {
     chunks: args.chunks.map((chunk) => {
       const rawText = chunk.text.trim();
-      const contextPreamble = buildChunkContextPreamble({
+      const contextPreamble = fitChunkContextPreamble({
         documentTitle: args.documentTitle,
         documentContext: context.summary,
         headingPath: chunk.headingPath,
         pageNumber: chunk.pageNumber,
         pageNumbers: chunk.pageNumbers,
-      });
+      }, rawText, args.maxInputTokens);
 
       return {
         rawText,
@@ -476,7 +509,7 @@ function isJsonLike(document: Document): boolean {
   return (ext === ".json" || ext === ".jsonl") && mime.includes("json");
 }
 
-function parseJsonContent(
+export function parseJsonContent(
   raw: string,
   document: Document,
 ): { text: string; extractor: string; schemaArtifact?: JsonSchemaArtifact } {
@@ -507,7 +540,7 @@ function parseJsonContent(
       const obj = JSON.parse(line) as Record<string, unknown>;
       const pairs: string[] = [];
       for (const [k, v] of Object.entries(obj)) {
-        pairs.push(`${k}: ${String(v)}`);
+        pairs.push(`${k}: ${jsonValueText(v)}`);
         trackType(k, v);
       }
       textLines.push(pairs.join(", "));
@@ -533,6 +566,13 @@ function parseJsonContent(
   } catch {
     return { text: raw, extractor: "raw-text" };
   }
+}
+
+/** A JSON value as text: strings as they are, nested objects and arrays as JSON (never `[object Object]`). */
+function jsonValueText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value !== null && typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function flattenJson(
@@ -601,11 +641,11 @@ function isTextLike(document: Document): boolean {
   );
 }
 
-/** Pre-call estimate for the fleet TPM bucket (about 4 characters per token); settled with actual usage. */
+/** Pre-call estimate for the fleet TPM bucket; settled with actual usage. */
 export function estimateEmbeddingTokens(batch: string[]): number {
-  let characters = 0;
-  for (const text of batch) characters += text.length;
-  return Math.max(1, Math.ceil(characters / 4));
+  let tokens = 0;
+  for (const text of batch) tokens += estimateTokens(text);
+  return Math.max(1, tokens);
 }
 
 /** 429/5xx, or an AI SDK error it marks retryable (network failures). */
@@ -1407,6 +1447,33 @@ export function buildHeuristicDocumentSummary(
   const firstSentence =
     normalized.match(/.+?[.!?](?:\s|$)/)?.[0]?.trim() ?? normalized;
   return truncateText(firstSentence, CONTEXTUAL_CHUNK_SUMMARY_LIMIT);
+}
+
+type ChunkPreambleArgs = {
+  documentTitle: string;
+  documentContext: string;
+  headingPath?: string[];
+  pageNumber?: number | null;
+  pageNumbers?: number[];
+};
+
+/** The fullest preamble that leaves the chunk's own text inside `maxInputTokens`. */
+export function fitChunkContextPreamble(args: ChunkPreambleArgs, rawText: string, maxInputTokens?: number): string {
+  const full = buildChunkContextPreamble(args);
+  if (maxInputTokens === undefined) return full;
+  const room = maxInputTokens - estimateTokens(rawText) - 2; // blank line between preamble and text
+  if (estimateTokens(full) <= room) return full;
+  const withoutContext = buildChunkContextPreamble({ ...args, documentContext: "" });
+  if (estimateTokens(withoutContext) <= room) return withoutContext;
+  const compact = buildChunkContextPreamble({ ...args, documentContext: "", headingPath: undefined });
+  if (estimateTokens(compact) <= room) return compact;
+  if (room < 8) return "";
+  // Title alone, cut on a grapheme boundary until it fits.
+  let title = args.documentTitle;
+  while (title.length > 1 && estimateTokens(`Document: ${title}`) > room) {
+    title = Array.from(title).slice(0, Math.max(1, Math.floor(Array.from(title).length * 0.7))).join("");
+  }
+  return estimateTokens(`Document: ${title}`) <= room ? `Document: ${title}` : "";
 }
 
 function buildChunkContextPreamble(args: {

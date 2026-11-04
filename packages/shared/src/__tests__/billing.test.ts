@@ -353,3 +353,15 @@ describe("auto top-up settings", () => {
     expect(autoTopUpSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 2_000, monthlyLimitCents: 10_000 }).success).toBe(true);
   });
 });
+
+describe("featurePagesRead", () => {
+  it("prices the share of the document the model read, at least one page", async () => {
+    const { featurePagesRead } = await import("../billing.js");
+    expect(featurePagesRead(300, 100, 100)).toBe(300);
+    expect(featurePagesRead(300, 50, 200)).toBe(75);
+    expect(featurePagesRead(300, 1, 1_000_000)).toBe(1);
+    expect(featurePagesRead(10, 500, 100)).toBe(10);
+    // Unknown text size: the whole document, as before.
+    expect(featurePagesRead(40, 0, 0)).toBe(40);
+  });
+});

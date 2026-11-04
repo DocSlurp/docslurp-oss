@@ -1,8 +1,10 @@
 import { tableChunks, TableBoundary } from "../pipeline/table-chunking.js";
+import { typeColumn, type TypedCell } from "./table-typing.js";
+import { atomize, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "./unicode-text.js";
 import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
-  splitTextIntoPages,
+  splitTextIntoPagesStrict,
   type CanonicalBlock,
   type CanonicalBlockType,
   type CanonicalDocument,
@@ -57,7 +59,13 @@ export function buildCanonicalDocumentFromMarkdown(args: {
   sourceArtifactUri?: string | null;
   extractor: string;
 }): CanonicalDocument {
-  const pages = splitTextIntoPages(args.text, args.pageCount);
+  // Page numbers come only from page breaks that match the page count. On a
+  // mismatch the whole text is one section with an unknown page, so a citation
+  // never points at a page the text did not come from.
+  const text = normalizeNfc(args.text);
+  const strictPages = splitTextIntoPagesStrict(text, args.pageCount);
+  const pagesKnown = strictPages !== null;
+  const pages = strictPages ?? (text.trim() ? [text.replace(/\r\n/g, "\n").replace(/\f/g, "\n").trim()] : []);
   const headingStack: Array<{ level: number; text: string }> = [];
   const blocks: CanonicalBlock[] = [];
   let order = 0;
@@ -80,7 +88,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
 
       const startLine = lineIndex + 1;
       const line = lines[lineIndex] ?? "";
-      const pageNumber = pageIndex + 1;
+      const pageNumber = pagesKnown ? pageIndex + 1 : null;
 
       if (CODE_FENCE_RE.test(line.trim())) {
         const codeLines = [line];
@@ -280,7 +288,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
       paragraphCount: countBlocks(blocks, "paragraph"),
       codeBlockCount: countBlocks(blocks, "code"),
       tableCount: countBlocks(blocks, "table"),
-      pageCount: Math.max(args.pageCount, pages.length)
+      pageCount: pagesKnown ? Math.max(args.pageCount, pages.length) : args.pageCount
     },
     blocks
   };
@@ -297,10 +305,21 @@ export function canonicalDocumentToText(document: CanonicalDocument): string {
 export function buildCanonicalChunksFromDocument(
   document: CanonicalDocument,
   fallback: string,
-  options?: { chunkOverlap?: boolean; maxChars?: number; sourceKind?: "image" | null; evidenceBoundaries?: boolean }
+  options?: {
+    chunkOverlap?: boolean;
+    maxChars?: number;
+    /** Model-token limit per chunk (`estimateTokens`); every chunk also respects `maxChars`. */
+    maxTokens?: number;
+    sourceKind?: "image" | null;
+    evidenceBoundaries?: boolean;
+  }
 ): CanonicalChunk[] {
   const maxChars = options?.maxChars ?? MAX_CHARS;
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) throw new RangeError("maxChars must be a positive safe integer");
+  if (options?.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) {
+    throw new RangeError("maxTokens must be a positive safe integer");
+  }
+  const limits: SizeLimits = { maxChars, maxTokens: options?.maxTokens };
   // Image-only pages carry no text to embed.
   const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0 && !isPageImageReferenceBlock(block));
 
@@ -340,15 +359,15 @@ export function buildCanonicalChunksFromDocument(
 
     if (block.type === "table") {
       flushCurrent();
-      for (const tableChunk of buildTableChunks(block, maxChars)) {
+      for (const tableChunk of buildTableChunks(block, limits)) {
         baseChunks.push(tableChunk);
       }
       continue;
     }
 
-    if (blockText.length > maxChars) {
+    if (!fitsLimits(blockText, limits)) {
       flushCurrent();
-      for (const splitText of splitOversizedText(blockText, maxChars)) {
+      for (const splitText of splitOversizedText(blockText, limits, block.type === "code")) {
         baseChunks.push(materializeChunk(splitText, [block]));
       }
       continue;
@@ -357,7 +376,7 @@ export function buildCanonicalChunksFromDocument(
     const nextText = currentText ? `${currentText}\n\n${blockText}` : blockText;
     const startsNewSection = block.type === "heading" && currentBlocks.length > 0;
 
-    if (startsNewSection || nextText.length > maxChars || (options?.evidenceBoundaries !== false && evidenceBoundary(currentBlocks, block, currentText.length))) {
+    if (startsNewSection || !fitsLimits(nextText, limits) || (options?.evidenceBoundaries !== false && evidenceBoundary(currentBlocks, block, currentText.length))) {
       flushCurrent();
     }
 
@@ -368,7 +387,7 @@ export function buildCanonicalChunksFromDocument(
   flushCurrent();
 
   attachLocators(baseChunks, meaningfulBlocks, options?.sourceKind ?? null);
-  return withOverlap(baseChunks, options?.chunkOverlap ? 0.5 : 0, maxChars);
+  return withOverlap(baseChunks, options?.chunkOverlap ? 0.5 : 0, limits);
 }
 
 function attachLocators(
@@ -473,7 +492,7 @@ function findLastHeadingPath(blocks: CanonicalBlock[]): string[] {
 function withOverlap(
   baseChunks: Array<Omit<CanonicalChunk, "chunkIndex" | "overlapIndex">>,
   overlapFraction: number,
-  maxChars: number
+  limits: SizeLimits
 ): CanonicalChunk[] {
   const chunks: CanonicalChunk[] = [];
   let chunkIndex = 0;
@@ -493,11 +512,12 @@ function withOverlap(
 
     const next = baseChunks[index + 1]!;
     if (current.blockTypes.includes("table") || next.blockTypes.includes("table")) continue;
-    const tailLength = Math.floor(current.text.length * overlapFraction);
-    const headLength = Math.floor(next.text.length * overlapFraction);
-    const overlapText = `${current.text.slice(-tailLength)} ${next.text.slice(0, headLength)}`.trim();
+    // Cut on word boundaries: never mid-word, mid-grapheme, or (slice(-0)) the whole chunk.
+    const tail = tailWords(current.text, Math.floor(current.text.length * overlapFraction));
+    const head = headWords(next.text, Math.floor(next.text.length * overlapFraction));
+    const overlapText = `${tail} ${head}`.trim();
 
-    if (!overlapText || overlapText.length > maxChars) {
+    if (!overlapText || !fitsLimits(overlapText, limits)) {
       continue;
     }
 
@@ -563,14 +583,9 @@ function isIndentedContinuation(line: string): boolean {
   return /^\s{2,}\S/.test(line);
 }
 
-function splitOversizedText(text: string, maxChars: number): string[] {
-  const slices: string[] = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    slices.push(text.slice(cursor, cursor + maxChars).trim());
-    cursor += maxChars;
-  }
-  return slices.filter(Boolean);
+/** Pieces of `text` that fit `limits`, cut at sentence, line, word, then grapheme boundaries; each is an exact substring of the trimmed text. */
+function splitOversizedText(text: string, limits: SizeLimits, code = false): string[] {
+  return atomize(text, limits, { code }).map((piece) => piece.trim()).filter(Boolean);
 }
 
 function collectRegionBoxes(blocks: CanonicalBlock[]): LayoutRegion[] {
@@ -638,14 +653,16 @@ function rectToPolygon(bbox: { x: number; y: number; width: number; height: numb
 
 function buildTableChunks(
   block: CanonicalBlock,
-  maxChars: number
+  limits: SizeLimits
 ): Array<Omit<CanonicalChunk, "chunkIndex" | "overlapIndex">> {
+  // HTML-table chunks are sized in characters; bound them by the token limit too (JSON-encoded cells cost about a token per two characters).
+  const maxChars = Math.max(128, limits.maxTokens === undefined ? limits.maxChars : Math.min(limits.maxChars, limits.maxTokens * 2));
   if (/^\s*<table(?=\s|>|$)/i.test(block.text)) {
     return [...tableChunks(block.text.trim(), maxChars, block.order + 1)]
       .map(text => materializeChunk(text, [block], { tableGranularity: "table" }));
   }
   const parsed = parseMarkdownTable(block.text);
-  const chunks = materializeOversizedBlock(block, maxChars, {
+  const chunks = materializeOversizedBlock(block, limits, {
     tableGranularity: "table",
     tableRowCount: parsed?.rowCount ?? null,
     tableColumnNames: parsed?.columnNames ?? [],
@@ -709,7 +726,7 @@ function withBlockFallbackGeometry(cell: TableCell, block: CanonicalBlock): Tabl
 
 function materializeOversizedBlock(
   block: CanonicalBlock,
-  maxChars: number,
+  limits: SizeLimits,
   tableMetadata?: Partial<Pick<
     CanonicalChunk,
     "tableGranularity" | "tableRowIndex" | "tableRowCount" | "tableColumnNames" | "tableColumnTypes" | "tableCells" | "tableCell"
@@ -720,11 +737,11 @@ function materializeOversizedBlock(
     return [];
   }
 
-  if (blockText.length <= maxChars) {
+  if (fitsLimits(blockText, limits)) {
     return [materializeChunk(blockText, [block], tableMetadata)];
   }
 
-  return splitOversizedText(blockText, maxChars).map((text) => materializeChunk(text, [block], tableMetadata));
+  return splitOversizedText(blockText, limits).map((text) => materializeChunk(text, [block], tableMetadata));
 }
 
 function parseMarkdownTable(text: string): {
@@ -747,13 +764,17 @@ function parseMarkdownTable(text: string): {
     return null;
   }
 
-  const columnNames = headerCells.map((cell, index) => cell || `Column ${index + 1}`);
   const bodyLines = lines.slice(2).filter((line) => isTableLine(line));
-  const rawRows = bodyLines.map((line) => normalizeTableRow(splitMarkdownTableCells(line), columnNames.length));
-  const columnTypes = columnNames.map((_, columnIndex) => inferColumnValueType(rawRows.map((row) => row[columnIndex] ?? "")));
+  const bodyCells = bodyLines.map((line) => splitMarkdownTableCells(line));
+  // A row may be wider than the header; keep its extra cells under generated column names rather than dropping them.
+  const width = Math.max(headerCells.length, ...bodyCells.map((row) => row.length));
+  const columnNames = Array.from({ length: width }, (_, index) => headerCells[index] || `Column ${index + 1}`);
+  const rawRows = bodyCells.map((row) => normalizeTableRow(row, width));
+  const typedColumns = columnNames.map((_, columnIndex) => typeColumn(rawRows.map((row) => row[columnIndex] ?? "")));
+  const columnTypes = typedColumns.map((column) => column.columnType);
   const rows = rawRows.map((row, rowIndex) => ({
     rowIndex,
-    cells: row.map((rawValue, columnIndex) => buildTableCell(columnIndex, columnNames[columnIndex]!, rawValue))
+    cells: row.map((rawValue, columnIndex) => buildTableCell(columnIndex, columnNames[columnIndex]!, rawValue, typedColumns[columnIndex]!.cells[rowIndex]!))
   }));
 
   return {
@@ -803,90 +824,12 @@ function normalizeTableRow(cells: string[], width: number): string[] {
   return normalized;
 }
 
-function buildTableCell(columnIndex: number, columnName: string, rawValue: string): TableCell {
-  const valueType = inferCellValueType(rawValue);
+function buildTableCell(columnIndex: number, columnName: string, rawValue: string, typed: TypedCell): TableCell {
   return {
     columnIndex,
     columnName,
     rawValue,
-    valueType,
-    typedValue: coerceTypedCellValue(rawValue, valueType)
+    valueType: typed.valueType,
+    typedValue: typed.typedValue
   };
-}
-
-function inferColumnValueType(values: string[]): TableCellValueType {
-  const nonEmpty = values
-    .map((value) => inferCellValueType(value))
-    .filter((value) => value !== "empty");
-
-  if (nonEmpty.length === 0) {
-    return "empty";
-  }
-
-  const distinct = [...new Set(nonEmpty)];
-  return distinct.length === 1 ? distinct[0]! : "string";
-}
-
-function inferCellValueType(value: string): TableCellValueType {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return "empty";
-  }
-  if (/^(true|false|yes|no)$/i.test(trimmed)) {
-    return "boolean";
-  }
-  if (/^[+-]?\d+(\.\d+)?%$/.test(trimmed)) {
-    return "percentage";
-  }
-  if (/^[$€£]\s*[+-]?\d[\d,]*(\.\d+)?$/.test(trimmed)) {
-    return "currency";
-  }
-  if (/^[+-]?\d[\d,]*(\.\d+)?$/.test(trimmed)) {
-    return "number";
-  }
-  if (normalizeDateValue(trimmed)) {
-    return "date";
-  }
-  return "string";
-}
-
-function coerceTypedCellValue(value: string, valueType: TableCellValueType): string | number | boolean | null {
-  const trimmed = value.trim();
-  if (valueType === "empty") {
-    return null;
-  }
-  if (valueType === "boolean") {
-    return /^(true|yes)$/i.test(trimmed);
-  }
-  if (valueType === "percentage") {
-    return Number.parseFloat(trimmed.replace(/%$/, ""));
-  }
-  if (valueType === "currency") {
-    return Number.parseFloat(trimmed.replace(/[^\d.+-]/g, ""));
-  }
-  if (valueType === "number") {
-    return Number.parseFloat(trimmed.replace(/,/g, ""));
-  }
-  if (valueType === "date") {
-    return normalizeDateValue(trimmed) ?? trimmed;
-  }
-  return trimmed;
-}
-
-function normalizeDateValue(value: string): string | null {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return value;
-  }
-
-  const monthDayYear = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (monthDayYear) {
-    const [, month, day, year] = monthDayYear;
-    return `${year}-${month!.padStart(2, "0")}-${day!.padStart(2, "0")}`;
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) {
-    return null;
-  }
-  return parsed.toISOString().slice(0, 10);
 }
