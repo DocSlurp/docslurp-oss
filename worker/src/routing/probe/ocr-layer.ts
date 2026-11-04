@@ -34,14 +34,14 @@ export interface OcrLayerCheck {
  * band is rendered from a customer PDF, so it never runs as a bare child of the worker. Resolves null when tesseract
  * is not installed.
  */
-export function sandboxedTesseract(runner: Pick<CommandRunner, "plan" | "run">, timeoutMs = 60_000): Recogniser {
+export function sandboxedTesseract(runner: Pick<CommandRunner, "plan" | "run">, timeoutMs = 60_000, language = "eng"): Recogniser {
   return async (png, signal) => {
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-ocr-layer-"));
     try {
       const input = path.join(dir, "band.png");
       const base = path.join(dir, "band");
       await writeFile(input, png);
-      const plan = await runner.plan("tesseract", input, base, "--psm", "4", "-l", "eng");
+      const plan = await runner.plan("tesseract", input, base, "--psm", "4", "-l", language);
       if (!plan.available) return null;
       // One thread, as the agreement threshold was tuned; bundleEnv is the plan's extra-environment channel.
       await runner.run({ ...plan, timeoutMs, bundleEnv: { OMP_THREAD_LIMIT: "1" } }, signal);

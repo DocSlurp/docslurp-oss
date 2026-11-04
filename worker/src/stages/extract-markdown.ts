@@ -100,6 +100,7 @@ import type { VisionServedRoute } from "../lib/vision-pricing.js";
 import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
+import { createTextLayerVerifier } from "../lib/text-layer-check.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -802,6 +803,12 @@ export class ExtractMarkdownStage implements Stage {
                       : null;
                   const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
                     document, tempFile, winningText, state, { isPdf, format }, signal);
+                  // An uploaded image the extractor OCR'd was read by a model: record the read per page, which is
+                  // the only thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same
+                  // page, charged once (the ledger keys a charge by run, document and page).
+                  if (format === "image" && winningCandidate.label !== "image-textless" && qualityAllowsPageReading(state.run.pipeline.quality)) {
+                    state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber: 1, readBy: "image-ocr" });
+                  }
                   registerHash(state, contentHash, artifactUri);
 
                   for (const parserArtifact of parserArtifacts) {
@@ -1224,8 +1231,14 @@ export class ExtractMarkdownStage implements Stage {
         pageTexts,
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
-        // Routing v2 counts native words from the text layer, so an OCR'd scan stays sparse.
-        textLayerPages: resolveRunRoutingV2(state) ? await this.textLayerPages(state, document) : null,
+        // Evidence routing counts native words from the PDF's own text layer, so an OCR'd scan stays sparse, and
+        // judges the layer's quality (a suspect layer is cross-checked against an OCR of its page).
+        ...(resolveRunRoutingV2(state)
+          ? {
+              textLayerPages: await this.textLayerPages(state, document),
+              verifyTextLayer: createTextLayerVerifier({ runner: this.runner, sourcePath }),
+            }
+          : {}),
       });
       if (!pages) return null;
       return await this.storePageImageEvidence(document, state, pages, "pdfimages",

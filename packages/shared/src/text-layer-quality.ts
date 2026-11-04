@@ -128,6 +128,17 @@ function wordLetterPairs(script: AlphabeticScript, tokenLetters: string[]): { su
   return { sum, count: sequence.length - 1 };
 }
 
+/**
+ * A long unspaced run of ASCII letters, digits and a few marks (a glyph-code shift lands on punctuation as well), that
+ * is not a URL, an address or a restricted-alphabet sequence (hex digests, nucleotides).
+ */
+function isLongTokenCandidate(token: string): boolean {
+  if (!/^[\x21-\x7e]+$/.test(token) || token.includes("://") || token.includes("@")) return false;
+  const alphanumeric = token.match(/[A-Za-z0-9]/g)?.length ?? 0;
+  if (alphanumeric < token.length * 0.7) return false;
+  return !RESTRICTED_ALPHABET.test(token.replace(/[^A-Za-z0-9]/g, ""));
+}
+
 const RESTRICTED_ALPHABET = /^[ACGTUNacgtun]+$|^[0-9A-Fa-f]+$/;
 
 /**
@@ -172,7 +183,7 @@ export function assessTextLayer(text: string): TextLayerAssessment {
   let mixedTokens = 0;
   for (const token of sample.split(" ")) {
     if (!token) continue;
-    if (token.length >= TEXT_LAYER_QUALITY.longTokenChars && /^[A-Za-z0-9]+$/.test(token) && !RESTRICTED_ALPHABET.test(token)) {
+    if (token.length >= TEXT_LAYER_QUALITY.longTokenChars && isLongTokenCandidate(token)) {
       // Mixed-case noise or upper-case and digits only (no word is that long): a glyph-code shift renders text so,
       // a key as well, but a key is one token; a page needs several and most of its characters.
       const flips = token.match(/[a-z][A-Z]|[A-Z][a-z]|[A-Za-z][0-9]|[0-9][A-Za-z]/g)?.length ?? 0;

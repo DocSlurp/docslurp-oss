@@ -754,6 +754,7 @@ export class VisionExtractStage implements Stage {
     return visionAllowedForDocument(
       state.run.pipeline,
       state.artifactLedger.readDocument(documentId, "parser-playbook"),
+      { evidenceRouting: resolveRunRoutingV2(state) },
     );
   }
 

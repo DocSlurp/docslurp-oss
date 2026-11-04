@@ -22,6 +22,8 @@ export interface ImagePlacement {
   rect?: { x: number; y: number; width: number; height: number };
   /** Draw the image inline in the content stream (`BI … ID … EI`) instead of as an XObject. */
   inline?: boolean;
+  /** Placements with the same key share one image object (a logo or slide background drawn on many pages). */
+  shareKey?: string;
 }
 
 export type TestPdfPage =
@@ -108,6 +110,7 @@ export function buildTestPdf(pages: TestPdfPage[]): Buffer {
   const boldFont = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
   const fonts = `/Font << /F1 ${regularFont} 0 R /F2 ${boldFont} 0 R >>`;
   const pageIds: number[] = [];
+  const sharedImages = new Map<string, number>();
   for (const page of pages) {
     const ops: string[] = [];
     const xobjects: string[] = [];
@@ -122,7 +125,9 @@ export function buildTestPdf(pages: TestPdfPage[]): Buffer {
           ops.push(`q ${rect.width} 0 0 ${rect.height} ${rect.x} ${rect.y} cm BI /W ${image.width} /H ${image.height} /CS /G /BPC 8 /F /AHx ID ${data}>\nEI Q`);
           return;
         }
-        const id = add(stream(`/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, image.pixels));
+        const shared = placement.shareKey ? sharedImages.get(placement.shareKey) : undefined;
+        const id = shared ?? add(stream(`/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, image.pixels));
+        if (placement.shareKey && shared === undefined) sharedImages.set(placement.shareKey, id);
         xobjects.push(`/Im${index} ${id} 0 R`);
         ops.push(`q ${rect.width} 0 0 ${rect.height} ${rect.x} ${rect.y} cm /Im${index} Do Q`);
       });
