@@ -497,6 +497,10 @@ describe("algolia compat", () => {
       [{ numericFilters: ["page<=2147483647", "page>=-2147483647"] }, { pageRange: { from: -2147483647, to: 2147483647 } }],
       [{ tagFilters: [[]], ruleContexts: [], enableRules: false }, {}],
       [{ tagFilters: [""] }, {}],
+      [{ type: "default" }, {}],
+      [{ typoTolerance: true, allowTyposOnNumericTokens: true, decompoundQuery: true, minWordSizefor1Typo: 3, minWordSizefor2Typos: 8 }, {}],
+      [{ ignorePlurals: true, removeStopWords: ["en"], queryLanguages: ["en"], naturalLanguages: ["en"], keepDiacriticsOnCharacters: "" }, {}],
+      [{ facetFilters: ["filename:" + "a".repeat(255)] }, { filenameEquals: "a".repeat(255) }],
       [{ tagFilters: [[""]] }, {}],
       [{ facetFilters: ["tags:a" + " ".repeat(900) + "b"] }, { tags: ["a" + " ".repeat(900) + "b"] }],
       [{ filters: "language:en and heading:Intro/Scope" }, { language: "en", headingPath: ["Intro", "Scope"] }],
@@ -580,7 +584,19 @@ describe("algolia compat", () => {
       [{ filters: Array.from({ length: 101 }, () => "tags:a").join(" AND ") }, /at most 100 clauses/],
       [{ facetFilters: Array.from({ length: 101 }, () => "tags:a") }, /at most 100 entries/],
       [{ facetFilters: [Array.from({ length: 60 }, () => "tags:a"), Array.from({ length: 60 }, () => "tags:a")] }, /at most 100 clauses/],
-      [{ type: "facet" }, /Unsupported search parameter "type"/]
+      [{ type: "facet" }, /Unsupported request type "facet"/],
+      [{ tagFilters: [[["finance"]]] }, /tagFilters: arrays nest at most 2 levels/],
+      [{ facetFilters: ["filename:" + "a".repeat(256)] }, /filename values are at most 255 characters/],
+      [{ filters: "filenameContains:" + "a".repeat(256) }, /filenameContains values are at most 255 characters/],
+      [{ typoTolerance: false }, /typoTolerance=.*restricts which results match/],
+      [{ typoTolerance: "strict" }, /typoTolerance=/],
+      [{ typoTolerance: "min" }, /typoTolerance=/],
+      [{ allowTyposOnNumericTokens: false }, /allowTyposOnNumericTokens=/],
+      [{ decompoundQuery: false }, /decompoundQuery=/],
+      [{ minWordSizefor1Typo: 5 }, /minWordSizefor1Typo=/],
+      [{ minWordSizefor2Typos: 9 }, /minWordSizefor2Typos=/],
+      [{ ignorePlurals: "yes" }, /ignorePlurals=/],
+      [{ keepDiacriticsOnCharacters: "éø" }, /keepDiacriticsOnCharacters is not supported/]
     ])("rejects %j with 400 before retrieval", async (body, message) => {
       const res = await search(body);
       expect(res.status).toBe(400);
@@ -736,6 +752,31 @@ describe("algolia compat", () => {
         expect(await res.json()).toMatchObject({ code: "UNSUPPORTED_SEARCH_OPTION", status: 400 });
       }
       expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects deeply nested arrays with a 400 instead of overflowing the stack", async () => {
+      const { parseAlgoliaCompatFilters } = await import("../search/algolia-compat-filters.js");
+      let nested: unknown = [];
+      for (let i = 0; i < 400_000; i++) nested = [nested];
+      const started = performance.now();
+      expect(() => parseAlgoliaCompatFilters({ tagFilters: nested })).toThrow(/nest at most 2 levels/);
+      expect(performance.now() - started).toBeLessThan(50);
+
+      const deepJson = `{"query":"alpha","tagFilters":${"[".repeat(400_000)}${"]".repeat(400_000)}}`;
+      const res = await app.request("/compat/algolia/1/indexes/ws-1/query", {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer test" }, body: deepJson
+      });
+      expect(res.status).toBe(400);
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    it("accepts type default on the single, facet and batch routes", async () => {
+      const headers = { "Content-Type": "application/json", Authorization: "Bearer test" };
+      expect((await search({ type: "default" })).status).toBe(200);
+      expect((await app.request("/compat/algolia/1/indexes/ws-1/facets/filename/query", { method: "POST", headers, body: JSON.stringify({ facetQuery: "a", type: "default" }) })).status).toBe(200);
+      expect((await app.request("/compat/algolia/1/indexes/*/queries", { method: "POST", headers, body: JSON.stringify({ requests: [{ indexName: "ws-1", query: "alpha", type: "default" }] }) })).status).toBe(200);
+      const facet = await app.request("/compat/algolia/1/indexes/ws-1/facets/filename/query", { method: "POST", headers, body: JSON.stringify({ facetQuery: "a", type: "facet" }) });
+      expect(facet.status).toBe(400);
     });
   });
 });

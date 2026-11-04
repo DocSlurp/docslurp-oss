@@ -65,6 +65,14 @@ beforeAll(async () => {
   }
   await sql`insert into workspace_search_settings (workspace_id, user_id, pinned_results)
     values ('w', 'u', '[{"queryPattern":"budget", "documentId":"outside", "rank":1}]')`;
+  // Filenames containing LIKE metacharacters, in their own workspace.
+  await sql`insert into workspaces (id, org_id, user_id, name) values ('names', 'o', 'u', 'Names')`;
+  for (const [id, filename] of [["wildcard", "50%_off.pdf"], ["backslash", "back\\slash.txt"], ["plain", "500 offers.pdf"]] as const) {
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+      values (${id}, 'o', 'u', 'names', 'r', ${filename}, 'text/plain', ${id}, 'completed')`;
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate)
+      values (${id + '-chunk'}, ${id}, 'r', 'u', 0, 'Discount evidence for names.', 10)`;
+  }
   search = await import("../services/search.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -210,12 +218,18 @@ it.each([
 });
 
 it.each([
-  ["a literal %", { filenameContains: "%" }, []],
+  ["a literal %_ inside a name", { workspaceId: "names", filenameContains: "%_" }, ["wildcard"]],
+  ["a literal backslash inside a name", { workspaceId: "names", filenameContains: "back\\slash" }, ["backslash"]],
+  ["an exact wildcard filename", { workspaceId: "names", filenameEquals: "50%_off.pdf" }, ["wildcard"]],
+  ["an exact backslash filename", { workspaceId: "names", filenameEquals: "back\\slash.txt" }, ["backslash"]],
+  ["a literal %", { workspaceId: "names", filenameContains: "%" }, ["wildcard"]],
+  ["a literal % in a workspace without one", { filenameContains: "%" }, []],
   ["a literal _", { filenameContains: "sel_cted" }, []],
-  ["a backslash", { filenameContains: "\\" }, []],
+  ["a backslash", { workspaceId: "names", filenameContains: "\\" }, ["backslash"]],
+  ["a backslash that is not in the name", { workspaceId: "names", filenameContains: "back\\\\slash" }, []],
   ["a case-insensitive substring", { filenameContains: "SELECTED" }, ["selected"]],
   ["an exact filename", { filenameEquals: "selected.txt" }, ["selected"]],
-  ["an exact filename never as a pattern", { filenameEquals: "%" }, []],
+  ["an exact filename never as a pattern", { workspaceId: "names", filenameEquals: "%" }, []],
   ["an exact filename is case-sensitive", { filenameEquals: "SELECTED.TXT" }, []],
 ] satisfies Array<[string, SearchFilters, string[]]>)("matches filename filters with %s without LIKE wildcards widening scope", async (_name, filters, expected) => {
   const result = await search.hybridSearch("evidence", "u", {

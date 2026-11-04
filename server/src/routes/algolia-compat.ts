@@ -89,10 +89,12 @@ function compatFilters(body: Record<string, unknown>, label?: string, extraAllow
   try {
     return parseAlgoliaCompatFilters(body, extraAllowed);
   } catch (error) {
-    if (!(error instanceof AlgoliaFilterError)) throw error;
+    // Any parse failure is a rejected request, never a 500 or a silently ignored filter.
+    if (!(error instanceof AlgoliaFilterError)) console.error("[algolia-compat] filter parsing failed", error);
+    const reason = error instanceof AlgoliaFilterError ? error.message : "Malformed search parameters.";
     // Same code as the Meilisearch/Typesense/Pagefind adapters, plus Algolia's message/status fields.
-    const message = label ? `${label}: ${error.message}` : error.message;
-    return Response.json({ code: error.code, error: message, message, status: 400 }, { status: 400 });
+    const message = label ? `${label}: ${reason}` : reason;
+    return Response.json({ code: "UNSUPPORTED_SEARCH_OPTION", error: message, message, status: 400 }, { status: 400 });
   }
 }
 
@@ -463,7 +465,7 @@ export const algoliaCompatRoutes = new Hono()
     // batch before any retrieval runs.
     const requestFilters: SearchFilters[] = [];
     for (const [index, request] of requests.entries()) {
-      const filters = compatFilters(request, `requests[${index}]`, ["indexName", "type"]);
+      const filters = compatFilters(request, `requests[${index}]`, ["indexName"]);
       if (filters instanceof Response) return filters;
       requestFilters.push(filters);
     }

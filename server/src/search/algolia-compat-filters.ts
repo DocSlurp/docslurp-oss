@@ -39,25 +39,46 @@ const anyOfAttributes = new Set<FacetAttribute>(["tags", "mime_type"]);
 
 const SUPPORTED_HINT = "Supported: tags, mime_type, filename (exact), filenameContains (substring), language, heading, documentId and runId facet clauses joined with AND (OR only between values of one tags or mime_type attribute), and page numeric comparisons.";
 
-/** Request fields the compatibility routes apply themselves. */
+/** Request fields the compatibility routes apply themselves. `type` must be "default". */
 const supportedParams = [
   "query", "page", "hitsPerPage", "filters", "facetFilters", "numericFilters", "facets",
-  "attributesToRetrieve", "highlightPreTag", "highlightPostTag", "facetQuery", "maxFacetHits",
+  "attributesToRetrieve", "highlightPreTag", "highlightPostTag", "facetQuery", "maxFacetHits", "type",
 ];
 
 /**
- * Algolia parameters accepted and ignored because they only affect ranking,
- * presentation or analytics: none of them can add or remove a hit.
+ * Algolia parameters accepted with any value and ignored: they only affect
+ * ranking order, highlighting, facet counts or analytics, never which hits match.
  */
 const rankingOnlyParams = [
   "analytics", "analyticsTags", "clickAnalytics", "getRankingInfo", "enablePersonalization",
   "personalizationImpact", "userToken", "enableABTest", "enableReRanking", "percentileComputation",
   "attributesToHighlight", "attributesToSnippet", "snippetEllipsisText", "restrictHighlightAndSnippetArrays",
   "responseFields", "maxValuesPerFacet", "sortFacetValuesBy", "facetingAfterDistinct",
-  "optionalFilters", "sumOrFiltersScores", "typoTolerance", "minWordSizefor1Typo", "minWordSizefor2Typos",
-  "allowTyposOnNumericTokens", "ignorePlurals", "removeStopWords", "queryLanguages", "naturalLanguages",
-  "decompoundQuery", "keepDiacriticsOnCharacters", "aroundPrecision",
+  "optionalFilters", "sumOrFiltersScores", "aroundPrecision",
 ];
+
+/**
+ * Query-matching parameters that change how many hits match. DocSlurp does not
+ * apply them, so only Algolia's default or a more permissive value is accepted
+ * (ignoring those can only return fewer matches); a restrictive value, which
+ * ignoring would widen, is rejected.
+ */
+const permissiveOnlyParams: Record<string, (value: unknown) => boolean> = {
+  typoTolerance: (value) => value === true || value === "true",
+  allowTyposOnNumericTokens: (value) => value === true,
+  decompoundQuery: (value) => value === true,
+  minWordSizefor1Typo: (value) => typeof value === "number" && value <= 4,
+  minWordSizefor2Typos: (value) => typeof value === "number" && value <= 8,
+  // Plural and stop-word handling only make more words optional or equivalent.
+  ignorePlurals: (value) => typeof value === "boolean" || isStringArray(value),
+  removeStopWords: (value) => typeof value === "boolean" || isStringArray(value),
+  queryLanguages: isStringArray,
+  naturalLanguages: isStringArray,
+};
+
+function isStringArray(value: unknown) {
+  return Array.isArray(value) && value.length <= 100 && value.every((entry) => typeof entry === "string");
+}
 
 /**
  * Algolia parameters that narrow results (or select Algolia-only behaviour) and
@@ -67,10 +88,15 @@ const rankingOnlyParams = [
 const emptyOnlyParams = [
   "tagFilters", "aroundLatLng", "aroundLatLngViaIP", "aroundRadius", "minimumAroundRadius",
   "insideBoundingBox", "insidePolygon", "restrictSearchableAttributes", "ruleContexts", "enableRules",
-  "params",
+  "keepDiacriticsOnCharacters", "params",
 ];
 
-const allowedParams = new Set([...supportedParams, ...rankingOnlyParams, ...emptyOnlyParams]);
+const allowedParams = new Set([...supportedParams, ...rankingOnlyParams, ...Object.keys(permissiveOnlyParams), ...emptyOnlyParams]);
+
+/** Algolia filter arrays nest at most two levels (AND of OR groups). */
+const MAX_PARAM_DEPTH = 2;
+/** Postgres/filesystem filenames are at most 255 characters. */
+const MAX_FILENAME_LENGTH = 255;
 
 /** Bounds keep filter parsing cheap for browser keys before any workspace lookup. */
 const MAX_FILTERS_BYTES = 8 * 1024;
@@ -190,6 +216,9 @@ function parseFacetAtom(clause: string, options: { facetFilterNegation: boolean 
     if (value.startsWith("\\-")) value = value.slice(1);
   }
   if (!value) fail(`Malformed filter ${describe(clause)}: empty value.`);
+  if ((attribute === "filename" || attribute === "filenameContains") && value.length > MAX_FILENAME_LENGTH) {
+    fail(`Filter ${describe(clause)}: ${attribute} values are at most ${MAX_FILENAME_LENGTH} characters.`);
+  }
   return { kind: "facet", attribute, value, source: clause };
 }
 
@@ -400,10 +429,12 @@ function combine(groups: Atom[][]): SearchFilters {
   return filters;
 }
 
-function isEmptyParam(value: unknown): boolean {
+function isEmptyParam(name: string, value: unknown, depth = 0): boolean {
   if (value === undefined || value === null || value === false || value === "") return true;
-  // tagFilters [[]], [""] and [[""]] carry no constraint.
-  return Array.isArray(value) && value.every(isEmptyParam);
+  if (!Array.isArray(value)) return false;
+  // tagFilters [[]], [""] and [[""]] carry no constraint; deeper nesting is not Algolia syntax.
+  if (depth >= MAX_PARAM_DEPTH) fail(`Malformed ${name}: arrays nest at most ${MAX_PARAM_DEPTH} levels.`);
+  return value.every((entry) => isEmptyParam(name, entry, depth + 1));
 }
 
 /**
@@ -418,10 +449,15 @@ export function parseAlgoliaCompatFilters(body: Record<string, unknown>, extraAl
     }
   }
   for (const param of emptyOnlyParams) {
-    if (!isEmptyParam(body[param])) {
+    if (!isEmptyParam(param, body[param])) {
       fail(param === "params"
         ? "The URL-encoded params string is not supported; send search parameters as JSON fields."
         : `${param} is not supported: it changes which results match and DocSlurp cannot apply it. ${SUPPORTED_HINT}`);
+    }
+  }
+  for (const [param, permissive] of Object.entries(permissiveOnlyParams)) {
+    if (body[param] !== undefined && !permissive(body[param])) {
+      fail(`${param}=${describe(JSON.stringify(body[param]) ?? "")} is not supported: it restricts which results match and DocSlurp cannot apply it. Omit it or use Algolia's default.`);
     }
   }
   if (body.type !== undefined && body.type !== "default") fail(`Unsupported request type ${describe(String(body.type))}: use the facet search route for facet values.`);
