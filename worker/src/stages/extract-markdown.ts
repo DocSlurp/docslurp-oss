@@ -803,12 +803,12 @@ export class ExtractMarkdownStage implements Stage {
                       : null;
                   const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
                     document, tempFile, winningText, state, { isPdf, format }, signal);
-                  // An uploaded image the extractor OCR'd was read by a model: record the read per page, which is
-                  // the only thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same
-                  // page, charged once (the ledger keys a charge by run, document and page).
-                  if (format === "image" && winningCandidate.label !== "image-textless" && qualityAllowsPageReading(state.run.pipeline.quality)) {
-                    state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber: 1, readBy: "image-ocr" });
-                  }
+                  // Every page OCR produced text for was read by a model: record the read per page, which is the only
+                  // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
+                  // once (the ledger keys a charge by run, document and page) and topped up for its output tokens.
+                  await this.recordOcrPageReads(state, document, {
+                    format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
+                  }, signal);
                   registerHash(state, contentHash, artifactUri);
 
                   for (const parserArtifact of parserArtifacts) {
@@ -1148,6 +1148,72 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /**
+   * Records the Rich read of every page OCR produced text for, exactly once per page per run (the ledger keys a charge by run,
+   * document and page; a retry re-records the same pages under the same ids).
+   *
+   * - An uploaded image: its one page, when the OCR text has words (Kreuzberg OCRs the first frame of a multi-page TIFF only, so
+   *   one page is the read that happened).
+   * - A PDF: a page whose native text layer (poppler's `pdftotext`, from page facts or run here) has no words while the extractor's
+   *   text for that page does. No extractor says which pages it OCR'd (Kreuzberg's own per-page flags describe the native layer
+   *   only, so a scan reads `isBlank` with its OCR text in the document content), and an empty native layer with words
+   *   in the extracted page can only be an OCR read. Pages the graph extractor's tesseract adapter OCR'd are added from its own list.
+   * Fast never reads a page with a model, so it records nothing. Never throws: a failed probe is logged and bills nothing.
+   */
+  private async recordOcrPageReads(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    args: { format: string; isPdf: boolean; winningText: string; candidate: ExtractedCandidate; sourcePath: string },
+    signal?: AbortSignal,
+  ): Promise<number[]> {
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return [];
+    const hasWords = (text: string | null | undefined) => typeof text === "string" && /[\p{L}\p{N}]/u.test(text);
+    const pages = new Set<number>();
+    if (args.format === "image") {
+      if (args.candidate.label !== "image-textless" && hasWords(args.winningText)) pages.add(1);
+    } else if (args.isPdf) {
+      for (const page of args.candidate.ocrPages ?? []) pages.add(page);
+      try {
+        const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+        const extracted = splitFormFeedPages(args.winningText, pageCount);
+        const native = await this.nativeTextLayerPages(state, document, args.sourcePath, pageCount, signal);
+        if (native && (extracted || hasWords(args.winningText))) {
+          for (let page = 1; page <= pageCount; page += 1) {
+            if (hasWords(native[page - 1])) continue;
+            // Without page breaks in the extracted text every page without a text layer shares the document's words.
+            if (extracted ? hasWords(extracted[page - 1]) : true) pages.add(page);
+          }
+        } else if (!native) {
+          console.warn(`[ocr-ledger] document=${document.id} native text layer unavailable; scanned-page OCR reads are not recorded`);
+        }
+      } catch (error) {
+        rethrowIfTeardown(error);
+        if (signal?.aborted) throw error;
+        console.warn(`[ocr-ledger] document=${document.id} OCR page detection failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const pageNumber of [...pages].sort((a, b) => a - b)) {
+      state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber, readBy: args.format === "image" ? "image-ocr" : "pdf-ocr", model: args.candidate.label });
+    }
+    return [...pages];
+  }
+
+  /** The PDF's own text layer per page (page facts' pdftotext run, else one run here), or null when neither is available. */
+  private async nativeTextLayerPages(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    sourcePath: string,
+    pageCount: number,
+    signal?: AbortSignal,
+  ): Promise<string[] | null> {
+    const fromFacts = await this.textLayerPages(state, document);
+    if (fromFacts && fromFacts.length >= pageCount) return fromFacts;
+    const plan = await this.runner.pageText(sourcePath, pageCount);
+    if (!plan.available) return null;
+    const result = await this.runner.run({ ...plan, pages: pageCount, timeoutMs: 120_000 }, signal);
+    return splitFormFeedPages(result.stdout, pageCount);
+  }
+
+  /**
    * Raster evidence for classify-route: PDFs get page triage (`pdfimages`), and with routing v2
    * an uploaded image gets one full-page raster page (`image-file`). Null when vision fallback is
    * off or the format has none.
@@ -1410,6 +1476,7 @@ export class ExtractMarkdownStage implements Stage {
         textKey,
         textUri: this.storage.uri(textKey),
         tempTextPath: markdown.uri,
+        ...(graph.ocrPages?.length ? { ocrPages: [...graph.ocrPages] } : {}),
       };
     } catch (error) {
       await rm(scratchDir, { recursive: true, force: true });

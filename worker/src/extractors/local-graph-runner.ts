@@ -26,6 +26,8 @@ export interface LocalPdfGraphOutput {
   artifacts: readonly ExtractionArtifactRef[];
   targets: readonly ExtractionArtifactRef[];
   steps: readonly string[];
+  /** Pages the tesseract adapter OCR'd to text (one model read each, billed as a Rich page by the caller). */
+  ocrPages?: readonly number[];
 }
 
 async function hashFile(filePath: string, signal?: AbortSignal): Promise<string> {
@@ -67,7 +69,8 @@ export async function runLocalPdfArtifactGraph(input: LocalPdfGraphInput): Promi
     placements: [],
     producer: { id: "source", optionsDigest: actualHash },
   };
-  const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes, ocrLanguage: input.ocrLanguage });
+  const ocrPages = new Set<number>();
+  const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes, ocrLanguage: input.ocrLanguage, onOcrRead: (page) => ocrPages.add(page) });
   const result = await executeArtifactGraph({
     sourceDocumentId: input.sourceDocumentId,
     initial: [source],
@@ -83,5 +86,5 @@ export async function runLocalPdfArtifactGraph(input: LocalPdfGraphInput): Promi
     const available = adapters.map((adapter) => adapter.id).join(", ") || "none";
     throw new Error(`Local PDF artifact graph ${result.reason}; missing: ${result.missing.join(", ") || "unknown"}. Available adapters: ${available}`);
   }
-  return { artifacts: result.artifacts, targets: result.targets, steps: result.steps };
+  return { artifacts: result.artifacts, targets: result.targets, steps: result.steps, ocrPages: [...ocrPages].sort((a, b) => a - b) };
 }

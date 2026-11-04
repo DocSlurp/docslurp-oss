@@ -250,7 +250,11 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
           return (await input.runner.run(plan, signal)).stdout;
         },
       });
-      return { text: ocr.text.trim(), latencyMs: Date.now() - started, model: "tesseract" };
+      const latencyMs = Date.now() - started;
+      const text = ocr.text.trim();
+      // Tesseract read this page (or a crop of it): a model read, billed as a Rich page once per page per run by the ledger.
+      if (/[\p{L}\p{N}]/u.test(text)) input.recordLocalUsage({ model: "tesseract", metric: "tesseract-page-ocr", pageNumber, latencyMs, outputChars: text.length });
+      return { text, latencyMs, model: "tesseract" };
     },
 
     async label(raster, { pageNumber, signal }) {

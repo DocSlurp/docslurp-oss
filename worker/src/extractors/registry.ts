@@ -21,6 +21,8 @@ export interface ExtractedCandidate {
   tempTextPath: string;
   structuredResult?: DocumentExtractionResult;
   structuredArtifactUri?: string;
+  /** Pages whose text this extractor OCR'd itself and reports (the graph extractor's tesseract adapter); billed as Rich reads. */
+  ocrPages?: number[];
 }
 
 export interface CandidateExecutors {
