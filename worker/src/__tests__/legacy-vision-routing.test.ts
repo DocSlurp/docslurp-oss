@@ -246,6 +246,12 @@ describe("drawn bytes per page", () => {
     expect(drawnBytesPerPage(2 * 1024 ** 2 + 12 * 1024, totalEmbeddedImageBytes(listing), 2)).toBe(1024);
   });
 
+  it("counts inline images and images without an object reference", () => {
+    // poppler prints the object and ID columns of these rows as one `[inline]` or `[none]` token.
+    const listing = header + [row(1, 7, "10K"), row(1, 7, "4000B").replace("7  0", "[inline]"), row(2, 7, "1K").replace("7  0", "[none]")].join("\n");
+    expect(totalEmbeddedImageBytes(listing)).toBe(10 * 1024 + 4000 + 1024);
+  });
+
   it("is unknown when the file size or any image size is unknown", () => {
     expect(totalEmbeddedImageBytes(header + row(1, 7, "??"))).toBeNull();
     expect(drawnBytesPerPage(null, 0, 1)).toBeNull();

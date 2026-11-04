@@ -162,7 +162,7 @@ export function totalEmbeddedImageBytes(stdout: string): number | null {
   let total = 0;
   let rows = 0;
   for (const line of stdout.split("\n")) {
-    const f = line.trim().split(/\s+/);
+    const f = pdfImagesListFields(line);
     if (!/^\d+$/.test(f[0] ?? "")) continue;
     if (++rows > 100_000) return null;
     if (!["image", "mask", "smask", "stencil"].includes(f[2] ?? "")) return null;

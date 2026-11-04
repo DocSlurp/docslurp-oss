@@ -276,6 +276,8 @@ describe("page image evidence parsing", () => {
     // Verbatim poppler 26.10 output for a page drawn with BI … ID … EI.
     const rows = parsePdfImagesList("   1     0 image      40   100  gray    1   8  image  no   [inline]       5     9 4000B 100%");
     expect(rows).toEqual([{ pageNumber: 1, type: "image", width: 40, height: 100, xPpi: 5, yPpi: 9 }]);
+    // An image object poppler cannot reference (reconstructed xref, out-of-range generation) prints `[none]`.
+    expect(parsePdfImagesList("   1     0 image      40   100  gray    1   8  image  no   [none]       5     9 4001B 100%")).toHaveLength(1);
   });
 
   it("caps the rows parsed from a hostile image list", () => {

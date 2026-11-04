@@ -117,8 +117,9 @@ export function buildTestPdf(pages: TestPdfPage[]): Buffer {
         const { image } = placement;
         const rect = placement.rect ?? { x: 0, y: 0, width: PAGE_WIDTH, height: PAGE_HEIGHT };
         if (placement.inline) {
-          const data = image.pixels.toString("latin1");
-          ops.push(`q ${rect.width} 0 0 ${rect.height} ${rect.x} ${rect.y} cm BI /W ${image.width} /H ${image.height} /CS /G /BPC 8 ID ${data}\nEI Q`);
+          // ASCIIHex data cannot contain an `EI` that would end the image early.
+          const data = image.pixels.toString("hex");
+          ops.push(`q ${rect.width} 0 0 ${rect.height} ${rect.x} ${rect.y} cm BI /W ${image.width} /H ${image.height} /CS /G /BPC 8 /F /AHx ID ${data}>\nEI Q`);
           return;
         }
         const id = add(stream(`/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, image.pixels));
