@@ -85,7 +85,7 @@ import {
 } from "../search/query-bounds.js";
 import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 
-export { MissingWorkspaceScopeError } from "../search/session-setup.js";
+export { CrossWorkspaceScopeError, MissingWorkspaceScopeError, WorkspaceNotFoundError } from "../search/session-setup.js";
 
 export interface SearchChunk {
   id: string;

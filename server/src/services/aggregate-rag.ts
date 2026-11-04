@@ -19,7 +19,7 @@ import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { hybridSearch, type SearchOptions } from "./search.js";
+import { hybridSearch, WorkspaceNotFoundError, type SearchOptions } from "./search.js";
 import {
   buildFallbackAnswer,
   buildNativeDocumentInputs,
@@ -90,7 +90,7 @@ async function resolveAggregateWorkspaces(args: {
       requestedWorkspaceIds.map(async (workspaceId) => {
         const workspace = await getWorkspace(workspaceId, args.userId);
         if (!workspace || !apiKeyCanReadWorkspace(args.apiKey, workspace)) {
-          throw new Error(`Workspace not found: ${workspaceId}`);
+          throw new WorkspaceNotFoundError();
         }
         return workspace;
       }),

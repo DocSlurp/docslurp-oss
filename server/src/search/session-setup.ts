@@ -23,6 +23,26 @@ import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 
+/**
+ * The workspace does not exist or the caller may not see it (the two are indistinguishable by design).
+ * The message stays "Workspace not found" for routes that still match it; new code tests `instanceof`.
+ */
+export class WorkspaceNotFoundError extends Error {
+  readonly status = 404 as const;
+  constructor(message = "Workspace not found") {
+    super(message);
+    this.name = "WorkspaceNotFoundError";
+  }
+}
+
+/** A retrieval scope spanning more than one workspace (HTTP 400). */
+export class CrossWorkspaceScopeError extends Error {
+  constructor() {
+    super("Search scope must stay within a single workspace");
+    this.name = "CrossWorkspaceScopeError";
+  }
+}
+
 export class MissingWorkspaceScopeError extends Error {
   constructor() {
     super(
@@ -209,7 +229,7 @@ export async function loadSearchWorkspaceContext(workspaceId: string, userId: st
     limit 1
   `;
   const allowlist = currentRequestApiKeyWorkspaceIds();
-  if (!row || (allowlist && !allowlist.includes(row.workspace_id))) throw new Error("Workspace not found");
+  if (!row || (allowlist && !allowlist.includes(row.workspace_id))) throw new WorkspaceNotFoundError();
   let settings: WorkspaceSearchSettings;
   try {
     settings = parseWorkspaceSearchSettingsRow(row.settings_workspace_id ? row as SettingsRow : undefined, row.workspace_id, userId);
@@ -242,7 +262,7 @@ async function resolveSearchWorkspaceScope(args: {
   if (requestedWorkspaceId) {
     const access = await getWorkspaceAccess(requestedWorkspaceId, args.userId);
     if (!access) {
-      throw new Error("Workspace not found");
+      throw new WorkspaceNotFoundError();
     }
     return { workspaceId: access.workspaceId, orgId: access.orgId };
   }
@@ -275,11 +295,11 @@ async function resolveSearchWorkspaceScope(args: {
     `;
 
     if (rows.length === 0) {
-      throw new Error("Workspace not found");
+      throw new WorkspaceNotFoundError();
     }
 
     if (rows.length > 1) {
-      throw new Error("Search scope must stay within a single workspace");
+      throw new CrossWorkspaceScopeError();
     }
 
     return { workspaceId: rows[0]!.workspace_id, orgId: rows[0]!.org_id };
@@ -308,7 +328,7 @@ async function resolveSearchWorkspaceScope(args: {
     `;
 
     if (!row) {
-      throw new Error("Workspace not found");
+      throw new WorkspaceNotFoundError();
     }
 
     return { workspaceId: row.workspace_id, orgId: row.org_id };
