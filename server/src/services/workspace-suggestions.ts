@@ -1,4 +1,5 @@
 import { sql } from "../db.js";
+import { escapeLikePattern } from "../search/filters.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { getWorkspaceAccess } from "./organizations.js";
 
@@ -7,7 +8,8 @@ export async function readWorkspaceSuggestions(userId: string, workspaceId: stri
   if (!await getWorkspaceAccess(workspaceId, userId)) return null;
   const q = (options.q ?? "").trim().slice(0, 64);
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(50, Math.floor(options.limit!))) : 8;
-  const like = q ? `${q}%` : "%";
+  // A typed `%` or `_` is text, not a wildcard: "100%" must not match every phrase.
+  const like = q ? `${escapeLikePattern(q)}%` : "%";
 
   // 1) Recent queries for this workspace starting with prefix. Stored queries
   // are encrypted or hashed at rest; those rows have no text to suggest.
