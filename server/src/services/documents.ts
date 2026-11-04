@@ -21,6 +21,7 @@ import { getArtifactText, parseArtifactUri } from "../lib/artifacts.js";
 import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
+import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getWorkspaceAccess, listAccessibleWorkspaceIds, listEditableWorkspaceIds } from "./organizations.js";
 import { runCreation } from "./run-creation.js";
 import {
@@ -705,16 +706,27 @@ async function getDocumentRow(docId: string, userId: string): Promise<DocumentRo
   return row ?? null;
 }
 
+export type DocumentsPage = { documents: DocumentRecord[]; hasMore: boolean; nextCursor: string | null };
+
+/**
+ * One page of documents, newest first, over the workspaces the caller can reach. Keyset-ordered on
+ * (created_at, id), so documents added while paging never shift a page; `nextCursor` is null on the last page.
+ */
 export async function listDocumentsWithFilters(args: {
   userId: string;
   orgId?: string;
   runId?: string;
   workspaceId?: string;
   tags?: string[];
-}): Promise<DocumentRecord[]> {
+  /** 1-250, default 250. */
+  limit?: number;
+  /** The previous page's nextCursor. */
+  cursor?: string;
+}): Promise<DocumentsPage> {
+  const limit = args.limit ?? 250;
   const workspaceIds = await listAccessibleWorkspaceIds(args.userId);
   if (workspaceIds.length === 0) {
-    return [];
+    return { documents: [], hasMore: false, nextCursor: null };
   }
 
   const conditions: SqlFragment[] = [sql`d.workspace_id = any(${sql.array(workspaceIds)})`];
@@ -739,20 +751,33 @@ export async function listDocumentsWithFilters(args: {
     )`);
   }
 
+  if (args.cursor) {
+    const after = decodeListCursor<{ createdAt: string; id: string }>("documents", args.cursor, { createdAt: "string", id: "string" });
+    conditions.push(sql`(d.created_at, d.id) < (${after.createdAt}::timestamptz, ${after.id})`);
+  }
+
   const whereClause = andSqlFragments(conditions);
-  const rows = await sql<DocumentRow[]>`
+  const rows = await sql<(DocumentRow & { cursor_created_at: string })[]>`
     select
        d.*,
+       d.created_at::text as cursor_created_at,
        coalesce(array_agg(distinct dt.tag) filter (where dt.tag is not null), '{}') as tags
      from documents d
      left join document_tags dt on dt.document_id = d.id
      where ${whereClause}
      group by d.id
-     order by d.created_at desc
-     limit 250
+     order by d.created_at desc, d.id desc
+     limit ${limit + 1}
   `;
 
-  return rows.map(mapDocument);
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page.at(-1);
+  return {
+    documents: page.map(mapDocument),
+    hasMore,
+    nextCursor: hasMore && last ? encodeListCursor("documents", { createdAt: last.cursor_created_at, id: last.id }) : null,
+  };
 }
 
 export async function listDocumentIndexEntries(args: {

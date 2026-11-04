@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const getRunMock = vi.fn();
 const getRunProgressMock = vi.fn();
 const listRunsMock = vi.fn();
+const listRunsPageMock = vi.fn();
 const getWorkspaceMock = vi.fn();
 const getRunProcessingPreviewMock = vi.fn();
 const reprocessRunMock = vi.fn();
@@ -50,6 +51,7 @@ vi.mock("../services/runs.js", () => ({
   listenForRunEvents: listenForRunEventsMock,
   listRunEvents: listRunEventsMock,
   listRuns: listRunsMock,
+  listRunsPage: listRunsPageMock,
   reprocessRun: reprocessRunMock,
   retryRun: retryRunMock
 }));
@@ -310,10 +312,20 @@ describe("API-key run reads", () => {
     expect(modes["POST /:runId/reprocess/estimate"]).toBe("apiKey");
     expect(modes["POST /:runId/control"] ?? "session").toBe("session");
   });
-  it("filters run lists to the key organization", async () => {
+  it("scopes run history to the key organization in the query and pages it with a cursor", async () => {
+    listRunsPageMock.mockResolvedValue({ runs: [{ id: "own", orgId: "org-1" }], hasMore: true, nextCursor: "next" });
+    const response = await keyApp().request("/runs?limit=20&cursor=abc");
+    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: true, nextCursor: "next" });
+    // The organization is a SQL condition, not a filter over an already truncated page.
+    expect(listRunsPageMock).toHaveBeenCalledWith(expect.any(String), { orgId: "org-1", limit: 20, cursor: "abc" });
+    expect((await keyApp().request("/runs?limit=0")).status).toBe(400);
+    expect((await keyApp().request("/runs?limit=101")).status).toBe(400);
+    expect((await keyApp().request("/runs?limit=ten")).status).toBe(400);
+  });
+  it("keeps the activity list organization-filtered and reports it as complete", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);
-    const response = await keyApp().request("/runs");
-    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }] });
+    const response = await keyApp().request("/runs?activity=true");
+    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: false, nextCursor: null });
   });
   it.each(["/events", "/events/stream", "/progress/stream"])("isolates streaming/event reads across organizations at %s", async suffix => {
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-2" });

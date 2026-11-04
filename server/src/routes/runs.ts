@@ -22,6 +22,7 @@ import {
   getRun,
   getRunProcessingPreview,
   getRunProgress,
+  listRunsPage,
   isReprocessRejectedError,
   isRunCreationBlockedError,
   listenForRunEvents,
@@ -32,6 +33,7 @@ import {
 } from "../services/runs.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
@@ -108,9 +110,14 @@ export const runsRoutes = new Hono()
     if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    const runs = c.req.query("activity") === "true" ? await listRuns(userId, true) : await listRuns(userId);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
-    return c.json({ runs: orgId ? runs.filter((run) => run.orgId === orgId) : runs });
+    if (c.req.query("activity") === "true") {
+      const runs = await listRuns(userId, true);
+      return c.json({ runs: orgId ? runs.filter((run) => run.orgId === orgId) : runs, hasMore: false, nextCursor: null });
+    }
+    // History is paged: `limit` (1-100, default 50) and the `cursor` from the previous page's nextCursor.
+    const page = await listRunsPage(userId, { orgId, limit: parseListLimit(c.req.query("limit"), 50, 100), cursor: c.req.query("cursor") || undefined });
+    return c.json(page);
   })
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
