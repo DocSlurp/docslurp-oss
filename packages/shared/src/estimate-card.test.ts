@@ -110,9 +110,13 @@ describe("quoteUpload", () => {
 
   it("counts text files the way the API counts their pages, as text", () => {
     const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+    // Unprobed: pages from size are a floor (short lines bill more), so the range stays open.
     const csv = quoteUpload({ files: [{ name: "rows.csv", size: 1_000_000 }], profile }).estimate;
     expect(csv.pages).toBe(Math.ceil(1_000_000 / 3_500));
-    expect(csv.credits!.low).toBe(csv.credits!.high);
+    expect(csv.credits!.low).toBeLessThan(csv.credits!.high);
+    // Counted (probe): all text pages, an exact price.
+    const counted = quoteUpload({ files: [{ name: "rows.csv", size: 1_000_000, pages: 334 }], profile }).estimate;
+    expect(counted.credits!.low).toBe(counted.credits!.high);
     expect(isUploadTextFile({ name: "notes", type: "application/x-ndjson" })).toBe(true);
     expect(isUploadTextFile({ name: "notes.md", type: "application/pdf" })).toBe(false);
     expect(textPageCount(`${"x\n".repeat(120)}`)).toBe(3);
@@ -153,12 +157,19 @@ describe("quoteUpload", () => {
     expect(allText.basis).toContain("page mix known for every file");
   });
 
-  it("keeps the unknown-mix bounds when the measured mix has no confidence", () => {
+  it("never lowers the high end below a measured scan-heavy mix", () => {
     const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
-    const unknown = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100 }], profile }).estimate.credits;
+    const allScanned = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100, mix: { text: 0, complex: 0, scanned: 1 }, mixConfidence: 0.5 }], profile }).estimate.credits!;
+    const certain = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100, mix: { text: 0, complex: 0, scanned: 1 } }], profile }).estimate.credits!;
+    expect(allScanned.high).toBe(certain.high);
+  });
+
+  it("ignores an untrusted mix on the low end but never quotes below it on the high end", () => {
+    const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+    const unknown = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100 }], profile }).estimate.credits!;
     const untrusted = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100, mix: { text: 0, complex: 0, scanned: 1 }, mixConfidence: 0 }], profile }).estimate.credits!;
-    expect(untrusted.low).toBeCloseTo(unknown!.low, 9);
-    expect(untrusted.high).toBeCloseTo(unknown!.high, 9);
+    expect(untrusted.low).toBeCloseTo(unknown.low, 9);
+    expect(untrusted.high).toBeGreaterThan(unknown.high);
   });
 
   it("returns no price when billing is disabled", () => {

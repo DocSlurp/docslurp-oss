@@ -202,7 +202,20 @@ fn known_mix(card: &Card, file: &QuoteFile) -> Option<(PageMix, f64)> {
     if is_image_file(card, &file.name, mime) {
         return Some((IMAGE_FILE_MIX, 1.0));
     }
-    is_text_file(card, &file.name, mime).then_some((TEXT_FILE_MIX, 1.0))
+    // Text pages are only known once counted; without a count the size-based pages may be low, so keep the range.
+    (is_text_file(card, &file.name, mime) && file.pages.is_some()).then_some((TEXT_FILE_MIX, 1.0))
+}
+
+/// The expensive end for a known mix: blended toward the scan-heavy bound, never below the measured scanned share.
+fn high_mix(card: &Card, mix: &PageMix, confidence: f64) -> PageMix {
+    let blended = blended_mix(mix, confidence, &card.quote_high_mix);
+    let total = mix.text + mix.complex + mix.scanned;
+    let measured_scanned = mix.scanned / total;
+    if measured_scanned > blended.scanned {
+        PageMix::new(mix.text / total, mix.complex / total, measured_scanned)
+    } else {
+        blended
+    }
 }
 
 fn blended_mix(mix: &PageMix, confidence: f64, bound: &PageMix) -> PageMix {
@@ -228,9 +241,7 @@ fn quote_mixes(card: &Card, files: &[&QuoteFile]) -> (PageMix, PageMix, usize) {
     for file in files {
         let pages = quote_file_pages(card, file);
         let (file_low, file_high) = match known_mix(card, file) {
-            Some((mix, confidence)) => {
-                (blended_mix(&mix, confidence, &card.quote_low_mix), blended_mix(&mix, confidence, &card.quote_high_mix))
-            }
+            Some((mix, confidence)) => (blended_mix(&mix, confidence, &card.quote_low_mix), high_mix(card, &mix, confidence)),
             None => (card.quote_low_mix, card.quote_high_mix),
         };
         low.text += pages * file_low.text;

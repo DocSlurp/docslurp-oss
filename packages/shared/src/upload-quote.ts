@@ -138,8 +138,9 @@ export function quoteFilePages(file: { name: string; type?: string | null; size:
 function knownMix(file: QuoteFile): { mix: PageMix; confidence: number } | null {
   if (file.mix && file.mix.text + file.mix.complex + file.mix.scanned > 0) return { mix: file.mix, confidence: file.mixConfidence ?? 1 };
   if (isUploadImageFile(file)) return { mix: IMAGE_FILE_MIX, confidence: 1 };
-  // Text files have no scanned pages: their pages bill Fast in every profile that bills by page class.
-  if (isUploadTextFile(file)) return { mix: TEXT_FILE_MIX, confidence: 1 };
+  // Text files have no scanned pages, but their page count is only known once counted (pages bill by lines or
+  // characters); without it the size-based count may be low, so the file keeps the unknown range.
+  if (isUploadTextFile(file) && file.pages !== undefined) return { mix: TEXT_FILE_MIX, confidence: 1 };
   return null;
 }
 
@@ -154,6 +155,17 @@ function blendedMix(mix: PageMix, confidence: number, bound: Readonly<PageMix>):
   };
 }
 
+/**
+ * The expensive end for a file with a known mix: blended toward the scan-heavy bound, but never below the measured
+ * scanned share (blending a scan-heavy measurement toward a 50%-scanned bound would lower the high end).
+ */
+function highMix(mix: PageMix, confidence: number): PageMix {
+  const blended = blendedMix(mix, confidence, QUOTE_HIGH_MIX);
+  const total = mix.text + mix.complex + mix.scanned;
+  const measuredScanned = mix.scanned / total;
+  return measuredScanned > blended.scanned ? { text: mix.text / total, complex: mix.complex / total, scanned: measuredScanned } : blended;
+}
+
 /** The low and high page mixes of a set of paged files: page-weighted, measured where a file carries a mix. */
 function quoteMixes(files: readonly QuoteFile[]): { low: PageMix; high: PageMix; known: number } {
   const known = files.filter((file) => knownMix(file)).length;
@@ -164,7 +176,7 @@ function quoteMixes(files: readonly QuoteFile[]): { low: PageMix; high: PageMix;
     const pages = quoteFilePages(file);
     const mix = knownMix(file);
     const fileLow = mix ? blendedMix(mix.mix, mix.confidence, QUOTE_LOW_MIX) : QUOTE_LOW_MIX;
-    const fileHigh = mix ? blendedMix(mix.mix, mix.confidence, QUOTE_HIGH_MIX) : QUOTE_HIGH_MIX;
+    const fileHigh = mix ? highMix(mix.mix, mix.confidence) : QUOTE_HIGH_MIX;
     low.text += pages * fileLow.text;
     low.complex += pages * fileLow.complex;
     low.scanned += pages * fileLow.scanned;

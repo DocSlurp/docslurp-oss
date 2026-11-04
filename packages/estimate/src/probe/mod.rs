@@ -230,8 +230,34 @@ impl<'a> ProbeInput<'a> {
 
 /// Probe one file. Unknown formats come back as [`ProbeKind::Unknown`]; hostile input hits a budget, not a hang.
 pub fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
+    let mut result = sniff(card, input);
+    // Billing reads the type intake stores (the declared type, else the extension), never a sniffed one. Report the
+    // sniffed type only for files whose name and declared type say nothing.
+    if named_format(card, input) {
+        result.mime_type = None;
+    }
+    result
+}
+
+/// Whether the declared type or the extension already names a format the quote rules know.
+fn named_format(card: &Card, input: &ProbeInput<'_>) -> bool {
+    let mime = input.mime();
+    if !(mime.is_empty() || mime == "application/octet-stream") {
+        return true;
+    }
+    let extension = input.extension();
+    let documents = ["pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "odt", "rtf", "epub"];
+    let lists = [&card.extensions.audio, &card.extensions.video, &card.extensions.image, &card.extensions.text];
+    documents.contains(&extension.as_str()) || lists.iter().any(|list| list.iter().any(|known| *known == extension))
+}
+
+fn sniff(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     let head = input.head;
     let extension = input.extension();
+    // A text file is counted as text even when it quotes a PDF header or starts like a media file.
+    if crate::price::is_text_file(card, input.name, input.mime_type) {
+        return text(card, input, if extension.is_empty() { "text" } else { &extension });
+    }
 
     if head.starts_with(b"%PDF-") || find(head, b"%PDF-", 1024).is_some() {
         return pdf::probe(card, input);
@@ -247,9 +273,6 @@ pub fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     }
     if extension == "pdf" {
         return pdf::probe(card, input);
-    }
-    if crate::price::is_text_file(card, input.name, input.mime_type) {
-        return text(card, input, if extension.is_empty() { "text" } else { &extension });
     }
     ProbeResult::new(ProbeKind::Unknown, if extension.is_empty() { "unknown" } else { &extension }, None)
         .note("format not recognized; priced from its name, type and size")
@@ -316,4 +339,25 @@ pub(crate) fn u64_be(bytes: &[u8], at: usize) -> Option<u64> {
 }
 pub(crate) fn u64_le(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_file_quoting_a_pdf_header_is_counted_as_text() {
+        let text = format!("Notes on the %PDF-1.7 header\n{}", "line\n".repeat(299));
+        let result = probe(Card::bundled(), &ProbeInput::whole("notes.md", None, text.as_bytes()));
+        assert_eq!(result.kind, ProbeKind::Text);
+        assert_eq!(result.pages, Some(6.0)); // 301 lines
+        assert_eq!(result.mime_type, None);
+    }
+
+    #[test]
+    fn sniffed_types_are_reported_only_for_unnamed_files() {
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+        assert_eq!(probe(Card::bundled(), &ProbeInput::whole("scan", None, png)).mime_type.as_deref(), Some("image/png"));
+        assert_eq!(probe(Card::bundled(), &ProbeInput::whole("scan.pdf", None, png)).mime_type, None);
+    }
 }
