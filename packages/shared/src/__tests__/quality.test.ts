@@ -306,7 +306,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
       });
       expect(JSON.stringify(parsed)).not.toContain("/tmp/attacker");
       expect(JSON.stringify(parsed)).not.toContain("/tmp/model");
-      expect(parsed.documentExtraction.ocr).toEqual({ language: "eng", autoRotate: false });
+      expect(parsed.documentExtraction.ocr).toEqual({ language: "auto", autoRotate: false });
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain("workspace ws_1");
       for (const path of [

@@ -328,12 +328,11 @@ export async function readCanonicalDocumentArtifact(
   storage: ArtifactStore,
   artifactUri: string,
 ): Promise<CanonicalDocument> {
-  const raw = await readUtf8Artifact(storage, artifactUri);
   let json: unknown;
   try {
-    json = JSON.parse(raw);
+    json = await storage.getJson(artifactKeyOf(artifactUri));
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, "not valid JSON", { cause: error });
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
   }
   const parsed = canonicalDocumentSchema.safeParse(json);
   if (!parsed.success) throw new ArtifactReadError(artifactUri, "does not match the canonical document schema");

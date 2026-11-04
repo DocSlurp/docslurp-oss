@@ -107,9 +107,10 @@ describe("a recorded artifact that cannot be read", () => {
     await expect(extractTextForEmbedding(document, runner, storage, "s3://bucket/markdown/doc.md", undefined, undefined)).rejects.toBeInstanceOf(ArtifactReadError);
   });
 
-  it("rejects an unparsable canonical artifact instead of indexing without it", async () => {
-    const getBytes = vi.fn(async (key: string) => Buffer.from(key.startsWith("canonical/") ? "{not json" : "text"));
-    const storage = { getBytes, bucket: "bucket" } as never;
+  it("rejects an unreadable canonical artifact instead of indexing without it", async () => {
+    const getBytes = vi.fn(async () => Buffer.from("text"));
+    const getJson = vi.fn(async () => { throw new Error("Unexpected token { in JSON"); });
+    const storage = { getBytes, getJson, bucket: "bucket" } as never;
     await expect(extractTextForEmbedding(document, runner, storage, "s3://bucket/markdown/doc.md", undefined, "s3://bucket/canonical/doc.json")).rejects.toBeInstanceOf(ArtifactReadError);
   });
 
