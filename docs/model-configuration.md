@@ -6,7 +6,7 @@ independently of the pipeline models below. Override `DOCSLURP_JUDGE_MODEL` and
 pricing, logs actual usage, and persists provider charges in its scoped SQLite
 evidence store. See the judge calibration and adoption tickets.
 
-## Model URIs (`llm://`)
+## Model URIs (llm://)
 
 Every API field that names a model takes an `llm://` model URI:
 
