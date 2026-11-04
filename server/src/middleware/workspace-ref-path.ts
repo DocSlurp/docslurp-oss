@@ -1,10 +1,12 @@
 import { Hono, type MiddlewareHandler } from "hono";
 import { isDefaultWorkspaceAlias, isWorkspaceUuid, WORKSPACE_ROUTE_SEGMENTS } from "@docslurp/shared";
 
-import { getRequestActor, resolveActorWorkspaceId, setRequestActor } from "../lib/request-actor.js";
-import { resolveWorkspaceRef } from "../services/workspaces.js";
+import { apiKeyAllowsWorkspace, getRequestActor, resolveActorWorkspaceId, setRequestActor } from "../lib/request-actor.js";
+import { apiErrorResponse } from "../lib/api-error.js";
+import { ensureDefaultWorkspace, resolveWorkspaceRef } from "../services/workspaces.js";
 import { setCurrentRequestWorkspaceId } from "../lib/request-context.js";
 
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const WORKSPACE_PATH = /^(.*?\/v1\/workspaces\/)([^/]+)(\/.*)?$/;
 
 /**
@@ -27,7 +29,15 @@ export function workspaceRefPath(routers: Hono[]): MiddlewareHandler {
     const actor = getRequestActor(c);
     let workspaceId: string;
     let renamedFrom: string | null = null;
-    if (isDefaultWorkspaceAlias(ref)) {
+    if (isDefaultWorkspaceAlias(ref) && actor.type === "apiKey" && !SAFE_METHODS.has(c.req.method.toUpperCase())) {
+      // A key's change to `default` means its organization's default workspace,
+      // never a stand-in from its allowlist: outside the allowlist it is not found.
+      const defaultWorkspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId: actor.apiKey.orgId });
+      if (!apiKeyAllowsWorkspace(actor.apiKey, defaultWorkspace.id)) {
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      workspaceId = defaultWorkspace.id;
+    } else if (isDefaultWorkspaceAlias(ref)) {
       workspaceId = await resolveActorWorkspaceId(actor, null, url.searchParams.get("orgId"));
     } else {
       const resolved = await resolveWorkspaceRef(ref);

@@ -28,7 +28,7 @@ export type EstimateToolName = (typeof ESTIMATE_TOOL_NAMES)[number];
 type EstimateAccess = { sessionOnly: true } | { scopes: readonly string[]; server?: boolean };
 export const ESTIMATE_TOOL_ACCESS: Record<EstimateToolName, EstimateAccess> = {
   "updateEstimate": { scopes: ["workspaces:manage"], server: true },
-  "searchSettingsEstimate": { sessionOnly: true },
+  "searchSettingsEstimate": { scopes: ["workspaces:manage"], server: true },
   "reprocessEstimate": { scopes: ["ingest"], server: true },
   "fullIndexEstimate": { scopes: ["ingest"] },
   "indexingModeEstimate": { scopes: ["workspaces:manage"], server: true },

@@ -23,8 +23,13 @@ import { hybridSearch, type SearchOptions } from "./search.js";
 import {
   buildFallbackAnswer,
   buildNativeDocumentInputs,
+  apiKeyOutputCap,
   buildWorkspaceChatEvidenceSpans,
+  capOutputTokens,
+  isWorkspaceChatEnabled,
 } from "./workspace-chat.js";
+
+const AGGREGATE_ANSWER_MAX_OUTPUT_TOKENS = 800;
 import { getWorkspace, listWorkspaces } from "./workspaces.js";
 
 export interface AggregateRagWorkspaceResult {
@@ -173,6 +178,7 @@ async function generateAggregateAnswer(args: {
   workspaces: AggregateRagWorkspaceResult[];
   /** Set only when every answered workspace belongs to the same org. */
   orgId: string | null;
+  maxOutputTokens: number;
 }): Promise<{
   answer: string;
   evidenceSpans: WorkspaceChatEvidenceSpan[];
@@ -235,7 +241,7 @@ async function generateAggregateAnswer(args: {
       "The evidence is multiplexed from multiple workspaces. Use workspace context to distinguish source collections.",
     ].join("\n"),
     documents,
-    maxOutputTokens: 800,
+    maxOutputTokens: args.maxOutputTokens,
   });
   await recordUsageEvent({
     userId: args.userId,
@@ -275,6 +281,15 @@ async function generateAggregateAnswer(args: {
   };
 }
 
+/** generateAnswer over workspaces from more than one organization (HTTP 400). */
+export class AggregateAnswerScopeError extends Error {
+  readonly status = 400 as const;
+  constructor() {
+    super("generateAnswer needs workspaces from one organization: list only that organization's workspaces in `workspaces`, or set generateAnswer to false to search across organizations.");
+    this.name = "AggregateAnswerScopeError";
+  }
+}
+
 export async function aggregateWorkspaceRagSearch(args: {
   userId: string;
   request: AggregateWorkspaceRagSearchRequest;
@@ -292,9 +307,7 @@ export async function aggregateWorkspaceRagSearch(args: {
   if (workspaces.length === 0) {
     return {
       query,
-      answer: request.generateAnswer
-        ? `No accessible workspaces are available for "${query}".`
-        : null,
+      answer: null,
       citations: [],
       evidenceSpans: [],
       workspaces: [],
@@ -306,6 +319,13 @@ export async function aggregateWorkspaceRagSearch(args: {
         totalTokens: 0,
       },
     };
+  }
+
+  // One answer is billed to one organization's credits (the usage scope), so an
+  // answer may not draw on workspaces from several organizations. Refused
+  // before retrieval; retrieval alone may still span organizations.
+  if (request.generateAnswer && new Set(workspaces.map((workspace) => workspace.orgId ?? null)).size > 1) {
+    throw new AggregateAnswerScopeError();
   }
 
   const workspaceResults = await Promise.all(
@@ -357,21 +377,34 @@ export async function aggregateWorkspaceRagSearch(args: {
       : []),
   ];
 
-  if (!request.generateAnswer) {
-    return {
-      query,
-      answer: null,
-      citations,
-      evidenceSpans: [],
-      workspaces: workspaceResults,
-      warnings: baseWarnings,
-      partial: baseWarnings.length > 0,
-      usage: {
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-      },
-    };
+  const citationsOnly = (warnings: string[]): AggregateRagSearchResponse => ({
+    query,
+    answer: null,
+    citations,
+    evidenceSpans: [],
+    workspaces: workspaceResults,
+    warnings,
+    partial: baseWarnings.length > 0,
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    },
+  });
+
+  if (!request.generateAnswer) return citationsOnly(baseWarnings);
+
+  // A workspace owner who turned chat off has opted out of generated answers
+  // over its documents: answer with citations only and call no model.
+  const chatEnabled = await Promise.all(
+    workspaces.map((workspace) => isWorkspaceChatEnabled(workspace.id, args.userId)),
+  );
+  const chatDisabled = workspaces.filter((_, index) => !chatEnabled[index]);
+  if (chatDisabled.length > 0) {
+    return citationsOnly([
+      ...baseWarnings,
+      `No answer was generated: chat is turned off in ${chatDisabled.map((workspace) => workspace.name).join(", ")}.`,
+    ]);
   }
 
   // The answer calls a model: every answered workspace's org must be able to spend.
@@ -389,6 +422,11 @@ export async function aggregateWorkspaceRagSearch(args: {
     citations,
     workspaces: workspaceResults,
     orgId: singleOrgId(workspaces),
+    // The key's chat output cap applies here as on every chat surface.
+    maxOutputTokens: capOutputTokens(
+      AGGREGATE_ANSWER_MAX_OUTPUT_TOKENS,
+      args.apiKey ? apiKeyOutputCap({ type: "apiKey", userId: args.userId, apiKey: args.apiKey }) : null,
+    ) ?? AGGREGATE_ANSWER_MAX_OUTPUT_TOKENS,
   });
   return {
     query,

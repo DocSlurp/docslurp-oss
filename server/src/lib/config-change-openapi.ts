@@ -46,6 +46,17 @@ export const configChangePaths = {
       responses: estimateResponses,
     },
   },
+  "/v1/workspaces/{workspaceId}/search-settings/estimate": {
+    post: {
+      tags: ["workspaces"],
+      summary: "Estimate a search settings update",
+      description: "Same body and access as PATCH /v1/workspaces/{workspaceId}/search-settings (session, or a server key with workspaces:manage). Returns `{ impact, estimate, billing }` and changes nothing.",
+      security,
+      parameters: [workspaceRefParameter],
+      requestBody: body,
+      responses: estimateResponses,
+    },
+  },
   "/v1/workspaces/{workspaceId}/full-index/estimate": {
     post: {
       tags: ["workspaces"],
