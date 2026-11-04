@@ -11,35 +11,14 @@ import path from "node:path";
 import { tokenAgreement, textLayerMatchesOcr } from "@docslurp/shared";
 
 import type { CommandRunner } from "../tools/runner.js";
-import { sandboxedTesseract, type Recogniser } from "../routing/probe/ocr-layer.js";
+import { sandboxedTesseract, tesseractLanguageForText, type Recogniser } from "../routing/probe/ocr-layer.js";
 import type { TextLayerVerifier } from "./page-image-evidence.js";
 
 const CHECK_DPI = 100;
 /** Longest edge of the check render, in pixels (the render is scaled before pixels are allocated). */
 const CHECK_MAX_EDGE_PX = 1600;
 
-/** Tesseract language packs for the dominant script of a text; null when no pack is mapped (the check is skipped). */
-export function tesseractLanguageForText(text: string): string | null {
-  const sample = text.slice(0, 20_000);
-  const scripts: Array<[string, RegExp]> = [
-    ["eng", /\p{Script=Latin}/gu],
-    ["rus+ukr", /\p{Script=Cyrillic}/gu],
-    ["ell", /\p{Script=Greek}/gu],
-    ["ara", /\p{Script=Arabic}/gu],
-    ["heb", /\p{Script=Hebrew}/gu],
-    ["hin", /\p{Script=Devanagari}/gu],
-    ["tha", /\p{Script=Thai}/gu],
-    ["kor", /\p{Script=Hangul}/gu],
-    ["jpn", /[\p{Script=Hiragana}\p{Script=Katakana}]/gu],
-    ["chi_sim+chi_tra", /\p{Script=Han}/gu],
-  ];
-  let best: { language: string; count: number } | null = null;
-  const counts = new Map(scripts.map(([language, pattern]) => [language, (sample.match(pattern) ?? []).length]));
-  // Japanese text is mostly Han plus Kana: any real amount of Kana makes it Japanese.
-  if ((counts.get("jpn") ?? 0) >= 5) return "jpn+chi_sim";
-  for (const [language, count] of counts) if (count > (best?.count ?? 0)) best = { language, count };
-  return best && best.count >= 5 ? best.language : null;
-}
+export { tesseractLanguageForText };
 
 export function createTextLayerVerifier(args: {
   runner: Pick<CommandRunner, "renderPdfPageRange" | "plan" | "run">;

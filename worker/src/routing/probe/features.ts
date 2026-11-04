@@ -6,9 +6,11 @@
 export const GRID = 4; // coverage masks are computed on a 4 pt grid
 export const PROBE_DPI = 72;
 
+// Greek letters are not in this set: they are the alphabet of Greek prose and of unit symbols (μA, kΩ); mathematical
+// alphanumerics, operators and symbols are the glyph-level evidence of typeset math.
 const MATH_RANGES: Array<[number, number]> = [
   [0x2200, 0x22ff], [0x2a00, 0x2aff], [0x27c0, 0x27ef], [0x2980, 0x29ff], [0x2070, 0x209f],
-  [0x0391, 0x03c9], [0x1d400, 0x1d7ff], [0x2140, 0x214f],
+  [0x1d400, 0x1d7ff], [0x2140, 0x214f],
 ];
 const MATH_SINGLE = new Set([..."±×÷∑∏√∞≈≠≤≥∂∇∫"]);
 

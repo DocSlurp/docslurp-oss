@@ -91,7 +91,7 @@ describe("page charges", () => {
     expect(rows.rows.map((r) => Number(r.amount))).toEqual([3]);
   });
 
-  it("charges pages a vision model read as Rich (once) and the rest Fast, scans and images Rich", async () => {
+  it("charges only pages a model read as Rich (once, by the ledger) and every other page Fast, scans and images included", async () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`
       delete from usage_events where run_id = 'up';
@@ -100,14 +100,14 @@ describe("page charges", () => {
       insert into document_page_facts (document_id, page_number, text_bytes, image_count) values ('mapped', 1, 0, 1), ('mapped', 2, 0, 2);
     `);
     const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
-    // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 scans; d1: 12 text pages.
-    expect(charges).toMatchObject({ fastPages: 2 + 3 + 12, richPages: 2 });
-    expect(charges.credits).toBeCloseTo(fast(17) + 2 * 0.25, 9);
+    // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 look like scans but were never read; d1: 12 text pages.
+    expect(charges).toMatchObject({ fastPages: 2 + 5 + 12, richPages: 0 });
+    expect(charges.credits).toBeCloseTo(fast(19), 9);
     await db.exec(`delete from document_page_facts where document_id = 'mapped'; update documents set mime_type = 'image/png' where id = 'full'`);
     await db.exec(`delete from usage_events where run_id = 'up' and id <> 'rich:up:full:1'`);
     const image = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
-    // An image file's pages are read as images: the 2 not yet charged bill Rich.
-    expect(image).toMatchObject({ fastPages: 17, richPages: 2 });
+    // An image file bills Rich only through a recorded read, like any page: its 2 unread pages bill Fast.
+    expect(image).toMatchObject({ fastPages: 19, richPages: 0 });
     await db.exec(`update documents set mime_type = 'application/pdf' where id = 'full'; delete from usage_events where run_id = 'up'`);
   });
 

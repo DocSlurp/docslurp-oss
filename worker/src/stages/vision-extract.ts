@@ -647,7 +647,9 @@ export class VisionExtractStage implements Stage {
         parserPlaybookCatalog[playbook]?.guidance?.visionDensityThreshold ??
         this.cfg.visionDensityThreshold;
       score = this.scoreTextDensity(text ?? "", pageCount);
-      needed = !text || this.needsVision(text, pageCount, threshold);
+      // Without routing evidence, a document that has text keeps it under evidence routing: characters per page say
+      // nothing about whether a page's content is pixels. Only a document with no text at all has no other reader.
+      needed = !text || (!routingV2 && this.needsVision(text, pageCount, threshold));
       reason = !text
         ? "routing-and-extraction-evidence-unavailable"
         : needed
