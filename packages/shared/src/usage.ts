@@ -1,3 +1,4 @@
+import { liveModelPrice } from "./live-model-prices.js";
 import { z } from "zod";
 import { ANTHROPIC_MODELS } from "./anthropic-models.js";
 import { DEFAULT_PIPELINE_TEXT_MODEL } from "./pipeline.js";
@@ -154,10 +155,11 @@ export function buildPricedAiUsageLedgerEvent(
     return event;
   }
 
+  const { pricing, pricingSource } = resolveAiUsagePricingWithSource(event, options);
   return {
     ...event,
-    costCents: estimateAiUsageCostCents(event, options),
-    metadata: { ...event.metadata, costSource: "estimate", pricing: resolveAiUsagePricing(event, options) },
+    costCents: calculateAiUsageCostCents({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, ...pricing }),
+    metadata: { ...event.metadata, costSource: "estimate", pricingSource, pricing },
   };
 }
 
@@ -208,8 +210,44 @@ export function estimateAiUsageCostCents(
   return calculateAiUsageCostCents({
     inputTokens: input.inputTokens,
     outputTokens: input.outputTokens,
-    ...resolveAiUsagePricing(input, options),
+    ...resolveAiUsagePricingWithSource(input, options).pricing,
   });
+}
+
+/** Where an estimated price came from: the live OpenRouter listing, a hardcoded catalog entry, or the configured fallback rate. */
+export type AiUsagePricingSource = "openrouter-live" | "catalog" | "configured-fallback";
+
+/**
+ * Price for an event without a provider receipt. OpenRouter models use the
+ * live list price when one is loaded (live-model-prices.ts), applying its
+ * long-prompt or time-of-day override; otherwise, and for every other
+ * provider, the hardcoded catalog, then the fallback rate. An explicit
+ * `options.catalog` (tests, operator overrides) skips the live listing.
+ */
+export function resolveAiUsagePricingWithSource(
+  input: { provider?: string | null; model?: string | null; inputTokens?: number | null },
+  options: AiUsagePricingOptions = {},
+): { pricing: AiUsagePricing; pricingSource: AiUsagePricingSource } {
+  if (!options.catalog && normalizeAiUsageCatalogKey(input.provider) === "openrouter") {
+    const live = liveModelPrice(input.model, { promptTokens: input.inputTokens ?? undefined });
+    if (live) {
+      // USD per token to cents per 1K tokens.
+      return { pricing: { costPer1kInputTokens: live.input * 100_000, costPer1kOutputTokens: live.output * 100_000 }, pricingSource: "openrouter-live" };
+    }
+  }
+  const matched = findAiUsageCatalogEntry(input, options.catalog ?? defaultAiUsagePricingCatalog);
+  return { pricing: resolveAiUsagePricing(input, options), pricingSource: matched ? "catalog" : "configured-fallback" };
+}
+
+function findAiUsageCatalogEntry(
+  input: { provider?: string | null; model?: string | null },
+  catalog: AiUsagePricingCatalogEntry[],
+): AiUsagePricingCatalogEntry | undefined {
+  const provider = normalizeAiUsageCatalogKey(input.provider);
+  const model = normalizeAiUsageCatalogKey(input.model);
+  return catalog.find((entry) => normalizeAiUsageCatalogKey(entry.model) === model
+      && (!entry.provider || !provider || normalizeAiUsageCatalogKey(entry.provider) === provider))
+    ?? catalog.find((entry) => normalizeAiUsageCatalogKey(entry.model) === model);
 }
 
 export function resolveAiUsagePricing(
@@ -219,20 +257,7 @@ export function resolveAiUsagePricing(
   },
   options: AiUsagePricingOptions = {},
 ): AiUsagePricing {
-  const provider = normalizeAiUsageCatalogKey(input.provider);
-  const model = normalizeAiUsageCatalogKey(input.model);
-  const catalog = options.catalog ?? defaultAiUsagePricingCatalog;
-  const match =
-    catalog.find(
-      (entry) =>
-        normalizeAiUsageCatalogKey(entry.model) === model &&
-        (!entry.provider ||
-          !provider ||
-          normalizeAiUsageCatalogKey(entry.provider) === provider),
-    ) ??
-    catalog.find(
-      (entry) => normalizeAiUsageCatalogKey(entry.model) === model,
-    );
+  const match = findAiUsageCatalogEntry(input, options.catalog ?? defaultAiUsagePricingCatalog);
 
   const pricing = match ?? options.fallback ?? defaultAiUsagePricing;
   return {
