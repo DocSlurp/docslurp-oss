@@ -30,13 +30,28 @@ the latest load test. `pnpm pricing:watch` there tracks model prices and where e
 
 | Quality | Billing | Per 1,000 pages |
 | --- | --- | --- |
-| `fast` | Text layer only. Pages without one keep their page image and are never OCR'd or read by a model. Billing comes from the usage ledger (`splitRemainingPages` in `worker/src/db/page-base-fee.ts`), never from the best-effort page facts: a page bills Rich only when a Rich read of it was recorded for the run (charged as it was read), and every other page, scans and image files included, bills Fast. A workspace cannot combine Fast with visual indexing mode, which embeds page images and bills them Rich. | $0.05 |
-| `auto` (default) | Text pages bill Fast; pages a model reads, and unread scans and image files, bill Rich. | $0.05 to $2.50 |
-| `good` | Vision reads every page (Good turns `visionFallback` on), so every page it reads bills Rich, plus `richPagesForOutputTokens` for long output. A run cost cap can stop vision early; pages it did not read bill as in Auto. On-demand materialization reads every page with vision too. | $2.50 |
+| `fast` | Text layer only. Pages without one keep their page image and are never OCR'd or read by a model. Billing comes from the usage ledger (`remainingFastPages` in `worker/src/db/page-base-fee.ts`), never from the best-effort page facts: a page bills Rich only when a vision or OCR model read it and that read was recorded for the run (charged as it was read), and every other page bills Fast. A workspace cannot combine Fast with visual indexing mode, which embeds page images and bills them Rich. | $0.05 |
+| `auto` (default) | A page bills Rich only when a vision or OCR model read it: a scanned PDF page the extractor OCR'd, an uploaded image read by OCR, a page a vision model read. Each such page is recorded on the usage ledger once per run, and every other page, an unread scan or image included, bills Fast. | $0.05 to $2.50 |
+| `good` | Vision reads every page (Good turns `visionFallback` on), so every page it reads bills Rich, plus `richPagesForOutputTokens` for long output (one more Rich page per 1,000 output tokens past the first 1,000, summed over the models that read the page: OCR then vision is one page plus the vision output's surcharge). A run cost cap can stop vision early; pages it did not read bill as in Auto. On-demand materialization reads every page with vision too. | $2.50 |
 
 `PIPELINE_PROFILES` (the `estimateIngest` page-class model) is keyed by the same ids, so estimator ranges match the
 catalog: `billing.test.ts` checks every mix stays inside its mode's range. A quality picker shows
 `qualityModePriceRange(mode)`. Parser playbooks are internal (`parserPlaybookForQuality`).
+
+## Which pages a document bills
+
+`documents.page_count` is the page basis: the pages the extracted text splits into, which citations, page rows and the page index use. A PDF's count is its own. Word, OpenDocument, RTF, legacy Office, slide, sheet and EPUB files have no page breaks in their text and arrive counted as one page (`documents.page_count_source` is `assumed`), so the worker measures what they hold and records it as `documents.billing_pages` (`worker/src/lib/office-page-count.ts`); the completion fee and the optional features bill that count, and a forecast uses it only once it exists.
+
+| Format | How `billing_pages` is counted |
+| --- | --- |
+| Word, OpenDocument, legacy Office | Pages of the file converted to PDF by LibreOffice. Where the worker has no LibreOffice (the lean production image) the text rule over the extracted text, then the file's size at the format's typical bytes per page. Never one page for a long document. |
+| PowerPoint | Slides. |
+| Spreadsheet | The text rule (60 lines or 3,500 characters a page) over each sheet's non-empty rows; a stray cell far down a sheet is a page, not thousands. |
+| EPUB | The text rule over the chapters' text. |
+
+A measured count far above intake's one page owes credits admission never saw, so the worker re-checks the organization's balance after measuring and pauses the run when the extra fee and enabled features no longer fit. A count from the layout engine is capped by the text the document holds when features bill, so blank pages bill the base fee but not features.
+
+The optional features that read text bill what their model read, not the page count alone. Structured extraction (`outputSchema`) and the knowledge graph charge the document's pages, or their share when only part was read, and at least the pages of text the model read (3,500 characters a page); a 1-page PDF with 800,000 characters read in 8 windows bills 229 pages of structured fields, 23 credits, not 1. A window the model answered is billed even when a later one fails or its answer does not parse, a retry bills only what is new, the spend counts against the run's cost cap (no further window is read once it is reached), and `DOCSLURP_STRUCTURED_MAX_WINDOWS` lowers the 8-window ceiling per document.
 
 ## Flat Extract tiers
 

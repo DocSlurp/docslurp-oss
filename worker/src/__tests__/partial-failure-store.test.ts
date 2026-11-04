@@ -77,6 +77,10 @@ describe("partial Document failure in the store", () => {
     }
     expect((await db.query("select id from webhook_outbox where payload->>'runId' = 'success-retry'")).rows).toHaveLength(1);
     expect((await db.query("select id from usage_events where id = 'fast:success-retry'")).rows).toHaveLength(1);
+    // The completion charge is reported in the run's stats: Fast pages charged now, Rich pages already charged by their reads.
+    const [reported] = (await db.query<{ page_charges: { fastPages: number; richPages: number; multiplier: number } }>("select stats -> 'pageCharges' as page_charges from workspace_runs where id = 'success-retry'")).rows;
+    expect(reported!.page_charges).toMatchObject({ richPages: 0, multiplier: 1 });
+    expect(typeof reported!.page_charges.fastPages).toBe("number");
   });
 
   it("rolls back success documents, billing, receipt and event when webhook persistence fails", async () => {

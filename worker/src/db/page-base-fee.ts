@@ -55,6 +55,10 @@ export function remainingFastPages(row: { pages: number; richRead: number }): nu
   return Math.max(0, row.pages - Math.min(row.richRead, row.pages));
 }
 
+/**
+ * What the completion charge decided: `fastPages` it charged now, `richPages` already charged as they were read (counted, not
+ * charged here), the share of the fee this run pays and the Fast credits it charged.
+ */
 export type RunPageCharges = { fastPages: number; richPages: number; multiplier: number; credits: number };
 
 /**
@@ -112,7 +116,9 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         fastPages += fast;
         if (fast > 0) documents[row.document_id] = { fast, rich: 0 };
       }
-      const richPages = 0;
+      // Rich pages are charged as they are read (the ledger); here they are only counted, for the report: the distinct pages of the
+      // completed documents a Rich read charged this run, inside each document's pages.
+      const richPages = rows.reduce((sum, row) => sum + Math.min(Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
       charges = { fastPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
         credits: fastCredits * speedBoostMultiplier(state.usageLedger.speedBoost) };

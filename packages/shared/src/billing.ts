@@ -161,7 +161,7 @@ export function featurePagesRead(pages: number, charsRead: number, charsTotal: n
 }
 
 /** Stamped on billable events so a receipt says which price card charged it. */
-export const PRICE_CARD_VERSION = "2026-10-25b";
+export const PRICE_CARD_VERSION = "2026-11-04";
 
 /** Per dedicated machine, sold by sales, not self-serve. */
 export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;

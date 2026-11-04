@@ -1148,13 +1148,16 @@ export class Store {
         }
         state.refreshStats();
         await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
-        await recordPageBaseFee(client, state, { afterCommit });
+        const pageCharges = await recordPageBaseFee(client, state, { afterCommit });
+        // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
+        state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         await client`update workspace_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
+          stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
           lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
         await insertWorkspaceRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);

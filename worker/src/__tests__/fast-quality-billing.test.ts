@@ -91,7 +91,7 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
 
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("fast"), []));
     // facts-off 3 + write-failed image 1 + long scan 305 + no-canonical 2 + unpaged 3 + f-read's unread page 1.
-    expect(charges).toMatchObject({ fastPages: 315, richPages: 0 });
+    expect(charges).toMatchObject({ fastPages: 315, richPages: 1 });
     expect(await chargedPages("fast", BILLABLE_UNIT_METRICS.fastPage)).toBe(315);
     // Only the recorded read bills Rich.
     expect(await chargedPages("fast", BILLABLE_UNIT_METRICS.richPage)).toBe(1);
@@ -123,7 +123,7 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
 
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("auto"), []));
     // a-pdf: pages 1 and 3 Fast (page 2 was read); a-png: its one page was read. Nothing bills Rich here.
-    expect(charges).toMatchObject({ fastPages: 2, richPages: 0 });
+    expect(charges).toMatchObject({ fastPages: 2, richPages: 2 });
     const { rows } = await db.query<{ documents: Record<string, { fast: number; rich: number }> }>(
       `select metadata -> 'documents' as documents from usage_events where id = 'fast:auto'`,
     );

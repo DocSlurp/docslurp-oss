@@ -101,13 +101,13 @@ describe("page charges", () => {
     `);
     const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
     // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 look like scans but were never read; d1: 12 text pages.
-    expect(charges).toMatchObject({ fastPages: 2 + 5 + 12, richPages: 0 });
+    expect(charges).toMatchObject({ fastPages: 2 + 5 + 12, richPages: 1 }); // the one page vision read, charged Rich as it was read
     expect(charges.credits).toBeCloseTo(fast(19), 9);
     await db.exec(`delete from document_page_facts where document_id = 'mapped'; update documents set mime_type = 'image/png' where id = 'full'`);
     await db.exec(`delete from usage_events where run_id = 'up' and id <> 'rich:up:full:1'`);
     const image = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
     // An image file bills Rich only through a recorded read, like any page: its 2 unread pages bill Fast.
-    expect(image).toMatchObject({ fastPages: 19, richPages: 0 });
+    expect(image).toMatchObject({ fastPages: 19, richPages: 1 });
     await db.exec(`update documents set mime_type = 'application/pdf' where id = 'full'; delete from usage_events where run_id = 'up'`);
   });
 
@@ -1182,7 +1182,7 @@ describe("runMaterializeRange activity", () => {
         values ('rich:fi:d1-full:3', 'u1', 'fi', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0.25, '{"documentId":"d1-full","pageNumber":3}')`);
       const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
       // 12 pages - page 4 (paid by the query, not read again) - page 3 (Rich read by this run) = 10 Fast.
-      expect(charges).toMatchObject({ fastPages: 10, richPages: 0 });
+      expect(charges).toMatchObject({ fastPages: 10, richPages: 1 });
     } finally {
       delete process.env.DOCSLURP_DEFERRED_PROFILES;
       await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);

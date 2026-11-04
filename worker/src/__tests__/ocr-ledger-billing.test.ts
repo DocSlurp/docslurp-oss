@@ -56,7 +56,7 @@ describe("scanned PDF pages OCR'd by Kreuzberg", () => {
       `select coalesce(sum(amount), 0)::text as n, coalesce(sum(cost_cents), 0)::text as credits from usage_events where run_id = 'scan' and metric = $1`, [BILLABLE_UNIT_METRICS.richPage]);
     expect(Number(rich.rows[0]!.n)).toBe(3);
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("scan"), []));
-    expect(charges).toMatchObject({ fastPages: 2, richPages: 0 });
+    expect(charges).toMatchObject({ fastPages: 2, richPages: 3 });
     const fast = await db.query<{ credits: string }>(`select coalesce(sum(cost_cents), 0)::text as credits from usage_events where run_id = 'scan' and metric = $1`, [BILLABLE_UNIT_METRICS.fastPage]);
     expect(Number(rich.rows[0]!.credits)).toBeCloseTo(pageCredits("rich", 3));
     expect(Number(fast.rows[0]!.credits)).toBeCloseTo(pageCredits("fast", 2));
