@@ -65,6 +65,22 @@ export async function loadWorkspacePrivacyMode(workspaceId: string): Promise<Pri
   }
 }
 
+/**
+ * A workspace's privacy mode for a cache decision. Unlike loadWorkspacePrivacyMode
+ * this never substitutes a mode: a lookup failure or a missing workspace returns
+ * null, and the caller must then neither read nor write its cache.
+ */
+export async function loadWorkspacePrivacyModeForCache(workspaceId: string): Promise<PrivacyMode | null> {
+  try {
+    const [row] = await sql<{ pipeline: unknown }[]>`
+      select pipeline from workspaces where id = ${workspaceId} limit 1
+    `;
+    return row ? privacyModeOf(row.pipeline) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function insertPrivacyAuditEntries(entries: readonly PrivacyAuditEntry[]): Promise<void> {
   if (entries.length === 0) return;
   const rows = entries.map((entry) => ({

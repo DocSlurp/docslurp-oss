@@ -33,6 +33,16 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
   getWorkspace,
 }));
 
+// The response cache re-checks access and reads privacy per request; workspaces named "*strict*" are strict-privacy.
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  getWorkspaceAccess: vi.fn(async (workspaceId: string) => ({ workspaceId, orgId: "org-1" })),
+}));
+vi.mock("../lib/privacy.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/privacy.js")>(),
+  loadWorkspacePrivacyModeForCache: vi.fn(async (workspaceId: string) => (workspaceId.includes("strict") ? "strict-privacy" : "standard")),
+}));
+
 const traceparent = vi.hoisted(() => ({ value: null as string | null }));
 vi.mock("@docslurp/shared/observability", async (importOriginal) => ({
   ...await importOriginal<typeof import("@docslurp/shared/observability")>(),
@@ -226,6 +236,11 @@ describe("searchRoutes", () => {
       expect(second.timings).toEqual({ cachedMs: 0, totalMs: 0 });
       await search("rate limits", "ws-3");
       expect(hybridSearch).toHaveBeenCalledTimes(2);
+      // Strict-privacy: never cached, so both identical requests run retrieval.
+      await search("rate limits", "ws-strict");
+      const strictReplay = await search("rate limits", "ws-strict");
+      expect(hybridSearch).toHaveBeenCalledTimes(4);
+      expect(strictReplay.usage.inputTokens).toBe(6);
     } finally {
       delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS;
       clearSearchResponseCacheForTests();

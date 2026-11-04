@@ -10,6 +10,7 @@ import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observ
 import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager, type PrivacyMode } from "@docslurp/shared";
+import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
 import { LANCE_HYDRATION_COLUMNS } from "@docslurp/shared/lancedb-hydration";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
 import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-s3-trace";
@@ -437,7 +438,7 @@ export async function lanceDbVectorSearch(args: {
   // like a query on that handle, so it adds no storage round trip of its own.
   const cache = resultCache<LanceDbSearchHit[]>();
   let cacheKey: string | null = null;
-  const bypassReason = args.privacyMode === "strict-privacy" ? "strict-privacy" : null;
+  const bypassReason = args.privacyMode && privacyModeBypassesCaches(args.privacyMode) ? "strict-privacy" : null;
   if (cache.enabled && bypassReason) {
     startDependencySpan("lancedb.result_cache", {
       "db.system.name": "lancedb", "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
