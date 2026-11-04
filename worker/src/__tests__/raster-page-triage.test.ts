@@ -18,6 +18,7 @@ import {
   parsePdfImagesList,
   parsePdfPageAreas,
   type PageImageEvidence,
+  type TextLayerVerifier,
 } from "../lib/page-image-evidence.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
@@ -67,7 +68,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
   });
 
   /** Kreuzberg extraction → raster evidence → classification → vision and render selection. */
-  async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20): Promise<Triage> {
+  async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20, verifyTextLayer?: TextLayerVerifier): Promise<Triage> {
     const dir = await mkdtemp(path.join(tmpdir(), "raster-triage-"));
     dirs.push(dir);
     const input = path.join(dir, "doc.pdf");
@@ -82,7 +83,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     const runner = new CommandRunner();
     const layerPlan = await runner.pageText(input, pages.length);
     const textLayerPages = splitFormFeedPages((await runner.run(layerPlan)).stdout, pages.length);
-    const evidence = await collectPageImageEvidence({ runner, sourcePath: input, pageTexts: pageTexts!, textLayerPages });
+    const evidence = await collectPageImageEvidence({ runner, sourcePath: input, pageTexts: pageTexts!, textLayerPages, ...(verifyTextLayer ? { verifyTextLayer } : {}) });
     const evidenceMap = new Map((evidence ?? []).map((page) => [page.pageNumber, page]));
     const surface = buildAdaptiveRoutingDecisionSurface({
       documentId: "doc-1",
@@ -229,8 +230,16 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
 
   it("a garbled text layer over a page image is read; the same page with a readable layer is not", async () => {
     const garbledLines = Array.from({ length: 20 }, (_, index) => `${index}KHPDWUL[SURGXFWFRPSDUHVHDFKTXHU\\ZLWK QRUPDOL]DWLRQ7KHUHVXOWLQJZHLJKWVDUHXVHG`);
-    const result = await triage([textPage(1), { kind: "text", heading: "Garbled export", lines: garbledLines }, textPage(3)]);
-    expect(result.evidence?.find((page) => page.pageNumber === 2)?.textLayer).toMatchObject({ verdict: "garbled" });
+    const pages: TestPdfPage[] = [textPage(1), { kind: "text", heading: "Garbled export", lines: garbledLines }, textPage(3)];
+    // A glyph-code shift is suspect, not garbled: the OCR cross-check of the page image decides. (The generated PDF draws
+    // the shifted text itself, so a real OCR would agree with it; the verifier stands in for a page that shows the
+    // intended text.) Without a check the page is reported and not read.
+    const unchecked = await triage(pages);
+    expect(unchecked.evidence?.find((page) => page.pageNumber === 2)?.textLayer).toMatchObject({ verdict: "suspect", reasons: expect.arrayContaining(["glyph-shift"]) });
+    expect(unchecked.visionPages).toEqual([]);
+    const disagrees: TextLayerVerifier = async (checked) => new Map(checked.map((page) => [page.pageNumber, false]));
+    const result = await triage(pages, 20, disagrees);
+    expect(result.evidence?.find((page) => page.pageNumber === 2)?.textLayer).toMatchObject({ verdict: "suspect", matchesOcr: false });
     expect(result.visionPages).toEqual([2]);
   }, 90_000);
 

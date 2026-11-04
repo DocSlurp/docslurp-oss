@@ -30,7 +30,7 @@ import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { createConcurrencyLimiter, createSerialQueue, createThrottledWriter, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
 import { textModelApiKey } from "../lib/text-model-route.js";
 import {
-  buildChunks,
+  buildChunksCooperative,
   contextualizeChunksForEmbedding,
   embedTextChunks,
   estimateTokens,
@@ -257,7 +257,7 @@ export class EmbedStage implements Stage {
                   maxTokens: chunkMaxTokens,
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
-              : fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens);
+              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal);
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
@@ -1143,13 +1143,14 @@ function normalizedChunkPages(chunk: CanonicalChunk | undefined): number[] {
   return [...new Set(pages)].sort((a, b) => a - b);
 }
 
-function fallbackChunkDrafts(
+async function fallbackChunkDrafts(
   text: string,
   fallback: string,
   chunkOverlap: boolean,
-  maxTokens: number
-): CanonicalChunk[] {
-  const { texts, headingPaths } = buildChunks(text, fallback, { chunkOverlap, maxTokens });
+  maxTokens: number,
+  signal?: AbortSignal,
+): Promise<CanonicalChunk[]> {
+  const { texts, headingPaths } = await buildChunksCooperative(text, fallback, { chunkOverlap, maxTokens }, signal);
   return texts.map((chunkText, index) => ({
     text: chunkText,
     headingPath: headingPaths[index] ?? [],
