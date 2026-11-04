@@ -2,6 +2,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import type { WorkspaceSearchSettings } from "@docslurp/shared";
@@ -15,7 +16,8 @@ import {
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { hybridSearch } from "../services/search.js";
 import type { ValidatedKey } from "../services/api-keys.js";
-import { parseFilters } from "../search/filters.js";
+import type { SearchFilters } from "../search/filters.js";
+import { AlgoliaFilterError, parseAlgoliaCompatFilters } from "../search/algolia-compat-filters.js";
 import {
   getWorkspaceSearchSettings,
   mutateWorkspaceSearchSettingsForUser,
@@ -26,7 +28,8 @@ const queryBodySchema = z.object({
   query: z.string().max(10_000).optional(),
   page: z.number().int().nonnegative().optional(),
   hitsPerPage: z.number().int().min(1).max(1000).optional(),
-  filters: z.string().optional(),
+  // Type-checked by parseAlgoliaCompatFilters so every filter error shares one envelope.
+  filters: z.unknown().optional(),
   facetFilters: z.unknown().optional(),
   numericFilters: z.unknown().optional(),
   attributesToRetrieve: z.array(z.string()).optional(),
@@ -42,7 +45,7 @@ const batchQuerySchema = z.object({
 const facetQuerySchema = queryBodySchema.pick({ query: true, filters: true, facetFilters: true, numericFilters: true }).extend({
   facetQuery: z.string().max(10_000).optional(),
   maxFacetHits: z.number().int().min(1).max(100).optional(),
-});
+}).passthrough();
 
 // Keep batched queries as predictable and inexpensive as single-index queries.
 const compatRetrievalOptions = {
@@ -82,108 +85,17 @@ const defaultCompatSettings = {
   paginationLimitedTo: 1000
 } satisfies Record<string, unknown>;
 
-function collectFilterClauses(value: unknown): string[] {
-  if (typeof value === "string") {
-    return [value];
+function compatFilters(body: Record<string, unknown>, label?: string, extraAllowed: readonly string[] = []): SearchFilters | Response {
+  try {
+    return parseAlgoliaCompatFilters(body, extraAllowed);
+  } catch (error) {
+    // Any parse failure is a rejected request, never a 500 or a silently ignored filter.
+    if (!(error instanceof AlgoliaFilterError)) console.error("[algolia-compat] filter parsing failed", error);
+    const reason = error instanceof AlgoliaFilterError ? error.message : "Malformed search parameters.";
+    // Same code as the Meilisearch/Typesense/Pagefind adapters, plus Algolia's message/status fields.
+    const message = label ? `${label}: ${reason}` : reason;
+    return Response.json({ code: "UNSUPPORTED_SEARCH_OPTION", error: message, message, status: 400 }, { status: 400 });
   }
-  if (Array.isArray(value)) {
-    return value.flatMap((entry) => collectFilterClauses(entry));
-  }
-  return [];
-}
-
-function applyCompatFilterClause(filters: Record<string, string>, rawClause: string) {
-  const clause = rawClause.trim();
-  if (!clause) {
-    return;
-  }
-
-  const [left, ...rest] = clause.split(":");
-  const key = (left ?? "").trim();
-  const value = rest.join(":").trim().replace(/^"|"$/g, "");
-  if (!value) {
-    return;
-  }
-
-  if (key === "tag" || key === "tags") {
-    filters.tags = filters.tags ? `${filters.tags},${value}` : value;
-  } else if (key === "mime_type" || key === "mimeType") {
-    filters.mimeTypes = filters.mimeTypes ? `${filters.mimeTypes},${value}` : value;
-  } else if (key === "documentId") {
-    filters.documentId = value;
-  } else if (key === "runId") {
-    filters.runId = value;
-  } else if (key === "language") {
-    filters.language = value;
-  } else if (key === "heading") {
-    filters.heading = value;
-  } else if (key === "filename" || key === "filenameContains") {
-    filters.filenameContains = value;
-  }
-}
-
-function applyNumericFilterClause(filters: Record<string, string>, rawClause: string) {
-  const clause = rawClause.trim();
-  if (!clause) {
-    return;
-  }
-
-  const match = clause.match(/^(page|pageNumber|page_number)\s*(<=|>=|=|<|>)\s*(\d+)$/i);
-  if (!match) {
-    return;
-  }
-
-  const operator = match[2];
-  const numericValue = match[3];
-  if (!numericValue) {
-    return;
-  }
-
-  if (operator === "=") {
-    filters.pageFrom = numericValue;
-    filters.pageTo = numericValue;
-  } else if (operator === ">=" || operator === ">") {
-    filters.pageFrom = operator === ">" ? String(Number(numericValue) + 1) : numericValue;
-  } else if (operator === "<=" || operator === "<") {
-    filters.pageTo = operator === "<" ? String(Math.max(0, Number(numericValue) - 1)) : numericValue;
-  }
-}
-
-function parseCompatFilters(args: {
-  filtersText?: string;
-  facetFilters?: unknown;
-  numericFilters?: unknown;
-}) {
-  const filters = {
-    documentId: "",
-    runId: "",
-    workspaceId: "",
-    filenameContains: "",
-    mimeTypes: "",
-    tags: "",
-    pageFrom: "",
-    pageTo: "",
-    language: "",
-    heading: "",
-    dateFrom: "",
-    dateTo: "",
-  };
-
-  const raw = (args.filtersText ?? "").trim();
-  if (raw) {
-    for (const clause of raw.split(/\s+AND\s+/i)) {
-      applyCompatFilterClause(filters, clause);
-    }
-  }
-
-  for (const clause of collectFilterClauses(args.facetFilters)) {
-    applyCompatFilterClause(filters, clause);
-  }
-  for (const clause of collectFilterClauses(args.numericFilters)) {
-    applyNumericFilterClause(filters, clause);
-  }
-
-  return parseFilters(filters);
 }
 
 function selectAlgoliaHitFields(hit: Record<string, unknown>, attributesToRetrieve?: string[]) {
@@ -456,6 +368,11 @@ async function recordAnalyticsEvent(args: {
   `;
 }
 
+const searchBodyLimit = bodyLimit({
+  maxSize: 1024 * 1024,
+  onError: (c) => c.json({ code: "PAYLOAD_TOO_LARGE", error: "Request body exceeds 1 MB.", message: "Request body exceeds 1 MB.", status: 413 }, 413),
+});
+
 export const algoliaCompatRoutes = new Hono()
   .use("*", async (c, next) => {
     let header = c.req.header("Authorization");
@@ -467,6 +384,10 @@ export const algoliaCompatRoutes = new Hono()
     await next();
   })
   .use("*", apiKeyAuth)
+  // Search bodies are small; bound them before JSON parsing and filter validation.
+  .use("/1/indexes/:indexName/query", searchBodyLimit)
+  .use("/1/indexes/:indexName/facets/:facetName/query", searchBodyLimit)
+  .use("/1/indexes/*/queries", searchBodyLimit)
   .post("/1/indexes/:indexName/query", zValidator("json", queryBodySchema), async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
@@ -479,6 +400,9 @@ export const algoliaCompatRoutes = new Hono()
     if (!query) {
       return c.json({ message: "query is required" }, 400);
     }
+    // Reject unsupported filters before any lookup or retrieval: ignoring one would widen results.
+    const filters = compatFilters(body);
+    if (filters instanceof Response) return filters;
 
     const workspace = await loadScopedWorkspace(indexName, apiKey);
     if (!workspace) {
@@ -490,11 +414,6 @@ export const algoliaCompatRoutes = new Hono()
     const page = Math.max(0, body.page ?? 0);
     const pageStart = page * hitsPerPage;
     const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
-    const filters = parseCompatFilters({
-      filtersText: body.filters,
-      facetFilters: body.facetFilters,
-      numericFilters: body.numericFilters
-    });
     filters.workspaceId = workspace.id;
 
     const { results, sessionId } = await hybridSearch(query, apiKey.userId, {
@@ -542,9 +461,17 @@ export const algoliaCompatRoutes = new Hono()
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
     const { requests } = c.req.valid("json");
+    // Validate every request's filters first: one unsupported clause rejects the whole
+    // batch before any retrieval runs.
+    const requestFilters: SearchFilters[] = [];
+    for (const [index, request] of requests.entries()) {
+      const filters = compatFilters(request, `requests[${index}]`, ["indexName"]);
+      if (filters instanceof Response) return filters;
+      requestFilters.push(filters);
+    }
 
     const results = [];
-    for (const request of requests) {
+    for (const [index, request] of requests.entries()) {
       const startedAt = performance.now();
       const workspace = await loadScopedWorkspace(request.indexName, apiKey);
       if (!workspace || !request.query) {
@@ -555,12 +482,7 @@ export const algoliaCompatRoutes = new Hono()
       const page = Math.max(0, request.page ?? 0);
       const pageStart = page * hitsPerPage;
       const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
-      const filters = parseCompatFilters({
-        filtersText: request.filters,
-        facetFilters: request.facetFilters,
-        numericFilters: request.numericFilters
-      });
-      filters.workspaceId = workspace.id;
+      const filters = { ...requestFilters[index]!, workspaceId: workspace.id };
       const response = await hybridSearch(request.query, apiKey.userId, {
         limit: fetchLimit,
         filters,
@@ -603,21 +525,18 @@ export const algoliaCompatRoutes = new Hono()
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
+    const body = c.req.valid("json");
+    const filters = compatFilters(body);
+    if (filters instanceof Response) return filters;
     const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
     if (!workspace) {
       return c.json({ message: "index (workspace) not found" }, 404);
     }
 
     const facetName = c.req.param("facetName");
-    const body = c.req.valid("json");
     const maxFacetHits = Math.max(1, Math.min(100, body.maxFacetHits ?? 10));
     const typedQuery = body.query?.trim();
     const query = typedQuery || body.facetQuery?.trim() || "*";
-    const filters = parseCompatFilters({
-      filtersText: body.filters,
-      facetFilters: body.facetFilters,
-      numericFilters: body.numericFilters
-    });
     filters.workspaceId = workspace.id;
 
     const { results } = await hybridSearch(query, apiKey.userId, {
