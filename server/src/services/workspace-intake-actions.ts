@@ -26,6 +26,7 @@ import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
   getCachedIdempotentResponse,
   hashIdempotencyPayload,
+  scopedIdempotencyKey,
   storeIdempotentResponse,
 } from "./idempotency.js";
 import {
@@ -122,15 +123,17 @@ function actionResult(
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
-  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string },
+  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null },
   run: () => Promise<WorkspaceIntakeActionResult>,
 ): Promise<WorkspaceIntakeActionResult> {
   if (!args.idempotencyKey) return await run();
+  // Clients choose their keys, so two tenants will pick the same one: the cache key is scoped to organization and user.
+  const idempotencyKey = scopedIdempotencyKey({ orgId: args.orgId, userId: args.userId }, args.idempotencyKey);
 
   let cached;
   try {
     cached = await getCachedIdempotentResponse({
-      idempotencyKey: args.idempotencyKey,
+      idempotencyKey,
       routeKey: args.routeKey,
       requestHash: args.requestHash,
     });
@@ -148,7 +151,7 @@ async function idempotently(
 
   const result = await run();
   await storeIdempotentResponse({
-    idempotencyKey: args.idempotencyKey,
+    idempotencyKey,
     routeKey: args.routeKey,
     requestHash: args.requestHash,
     userId: args.userId,
@@ -312,7 +315,7 @@ export async function createBulkWorkspaceIntake(
   });
 
   return await idempotently(
-    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId },
+    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId },
     async () =>
       actionResult(
         await requiredIntake(
@@ -346,6 +349,7 @@ export async function createRemoteUrlWorkspaceIntake(
       routeKey: target.extract ? "extracts.url" : "uploads.url",
       requestHash: hashIdempotencyPayload({ ...hashedTarget, canonicalIds: canonicalIds ?? null, idempotencyKey }),
       userId: args.userId,
+      orgId: args.orgId,
     },
     async () => {
       const intake = await requiredIntake(
@@ -399,6 +403,7 @@ export async function createWebsiteWorkspaceIntake(
       routeKey: "web.ingest",
       requestHash: hashIdempotencyPayload({ ...target, startUrl, crawlOptions, idempotencyKey }),
       userId: args.userId,
+      orgId: args.orgId,
     },
     async () => {
       const crawled = await crawl();

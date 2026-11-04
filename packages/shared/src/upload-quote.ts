@@ -6,6 +6,8 @@ import {
   PRICE_CARD_VERSION,
   estimateIngest,
   isBillingEnforced,
+  MEDIA_BYTES_PER_MINUTE,
+  richPagesForOutputTokens,
   speedBoostMultiplier,
   type DocumentFeature,
   type PageMix,
@@ -31,13 +33,32 @@ import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
  * golden cases `estimate-card.test.ts` writes.
  */
 
-/** Pages assumed for a file whose page count the client does not know (about 75 KB of source per page). */
+/** Pages assumed for a file whose page count the client does not know (about 75 KB of source per page): the middle of its range. */
 export const ASSUMED_BYTES_PER_PAGE = 75 * 1024;
+/**
+ * The ends of that range. A page of source is anywhere from a bilevel scan or dense vector page (about 16 KB) to a photographic
+ * scan (about 300 KB), so a file of unknown page count is quoted over the pages those sizes give, not at one guess. The high end is
+ * a ceiling only when pages are measured.
+ */
+export const UNMEASURED_MIN_BYTES_PER_PAGE = 16 * 1024;
+export const UNMEASURED_MAX_BYTES_PER_PAGE = 300 * 1024;
+/**
+ * Text files of unknown line count: pages by characters need 3,500 per page (UTF-8; a UTF-16 file has half as many characters per
+ * byte), pages by lines up to one per 12 bytes of line (60 lines, the shortest lines a text file realistically has).
+ */
+export const UNMEASURED_TEXT_MAX_BYTES_PER_PAGE = 7_000;
+export const UNMEASURED_TEXT_MIN_BYTES_PER_PAGE = 720;
 
 /** The cheap end of a quote when a file's page mix is unknown: every page has a text layer. */
 export const QUOTE_LOW_MIX: Readonly<PageMix> = { text: 1, complex: 0, scanned: 0 };
-/** The expensive end when the mix is unknown: a scan-heavy corpus. */
-export const QUOTE_HIGH_MIX: Readonly<PageMix> = { text: 0.2, complex: 0.3, scanned: 0.5 };
+/** The expensive end when the mix is unknown: every page is read by a vision model (Rich). */
+export const QUOTE_HIGH_MIX: Readonly<PageMix> = { text: 0, complex: 0, scanned: 1 };
+/**
+ * Output tokens of a dense full page, for the top of a quote. A Rich page whose output exceeds richIncludedOutputTokens bills extra
+ * Rich pages (richPagesForOutputTokens), so each Rich page at the high end counts as this many.
+ */
+export const QUOTE_HIGH_RICH_OUTPUT_TOKENS = 2_000;
+export const QUOTE_HIGH_RICH_PAGE_FACTOR = richPagesForOutputTokens(QUOTE_HIGH_RICH_OUTPUT_TOKENS);
 
 export const pageMixSchema = z.strictObject({
   text: z.number().nonnegative(),
@@ -119,6 +140,9 @@ export type QuoteFile = UploadMediaFile & {
   mixConfidence?: number;
 };
 
+/** Where a file's page count sits: the cheap end, the middle, and the expensive end; `measured` when the client counted them. */
+export type PageRange = { low: number; central: number; high: number; measured: boolean };
+
 /**
  * Pages a non-media file counts as: its known page count; else 1 for an image file, its size over TEXT_PAGE_CHARS
  * for a text file, and its size at ASSUMED_BYTES_PER_PAGE for anything else (at least 1).
@@ -134,13 +158,27 @@ export function quoteFilePages(file: { name: string; type?: string | null; size:
   return Math.max(1, Math.round(pages));
 }
 
+/** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
+export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number }): PageRange {
+  const central = quoteFilePages(file);
+  if (file.pages !== undefined || isUploadImageFile(file)) return { low: central, central, high: central, measured: true };
+  const [lowDivisor, highDivisor] = isUploadTextFile(file)
+    ? [UNMEASURED_TEXT_MAX_BYTES_PER_PAGE, UNMEASURED_TEXT_MIN_BYTES_PER_PAGE]
+    : [UNMEASURED_MAX_BYTES_PER_PAGE, UNMEASURED_MIN_BYTES_PER_PAGE];
+  return {
+    low: Math.max(1, Math.min(central, Math.round(Math.ceil(file.size / lowDivisor)))),
+    central,
+    high: Math.max(central, Math.round(Math.ceil(file.size / highDivisor))),
+    measured: false,
+  };
+}
+
 /** A file's known page mix and its trust: measured, every page scanned for an image file, or all text for a text file. */
 function knownMix(file: QuoteFile): { mix: PageMix; confidence: number } | null {
   if (file.mix && file.mix.text + file.mix.complex + file.mix.scanned > 0) return { mix: file.mix, confidence: file.mixConfidence ?? 1 };
   if (isUploadImageFile(file)) return { mix: IMAGE_FILE_MIX, confidence: 1 };
-  // Text files have no scanned pages, but their page count is only known once counted (pages bill by lines or
-  // characters); without it the size-based count may be low, so the file keeps the unknown range.
-  if (isUploadTextFile(file) && file.pages !== undefined) return { mix: TEXT_FILE_MIX, confidence: 1 };
+  // Text files have no scanned pages whatever their length; only their page count is uncertain (quoteFilePageRange).
+  if (isUploadTextFile(file)) return { mix: TEXT_FILE_MIX, confidence: 1 };
   return null;
 }
 
@@ -166,25 +204,41 @@ function highMix(mix: PageMix, confidence: number): PageMix {
   return measuredScanned > blended.scanned ? { text: mix.text / total, complex: mix.complex / total, scanned: measuredScanned } : blended;
 }
 
-/** The low and high page mixes of a set of paged files: page-weighted, measured where a file carries a mix. */
-function quoteMixes(files: readonly QuoteFile[]): { low: PageMix; high: PageMix; known: number } {
+/**
+ * The low and high page mixes of a set of paged files, as page counts: page-weighted, measured where a file carries a mix. The low end
+ * counts a file's fewest pages as cheap text; the high end its most pages with the scanned share read by vision, each such page
+ * counting QUOTE_HIGH_RICH_PAGE_FACTOR times (a dense page's output tokens).
+ */
+function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: PageMix; high: PageMix; known: number; unmeasured: number; rangeLow: number; rangeHigh: number } {
   const known = files.filter((file) => knownMix(file)).length;
-  if (known === 0) return { low: { ...QUOTE_LOW_MIX }, high: { ...QUOTE_HIGH_MIX }, known };
   const low: PageMix = { text: 0, complex: 0, scanned: 0 };
   const high: PageMix = { text: 0, complex: 0, scanned: 0 };
+  let unmeasured = 0;
+  let rangeLow = 0;
+  let rangeHigh = 0;
   for (const file of files) {
-    const pages = quoteFilePages(file);
+    const range = quoteFilePageRange(file);
+    if (!range.measured) unmeasured += 1;
+    rangeLow += range.low;
+    rangeHigh += range.high;
     const mix = knownMix(file);
     const fileLow = mix ? blendedMix(mix.mix, mix.confidence, QUOTE_LOW_MIX) : QUOTE_LOW_MIX;
     const fileHigh = mix ? highMix(mix.mix, mix.confidence) : QUOTE_HIGH_MIX;
-    low.text += pages * fileLow.text;
-    low.complex += pages * fileLow.complex;
-    low.scanned += pages * fileLow.scanned;
-    high.text += pages * fileHigh.text;
-    high.complex += pages * fileHigh.complex;
-    high.scanned += pages * fileHigh.scanned;
+    low.text += range.low * fileLow.text;
+    low.complex += range.low * fileLow.complex;
+    low.scanned += range.low * fileLow.scanned;
+    high.text += range.high * fileHigh.text;
+    high.complex += range.high * fileHigh.complex;
+    high.scanned += range.high * fileHigh.scanned * richFactor;
   }
-  return { low, high, known };
+  return { low, high, known, unmeasured, rangeLow, rangeHigh };
+}
+
+/** The bitrates durations are assumed at when a media file's length is not known, for the quote's basis text. */
+function assumedBitrates(): string {
+  const kbps = (bytesPerMinute: number) => Math.round((bytesPerMinute * 8) / 60 / 1000);
+  const mbps = (bytesPerMinute: number) => Math.round((bytesPerMinute * 8) / 60 / 100_000) / 10;
+  return `${kbps(MEDIA_BYTES_PER_MINUTE.audio)} kbps audio and ${mbps(MEDIA_BYTES_PER_MINUTE.video)} Mbps video`;
 }
 
 function roundUp5(value: number): number {
@@ -206,29 +260,37 @@ export function quoteUpload(args: {
   const paged = args.files.filter((file) => !uploadMediaKind(file));
   const pages = Math.max(0, Math.round(paged.reduce((sum, file) => sum + quoteFilePages(file), 0)));
   const documents = paged.length;
-  const mixes = quoteMixes(paged);
+  // Fast never reads a page with a model, so no page can bill the extra Rich pages of a long output.
+  const mixes = quoteMixes(paged, profile.quality === "fast" ? 1 : QUOTE_HIGH_RICH_PAGE_FACTOR);
   const features: Partial<Record<DocumentFeature, boolean>> = {};
   for (const feature of DOCUMENT_FEATURES) features[feature] = profile.documentFeatures[feature];
 
-  const run = (mix: PageMix) => estimateIngest({
-    pages,
-    documents: Math.max(1, documents),
-    mix,
-    profile: profile.quality as PipelineProfileId,
-    features,
-    ...(profile.workerSlots ? { workerSlots: profile.workerSlots } : {}),
-  });
+  // `mix` holds page counts; the pages priced are their sum, so each end of the range prices its own page count.
+  const run = (mix: PageMix, bound: Readonly<PageMix>) => {
+    const total = mix.text + mix.complex + mix.scanned;
+    return estimateIngest({
+      pages: total > 0 ? Math.max(0, Math.round(total)) : pages,
+      documents: Math.max(1, documents),
+      mix: total > 0 ? mix : { ...bound },
+      profile: profile.quality as PipelineProfileId,
+      features,
+      ...(profile.workerSlots ? { workerSlots: profile.workerSlots } : {}),
+    });
+  };
   // Same arithmetic as estimatePipelineWork with every planned stage selected, so results match it bit for bit.
-  const pagedCredits = (estimate: ReturnType<typeof run>) =>
+  const pagedCredits = (estimate: ReturnType<typeof estimateIngest>) =>
     (estimate.credits.totalCredits - estimate.credits.breakdown.features) + estimate.credits.breakdown.features;
-  const low = run(mixes.low);
-  const high = run(mixes.high);
+  const low = run(mixes.low, QUOTE_LOW_MIX);
+  const high = run(mixes.high, QUOTE_HIGH_MIX);
   const seconds = (wall: number) => (pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) + FIXED_OVERHEAD_SECONDS : 0);
-  const range = mixes.known === 0
-    ? "range from all-text to scan-heavy pages"
+  const mixRange = mixes.known === 0
+    ? "range from all-text to every page read by vision"
     : mixes.known === documents
       ? "page mix known for every file"
-      : `page mix known for ${mixes.known} of ${documents} files, others range from all-text to scan-heavy pages`;
+      : `page mix known for ${mixes.known} of ${documents} files, others range from all-text to every page read by vision`;
+  const range = mixes.unmeasured === 0
+    ? mixRange
+    : `${mixRange}; pages not counted for ${mixes.unmeasured} of ${documents} files, assumed ${Math.max(0, Math.round(mixes.rangeLow))} to ${Math.max(0, Math.round(mixes.rangeHigh))} from their sizes`;
   const pagedEstimate = costEstimateSchema.parse({
     pages,
     documents,
@@ -237,6 +299,9 @@ export function quoteUpload(args: {
       ? null
       : { low: roundUp5(pagedCredits(low)) * multiplier, high: roundUp5(pagedCredits(high)) * multiplier },
     seconds: { low: roundUp5(seconds(low.wallSeconds)), high: roundUp5(seconds(high.wallSeconds)) },
+    ...(mixes.unmeasured > 0
+      ? { pagesRange: { low: Math.max(0, Math.round(mixes.rangeLow)), high: Math.max(0, Math.round(mixes.rangeHigh)) }, unmeasuredFiles: mixes.unmeasured }
+      : {}),
     basis: `${profile.quality} profile, ${profile.stageCount} of ${profile.stageCount} stages; ${range}; `
       + "modeled averages, not measured for this corpus",
   });
@@ -259,7 +324,7 @@ export function quoteUpload(args: {
       credits: pagedEstimate.credits
         ? { low: pagedEstimate.credits.low + media.credits.low, high: pagedEstimate.credits.high + media.credits.high }
         : null,
-      basis: `${pagedEstimate.basis}; audio and video priced by duration`,
+      basis: `${pagedEstimate.basis}; audio and video priced by duration${media.durationsAssumed ? ` (not read from every file: assumed from size at ${assumedBitrates()})` : ""}`,
     },
   };
 }

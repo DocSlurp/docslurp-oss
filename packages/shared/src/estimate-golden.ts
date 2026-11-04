@@ -107,6 +107,11 @@ function quoteCases() {
     { files: [{ name: "a.pdf", size: 1, pages: 10, mix: { text: 0, complex: 0, scanned: 1 }, mixConfidence: 0 }], profile: profileFor({ billing: "enforced" }) },
     { files: [{ name: "a.pdf", size: 1, pages: 10, mix: { text: 0, complex: 0, scanned: 1 }, mixConfidence: 1.5 }], profile: profileFor({ billing: "enforced" }) },
     { files: [{ name: "scan.tiff", size: 90_000_000, pages: 12 }, { name: "x.pdf", size: 0 }], profile: profileFor({ quality: "fast", billing: "enforced" }) },
+    // Uncounted pages: a 12 MB scan quoted over its size-allowed page range, text over the line rule, a CJK-sized CSV, Fast flat.
+    { files: [{ name: "scan.pdf", size: 12 * 1024 * 1024 }], profile: profileFor({ quality: "auto", billing: "enforced" }) },
+    { files: [{ name: "scan.pdf", size: 12 * 1024 * 1024 }], profile: profileFor({ quality: "fast", billing: "enforced" }) },
+    { files: [{ name: "rows.csv", size: 1_000_000 }, { name: "notes.md", size: 12_345, type: "text/markdown" }, { name: "deck.pptx", size: 8_000_000, pages: 42 }], profile: profileFor({ quality: "good", billing: "enforced" }) },
+    { files: [{ name: "a.pdf", size: 12 * 1024 * 1024, pages: 300, mix: { text: 0, complex: 0, scanned: 1 } }, { name: "b.docx", size: 90_000 }], profile: profileFor({ quality: "auto", billing: "enforced" }), speedBoost: true },
   ];
   for (let i = 0; i < 40; i += 1) {
     const files: QuoteFile[] = [];

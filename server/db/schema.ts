@@ -352,6 +352,7 @@ export const documents = pgTable(
     versionNumber: integer("version_number").default(1).notNull(),
     previousVersionId: text("previous_version_id"),
     sourceSha256: text("source_sha256"),
+    fileFacts: jsonb("file_facts"),
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),
@@ -2248,6 +2249,8 @@ export const uploadSessionFiles = pgTable(
     sha256: text(),
     canonicalId: text("canonical_id"),
     sourcePath: text("source_path").default("").notNull(),
+    requestIndex: integer("request_index"),
+    clientId: text("client_id"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),

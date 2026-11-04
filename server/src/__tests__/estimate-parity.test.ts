@@ -65,12 +65,18 @@ describe("estimate parity", () => {
     expect(estimate!.seconds).not.toBeNull();
   });
 
-  it("upload estimate assumes pages from size when the client does not know them", async () => {
+  it("upload estimate centres on pages assumed from size, and says the count is a range, when the client does not know them", async () => {
     const workspace = { pipeline: defaultPipelineFeatures, orgId: "o1" };
     const sized = await work.estimateUpload({ files: [{ name: "a.pdf", size: 75 * 1024 * 10 }], workspace });
     const known = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace });
     expect(sized.estimate.pages).toBe(10);
-    expect(sized).toEqual(known);
+    // Counted pages are exact; uncounted ones span the pages the size allows, so the range is wider and says so.
+    expect(known.estimate.pagesRange).toBeUndefined();
+    expect(sized.estimate).toMatchObject({ unmeasuredFiles: 1, pagesRange: { low: 3, high: 47 } });
+    expect(sized.estimate.credits).toBeNull();
+    expect(sized.estimate.seconds!.low).toBe(known.estimate.seconds!.low);
+    expect(sized.estimate.seconds!.high).toBeGreaterThan(known.estimate.seconds!.high);
+    expect(sized.profile).toEqual(known.profile);
     expect(sized.media).toBeNull();
   });
 

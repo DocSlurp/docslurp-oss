@@ -302,9 +302,18 @@ test("AI calls and unkeyed uploads never retry; keyed upload can retry", async (
   for (const method of ["chat", "search", "upload", "ingestUrls"]) {
     let calls = 0;
     const sdk = client(async () => { calls++; return json({ error: "Busy" }, 503, { "retry-after": "0" }); });
+    // Direct sessions always send an Idempotency-Key, so a transient 503 on create is retried safely; the bulk path without a key is not.
     const input = method === "upload" ? { files: [new Blob(["data"])] } : { workspace: "workspace", q: "question", urls: ["https://example.test/doc"] };
-    await assert.rejects(sdk[method](input), DocSlurpApiError);
+    await assert.rejects(method === "upload" ? sdk.upload(input, { directUpload: false }) : sdk[method](input), DocSlurpApiError);
     assert.equal(calls, 1, method);
+  }
+  {
+    let calls = 0;
+    const keys = new Set();
+    const sdk = client(async (_url, init) => { calls++; keys.add(new Headers(init.headers).get("idempotency-key")); return json({ error: "Busy" }, 503, { "retry-after": "0" }); });
+    await assert.rejects(sdk.upload({ files: [new Blob(["data"])] }), DocSlurpApiError);
+    assert.equal(calls, 3, "direct session create is keyed and retried");
+    assert.equal(keys.size, 1, "every attempt carries the same key");
   }
   let calls = 0;
   const sdk = client(async (_url, init) => {

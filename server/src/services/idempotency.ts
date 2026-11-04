@@ -10,6 +10,22 @@ type IdempotencyRow = {
   response_body: Record<string, unknown> | null;
 };
 
+/**
+ * The cache key for a caller's Idempotency-Key. Keys are chosen by clients, so two tenants will choose the same one: the stored
+ * key is a hash over the organization, the user and the key, and a key from one tenant can never match another tenant's entry.
+ */
+export function scopedIdempotencyKey(scope: { orgId?: string | null; userId: string }, key: string): string {
+  return createHash("sha256").update(`${scope.orgId ?? ""}\u0000${scope.userId}\u0000${key}`).digest("hex");
+}
+
+/** An Idempotency-Key header value, or an error message when it is unusable. */
+export function parseIdempotencyKey(raw: string | undefined | null): { key: string | null } | { error: string } {
+  const key = raw?.trim();
+  if (!key) return { key: null };
+  if (key.length > 255 || !/^[\x21-\x7e]+$/.test(key)) return { error: "Idempotency-Key must be 1-255 printable ASCII characters without spaces" };
+  return { key };
+}
+
 export function hashIdempotencyPayload(value: unknown): string {
   return createHash("sha256").update(stableStringify(value)).digest("hex");
 }

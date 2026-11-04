@@ -59,6 +59,8 @@ export interface Document {
   status: string;
   extractionMode: string;
   pageCount: number;
+  /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
+  fileFacts?: import("@docslurp/shared").FileFacts | null;
   createdAt: Date;
   updatedAt: Date;
   /** Set for documents of an extract run: the run's storage prefix (see runArtifactRoot). */

@@ -5,6 +5,9 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { recordMeasuredPageCount } from "../lib/office-page-count.js";
+import { sourceStorageKey } from "../tools/storage.js";
+import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 
 type CanonicalStrategy =
   | "already-pdf"
@@ -204,6 +207,18 @@ export class ToCanonicalStage implements Stage {
             };
           }
 
+          // Office, EPUB and spreadsheet files arrive counted as one page. Measure what the converted document really
+          // holds and write it to documents.page_count before the completion charge reads it (page-base-fee.ts).
+          const pages = await recordMeasuredPageCount(state, {
+            runner: this.runner,
+            signal,
+            downloadSource: (target) => this.storage.downloadSourceToTempFile(
+              sourceStorageKey(target.sourceKey),
+              trustedTempDownloadPattern("docslurp-pages-", target),
+            ),
+          }, document, normalizedFormat);
+          artifact.pageCount = { intake: pages.intakePages, measured: pages.pages, method: pages.method };
+
           await this.storage.putJson(key, artifact);
 
           return {
@@ -211,6 +226,8 @@ export class ToCanonicalStage implements Stage {
             stats: {
               strategy,
               normalizedFormat,
+              pageCount: pages.pages ?? pages.intakePages,
+              pageCountMethod: pages.method,
             },
           };
         },

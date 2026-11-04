@@ -6,8 +6,14 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { detectFileFormat, type NormalizedFormat } from "@docslurp/shared";
 
-function detectFormat(document: Document): NormalizedFormat {
-  return detectFileFormat({ filename: document.filename, mimeType: document.mimeType });
+/**
+ * The format intake persisted from the sniffed bytes (documents.file_facts) when there is one; otherwise the stored MIME type
+ * and extension, for documents ingested before intake sniffed.
+ */
+function detectFormat(document: Document): { format: NormalizedFormat; detectedBy: "intake-file-facts" | "mime-and-extension" } {
+  const persisted = document.fileFacts?.format;
+  if (persisted && persisted !== "unknown") return { format: persisted, detectedBy: "intake-file-facts" };
+  return { format: detectFileFormat({ filename: document.filename, mimeType: document.mimeType }), detectedBy: "mime-and-extension" };
 }
 
 export class FormatDetectStage implements Stage {
@@ -31,14 +37,15 @@ export class FormatDetectStage implements Stage {
             throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
           }
 
-          const normalizedFormat = detectFormat(document);
+          const { format: normalizedFormat, detectedBy } = detectFormat(document);
 
           await this.storage.putJson(key, {
             documentId: document.id,
             filename: document.filename,
             declaredMimeType: document.mimeType,
             normalizedFormat,
-            detectedBy: "mime-and-extension",
+            detectedBy,
+            fileFacts: document.fileFacts ?? null,
           });
 
           state.artifactLedger.recordDocument(document.id, "normalizedFormat", normalizedFormat);
@@ -47,7 +54,8 @@ export class FormatDetectStage implements Stage {
             artifactUri: this.storage.uri(key),
             stats: {
               normalizedFormat,
-              detectedBy: "mime-and-extension",
+              detectedBy,
+              mimeVerdict: document.fileFacts?.mismatch ?? null,
             },
           };
         },

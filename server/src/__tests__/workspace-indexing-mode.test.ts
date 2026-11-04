@@ -25,7 +25,7 @@ beforeAll(async () => {
     types: { numeric: { to: 1700, from: [1700], serialize: (v: unknown) => String(v), parse: (v: string): unknown => Number(v) } },
   }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));
-  vi.doMock("../services/source-metadata.js", () => ({ resolveSourceMetadata: async () => ({ pageCount: 1, sourceSha256: null }) }));
+  vi.doMock("../services/source-metadata.js", () => ({ resolveSourceMetadata: async (file: { mimeType: string }) => ({ pageCount: 1, sourceSha256: null, fileFacts: { mimeType: file.mimeType, format: "pdf", mismatch: "none" } }) }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   // free: starter credits only; gold and funded: funded (a paid grant set funded_at, migration 0068).
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('free', 'Free', 'free', 'u1', 0)`;
