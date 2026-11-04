@@ -262,19 +262,28 @@ describe("chunking large documents", () => {
     return chunks;
   };
 
-  // Each case was 3 to 23 seconds (and up to 945 MB) when every level re-counted the whole text; linear it is
-  // 0.2 to 0.5 seconds. The bound leaves a slow CI machine ten times as much.
+  // Each case was 3 to 23 seconds (and up to 945 MB) when every level re-counted the whole text; linear it costs a
+  // few passes of the word segmenter. The bound is relative to one such pass over the same text, measured under the
+  // same load (a parallel suite slows both), so it does not flake on a busy machine; the old code was 30 to 750 times
+  // one pass.
+  const onePass = (text: string) => {
+    const started = performance.now();
+    estimateTokens(text);
+    return performance.now() - started;
+  };
+  const withinPasses = (text: string, elapsedMs: number, passes: number) => expect(elapsedMs).toBeLessThan(passes * onePass(text) + 1_000);
+
   it.each([
-    ["one 2.8M-character English paragraph", () => sentence.repeat(25_000), 5_000],
-    ["2.8M characters of words with no sentence end", () => "the committee reviewed the quarterly report and agreed ".repeat(52_000), 5_000],
-    ["1.1M characters of Chinese", () => "委员会审议了季度报告，并同意在冬季休假之后开始执行新的时间表。".repeat(36_000), 5_000],
-    ["one 1M-character token", () => "a".repeat(1_000_000), 5_000],
-    ["3M characters of unbroken Hangul", () => "위원회는분기보고서를검토하고".repeat(210_000), 5_000],
-  ])("%s chunks in linear time", (_name, make, budgetMs) => {
+    ["one 2.8M-character English paragraph", () => sentence.repeat(25_000)],
+    ["2.8M characters of words with no sentence end", () => "the committee reviewed the quarterly report and agreed ".repeat(52_000)],
+    ["1.1M characters of Chinese", () => "委员会审议了季度报告，并同意在冬季休假之后开始执行新的时间表。".repeat(36_000)],
+    ["one 1M-character token", () => "a".repeat(1_000_000)],
+    ["3M characters of unbroken Hangul", () => "위원회는분기보고서를검토하고".repeat(210_000)],
+  ])("%s chunks in linear time", (_name, make) => {
     const text = make();
     const started = performance.now();
     const chunks = checkAll(text, 1800, 256);
-    expect(performance.now() - started).toBeLessThan(budgetMs);
+    withinPasses(text, performance.now() - started, 12);
     expect(chunks.length).toBeGreaterThan(100);
   });
 
@@ -283,7 +292,7 @@ describe("chunking large documents", () => {
     const text = Array.from({ length: 10_000 }, (_, i) => page(i)).join("\f");
     const started = performance.now();
     const chunks = [...chunkTextWithMeta(text, 1800, { maxTokens: 256 })];
-    expect(performance.now() - started).toBeLessThan(15_000);
+    withinPasses(text, performance.now() - started, 12);
     expect(chunks.length).toBeGreaterThanOrEqual(10_000);
   });
 
