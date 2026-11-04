@@ -148,6 +148,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   oauth_accounts: "OAuth identity links and tokens",
   org_invites: "membership invitations",
   org_memberships: "membership and roles",
+  org_memberships_removed_backup: "memberships removed by 0127 (one organization per user); admin recovery only",
   parser_eval_fixtures: "evaluation fixtures (admin)",
   passkey: "Better Auth passkey credentials",
   query_suggestions: "search (API only)",

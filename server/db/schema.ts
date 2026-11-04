@@ -2947,6 +2947,9 @@ export const orgMemberships = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
+    // One organization per user while DOCSLURP_MAX_ORGS_PER_USER is 1 (migration 0127, services/org-membership-limit.ts).
+    // Allowing several means dropping this index and raising that limit.
+    uniqueIndex("org_memberships_one_org_per_user").using("btree", table.userId.asc().nullsLast().op("text_ops")),
     foreignKey({
       columns: [table.orgId],
       foreignColumns: [organizations.id],

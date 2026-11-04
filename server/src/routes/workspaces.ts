@@ -81,6 +81,7 @@ import {
   inviteWorkspaceMember,
   listWorkspaceInvites,
   listWorkspaceMembers,
+  OrganizationError,
   removeWorkspaceMember,
   revokeWorkspaceInvite,
   updateWorkspaceMemberRole,
@@ -656,6 +657,10 @@ export const workspacesRoutes = new Hono()
         });
         return c.json(member);
       } catch (error) {
+        // Joining the workspace's organization would exceed the one-organization-per-user policy.
+        if (error instanceof OrganizationError && error.code === "user_already_in_org") {
+          return apiStatusError(c, 409, error.message, { code: error.code });
+        }
         return apiStatusError(c, 400, reportPublicError(error));
       }
     },

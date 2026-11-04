@@ -717,6 +717,17 @@ Use these endpoints to read and manage an organization, its members and its API 
 
 Signed-in sessions don't need key scopes. Demoting, removing or leaving as the last owner returns 409, and this check is safe against concurrent membership changes. Personal organization memberships can't be added, changed or removed. Removing a member revokes their keys for that organization; workspaces shared with them directly stay shared.
 
+### One organization per user
+
+For now a user belongs to exactly one organization. Everything tenant-scoped (runs, documents, API keys, webhooks, search) still names its organization explicitly, and organization IDs stay in every API, so several organizations per user can be enabled later without API changes.
+
+- Sign-up creates your personal organization.
+- Accepting an organization or workspace invite into another organization, or creating an organization, works only while your current organization is a personal one with no data (no documents, runs, API keys or webhooks, never paid). That personal organization is then deleted and replaced. Otherwise the request returns 409 `user_already_in_org`: leave your current organization first.
+- Leaving an organization, or being removed from one, gives you your personal organization back, so you always have exactly one. Access to the organization you left ends at once.
+- While the limit is 1, `orgId` on requests made with a session can only name your own organization, and `workspace_ambiguous` cannot occur.
+
+Self-hosters: the limit is `DOCSLURP_MAX_ORGS_PER_USER` (default and current maximum `1`) and the unique index `org_memberships_one_org_per_user` (migration 0127). Lifting it means dropping that index in a new migration and raising the variable; nothing else in the server assumes one organization per user.
+
 ### Grant organization scopes explicitly
 
 Create the key while signed in, on the [API keys](https://docslurp.io/app/api-keys) page or over HTTP with your session cookie. Below, `DOCSLURP_COOKIE_JAR` is a cookie jar file from a signed-in session. Granting `organizations:manage` needs an owner or admin; any member can grant read access. Pass the real organization ID: without `orgId`, the key is created in your personal organization.
@@ -889,7 +900,7 @@ curl --fail-with-body --silent --show-error -X POST "$api_url/v1/organizations/$
   -H "Authorization: Bearer $DOCSLURP_API_KEY"
 ```
 
-No request body is needed. Success returns `{ "ok": true }` with 200, and the SDK's `leaveOrganization(org_id)` resolves to `undefined`. A key needs `organizations:manage` to leave; any member can leave from a signed-in session. You can't leave a personal organization, or leave as the last owner. Leaving revokes your keys for that organization, so later calls with the same key fail.
+No request body is needed. Success returns `{ "ok": true }` with 200, and the SDK's `leaveOrganization(org_id)` resolves to `undefined`. A key needs `organizations:manage` to leave; any member can leave from a signed-in session. You can't leave a personal organization, or leave as the last owner. Leaving revokes your keys for that organization, so later calls with the same key fail, and makes your personal organization your organization again ([one organization per user](#one-organization-per-user)).
 
 ### List and revoke organization keys
 
@@ -947,7 +958,7 @@ const result = await client.revokeOrganizationApiKeys(org_id); // {keys, revoked
 | 401 | No valid authentication. |
 | 403 | Missing organization scope, a browser key, creating without a session, or a role that isn't high enough. |
 | 404 | The organization or membership doesn't exist or you can't access it, or the target user is unknown. A key asking about another organization gets 404, so it can't tell whether that organization exists. |
-| 409 | Duplicate membership or slug, a personal membership, or removing, demoting or leaving as the last owner. |
+| 409 | Duplicate membership or slug, a personal membership, removing, demoting or leaving as the last owner, or `user_already_in_org` (joining or creating a second organization). |
 | 429 | Rate limit reached. Wait for `Retry-After`, and cap your retries. |
 
 Organization errors use the [error envelope](https://docslurp.io/docs/search-reference#errors). For example, removing the last owner returns:
@@ -962,7 +973,20 @@ Organization errors use the [error envelope](https://docslurp.io/docs/search-ref
 }
 ```
 
-Other codes include `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `organization_not_found`, `organization_forbidden`, `organization_conflict`, `session_required` and `user_not_found`. In the SDK, HTTP failures throw `DocSlurpApiError` with `status`, `code`, `requestId` and the response in `body`; branch on `code`. The SDK never retries organization writes, so keep earlier successful responses when a later call fails.
+Other codes include `user_already_in_org`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `organization_not_found`, `organization_forbidden`, `organization_conflict`, `session_required` and `user_not_found`. In the SDK, HTTP failures throw `DocSlurpApiError` with `status`, `code`, `requestId` and the response in `body`; branch on `code`. The SDK never retries organization writes, so keep earlier successful responses when a later call fails.
+
+## Webhooks
+
+A webhook belongs to one organization and receives that organization's run events (`run.completed`, `run.failed`, `document.replaced`; `GET /v1/webhooks/catalog` lists them), whoever started the run. There is no per-workspace webhook; a workspace can switch its own events off in its pipeline settings. Webhook routes take a signed-in session, not an API key.
+
+| Operation | Route | Who |
+| --- | --- | --- |
+| List | `GET /v1/webhooks?orgId=` | Owners and admins of the organization. |
+| Create | `POST /v1/webhooks` with `{ url, secret, events?, orgId? }` | Owners and admins. Any other field (such as `workspaceId`) is a 400. |
+| Update, delete, rotate secret, send a test event | `PATCH`, `DELETE /v1/webhooks/:id`, `POST /v1/webhooks/:id/rotate-secret`, `POST /v1/webhooks/:id/test` | Owners and admins of the webhook's organization. |
+| Delivery log and replay | `GET /v1/webhooks/deliveries?orgId=&webhookId=`, `POST /v1/webhooks/deliveries/:deliveryId/replay` | Owners and admins of the webhook's organization. |
+
+An omitted `orgId` means your [organization](#one-organization-per-user) (your personal one when you have it). Not a member answers 404, a member who is not an owner or admin 403; a webhook of an organization you do not administer answers 404. A webhook delivers only while the user who created it is still an owner or admin of its organization: demoting or removing that user stops it (another admin can recreate it). Each delivery is signed with `X-DocSlurp-Signature: t=<unix>,id=<delivery id>,v1=<hex HMAC-SHA256 of "<t>.<id>.<body>">` under the webhook secret.
 
 ## Make failures recoverable
 

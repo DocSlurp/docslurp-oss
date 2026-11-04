@@ -23,7 +23,8 @@ import { withDeferredContext, type DeferredRequestContext, type MaterializeEvent
 import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-client.js";
 import { loadWorkspacePipeline } from "../search/session-setup.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
-import { AggregateAnswerScopeError, aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
+import { aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
+import { resolveDefaultOrganization } from "../services/organizations.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { CrossWorkspaceScopeError, hybridSearch, MissingWorkspaceScopeError, WorkspaceNotFoundError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
@@ -573,11 +574,17 @@ export const searchRoutes = new Hono()
     try {
       // Each listed workspace may be a UUID, slug, former slug, name or
       // `default`; one that matches nothing answers 404 naming its slug.
+      // One organization per search: the key's, else the one the session names, else its personal one.
+      const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : parsed.data.orgId ?? (await resolveDefaultOrganization(actor.userId)).id;
+      if (actor.type === "apiKey" && parsed.data.orgId && parsed.data.orgId !== orgId) {
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
       const workspaces = await Promise.all(
-        parsed.data.workspaces.map((workspace) => resolveActorWorkspaceId(actor, workspace)),
+        parsed.data.workspaces.map((workspace) => resolveActorWorkspaceId(actor, workspace, orgId)),
       );
       const response = await aggregateWorkspaceRagSearch({
         userId: actor.userId,
+        orgId,
         request: { ...parsed.data, workspaces },
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
       });
@@ -585,9 +592,6 @@ export const searchRoutes = new Hono()
     } catch (error) {
       if (error instanceof WorkspaceNotFoundError) {
         return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
-      }
-      if (error instanceof AggregateAnswerScopeError) {
-        return apiErrorResponse(c, 400, "invalid_request", error.message);
       }
       throw error;
     } finally {

@@ -19,7 +19,7 @@ import {
   updateWebhook
 } from "../services/webhooks.js";
 import { apiStatusError } from "../lib/api-error.js";
-import { ensurePersonalOrganization } from "../services/organizations.js";
+import { resolveDefaultOrganization } from "../services/organizations.js";
 import { validationHook } from "../lib/validation.js";
 
 const createWebhookSchema = z.object({
@@ -46,7 +46,7 @@ const updateWebhookSchema = z.object({
 
 /** Webhooks are an organization's: `orgId` names it, and an omitted one means the caller's personal organization. */
 async function requestOrgId(userId: string, orgId: string | null | undefined): Promise<string> {
-  return orgId?.trim() || (await ensurePersonalOrganization(userId)).id;
+  return orgId?.trim() || (await resolveDefaultOrganization(userId)).id;
 }
 
 function webhookScopeResponse(c: Context, error: unknown): Response | null {

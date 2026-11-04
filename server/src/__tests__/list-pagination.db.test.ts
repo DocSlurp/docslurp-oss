@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 import { InvalidListCursorError, encodeListCursor } from "../lib/list-cursor.js";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Documents and run history page by keyset cursor: every row appears exactly
@@ -16,6 +17,7 @@ let runs: typeof import("../services/runs.js");
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
+  await database.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = database.stop;
   sql = postgres(database.url, {
     max: 1, prepare: false, onnotice: () => {},

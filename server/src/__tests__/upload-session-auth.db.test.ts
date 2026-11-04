@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMigratedDatabase } from "@docslurp/worker/testing";
 import { createHash, randomBytes } from "node:crypto";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 // Only the SQL transport is replaced: authentication and ownership run production queries
 // against an isolated database built from the full migration journal.
@@ -40,6 +41,7 @@ const ownershipQueries = () => mocks.query.mock.calls.filter(([sql]) => /from up
 beforeAll(async () => {
   vi.stubEnv("API_RATE_LIMIT_ENABLED", "false");
   db = await createMigratedDatabase();
+  await db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   await db.exec(`
     insert into "user" (id,name,email) values ('u','Test','upload@example.test'), ('other','Other','other@example.test');
     insert into organizations (id,name,slug,created_by_user_id) values ('o','Org','upload-test','u'), ('foreign','Foreign','upload-foreign','u');

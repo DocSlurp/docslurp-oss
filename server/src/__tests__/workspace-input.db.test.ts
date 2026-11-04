@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseWorkspaceInput } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query: vi.fn() }, auth: { api: { getSession: vi.fn() } } }));
 
@@ -20,6 +21,7 @@ async function find(value: string, scope: { userId: string; orgId?: string | nul
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
+  await database.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = database.stop;
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));

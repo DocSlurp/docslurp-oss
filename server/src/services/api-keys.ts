@@ -7,7 +7,7 @@ import { sql } from "../db.js";
 import { ipInRange, parseCidr, parseIp } from "@docslurp/shared/client-ip";
 import { AllowedOriginError, normalizeAllowedOriginEntry, originMatchesAllowlist } from "../lib/allowed-origins.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
-import { ensurePersonalOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
+import { resolveDefaultOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
 
 type ApiKeyRow = {
   id: string;
@@ -309,7 +309,7 @@ export async function createApiKey(
   if (limits?.orgId && !requestedOrg) {
     throw new OrganizationError(404, "organization_not_found", "Organization not found");
   }
-  const orgId = requestedOrg?.id ?? (await ensurePersonalOrganization(userId)).id;
+  const orgId = requestedOrg?.id ?? (await resolveDefaultOrganization(userId)).id;
   const keyType = limits?.keyType ?? ((limits?.allowedDomains?.length ?? 0) > 0 ? "client" : "server");
   const rawKey = generateRawKey(keyType);
   const keyHash = hashKey(rawKey);
@@ -464,8 +464,8 @@ async function normalizeKeyWorkspaceIds(tx: KeyTransaction, orgId: string, userI
   return requested;
 }
 async function withOwnedKeyLock<T>(id: string, userId: string, operation: (tx: KeyTransaction, existing: ApiKeyRow, role: string) => Promise<T>): Promise<T | null> {
-  const [binding] = await sql<{ org_id: string | null }[]>`select org_id from api_keys where id = ${id} and user_id = ${userId} and revoked_at is null`;
-  if (!binding?.org_id) return null;
+  const [binding] = await sql<{ org_id: string }[]>`select org_id from api_keys where id = ${id} and user_id = ${userId} and revoked_at is null`;
+  if (!binding) return null;
   return await withOrganizationLock(binding.org_id, userId, async (tx, actor) => {
     const [existing] = await tx<ApiKeyRow[]>`select * from api_keys where id = ${id} and user_id = ${userId} and revoked_at is null for update`;
     if (!existing) return null;
@@ -500,7 +500,7 @@ export async function updateApiKey(id: string, userId: string, updates: {
     const nextScopes = updates.scopes ? [...new Set(updates.scopes)] : effectiveKeyScopes(nextKeyType, existing.scopes ?? [], existing.workspace_ids ?? []);
     assertOrganizationKeyScopes(nextKeyType, nextScopes, role);
     const nextWorkspaceIds = updates.workspaceIds !== undefined
-      ? await normalizeKeyWorkspaceIds(tx, existing.org_id!, userId, updates.workspaceIds)
+      ? await normalizeKeyWorkspaceIds(tx, existing.org_id, userId, updates.workspaceIds)
       : existing.workspace_ids ?? [];
     // Every save of a browser key must leave it bound to workspaces, including a legacy key with none.
     assertClientKeyWorkspaces(nextKeyType, nextWorkspaceIds);
@@ -573,7 +573,8 @@ export async function revokeApiKey(id: string, userId: string): Promise<ApiKey |
 export interface ValidatedKey {
   keyId: string;
   userId: string;
-  orgId: string | null;
+  /** The key's one tenant (api_keys.org_id is NOT NULL). */
+  orgId: string;
   keyType: ApiKeyType;
   allowedDomains: string[];
   scopes: string[];
@@ -622,6 +623,7 @@ export async function validateApiKey(
       )
   `;
 
+  // api_keys.org_id is NOT NULL (0125); refusing a key without one anyway keeps this fail-closed if that ever changes.
   if (!row || !row.org_id) return null;
 
   const keyType = parseApiKeyType(row.key_type);
@@ -672,7 +674,7 @@ export async function validateApiKey(
  * under it. Skips the type/domain checks: the token holder is not the key.
  * Null when the key is revoked, gone, or its owner left the organization.
  */
-export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKeyType; scopes: string[]; workspaceIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
+export async function getLiveApiKeyById(keyId: string): Promise<{ orgId: string; keyType: ApiKeyType; scopes: string[]; workspaceIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
   const [row] = await sql<ApiKeyRow[]>`
     select * from api_keys
     where id = ${keyId} and revoked_at is null
@@ -683,5 +685,5 @@ export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKe
       )
   `;
   const keyType = row ? parseApiKeyType(row.key_type) : null;
-  return row && keyType ? { keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.workspace_ids ?? []), workspaceIds: row.workspace_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
+  return row && keyType ? { orgId: row.org_id, keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.workspace_ids ?? []), workspaceIds: row.workspace_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
 }

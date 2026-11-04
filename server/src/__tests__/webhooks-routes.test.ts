@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestSession } from "./helpers/session-app.js";
 
-vi.mock("../services/organizations.js", () => ({ ensurePersonalOrganization: vi.fn(async () => ({ id: "personal-org" })) }));
+vi.mock("../services/organizations.js", () => ({ resolveDefaultOrganization: vi.fn(async () => ({ id: "personal-org" })) }));
 
 vi.mock("../services/webhooks.js", () => ({
   WebhookScopeError: class WebhookScopeError extends Error {},

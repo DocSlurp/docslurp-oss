@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /** `PATCH /v1/organizations/:id { retainDocumentVersions }`: open to every org (archived versions bill as storage). */
 let stop: () => Promise<void>;
@@ -10,6 +11,7 @@ let orgs: typeof import("../services/organizations.js");
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {}, types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } } }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));

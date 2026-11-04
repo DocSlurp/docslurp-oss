@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Webhooks belong to exactly one organization. A run's events reach that organization's webhooks whoever started the
@@ -29,6 +30,7 @@ const urls = () => requests.map((request) => request.url).sort();
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
+  await database.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = database.stop;
   sql = postgres(database.url, {
     max: 1, prepare: false, onnotice: () => {},

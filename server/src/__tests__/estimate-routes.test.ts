@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { defaultPipelineFeatures, workspaceTemplates } from "@docslurp/shared";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Real routes over a migrated database: each work-creating mutation reports the same `job.estimate` its
@@ -26,6 +27,7 @@ type Key = { orgId: string | null; scopes: string[]; keyType?: string; workspace
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, {
     max: 1, prepare: false, onnotice: () => {},
