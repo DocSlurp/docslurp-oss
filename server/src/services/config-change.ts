@@ -149,7 +149,7 @@ async function hasVectorizedDocuments(client: typeof sql | Tx, workspaceId: stri
 }
 
 /** The org's concurrent worker ceiling (starter 50, funded 250, or a raised custom value). */
-async function orgWorkerSlots(orgId: string): Promise<number | undefined> {
+export async function orgWorkerSlots(orgId: string): Promise<number | undefined> {
   const [row] = await sql<{ worker_slots: number | null }[]>`select worker_slots from organizations where id = ${orgId}`;
   return row?.worker_slots ? Number(row.worker_slots) : undefined;
 }

@@ -1,0 +1,143 @@
+{
+ "schema": 1,
+ "version": "2026-10-25b",
+ "creditsPerDollar": 100,
+ "priceCard": {
+  "fastPer1kPages": 5,
+  "richPer1kPages": 250,
+  "audioMinuteRichPages": 1,
+  "videoMinuteRichPages": 3,
+  "storageGbMonth": 25,
+  "searchPer1k": 10,
+  "chatAnswerTiers": {
+   "standard": 1,
+   "advanced": 7.5,
+   "premium": 50
+  },
+  "richIncludedOutputTokens": 1000,
+  "richExtraPageOutputTokens": 1000,
+  "llmSearchMultiplier": 10,
+  "chatAnswerTokenBlock": 100000,
+  "documentSummary": 0.5,
+  "structuredFieldsPer10Pages": 1,
+  "knowledgeGraphPer10Pages": 1.5,
+  "propositionsPer10Pages": 1,
+  "webSearch": 1,
+  "webSearchDeepMultiplier": 2,
+  "webPage": 0.25,
+  "webMapUrlsPerCredit": 50
+ },
+ "profiles": {
+  "fast": {
+   "text": {
+    "workerSeconds": 0.2,
+    "mode": "fast",
+    "sourceBytes": 30720,
+    "artifactBytes": 24576,
+    "indexBytes": 20480
+   },
+   "complex": {
+    "workerSeconds": 0.8,
+    "mode": "fast",
+    "sourceBytes": 122880,
+    "artifactBytes": 40960,
+    "indexBytes": 24576
+   },
+   "scanned": {
+    "workerSeconds": 1,
+    "mode": "fast",
+    "sourceBytes": 256000,
+    "artifactBytes": 163840,
+    "indexBytes": 0
+   }
+  },
+  "auto": {
+   "text": {
+    "workerSeconds": 0.3,
+    "mode": "fast",
+    "sourceBytes": 30720,
+    "artifactBytes": 65536,
+    "indexBytes": 25600
+   },
+   "complex": {
+    "workerSeconds": 4,
+    "mode": "fast",
+    "sourceBytes": 122880,
+    "artifactBytes": 163840,
+    "indexBytes": 30720
+   },
+   "scanned": {
+    "workerSeconds": 4.2,
+    "mode": "rich",
+    "sourceBytes": 256000,
+    "artifactBytes": 163840,
+    "indexBytes": 25600
+   }
+  },
+  "good": {
+   "text": {
+    "workerSeconds": 4.2,
+    "mode": "rich",
+    "sourceBytes": 30720,
+    "artifactBytes": 163840,
+    "indexBytes": 30720
+   },
+   "complex": {
+    "workerSeconds": 6,
+    "mode": "rich",
+    "sourceBytes": 122880,
+    "artifactBytes": 184320,
+    "indexBytes": 40960
+   },
+   "scanned": {
+    "workerSeconds": 6,
+    "mode": "rich",
+    "sourceBytes": 256000,
+    "artifactBytes": 184320,
+    "indexBytes": 35840
+   }
+  }
+ },
+ "documentFeatures": [
+  "documentSummary",
+  "structuredFields",
+  "knowledgeGraph",
+  "propositions"
+ ],
+ "parallelEfficiency": 0.85,
+ "fixedOverheadSeconds": 15,
+ "mediaWorkerSecondsPerMinute": {
+  "audio": 2,
+  "video": 6
+ },
+ "mediaBytesPerMinute": {
+  "audio": 1024000,
+  "video": 15360000
+ },
+ "maxPageFanoutPerRun": 128,
+ "fundedWorkerSlots": 250,
+ "speedBoostMultiplier": 4,
+ "assumedBytesPerPage": 76800,
+ "quoteLowMix": {
+  "text": 1,
+  "complex": 0,
+  "scanned": 0
+ },
+ "quoteHighMix": {
+  "text": 0.2,
+  "complex": 0.3,
+  "scanned": 0.5
+ },
+ "mediaExtensions": {
+  "audio": [
+   "mp3",
+   "m4a",
+   "wav",
+   "weba"
+  ],
+  "video": [
+   "mp4",
+   "webm"
+  ]
+ }
+}

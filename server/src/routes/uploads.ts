@@ -9,6 +9,7 @@ import {
   WORKSPACE_INPUT_MAX_LENGTH,
   workspaceTemplateKeySchema,
   indexingModeSchema,
+  pageMixSchema,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -523,6 +524,10 @@ const uploadEstimateSchema = z.object({
     type: z.string().max(255).optional(),
     /** Length in seconds when the client can read it; otherwise estimated from the size. */
     durationSeconds: z.number().positive().max(24 * 3600).optional(),
+    /** Page mix the client measured (offline probe, `@docslurp/estimate`); narrows the price range. Estimate only, never billed. */
+    mix: pageMixSchema.optional(),
+    /** 0-1 trust in `mix`; default 1. */
+    mixConfidence: z.number().min(0).max(1).optional(),
   })).min(1).max(1000),
   workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
@@ -551,9 +556,10 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
-    const { estimate, media } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
-    // `orgId` is the organization whose credits the upload would spend, for reading its balance.
-    return c.json({ estimate, media, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
+    const { estimate, media, profile } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` lets
+    // offline estimators quote later batches for this workspace without calling back.
+    return c.json({ estimate, media, profile, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
   },
 );
 acceptApiKeys(uploadEstimateRoutes);
