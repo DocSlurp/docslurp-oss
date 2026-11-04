@@ -156,7 +156,7 @@ describe("legacy graph keys", () => {
       nodes: [{ key: graphNodeKey(key, "person"), canonicalName: "Müller", normalizedName: key, entityType: "person", aliases: [], confidence: 0.8, mentionCount: 1 }],
       edges: [],
       chunkEntities: [{ chunkId: "d2-c0", nodeKey: graphNodeKey(key, "person"), mentionCount: 1, confidence: 0.8, pageNumbers: [1] }],
-      source: "llm", llmFailed: false, windows: 1, charsRead: 10, charsTotal: 10, truncated: false, inputTokens: 1, outputTokens: 1, durationMs: 1,
+      source: "llm", llmFailed: false, windows: 1, charsRead: 10, charsAttempted: 10, charsTotal: 10, truncated: false, inputTokens: 1, outputTokens: 1, durationMs: 1,
     };
     await replaceDocumentGraph(sql, { workspaceId: "w", userId: "u1", runId: "run-d2", documentId: "d2", configHash: graphConfigFingerprint(defaultGraphConfig, "model"), graph });
     // One Müller, not "mller" and "müller".
