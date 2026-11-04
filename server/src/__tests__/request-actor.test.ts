@@ -124,9 +124,9 @@ describe("request actor helpers", () => {
     await expect(loadActorScopedWorkspace("ws-1", actor)).resolves.toBe(workspace);
   });
 
-  it("denies workspace access for a key without an organization", async () => {
+  it("denies workspace access for a key whose organization is blank", async () => {
     vi.mocked(getWorkspace).mockResolvedValue(workspace);
-    await expect(loadActorScopedWorkspace("ws-1", { type: "apiKey", userId: "user-1", apiKey: { ...validatedKey, orgId: null } })).resolves.toBeNull();
+    await expect(loadActorScopedWorkspace("ws-1", { type: "apiKey", userId: "user-1", apiKey: { ...validatedKey, orgId: "" } })).resolves.toBeNull();
   });
 
   it("denies API-key workspace loads outside the key organization", async () => {

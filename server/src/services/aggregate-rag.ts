@@ -65,11 +65,6 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-function singleOrgId(workspaces: WorkspaceRecord[]): string | null {
-  const orgIds = uniqueStrings(workspaces.map((workspace) => workspace.orgId));
-  return orgIds.length === 1 ? orgIds[0]! : null;
-}
-
 function apiKeyCanReadWorkspace(
   apiKey: ValidatedKey | null | undefined,
   workspace: WorkspaceRecord,
@@ -80,19 +75,22 @@ function apiKeyCanReadWorkspace(
   return apiKeyCanUseWorkspace(apiKey, workspace);
 }
 
+/** The workspaces of one organization the caller may search: an aggregate search never spans tenants. */
 async function resolveAggregateWorkspaces(args: {
   userId: string;
+  orgId: string;
   apiKey?: ValidatedKey | null;
   workspaceIds: string[];
   maxWorkspaces: number;
 }): Promise<WorkspaceRecord[]> {
   const requestedWorkspaceIds = uniqueStrings(args.workspaceIds);
+  if (args.apiKey && args.apiKey.orgId !== args.orgId) throw new WorkspaceNotFoundError();
 
   if (requestedWorkspaceIds.length > 0) {
     const workspaces = await Promise.all(
       requestedWorkspaceIds.map(async (workspaceId) => {
         const workspace = await getWorkspace(workspaceId, args.userId);
-        if (!workspace || !apiKeyCanReadWorkspace(args.apiKey, workspace)) {
+        if (!workspace || workspace.orgId !== args.orgId || !apiKeyCanReadWorkspace(args.apiKey, workspace)) {
           throw new WorkspaceNotFoundError();
         }
         return workspace;
@@ -103,7 +101,7 @@ async function resolveAggregateWorkspaces(args: {
 
   const workspaces = await listWorkspaces(args.userId);
   return workspaces
-    .filter((workspace) => apiKeyCanReadWorkspace(args.apiKey, workspace))
+    .filter((workspace) => workspace.orgId === args.orgId && apiKeyCanReadWorkspace(args.apiKey, workspace))
     .slice(0, args.maxWorkspaces);
 }
 
@@ -284,17 +282,10 @@ async function generateAggregateAnswer(args: {
   };
 }
 
-/** generateAnswer over workspaces from more than one organization (HTTP 400). */
-export class AggregateAnswerScopeError extends Error {
-  readonly status = 400 as const;
-  constructor() {
-    super("generateAnswer needs workspaces from one organization: list only that organization's workspaces in `workspaces`, or set generateAnswer to false to search across organizations.");
-    this.name = "AggregateAnswerScopeError";
-  }
-}
-
 export async function aggregateWorkspaceRagSearch(args: {
   userId: string;
+  /** The one organization searched (an API key's, or the session's named or personal one); the answer bills to it. */
+  orgId: string;
   request: AggregateWorkspaceRagSearchRequest;
   apiKey?: ValidatedKey | null;
 }): Promise<AggregateRagSearchResponse> {
@@ -302,6 +293,7 @@ export async function aggregateWorkspaceRagSearch(args: {
   const query = (request.q ?? request.goal ?? "").trim();
   const workspaces = await resolveAggregateWorkspaces({
     userId: args.userId,
+    orgId: args.orgId,
     apiKey: args.apiKey,
     workspaceIds: request.workspaces,
     maxWorkspaces: request.maxWorkspaces,
@@ -322,13 +314,6 @@ export async function aggregateWorkspaceRagSearch(args: {
         totalTokens: 0,
       },
     };
-  }
-
-  // One answer is billed to one organization's credits (the usage scope), so an
-  // answer may not draw on workspaces from several organizations. Refused
-  // before retrieval; retrieval alone may still span organizations.
-  if (request.generateAnswer && new Set(workspaces.map((workspace) => workspace.orgId ?? null)).size > 1) {
-    throw new AggregateAnswerScopeError();
   }
 
   const workspaceResults = await Promise.all(
@@ -413,18 +398,15 @@ export async function aggregateWorkspaceRagSearch(args: {
   // The answer calls a model: every answered workspace's org must be able to spend.
   // Interactive spend (chat reserve and overdraft, spend-guard.ts): budget
   // caps per workspace, one interactive hold per org for the one answer.
-  const heldOrgs = new Set<string>();
-  for (const workspace of workspaces) {
-    const hold = workspace.orgId ? !heldOrgs.has(workspace.orgId) : true;
-    await assertCanSpend(workspace.orgId, workspace.id, { kind: "interactive", hold });
-    if (workspace.orgId) heldOrgs.add(workspace.orgId);
+  for (const [index, workspace] of workspaces.entries()) {
+    await assertCanSpend(args.orgId, workspace.id, { kind: "interactive", hold: index === 0 });
   }
   const generated = await generateAggregateAnswer({
     userId: args.userId,
     query,
     citations,
     workspaces: workspaceResults,
-    orgId: singleOrgId(workspaces),
+    orgId: args.orgId,
     // The key's chat output cap applies here as on every chat surface.
     maxOutputTokens: capOutputTokens(
       AGGREGATE_ANSWER_MAX_OUTPUT_TOKENS,

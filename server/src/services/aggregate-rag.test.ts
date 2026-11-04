@@ -67,7 +67,7 @@ beforeEach(() => {
 
 describe("aggregateWorkspaceRagSearch spend", () => {
   it("runs no model-calling step for a default request", async () => {
-    const response = await aggregateWorkspaceRagSearch({ userId: "u1", request: request({}) });
+    const response = await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({}) });
     expect(response.answer).toBeNull();
     expect(response.citations).toHaveLength(1);
     expect(mocks.hybridSearch).toHaveBeenCalledWith("who is this for?", "u1", expect.objectContaining({
@@ -79,7 +79,7 @@ describe("aggregateWorkspaceRagSearch spend", () => {
   });
 
   it("checks spend before the answer model and records its usage with the workspace scope", async () => {
-    const response = await aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }) });
+    const response = await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(response.answer).toBe("Answer [1].");
     expect(mocks.calls).toEqual(["assertCanSpend", "model", "usage"]);
     expect(mocks.assertCanSpend).toHaveBeenCalledWith("org-1", "ws-1", { kind: "interactive", hold: true });
@@ -92,14 +92,14 @@ describe("aggregateWorkspaceRagSearch spend", () => {
 
   it("calls no model when the spend guard refuses", async () => {
     mocks.assertCanSpend.mockRejectedValueOnce(Object.assign(new Error("out of credits"), { status: 402 }));
-    await expect(aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }) })).rejects.toThrow("out of credits");
+    await expect(aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) })).rejects.toThrow("out of credits");
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
   });
 
   it("returns citations only, with no spend check or model call, when chat is off in an answered workspace", async () => {
     mocks.isWorkspaceChatEnabled.mockResolvedValueOnce(false);
-    const response = await aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }) });
+    const response = await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(response.answer).toBeNull();
     expect(response.citations).toHaveLength(1);
     expect(response.warnings.join(" ")).toContain("chat is turned off in Manuals");
@@ -109,21 +109,23 @@ describe("aggregateWorkspaceRagSearch spend", () => {
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
   });
 
-  it("refuses an answer over workspaces from two organizations before searching, and still searches across them without one", async () => {
+  it("never searches a workspace of another of the caller's organizations, named or listed", async () => {
     mocks.getWorkspace.mockImplementation(async (id: string) => ({ id, orgId: id === "ws-1" ? "org-1" : "org-2", name: id }));
-    await expect(aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true, workspaces: ["ws-1", "ws-2"] }) }))
-      .rejects.toMatchObject({ name: "AggregateAnswerScopeError", status: 400 });
+    await expect(aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ workspaces: ["ws-1", "ws-2"] }) }))
+      .rejects.toThrow("Workspace not found");
     expect(mocks.hybridSearch).not.toHaveBeenCalled();
-    expect(mocks.assertCanSpend).not.toHaveBeenCalled();
-    expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
-    const retrieval = await aggregateWorkspaceRagSearch({ userId: "u1", request: request({ workspaces: ["ws-1", "ws-2"] }) });
-    expect(retrieval.workspaces).toHaveLength(2);
-    expect(retrieval.answer).toBeNull();
+    mocks.listWorkspaces.mockResolvedValueOnce([
+      { id: "ws-1", orgId: "org-1", name: "Mine" },
+      { id: "ws-2", orgId: "org-2", name: "Other org" },
+    ]);
+    const retrieval = await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ workspaces: [] }) });
+    expect(retrieval.workspaces.map((workspace) => workspace.workspaceId)).toEqual(["ws-1"]);
+    expect(mocks.hybridSearch).toHaveBeenCalledTimes(1);
   });
 
   it("answers null with a warning, and calls no model, when no workspace is accessible", async () => {
     mocks.listWorkspaces.mockResolvedValueOnce([]);
-    const response = await aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true, workspaces: [] }) });
+    const response = await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true, workspaces: [] }) });
     expect(response.answer).toBeNull();
     expect(response.warnings).toEqual(["No accessible workspaces matched the aggregate request."]);
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
@@ -131,22 +133,22 @@ describe("aggregateWorkspaceRagSearch spend", () => {
 
   it("applies the key's chat output cap to the answer", async () => {
     const apiKey = { keyId: "k", userId: "u1", orgId: "org-1", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [], maxOutputTokens: 500 };
-    await aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }), apiKey });
+    await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }), apiKey });
     expect(mocks.generateOpenRouterDocumentText).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 500 }));
-    await aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }) });
+    await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(mocks.generateOpenRouterDocumentText).toHaveBeenLastCalledWith(expect.objectContaining({ maxOutputTokens: 800 }));
   });
 
   it("never searches a workspace outside the key's organization", async () => {
     const apiKey = { keyId: "k", userId: "u1", orgId: "org-2", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] };
-    await expect(aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }), apiKey })).rejects.toThrow("Workspace not found");
+    await expect(aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }), apiKey })).rejects.toThrow("Workspace not found");
     expect(mocks.hybridSearch).not.toHaveBeenCalled();
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
   });
-  it("fails closed for a key that carries no organization", async () => {
-    const apiKey = { keyId: "k", userId: "u1", orgId: null, keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] };
-    await expect(aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }), apiKey })).rejects.toThrow("Workspace not found");
+  it("fails closed for a key searching an organization other than its own", async () => {
+    const apiKey = { keyId: "k", userId: "u1", orgId: "org-2", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] };
+    mocks.listWorkspaces.mockResolvedValueOnce([{ id: "ws-1", orgId: "org-1", name: "Manuals" }]);
+    await expect(aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ workspaces: [] }), apiKey })).rejects.toThrow("Workspace not found");
     expect(mocks.hybridSearch).not.toHaveBeenCalled();
-    expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
   });
 });
