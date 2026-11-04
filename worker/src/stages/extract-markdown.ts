@@ -87,6 +87,7 @@ import { logNativePdfFallback } from "../native-pdf/types.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
+import { withKreuzbergOcrLanguage } from "../extractors/kreuzberg-ocr.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
@@ -212,6 +213,8 @@ export class ExtractMarkdownStage implements Stage {
           );
         }
         assertSupportedDocumentTarget(extractionConfig.target);
+        // The workspace's OCR language reaches Kreuzberg too (it reads English only otherwise).
+        const extractorOptions = withKreuzbergOcrLanguage(extractionConfig.options, extractionConfig.ocr.language);
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
         const format = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? (this.isPdfDocument(document) ? "pdf" : "unknown");
@@ -314,7 +317,7 @@ export class ExtractMarkdownStage implements Stage {
                   secondaryId: extractionConfig.voting.secondary,
                   order: extractionConfig.order,
                   format,
-                  options: extractionConfig.options,
+                  options: extractorOptions,
                   attemptLedger,
                 });
                 // Why an image continues without extracted text (reported in the manifest and stats).
@@ -356,7 +359,7 @@ export class ExtractMarkdownStage implements Stage {
                   secondary: plannedExtractors.secondary,
                   sourcePath: tempFile,
                   format,
-                  options: extractionConfig.options,
+                  options: extractorOptions,
                   dirs: candidateDirs,
                 });
                 if (requestedImages) {

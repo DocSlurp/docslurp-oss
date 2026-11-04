@@ -21,7 +21,7 @@ import type { VisionPageOutput } from "../../stages/vision-extract.js";
 import type { CommandRunner } from "../../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } from "../../tools/storage.js";
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
-import { ocrImageText } from "../../lib/ocr-language.js";
+import { OcrLowConfidenceError, ocrImageText } from "../../lib/ocr-language.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
 import { logNativePdfFallback } from "../../native-pdf/types.js";
@@ -241,16 +241,24 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     async ocr(raster, { pageNumber, signal }) {
       const started = Date.now();
       // Script detection and the matching language packs, as in page OCR (lib/ocr-language.ts).
-      const ocr = await ocrImageText({
-        image: raster.path,
-        setting: input.ocrLanguage,
-        run: async (args) => {
-          const plan = await input.runner.plan("tesseract", ...args);
-          if (!plan.available) throw new Error("tesseract unavailable");
-          return (await input.runner.run(plan, signal)).stdout;
-        },
-      });
-      return { text: ocr.text.trim(), latencyMs: Date.now() - started, model: "tesseract" };
+      try {
+        const ocr = await ocrImageText({
+          image: raster.path,
+          setting: input.ocrLanguage,
+          run: async (args) => {
+            const plan = await input.runner.plan("tesseract", ...args);
+            if (!plan.available) throw new Error("tesseract unavailable");
+            return (await input.runner.run(plan, signal)).stdout;
+          },
+        });
+        return { text: ocr.text.trim(), latencyMs: Date.now() - started, model: "tesseract" };
+      } catch (error) {
+        if (!(error instanceof OcrLowConfidenceError)) throw error;
+        // No installed pack read the page: empty output, so the route falls back to the next, stronger reader
+        // instead of indexing junk or failing the document.
+        console.warn(`[ocr] page=${pageNumber} unreadable by tesseract: ${error.message}`);
+        return { text: "", latencyMs: Date.now() - started, model: "tesseract" };
+      }
     },
 
     async label(raster, { pageNumber, signal }) {

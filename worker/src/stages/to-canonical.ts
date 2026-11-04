@@ -7,6 +7,7 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { recordMeasuredPageCount } from "../lib/office-page-count.js";
 import { sourceStorageKey } from "../tools/storage.js";
+import { resolveOcrLanguages } from "../extractors/kreuzberg-ocr.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 
 type CanonicalStrategy =
@@ -96,6 +97,8 @@ export class ToCanonicalStage implements Stage {
             strategy = "tiff-split-ocr";
           }
 
+          // The workspace's OCR language, not English (`auto` is English plus the installed major-script packs).
+          const ocrLanguages = resolveOcrLanguages(state.run.pipeline.documentExtraction?.ocr?.language) ?? undefined;
           const artifact: Record<string, unknown> = {
             documentId: document.id,
             normalizedFormat,
@@ -195,11 +198,11 @@ export class ToCanonicalStage implements Stage {
             artifact.outputKey = output;
           } else if (strategy === "tiff-split-ocr") {
             const splitPlan = await this.runner.tiffSplit(document.sourceKey, "page-%04d.tiff");
-            const ocrPlan = await this.runner.tesseractOcr("page-0001.tiff", "ocr-output");
+            const ocrPlan = await this.runner.tesseractOcr("page-0001.tiff", "ocr-output", ocrLanguages);
             artifact.splitPlan = { binary: splitPlan.binary, args: splitPlan.args, available: splitPlan.available };
             artifact.ocrPlan = { binary: ocrPlan.binary, args: ocrPlan.args, available: ocrPlan.available };
           } else if (strategy === "tesseract-ocr") {
-            const plan = await this.runner.tesseractOcr(document.sourceKey, "ocr-output");
+            const plan = await this.runner.tesseractOcr(document.sourceKey, "ocr-output", ocrLanguages);
             artifact.plan = {
               binary: plan.binary,
               args: plan.args,
