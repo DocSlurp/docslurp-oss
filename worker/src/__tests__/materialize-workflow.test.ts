@@ -239,7 +239,7 @@ describe("page-index ledger hook", () => {
 describe("runMaterializeRange activity", () => {
   const ops: Partial<PageMaterializerOps> = {
     async extractText(_d, range) { return Array.from({ length: range.last - range.first + 1 }, () => LONG); },
-    async embed(args) { return { vectors: args.chunks.map(() => [0.1, 0.2, 0.3]), totalTokens: 10 } as never; },
+    async embed(args) { return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 10 } as never; },
     async writeVectors() {},
     async deleteVectors() {},
   };
@@ -400,7 +400,7 @@ describe("runMaterializeRange activity", () => {
       async extractText(_d, range) {
         return Array.from({ length: range.last - range.first + 1 }, (_, i) => (range.first + i === 2 ? `${LONG} SSN 123-45-6789` : LONG));
       },
-      async embed(args) { seen.push({ privacyMode: args.pipeline.privacyMode, profile: args.profile.model }); return { vectors: args.chunks.map(() => [0.1, 0.2, 0.3]), totalTokens: 1 } as never; },
+      async embed(args) { seen.push({ privacyMode: args.pipeline.privacyMode, profile: args.profile.model }); return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 1 } as never; },
     };
     const d = deps();
     d.materializer.ops = piiOps;

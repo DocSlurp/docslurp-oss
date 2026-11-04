@@ -332,13 +332,14 @@ describe("algolia compat", () => {
     expect(body.nbHits).toBe(100);
     expect(body.nbPages).toBe(10);
     expect(body.exhaustiveNbHits).toBe(false);
-    // A deeper page widens the window instead of reading past it.
+    // A deeper page widens the window instead of reading past it: 201 passages are needed, fetched as the next
+    // stable bucket (400) so later pages share the same cached search.
     await app.request("/compat/algolia/1/indexes/ws-1/query", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
       body: JSON.stringify({ query: "alpha", hitsPerPage: 50, page: 3 })
     });
-    expect(hybridSearchMock).toHaveBeenLastCalledWith("alpha", "demo-user", expect.objectContaining({ limit: 201 }));
+    expect(hybridSearchMock).toHaveBeenLastCalledWith("alpha", "demo-user", expect.objectContaining({ limit: 400 }));
   });
 
   it.each([null, { query: {} }, { facetQuery: 1 }, { maxFacetHits: -1 }])("rejects invalid facet requests before retrieval: %j", async (payload) => {
