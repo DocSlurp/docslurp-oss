@@ -76,7 +76,7 @@ export async function resolveAuth(flags: Record<string, string | boolean>, apiUr
       }
       server ??= await discover(apiUrl);
       const result = await refreshTokens(server, current.refreshToken);
-      if (!result.ok && result.error === "invalid_grant" && /just rotated/i.test(result.description)) {
+      if (!result.ok && result.error === "invalid_grant" && result.reason === "refresh_token_just_rotated") {
         // A refresh elsewhere (another machine sharing this store, or a keychain
         // without our lock) won the race; poll for its tokens for up to ~10 s.
         for (let waited = 0; waited < 10_000; waited += 500) {
