@@ -10,7 +10,7 @@ import { buildEstimateCard, ESTIMATE_RULES } from "./estimate-card.js";
 import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golden.js";
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
 import { speedBoostMultiplier } from "./billing.js";
-import { estimateProfileFor, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, type QuoteFile } from "./upload-quote.js";
+import { countedPagesForForecast, estimateProfileFor, intakePageCountSource, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, workerCountedFormat, type QuoteFile } from "./upload-quote.js";
 import { isUploadImageFile, isUploadTextFile, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
 const estimateDir = join(dirname(fileURLToPath(import.meta.url)), "../../estimate");
@@ -239,5 +239,41 @@ describe("quoteUpload with uncounted pages", () => {
     expect(range.measured).toBe(false);
     expect(range.low).toBeLessThan(range.central);
     expect(range.central).toBeLessThan(range.high);
+  });
+
+  it("quotes a Word, slide, sheet or EPUB file of unknown pages over bytes per page that hold for the format, not a scan's 16 KB", () => {
+    // 600 KB: a scan's 16 KB a page would cap the high end at 37 pages; a .docx holds a page in 1 to 7 KB.
+    const docx = quoteFilePageRange({ name: "contract.docx", size: 600_000 });
+    expect(docx).toEqual({ low: 4, central: 49, high: 586, measured: false });
+    expect(quoteFilePageRange({ name: "contract.pdf", size: 600_000 }).high).toBe(37);
+    // By MIME type or, when it is absent or generic, by extension; a declared PDF or a text type is something else.
+    expect(workerCountedFormat({ name: "x", type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })).toBe("office-excel");
+    expect(workerCountedFormat({ name: "deck.PPTX", type: "application/octet-stream" })).toBe("office-pptx");
+    expect(workerCountedFormat({ name: "book.epub" })).toBe("epub");
+    expect(workerCountedFormat({ name: "a.docx", type: "application/pdf" })).toBeNull();
+    expect(workerCountedFormat({ name: "n.rtf", type: "text/rtf" })).toBeNull();
+    expect(workerCountedFormat({ name: "n.rtf", type: "application/rtf" })).toBe("office-other");
+    // Counted pages are not a range whatever the format.
+    expect(quoteFilePageRange({ name: "contract.docx", size: 600_000, pages: 12 })).toEqual({ low: 12, central: 12, high: 12, measured: true });
+  });
+
+  it("says in the basis that the high end counts a page's typical vision output, and not for Fast", () => {
+    const quote = quoteUpload({ files: [{ name: "scan.pdf", size: 3_000_000 }], profile }).estimate;
+    expect(quote.basis).toContain(`high end assumes ${QUOTE_HIGH_RICH_PAGE_FACTOR} Rich pages for each page a vision model reads`);
+    expect(quote.basis).toContain("typical, not a ceiling");
+    const fast = quoteUpload({ files: [{ name: "scan.pdf", size: 3_000_000 }], profile: estimateProfileFor({ ...defaultPipelineFeatures, quality: "fast" }, { env: enforced }) }).estimate;
+    expect(fast.basis).not.toContain("Rich pages");
+  });
+
+  it("passes a forecast pages only when they were counted", () => {
+    expect(intakePageCountSource({ name: "a.pdf", type: "application/pdf" })).toBe("counted");
+    expect(intakePageCountSource({ name: "a.csv", type: "text/csv" })).toBe("counted");
+    expect(intakePageCountSource({ name: "photo.png", type: "image/png" })).toBe("counted");
+    expect(intakePageCountSource({ name: "a.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })).toBe("assumed");
+    expect(intakePageCountSource({ name: "n.rtf", type: "text/rtf" })).toBe("counted");
+    expect(countedPagesForForecast({ pageCount: 1, pageCountSource: "assumed" })).toBeUndefined();
+    expect(countedPagesForForecast({ pageCount: 1, billingPages: 300, pageCountSource: "assumed" })).toBe(300);
+    expect(countedPagesForForecast({ pageCount: 40, pageCountSource: "counted" })).toBe(40);
+    expect(countedPagesForForecast({ pageCount: 0, pageCountSource: "counted" })).toBeUndefined();
   });
 });

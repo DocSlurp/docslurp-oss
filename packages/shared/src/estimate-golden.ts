@@ -85,8 +85,8 @@ function mediaCases() {
 
 function quoteCases() {
   const rng = sequence(0x9a07e);
-  const names = ["report.pdf", "deck.pptx", "scan.png", "photo.JPG", "a.docx", "talk.mp3", "song.flac", "clip.mp4", "film.mov", "page.html", "data"];
-  const types = [undefined, undefined, "image/heic", "application/pdf", "audio/aac", "video/x-msvideo"];
+  const names = ["report.pdf", "deck.pptx", "scan.png", "photo.JPG", "a.docx", "talk.mp3", "song.flac", "clip.mp4", "film.mov", "page.html", "data", "book.epub", "sheet.XLSX", "memo.doc", "letter.odt", "note.rtf"];
+  const types = [undefined, undefined, "image/heic", "application/pdf", "audio/aac", "video/x-msvideo", "application/octet-stream", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/rtf"];
   const profileFor = (overrides: Partial<EstimateProfile> = {}): EstimateProfile => ({
     cardVersion: PRICE_CARD_VERSION,
     quality: rng.pick(PROFILE_IDS),
@@ -98,6 +98,11 @@ function quoteCases() {
     ...overrides,
   });
   const inputs: Array<{ files: QuoteFile[]; profile: EstimateProfile; speedBoost?: boolean }> = [
+    // Formats only the worker can count, uncounted: priced over their own bytes per page, by MIME type or by extension; a PDF-declared
+    // .docx and an RTF the API counts as text are not those formats.
+    { files: [{ name: "contract.docx", size: 1_200_000 }, { name: "deck.pptx", size: 8_000_000 }, { name: "model.xlsx", size: 600_000 }, { name: "book.epub", size: 3_000_000 }], profile: profileFor({ quality: "auto", billing: "enforced" }) },
+    { files: [{ name: "memo", size: 400_000, type: "application/msword" }, { name: "letter.odt", size: 90_000, type: "application/octet-stream" }, { name: "notes.rtf", size: 50_000, type: "application/rtf" }], profile: profileFor({ quality: "good", billing: "enforced" }) },
+    { files: [{ name: "contract.docx", size: 1_200_000, type: "application/pdf" }, { name: "notes.rtf", size: 50_000, type: "text/rtf" }, { name: "contract.docx", size: 1_200_000, pages: 80 }], profile: profileFor({ quality: "fast", billing: "enforced" }) },
     // Branches the random cases may miss: media only, billing disabled, speed boost with a lighter video option,
     // every file's mix known, untrusted and over-trusted mixes, an image with a page count.
     { files: [{ name: "talk.mp3", size: 9_000_000 }], profile: profileFor({ billing: "enforced" }) },

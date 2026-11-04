@@ -14,13 +14,14 @@ import {
   type PipelineProfileId,
   pipelineProfileIdSchema,
 } from "./billing.js";
-import { detectFileFormat, FILE_FORMATS, type NormalizedFormat } from "./file-formats.js";
+import { fileExtension, FILE_FORMATS } from "./file-formats.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   estimateUploadMedia,
   isUploadImageFile,
   isUploadTextFile,
   TEXT_PAGE_CHARS,
+  TEXT_PAGE_MIME_PREFIXES,
   uploadMediaKind,
   type UploadMediaEstimate,
   type UploadMediaFile,
@@ -72,22 +73,36 @@ export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCou
   epub: { min: 1_024, typical: 6 * 1024, max: 300 * 1024 },
 };
 
-/** The worker-counted format of a file (by MIME type, else extension), or null. */
-export function workerCountedFormat(file: { name: string; type?: string | null }): WorkerCountedFormat | null {
-  const format: NormalizedFormat = detectFileFormat({ filename: file.name, mimeType: file.type });
-  return (WORKER_COUNTED_FORMATS as readonly string[]).includes(format) ? (format as WorkerCountedFormat) : null;
-}
-
-/** The MIME types and extensions that make a file one of those formats (the card ships them for ports that cannot import the table). */
+/**
+ * The MIME types and extensions that make a file one of those formats (the card ships them for ports that cannot import the table).
+ * A MIME type the API counts as text (`text/rtf`) is left out: intake counts such a file from its text.
+ */
 export function workerCountedFormatTable(): Array<{ format: WorkerCountedFormat; mimeTypes: string[]; extensions: string[] }> {
-  return WORKER_COUNTED_FORMATS.map((format) => {
+  cachedFormatTable ??= WORKER_COUNTED_FORMATS.map((format) => {
     const specs = FILE_FORMATS.filter((spec) => spec.format === format);
     return {
       format,
-      mimeTypes: [...new Set(specs.flatMap((spec) => [spec.mimeType, ...(spec.aliases ?? [])]))],
+      mimeTypes: [...new Set(specs.flatMap((spec) => [spec.mimeType, ...(spec.aliases ?? [])]))]
+        .filter((type) => !TEXT_PAGE_MIME_PREFIXES.some((prefix) => type.startsWith(prefix))),
       extensions: [...new Set(specs.flatMap((spec) => spec.extensions.map((extension) => extension.slice(1))))],
     };
   });
+  return cachedFormatTable;
+}
+let cachedFormatTable: Array<{ format: WorkerCountedFormat; mimeTypes: string[]; extensions: string[] }> | null = null;
+
+/**
+ * The worker-counted format of a file: its declared MIME type when one of them claims it, else its extension when the type is absent
+ * or generic (the rule `isUploadImageFile` and `isUploadTextFile` follow, which the offline estimator's port repeats).
+ */
+export function workerCountedFormat(file: { name: string; type?: string | null }): WorkerCountedFormat | null {
+  const type = (file.type ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  const table = workerCountedFormatTable();
+  const byType = table.find((entry) => entry.mimeTypes.includes(type));
+  if (byType) return byType.format;
+  if (type !== "" && type !== "application/octet-stream") return null;
+  const extension = fileExtension(file.name).slice(1);
+  return table.find((entry) => entry.extensions.includes(extension))?.format ?? null;
 }
 
 /**
@@ -304,6 +319,14 @@ function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: Pag
   return { low, high, known, unmeasured, rangeLow, rangeHigh };
 }
 
+/**
+ * What the high end of a quote assumes of a page a vision model reads: a dense page's typical output, `factor` Rich pages. A
+ * longer output bills one more Rich page per 1,000 tokens past the first 1,000, so the high end is typical, not a ceiling.
+ */
+function richHighEnd(factor: number): string {
+  return `high end assumes ${factor} Rich pages for each page a vision model reads (a dense page's typical ${QUOTE_HIGH_RICH_OUTPUT_TOKENS.toLocaleString("en-US")}-token output; each further 1,000 output tokens bills one more, so it is typical, not a ceiling)`;
+}
+
 /** The bitrates durations are assumed at when a media file's length is not known, for the quote's basis text. */
 function assumedBitrates(): string {
   const kbps = (bytesPerMinute: number) => Math.round((bytesPerMinute * 8) / 60 / 1000);
@@ -373,6 +396,7 @@ export function quoteUpload(args: {
       ? { pagesRange: { low: Math.max(0, Math.round(mixes.rangeLow)), high: Math.max(0, Math.round(mixes.rangeHigh)) }, unmeasuredFiles: mixes.unmeasured }
       : {}),
     basis: `${profile.quality} profile, ${profile.stageCount} of ${profile.stageCount} stages; ${range}; `
+      + (profile.quality === "fast" ? "" : `${richHighEnd(QUOTE_HIGH_RICH_PAGE_FACTOR)}; `)
       + "modeled averages, not measured for this corpus",
   });
 
