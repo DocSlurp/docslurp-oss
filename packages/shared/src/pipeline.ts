@@ -19,6 +19,7 @@ import {
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
+import { piiPatternTypeSchema } from "./pii.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
 import {
   indexingModeSchema,
@@ -501,8 +502,9 @@ export const pipelineFeaturesSchema = z
     piiPolicy: z
       .object({
         enabled: z.boolean().default(false),
+        // Only detectors that exist: an unknown name is rejected here instead of being dropped by a scan.
         patterns: z
-          .array(z.string())
+          .array(piiPatternTypeSchema)
           .default([
             "ssn",
             "credit-card",
@@ -510,6 +512,9 @@ export const pipelineFeaturesSchema = z
             "anthropic-api-key",
             "github-token",
             "generic-api-key",
+            "aws-access-key",
+            "stripe-api-key",
+            "private-key",
           ]),
         action: z
           .enum(["flag_for_review", "redact_artifacts", "block_indexing"])
@@ -695,6 +700,9 @@ export const defaultPipelineFeatures: PipelineFeatures = {
       "anthropic-api-key",
       "github-token",
       "generic-api-key",
+      "aws-access-key",
+      "stripe-api-key",
+      "private-key",
     ],
     action: "flag_for_review",
     allowlistPatterns: [],

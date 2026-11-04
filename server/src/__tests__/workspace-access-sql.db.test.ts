@@ -115,7 +115,7 @@ describe("every reader of the rule agrees with the SQL function", () => {
   });
 
   it("realtime delivery filters an activity payload to workspaces the user may see", async () => {
-    const delivery = (user: string, workspaceIds: string[]) => realtime.realtimeBackend.authorizeDelivery(
+    const delivery = (user: string, workspaceIds: string[]) => realtime.realtimeBackend.authorizeDelivery!(
       user, { kind: "activity", orgId: "team" }, { runs: workspaceIds.map((workspaceId) => ({ workspaceId })) });
     expect(await delivery("member", ["wsDefault", "wsMemberOwned"])).toBe(true);
     // One workspace the member may not see poisons the whole payload.
