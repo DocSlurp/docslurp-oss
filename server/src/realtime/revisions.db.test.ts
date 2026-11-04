@@ -14,7 +14,7 @@ async function revision() {
 describe("commit-visible realtime coverage", () => {
   it("compacts committed counter rows without changing the aggregate revision", async () => {
     const before=await revision();
-    for(let i=0;i<300;i++) await db.exec("select realtime_record_change('realtime-org')");
+    for(let i=0;i<300;i++) await db.exec("update workspaces set name=name where id='realtime-workspace'");
     expect(await revision()).toBe(before+300);
     const {rows:[row]}=await db.query<{count:number}>("select count(*)::int as count from realtime_revision_counters where org_id='realtime-org'");
     expect(row!.count).toBeLessThanOrEqual(2);

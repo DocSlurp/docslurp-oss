@@ -155,11 +155,13 @@ retirement code's Run-lock policy. Its three-second timeout is unchanged.
 Migration 0120 replaces that write hotspot with transaction-owned counters and
 nonblocking compaction, preserving the aggregate revision reader contract and
 commit-only notifications. Ingestion workers are explicitly denied all chat
-identity/output/dependency tables and the aggregate API view; only the counter
-storage needed by invoker triggers is granted. Tests exercise actual run,
+identity/output/dependency tables and the aggregate API view. The first repair
+granted counter DML to ingestion; the council rejected that permission below.
+Tests exercise actual run,
 document and materialization writes as the worker, negative permissions, repeated
 write coalescing, compaction, and concurrent out-of-order commit/rollback. No
-SECURITY DEFINER function or relaxed CI skip/timeout/budget was introduced.
+relaxed CI skip/timeout/budget was introduced. The initial invoker-only design
+is superseded by the constrained definer repair below.
 This migration/permission delta requires the coordinator's security review before
 merge. The reviewed native recovery implementation is unchanged.
 
@@ -197,10 +199,65 @@ unchanged.
 
 For rolling compatibility, prior-main application queries do not use this new
 relation. Its ingestion writes still invoke the database trigger functions, whose
-bodies are replaced by 0120; the migrated worker grants cover their counter
-writes. Candidate readers retain the `realtime_revisions` name and columns through
+bodies are replaced by 0120 and their constrained owner supplies counter access.
+Candidate readers retain the `realtime_revisions` name and columns through
 the aggregate view. The migration runner applies the migration through Drizzle's
 PostgreSQL transaction, so readers do not observe a committed rename without its
 replacement view/functions. This establishes compatibility with the previous main
 schema, not support for deploying an arbitrary intermediate commit of this PR.
 No production deployment was inspected or performed for this annotation.
+
+
+### Council follow-up: publication capability and maintenance
+
+The adversarial review correctly found that numeric counter DML still allowed a
+worker to forge/reset another tenant's revision or overflow a bigint. Removed
+that grant for both runtime roles. A dedicated non-login, non-inheriting publisher
+owns only the publication functions, has counter DML and three narrow identity
+lookup grants, and no runtime role may assume it. Public trigger entrypoints use
+SECURITY DEFINER with exact source validation; fixed search paths and qualified
+references prevent temp/schema shadowing. PUBLIC and runtime EXECUTE are revoked
+on trigger and internal arbitrary-org helpers. Only the API may invoke the
+bounded compactor, which derives sums from already-committed counters rather than
+accepting a revision. Provisioning requirements are explicit in database-roles.md.
+
+The reliability review found the view/grant cutover gap and a finite-burst
+compaction backlog. Migration 0120 now installs default optional runtime grants
+atomically with the schema change; reconciliation cannot re-expose internals.
+Already-connected restricted PostgreSQL sessions are tested immediately after
+COMMIT without reconciliation. Independent bounded maintenance drains counters
+after a long transaction releases its lock without another write. It retains
+try-lock/SKIP LOCKED publication independence and advances through organization
+pages. This adds one maintenance statement per process per five seconds, not
+per observer or event; capacity accounting must include it.
+
+This is a substantive security delta from a00e087d and needs fresh independent
+review. Native recovery/execution behavior remains unchanged. No activation,
+merge, paid provider calls or deployment was performed.
+
+Validation: all 35 registered PostgreSQL/Redis files passed with zero skips on
+the final indexed migration, including the original three-second supersession
+regression and all eight native process recovery tests. The focused final
+publication suite passed five real PostgreSQL tests: session-cutover grants,
+actual worker denial, long-transaction burst drainage with no further writes,
+35-organization paging, and recovery after an idle connection is terminated.
+The 300-write fixture verifies the reader's execution plan returns to one
+checkpoint row after asynchronous drainage; its accelerated 20ms test timer does
+not claim production five-second cadence latency. Role/revision tests passed
+23 cases, and the full server suite passed 3,677 tests (its gated tests run in
+the separate real-service harness). Server TypeScript and all nine migration
+safety/registration guard tests passed. The new gated file is registered in
+`scripts/run-database-tests.mjs`.
+
+One initial full database run overlapped the full server suite and failed the
+native pool-outage test's child readiness deadline before fault injection; the
+other 34 files passed. The full database rerun without that competing server
+workload passed all 35 files without changing readiness/shutdown timeouts or
+assertions. The pool-outage shutdown/release measurements on that rerun were
+996ms/1,062ms. This records the initial failure rather than erasing it with the
+rerun; production capacity and final remote CI remain coordinator gates.
+
+Before publishing, merged fresh main `bcec22ef2717afab35ef9cc4ada6fa254b82d917`
+(documentation/comments only). It still has no realtime revision schema or
+server/worker/package references; the N-1 rename-safety conclusion is unchanged.
+The migration and registration gates passed again after the merge.

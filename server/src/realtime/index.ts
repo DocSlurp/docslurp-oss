@@ -11,6 +11,7 @@ export { attachRealtimeServer } from "./node.js";
 export type { RealtimeHostOptions, RealtimeSession } from "./node.js";
 export type { RealtimeOperationProvider, RealtimeOperationObserver, RealtimeOperationSubscription } from "../services/realtime-operation.js";
 export { realtimeMetrics } from "./broker.js";
+export { revisionMaintenanceMetrics } from "./revision-maintenance.js";
 
 /** First-party standalone and mounted-host entrypoint. The caller must pass the
  * actual Node server; mounting Hono's fetch handler alone cannot handle Upgrade.

@@ -268,7 +268,7 @@ delivery still authorizes immediately. First-party session revalidation uses one
 live SQL policy query after the initial BetterAuth Upgrade. No settled grants are
 cached, so membership changes require no cache-invalidation guess.
 
-Runtime requirements: migrations through 0119 and an explicitly configured durable
+Runtime requirements: migrations through 0120 and an explicitly configured durable
 shared Redis connection (MASTRA_REDIS_URL, falling back to API_RATE_LIMIT_REDIS_URL).
 REST-only rate-limit Redis credentials are not sufficient. No infrastructure,
 provider migration or flag activation is performed by these changes. The chosen
@@ -290,3 +290,19 @@ transactions commit out of order. Normal sequential publication retains only the
 checkpoint and current transaction counter. Long transactions can defer compaction;
 monitor outstanding counter rows and include them in capacity testing rather than
 claiming a fixed row bound under arbitrary transaction duration/concurrency.
+
+Publication capabilities are confined to validated triggers owned by the isolated
+non-login publisher role; runtime roles cannot directly mutate counters or invoke
+arbitrary-org publication. See `self-host/database-roles.md` for provisioning.
+The API startup shared by standalone and mounted hosts starts an independent
+five-second compaction task, even without subscribers or new tenant writes. Each
+pass visits at most 16 organizations using a keyset cursor over a partial index
+that excludes settled checkpoints, and folds at most 256
+rows per organization. A long publisher transaction makes its org's try-lock
+fail; later passes retry after release. A finite backlog drains without another
+tenant write; arbitrary sustained ingress above maintenance throughput is not a
+fixed storage bound. The interval adds one SQL statement per API process per five
+seconds, with at most one dedicated connection (closed after one idle second),
+a 500ms acquisition deadline, 1s statement timeout and 1.5s client query timeout.
+It never runs per observer, per read or per event. Maintenance exports query,
+folded-row and failure counters; include this additional load in capacity gates.

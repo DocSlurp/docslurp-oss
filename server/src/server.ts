@@ -7,6 +7,7 @@ import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
+import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -255,11 +256,13 @@ function shouldRunStartupMigrations(): boolean {
 }
 
 let startupPromise: Promise<void> | null = null;
+let stopRevisionMaintenance: (() => Promise<void>) | undefined;
 // LISTEN subscriptions retry until their dependency returns (lib/start-with-retry.ts).
 let listenerStarts: StartWithRetry[] = [];
 
 /** Stops this module instance's timers and LISTEN subscription. */
 async function stopApiBackgroundTasks(): Promise<void> {
+  await stopRevisionMaintenance?.();
   for (const pending of listenerStarts) pending.stop();
   listenerStarts = [];
   stopMaintenanceSweeper();
@@ -295,6 +298,7 @@ export function ensureApiStartup(): Promise<void> {
       // After a dev module reload, stop the previous instance's tasks first:
       // they would keep running (and querying) alongside the new ones.
       await replaceProcessTask("api-background-tasks", stopApiBackgroundTasks)?.();
+      stopRevisionMaintenance = startRevisionMaintenance(env.databaseUrl);
       startMaintenanceSweeper();
       startDirectUploadReconciler();
       // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.

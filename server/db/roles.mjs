@@ -5,8 +5,9 @@
 //   worker  (docslurp_worker)   DML only on the tables below; denied auth, credential and billing tables
 //   backup  (docslurp_backup)   pg_read_all_data (granted by the superuser, see ops scripts)
 //
-// Roles are created outside migrations (they are cluster-wide and need
-// CREATEROLE). `reconcileRoleGrants` runs as the owner after every migration
+// Runtime login roles are created outside migrations (cluster-wide CREATEROLE).
+// Migration 0120 separately provisions its isolated non-login publisher, or
+// requires an administrator to provision it for a restricted migration owner. `reconcileRoleGrants` runs as the owner after every migration
 // (migrate.mjs) and grants only to the roles that exist, so a database without
 // them behaves exactly as before. It is idempotent: the worker's table grants
 // are revoked and re-granted from WORKER_TABLES each time, and the app's come
@@ -28,7 +29,7 @@ const DML = ["select", "insert", "update", "delete"];
 /**
  * Relations the worker uses, with the privileges it needs and where. Column
  * lists restrict SELECT to the named columns. Rows written by triggers count:
- * trigger functions here are SECURITY INVOKER, so they run with the worker's
+ * most trigger functions are SECURITY INVOKER, so they run with the worker's
  * privileges (foreign-key cascades run as the table owner and need nothing).
  */
 export const WORKER_TABLES = Object.freeze({
@@ -74,7 +75,6 @@ export const WORKER_TABLES = Object.freeze({
   pii_detections: { privileges: DML, evidence: "worker/src/stages/pii-detect.ts" },
   privacy_audit_log: { privileges: ["insert"], evidence: "worker/src/lib/privacy-guard.ts" },
   quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "worker/src/sandbox/source-quarantine.ts (find; insert ... on conflict do update returning; noteRefusal update); operators delete rows" },
-  realtime_revision_counters: { privileges: DML, evidence: "SECURITY INVOKER realtime triggers: insert per-transaction counter, select/update/delete committed counters during nonblocking compaction; no chat payloads" },
   remote_capacity_leases: { privileges: DML, evidence: "worker/src/media/capacity, journal.ts" },
   remote_capacity_watchdog: { privileges: DML, evidence: "worker/src/media/capacity/store.ts" },
   remote_media_jobs: { privileges: DML, evidence: "worker/src/media/journal.ts, reconcile.ts" },
@@ -126,6 +126,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   chat_operations: "first-party chat identity/session/budget metadata (API/native chat executor only)",
   chat_operation_events: "retained chat output (API/native chat executor only)",
   chat_run_dependencies: "authorized chat task discovery links (API only); ingestion publishes through document_page_states",
+  realtime_revision_counters: "private numeric publication storage; only validated triggers may write",
   realtime_revisions: "aggregate dashboard revision view (API only); ingestion triggers use realtime_revision_counters",
   extracts: "extract retention, charges and deletion (API maintenance sweep only); the worker reads runs' storage_prefix",
   chat_turns: "chat (API only)",
@@ -245,6 +246,18 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
         `grant select on drizzle.__drizzle_migrations to ${worker}`,
       );
     }
+  }
+  if (relations.includes("realtime_revision_counters")) {
+    // Schema-wide application grants must never expose publication internals.
+    const functions = "public.realtime_changed(),public.realtime_search_session_changed(),public.realtime_materialization_changed(),public.realtime_record_change(text),public.realtime_fold_committed(text),public.realtime_compact_revisions(text)";
+    statements.push(`revoke all on function ${functions} from public`,
+      "revoke all on public.realtime_revision_counters,public.realtime_revisions from public");
+    for (const role of [roles.app, roles.worker].filter(has)) {
+      statements.push(`revoke all on public.realtime_revision_counters,public.realtime_revisions from ${quoteIdent(role)}`,
+        `revoke all on function ${functions} from ${quoteIdent(role)}`);
+    }
+    if (has(roles.app)) statements.push(`grant select on public.realtime_revisions to ${quoteIdent(roles.app)}`,
+      `grant execute on function public.realtime_compact_revisions(text) to ${quoteIdent(roles.app)}`);
   }
   if (nativeSchema) {
     // Native chat execution is an application service, never the ingestion role.
