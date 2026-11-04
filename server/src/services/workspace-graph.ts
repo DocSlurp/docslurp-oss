@@ -22,6 +22,7 @@ import {
   type WorkspaceGraphStatus,
   type WorkspaceRecord,
   PUBLIC_ERROR_MESSAGES,
+  normalizeHostedModelRef,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -77,7 +78,7 @@ function graphEnabled(pipeline: PipelineFeatures): boolean {
 }
 
 function graphModel(pipeline: PipelineFeatures): string {
-  return resolvePipelineTextModel(pipeline, "graph-extraction", process.env.DOCSLURP_TEXT_MODEL?.trim() || undefined);
+  return resolvePipelineTextModel(pipeline, "graph-extraction", (process.env.DOCSLURP_TEXT_MODEL?.trim() ? normalizeHostedModelRef(process.env.DOCSLURP_TEXT_MODEL) : undefined));
 }
 
 function workerConcurrency(): number {

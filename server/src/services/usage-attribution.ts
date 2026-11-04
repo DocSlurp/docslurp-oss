@@ -628,3 +628,84 @@ export async function extractUsageTotals(orgId: string, since: UsageWindow, clie
     pagesPerDollar: cost > 0 ? pages / (cost / 100) : null,
   };
 }
+
+/** One chat turn, finished run or search session whose provider cost exceeded the credits it charged. */
+export interface ProviderCostLossItem {
+  kind: "chat-turn" | "run" | "search-session";
+  /** The chat turn id, run id or search session id. */
+  key: string;
+  orgId: string;
+  /** Credits the item charged (1 credit = 1 cent), after any refund. */
+  creditCents: number;
+  /** What providers charged: the reported charge, or the list-price estimate where no receipt arrived. */
+  providerCostCents: number;
+  /** The part of providerCostCents that is an estimate rather than a provider receipt. */
+  estimatedCostCents: number;
+  lossCents: number;
+  /** Credits were refunded (an undelivered chat turn), so the loss is expected. */
+  refunded: boolean;
+  /** Model with the largest provider cost in the item. */
+  topModel: string | null;
+  lastEventAt: Date;
+}
+
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled", "pii_blocked"];
+
+/**
+ * Items whose last Usage Event falls in (since, until] and whose provider cost
+ * (`metadata.providerCostCents`, split like every other column) exceeds the
+ * credits they charged. Runs count only once terminal. Events up to
+ * `lookbackMs` before `since` are included so an item's earlier calls count;
+ * items running longer than that are judged on their recent part only.
+ * Ordered by loss, largest first.
+ */
+export async function providerCostLossItems(
+  args: { since: Date; until: Date; lookbackMs?: number; limit?: number },
+  client: SqlClient = sql,
+): Promise<ProviderCostLossItem[]> {
+  const from = new Date(args.since.getTime() - (args.lookbackMs ?? 6 * 60 * 60_000));
+  const rows = await client<{
+    kind: ProviderCostLossItem["kind"]; key: string; org_id: string; credit_cents: number; provider_cost_cents: number;
+    estimated_cost_cents: number; refunded: boolean; top_model: string | null; last_event_at: Date;
+  }[]>`
+    with events as (
+      select au.*,
+        case
+          when au.metadata ->> 'chatTurnId' is not null then 'chat-turn'
+          when au.source_run_id is not null then 'run'
+          when au.metadata ->> 'sessionId' is not null then 'search-session'
+        end as item_kind,
+        coalesce(au.metadata ->> 'chatTurnId', au.source_run_id, au.metadata ->> 'sessionId') as item_key,
+        coalesce((au.metadata ->> 'providerCostCents')::double precision, 0) * au.share as provider_cost
+      from ${attributedUsage(from, client)} au
+      where au.org_id is not null
+    ),
+    items as (
+      select item_kind as kind, item_key as key, org_id,
+        coalesce(sum(cost_cents), 0)::double precision as credit_cents,
+        coalesce(sum(provider_cost), 0)::double precision as provider_cost_cents,
+        coalesce(sum(provider_cost) filter (where metadata ->> 'costSource' is distinct from 'provider'), 0)::double precision as estimated_cost_cents,
+        bool_or(metadata ? 'chatTurnRefund') as refunded,
+        (array_agg(model order by provider_cost desc))[1] as top_model,
+        max(created_at) as last_event_at
+      from events
+      where item_kind is not null
+      group by item_kind, item_key, org_id
+    )
+    select i.* from items i
+    left join workspace_runs wr on i.kind = 'run' and wr.id = i.key
+    where i.last_event_at > ${args.since} and i.last_event_at <= ${args.until}
+      and i.provider_cost_cents > i.credit_cents + 0.000001
+      and (i.kind <> 'run' or wr.id is null or wr.status = any(${TERMINAL_RUN_STATUSES}::text[]))
+    order by i.provider_cost_cents - i.credit_cents desc
+    limit ${args.limit ?? 500}
+  `;
+  return rows.map((row) => {
+    const creditCents = Number(row.credit_cents), providerCostCents = Number(row.provider_cost_cents);
+    return {
+      kind: row.kind, key: row.key, orgId: row.org_id, creditCents, providerCostCents,
+      estimatedCostCents: Number(row.estimated_cost_cents), lossCents: providerCostCents - creditCents,
+      refunded: Boolean(row.refunded), topModel: row.top_model, lastEventAt: new Date(row.last_event_at),
+    };
+  });
+}

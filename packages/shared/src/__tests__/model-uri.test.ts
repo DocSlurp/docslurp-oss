@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeHostedModelRef, openRouterModelIdFromUri, textGenerationConfigSchema, toModelUri } from "../index.js";
+import { normalizeHostedModelRef, openRouterModelIdFromUri, parseProviderModelUri, textGenerationConfigSchema, toModelUri } from "../index.js";
 
 describe("llm:// model references", () => {
   it("reads the OpenRouter id from llm://openrouter/<id>, keeping variant suffixes", () => {
@@ -37,5 +37,10 @@ describe("llm:// model references", () => {
     for (const model of ["llm://perplexity/pplx-embed-v1-0.6b", "llm://openrouter/", "llm://openrouter/a/b?x=1", "llm://private/", "llm://private/gpu1"]) {
       expect(textGenerationConfigSchema.safeParse({ model }).success, model).toBe(false);
     }
+  });
+
+  it("splits provider model URIs", () => {
+    expect(parseProviderModelUri("llm://deepinfra/openai/whisper-large-v3-turbo")).toEqual({ provider: "deepinfra", model: "openai/whisper-large-v3-turbo" });
+    for (const value of ["openai/whisper", "llm://deepinfra/", "llm://deepinfra//x", "llm://deepinfra/a?b", null]) expect(parseProviderModelUri(value), String(value)).toBeNull();
   });
 });

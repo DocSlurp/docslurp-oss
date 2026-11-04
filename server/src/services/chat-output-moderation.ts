@@ -1,4 +1,4 @@
-import { createOpenRouterRoutingFetch, type PrivacyMode, type WorkspaceChatResponse } from "@docslurp/shared";
+import { createOpenRouterRoutingFetch, liveModelPrice, readProviderCharge, type PrivacyMode, type WorkspaceChatResponse } from "@docslurp/shared";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
@@ -73,7 +73,7 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
       if (!response.ok) throw new Error(`moderation provider returned ${response.status}`);
-      const body = await response.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number } };
+      const body = await response.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number; is_byok?: boolean } };
       const verdict = (body.choices?.[0]?.message?.content ?? "").trim().toLowerCase();
       const valid = /^(?:safe|unsafe(?:\s+s(?:[1-9]|1[0-4])(?:\s*,\s*s(?:[1-9]|1[0-4]))*)?)$/.test(verdict);
       const flagged = verdict !== "safe";
@@ -84,12 +84,22 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
         flagged,
         ...(valid ? {} : { unavailable: true }),
         categories,
-        usage: {
-          model: LLAMA_GUARD_MODEL, inputTokens, outputTokens,
-          costCents: typeof body.usage?.cost === "number" ? body.usage.cost * 100 : (inputTokens * LLAMA_GUARD_PRICE.input + outputTokens * LLAMA_GUARD_PRICE.output) / 10_000,
-        },
+        usage: moderationUsage(body.usage, inputTokens, outputTokens),
       };
     },
+  };
+}
+
+/** The provider charge (BYOK-aware) when reported; otherwise the live list price, then LLAMA_GUARD_PRICE. */
+function moderationUsage(raw: unknown, inputTokens: number, outputTokens: number): NonNullable<ModerationVerdict["usage"]> {
+  const charge = readProviderCharge(raw);
+  if (charge.costCents !== undefined) return { model: LLAMA_GUARD_MODEL, inputTokens, outputTokens, costCents: charge.costCents, metadata: charge.metadata };
+  const live = liveModelPrice(LLAMA_GUARD_MODEL, { promptTokens: inputTokens });
+  const usdPerToken = live ?? { input: LLAMA_GUARD_PRICE.input / 1_000_000, output: LLAMA_GUARD_PRICE.output / 1_000_000 };
+  return {
+    model: LLAMA_GUARD_MODEL, inputTokens, outputTokens,
+    costCents: (inputTokens * usdPerToken.input + outputTokens * usdPerToken.output) * 100,
+    metadata: { costSource: "estimate", accountingStatus: "receipt-missing", pricingSource: live ? "openrouter-live" : "model-prices" },
   };
 }
 
@@ -155,7 +165,7 @@ export async function moderateChatAnswer(response: WorkspaceChatResponse, args: 
       scope: { orgId: args.orgId ?? null, workspaceId: args.workspaceId, sessionId: response.sessionId },
       usage: { provider: "openrouter", model: verdict.usage.model, metric: "chat-output-moderation",
         inputTokens: verdict.usage.inputTokens, outputTokens: verdict.usage.outputTokens, costCents: verdict.usage.costCents,
-        metadata: { moderator: moderator.name, flagged: verdict.flagged } },
+        metadata: { ...verdict.usage.metadata, moderator: moderator.name, flagged: verdict.flagged } },
     });
   }
   if (verdict.unavailable) return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };

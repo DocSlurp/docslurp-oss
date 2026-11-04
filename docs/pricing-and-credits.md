@@ -11,7 +11,8 @@ module behind each rule that code comments cite. 1 credit = 1 US cent.
 | Flat Extract tiers and private dedicated capacity | `packages/shared/src/extract-pricing.ts` |
 | What the infrastructure costs (`INFRA_COST_OBSERVATIONS`), the margin policy every list price must meet (`RESOURCE_CLASS_POLICY`), the slot cost basis (`WORKER_SLOT`) | `packages/shared/src/infra-costs.ts` |
 | Model list prices: evaluation and router registry | `scripts/lib/model-prices.json`, with the retained official responses in `docs/evals/model-prices-<date>.json` |
-| Chat model prices used when a usage receipt is missing | `packages/shared/src/chat-model-prices.ts` (a test keeps it equal to `model-prices.json`) |
+| Live OpenRouter list prices for usage without a receipt | `packages/shared/src/live-model-prices.ts` (see [Provider cost](#provider-cost)) |
+| Hardcoded fallback prices used when no live price is loaded | `packages/shared/src/chat-model-prices.ts` (a test keeps it equal to `model-prices.json`), `defaultAiUsagePricingCatalog` in `packages/shared/src/usage.ts` |
 | Vision model token prices and per-page estimates | `visionModelCatalog` in `packages/shared/src/embedding.ts` |
 | Spend attribution for budgets, limits and billing | `server/src/services/usage-attribution.ts` |
 
@@ -22,6 +23,47 @@ default, preset or the page router can select one.
 Rate-card and plan changes are owner decisions. Before you change `CREDIT_RATE_CARD`, `SERVICE_PLANS`,
 `INFRA_COST_OBSERVATIONS` or worker sizing, run `pnpm pricing:validate` in DocSlurp/app and compare the result with
 the latest load test. `pnpm pricing:watch` there tracks model prices and where each model is hosted.
+
+## Provider cost
+
+Credits are flat (the price card); what providers charge us is recorded separately on each AI Usage Event as
+`metadata.providerCostCents`, with `costSource` (`provider` or `estimate`) and, for estimates, `pricingSource`.
+Customers' charges never depend on it.
+
+Each call records, in order of preference:
+
+1. **The provider's reported charge.** OpenRouter's `usage.cost` from the response (chat, agent steps, vision,
+   embeddings, moderation; summed per request for batched embeddings; BYOK adds the upstream cost), else the
+   `/api/v1/generation` receipt, looked up again once after 1.5 s when it is not ready. Media transcription and
+   media vision record the provider's figure when it is within 25% of the rate estimate; a disputed figure is kept as
+   evidence and the estimate is recorded.
+2. **The live list price** (`pricingSource: "openrouter-live"`): OpenRouter's public chat and embeddings catalogs,
+   loaded at startup and hourly by the server and worker, with listed long-prompt and time-of-day overrides
+   applied. A failed refresh keeps the last snapshot, retries after 5 minutes, and a snapshot older than 7 days is
+   ignored. It is off without `OPENROUTER_API_KEY` or with `LIVE_MODEL_PRICES=off`.
+3. **The hardcoded fallback** (`model-prices`, `catalog`): the tables above, then `COST_PER_1K_*`
+   (`configured-fallback`).
+
+Live prices only price usage. Prohibited-model checks and the eval-model allowlist keep using the verified
+hardcoded prices, so a live listing never admits a model.
+
+### Loss alerts
+
+The alert leader compares, every 5 minutes, what each chat turn, finished run and search session charged in credits
+with its provider cost (receipts, or list-price estimates where no receipt arrived):
+
+- Each item whose provider cost exceeds its credits logs `[billing] provider_cost_loss` and emits the
+  `docslurp.billing.provider_cost_loss` telemetry event once (`info` for refunded turns, `warn` otherwise).
+- An organization whose losses over the last hour, refunded turns excluded, reach `ALERT_PROVIDER_LOSS_CENTS`
+  (default 100, so $1) fires the `provider-cost-loss:<orgId>` alert through the normal tracker and Telegram/webhook
+  delivery, with its loss, provider cost, credits, estimated share and top models. It resolves when the hour's
+  losses fall below the threshold.
+
+It runs only where billing is enforced. `ALERT_PROVIDER_LOSS_CENTS=0` turns it off;
+`ALERT_PROVIDER_LOSS_INTERVAL_MS` (default 300000) and `ALERT_PROVIDER_LOSS_SETTLE_MS` (default 120000, how long an
+item's last event must age before it is judged) tune it. Item dedupe is per process: a new leader can repeat an item
+from the last hour. Runs longer than six hours are judged on their recent usage. The query is
+`providerCostLossItems` in `server/src/services/usage-attribution.ts`.
 
 ## Processing quality
 
