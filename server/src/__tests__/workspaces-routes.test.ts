@@ -120,7 +120,7 @@ vi.mock("../lib/request-context.js", async () => {
 
 const { workspacesRoutes } = await import("../routes/workspaces.js");
 
-function buildApp(apiKey?: { orgId: string | null; scopes: string[]; keyType?: string; keyId?: string }) {
+function buildApp(apiKey?: { orgId: string | null; scopes: string[]; keyType?: string; keyId?: string; workspaceIds?: string[]; oauth?: object }) {
   const app = new Hono();
   app.use("/workspaces/*", async (c, next) => {
     const user = { id: "demo-user", email: "demo@example.com", name: "Demo User" };
@@ -1347,6 +1347,60 @@ describe("workspace rename via API keys", () => {
   });
 });
 
+
+describe("workspace search settings via API keys", () => {
+  const settingsPath = "/workspaces/ws-1/search-settings";
+  const send = (app: Hono, path = settingsPath) => app.request(path, {
+    method: path.endsWith("/estimate") ? "POST" : "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat: { answerStyle: "concise" } }),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Legal", slug: "legal" });
+    updateWorkspaceSearchSettingsForUserMock.mockResolvedValue({ workspaceId: "ws-1", retrievalDefaults: {}, chat: { answerStyle: "concise" } });
+  });
+
+  it("updates with a workspaces:manage server key and attributes the audit entry to the key", async () => {
+    const response = await send(buildApp({ orgId: "org-1", scopes: ["workspaces:manage"], keyId: "key-1" }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ chat: { answerStyle: "concise" } });
+    expect(updateWorkspaceSearchSettingsForUserMock).toHaveBeenCalledWith({ workspaceId: "ws-1", userId: "demo-user", input: { chat: { answerStyle: "concise" } } });
+    expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({ action: "workspace.search-settings.updated", apiKeyId: "key-1" }));
+  });
+
+  it.each([
+    ["search-only server key", { orgId: "org-1", scopes: ["search", "chat", "ingest"] }],
+    ["browser key with workspaces:manage", { orgId: "org-1", scopes: ["workspaces:manage"], keyType: "client", workspaceIds: ["ws-1"] }],
+    ["OAuth token, even if it held workspaces:manage", { orgId: "org-1", scopes: ["workspaces:manage"], oauth: { audience: "api", grantId: "g", clientId: "docslurp-cli", clientName: "CLI", resource: "x", grantedScopes: [], expiresAt: "2099-01-01T00:00:00Z" } }],
+  ])("refuses a %s with 403 and writes nothing", async (_name, key) => {
+    for (const path of [settingsPath, `${settingsPath}/estimate`]) {
+      const response = await send(buildApp(key), path);
+      expect(response.status, path).toBe(403);
+    }
+    expect(getWorkspaceMock).not.toHaveBeenCalled();
+    expect(updateWorkspaceSearchSettingsForUserMock).not.toHaveBeenCalled();
+    expect(appendAuditLogMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["another organization's key", { orgId: "org-2", scopes: ["workspaces:manage"] }],
+    ["a key restricted to other workspaces", { orgId: "org-1", scopes: ["workspaces:manage"], workspaceIds: ["ws-2"] }],
+  ])("answers 404 for %s and writes nothing", async (_name, key) => {
+    for (const path of [settingsPath, `${settingsPath}/estimate`]) {
+      expect((await send(buildApp(key), path)).status, path).toBe(404);
+    }
+    expect(updateWorkspaceSearchSettingsForUserMock).not.toHaveBeenCalled();
+    expect(appendAuditLogMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 404 when the key owner cannot see the workspace", async () => {
+    getWorkspaceMock.mockResolvedValue(null);
+    expect((await send(buildApp({ orgId: "org-1", scopes: ["workspaces:manage"] }))).status).toBe(404);
+    expect(updateWorkspaceSearchSettingsForUserMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("workspace tags API", () => {
   beforeEach(() => { vi.clearAllMocks(); });

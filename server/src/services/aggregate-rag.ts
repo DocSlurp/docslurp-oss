@@ -24,6 +24,7 @@ import {
   buildFallbackAnswer,
   buildNativeDocumentInputs,
   buildWorkspaceChatEvidenceSpans,
+  isWorkspaceChatEnabled,
 } from "./workspace-chat.js";
 import { getWorkspace, listWorkspaces } from "./workspaces.js";
 
@@ -357,21 +358,34 @@ export async function aggregateWorkspaceRagSearch(args: {
       : []),
   ];
 
-  if (!request.generateAnswer) {
-    return {
-      query,
-      answer: null,
-      citations,
-      evidenceSpans: [],
-      workspaces: workspaceResults,
-      warnings: baseWarnings,
-      partial: baseWarnings.length > 0,
-      usage: {
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-      },
-    };
+  const citationsOnly = (warnings: string[]): AggregateRagSearchResponse => ({
+    query,
+    answer: null,
+    citations,
+    evidenceSpans: [],
+    workspaces: workspaceResults,
+    warnings,
+    partial: baseWarnings.length > 0,
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    },
+  });
+
+  if (!request.generateAnswer) return citationsOnly(baseWarnings);
+
+  // A workspace owner who turned chat off has opted out of generated answers
+  // over its documents: answer with citations only and call no model.
+  const chatEnabled = await Promise.all(
+    workspaces.map((workspace) => isWorkspaceChatEnabled(workspace.id, args.userId)),
+  );
+  const chatDisabled = workspaces.filter((_, index) => !chatEnabled[index]);
+  if (chatDisabled.length > 0) {
+    return citationsOnly([
+      ...baseWarnings,
+      `No answer was generated: chat is turned off in ${chatDisabled.map((workspace) => workspace.name).join(", ")}.`,
+    ]);
   }
 
   // The answer calls a model: every answered workspace's org must be able to spend.

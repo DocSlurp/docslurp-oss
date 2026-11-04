@@ -535,6 +535,12 @@ export const searchRoutes = new Hono()
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
+    // A generated answer is a model call billed like chat, so it needs the
+    // chat scope as well (the same scope /v1/chat checks). Refuse before any
+    // workspace lookup or retrieval runs.
+    if (parsed.data.generateAnswer && actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["chat"])) {
+      return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+    }
 
     try {
       // Each listed workspace may be a UUID, slug, former slug, name or

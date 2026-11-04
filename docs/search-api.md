@@ -52,6 +52,12 @@ A replacement version (reprocess or re-upload) never serves early: the previous 
 
 Chunks reach keyword search once the embed stage has written every chunk row of a document and stamped it keyword-searchable. By default the worker does this after the embedding calls finish; set the worker variable `DOCSLURP_EARLY_LEXICAL_CHUNKS=on` (exact value, default off) to write the chunks before embedding starts, so a document is keyword-searchable for the duration of embedding. Serving is governed separately by the server's `SEARCH_EARLY_LEXICAL`, so both must allow it. When a failed document is retried, or embed re-runs, its previous marker is lifted until the replacement chunks are complete, and chunk rows left over from an attempt that produced more chunks are removed.
 
+## Aggregate search
+
+`POST /v1/search/aggregate` searches several workspaces at once (`workspaces`: IDs, slugs or names; empty means every workspace the caller can search, up to `maxWorkspaces`) and merges their citations. It needs the `search` scope. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `compression`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on.
+
+`generateAnswer` (default `false`) also writes one answer over the merged citations with a model, billed as a chat answer. An API key needs the `chat` scope for it as well; a key without `chat` gets 403 `forbidden` before any search runs. Spend limits are checked for every answered workspace's organization before the model call, and the call is recorded as an `aggregate-rag-answer` usage event. If chat is turned off in any of the answered workspaces, the response carries citations only (`answer: null`) with a warning, and no model is called.
+
 ## Batch retrieval
 
 `POST /v1/search` accepts either a single `{ q, ...filters }` input or a batch of search input objects. Supply exactly one form; batch workspace and filter options belong inside each query:
@@ -141,7 +147,7 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 #### Settings suggestions are app-only
 
-Settings suggestions, settings proposals with **Apply**, and search settings changed by a chat message ("turn on reranking") are features of the DocSlurp app's signed-in chat. They are not part of the API. API keys of any type (server and publishable), the OpenAI-compatible endpoint, MCP and the SDK never get the `getWorkspaceSettings` or `proposeWorkspaceSettings` tools, suggestions mode, or settings changes from messages, so a product built on DocSlurp cannot expose them to its own users. `agent.suggestions` is accepted and ignored, and `debug.modes.suggestions` is always `false`. To change workspace settings (name, slug, `systemPrompt`, `pipeline`, budget, retention) from your own code, use `PATCH /v1/workspaces/:id` with a server key that has `workspaces:manage`. Search and chat settings (`PATCH /v1/workspaces/:id/search-settings`: retrieval defaults, chat instructions, answer style, citations) need a signed-in session; API keys can't change them. See [Workspace settings from chat](agent-workspace-settings.md).
+Settings suggestions, settings proposals with **Apply**, and search settings changed by a chat message ("turn on reranking") are features of the DocSlurp app's signed-in chat. They are not part of the API. API keys of any type (server and publishable), the OpenAI-compatible endpoint, MCP and the SDK never get the `getWorkspaceSettings` or `proposeWorkspaceSettings` tools, suggestions mode, or settings changes from messages, so a product built on DocSlurp cannot expose them to its own users. `agent.suggestions` is accepted and ignored, and `debug.modes.suggestions` is always `false`. To change workspace settings (name, slug, `systemPrompt`, `pipeline`, budget, retention) from your own code, use `PATCH /v1/workspaces/:id` with a server key that has `workspaces:manage`. Search and chat settings (`PATCH /v1/workspaces/:id/search-settings`: retrieval defaults, chat instructions, answer style, citations) take the same server key with `workspaces:manage`; the key owner must be able to edit the workspace. Browser keys and OAuth tokens can't change them. See [Workspace settings from chat](agent-workspace-settings.md).
 
 Settings are configuration, not document evidence, so the agent never attaches a `[n]` citation to a statement about them. Answers also never include visible self-corrections: the agent works calculations out before it writes.
 
@@ -231,7 +237,7 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
 
 ### Chat instructions
 
-Each workspace has one chat instructions text (`chat.searchInstructions` in `PATCH /v1/workspaces/:id/search-settings`, up to 4,000 characters; signed-in session only). It is added to the chat system message for every answer in the workspace: the app, `/v1/chat`, `/v1/chat/completions`, MCP, the SDK and the embed widget.
+Each workspace has one chat instructions text (`chat.searchInstructions` in `PATCH /v1/workspaces/:id/search-settings`, up to 4,000 characters; a signed-in editor, or a server key with `workspaces:manage`). It is added to the chat system message for every answer in the workspace: the app, `/v1/chat`, `/v1/chat/completions`, MCP, the SDK and the embed widget.
 
 The system message is always composed in this order:
 
@@ -371,7 +377,7 @@ Workspace search settings can explicitly select DeepInfra's pointwise
 `Qwen/Qwen3-Reranker-0.6B`. Omitted provider settings continue to use local BM25.
 With the operator's `DEEPINFRA_API_KEY` configured, an authorized workspace owner
 can opt in through `PATCH /v1/workspaces/:workspaceId/search-settings` from a
-signed-in session:
+signed-in session or a server key with `workspaces:manage`:
 
 ```json
 {

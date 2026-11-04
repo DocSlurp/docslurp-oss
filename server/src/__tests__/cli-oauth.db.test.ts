@@ -388,6 +388,11 @@ describe("scope mapping on the REST API", () => {
     const headers = { authorization: `Bearer ${issued.access_token}`, "content-type": "application/json" };
     const patch = await fetch(`${api}/workspaces/ws-org-owner`, { method: "PATCH", headers, body: JSON.stringify({ name: "renamed" }) });
     expect(patch.status).toBe(403);
+    // Search and chat settings take only a server key with workspaces:manage, which an OAuth token never holds.
+    const settings = await fetch(`${api}/workspaces/ws-org-owner/search-settings`, { method: "PATCH", headers, body: JSON.stringify({ chat: { answerStyle: "concise" } }) });
+    expect(settings.status).toBe(403);
+    const settingsEstimate = await fetch(`${api}/workspaces/ws-org-owner/search-settings/estimate`, { method: "POST", headers, body: JSON.stringify({ chat: { answerStyle: "concise" } }) });
+    expect(settingsEstimate.status).toBe(403);
     const apply = await fetch(`${api}/workspaces/ws-org-owner/ingest-report/apply`, { method: "POST", headers, body: JSON.stringify({ recommendationId: "x" }) });
     expect([400, 403]).toContain(apply.status);
     expect(apply.status).not.toBe(200);

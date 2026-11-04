@@ -330,6 +330,41 @@ describe("searchRoutes", () => {
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
+  describe("aggregate answers need the chat scope", () => {
+    const keyActor = (scopes: string[]) => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] } });
+    const aggregate = (actor: ReturnType<typeof keyActor>, body: Record<string, unknown>) => buildApp(actor).request("/search/aggregate", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "who is this for?", ...body }),
+    });
+    const empty = { query: "q", answer: null, citations: [], evidenceSpans: [], workspaces: [], warnings: [], partial: false, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+
+    it("refuses generateAnswer from a search-only key before any lookup, search or model call", async () => {
+      const response = await aggregate(keyActor(["search"]), { generateAnswer: true });
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "forbidden" } });
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
+    it("refuses a chat-only key (search is still required)", async () => {
+      expect((await aggregate(keyActor(["chat"]), { generateAnswer: true })).status).toBe(403);
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+    });
+
+    it("runs a default request from a search-only key with every model-calling step off", async () => {
+      aggregateWorkspaceRagSearch.mockResolvedValueOnce(empty);
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
+      expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({
+        request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, compression: false, queryDecompose: false, stepback: false }),
+      }));
+    });
+
+    it("answers for a key with search and chat", async () => {
+      aggregateWorkspaceRagSearch.mockResolvedValueOnce({ ...empty, answer: "Answer [1]." });
+      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
+      expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ generateAnswer: true }) }));
+    });
+  });
+
   it("forwards a verified API actor and preserves scope and workspace denials", async () => {
     const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
     getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
