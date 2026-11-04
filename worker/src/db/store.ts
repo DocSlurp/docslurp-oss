@@ -2697,6 +2697,15 @@ export class Store {
     return rows.length > 0;
   }
 
+  async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set file_facts = ${this.sql.json(JSON.parse(JSON.stringify(facts)))}, mime_type = ${facts.mimeType}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
   async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
     const rows = await this.sql`
       update documents

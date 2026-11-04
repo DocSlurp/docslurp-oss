@@ -63,6 +63,11 @@ export interface CheckpointStore {
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
   /** Persists the page count the worker measured after conversion (documents.page_count), which completion billing reads. */
   setDocumentPageCount?(runId: string, documentId: string, pageCount: number): Promise<boolean>;
+  /**
+   * Replaces the API's provisional file facts (header inspection) with the worker's full inspection, and the document's
+   * MIME type with the one the bytes are. Scoped to the run's own document.
+   */
+  setDocumentFileFacts?(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean>;
   /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
   loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }

@@ -59,3 +59,30 @@ describe("Store.setDocumentPageCount", () => {
     expect(rows).toEqual([{ id: "copy", page_count: 1 }, { id: "other-run", page_count: 1 }]);
   }, 60_000);
 });
+
+describe("Store.setDocumentFileFacts", () => {
+  const full = {
+    declaredMimeType: "application/msword",
+    sniffedMimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    format: "office-excel",
+    container: "zip",
+    encoding: null,
+    mismatch: "corrected",
+    inspection: "full",
+  } as never;
+
+  it("replaces a document's provisional facts and MIME type with the worker's full inspection", async () => {
+    expect(await store.setDocumentFileFacts("run1", "long-docx", full)).toBe(true);
+    const document = await store.loadDocument("long-docx");
+    expect(document).toMatchObject({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileFacts: { inspection: "full", mismatch: "corrected" } });
+  }, 60_000);
+
+  it("never writes another run's document or a deduplicated copy", async () => {
+    expect(await store.setDocumentFileFacts("run1", "other-run", full)).toBe(false);
+    expect(await store.setDocumentFileFacts("run1", "copy", full)).toBe(false);
+    expect(await store.setDocumentFileFacts("run1", "missing", full)).toBe(false);
+    const rows = (await db.query<{ id: string; mime_type: string }>(`select id, mime_type from documents where id in ('other-run','copy') order by id`)).rows;
+    expect(rows).toEqual([{ id: "copy", mime_type: "application/msword" }, { id: "other-run", mime_type: "application/msword" }]);
+  }, 60_000);
+});

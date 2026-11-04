@@ -86,9 +86,24 @@ describe("resolveSourceMetadata file facts", () => {
     expect(error.message).toContain("not the declared application/pdf");
   });
 
-  it("refuses a hostile ZIP declared as a DOCX", async () => {
+  it("does not open a ZIP declared as a DOCX: the worker's quarantine inspects it, the API keeps the declaration provisional", async () => {
     s3.bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(64).fill(7)]);
-    const error = await resolveSourceMetadata({ mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sourceKey: "k", filename: "x.docx" }).catch((caught) => caught);
+    const metadata = await resolveSourceMetadata({ mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sourceKey: "k", filename: "x.docx" });
+    expect(metadata.fileFacts).toMatchObject({ container: "zip", mismatch: "none", inspection: "header" });
+  });
+
+  it("refuses a ZIP declared as a PDF, which the magic bytes alone contradict", async () => {
+    s3.bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(64).fill(7)]);
+    const error = await resolveSourceMetadata({ mimeType: "application/pdf", sourceKey: "k", filename: "x.pdf" }).catch((caught) => caught);
     expect(error).toBeInstanceOf(UnreadableSourceError);
+  });
+
+  it("counts a very large text file from a bounded sample", async () => {
+    const line = `${"word ".repeat(40)}\n`;
+    const bytes = Buffer.from(line.repeat(Math.ceil(30_000_000 / line.length)));
+    const started = performance.now();
+    const pages = estimateNonPdfPageCount("text/plain", bytes);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(pages).toBeGreaterThan(8_000);
   });
 });

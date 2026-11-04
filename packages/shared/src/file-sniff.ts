@@ -2,8 +2,13 @@
  * What a file is, from its bytes. Intake sniffs once and persists the result (documents.file_facts); billing, routing and
  * the worker's quarantine read that record instead of trusting the declared MIME type or the filename.
  *
- * Pure functions over bytes: no I/O, no process spawning. Containers are inspected by listing the ZIP central
- * directory or searching an OLE2 file for its application stream, which tells OOXML from OLE and EPUB from a plain ZIP.
+ * Pure functions over bytes: no I/O, no process spawning. There are two depths:
+ *
+ * - `header` is all the API does with customer bytes: magic numbers in the first few KB and a text-encoding check of the
+ *   first 8 KB. A ZIP or OLE file stays a generic container, and text is not classified (CSV, JSON, HTML).
+ * - `full` (the default, run by the worker inside its quarantine stage, before any parser) lists the ZIP central
+ *   directory or walks an OLE2 file's directory entries, which tells OOXML from OLE and EPUB from a plain ZIP, and
+ *   classifies text. The worker persists its result over the API's header facts.
  */
 
 import {
@@ -21,6 +26,13 @@ import {
 
 export type FileEncoding = "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "8-bit";
 export type FileContainer = "zip" | "ole";
+/** How deeply the bytes were inspected: the first KB only (API intake), or the whole container (worker). */
+export type FileInspection = "header" | "full";
+
+export interface SniffOptions {
+  /** Defaults to `full`. The API passes `header`, so it never parses a container or scans a whole customer file. */
+  depth?: FileInspection;
+}
 
 export interface SniffedBytes {
   /** Canonical MIME type of what the bytes are; null when unrecognised (or empty). */
@@ -50,12 +62,28 @@ export interface FileFacts {
   container: FileContainer | null;
   encoding: FileEncoding | null;
   mismatch: FileMimeMismatch;
+  /** Absent on facts persisted before it existed, which were all `full`. A `header` record is provisional until the worker inspects the file. */
+  inspection?: FileInspection;
 }
 
 const ZIP_SIGNATURES = [[0x50, 0x4b, 0x03, 0x04], [0x50, 0x4b, 0x05, 0x06], [0x50, 0x4b, 0x07, 0x08]];
 const OLE_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 const SAMPLE_BYTES = 8192;
 const MAX_ZIP_NAMES = 10_000;
+const ZIP_END_SIGNATURE = 0x06054b50;
+const ZIP64_END_SIGNATURE = 0x06064b50;
+const ZIP64_LOCATOR_SIGNATURE = 0x07064b50;
+/** Types a ZIP can be (the worker reads the directory to say which). */
+const ZIP_CONTAINER_MIMES: ReadonlySet<string> = new Set([
+  GENERIC_ZIP_MIME,
+  "application/epub+zip",
+  "application/vnd.oasis.opendocument.text",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]);
+/** Types an OLE2 file can be. */
+const OLE_CONTAINER_MIMES: ReadonlySet<string> = new Set([OLE_STORAGE_MIME, "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint"]);
 
 function startsWith(bytes: Uint8Array, expected: readonly number[], offset = 0): boolean {
   return bytes.length >= offset + expected.length && expected.every((value, index) => bytes[offset + index] === value);
@@ -67,38 +95,44 @@ function ascii(bytes: Uint8Array, start: number, end: number): string {
   return out;
 }
 
-function utf16le(text: string): number[] {
-  return [...text].flatMap((char) => [char.charCodeAt(0), 0]);
-}
-
-function indexOfBytes(haystack: Uint8Array, needle: readonly number[]): number {
-  if (typeof Buffer !== "undefined") return Buffer.from(haystack.buffer, haystack.byteOffset, haystack.byteLength).indexOf(Uint8Array.from(needle));
-  const limit = Math.min(haystack.length, 4 * 1024 * 1024) - needle.length;
-  outer: for (let index = 0; index <= limit; index++) {
-    for (let inner = 0; inner < needle.length; inner++) if (haystack[index + inner] !== needle[inner]) continue outer;
-    return index;
-  }
-  return -1;
-}
-
-/** Names of a ZIP's central directory entries, or null when the directory is unreadable. Never decompresses. */
+/**
+ * Names of a ZIP's central directory entries, or null when the directory is not a consistent one: the end record is
+ * missing, the directory lies outside the archive (or past its end record), an entry overruns it, or the entry count
+ * disagrees with what is there. Reads ZIP64 end records. Never decompresses.
+ */
 export function listZipEntryNames(bytes: Uint8Array): string[] | null {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let end = -1;
   for (let offset = bytes.length - 22; offset >= Math.max(0, bytes.length - 65_557); offset--) {
-    if (view.getUint32(offset, true) === 0x06054b50) { end = offset; break; }
+    if (view.getUint32(offset, true) === ZIP_END_SIGNATURE) { end = offset; break; }
   }
   if (end < 0) return null;
-  const count = view.getUint16(end + 10, true);
-  let offset = view.getUint32(end + 16, true);
+  let count = view.getUint16(end + 10, true);
+  let directorySize = view.getUint32(end + 12, true);
+  let directoryOffset = view.getUint32(end + 16, true);
+  let limit = end;
+  if (count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
+    const locator = end - 20;
+    if (locator < 0 || view.getUint32(locator, true) !== ZIP64_LOCATOR_SIGNATURE) return null;
+    const record = Number(view.getBigUint64(locator + 8, true));
+    if (!Number.isSafeInteger(record) || record < 0 || record + 56 > locator || view.getUint32(record, true) !== ZIP64_END_SIGNATURE) return null;
+    count = Number(view.getBigUint64(record + 32, true));
+    directorySize = Number(view.getBigUint64(record + 40, true));
+    directoryOffset = Number(view.getBigUint64(record + 48, true));
+    limit = record;
+  }
+  if (![count, directorySize, directoryOffset].every(Number.isSafeInteger) || count > MAX_ZIP_NAMES) return null;
+  const directoryEnd = directoryOffset + directorySize;
+  if (directoryEnd > limit) return null;
   const names: string[] = [];
   const decoder = new TextDecoder("utf-8");
-  for (let index = 0; index < count && index < MAX_ZIP_NAMES; index++) {
-    if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) return names.length ? names : null;
+  let offset = directoryOffset;
+  for (let index = 0; index < count; index++) {
+    if (offset + 46 > directoryEnd || view.getUint32(offset, true) !== 0x02014b50) return null;
     const nameLength = view.getUint16(offset + 28, true);
     const extraLength = view.getUint16(offset + 30, true);
     const commentLength = view.getUint16(offset + 32, true);
-    if (offset + 46 + nameLength > end) return names.length ? names : null;
+    if (offset + 46 + nameLength + extraLength + commentLength > directoryEnd) return null;
     names.push(decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength)));
     offset += 46 + nameLength + extraLength + commentLength;
   }
@@ -123,17 +157,38 @@ function sniffZip(bytes: Uint8Array, filename: string): string {
   const mimetype = zipMimetypeEntry(bytes);
   if (mimetype === "application/epub+zip") return "application/epub+zip";
   if (mimetype === "application/vnd.oasis.opendocument.text") return "application/vnd.oasis.opendocument.text";
-  if (names.some((name) => name.startsWith("word/"))) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (names.some((name) => name.startsWith("xl/"))) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (names.some((name) => name.startsWith("ppt/"))) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  // The application's main part, not any entry under its folder: a ZIP that merely holds a word/ file is not a DOCX.
+  if (names.includes("word/document.xml")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (names.includes("xl/workbook.xml")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (names.includes("ppt/presentation.xml")) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
   if (fileExtension(filename) === ".epub" && names.includes("META-INF/container.xml")) return "application/epub+zip";
   return GENERIC_ZIP_MIME;
 }
 
+/** OLE2 directory entries are 128 bytes, in sectors of 512 or 4096 bytes after the header sector, so always 128-byte aligned. */
+const OLE_DIRECTORY_ENTRY_BYTES = 128;
+const OLE_APPLICATION_STREAMS: ReadonlyArray<readonly [string, string]> = [
+  ["WordDocument", "application/msword"],
+  ["Workbook", "application/vnd.ms-excel"],
+  ["Book", "application/vnd.ms-excel"],
+  ["PowerPoint Document", "application/vnd.ms-powerpoint"],
+];
+
+/**
+ * Which Office application wrote an OLE2 file, from its directory entries: a stream or storage named WordDocument,
+ * Workbook or PowerPoint Document. Entries are matched in place (name, length and type), not as bytes anywhere in the file.
+ */
 function sniffOle(bytes: Uint8Array): string {
-  if (indexOfBytes(bytes, utf16le("WordDocument")) >= 0) return "application/msword";
-  if (indexOfBytes(bytes, utf16le("Workbook")) >= 0 || indexOfBytes(bytes, utf16le("Book")) >= 0) return "application/vnd.ms-excel";
-  if (indexOfBytes(bytes, utf16le("PowerPoint Document")) >= 0) return "application/vnd.ms-powerpoint";
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const found = new Set<string>();
+  for (let entry = 512; entry + OLE_DIRECTORY_ENTRY_BYTES <= bytes.length; entry += OLE_DIRECTORY_ENTRY_BYTES) {
+    const nameBytes = view.getUint16(entry + 64, true);
+    const type = bytes[entry + 66]!;
+    if (nameBytes < 4 || nameBytes > 64 || nameBytes % 2 !== 0 || (type !== 1 && type !== 2 && type !== 5)) continue;
+    const name = new TextDecoder("utf-16le").decode(bytes.subarray(entry, entry + nameBytes - 2));
+    for (const [stream, mime] of OLE_APPLICATION_STREAMS) if (name === stream) found.add(mime);
+  }
+  for (const [, mime] of OLE_APPLICATION_STREAMS) if (found.has(mime)) return mime;
   return OLE_STORAGE_MIME;
 }
 
@@ -223,11 +278,14 @@ function classifyText(sample: string): string {
 }
 
 /** What the bytes are. `filename` is used only to tell WebM audio from video. */
-export function sniffFileBytes(bytes: Uint8Array, filename = ""): SniffedBytes {
+export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffOptions = {}): SniffedBytes {
+  const header = options.depth === "header";
+  // Header depth looks at the first SAMPLE_BYTES and nothing else, whatever length the caller holds.
+  const bytes = header && input.length > SAMPLE_BYTES ? input.subarray(0, SAMPLE_BYTES) : input;
   const none: SniffedBytes = { mimeType: null, container: null, encoding: null };
   if (bytes.length === 0) return none;
   if (ascii(bytes, 0, 5) === "%PDF-") return { ...none, mimeType: "application/pdf" };
-  if (ZIP_SIGNATURES.some((signature) => startsWith(bytes, signature))) return { ...none, mimeType: sniffZip(bytes, filename), container: "zip" };
+  if (ZIP_SIGNATURES.some((signature) => startsWith(bytes, signature))) return { ...none, mimeType: header ? GENERIC_ZIP_MIME : sniffZip(bytes, filename), container: "zip" };
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { ...none, mimeType: "image/png" };
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return { ...none, mimeType: "image/jpeg" };
   if (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a])) return { ...none, mimeType: "image/tiff" };
@@ -259,7 +317,8 @@ export function sniffFileBytes(bytes: Uint8Array, filename = ""): SniffedBytes {
     if (isMpegAudioFrame(bytes)) return { ...none, mimeType: "audio/mpeg" };
     if (bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0) return { ...none, mimeType: "audio/aac" };
   }
-  if (startsWith(bytes, OLE_SIGNATURE)) return { ...none, mimeType: sniffOle(bytes), container: "ole" };
+  if (startsWith(bytes, OLE_SIGNATURE)) return { ...none, mimeType: header ? OLE_STORAGE_MIME : sniffOle(bytes), container: "ole" };
+  if (encoding && header) return { mimeType: "text/plain", container: null, encoding };
   if (encoding) return { mimeType: classifyText(decodeTextBytes(bytes.subarray(0, SAMPLE_BYTES), encoding).slice(0, 4096)), container: null, encoding };
   return none;
 }
@@ -270,8 +329,9 @@ const TEXT_FAMILY_MIME = (mimeType: string | null) => mimeFamily(mimeType) === "
  * The facts of a file: the sniffed type reconciled with the declared MIME type and the extension. Pure; intake runs it once
  * and persists the result.
  */
-export function fileFactsFor(bytes: Uint8Array, file: { filename: string; declaredMimeType?: string | null }): FileFacts {
-  const sniffed = sniffFileBytes(bytes, file.filename);
+export function fileFactsFor(bytes: Uint8Array, file: { filename: string; declaredMimeType?: string | null }, options: SniffOptions = {}): FileFacts {
+  const inspection: FileInspection = options.depth === "header" ? "header" : "full";
+  const sniffed = sniffFileBytes(bytes, file.filename, options);
   const declaredBare = bareMimeType(file.declaredMimeType);
   const declared = canonicalMimeType(declaredBare);
   const extensionMime = MIME_BY_EXTENSION[fileExtension(file.filename)] ?? null;
@@ -283,10 +343,20 @@ export function fileFactsFor(bytes: Uint8Array, file: { filename: string; declar
     container: sniffed.container,
     encoding: sniffed.encoding,
     mismatch,
+    inspection,
   });
   const fallback = declared ?? extensionMime ?? (declaredBare || "application/octet-stream");
 
   if (!sniffed.mimeType) return facts(fallback, "none");
+
+  if (inspection === "header" && sniffed.container) {
+    // The container's contents are the worker's to read. Here the declaration (or the extension) stands if a container of
+    // this kind can be that type, and is refused if the magic bytes alone contradict it.
+    const claimed = declared ?? extensionMime;
+    const possible = sniffed.container === "zip" ? ZIP_CONTAINER_MIMES : OLE_CONTAINER_MIMES;
+    if (!claimed) return facts(sniffed.mimeType, "none");
+    return possible.has(claimed) ? facts(claimed, "none") : facts(fallback, "unresolved");
+  }
 
   if (sniffed.encoding) {
     // A text sniff cannot tell CSV from plain text: any member of the text family is acceptable as declared.

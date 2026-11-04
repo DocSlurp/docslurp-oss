@@ -583,6 +583,8 @@ export interface DocumentVersionChangelog {
     rewrites: number;
     contradictions: number;
     changedRatio: number;
+    /** The comparison stopped at its text, block or work limit; some blocks may be listed as added or removed that are unchanged. */
+    truncated: boolean;
   };
   additions: DocumentVersionChangelogEntry[];
   deletions: DocumentVersionChangelogEntry[];

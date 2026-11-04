@@ -60,6 +60,26 @@ type QuarantinePolicy = Pick<
   | "quarantineMaxExpansionRatio"
 >;
 
+/**
+ * The API only glances at an upload (magic bytes and the declared type; it never opens a container), so a document it
+ * recorded with `inspection: "header"` is provisional. This is the full inspection, run on the staged bytes before any parser:
+ * it opens ZIP and OLE containers, classifies text, and decides what the file is.
+ *
+ * `refused` means the bytes cannot be what was declared (a generic ZIP declared as a DOCX); the quarantine records that
+ * as a mime-mismatch error. Otherwise `facts` replace the provisional record (persisted by the stage) and
+ * `scanDeclaredMimeType` is the type the scan should treat as declared. Null when the record is not provisional.
+ */
+export function verifyIntakeFileFacts(
+  document: { filename: string; mimeType: string; fileFacts?: FileFacts | null },
+  bytes: Uint8Array,
+): { facts: FileFacts; refused: boolean; scanDeclaredMimeType: string } | null {
+  if (document.fileFacts?.inspection !== "header") return null;
+  const declared = document.fileFacts.declaredMimeType ?? document.mimeType;
+  const facts = fileFactsFor(bytes, { filename: document.filename, declaredMimeType: declared });
+  const refused = facts.mismatch === "unresolved";
+  return { facts, refused, scanDeclaredMimeType: refused ? declared : facts.mimeType };
+}
+
 export async function scanDocumentForQuarantine(args: {
   documentId: string;
   filename: string;
