@@ -1,4 +1,5 @@
 import { tableChunks, TableBoundary } from "../pipeline/table-chunking.js";
+import { typeColumn, type TypedCell } from "./table-typing.js";
 import { atomize, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "./unicode-text.js";
 import {
   isPageImageReferenceBlock,
@@ -763,13 +764,17 @@ function parseMarkdownTable(text: string): {
     return null;
   }
 
-  const columnNames = headerCells.map((cell, index) => cell || `Column ${index + 1}`);
   const bodyLines = lines.slice(2).filter((line) => isTableLine(line));
-  const rawRows = bodyLines.map((line) => normalizeTableRow(splitMarkdownTableCells(line), columnNames.length));
-  const columnTypes = columnNames.map((_, columnIndex) => inferColumnValueType(rawRows.map((row) => row[columnIndex] ?? "")));
+  const bodyCells = bodyLines.map((line) => splitMarkdownTableCells(line));
+  // A row may be wider than the header; keep its extra cells under generated column names rather than dropping them.
+  const width = Math.max(headerCells.length, ...bodyCells.map((row) => row.length));
+  const columnNames = Array.from({ length: width }, (_, index) => headerCells[index] || `Column ${index + 1}`);
+  const rawRows = bodyCells.map((row) => normalizeTableRow(row, width));
+  const typedColumns = columnNames.map((_, columnIndex) => typeColumn(rawRows.map((row) => row[columnIndex] ?? "")));
+  const columnTypes = typedColumns.map((column) => column.columnType);
   const rows = rawRows.map((row, rowIndex) => ({
     rowIndex,
-    cells: row.map((rawValue, columnIndex) => buildTableCell(columnIndex, columnNames[columnIndex]!, rawValue))
+    cells: row.map((rawValue, columnIndex) => buildTableCell(columnIndex, columnNames[columnIndex]!, rawValue, typedColumns[columnIndex]!.cells[rowIndex]!))
   }));
 
   return {
@@ -819,90 +824,12 @@ function normalizeTableRow(cells: string[], width: number): string[] {
   return normalized;
 }
 
-function buildTableCell(columnIndex: number, columnName: string, rawValue: string): TableCell {
-  const valueType = inferCellValueType(rawValue);
+function buildTableCell(columnIndex: number, columnName: string, rawValue: string, typed: TypedCell): TableCell {
   return {
     columnIndex,
     columnName,
     rawValue,
-    valueType,
-    typedValue: coerceTypedCellValue(rawValue, valueType)
+    valueType: typed.valueType,
+    typedValue: typed.typedValue
   };
-}
-
-function inferColumnValueType(values: string[]): TableCellValueType {
-  const nonEmpty = values
-    .map((value) => inferCellValueType(value))
-    .filter((value) => value !== "empty");
-
-  if (nonEmpty.length === 0) {
-    return "empty";
-  }
-
-  const distinct = [...new Set(nonEmpty)];
-  return distinct.length === 1 ? distinct[0]! : "string";
-}
-
-function inferCellValueType(value: string): TableCellValueType {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return "empty";
-  }
-  if (/^(true|false|yes|no)$/i.test(trimmed)) {
-    return "boolean";
-  }
-  if (/^[+-]?\d+(\.\d+)?%$/.test(trimmed)) {
-    return "percentage";
-  }
-  if (/^[$€£]\s*[+-]?\d[\d,]*(\.\d+)?$/.test(trimmed)) {
-    return "currency";
-  }
-  if (/^[+-]?\d[\d,]*(\.\d+)?$/.test(trimmed)) {
-    return "number";
-  }
-  if (normalizeDateValue(trimmed)) {
-    return "date";
-  }
-  return "string";
-}
-
-function coerceTypedCellValue(value: string, valueType: TableCellValueType): string | number | boolean | null {
-  const trimmed = value.trim();
-  if (valueType === "empty") {
-    return null;
-  }
-  if (valueType === "boolean") {
-    return /^(true|yes)$/i.test(trimmed);
-  }
-  if (valueType === "percentage") {
-    return Number.parseFloat(trimmed.replace(/%$/, ""));
-  }
-  if (valueType === "currency") {
-    return Number.parseFloat(trimmed.replace(/[^\d.+-]/g, ""));
-  }
-  if (valueType === "number") {
-    return Number.parseFloat(trimmed.replace(/,/g, ""));
-  }
-  if (valueType === "date") {
-    return normalizeDateValue(trimmed) ?? trimmed;
-  }
-  return trimmed;
-}
-
-function normalizeDateValue(value: string): string | null {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return value;
-  }
-
-  const monthDayYear = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (monthDayYear) {
-    const [, month, day, year] = monthDayYear;
-    return `${year}-${month!.padStart(2, "0")}-${day!.padStart(2, "0")}`;
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) {
-    return null;
-  }
-  return parsed.toISOString().slice(0, 10);
 }
