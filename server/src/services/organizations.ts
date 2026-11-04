@@ -597,7 +597,7 @@ export async function removeOrganizationMember(args: { orgId: string; userId: st
 
 export async function listAccessibleWorkspaceIds(userId: string): Promise<string[]> {
   const rows = await sql<{ workspace_id: string }[]>`
-    -- The rule itself lives in docslurp_workspace_access (migration 0129). The
+    -- The rule itself lives in docslurp_workspace_access (migration 0124). The
     -- candidate filter only narrows the scan to workspaces in the user's orgs or
     -- shared with them, which is a superset of what the function can grant.
     select w.id as workspace_id

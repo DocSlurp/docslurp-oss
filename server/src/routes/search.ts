@@ -23,9 +23,9 @@ import { withDeferredContext, type DeferredRequestContext, type MaterializeEvent
 import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-client.js";
 import { loadWorkspacePipeline } from "../search/session-setup.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
-import { aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
+import { AggregateAnswerScopeError, aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
-import { hybridSearch, MissingWorkspaceScopeError } from "../services/search.js";
+import { CrossWorkspaceScopeError, hybridSearch, MissingWorkspaceScopeError, WorkspaceNotFoundError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
 import { beginChatTurn, chatTurnFailureReason, type ChatTurn, type ChatTurnUsage } from "../services/billing/chat-turn-billing.js";
@@ -380,10 +380,10 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
       ? { code: "FORBIDDEN", apiCode: "forbidden", message: error.message, status: 403 }
       : { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
   }
-  if (error instanceof MissingWorkspaceScopeError || (error instanceof Error && error.message === "Search scope must stay within a single workspace")) {
+  if (error instanceof MissingWorkspaceScopeError || error instanceof CrossWorkspaceScopeError) {
     return { code: "INVALID_SEARCH_SCOPE", apiCode: "invalid_search_scope", message: error.message, status: 400 };
   }
-  if (error instanceof Error && error.message === "Workspace not found") {
+  if (error instanceof WorkspaceNotFoundError) {
     return { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
   }
   return null;
@@ -583,10 +583,10 @@ export const searchRoutes = new Hono()
       });
       return c.json(response);
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith("Workspace not found")) {
+      if (error instanceof WorkspaceNotFoundError) {
         return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
-      if (error instanceof Error && error.name === "AggregateAnswerScopeError") {
+      if (error instanceof AggregateAnswerScopeError) {
         return apiErrorResponse(c, 400, "invalid_request", error.message);
       }
       throw error;

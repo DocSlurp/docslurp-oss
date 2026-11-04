@@ -1,4 +1,5 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
+import { estimateTextTokens } from "../token-estimate.js";
 import {
   authorizePrivateModelCall,
   isPrivateModelUri,
@@ -109,7 +110,7 @@ async function embedWithGemini(
     model: modelId,
     metric: "page-query-embedding",
     // Actual provider usage; only a response without any usage falls back to an estimate, labelled as such.
-    inputTokens: reported ?? Math.ceil(args.query.length / 4),
+    inputTokens: reported ?? estimateTextTokens(args.query),
     metadata: { embedding: true, usageSource: reported === undefined ? "estimated" : "provider" },
   });
   return l2Normalize(values);

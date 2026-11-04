@@ -11,7 +11,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
  * personal organization, and deleted when there is none. A webhook is re-homed to
  * an organization its creator owns or administers (personal first), else deleted.
  */
-const migration = readFileSync(new URL("../../db/migrations/0130_tenant_scoped_keys_and_webhooks.sql", import.meta.url), "utf8");
+const migration = readFileSync(new URL("../../db/migrations/0125_tenant_scoped_keys_and_webhooks.sql", import.meta.url), "utf8");
 let stop: () => Promise<void>;
 let sql: postgres.Sql;
 

@@ -21,6 +21,8 @@ vi.mock("../db.js", () => ({
 vi.mock("../services/search.js", () => ({
   hybridSearch,
   MissingWorkspaceScopeError: class extends Error {},
+  CrossWorkspaceScopeError: class extends Error {},
+  WorkspaceNotFoundError: class WorkspaceNotFoundError extends Error { constructor() { super("Workspace not found"); } },
 }));
 
 vi.mock("../services/workspace-chat.js", () => ({
@@ -30,6 +32,7 @@ vi.mock("../services/workspace-chat.js", () => ({
 
 vi.mock("../services/aggregate-rag.js", () => ({
   aggregateWorkspaceRagSearch,
+  AggregateAnswerScopeError: class AggregateAnswerScopeError extends Error { constructor() { super("generateAnswer needs workspaces from one organization"); } },
 }));
 
 const getWorkspace = vi.fn();
@@ -380,8 +383,18 @@ describe("searchRoutes", () => {
       expect(hybridSearch).not.toHaveBeenCalled();
     });
 
+    it("answers 404 for the typed workspace-not-found error and not for look-alike messages", async () => {
+      const { WorkspaceNotFoundError } = await import("../services/search.js");
+      aggregateWorkspaceRagSearch.mockRejectedValueOnce(new WorkspaceNotFoundError());
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(404);
+      // Control flow follows the error's type, not its wording.
+      aggregateWorkspaceRagSearch.mockRejectedValueOnce(new Error("Workspace not found: cache entry evicted"));
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(500);
+    });
+
     it("answers 400 when an answer would span organizations", async () => {
-      aggregateWorkspaceRagSearch.mockRejectedValueOnce(Object.assign(new Error("generateAnswer needs workspaces from one organization"), { name: "AggregateAnswerScopeError" }));
+      const { AggregateAnswerScopeError } = await import("../services/aggregate-rag.js");
+      aggregateWorkspaceRagSearch.mockRejectedValueOnce(new AggregateAnswerScopeError());
       const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
       expect(response.status).toBe(400);
       await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });

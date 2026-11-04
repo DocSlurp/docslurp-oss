@@ -19,7 +19,6 @@ import {
   planRecursiveSearchMode,
   prepareSearchSessionRetrievalPlan,
 } from "./session-planner.js";
-import { expandGraphTextQuery } from "./graph-expansion.js";
 import type {
   SearchAvailability,
   SearchChunk,
@@ -225,14 +224,9 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       selfQueryReasons = [...selfQueryReasons, ...retrievalPlan.selfQueryReasons];
       const effectiveQuery = retrievalPlan.effectiveQuery;
       const queryVector = retrievalPlan.queryVector;
-      const textQuery = await timePhase("graphQuery", () => expandGraphTextQuery({
-        enabled: effectiveOptions.enableGraphExpansion,
-        query: retrievalQuery,
-        textQuery: retrievalPlan.textQuery,
-        filters: effectiveOptions.filters,
-        runId: effectiveOptions.runId,
-        workspaceId: normalizedScope.workspaceId,
-      }));
+      // Graph expansion adds its own candidate list (the "graph" adapter). It used to also append up to four
+      // entity names to every keyword query, which AND-ed them in and emptied the strict match.
+      const textQuery = retrievalPlan.textQuery;
 
       let deferred: { stats: DeferredSearchStats; documentIds: string[] } | null = null;
       let scopeSignal: ScopeSignal | null = null;

@@ -73,7 +73,7 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
     ["other tenant", { orgId: "foreign" }, 404],
     ["other workspace", { workspaceIds: ["excluded"] }, 404],
     ["other owner", { userId: "other" }, 404],
-    // A key without an organization can no longer exist: api_keys.org_id is NOT NULL (migration 0130, api-keys-org-required.db.test.ts).
+    // A key without an organization can no longer exist: api_keys.org_id is NOT NULL (migration 0125, api-keys-org-required.db.test.ts).
   ])("rejects %s before serialization or signing", async (_label, overrides, status) => {
     await seedKey(overrides);
     expect((await request()).status).toBe(status);

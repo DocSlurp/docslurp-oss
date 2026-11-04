@@ -4,7 +4,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * The workspace access rule has one definition, the SQL function
- * docslurp_workspace_access (migration 0129). Every reader of the rule calls
+ * docslurp_workspace_access (migration 0124). Every reader of the rule calls
  * it; this test pins the rule itself against an explicit table and proves the
  * TypeScript entry points (getWorkspaceAccess, the accessible-id listing, the
  * search session context, realtime authorization and the org workspace count)

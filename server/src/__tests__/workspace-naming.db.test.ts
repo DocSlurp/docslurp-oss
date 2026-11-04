@@ -97,11 +97,10 @@ describe("automatic workspace naming", () => {
     await naming.refineWorkspaceNames([workspace.id]);
     expect((await state(workspace.id)).name).toBe("Residential lease agreement between Acme and Bob");
 
-    await naming.refineWorkspaceNames([workspace.id], "What is the security deposit?");
-    expect(await state(workspace.id)).toEqual({ name: "What is the security deposit", autoTitle: { phase: "chat", name: "What is the security deposit" } });
-    await naming.refineWorkspaceNames([workspace.id], "When is rent due?");
+    // A chat message cannot rename the workspace: refineWorkspaceNames takes no message at all.
+    expect(naming.refineWorkspaceNames.length).toBe(1);
     await naming.refineWorkspaceNames([workspace.id]);
-    expect((await state(workspace.id)).name).toBe("What is the security deposit");
+    expect((await state(workspace.id)).name).toBe("Residential lease agreement between Acme and Bob");
   });
 
   it("names an untitled workspace from its first chunk heading when no upload named it", async () => {
@@ -118,7 +117,7 @@ describe("automatic workspace naming", () => {
     await ws.updateWorkspace(workspace.id, "u", { name: "My leases" });
     await addDocument(workspace.id, "lease.pdf");
     expect(await naming.nameWorkspaceFromUpload({ workspaceId: workspace.id, filenames: ["lease.pdf"] })).toBeNull();
-    await naming.refineWorkspaceNames([workspace.id], "What is the deposit?");
+    await naming.refineWorkspaceNames([workspace.id]);
     expect((await state(workspace.id)).name).toBe("My leases");
   });
 });
@@ -133,7 +132,7 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     await connection`update workspaces set name = 'Manual confidential title' where id = ${workspace.id}`;
     // The initial SELECT sees the old committed name. applyAutoTitle must wait
     // for this transaction, then reject the stale expected name in the UPDATE.
-    automatic = naming.refineWorkspaceNames([workspace.id], candidate === "same" ? "Untitled workspace" : "Annual budget review");
+    automatic = naming.nameWorkspaceFromUpload({ workspaceId: workspace.id, filenames: [candidate === "same" ? `${before.name}.pdf` : "Annual budget review.pdf"] });
     const deadline = Date.now() + 10_000;
     for (;;) {
       // pg_stat_activity is cached within a transaction until explicitly cleared.
@@ -155,15 +154,6 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     await automatic;
   }
 }, 15_000);
-
-it("advances a same-name phase and leaves the workspace timestamp unchanged", async () => {
-  const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });
-  const [before] = await sql`select updated_at from workspaces where id = ${workspace.id}`;
-  await naming.refineWorkspaceNames([workspace.id], "Untitled workspace");
-  expect(await state(workspace.id)).toEqual({ name: "Untitled workspace", autoTitle: { phase: "chat", name: "Untitled workspace" } });
-  const [after] = await sql`select updated_at from workspaces where id = ${workspace.id}`;
-  expect(after!.updated_at).toEqual(before!.updated_at);
-});
 
 it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked", "queued", "processing"])("excludes %s documents from all naming sources", async (excluded) => {
   const workspace = await ws.createWorkspace({ userId: "u", orgId: "o" });

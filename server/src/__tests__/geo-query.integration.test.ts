@@ -91,9 +91,8 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
    if(previous===undefined)delete process.env.SEARCH_STATEMENT_TIMEOUT_MS;else process.env.SEARCH_STATEMENT_TIMEOUT_MS=previous;
   }
  });
- it.each(["parent","neighbor","graph","lexical","progressive","graph-evidence"].flatMap(target=>["timeout","abort"].map(mode=>({target,mode}))))("$target expansion obeys $mode",async({target,mode})=>{
+ it.each(["parent","neighbor","lexical","progressive","graph-evidence"].flatMap(target=>["timeout","abort"].map(mode=>({target,mode}))))("$target expansion obeys $mode",async({target,mode})=>{
   const {withSearchSignal}=await import("../search/query-bounds.js");
-  const {expandGraphTextQuery}=await import("../search/graph-expansion.js");
   const {finalizeSearchSessionExecution,searchResultsToChunks}=await import("../search/session-execution.js");
   const filters=await resolve(tenant,{geo:radius},schema);
   const baseline=await search.hybridSearch("budget","q-u",{filters:{workspaceId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:false,queryRewrite:false,selfQuery:false});
@@ -114,7 +113,6 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
    process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
    if(mode==="abort")timer=setTimeout(()=>controller.abort(),200);
    const work=async()=>{
-    if(target==="graph")return expandGraphTextQuery({enabled:true,query:"budget",textQuery:"budget",workspaceId:"q-w",filters});
     if(["parent","lexical","progressive","graph-evidence"].includes(target))return search.hybridSearch("budget","q-u",{filters:{workspaceId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:target==="parent",queryRewrite:false,selfQuery:false,enableGraphExpansion:target==="graph-evidence"});
     return finalizeSearchSessionExecution({query:"budget",userId:"q-u",workspaceId:"q-w",filters,options:{parentRetrieval:true},chunks:searchResultsToChunks(baseline.results),availability:baseline.availability,effectiveQuery:"budget",selfQueryReasons:[],session:{sessionId:"parent-test",persist:vi.fn(),usageEvents:()=>[],diagnostics:()=>({})}} as never);
    };

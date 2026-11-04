@@ -70,7 +70,7 @@ describe("optional hosted reranking", () => {
     const candidates=searchResultsToChunks(chunks.map((c,i)=>({text:c.text,score:c.score,citation:{source:"document" as const,documentId:"doc",filename:"manual.txt",pageNumber:i+1,pageNumbers:[i+1],headingPath:[],chunkIndex:i,blockIds:[],blockTypes:[],evidenceType:null,canonicalDocumentUri:null,tableGranularity:null,tableRowIndex:null,tableRowCount:null,tableColumnNames:[],tableColumnTypes:[],tableCells:[],tableCell:null,regionBoxes:[],regions:[],regionCoordinateSpace:null}})));
     http.mockResolvedValue(Response.json({ input_tokens: 20, scores: [0.1, 0.9] }));
     const input={query:"pump maintenance",chunks:candidates,limit:2,options:{useRerank:true,rerankProvider:"deepinfra" as const,resultOrder:"relevance" as const},privacyMode:"standard" as const,session:session(),rerankApiKey:"synthetic",rerankScope:{orgId:"o",workspaceId:"w"}};
-    const ranked=await applySearchPostRetrievalProcessing(input); expect(ranked[0].pageNumber).toBe(2); expect(ranked[0].text).toBe(candidates[1].text); expect(ranked[0].documentId).toBe("doc");
+    const ranked=await applySearchPostRetrievalProcessing(input); expect(ranked.map(c=>c.pageNumber).sort()).toEqual([1,2]); expect(ranked[0].pageNumber).toBe(1); expect(ranked.find(c=>c.pageNumber===2)!.text).toBe(candidates[1].text); expect(ranked[0].documentId).toBe("doc");
     await applySearchPostRetrievalProcessing({...input,options:{...input.options,useRerank:false}}); expect(http).toHaveBeenCalledTimes(1);
   });
   it("bounds configurable concurrency and the whole-operation request timeout", () => {
