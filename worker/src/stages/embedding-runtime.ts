@@ -1,4 +1,4 @@
-import { delimitedTableMarkdown } from "../lib/delimited-table.js";
+import { decodeDelimitedBytes, delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -198,7 +198,7 @@ export async function extractTextForEmbedding(
 
   if (isCsvLike(document)) {
     const data = await readSourceBytes(storage, document);
-    const text = delimitedTableMarkdown(data.toString("utf8"), document.filename);
+    const text = delimitedTableMarkdown(decodeDelimitedBytes(data), document.filename);
     return { text, extractor: "csv-to-markdown-table", canonicalDocument };
   }
 
@@ -505,7 +505,7 @@ function isJsonLike(document: Document): boolean {
   return (ext === ".json" || ext === ".jsonl") && mime.includes("json");
 }
 
-function parseJsonContent(
+export function parseJsonContent(
   raw: string,
   document: Document,
 ): { text: string; extractor: string; schemaArtifact?: JsonSchemaArtifact } {
@@ -536,7 +536,7 @@ function parseJsonContent(
       const obj = JSON.parse(line) as Record<string, unknown>;
       const pairs: string[] = [];
       for (const [k, v] of Object.entries(obj)) {
-        pairs.push(`${k}: ${String(v)}`);
+        pairs.push(`${k}: ${jsonValueText(v)}`);
         trackType(k, v);
       }
       textLines.push(pairs.join(", "));
@@ -562,6 +562,13 @@ function parseJsonContent(
   } catch {
     return { text: raw, extractor: "raw-text" };
   }
+}
+
+/** A JSON value as text: strings as they are, nested objects and arrays as JSON (never `[object Object]`). */
+function jsonValueText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value !== null && typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function flattenJson(
