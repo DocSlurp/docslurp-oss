@@ -6,6 +6,7 @@ its JSON ABI (`ds_alloc`, `ds_free`, `ds_card`, `ds_read_plan`, `ds_probe`, `ds_
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import urllib.request
@@ -73,7 +74,12 @@ class Estimator:
         try:
             packed = self._fn[name](store, *args) & _MASK64
         except wasmtime.Trap as error:
-            # A panic traps the module and may leave its memory inconsistent: start a fresh instance.
+            # A panic traps the module and may leave its memory inconsistent: start a fresh instance, and release the
+            # old one's linear memory (up to the module's 256 MiB cap) now rather than at the next collection.
+            self._memory = None
+            self._fn = {}
+            self._store = None
+            gc.collect()
             self._instantiate()
             raise EstimatorError("crashed", f"the estimator stopped on this input ({error})") from None
         for pointer, length in allocated:

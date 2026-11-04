@@ -122,7 +122,7 @@ describe("@docslurp/estimate (wasm)", () => {
   it("caps the module's memory so a hostile file traps instead of exhausting the host", async () => {
     const module = await WebAssembly.compile(readFileSync(new URL("../dist/docslurp_estimate.wasm", import.meta.url)));
     const instance = new WebAssembly.Instance(module, {});
-    assert.throws(() => instance.exports.memory.grow(8_193)); // 512 MiB is 8,192 pages
+    assert.throws(() => instance.exports.memory.grow(4_097)); // 256 MiB is 4,096 pages
   });
 
   it("reads a WAV duration from its header and prices it as audio without a name hint", () => {

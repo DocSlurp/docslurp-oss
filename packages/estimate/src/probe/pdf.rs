@@ -7,6 +7,7 @@
 //! rest, blank pages included, are `text`. Words come from text runs, image coverage from each image's placement
 //! matrix over the page's CropBox, so nothing is rendered.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -30,13 +31,11 @@ const MAX_FORM_CALLS_PER_PAGE: usize = 2_000;
 const MAX_FORM_DEPTH: u32 = 3;
 /// Decompression limit per stream while loading the document (object and xref streams).
 const MAX_LOAD_STREAM_BYTES: usize = 16 * 1024 * 1024;
-/// Decompressed bytes of all object streams together, checked before the document is loaded: lopdf decodes and
-/// keeps every object stream at load time with only a per-stream limit.
+/// Decompressed bytes of all object streams together (`budget_object_streams`): lopdf decodes and keeps every object
+/// stream at load time with only a per-stream limit.
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
 /// Decompressed page content and form bytes per document, cached forms included.
 const MAX_DOCUMENT_CONTENT_BYTES: usize = 32 * 1024 * 1024;
-/// Object streams inspected before loading; a document has a handful to a few thousand.
-const MAX_OBJECT_STREAMS: usize = 20_000;
 /// Estimator-only: what makes a text page `complex` (layout-aware extraction) rather than prose. Time, not credits.
 const COMPLEX_MIN_IMAGE_COVERAGE: f64 = 0.15;
 const COMPLEX_MIN_PATH_OPERATIONS: usize = 60;
@@ -57,12 +56,24 @@ pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     if !input.is_whole() {
         return result.note("PDF probes need the whole file; priced from size");
     }
-    if !object_streams_fit(input.head, MAX_OBJECT_STREAM_BYTES) {
+    // lopdf's encrypted-document path decodes object streams without the budget hook below, and the probe does not
+    // measure encrypted content anyway: count pages from the raw objects instead of loading.
+    if has_name(input.head, b"Encrypt") {
+        return fallback_page_count(input.head, result).note("encrypted PDF; page mix not measured");
+    }
+    OBJECT_STREAM_BUDGET.with(|budget| budget.set(MAX_OBJECT_STREAM_BYTES));
+    OBJECT_STREAM_BUDGET_EXCEEDED.with(|exceeded| exceeded.set(false));
+    let options = LoadOptions {
+        max_decompressed_size: Some(MAX_LOAD_STREAM_BYTES),
+        filter: Some(budget_object_streams),
+        ..LoadOptions::default()
+    };
+    let loaded = Document::load_mem_with_options(input.head, options);
+    if OBJECT_STREAM_BUDGET_EXCEEDED.with(Cell::get) {
         return fallback_page_count(input.head, result)
             .note("compressed object streams exceed the probe's budget; page mix not measured");
     }
-    let options = LoadOptions { max_decompressed_size: Some(MAX_LOAD_STREAM_BYTES), ..LoadOptions::default() };
-    match Document::load_mem_with_options(input.head, options) {
+    match loaded {
         Ok(document) => probe_document(&card.page_raster_routing, &document, input.head.len(), result),
         Err(error) => fallback_page_count(input.head, result).note(format!("PDF did not parse ({error})")),
     }
@@ -194,41 +205,67 @@ impl FormCache {
     }
 }
 
-/// Whether every FlateDecode object stream (`/Type /ObjStm`) inflates within `budget` bytes in total. Scans the raw
-/// file for object stream dictionaries and inflates each with the remaining budget as its limit.
-fn object_streams_fit(bytes: &[u8], budget: usize) -> bool {
-    let mut remaining = budget;
-    let mut at = 0usize;
-    let mut seen = 0usize;
-    while let Some(found) = find_from(bytes, b"/ObjStm", at) {
-        seen += 1;
-        if seen > MAX_OBJECT_STREAMS {
-            return false;
-        }
-        at = found + 7;
-        let Some(keyword) = find_from(bytes, b"stream", at) else { break };
-        let mut start = keyword + 6;
-        if bytes.get(start) == Some(&b'\r') {
-            start += 1;
-        }
-        if bytes.get(start) == Some(&b'\n') {
-            start += 1;
-        }
-        let end = find_from(bytes, b"endstream", start).unwrap_or(bytes.len());
-        let data = &bytes[start.min(end)..end];
-        match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, remaining) {
-            Ok(inflated) => remaining -= inflated.len(),
-            Err(error) if matches!(error.status, miniz_oxide::inflate::TINFLStatus::HasMoreOutput) => return false,
-            // Not a zlib stream (another filter or damage): lopdf's per-stream limit applies to it.
-            Err(_) => remaining = remaining.saturating_sub(data.len()),
-        }
-        at = end;
-    }
-    true
+thread_local! {
+    /// Decompressed object-stream bytes the current load may still decode (the module is single-threaded).
+    static OBJECT_STREAM_BUDGET: Cell<usize> = const { Cell::new(0) };
+    static OBJECT_STREAM_BUDGET_EXCEEDED: Cell<bool> = const { Cell::new(false) };
 }
 
-fn find_from(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    bytes.get(from..)?.windows(needle.len()).position(|window| window == needle).map(|offset| from + offset)
+/// lopdf load hook, called on every raw object before lopdf decodes object streams: decode each object stream with
+/// lopdf's own decoder (every filter in its chain, names as lopdf reads them) against the document-wide budget, and
+/// drop it, and every later one, once the budget is spent. lopdf keeps only a per-stream limit.
+fn budget_object_streams(id: ObjectId, object: &mut Object) -> Option<(ObjectId, Object)> {
+    if let Object::Stream(stream) = object {
+        if stream.dict.has_type(b"ObjStm") {
+            if OBJECT_STREAM_BUDGET_EXCEEDED.with(Cell::get) {
+                return None;
+            }
+            let remaining = OBJECT_STREAM_BUDGET.with(Cell::get);
+            match stream.get_plain_content_with_limit(remaining) {
+                Ok(content) => OBJECT_STREAM_BUDGET.with(|budget| budget.set(remaining.saturating_sub(content.len()))),
+                Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. })) => {
+                    OBJECT_STREAM_BUDGET_EXCEEDED.with(|exceeded| exceeded.set(true));
+                    return None;
+                }
+                // Undecodable: lopdf will skip it as well.
+                Err(_) => {}
+            }
+        }
+    }
+    // lopdf keeps the original top-level object after this hook and uses the returned value only for object-stream
+    // members, which are never streams: streams return a placeholder, everything else a copy.
+    match object {
+        Object::Stream(_) => Some((id, Object::Null)),
+        other => Some((id, other.clone())),
+    }
+}
+
+/// Whether the file contains the PDF name `/<name>`, with `#xx` escapes decoded as a PDF parser decodes them.
+fn has_name(bytes: &[u8], name: &[u8]) -> bool {
+    let delimiter = |byte: u8| byte.is_ascii_whitespace() || b"()<>[]{}/%".contains(&byte);
+    let hex = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
+    let mut at = 0usize;
+    while let Some(offset) = bytes.get(at..).and_then(|rest| rest.iter().position(|byte| *byte == b'/')) {
+        let mut cursor = at + offset + 1;
+        let mut decoded = Vec::with_capacity(name.len());
+        while cursor < bytes.len() && !delimiter(bytes[cursor]) && decoded.len() <= name.len() {
+            let byte = bytes[cursor];
+            if byte == b'#' {
+                if let (Some(high), Some(low)) = (bytes.get(cursor + 1).and_then(|b| hex(*b)), bytes.get(cursor + 2).and_then(|b| hex(*b))) {
+                    decoded.push(high << 4 | low);
+                    cursor += 3;
+                    continue;
+                }
+            }
+            decoded.push(byte);
+            cursor += 1;
+        }
+        if decoded == name && (cursor >= bytes.len() || delimiter(bytes[cursor])) {
+            return true;
+        }
+        at = cursor.max(at + offset + 1);
+    }
+    false
 }
 
 /// Native words as the worker counts them on extracted text (`pageEvidenceWordCount`): runs of 2+ letters or
@@ -634,6 +671,14 @@ mod tests {
 
     fn routing() -> PageRasterRouting {
         Card::bundled().page_raster_routing.clone()
+    }
+
+    #[test]
+    fn finds_names_with_escapes_and_ignores_prefixes() {
+        assert!(has_name(b"<< /Encrypt 5 0 R >>", b"Encrypt"));
+        assert!(has_name(b"<</Encr#79pt 5 0 R>>", b"Encrypt"));
+        assert!(!has_name(b"<< /Encrypted true /EncryptMetadata false >>", b"Encrypt"));
+        assert!(!has_name(b"(no names here)", b"Encrypt"));
     }
 
     #[test]

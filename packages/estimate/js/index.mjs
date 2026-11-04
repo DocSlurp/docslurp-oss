@@ -61,8 +61,11 @@ export async function createEstimator(options = {}) {
       packed = BigInt.asUintN(64, BigInt(exports[name](...args)));
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
-        // A panic traps the module and may leave its memory inconsistent: start a fresh instance.
+        // A panic traps the module and may leave its memory inconsistent: start a fresh instance. The old one's
+        // memory (up to the module's 256 MiB cap) is freed at the next collection; hosts probing untrusted files in
+        // bulk should run the estimator in a worker they can terminate.
         instance = new WebAssembly.Instance(module, {});
+        globalThis.gc?.();
         throw new EstimatorError("crashed", `the estimator stopped on this input (${error.message})`);
       }
       throw error;

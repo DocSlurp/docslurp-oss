@@ -70,22 +70,45 @@ fn pages_without_text_but_with_any_image_bill_rich() {
     assert_eq!(scanned_share(&result), 1.0);
 }
 
-#[test]
-fn object_stream_bombs_are_refused_before_loading() {
-    // Many object streams that each inflate to 15 MiB of spaces: under lopdf's per-stream limit, far over the
-    // probe's 64 MiB document budget. The probe must refuse quickly instead of decoding gigabytes.
+/// Many object streams that each decode to 15 MiB of spaces: under lopdf's per-stream limit, far over the probe's
+/// 64 MiB document budget. `type_name` and `double_flate` cover the council's bypasses of a raw-text check
+/// (`#`-escaped names, nested filters).
+fn object_stream_bomb(type_name: &str, double_flate: bool) -> Vec<u8> {
     let chunk = vec![b' '; 15 * 1024 * 1024];
-    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&chunk, 9);
+    let mut compressed = miniz_oxide::deflate::compress_to_vec_zlib(&chunk, 9);
+    if double_flate {
+        compressed = miniz_oxide::deflate::compress_to_vec_zlib(&compressed, 9);
+    }
+    let filter = if double_flate { "[/FlateDecode /FlateDecode]" } else { "/FlateDecode" };
     let mut pdf = b"%PDF-1.7\n".to_vec();
     for number in 1..=40 {
-        pdf.extend_from_slice(format!("{number} 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length {} >>\nstream\n", compressed.len()).as_bytes());
+        pdf.extend_from_slice(
+            format!("{number} 0 obj\n<< /Type {type_name} /N 1 /First 4 /Filter {filter} /Length {} >>\nstream\n", compressed.len())
+                .as_bytes(),
+        );
         pdf.extend_from_slice(&compressed);
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
     }
     pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
-    let started = Instant::now();
-    let result = probe(Card::bundled(), &ProbeInput::whole("bomb.pdf", None, &pdf));
-    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
-    assert!(result.mix.is_none());
-    assert!(result.notes.iter().any(|note| note.contains("object streams")), "{:?}", result.notes);
+    pdf
+}
+
+#[test]
+fn object_stream_bombs_are_refused_within_the_document_budget() {
+    for (type_name, double_flate) in [("/ObjStm", false), ("/ObjSt#6D", false), ("/ObjStm", true), ("/O#62jStm", true)] {
+        let pdf = object_stream_bomb(type_name, double_flate);
+        let started = Instant::now();
+        let result = probe(Card::bundled(), &ProbeInput::whole("bomb.pdf", None, &pdf));
+        assert!(started.elapsed() < Duration::from_secs(10), "{type_name} {double_flate}: took {:?}", started.elapsed());
+        assert!(result.mix.is_none(), "{type_name} {double_flate}");
+        assert!(result.notes.iter().any(|note| note.contains("object streams")), "{type_name} {double_flate}: {:?}", result.notes);
+    }
+}
+
+#[test]
+fn encrypted_files_are_not_loaded() {
+    let pdf = b"%PDF-1.7\n1 0 obj << /Type /Page >> endobj\ntrailer << /Root 1 0 R /Encr#79pt 2 0 R >>\n%%EOF";
+    let result = probe(Card::bundled(), &ProbeInput::whole("locked.pdf", None, pdf));
+    assert_eq!(result.pages, Some(1.0));
+    assert!(result.notes.iter().any(|note| note.contains("encrypted")));
 }

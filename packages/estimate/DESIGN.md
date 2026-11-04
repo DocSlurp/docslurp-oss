@@ -70,10 +70,12 @@ The `complex` page class changes only the time estimate. Probe effort goes where
 ## Probes: bounded and closer to the worker
 
 Hostile-input budgets **[D]**, tightened after the merge council (adversarial H1/M2):
-- The module's linear memory is capped at 512 MiB (`--max-memory`): anything that escapes a budget traps, and the
+- The module's linear memory is capped at 256 MiB (`--max-memory`): anything that escapes a budget traps, and the
   host recreates the instance, instead of exhausting the host's memory.
-- PDF: object streams are inflated in a preflight against a 64 MiB document budget before lopdf loads them (lopdf
-  only limits each stream); page content and forms share a 32 MiB document budget; each form XObject is
+- PDF: object streams are decoded inside lopdf's load hook, with lopdf's own name parsing and filter chain, against a
+  64 MiB document budget (lopdf only limits each stream; a raw-text preflight was bypassed by `#`-escaped names and
+  nested filters in the council re-review). Encrypted files, whose load path skips the hook, are not loaded;
+ page content and forms share a 32 MiB document budget; each form XObject is
   decompressed once; per-page budgets for interpreted bytes (16 MiB), form invocations and operations; whole-file
   probe limit 64 MB. Over a budget, the probe reports the page count it can and no mix.
 - Media: all offset arithmetic in `u64` with checked operations (a WAV chunk size of `0xFFFFFFF9` wraps today).
