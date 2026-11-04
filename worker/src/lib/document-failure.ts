@@ -7,6 +7,7 @@
  */
 
 import { isShutdownMessage } from "../temporal/failure-classification.js";
+import { findArtifactReadError } from "./artifact-read-error.js";
 import { findHungWorkError, HungWorkError } from "./hung-work.js";
 import { findProviderRetryableError } from "./provider-retry.js";
 
@@ -58,6 +59,11 @@ function causeChain(error: unknown): unknown[] {
 
 export function isDocumentLevelFailure(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return false;
+  // A recorded artifact that is missing, malformed or outside the bucket is a verdict on the document (it fails with
+  // the reason, no strategy or retry reads it differently). A failed read of a healthy artifact is the store's: the
+  // stage reruns the document.
+  const unreadable = findArtifactReadError(error);
+  if (unreadable) return !unreadable.retryable;
   for (const link of causeChain(error)) {
     if (!(link instanceof Error)) continue;
     if (link instanceof RunPolicyError) return false;

@@ -25,13 +25,14 @@ import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta, type ChunkMeta } from "../pipeline/chunking.js";
 import { estimateTokens, normalizeNfc } from "../lib/unicode-text.js";
-import { ArtifactReadError } from "../lib/artifact-read-error.js";
+import { ArtifactReadError, artifactReadFailureKind } from "../lib/artifact-read-error.js";
 export { ArtifactReadError };
 import type { CommandRunner } from "../tools/runner.js";
 import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
 import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import {
   type ArtifactStore,
+  artifactStorageKey,
   cleanupTempFile,
   keyFromStorageUri,
 } from "../tools/storage.js";
@@ -288,18 +289,30 @@ async function extractTextForEmbeddingRaw(
   throw new Error(`no extractor produced text for ${document.filename}`);
 }
 
-function artifactKeyOf(artifactUri: string): string {
-  return artifactUri.replace(/^s3:\/\/[^/]+\//, "");
+/**
+ * The bucket-local key of a recorded artifact. The worker reads only its own bucket: another bucket's URI, or a key
+ * with traversal segments, is refused (`outside-bucket`) before any storage call, so a manifest or run record
+ * cannot point the worker at objects it does not own.
+ */
+function artifactKeyOf(storage: ArtifactStore, artifactUri: string): string {
+  const key = keyFromStorageUri(artifactUri, storage.bucket);
+  if (key === null) throw new ArtifactReadError(artifactUri, `it is not in this worker's bucket`, { kind: "outside-bucket" });
+  try {
+    return artifactStorageKey(key);
+  } catch (error) {
+    throw new ArtifactReadError(artifactUri, `unsafe storage key`, { kind: "outside-bucket", cause: error });
+  }
 }
 
 async function readUtf8Artifact(storage: ArtifactStore, artifactUri: string): Promise<string> {
+  const key = artifactKeyOf(storage, artifactUri);
   let data: Buffer;
   try {
-    data = await storage.getBytes(artifactKeyOf(artifactUri));
+    data = await storage.getBytes(key);
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error, kind: artifactReadFailureKind(error) });
   }
-  if (!isUtf8(data)) throw new ArtifactReadError(artifactUri, "not valid UTF-8");
+  if (!isUtf8(data)) throw new ArtifactReadError(artifactUri, "not valid UTF-8", { kind: "invalid" });
   return data.toString("utf8");
 }
 
@@ -316,10 +329,10 @@ export async function readExtractedMarkdown(
   try {
     parsed = JSON.parse(raw) as { textArtifactUri?: string };
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, "manifest is not valid JSON", { cause: error });
+    throw new ArtifactReadError(artifactUri, "manifest is not valid JSON", { cause: error, kind: "invalid" });
   }
   if (!parsed.textArtifactUri) {
-    throw new ArtifactReadError(artifactUri, "manifest has no textArtifactUri");
+    throw new ArtifactReadError(artifactUri, "manifest has no textArtifactUri", { kind: "invalid" });
   }
   return normalizeNfc(await readUtf8Artifact(storage, parsed.textArtifactUri));
 }
@@ -328,14 +341,15 @@ export async function readCanonicalDocumentArtifact(
   storage: ArtifactStore,
   artifactUri: string,
 ): Promise<CanonicalDocument> {
+  const key = artifactKeyOf(storage, artifactUri);
   let json: unknown;
   try {
-    json = await storage.getJson(artifactKeyOf(artifactUri));
+    json = await storage.getJson(key);
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error, kind: artifactReadFailureKind(error) });
   }
   const parsed = canonicalDocumentSchema.safeParse(json);
-  if (!parsed.success) throw new ArtifactReadError(artifactUri, "does not match the canonical document schema");
+  if (!parsed.success) throw new ArtifactReadError(artifactUri, "does not match the canonical document schema", { kind: "invalid" });
   // Indexed text is NFC, so "ü" typed as one character or as u + combining diaeresis finds the same chunks.
   for (const block of parsed.data.blocks) block.text = normalizeNfc(block.text);
   return parsed.data;

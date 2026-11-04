@@ -6,6 +6,7 @@ import { buildCanonicalChunksFromDocument, buildCanonicalDocumentFromMarkdown } 
 import { estimateTokens } from "../lib/unicode-text.js";
 import { ArtifactReadError, buildChunks, extractTextForEmbedding, fitChunkContextPreamble } from "../stages/embedding-runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import type { Document } from "../models.js";
 
 describe("embedding input limits", () => {
@@ -112,6 +113,54 @@ describe("a recorded artifact that cannot be read", () => {
     const getJson = vi.fn(async () => { throw new Error("Unexpected token { in JSON"); });
     const storage = { getBytes, getJson, bucket: "bucket" } as never;
     await expect(extractTextForEmbedding(document, runner, storage, "s3://bucket/markdown/doc.md", undefined, "s3://bucket/canonical/doc.json")).rejects.toBeInstanceOf(ArtifactReadError);
+  });
+
+  it("refuses an artifact in another bucket before any storage call, in the URI, a manifest and the canonical artifact", async () => {
+    const getBytes = vi.fn(async () => Buffer.from(JSON.stringify({ textArtifactUri: "s3://other-tenant-bucket/markdown/doc.md" })));
+    const getJson = vi.fn(async () => ({}));
+    const storage = { getBytes, getJson, bucket: "bucket" } as never;
+
+    const direct = await extractTextForEmbedding(document, runner, storage, "s3://other-bucket/markdown/doc.md", undefined, undefined).catch((e) => e);
+    expect(direct).toBeInstanceOf(ArtifactReadError);
+    expect(direct).toMatchObject({ kind: "outside-bucket", retryable: false });
+    expect(getBytes).not.toHaveBeenCalled();
+
+    // A manifest in our bucket that points at another bucket.
+    const nested = await extractTextForEmbedding(document, runner, storage, "s3://bucket/markdown/doc.json", undefined, undefined).catch((e) => e);
+    expect(nested).toMatchObject({ kind: "outside-bucket", retryable: false, artifactUri: "s3://other-tenant-bucket/markdown/doc.md" });
+    expect(getBytes).toHaveBeenCalledTimes(1);
+
+    const canonical = await extractTextForEmbedding(document, runner, storage, "s3://bucket/markdown/doc.md", undefined, "s3://other-bucket/canonical/doc.json").catch((e) => e);
+    expect(canonical).toMatchObject({ kind: "outside-bucket" });
+    expect(getJson).not.toHaveBeenCalled();
+  });
+
+  it("refuses keys that climb out of the artifact tree", async () => {
+    const getBytes = vi.fn(async () => Buffer.from("text"));
+    const storage = { getBytes, bucket: "bucket" } as never;
+    for (const uri of ["s3://bucket/../other-user/run/markdown/doc.md", "s3://bucket/a/%2e%2e/../b.md", "../x.md", "s3://bucket//absolute.md"]) {
+      await expect(extractTextForEmbedding(document, runner, storage, uri, undefined, undefined)).rejects.toMatchObject({ kind: "outside-bucket", retryable: false });
+    }
+    expect(getBytes).not.toHaveBeenCalled();
+  });
+
+  it("classifies a missing or malformed artifact as permanent and a failed read as retryable", async () => {
+    const noSuchKey = Object.assign(new Error("The specified key does not exist."), { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } });
+    const missing = await extractTextForEmbedding(document, runner, { getBytes: async () => { throw noSuchKey; }, bucket: "bucket" } as never, "s3://bucket/markdown/doc.md", undefined, undefined).catch((e) => e);
+    expect(missing).toMatchObject({ kind: "missing", retryable: false });
+    expect(missing.message).toContain("not retryable");
+    const notUtf8 = await extractTextForEmbedding(document, runner, { getBytes: async () => Buffer.from([0xff, 0xfe]), bucket: "bucket" } as never, "s3://bucket/markdown/doc.md", undefined, undefined).catch((e) => e);
+    expect(notUtf8).toMatchObject({ kind: "invalid", retryable: false });
+    const badSchema = await extractTextForEmbedding(document, runner, { getBytes: async () => Buffer.from("text"), getJson: async () => ({ blocks: "nope" }), bucket: "bucket" } as never, "s3://bucket/markdown/doc.md", undefined, "s3://bucket/canonical/doc.json").catch((e) => e);
+    expect(badSchema).toMatchObject({ kind: "invalid", retryable: false });
+    const slow = await extractTextForEmbedding(document, runner, { getBytes: async () => { throw new Error("503 Service Unavailable"); }, bucket: "bucket" } as never, "s3://bucket/markdown/doc.md", undefined, undefined).catch((e) => e);
+    expect(slow).toMatchObject({ kind: "storage", retryable: true });
+  });
+
+  it("fails the document for a permanent read error and reruns the stage for a transient one", () => {
+    expect(isDocumentLevelFailure(new ArtifactReadError("s3://bucket/a.md", "gone", { kind: "missing" }))).toBe(true);
+    expect(isDocumentLevelFailure(new ArtifactReadError("s3://bucket/a.md", "503", { kind: "storage" }))).toBe(false);
+    expect(isDocumentLevelFailure(new Error("outer", { cause: new ArtifactReadError("s3://bucket/a.md", "other bucket", { kind: "outside-bucket" }) }))).toBe(true);
   });
 
   it("returns the artifact text in NFC", async () => {
