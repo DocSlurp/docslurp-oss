@@ -1,4 +1,5 @@
 import { tableChunks, TableBoundary } from "../pipeline/table-chunking.js";
+import { atomize, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "./unicode-text.js";
 import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
@@ -60,9 +61,10 @@ export function buildCanonicalDocumentFromMarkdown(args: {
   // Page numbers come only from page breaks that match the page count. On a
   // mismatch the whole text is one section with an unknown page, so a citation
   // never points at a page the text did not come from.
-  const strictPages = splitTextIntoPagesStrict(args.text, args.pageCount);
+  const text = normalizeNfc(args.text);
+  const strictPages = splitTextIntoPagesStrict(text, args.pageCount);
   const pagesKnown = strictPages !== null;
-  const pages = strictPages ?? (args.text.trim() ? [args.text.replace(/\r\n/g, "\n").replace(/\f/g, "\n").trim()] : []);
+  const pages = strictPages ?? (text.trim() ? [text.replace(/\r\n/g, "\n").replace(/\f/g, "\n").trim()] : []);
   const headingStack: Array<{ level: number; text: string }> = [];
   const blocks: CanonicalBlock[] = [];
   let order = 0;
@@ -302,10 +304,21 @@ export function canonicalDocumentToText(document: CanonicalDocument): string {
 export function buildCanonicalChunksFromDocument(
   document: CanonicalDocument,
   fallback: string,
-  options?: { chunkOverlap?: boolean; maxChars?: number; sourceKind?: "image" | null; evidenceBoundaries?: boolean }
+  options?: {
+    chunkOverlap?: boolean;
+    maxChars?: number;
+    /** Model-token limit per chunk (`estimateTokens`); every chunk also respects `maxChars`. */
+    maxTokens?: number;
+    sourceKind?: "image" | null;
+    evidenceBoundaries?: boolean;
+  }
 ): CanonicalChunk[] {
   const maxChars = options?.maxChars ?? MAX_CHARS;
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) throw new RangeError("maxChars must be a positive safe integer");
+  if (options?.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) {
+    throw new RangeError("maxTokens must be a positive safe integer");
+  }
+  const limits: SizeLimits = { maxChars, maxTokens: options?.maxTokens };
   // Image-only pages carry no text to embed.
   const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0 && !isPageImageReferenceBlock(block));
 
@@ -345,15 +358,15 @@ export function buildCanonicalChunksFromDocument(
 
     if (block.type === "table") {
       flushCurrent();
-      for (const tableChunk of buildTableChunks(block, maxChars)) {
+      for (const tableChunk of buildTableChunks(block, limits)) {
         baseChunks.push(tableChunk);
       }
       continue;
     }
 
-    if (blockText.length > maxChars) {
+    if (!fitsLimits(blockText, limits)) {
       flushCurrent();
-      for (const splitText of splitOversizedText(blockText, maxChars)) {
+      for (const splitText of splitOversizedText(blockText, limits, block.type === "code")) {
         baseChunks.push(materializeChunk(splitText, [block]));
       }
       continue;
@@ -362,7 +375,7 @@ export function buildCanonicalChunksFromDocument(
     const nextText = currentText ? `${currentText}\n\n${blockText}` : blockText;
     const startsNewSection = block.type === "heading" && currentBlocks.length > 0;
 
-    if (startsNewSection || nextText.length > maxChars || (options?.evidenceBoundaries !== false && evidenceBoundary(currentBlocks, block, currentText.length))) {
+    if (startsNewSection || !fitsLimits(nextText, limits) || (options?.evidenceBoundaries !== false && evidenceBoundary(currentBlocks, block, currentText.length))) {
       flushCurrent();
     }
 
@@ -373,7 +386,7 @@ export function buildCanonicalChunksFromDocument(
   flushCurrent();
 
   attachLocators(baseChunks, meaningfulBlocks, options?.sourceKind ?? null);
-  return withOverlap(baseChunks, options?.chunkOverlap ? 0.5 : 0, maxChars);
+  return withOverlap(baseChunks, options?.chunkOverlap ? 0.5 : 0, limits);
 }
 
 function attachLocators(
@@ -478,7 +491,7 @@ function findLastHeadingPath(blocks: CanonicalBlock[]): string[] {
 function withOverlap(
   baseChunks: Array<Omit<CanonicalChunk, "chunkIndex" | "overlapIndex">>,
   overlapFraction: number,
-  maxChars: number
+  limits: SizeLimits
 ): CanonicalChunk[] {
   const chunks: CanonicalChunk[] = [];
   let chunkIndex = 0;
@@ -498,11 +511,12 @@ function withOverlap(
 
     const next = baseChunks[index + 1]!;
     if (current.blockTypes.includes("table") || next.blockTypes.includes("table")) continue;
-    const tailLength = Math.floor(current.text.length * overlapFraction);
-    const headLength = Math.floor(next.text.length * overlapFraction);
-    const overlapText = `${current.text.slice(-tailLength)} ${next.text.slice(0, headLength)}`.trim();
+    // Cut on word boundaries: never mid-word, mid-grapheme, or (slice(-0)) the whole chunk.
+    const tail = tailWords(current.text, Math.floor(current.text.length * overlapFraction));
+    const head = headWords(next.text, Math.floor(next.text.length * overlapFraction));
+    const overlapText = `${tail} ${head}`.trim();
 
-    if (!overlapText || overlapText.length > maxChars) {
+    if (!overlapText || !fitsLimits(overlapText, limits)) {
       continue;
     }
 
@@ -568,14 +582,9 @@ function isIndentedContinuation(line: string): boolean {
   return /^\s{2,}\S/.test(line);
 }
 
-function splitOversizedText(text: string, maxChars: number): string[] {
-  const slices: string[] = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    slices.push(text.slice(cursor, cursor + maxChars).trim());
-    cursor += maxChars;
-  }
-  return slices.filter(Boolean);
+/** Pieces of `text` that fit `limits`, cut at sentence, line, word, then grapheme boundaries; each is an exact substring of the trimmed text. */
+function splitOversizedText(text: string, limits: SizeLimits, code = false): string[] {
+  return atomize(text, limits, { code }).map((piece) => piece.trim()).filter(Boolean);
 }
 
 function collectRegionBoxes(blocks: CanonicalBlock[]): LayoutRegion[] {
@@ -643,14 +652,16 @@ function rectToPolygon(bbox: { x: number; y: number; width: number; height: numb
 
 function buildTableChunks(
   block: CanonicalBlock,
-  maxChars: number
+  limits: SizeLimits
 ): Array<Omit<CanonicalChunk, "chunkIndex" | "overlapIndex">> {
+  // HTML-table chunks are sized in characters; bound them by the token limit too (JSON-encoded cells cost about a token per two characters).
+  const maxChars = Math.max(128, limits.maxTokens === undefined ? limits.maxChars : Math.min(limits.maxChars, limits.maxTokens * 2));
   if (/^\s*<table(?=\s|>|$)/i.test(block.text)) {
     return [...tableChunks(block.text.trim(), maxChars, block.order + 1)]
       .map(text => materializeChunk(text, [block], { tableGranularity: "table" }));
   }
   const parsed = parseMarkdownTable(block.text);
-  const chunks = materializeOversizedBlock(block, maxChars, {
+  const chunks = materializeOversizedBlock(block, limits, {
     tableGranularity: "table",
     tableRowCount: parsed?.rowCount ?? null,
     tableColumnNames: parsed?.columnNames ?? [],
@@ -714,7 +725,7 @@ function withBlockFallbackGeometry(cell: TableCell, block: CanonicalBlock): Tabl
 
 function materializeOversizedBlock(
   block: CanonicalBlock,
-  maxChars: number,
+  limits: SizeLimits,
   tableMetadata?: Partial<Pick<
     CanonicalChunk,
     "tableGranularity" | "tableRowIndex" | "tableRowCount" | "tableColumnNames" | "tableColumnTypes" | "tableCells" | "tableCell"
@@ -725,11 +736,11 @@ function materializeOversizedBlock(
     return [];
   }
 
-  if (blockText.length <= maxChars) {
+  if (fitsLimits(blockText, limits)) {
     return [materializeChunk(blockText, [block], tableMetadata)];
   }
 
-  return splitOversizedText(blockText, maxChars).map((text) => materializeChunk(text, [block], tableMetadata));
+  return splitOversizedText(blockText, limits).map((text) => materializeChunk(text, [block], tableMetadata));
 }
 
 function parseMarkdownTable(text: string): {

@@ -1,7 +1,6 @@
 import {
   embeddingProfileCatalog,
   resolveEmbeddingRoute,
-  type EmbeddingProfileKey,
   type InferenceLane,
   type PipelineFeatures,
 } from "@docslurp/shared";
@@ -11,41 +10,87 @@ import type { EmbeddingProfile } from "../models.js";
 
 const supportedVectorBackends = new Set(["lancedb", "orama", "chroma", "milvus"]);
 
-export function detectLanguage(text: string): string {
-  const sample = text.slice(0, 2000);
-  if (!sample) return "en";
-  const nonAsciiRatio = (sample.match(/[^\x00-\x7F]/g) ?? []).length / sample.length;
-  if (nonAsciiRatio > 0.15) {
-    return "mul";
+/**
+ * Dominant script of a text sample: `latin`, `cjk`, `cyrillic`, `arabic`, ... or
+ * `und` when there are too few letters to tell. It is metadata (and may pick a
+ * tokenizer); it never selects an embedding model, because one index config
+ * means one vector space.
+ */
+export function detectScript(text: string): string {
+  const counts = new Map<string, number>();
+  let letters = 0;
+  for (const char of text.slice(0, 4000)) {
+    if (!/\p{L}/u.test(char)) continue;
+    letters++;
+    const script = SCRIPTS.find(([, pattern]) => pattern.test(char))?.[0] ?? "other";
+    counts.set(script, (counts.get(script) ?? 0) + 1);
   }
-  return "en";
+  if (letters < 8) return "und";
+  let best = "und";
+  let bestCount = 0;
+  for (const [script, count] of counts) {
+    if (count > bestCount) {
+      best = script;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
-export function resolveEmbeddingModel(cfg: Config, pipeline: PipelineFeatures, detectedLanguage?: string): EmbeddingProfile {
-  const pipelineProfileKey = pipeline.embedding.profile;
-  const pipelineProfileDefaults = embeddingProfileCatalog[pipelineProfileKey].config;
+/**
+ * Coarse language code implied by the dominant script, for metadata. Scripts
+ * shared by many languages (Latin, Cyrillic, Arabic, Devanagari) stay `und-<Script>`
+ * rather than guessing a language from a letter ratio.
+ */
+export function detectLanguage(text: string): string {
+  const sample = text.slice(0, 4000);
+  switch (detectScript(sample)) {
+    case "cjk": return /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(sample) ? "ja" : "zh";
+    case "hangul": return "ko";
+    case "greek": return "el";
+    case "hebrew": return "he";
+    case "thai": return "th";
+    case "latin": return "und-Latn";
+    case "cyrillic": return "und-Cyrl";
+    case "arabic": return "und-Arab";
+    case "devanagari": return "und-Deva";
+    default: return "und";
+  }
+}
 
-  const pipelineModelOverride = differsFromProfileDefault(pipeline.embedding.modelUri, pipelineProfileDefaults.modelUri)
+const SCRIPTS: Array<[string, RegExp]> = [
+  ["latin", /\p{Script=Latin}/u],
+  ["cjk", /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u],
+  ["hangul", /\p{Script=Hangul}/u],
+  ["cyrillic", /\p{Script=Cyrillic}/u],
+  ["greek", /\p{Script=Greek}/u],
+  ["arabic", /\p{Script=Arabic}/u],
+  ["hebrew", /\p{Script=Hebrew}/u],
+  ["devanagari", /\p{Script=Devanagari}/u],
+  ["thai", /\p{Script=Thai}/u],
+];
+
+/**
+ * The embedding route of a run. It depends on the pipeline config alone: every
+ * document of an index config is embedded with the same model, so every vector
+ * has the dimension the config records and the server can search them together.
+ */
+export function resolveEmbeddingModel(cfg: Config, pipeline: PipelineFeatures): EmbeddingProfile {
+  const profileKey = pipeline.embedding.profile;
+  const profileDefaults = embeddingProfileCatalog[profileKey].config;
+
+  const modelOverride = differsFromProfileDefault(pipeline.embedding.modelUri, profileDefaults.modelUri)
     ? pipeline.embedding.modelUri
     : undefined;
-  const effectiveProfileKey = shouldUseMultilingualProfile(
-    detectedLanguage,
-    pipelineProfileKey,
-    pipelineModelOverride,
-    undefined
-  )
-    ? "multilingual-local"
-    : pipelineProfileKey;
-  const effectiveProfileDefaults = embeddingProfileCatalog[effectiveProfileKey].config;
 
   const modelUri = firstNonEmpty(
-    pipelineModelOverride,
-    effectiveProfileDefaults.modelUri,
+    modelOverride,
+    profileDefaults.modelUri,
     "llm://openrouter/perplexity/pplx-embed-v1-0.6b",
   );
-  const target = pipelineModelOverride
+  const target = modelOverride
     ? pipeline.embedding.target
-    : effectiveProfileDefaults.target;
+    : profileDefaults.target;
   const sharedRoute = resolveEmbeddingRoute({
     ...pipeline.embedding,
     modelUri,
@@ -59,7 +104,7 @@ export function resolveEmbeddingModel(cfg: Config, pipeline: PipelineFeatures, d
   );
 
   return {
-    profile: effectiveProfileKey,
+    profile: profileKey,
     target,
     modelUri,
     runtime: sharedRoute.runtime as EmbeddingProfile["runtime"],
@@ -69,12 +114,12 @@ export function resolveEmbeddingModel(cfg: Config, pipeline: PipelineFeatures, d
     dimensions: sharedRoute.dimensions,
     requestedDimensions: sharedRoute.requestedDimensions,
     task: firstNonEmpty(
-      differsFromProfileDefault(pipeline.embedding.task, pipelineProfileDefaults.task) ? pipeline.embedding.task : undefined,
-      effectiveProfileDefaults.task
+      differsFromProfileDefault(pipeline.embedding.task, profileDefaults.task) ? pipeline.embedding.task : undefined,
+      profileDefaults.task
     ) as EmbeddingProfile["task"],
-    normalize: differsFromProfileDefault(pipeline.embedding.normalize, pipelineProfileDefaults.normalize)
+    normalize: differsFromProfileDefault(pipeline.embedding.normalize, profileDefaults.normalize)
       ? pipeline.embedding.normalize
-      : effectiveProfileDefaults.normalize,
+      : profileDefaults.normalize,
     batchSize: laneBatchSize,
     lateChunking: pipeline.embedding.lateChunking,
     lateChunkingWindow: pipeline.embedding.lateChunkingWindow,
@@ -124,18 +169,6 @@ function firstNonEmpty(...values: Array<string | undefined>): string {
 
 function differsFromProfileDefault<T>(value: T, defaultValue: T): boolean {
   return value !== defaultValue;
-}
-
-function shouldUseMultilingualProfile(
-  detectedLanguage: string | undefined,
-  profileKey: EmbeddingProfileKey,
-  pipelineModelOverride: string | undefined,
-  configModelOverride: string | undefined
-): boolean {
-  return detectedLanguage === "mul"
-    && !pipelineModelOverride
-    && !configModelOverride
-    && profileKey === "good-fast-local";
 }
 
 function defaultBatchSizeForLane(lane: InferenceLane, profileBatchSize: number): number {
