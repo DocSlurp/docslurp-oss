@@ -1,0 +1,382 @@
+//! Ports of `estimateIngest` and `estimateUploadMedia` (`@docslurp/shared`).
+//!
+//! The arithmetic follows the TypeScript operation for operation, so results agree to the last bit; the golden
+//! cases in `golden/cases.json` hold it there. Change the TypeScript first, regenerate, then mirror it here.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::card::{Card, PageCost, PageMix, PageMode};
+
+const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// `nonNegative` in billing.ts: non-finite and missing values are 0, negatives clamp to 0.
+pub(crate) fn non_negative(value: Option<f64>) -> f64 {
+    match value {
+        Some(v) if v.is_finite() => v.max(0.0),
+        _ => 0.0,
+    }
+}
+
+/// JavaScript `Math.round`: halves round towards +infinity.
+pub(crate) fn js_round(value: f64) -> f64 {
+    let floor = value.floor();
+    // `value - floor` is exact for every finite double, unlike `value + 0.5`.
+    if value - floor >= 0.5 { floor + 1.0 } else { floor }
+}
+
+/// Credits for `pages` pages in `mode`.
+pub fn page_credits(card: &Card, mode: PageMode, pages: f64) -> f64 {
+    let per1k = match mode {
+        PageMode::Rich => card.price_card.rich_per1k_pages,
+        PageMode::Fast => card.price_card.fast_per1k_pages,
+    };
+    (non_negative(Some(pages)) * per1k) / 1_000.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Audio,
+    Video,
+}
+
+/// Rich pages a media file counts as: its duration rounded up to whole minutes, times the kind's factor.
+pub fn media_rich_pages(card: &Card, kind: MediaKind, seconds: f64) -> f64 {
+    let minutes = (non_negative(Some(seconds)) / 60.0).ceil();
+    minutes
+        * match kind {
+            MediaKind::Video => card.price_card.video_minute_rich_pages,
+            MediaKind::Audio => card.price_card.audio_minute_rich_pages,
+        }
+}
+
+/// Credits for one optional per-document feature over one document of `pages` pages.
+pub fn feature_credits(card: &Card, feature: &str, pages: f64) -> f64 {
+    if feature == "documentSummary" {
+        return card.price_card.document_summary;
+    }
+    let pages = if pages.is_finite() { pages } else { 0.0 };
+    let blocks = 1f64.max((0f64.max(pages) / 10.0).ceil());
+    let per10 = match feature {
+        "structuredFields" => card.price_card.structured_fields_per10_pages,
+        "knowledgeGraph" => card.price_card.knowledge_graph_per10_pages,
+        _ => card.price_card.propositions_per10_pages,
+    };
+    per10 * blocks
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestInput {
+    pub pages: f64,
+    #[serde(default)]
+    pub mix: PageMix,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub worker_slots: Option<f64>,
+    #[serde(default)]
+    pub documents: Option<f64>,
+    #[serde(default)]
+    pub audio_minutes: Option<f64>,
+    #[serde(default)]
+    pub video_minutes: Option<f64>,
+    /// Optional per-document features to price (`documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`).
+    #[serde(default)]
+    pub features: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditBreakdown {
+    pub fast: f64,
+    pub rich: f64,
+    pub media: f64,
+    pub features: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestCredits {
+    pub total_credits: f64,
+    pub breakdown: CreditBreakdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestStorage {
+    pub bytes: f64,
+    pub object_bytes: f64,
+    pub index_bytes: f64,
+    pub monthly_credits: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestEstimate {
+    pub pages: f64,
+    pub profile: String,
+    pub workers: f64,
+    pub effective_parallelism: f64,
+    pub worker_seconds: f64,
+    pub wall_seconds: f64,
+    pub pages_per_minute: f64,
+    pub minutes_per100_pages: f64,
+    pub fast_pages: f64,
+    pub rich_pages: f64,
+    pub media_rich_pages: f64,
+    pub credits: IngestCredits,
+    pub feature_credits: BTreeMap<String, f64>,
+    pub pages_per_dollar: f64,
+    pub credits_per1000_pages: f64,
+    pub storage: IngestStorage,
+}
+
+fn normalize_mix(mix: &PageMix) -> PageMix {
+    let text = non_negative(Some(mix.text));
+    let complex = non_negative(Some(mix.complex));
+    let scanned = non_negative(Some(mix.scanned));
+    let total = text + complex + scanned;
+    if total <= 0.0 {
+        return PageMix::new(1.0, 0.0, 0.0);
+    }
+    PageMix::new(text / total, complex / total, scanned / total)
+}
+
+/// Port of `estimateIngest`: credits, time and storage for a corpus of `pages` pages with a page-class mix.
+pub fn estimate_ingest(card: &Card, input: &IngestInput) -> IngestEstimate {
+    let (profile_id, profile) = card.profile(input.profile.as_deref().unwrap_or("auto"));
+    let slots = js_round(non_negative(Some(input.worker_slots.unwrap_or(card.funded_worker_slots))));
+    let workers = 1f64.max(if slots == 0.0 || slots.is_nan() { card.funded_worker_slots } else { slots });
+    let pages = 0f64.max(js_round(non_negative(Some(input.pages))));
+    let documents = 1f64.max(js_round(non_negative(Some(input.documents.unwrap_or(1.0)))));
+    let audio_minutes = non_negative(input.audio_minutes).ceil();
+    let video_minutes = non_negative(input.video_minutes).ceil();
+    let mix = normalize_mix(&input.mix);
+
+    let mut worker_seconds = 0.0;
+    let mut fast_pages = 0.0;
+    let mut rich_pages = 0.0;
+    let mut source_bytes = 0.0;
+    let mut artifact_bytes = 0.0;
+    let mut index_bytes = 0.0;
+    let mut slowest_page_seconds: f64 = 0.0;
+    let classes: [(f64, &PageCost); 3] =
+        [(mix.text, &profile.text), (mix.complex, &profile.complex), (mix.scanned, &profile.scanned)];
+    for (share, cost) in classes {
+        let count = pages * share;
+        if count <= 0.0 {
+            continue;
+        }
+        worker_seconds += count * cost.worker_seconds;
+        match cost.mode {
+            PageMode::Rich => rich_pages += count,
+            PageMode::Fast => fast_pages += count,
+        }
+        source_bytes += count * cost.source_bytes;
+        artifact_bytes += count * cost.artifact_bytes;
+        index_bytes += count * cost.index_bytes;
+        slowest_page_seconds = slowest_page_seconds.max(cost.worker_seconds);
+    }
+    let media_pages = media_rich_pages(card, MediaKind::Audio, audio_minutes * 60.0)
+        + media_rich_pages(card, MediaKind::Video, video_minutes * 60.0);
+    worker_seconds += audio_minutes * card.media_worker_seconds_per_minute.audio
+        + video_minutes * card.media_worker_seconds_per_minute.video;
+    source_bytes += audio_minutes * card.media_bytes_per_minute.audio + video_minutes * card.media_bytes_per_minute.video;
+
+    let units = 1f64.max(pages + audio_minutes + video_minutes);
+    let effective_parallelism = 1f64.max(workers.min(documents * card.max_page_fanout_per_run).min(units));
+    let has_work = pages > 0.0 || audio_minutes > 0.0 || video_minutes > 0.0;
+    let wall_seconds = if !has_work {
+        0.0
+    } else {
+        slowest_page_seconds.max(worker_seconds / (effective_parallelism * card.parallel_efficiency))
+            + card.fixed_overhead_seconds
+    };
+
+    let fast = page_credits(card, PageMode::Fast, fast_pages);
+    let rich = page_credits(card, PageMode::Rich, rich_pages);
+    let media = page_credits(card, PageMode::Rich, media_pages);
+    let pages_per_document = (pages + media_pages) / documents;
+    let mut feature_totals = BTreeMap::new();
+    let mut features = 0.0;
+    if has_work {
+        for feature in &card.document_features {
+            if !input.features.get(feature).copied().unwrap_or(false) {
+                continue;
+            }
+            let credits = feature_credits(card, feature, pages_per_document) * documents;
+            feature_totals.insert(feature.clone(), credits);
+            features += credits;
+        }
+    }
+    let total_credits = fast + rich + media + features;
+
+    let object_bytes = source_bytes + artifact_bytes;
+    let bytes = object_bytes + index_bytes;
+    let pages_per_minute = if wall_seconds > 0.0 { pages / (wall_seconds / 60.0) } else { 0.0 };
+    let dollars = total_credits / card.credits_per_dollar;
+
+    IngestEstimate {
+        pages,
+        profile: profile_id.to_string(),
+        workers,
+        effective_parallelism,
+        worker_seconds,
+        wall_seconds,
+        pages_per_minute,
+        minutes_per100_pages: if pages_per_minute > 0.0 { 100.0 / pages_per_minute } else { 0.0 },
+        fast_pages,
+        rich_pages,
+        media_rich_pages: media_pages,
+        credits: IngestCredits { total_credits, breakdown: CreditBreakdown { fast, rich, media, features } },
+        feature_credits: feature_totals,
+        pages_per_dollar: if dollars > 0.0 { pages / dollars } else { 0.0 },
+        credits_per1000_pages: if pages > 0.0 { (total_credits / pages) * 1000.0 } else { 0.0 },
+        storage: IngestStorage {
+            bytes,
+            object_bytes,
+            index_bytes,
+            monthly_credits: (non_negative(Some(bytes)) / BYTES_PER_GB) * card.price_card.storage_gb_month,
+        },
+    }
+}
+
+/// A file as the upload estimate sees it: name, size, MIME type, and duration when the client knows it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaFile {
+    pub name: String,
+    pub size: f64,
+    #[serde(default, rename = "type")]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+}
+
+/// Port of `uploadMediaKind`: MIME type first, then the extension; `None` for files priced per page.
+pub fn upload_media_kind(card: &Card, name: &str, mime_type: Option<&str>) -> Option<MediaKind> {
+    let mime = mime_type.unwrap_or("").split(';').next().unwrap_or("").trim().to_lowercase();
+    if mime.starts_with("audio/") {
+        return Some(MediaKind::Audio);
+    }
+    if mime.starts_with("video/") {
+        return Some(MediaKind::Video);
+    }
+    let extension = name.rfind('.').map(|dot| name[dot + 1..].to_lowercase()).unwrap_or_default();
+    if card.media_extensions.audio.iter().any(|candidate| *candidate == extension) {
+        return Some(MediaKind::Audio);
+    }
+    if card.media_extensions.video.iter().any(|candidate| *candidate == extension) {
+        return Some(MediaKind::Video);
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditRange {
+    pub low: f64,
+    pub high: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LighterPipeline {
+    pub media_video: LighterMediaVideo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LighterMediaVideo {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LighterOption {
+    pub kind: String,
+    pub credits: f64,
+    pub saved_credits: f64,
+    pub pipeline: LighterPipeline,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadMediaEstimate {
+    pub audio_files: u32,
+    pub video_files: u32,
+    pub audio_minutes: f64,
+    pub video_minutes: f64,
+    pub durations_assumed: bool,
+    pub video_frames: bool,
+    pub credits: CreditRange,
+    pub lighter: Option<LighterOption>,
+}
+
+fn round_tenth(value: f64) -> f64 {
+    js_round(value * 10.0) / 10.0
+}
+
+/// Port of `estimateUploadMedia`: what the audio and video among `files` cost. `None` when no file is media.
+pub fn estimate_upload_media<'a, I>(card: &Card, files: I, video_frames: bool) -> Option<UploadMediaEstimate>
+where
+    I: IntoIterator<Item = &'a MediaFile>,
+{
+    let mut audio_files = 0;
+    let mut video_files = 0;
+    let mut audio_seconds = 0.0;
+    let mut video_seconds = 0.0;
+    let mut audio_pages = 0.0;
+    let mut video_frame_pages = 0.0;
+    let mut video_track_pages = 0.0;
+    let mut assumed = false;
+    for file in files {
+        let Some(kind) = upload_media_kind(card, &file.name, file.mime_type.as_deref()) else { continue };
+        let known = matches!(file.duration_seconds, Some(d) if d.is_finite() && d > 0.0);
+        if !known {
+            assumed = true;
+        }
+        let seconds = if known {
+            file.duration_seconds.unwrap_or_default()
+        } else {
+            let per_minute = match kind {
+                MediaKind::Audio => card.media_bytes_per_minute.audio,
+                MediaKind::Video => card.media_bytes_per_minute.video,
+            };
+            (0f64.max(file.size) / per_minute) * 60.0
+        };
+        match kind {
+            MediaKind::Audio => {
+                audio_files += 1;
+                audio_seconds += seconds;
+                audio_pages += media_rich_pages(card, MediaKind::Audio, seconds);
+            }
+            MediaKind::Video => {
+                video_files += 1;
+                video_seconds += seconds;
+                video_frame_pages += media_rich_pages(card, MediaKind::Video, seconds);
+                video_track_pages += media_rich_pages(card, MediaKind::Audio, seconds);
+            }
+        }
+    }
+    if audio_files + video_files == 0 {
+        return None;
+    }
+    let low = page_credits(card, PageMode::Rich, audio_pages + video_track_pages);
+    let high = if video_frames { page_credits(card, PageMode::Rich, audio_pages + video_frame_pages) } else { low };
+    Some(UploadMediaEstimate {
+        audio_files,
+        video_files,
+        audio_minutes: round_tenth(audio_seconds / 60.0),
+        video_minutes: round_tenth(video_seconds / 60.0),
+        durations_assumed: assumed,
+        video_frames,
+        credits: CreditRange { low, high },
+        lighter: (video_frames && video_files > 0 && high > low).then(|| LighterOption {
+            kind: "video-audio-track-only".into(),
+            credits: low,
+            saved_credits: high - low,
+            pipeline: LighterPipeline { media_video: LighterMediaVideo { enabled: false } },
+        }),
+    })
+}

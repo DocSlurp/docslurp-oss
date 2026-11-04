@@ -16,8 +16,10 @@ import {
   type PageMix,
 } from "./billing.js";
 import { estimateUploadMedia, type UploadMediaFile } from "./media-upload-estimate.js";
+import { defaultPipelineFeatures } from "./pipeline.js";
 import {
   ASSUMED_BYTES_PER_PAGE,
+  estimateProfileFor,
   QUOTE_HIGH_MIX,
   QUOTE_LOW_MIX,
   quoteUpload,
@@ -53,6 +55,8 @@ export function buildEstimateCard() {
     assumedBytesPerPage: ASSUMED_BYTES_PER_PAGE,
     quoteLowMix: { ...QUOTE_LOW_MIX },
     quoteHighMix: { ...QUOTE_HIGH_MIX },
+    /** A new hosted workspace with default settings, for quotes made without a workspace's profile. */
+    defaultProfile: estimateProfileFor(defaultPipelineFeatures, { env: { DOCSLURP_BILL_INGEST: "true" } }),
     /** Extensions priced as media when the MIME type does not say (uploadMediaKind). */
     mediaExtensions: { audio: ["mp3", "m4a", "wav", "weba"], video: ["mp4", "webm"] },
   };

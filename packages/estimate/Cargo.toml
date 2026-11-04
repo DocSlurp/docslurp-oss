@@ -1,0 +1,35 @@
+[package]
+name = "docslurp-estimate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Offline DocSlurp credit estimator: probe files locally and price an upload with the published price card."
+license = "Apache-2.0"
+homepage = "https://docslurp.io/docs/packages/estimate"
+repository = "https://github.com/DocSlurp/docslurp-oss/tree/main/packages/estimate"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# wasm-bindgen exports for @docslurp/estimate (browser, Node, edge runtimes).
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "lopdf/wasm_js"]
+# PyO3 module for the Python package (built with maturin).
+python = ["dep:pyo3"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+lopdf = { version = "0.47", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+wasm-bindgen = { version = "0.2.130", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+pyo3 = { version = "0.30", optional = true, features = ["extension-module", "abi3-py310"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,4 @@
+target/
+pkg/
+python/docslurp_estimate/*.so
+python/docslurp_estimate/*.pyd
