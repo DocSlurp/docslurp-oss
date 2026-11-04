@@ -18,6 +18,7 @@ export declare function roleGrantStatements(options: {
   relations: readonly string[];
   sequences?: Readonly<Record<string, string>>;
   migrationsTable?: boolean;
+  nativeSchema?: boolean;
 }): string[];
 type QueryClient = { query(text: string, values?: unknown[]): Promise<{ rows: any[] }> };
 export declare function reconcileRoleGrants(client: QueryClient, options?: { roles?: DbRoles; log?: (line: string) => void }): Promise<string[]>;

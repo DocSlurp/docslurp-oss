@@ -140,8 +140,8 @@ function emptyStats(over: Partial<DeferredSearchStats>): DeferredSearchStats {
  * vectors of deferred-mode documents, materialize only those pages (bounded by
  * the policy), then return chunks restricted to the candidate documents with
  * the pages the locators picked ranked first. Returns null when the scope has
- * no deferred documents. Never throws: any failure degrades to the normal
- * retrieval path with a diagnostic.
+ * no deferred documents. Provider failures degrade to normal retrieval with a diagnostic; explicit
+ * cancellation propagates to the execution owner.
  */
 export async function runDeferredPageSearch(
   args: DeferredSearchArgs,
@@ -149,6 +149,7 @@ export async function runDeferredPageSearch(
 ): Promise<DeferredSearchResult | null> {
   const { journal, workspaceId } = args;
   try {
+    args.signal?.throwIfAborted();
     const startedAt = deps.now();
     const selected = scopedDocumentIds(args.options);
     if (selected?.length === 0) return null;
@@ -186,9 +187,10 @@ export async function runDeferredPageSearch(
     const spend = () => (spendOk ??= deps.canSpend(args.orgId, workspaceId));
     let routerCall: MapRouterCall | undefined;
     if (args.openRouterApiKey && policy.mapRouter !== "off") {
-      const llm = createMapRouterCall({ apiKey: args.openRouterApiKey, privacyMode: args.privacyMode, journal });
+      const llm = createMapRouterCall({ apiKey: args.openRouterApiKey, privacyMode: args.privacyMode, journal, signal: args.signal });
       routerCall = async (input) => {
         if (!(await spend())) throw new Error("router skipped: cannot spend");
+        args.signal?.throwIfAborted();
         return llm(input);
       };
     }
@@ -203,7 +205,8 @@ export async function runDeferredPageSearch(
       const model = models[0];
       if (!model) return { list: [], degraded: false };
       if (!(await spend())) return { list: [], degraded: true };
-      const vector = await deps.embed({ model, query: args.query, journal: journal as UsageRecorder, privacyMode: args.privacyMode });
+      args.signal?.throwIfAborted();
+      const vector = await deps.embed({ model, query: args.query, journal: journal as UsageRecorder, privacyMode: args.privacyMode, signal: args.signal });
       if (!vector) return { list: [], degraded: true };
       const hits = await deps.locateImages({ workspaceId, documentIds, model, queryVector: vector, k: cap });
       return { list: hits.map((h) => ({ documentId: h.documentId, page: h.page, locator: "page-image" as const })), degraded: false };
@@ -213,8 +216,9 @@ export async function runDeferredPageSearch(
       mapDocs.length > 0
         ? deps.locateMap({ query: args.query, documentIds: mapDocs, maxPages: cap, router: policy.mapRouter, routerCall })
         : Promise.resolve({ pages: [], routerUsed: false, confident: true }),
-      locateImages(visualDocs).catch(() => ({ list: [] as Candidate[], degraded: true })),
+      locateImages(visualDocs).catch(() => { args.signal?.throwIfAborted(); return { list: [] as Candidate[], degraded: true }; }),
     ]);
+    args.signal?.throwIfAborted();
     const mapList: Candidate[] = map.pages.map((p) => ({ documentId: p.documentId, page: p.page, locator: "map-node" as const }));
     let degraded = images.degraded;
     let lists = [mapList, images.list];
@@ -223,7 +227,7 @@ export async function runDeferredPageSearch(
     let fallbackUsed = false;
     if (mapDocs.length > 0 && !map.confident) {
       fallbackUsed = true;
-      const extra = await locateImages(mapDocs).catch(() => ({ list: [] as Candidate[], degraded: true }));
+      const extra = await locateImages(mapDocs).catch(() => { args.signal?.throwIfAborted(); return { list: [] as Candidate[], degraded: true }; });
       degraded ||= extra.degraded;
       lists = [...lists, extra.list];
     }
@@ -243,7 +247,7 @@ export async function runDeferredPageSearch(
     if (stats.materializedPages > 0) deps.invalidateVectors(workspaceId);
     if (stats.temperature === "hot" || candidates.length === 0) return { chunks: [], stats, documentIds: documentIdsInScope };
 
-    if (args.signal?.aborted) return { chunks: [], stats, documentIds: documentIdsInScope };
+    args.signal?.throwIfAborted();
     const documentIds = [...new Set(candidates.map((c) => c.documentId))];
     const restricted: SearchOptions = {
       ...args.options,
@@ -264,6 +268,7 @@ export async function runDeferredPageSearch(
     const onCandidate = labelled.filter((chunk) => chunk.deferredLocator);
     return { chunks: [...onCandidate, ...labelled.filter((chunk) => !chunk.deferredLocator)], stats, documentIds: documentIdsInScope };
   } catch (error) {
+    args.signal?.throwIfAborted();
     console.warn(`[deferred-search] degraded to standard retrieval: ${error instanceof Error ? error.message : String(error)}`);
     journal.recordDiagnostic("deferredError", { message: error instanceof Error ? error.message : String(error) });
     return null;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { bundlePageTasks, runPageFanOut, slotBackoffMs } from "../temporal/page-fanout.js";
+import { bundlePageTasks, createAdmissionBudget, runPageFanOut, slotBackoffMs } from "../temporal/page-fanout.js";
 
 const zero = { inputTokens: 0, outputTokens: 0, costCents: 0 };
 const waitFor = async (predicate: () => boolean) => {
@@ -96,3 +96,29 @@ describe("helpers", () => {
     expect(bundlePageTasks(tasks, 1)).toHaveLength(4);
   });
 });
+
+ it.each([1, 8, 128])("bounds prolonged contention across %i lanes and leaves pending work failed", async (concurrency) => {
+   const exhausted = new Error("AdmissionExhausted");
+   const admit = createAdmissionBudget(() => exhausted);
+   let attempts = 0;
+   let active = 0;
+   await expect(runPageFanOut({
+     bundles: Array.from({ length: 2000 }, (_, i) => i), concurrency,
+     beforeDispatch: admit,
+     run: async () => { attempts++; active++; await Promise.resolve(); active--; throw new SlotDenied(); },
+     onUsage: () => { throw new Error("unexpected success"); },
+     isSlotUnavailable: (error) => error instanceof SlotDenied,
+     waitFor, sleep: async () => {}, now: () => 0, random: () => 0,
+     isPaused: () => false, isCancelled: () => false,
+   })).rejects.toBe(exhausted);
+   expect(attempts).toBe(2048);
+   expect(active).toBe(0);
+ });
+
+ it("charges successful dispatches to the same budget as denials", () => {
+   const exhausted = new Error("AdmissionExhausted");
+   const admit = createAdmissionBudget(() => exhausted, 3);
+   admit(); admit(); admit();
+   expect(admit).toThrow(exhausted);
+   expect(admit).toThrow(exhausted);
+ });

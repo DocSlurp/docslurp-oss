@@ -2,7 +2,7 @@ import { apiPool, sql } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 import { SEARCH_ELIGIBILITY_CHANNEL } from "./eligibility-hint.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
-import type { SearchFilters } from "./filters.js";
+import { escapeLikePattern, type SearchFilters } from "./filters.js";
 import type { HashFilter } from "./index-serving.js";
 import { loadSearchAvailability, type SearchAvailabilityRow } from "./session-setup.js";
 import { envInt, TtlLruCache } from "./ttl-lru.js";
@@ -108,8 +108,27 @@ function remember(workspaceId: string, key: string): void {
   keysByWorkspace.set(workspaceId, keys);
 }
 
-/** Drop every cached eligibility and availability entry of the workspace. */
+/**
+ * Other per-workspace search caches (the search response cache) that drop
+ * entries on the same hints. `active` says whether it holds anything, so an
+ * unknown run is still looked up while only those caches are populated.
+ */
+export interface SearchWorkspaceInvalidationListener {
+  invalidate(workspaceId: string): void;
+  active(): boolean;
+}
+const invalidationListeners = new Set<SearchWorkspaceInvalidationListener>();
+
+/** Registers a cache to clear on workspace invalidation hints, and starts listening for them. */
+export function onSearchWorkspaceInvalidated(listener: SearchWorkspaceInvalidationListener): void {
+  invalidationListeners.add(listener);
+}
+
+/** Drop every cached eligibility and availability entry of the workspace (and of registered caches). */
 export function invalidateSearchWorkspace(workspaceId: string): void {
+  for (const listener of invalidationListeners) {
+    try { listener.invalidate(workspaceId); } catch { /* one cache must not block the others */ }
+  }
   const keys = keysByWorkspace.get(workspaceId);
   if (!keys) return;
   keysByWorkspace.delete(workspaceId);
@@ -127,7 +146,8 @@ export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
     if (workspaceId) invalidateSearchWorkspace(workspaceId);
     else unknown.push(runId);
   }
-  if (unknown.length === 0 || keysByWorkspace.size === 0) return;
+  const listenersActive = [...invalidationListeners].some((listener) => listener.active());
+  if (unknown.length === 0 || (keysByWorkspace.size === 0 && !listenersActive)) return;
   const rows = await sql<{ id: string; workspace_id: string }[]>`
     select id, workspace_id from workspace_runs where id = any(${sql.array(unknown)})
   `;
@@ -158,7 +178,7 @@ export function handleSearchEligibilityHint(payload: string): void {
  * Subscribe once per process to run_events hints (worker/src/db/run-event-store.ts)
  * and search_eligibility hints (API-side deletes). Best effort: the TTL still bounds staleness.
  */
-function ensureInvalidationListener(): void {
+export function ensureInvalidationListener(): void {
   if (listening) return;
   // Tests replace ../db.js with partial mocks; without a pool there is nothing to listen on.
   let pool: typeof apiPool | undefined;
@@ -280,7 +300,7 @@ export function nativeScopeSupported(filters: SearchFilters | undefined): boolea
   // Explicit capabilities: a newly introduced filter must never silently widen
   // native retrieval before this adapter implements its semantics.
   const supported = new Set([
-    "documentId", "documentIds", "runId", "workspaceId", "filenameContains", "mimeTypes", "tags",
+    "documentId", "documentIds", "runId", "workspaceId", "filenameContains", "filenameEquals", "mimeTypes", "tags",
   ]);
   return Object.entries(filters ?? {}).every(([key, value]) =>
     value === undefined || supported.has(key));
@@ -342,7 +362,9 @@ export function scopeEligibleDocuments(
 ): EligibleDocument[] {
   if (filters?.workspaceId && filters.workspaceId !== set.workspaceId) return [];
   const ids = new Set(filters?.documentIds ?? []);
-  const filename = filters?.filenameContains ? ilikeContainsMatcher(filters.filenameContains) : null;
+  // Same literal-substring semantics as the Postgres path (wildcards escaped).
+  const filename = filters?.filenameContains ? ilikeContainsMatcher(escapeLikePattern(filters.filenameContains)) : null;
+  const filenameEquals = filters?.filenameEquals;
   const mimeTypes = filters?.mimeTypes?.length ? new Set(filters.mimeTypes) : null;
   const tags = filters?.tags?.length ? new Set(filters.tags) : null;
   const runIds = [runId, filters?.runId].filter((id): id is string => Boolean(id));
@@ -350,6 +372,7 @@ export function scopeEligibleDocuments(
     (!filters?.documentId || document.id === filters.documentId)
     && (filters?.documentIds === undefined || ids.has(document.id))
     && (!filename || filename(document.filename))
+    && (filenameEquals === undefined || document.filename === filenameEquals)
     && (!mimeTypes || (document.mimeType !== null && mimeTypes.has(document.mimeType)))
     && (!tags || document.tags.some((tag) => tags.has(tag)))
     && runIds.every((id) => document.runId === id));

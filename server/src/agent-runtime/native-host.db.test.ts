@@ -1,0 +1,48 @@
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { Pool } from "pg";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { Agent } from "@mastra/core/agent";
+import { exportSchemas } from "@mastra/pg";
+import { createMockModel } from "@mastra/core/test-utils/llm-mock";
+import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { createNativeChatHost } from "./native-host.js";
+let stop:()=>Promise<void>;
+let pool:Pool;
+const hosts:Array<Awaited<ReturnType<typeof createNativeChatHost>>>=[];
+beforeAll(async()=>{const pg=await startMigratedPostgres();stop=pg.stop;pool=new Pool({connectionString:pg.url,max:1});},120000);
+afterAll(async()=>{for(const host of hosts.reverse())await host.close();await pool?.end();await stop?.();});
+it("keeps native storage DDL reproducible and out of runtime startup",async()=>{
+  const migration=await readFile(new URL("../../db/migrations/0118_native_mastra.sql",import.meta.url),"utf8");
+  expect(migration.slice(migration.indexOf("CREATE SCHEMA"))).toBe(exportSchemas("docslurp_mastra"));
+  const result=await pool.query("select to_regclass('docslurp_mastra.mastra_workflow_snapshot') as table_name");
+  expect(result.rows[0].table_name).toBeTruthy();
+});
+it.runIf(!!process.env.NATIVE_CHAT_TEST_REDIS_URL)("replays from another native host through shared storage/cache without re-execution",async()=>{
+  const url=new URL(process.env.NATIVE_CHAT_TEST_REDIS_URL!);
+  if(url.hostname!=="127.0.0.1")throw new Error("local test Redis required");
+  const namespace=`native-test:${randomUUID()}`;
+  let executions=0;
+  const makeAgent=()=>{
+    const model=createMockModel({version:"v2",mockText:"native shared result",spyStream:()=>{executions++;}});
+    return new Agent({id:"shared-native-test",name:"Local",instructions:"fixture",model});
+  };
+  const a=await createNativeChatHost({pool,redisUrl:url.href,namespace,worker:true,createAgent:makeAgent});hosts.push(a);
+  const b=await createNativeChatHost({pool,redisUrl:url.href,namespace,worker:false,createAgent:makeAgent});hosts.push(b);
+  const started=await a.agent!.stream("fixture",{runId:randomUUID(),maxSteps:1});
+  expect(await started.output.text).toBe("native shared result");
+  const recovered=await b.agent!.observe(started.runId,{idleTimeoutMs:5000});
+  expect(await recovered.output.text).toBe("native shared result");
+  expect(executions).toBe(1);
+  recovered.detach();started.cleanup();
+  const topic=`agent.stream.quota-${randomUUID()}`;
+  for(let n=0;n<3;n++) await a.pubsub.publish(topic,{type:"test",runId:topic,data:{text:"x".repeat(510000)}});
+  const retained=await a.pubsub.getHistory(topic);
+  expect(retained).toHaveLength(3);
+  await expect(a.pubsub.publish(topic,{type:"test",runId:topic,data:{text:"x".repeat(510000)}})).rejects.toThrow("native_cache_atomic_write_failed");
+  expect(await a.pubsub.getHistory(topic)).toHaveLength(3);
+  expect((await a.pubsub.getHistory(topic)).map(event=>event.index)).toEqual([0,1,2]);
+  await a.pubsub.publish(topic,{type:"error",runId:topic,data:{code:"output_limit"}});
+  expect((await a.pubsub.getHistory(topic)).at(-1)).toMatchObject({index:3,type:"error"});
+  await a.pubsub.clearTopic(topic);
+},30000);

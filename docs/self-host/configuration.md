@@ -4,15 +4,21 @@ Edit `.env.selfhost` before running `up`. Recreate affected containers after an
 edit with the same `up -d` command (see [Docker Compose install](docker-compose.md)).
 The [template](../../.env.selfhost.example) lists all supported first-run options.
 
+Compose passes every variable in `.env.selfhost` to the server and workers (`env_file`), but the shared `environment` block in `compose.selfhost.yml` wins for the keys it sets: `NODE_ENV`, `APP_URL`, `API_URL`, `PUBLIC_API_URL` and `BETTER_AUTH_URL` (all set from `SELFHOST_URL`), `PORT`, `HOST`, `STORAGE_URI`, `VECTOR_BACKENDS`, `LANCEDB_URI`, `API_RATE_LIMIT_REDIS_URL`, `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` and `RUN_STARTUP_MIGRATIONS` (the credentials and `WORKER_DOC_CONCURRENCY` are read from `.env.selfhost` through `--env-file`). Setting one of the fixed keys in `.env.selfhost` has no effect; edit `compose.selfhost.yml` instead (for example to point `STORAGE_URI` at an external bucket).
+
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `SELFHOST_URL` | `http://localhost:8787` | Public origin of the server for auth cookies, and OAuth callbacks. Use `https://your-domain` behind TLS. No trailing slash. |
-| `DOCSLURP_ALLOW_INSECURE_LOCAL_AUTH_ORIGIN` | `true` in the template, `false` if unset | Allows a plain `http://localhost` or `http://127.0.0.1` `SELFHOST_URL` for local trial runs. Any other origin must use HTTPS regardless of this flag. |
+| `DOCSLURP_ALLOW_INSECURE_LOCAL_AUTH_ORIGIN` | `true` in the template, `false` if unset | Allows a plain `http://localhost`, `http://127.0.0.1` or `http://[::1]` `SELFHOST_URL` for local trial runs. Any other origin must use HTTPS regardless of this flag. |
 | `SERVER_BIND_ADDRESS` / `SERVER_PORT` | `127.0.0.1` / `8787` | Host listener. Keep it on loopback when a reverse proxy runs on the same host. |
 | `BETTER_AUTH_TRUST_PROXY_HEADERS` | `false` | Set to `true` only behind a reverse proxy you control, after it overwrites forwarded host and protocol headers. |
 | `WORKER_DOC_CONCURRENCY` | `1` | Documents processed concurrently by each worker. Increase after observing memory and latency. |
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` | blank | Optional hosted AI models. Default local embedding mode needs no provider key; LLM-powered stages need a configured provider. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | blank | Optional OAuth sign-in. Configure provider callbacks at `SELFHOST_URL/api/auth/callback/github` or `/google`. |
+| `RESEND_API_KEY` / `EMAIL_FROM` | unset (not in the template) | Email delivery through Resend for verification codes, sign-in codes and magic links. Without both, email and password sign-up is disabled (`isEmailAuthConfigured` in `packages/shared/src/auth-security.ts`), so configure them or an OAuth provider before anyone can create an account. |
+| `MAX_UPLOAD_BYTES` | `524288000` (500 MiB) | Largest accepted upload. |
+| `MAX_MULTIPART_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest file on the buffered `POST /v1/uploads/bulk` path, which holds the body in memory; larger files must use direct upload sessions. Capped at `MAX_UPLOAD_BYTES`. |
+| `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](../self-host.md#mcp-apps-uploader-and-minio). |
 
 Storage is preconfigured in `compose.selfhost.yml` as
 `STORAGE_URI=s3://docslurp-files?endpoint=http://minio:9000&region=us-east-1`
@@ -87,6 +93,14 @@ than blobs, for example blobs on Backblaze B2 (which rejects conditional
 `PutObject`, so Lance cannot commit there) and the index on Tigris or S3. When
 `LANCEDB_URI` is unset the root is `s3://<that bucket>/lancedb`. Unset, the
 index inherits `STORAGE_URI` as before.
+
+**External commit store** — setting `LANCEDB_DDB_TABLE` (or `?ddbTableName=` on
+`LANCEDB_URI`) turns an `s3://` root into `s3+ddb://`, so Lance commits through a
+DynamoDB table. Optional: `LANCEDB_DDB_REGION` (default `us-east-1`),
+`LANCEDB_DDB_ENDPOINT`, and `LANCEDB_DDB_ACCESS_KEY_ID` /
+`LANCEDB_DDB_SECRET_ACCESS_KEY` / `LANCEDB_DDB_SESSION_TOKEN` (both keys
+together; without them the object-store credentials are used). See
+`applyLanceDdbEnv` in `packages/shared/src/connection-uri.ts`.
 
 **Client tuning** — all optional; unset keeps AWS SDK and Lance defaults.
 
@@ -165,6 +179,17 @@ trip the watchdog.
 `/ready` runs its `database` and `migrations` checks on the probe connection;
 the `database` detail reports the pool's in-flight queries and the search
 queue, so overload is visible without failing readiness.
+
+## Migrations
+
+Compose runs `server/db/migrate.mjs` once in the `migrate` service and sets `RUN_STARTUP_MIGRATIONS=false` for the server. The `migrate` service gets only `DATABASE_URL`, not `.env.selfhost`, so add the variables below to its `environment` in `compose.selfhost.yml`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MIGRATION_DATABASE_URL` | `DATABASE_URL` | Direct owner connection for migrations. Required when `DATABASE_URL` is a restricted role ([Database roles](database-roles.md)) or a transaction-mode pooler. |
+| `MIGRATION_OWNER_ROLE` | Existing documents owner, otherwise database owner | Optional explicit confirmation of the DDL owner. Must match the inferred owner; the supported migrator checks admission before switching roles on the same connection. See [generation rollout](../generation-rollout.md). |
+| `MIGRATION_LOCK_WAIT_MS` | `240000` | How long a migrator waits for the advisory migration lock before failing. |
+| `POSTGIS_MIGRATIONS` | unset | `1` also applies the optional spatial journal in `server/db/migrations/postgis/`. It needs an installed `postgis` extension; the Compose `postgres:17-bookworm` image has none, so the run fails. See [PostGIS](postgis.md). |
 
 ## Temporal connection
 

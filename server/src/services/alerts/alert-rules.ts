@@ -188,7 +188,9 @@ export function evaluateAlertRules(
       "database-unreachable",
       !db.ok,
       "critical",
-      db.ok ? "App database reachable" : "App database (Neon) is unreachable from the app",
+      db.ok ? "App database reachable" : /read-only transaction/i.test(db.error ?? "")
+        ? "App database is read-only; writes are failing"
+        : "App database health check failed",
       db.ok ? {} : { error: db.error },
     ));
   }

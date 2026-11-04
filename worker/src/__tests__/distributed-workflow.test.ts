@@ -1,18 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ activities: {} as Record<string, any> }));
-vi.mock("@temporalio/workflow", () => ({
-  patched: () => false,
+const mocks = vi.hoisted(() => ({ budget: false, cleanupInit: false, activities: {} as Record<string, any> }));
+vi.mock("@temporalio/workflow", async () => ({
+  ActivityFailure: (await import("@temporalio/common")).ActivityFailure,
+  sleep: async () => {},
+  patched: (id: string) => (id === "pipeline-init-lifecycle-v1" && mocks.cleanupInit) || (id === "admission-history-budget-v1" && mocks.budget),
   proxyActivities: () => new Proxy({}, { get: (_, key: string) => (...args: unknown[]) => mocks.activities[key](...args) }),
   defineQuery: (name:string) => name, defineSignal: (name:string) => name,
   CancellationScope: { nonCancellable: async (fn: () => Promise<unknown>) => fn() },
   ActivityCancellationType: { WAIT_CANCELLATION_COMPLETED: "WAIT_CANCELLATION_COMPLETED" },
   setHandler: vi.fn(), condition: async () => {},
-  ApplicationFailure: {nonRetryable:(message:string)=>new Error(message)}, rootCause:(e:unknown)=>e,
+  ApplicationFailure: (await import("@temporalio/common")).ApplicationFailure, rootCause:(e:unknown)=>e,
 }));
 import { documentPipeline } from "../temporal/workflows.js";
 const zero = {inputTokens:0,outputTokens:0,costCents:0};
 describe("page workflow scheduling", () => {
   beforeEach(() => {
+    mocks.cleanupInit = false;
     Object.assign(mocks.activities, {
       initPipelineRun: vi.fn(async()=>({artifacts:{},documentIds:["doc"]})),
       runPipelineStage: vi.fn(async()=>({artifacts:{},usage:zero})),
@@ -66,3 +69,39 @@ describe("page workflow scheduling", () => {
     expect(mocks.activities.failPipelineRun).toHaveBeenCalled();expect(mocks.activities.runPipelineStage).not.toHaveBeenCalled();
   });
 });
+
+describe("initialization lifecycle", () => {
+  it.each([false, true])("preserves old init failure history (patch=%s)", async (enabled) => {
+    mocks.cleanupInit = enabled;
+    const failure = new Error("init failed");
+    mocks.activities.initPipelineRun = vi.fn().mockRejectedValue(failure);
+    mocks.activities.failPipelineRun = vi.fn().mockRejectedValue(new Error("cleanup failed"));
+    await expect(documentPipeline({runId:"run",pipeline:{} as never,stageOrder:[]})).rejects.toBe(failure);
+    expect(mocks.activities.failPipelineRun).toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+  it("cleans up cancelled initialization without replacing cancellation", async () => {
+    mocks.cleanupInit = true;
+    const cancellation = new Error("cancelled");
+    mocks.activities.initPipelineRun = vi.fn().mockRejectedValue(cancellation);
+    mocks.activities.failPipelineRun = vi.fn().mockResolvedValue(undefined);
+    await expect(documentPipeline({runId:"run",pipeline:{} as never,stageOrder:[]})).rejects.toBe(cancellation);
+    expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
+  });
+});
+
+ it("bounds stage slot denial loops and finalizes failure", async () => {
+   const { ActivityFailure, ApplicationFailure, RetryState } = await import("@temporalio/common");
+   const { WORKER_SLOT_UNAVAILABLE } = await import("../temporal/shared.js");
+   mocks.budget = true;
+   mocks.activities.initPipelineRun = vi.fn().mockResolvedValue({ artifacts: {}, documentIds: [] });
+   mocks.activities.failPipelineRun = vi.fn().mockResolvedValue(undefined);
+   mocks.activities.runPipelineStage = vi.fn().mockRejectedValue(new ActivityFailure(
+     "denied", "runPipelineStage", "1", RetryState.NON_RETRYABLE_FAILURE, "worker",
+     ApplicationFailure.nonRetryable("full", WORKER_SLOT_UNAVAILABLE),
+   ));
+   await expect(documentPipeline({runId:"run", pipeline:{} as never, stageOrder:["extract-markdown"], slotGate:true}))
+     .rejects.toMatchObject({type:"AdmissionExhausted", nonRetryable:true});
+   expect(mocks.activities.runPipelineStage).toHaveBeenCalledTimes(2048);
+   expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
+   mocks.budget = false;
+ });

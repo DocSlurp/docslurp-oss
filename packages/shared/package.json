@@ -26,6 +26,10 @@
       "types": "./dist/temporal-connection.d.ts",
       "import": "./dist/temporal-connection.js"
     },
+    "./env-flags": {
+      "types": "./dist/env-flags.d.ts",
+      "import": "./dist/env-flags.js"
+    },
     "./observability": {
       "types": "./dist/observability.d.ts",
       "import": "./dist/observability.js"
@@ -96,8 +100,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@langfuse/otel": "^6.0.2",
-    "@langfuse/tracing": "^6.0.2",
+    "@langfuse/otel": "^6.1.0",
+    "@langfuse/tracing": "^6.1.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.223.0",
     "@opentelemetry/context-async-hooks": "^2.12.0",
@@ -111,14 +115,14 @@
     "@opentelemetry/sdk-metrics": "^2.12.0",
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@opentelemetry/sdk-trace-node": "^2.12.0",
-    "@smithy/signature-v4": "5.7.4",
+    "@smithy/signature-v4": "5.7.5",
     "@smithy/types": "4.19.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
-    "ai": "7.0.156",
-    "vitest": "^5.0.5"
+    "ai": "7.0.161",
+    "vitest": "^5.1.0"
   },
   "license": "MIT"
 }

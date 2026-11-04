@@ -9,7 +9,7 @@ import {
 } from "@docslurp/shared";
 
 import { operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
-import { generateOpenRouterText } from "../lib/ai.js";
+import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
 import { lockWorkspaceGraph } from "./graph-store.js";
 
@@ -19,6 +19,7 @@ const MAX_COMMUNITY_SUMMARY_CHARS = 6_000;
 const LABEL_PROPAGATION_ROUNDS = 20;
 const CO_MENTION_WEIGHT = 0.5;
 const COMMUNITY_SUMMARY_CONCURRENCY = 4;
+const COMMUNITY_SUMMARY_TOKENS = 220;
 
 export interface CommunityGraphNode {
   id: string;
@@ -155,6 +156,8 @@ export interface CommunitySummaryContext {
   textGeneration?: TextGenerationConfig;
   deploymentProfile?: TextGenerationProfile;
   signal?: AbortSignal;
+  /** Record each completed provider call at once, so a later cancellation cannot discard its usage. */
+  onUsage?: (usage: TextGenerationUsage, details: { finishReason: string }) => void;
 }
 
 export interface CommunityRefreshResult {
@@ -261,31 +264,41 @@ export async function refreshWorkspaceCommunities(args: {
   await runBounded(pending.length, COMMUNITY_SUMMARY_CONCURRENCY, async (index) => {
     const { record, prompt } = pending[index]!;
     try {
-      const generated = await generateOpenRouterText({
-        operation: "community-summary",
-        apiKey: args.context.apiKey!,
-        privacyMode: args.context.privacyMode,
-        system: [
-          "Write a concise retrieval-oriented summary for this graph community.",
-          "Highlight the shared theme, the most central entities, and the key relationships operators should follow first.",
-          `Frame the summary for this workspace domain and scope:\n${args.context.scope}`,
-        ].join("\n"),
-        prompt,
-        model: args.context.model,
-        maxOutputTokens: 220,
-        textGeneration: args.context.textGeneration,
-        deploymentProfile: args.context.deploymentProfile,
-        signal: args.context.signal,
-      });
-      console.log(
-        `[ai-usage] community-summary model=${args.context.model} input_tokens=${generated.usage.inputTokens} output_tokens=${generated.usage.outputTokens}`,
-      );
-      result.inputTokens += generated.usage.inputTokens;
-      result.outputTokens += generated.usage.outputTokens;
-      const text = generated.text.trim();
-      if (text) {
-        record.summary = text;
-        record.summarySource = "llm";
+      // Reasoning starts at the model's floor; a cut-off summary retries once with double the budget.
+      let maxOutputTokens = COMMUNITY_SUMMARY_TOKENS;
+      for (;;) {
+        const generated = await generateOpenRouterText({
+          operation: "community-summary",
+          apiKey: args.context.apiKey!,
+          privacyMode: args.context.privacyMode,
+          system: [
+            "Write a concise retrieval-oriented summary for this graph community.",
+            "Highlight the shared theme, the most central entities, and the key relationships operators should follow first.",
+            `Frame the summary for this workspace domain and scope:\n${args.context.scope}`,
+          ].join("\n"),
+          prompt,
+          model: args.context.model,
+          maxOutputTokens,
+          textGeneration: args.context.textGeneration,
+          deploymentProfile: args.context.deploymentProfile,
+          signal: args.context.signal,
+        });
+        console.log(
+          `[ai-usage] community-summary model=${args.context.model} input_tokens=${generated.usage.inputTokens} output_tokens=${generated.usage.outputTokens}`,
+        );
+        result.inputTokens += generated.usage.inputTokens;
+        result.outputTokens += generated.usage.outputTokens;
+        args.context.onUsage?.(generated.usage, { finishReason: generated.finishReason });
+        if (generated.finishReason === "length" && maxOutputTokens === COMMUNITY_SUMMARY_TOKENS) {
+          maxOutputTokens *= 2;
+          continue;
+        }
+        const text = generated.text.trim();
+        if (text) {
+          record.summary = text;
+          record.summarySource = "llm";
+        }
+        break;
       }
     } catch (error) {
       if (args.context.signal?.aborted) throw error;

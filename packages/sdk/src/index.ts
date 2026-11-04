@@ -141,6 +141,8 @@ export type UpdateWorkspaceInput = JsonObject & {
   allowChinaProviders?: boolean;
 };
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
+/** The stored search and chat settings `PATCH /v1/workspaces/:id/search-settings` returns. */
+export type WorkspaceSearchSettingsResponse = { workspaceId: string; retrievalDefaults: JsonObject; chat: JsonObject } & JsonObject;
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
 export type UploadEstimateInput = {
@@ -1688,10 +1690,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     updateWorkspaceEstimate(id: string | undefined, input: UpdateWorkspaceInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/estimate`, input, requestOptions);
     },
-    updateSearchSettings(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<WorkspaceUpdateResponse> {
-      return request<WorkspaceUpdateResponse>(`${wsPath(id)}/search-settings`, jsonRequest("PATCH", input), requestOptions);
+    /**
+     * Changes a workspace's retrieval defaults, ranking controls and chat settings (omitted fields keep their
+     * values) and returns the stored settings. API keys must be server keys with `workspaces:manage`, and the key
+     * owner must be able to edit the workspace.
+     */
+    updateSearchSettings(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<WorkspaceSearchSettingsResponse> {
+      return request<WorkspaceSearchSettingsResponse>(`${wsPath(id)}/search-settings`, jsonRequest("PATCH", input), requestOptions);
     },
-    /** Session-only: the search-settings mutation accepts no API key. */
+    /** Impact of an `updateSearchSettings` body, without applying it. Same access as the mutation. */
     updateSearchSettingsEstimate(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/search-settings/estimate`, input, requestOptions);
     },

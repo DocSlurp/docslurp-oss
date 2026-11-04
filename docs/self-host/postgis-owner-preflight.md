@@ -17,14 +17,9 @@ It checks foreign application-table rejection, same-name nonmember rejection,
 restricted-role rejection and publication/correction lifecycle. The backend OS
 is Debian, while production's reported PostgreSQL build uses Ubuntu.
 
-Validation: both entrypoint runs and lifecycle assertions passed; 11 database
-role tests passed. The first harness attempt reached the image's temporary init
-server and lost its connection during init restart; the harness now waits for
-TCP readiness of the final server. No production changes were made.
-
 Threat model: an unprivileged caller must not bypass migration ownership by
 naming a table after an extension object. The exemption uses pg_depend's exact
 relation/class, extension reference class and extension-membership dependency,
 not text names or broad schema ownership. Altering PostGIS membership requires
 privileged extension ownership; this check is not an authorization boundary
-against a database superuser. Independent council review is required before merge.
+against a database superuser.

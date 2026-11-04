@@ -761,6 +761,7 @@ export async function listRunStageStates(
 
 async function listRunStageStatesForRunId(
   runId: string,
+  limit?: number,
 ): Promise<WorkspaceRunStageState[]> {
   const rows = await sql<StageStateRow[]>`
     select
@@ -795,6 +796,7 @@ async function listRunStageStatesForRunId(
     join workspace_runs runs on runs.id = drss.run_id
     where drss.run_id = ${runId}
     order by updated_at asc
+    ${limit ? sql`limit ${limit}` : sql``}
   `;
 
   return rows.map(mapStageState);
@@ -822,6 +824,7 @@ export async function listRunEventsForRunId(args: {
   runId: string;
   after?: string;
   limit?: number;
+  newest?: boolean;
 }): Promise<WorkspaceRunEvent[]> {
   const limit = Math.max(1, Math.min(args.limit ?? 50, 200));
   const rows = await sql<WorkspaceRunEventRow[]>`
@@ -842,12 +845,13 @@ export async function listRunEventsForRunId(args: {
     join workspace_runs runs on runs.id = events.run_id
     where events.run_id = ${args.runId}
       and (${args.after ?? null}::timestamptz is null or events.created_at > ${args.after ?? null}::timestamptz)
-    order by events.created_at asc, events.id asc
+    order by ${args.newest ? sql`events.created_at desc, events.id desc` : sql`events.created_at asc, events.id asc`}
     limit ${limit}
   `;
 
   // One event the schema can't read (an event type added on the worker side
   // before the shared list learned it) must not turn the whole history into a 500.
+  if (args.newest) rows.reverse();
   return rows.flatMap((row) => {
     try {
       return [mapWorkspaceRunEvent(row)];
@@ -887,18 +891,21 @@ export async function buildRunProgressSnapshot(
   run: WorkspaceRun,
   options?: {
     recentEventLimit?: number;
+    /** Observe persisted state without querying/reconciling the executor. */
+    readOnly?: boolean;
   },
 ): Promise<WorkspaceRunProgressSnapshot> {
   const recentEventLimit = options?.recentEventLimit ?? 100;
 
-  const temporal = await getPipelineTemporalSnapshot(run.id);
-  const reconciledRun = await reconcileTemporalRunState(run, temporal);
+  const temporal = options?.readOnly ? null : await getPipelineTemporalSnapshot(run.id);
+  const reconciledRun = options?.readOnly ? run : await reconcileTemporalRunState(run, temporal);
   const [stages, recentEvents, perfRows, usageRows, pageProgressRows] = await Promise.all([
-    listRunStageStatesForRunId(reconciledRun.id),
+    listRunStageStatesForRunId(reconciledRun.id, options?.readOnly ? 1_001 : undefined),
     recentEventLimit > 0
       ? listRunEventsForRunId({
           runId: reconciledRun.id,
           limit: recentEventLimit,
+          newest: options?.readOnly,
         })
       : Promise.resolve([]),
     sql<StageResourceRow[]>`
@@ -918,9 +925,11 @@ export async function buildRunProgressSnapshot(
       where run_id = ${reconciledRun.id}
         and status = 'completed'
       group by document_id, stage_name
+      ${options?.readOnly ? sql`limit 2001` : sql``}
     `,
   ]);
 
+  if (options?.readOnly && (stages.length > 1_000 || pageProgressRows.length > 2_000)) throw new Error("snapshot_too_large");
   const resources = summarizeStageResources(perfRows);
   const { cpuUserMs, cpuSystemMs, rssDeltaBytes, peakRssBytes } = resources.totals;
   const cost = summarizeRunUsageCost(usageRows[0]);

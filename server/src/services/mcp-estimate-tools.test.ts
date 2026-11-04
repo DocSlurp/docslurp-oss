@@ -48,7 +48,9 @@ describe("MCP estimate tools", () => {
     expect(ids(["workspaces:manage"], "client")).not.toContain("updateEstimate");
     expect(ids(["ingest"])).toContain("reprocessEstimate");
     expect(ids(["ingest"], "client")).not.toContain("reprocessEstimate");
-    // Session-only estimates are never offered to keys, whatever their scopes.
-    expect(ids(["search", "ingest", "workspaces:manage"])).not.toContain("searchSettingsEstimate");
+    // The search-settings estimate needs the mutation's gate: a server key with workspaces:manage.
+    expect(ids(["workspaces:manage"])).toContain("searchSettingsEstimate");
+    expect(ids(["search", "ingest"])).not.toContain("searchSettingsEstimate");
+    expect(ids(["workspaces:manage"], "client")).not.toContain("searchSettingsEstimate");
   });
 });

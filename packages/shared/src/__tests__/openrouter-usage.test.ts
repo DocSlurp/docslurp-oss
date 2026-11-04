@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createOpenRouterRoutingFetch, setOpenRouterProviderPolicyResolver } from "../openrouter-routing.js";
+import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS } from "../provider-regions.js";
 import { createOpenRouterReasoningFetch, lowestOpenRouterReasoning, openRouterReasoningParams, createOpenRouterUsageCapture, readProviderCharge, resolveOpenRouterUsage } from "../openrouter-usage.js";
 afterEach(() => vi.unstubAllGlobals());
 describe("OpenRouter thinking controls", () => {
@@ -45,6 +47,41 @@ describe("lowest accepted reasoning", () => {
     expect(await sent("deepseek/deepseek-v4.1-flash")).toEqual({ effort: "none" });
     expect(await sent("anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
     expect(await sent("vendor/unknown")).toEqual({ enabled: false });
+    expect(await sent("qwen/qwen3.5-flash-02-23")).toEqual({ enabled: false });
+  });
+  it("retries an unverified model with the caller's body when it requires reasoning", async () => {
+    const mandatory = () => new Response('{"error":{"code":400,"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}', { status: 400 });
+    const baseFetch = vi.fn<typeof fetch>().mockResolvedValueOnce(mandatory()).mockResolvedValueOnce(new Response("{}"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const body = JSON.stringify({ model: "vendor/thinker", messages: [] });
+    const response = await createOpenRouterReasoningFetch(baseFetch, "none")("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string).reasoning).toEqual({ enabled: false });
+    expect(baseFetch.mock.calls[1][1]!.body).toBe(body);
+
+    // Composed as the worker does, the retry still carries a restricted run's provider allowlist.
+    setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false }));
+    try {
+      const network = vi.fn<typeof fetch>().mockResolvedValueOnce(mandatory()).mockResolvedValueOnce(new Response("{}"));
+      const chain = createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(network), "none");
+      await chain("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body });
+      expect(network).toHaveBeenCalledTimes(2);
+      for (const [, sent] of network.mock.calls) {
+        const provider = JSON.parse(sent!.body as string).provider;
+        expect(provider.only).toEqual([...NON_CHINA_PROVIDER_SLUGS]);
+        expect(provider.ignore).toEqual(expect.arrayContaining([...CHINA_PROVIDER_SLUGS]));
+      }
+    } finally {
+      setOpenRouterProviderPolicyResolver(undefined);
+    }
+
+    // A verified floor is never second-guessed, and other 400s are returned as they are.
+    for (const [model, reply] of [["z-ai/glm-5.3-flash", mandatory()], ["vendor/thinker", new Response("{}", { status: 400 })]] as const) {
+      const once = vi.fn<typeof fetch>().mockResolvedValue(reply);
+      const result = await createOpenRouterReasoningFetch(once, "none")("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: JSON.stringify({ model }) });
+      expect(result.status).toBe(400);
+      expect(once).toHaveBeenCalledTimes(1);
+    }
   });
   it("with no effort set, applies the floor only to listed models without an explicit reasoning choice", async () => {
     const call = async (body: Record<string, unknown>) => {

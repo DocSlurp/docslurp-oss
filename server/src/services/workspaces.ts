@@ -34,6 +34,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import {
   effectiveIndexingMode,
   validateModeChoice,
@@ -615,13 +616,13 @@ export async function ensurePersonalDefaultWorkspace(userId: string): Promise<vo
   await insertDefaultWorkspace(sql, { orgId: organization.id, userId });
 }
 
-export async function getWorkspace(workspaceId: string, userId: string): Promise<WorkspaceRecord | null> {
+export async function getWorkspace(workspaceId: string, userId: string, options: { refineNames?: boolean } = {}): Promise<WorkspaceRecord | null> {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) {
     return null;
   }
 
-  await refineWorkspaceNames([workspaceId]);
+  if (options.refineNames !== false) await refineWorkspaceNames([workspaceId]);
   const [row] = await sql<WorkspaceRow[]>`
     select
       w.id,
@@ -1058,6 +1059,8 @@ export async function updateWorkspace(
   });
 
   if (parsed.allowChinaProviders !== undefined) forgetWorkspaceProviderPolicy(workspaceId);
+  // Settings, pipeline and privacy changes drop cached search answers in every API process (on commit inside a transaction).
+  await notifySearchEligibilityChanged(client, [workspaceId]);
   return options.client ? current : await getWorkspace(workspaceId, userId);
 }
 

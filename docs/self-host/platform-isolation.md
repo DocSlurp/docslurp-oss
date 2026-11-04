@@ -8,7 +8,7 @@ Read it before you pick a provider for a cloud platform. The platform boundary d
 
 | Mode | What it is | DocSlurp today |
 | --- | --- | --- |
-| In-process sandbox | `bubblewrap` or `landlock` wraps each parser command inside the worker's own host or container. | Supported |
+| In-process sandbox | `bubblewrap` or `landlock` wraps each parser command inside the worker's own host or container. Defense in depth only: the parser shares a kernel with the worker and its secrets. | Supported |
 | Remote sandbox | `modal` runs the commands in a Modal sandbox with the network blocked. | Supported |
 | Platform task | The parser runs in a separate ECS task, Cloud Run job or Fly Machine with no network and no credentials. The operator attests this; the job probes itself and fails closed. | Planned (`platform-task` provider). Not available yet. |
 | Runtime class | gVisor or Kata runtime for the parser pod, set by the cluster. | Not planned. You can run the worker in such a pod, but DocSlurp has no provider for it, and bubblewrap and landlock do not work under gVisor. |
@@ -18,7 +18,7 @@ If the platform has no supported mode, the worker does not start in production. 
 
 ## What production accepts
 
-The production policy accepts a provider that reports filesystem isolation and a network level of `tcp-only` or `full`. In practice that means the parser process has:
+The production policy accepts a provider that reports filesystem isolation, a network level of `tcp-only` or `full`, and process teardown. It checks only those reported flags. A sound parser boundary also needs the parser process to have:
 
 1. no network, or at minimum no TCP,
 2. no cloud credentials or worker secrets within reach,
@@ -38,7 +38,7 @@ Where a platform boundary already gives you a microVM, no network and no credent
 
 | Platform | Platform boundary | Recommended mode | Key caveats |
 | --- | --- | --- | --- |
-| Self-hosted VM or bare metal | The host kernel | `bubblewrap` (supported). `landlock` if the kernel exposes Landlock ABI v9 (supported). `modal` to offload (supported). | This is where the current implementation works. |
+| Self-hosted VM or bare metal | The host kernel | `bubblewrap` (supported). `landlock` if the kernel exposes Landlock ABI v9 (supported). `modal` to offload (supported). | This is where the current implementation works. It is not a VM boundary: the parser shares the host kernel with a worker that holds every secret, so run the stack on a dedicated host or VM ([Security](security.md#what-the-sandbox-does-not-give-you)). |
 | ECS on EC2 | Shared kernel. The instance role and IMDS are reachable unless blocked. | `bubblewrap` if the AMI and Docker seccomp profile allow user namespaces (supported). Otherwise a separate task on an isolated capacity pool (platform task, planned). | Set `ECS_AWSVPC_BLOCK_IMDS=true` for awsvpc tasks, or drop traffic to `169.254.169.254` in `DOCKER-USER` for bridge mode ([task IAM roles](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html)). Give parser tasks no task role. |
 | AWS Fargate | A microVM per task. AWS: each task "has its own isolation boundary and does not share the underlying kernel". | `modal` today (supported). A per-job hardened task later (platform task, planned). | Bubblewrap and landlock do not work on Fargate (measured; see [Fargate results](sandbox-providers.md#aws-fargate)). Custom seccomp is not documented for Fargate. A sidecar is not isolated. The [spike](sandbox-providers.md#running-parsers-in-a-separate-fargate-task-no-bubblewrap-or-landlock) shows a no-role, no-egress task passes its checks, with scratch writable after an init-container `chown`, but takes 12 to 48 s to start. |
 | EKS (EC2 nodes) | Shared node kernel | Run the worker's parsers with `bubblewrap` where the pod may create user namespaces (supported), or `modal` (supported). A separate parser pod is the platform-task form (planned). | Require IMDSv2 only with hop limit 1, `seccompProfile: RuntimeDefault`, dropped capabilities and a deny-all egress NetworkPolicy ([EKS identity](https://docs.aws.amazon.com/eks/latest/best-practices/identity-and-access-management.html), [EKS runtime security](https://docs.aws.amazon.com/eks/latest/best-practices/runtime-security.html)). Pod user namespaces (`hostUsers: false`) need a recent node stack ([Kubernetes docs](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)). Whether EKS AMIs ship it is unverified. |

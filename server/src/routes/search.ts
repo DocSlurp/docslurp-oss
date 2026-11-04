@@ -1,3 +1,4 @@
+import { chatOperationRoutes, durableChatLaunchHandler } from "./chat-operations.js";
 import { GeoSearchError } from "../search/geo-scope.js";
 import { geoPredicateSchema } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
@@ -7,6 +8,8 @@ import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
+import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
+import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 
 import { aggregateWorkspaceRagSearchRequestSchema, deferredProfilesEnabled, type ApiErrorCode } from "@docslurp/shared";
 
@@ -32,6 +35,8 @@ import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { cacheableApiKeyId, createCacheScopeMemo, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse, type CacheScopeMemo } from "../search/response-cache.js";
+export { clearSearchResponseCacheForTests } from "../search/response-cache.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
 import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
@@ -76,6 +81,8 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
   if (!signal.aborted) {
     await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), workspaceId: input.workspaceId, options: searchOptions(input) }] : []), userId, signal);
   }
+  // One access and privacy lookup per workspace for the whole batch, never reused by another request.
+  const memo = createCacheScopeMemo();
   let next = 0;
   async function worker() {
     while (!signal.aborted && next < queries.length) {
@@ -88,7 +95,7 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
           const status = deferred.response.status;
           results[index] = { ok: false, error: { code: status === 401 ? "UNAUTHORIZED" : "FORBIDDEN", message: "Search capability rejected", status } };
         } else {
-          results[index] = { ok: true, data: await retrieve(input, userId, deferred.context) };
+          results[index] = { ok: true, data: await retrieve(input, userId, requestApiKeyId(c), deferred.context, memo) };
         }
       } catch (error) {
         results[index] = { ok: false, error: searchError(error) };
@@ -173,6 +180,9 @@ function sameOriginBrowserRequest(c: Context): boolean {
 
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
 async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
+  if (mode === "public" && process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
+    return durableChatLaunchHandler(c);
+  }
   // Lets clients join a turn to its trace (the trace id is the second field).
   const traceparent = activeTraceparent();
   if (traceparent) c.header("traceparent", traceparent);
@@ -234,6 +244,7 @@ async function failChatTurn(turn: ChatTurn, reason: string): Promise<ChatTurnUsa
 const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
 
 export const workspaceChatRoutes = new Hono()
+  .route("/operations", chatOperationRoutes)
   .use("*", nativeApiErrors)
   .post("/", workspaceChatHandler)
   .get("/stream", workspaceChatStreamHandler);
@@ -246,6 +257,9 @@ export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).
  * chat settings and spend checks as `POST /v1/chat` apply.
  */
 async function workspaceChatStreamHandler(c: Context) {
+  if (process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
+    return c.json({ error: "Use POST /v1/chat/operations with Idempotency-Key, then resume the operation" }, 409);
+  }
   // Paid GET turns from cookie sessions require same-origin browser evidence.
   if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
@@ -367,46 +381,40 @@ function searchError(error: unknown): { code: string; message: string; status: 4
   if (error instanceof Error && error.name === "AbortError") return { code: "REQUEST_ABORTED", message: "Request aborted before search finished", status: 499 };
   return expectedSearchFailure(error) ?? { code: "SEARCH_FAILED", message: reportPublicError(error), status: 500 };
 }
+/** The API key a request authenticated with, null for a session, undefined when the caller is unknown (never cached). */
+function requestApiKeyId(c: Context): string | null | undefined {
+  const actor = getRequestActor(c) as ReturnType<typeof getRequestActor> | undefined;
+  if (!actor) return undefined;
+  return actor.type === "apiKey" ? actor.apiKey.keyId : null;
+}
+
 /**
- * Identical searches repeat constantly (type-ahead, popular questions), so a
- * complete answer is reused for a short window instead of re-running
- * embedding, vector and text retrieval. The key holds the user, the API key and
- * the whole normalized request, so answers never cross callers, workspaces or
- * options. Workspace and key checks still run on every request (route), and a
- * reused answer reports no new usage. SEARCH_RESPONSE_CACHE_TTL_MS=0 disables it.
+ * Runs one search, reusing a recent identical answer when the response cache
+ * (search/response-cache.ts) allows it. Callers authorize the workspace and the
+ * API key's scopes first; the cache never serves a request that has not passed them.
+ * `memo` shares access and privacy lookups across the searches of one request or batch.
  */
-const SEARCH_CACHE_MAX = 500;
-const searchCache = new Map<string, { at: number; data: SearchData }>();
-function searchCacheTtlMs(): number {
-  const value = Number.parseInt(process.env.SEARCH_RESPONSE_CACHE_TTL_MS ?? "", 10);
-  if (Number.isFinite(value) && value >= 0) return value;
-  return process.env.NODE_ENV === "test" ? 0 : 30_000;
-}
-
-export function clearSearchResponseCacheForTests(): void {
-  searchCache.clear();
-}
-
-async function retrieve(body: SearchInput & { workspaceId: string }, userId: string, deferred?: DeferredRequestContext): Promise<SearchData> {
+async function retrieve(body: SearchInput & { workspaceId: string }, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
   // A capability changes the policy a cached answer was produced under: never share across it.
-  const ttl = deferred?.policy || body.geo ? 0 : searchCacheTtlMs();
-  const key = JSON.stringify([userId, currentRequestApiKeyId(), { ...body, q: body.q.trim().replace(/\s+/g, " ") }]);
-  const cached = ttl > 0 ? searchCache.get(key) : undefined;
-  if (cached && Date.now() - cached.at < ttl) {
-    searchCache.delete(key);
-    searchCache.set(key, cached);
+  const ttl = deferred?.policy || body.geo ? 0 : searchResponseCacheTtlMs();
+  const apiKeyId = cacheableApiKeyId(actorApiKeyId, currentRequestApiKeyId());
+  // Keyed on the exact request, query as sent: the search runs on that same text.
+  const ticket = ttl > 0 && apiKeyId !== undefined
+    ? await responseCacheTicket({ userId, apiKeyId, workspaceIds: [body.workspaceId], request: { ...body }, memo })
+    : null;
+  const cached = ticket ? readCachedResponse(ticket, ttl) as SearchData | undefined : undefined;
+  if (cached) {
     return {
-      ...cached.data,
-      usage: { ...cached.data.usage, inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0, costSource: "none" },
+      ...cached,
+      usage: { ...cached.usage, inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0, costSource: "none" },
       timings: { cachedMs: 0, totalMs: 0 },
     };
   }
   const search = () => hybridSearch(body.q, userId, searchOptions(body));
   const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
   // A response with pages still materializing must not be replayed as final.
-  if (ttl > 0 && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
-    searchCache.set(key, { at: Date.now(), data });
-    if (searchCache.size > SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value!);
+  if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
+    await storeResponse(ticket, data, data.availability?.scope?.workspaceId);
   }
   return data;
 }
@@ -508,7 +516,7 @@ export const searchRoutes = new Hono()
     const deferred = await deferredRequestContext(c, workspaceId);
     if ("response" in deferred) return deferred.response;
     try {
-      return c.json(await retrieve({ ...parsed.data, workspaceId }, userId, deferred.context));
+      return c.json(await retrieve({ ...parsed.data, workspaceId }, userId, requestApiKeyId(c), deferred.context, createCacheScopeMemo()));
     } catch (error) {
       const failure = expectedSearchFailure(error);
       if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
@@ -527,6 +535,27 @@ export const searchRoutes = new Hono()
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
+    // A generated answer is a model call billed like chat, so it needs the
+    // chat scope as well (the same scope /v1/chat checks). Refuse before any
+    // workspace lookup or retrieval runs.
+    // Browser keys never get aggregate answers: the answer path has no output
+    // moderation and fans out across workspaces, which a public key must not reach.
+    if (parsed.data.generateAnswer && actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["chat"]))) {
+      return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+    }
+
+    // An answer is a chat turn: it spends the chat-ai allowance and holds a
+    // chat slot like /v1/chat (the path alone classifies it as search).
+    let slot: { release: () => void } | null | "uncapped" = "uncapped";
+    if (parsed.data.generateAnswer) {
+      const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
+      if (limited) return limited;
+      slot = acquireChatSlot(c);
+      if (!slot) {
+        c.header("Retry-After", "5");
+        return apiErrorResponse(c, 429, "rate_limited", "Too many chat requests in progress for this key; wait for one to finish");
+      }
+    }
 
     try {
       // Each listed workspace may be a UUID, slug, former slug, name or
@@ -544,7 +573,12 @@ export const searchRoutes = new Hono()
       if (error instanceof Error && error.message.startsWith("Workspace not found")) {
         return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
+      if (error instanceof Error && error.name === "AggregateAnswerScopeError") {
+        return apiErrorResponse(c, 400, "invalid_request", error.message);
+      }
       throw error;
+    } finally {
+      if (slot && slot !== "uncapped") slot.release();
     }
   })
   .post("/:sessionId/feedback", async (c) => {

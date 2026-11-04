@@ -7,6 +7,12 @@ const chatWorkspace = vi.fn();
 const workspaceChatDisabledBody = vi.fn(async (_workspaceId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
 const aggregateWorkspaceRagSearch = vi.fn();
 const sqlMock = vi.fn();
+const enforceActorCategoryRateLimit = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
+
+vi.mock("../middleware/rate-limit.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../middleware/rate-limit.js")>(),
+  enforceActorCategoryRateLimit,
+}));
 
 vi.mock("../db.js", () => ({
   sql: sqlMock,
@@ -31,6 +37,14 @@ const ensureDefaultWorkspace = vi.fn(async () => ({ id: "ws-default" }));
 vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   ensureDefaultWorkspace,
   getWorkspace,
+}));
+
+// The response cache re-checks access and reads privacy per request; workspaces named "*strict*" are strict-privacy.
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  getWorkspaceAccessWithPipeline: vi.fn(async (workspaceId: string) => ({
+    workspaceId, orgId: "org-1", pipeline: workspaceId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
+  })),
 }));
 
 const traceparent = vi.hoisted(() => ({ value: null as string | null }));
@@ -210,15 +224,15 @@ describe("searchRoutes", () => {
     process.env.SEARCH_RESPONSE_CACHE_TTL_MS = "30000";
     clearSearchResponseCacheForTests();
     try {
-      hybridSearch.mockResolvedValue({
+      hybridSearch.mockImplementation(async (_q: string, _user: string, options: { filters: { workspaceId: string } }) => ({
         results: [{ id: "c1" }], sessionId: "s",
-        availability: { status: "complete", isPartial: false },
+        availability: { status: "complete", isPartial: false, scope: { workspaceId: options.filters.workspaceId, runId: null } },
         usageEvents: [{ inputTokens: 6, outputTokens: 0, costCents: 0.01, metadata: { costSource: "provider" } }],
-      });
+      }));
       const search = async (q: string, workspaceId = "ws-2"): Promise<any> =>
         (await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, workspace: workspaceId }) })).json();
       const first = await search("rate limits");
-      const second = await search("  rate   limits ");
+      const second = await search("rate limits");
       expect(hybridSearch).toHaveBeenCalledTimes(1);
       expect(first.usage.inputTokens).toBe(6);
       expect(second.results).toEqual(first.results);
@@ -226,6 +240,15 @@ describe("searchRoutes", () => {
       expect(second.timings).toEqual({ cachedMs: 0, totalMs: 0 });
       await search("rate limits", "ws-3");
       expect(hybridSearch).toHaveBeenCalledTimes(2);
+      // The key is the query as sent: different whitespace is a different search.
+      await search("  rate   limits ");
+      expect(hybridSearch).toHaveBeenCalledTimes(3);
+      expect(hybridSearch).toHaveBeenLastCalledWith("rate   limits", "user-1", expect.anything());
+      // Strict-privacy: never cached, so both identical requests run retrieval.
+      await search("rate limits", "ws-strict");
+      const strictReplay = await search("rate limits", "ws-strict");
+      expect(hybridSearch).toHaveBeenCalledTimes(5);
+      expect(strictReplay.usage.inputTokens).toBe(6);
     } finally {
       delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS;
       clearSearchResponseCacheForTests();
@@ -328,6 +351,69 @@ describe("searchRoutes", () => {
       apiKey: null,
     });
     expect(hybridSearch).not.toHaveBeenCalled();
+  });
+
+  describe("aggregate answers need the chat scope", () => {
+    const keyActor = (scopes: string[], keyType: "server" | "client" = "server") => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] } });
+    const aggregate = (actor: ReturnType<typeof keyActor>, body: Record<string, unknown>) => buildApp(actor).request("/search/aggregate", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "who is this for?", ...body }),
+    });
+    const empty = { query: "q", answer: null, citations: [], evidenceSpans: [], workspaces: [], warnings: [], partial: false, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+
+    it("refuses generateAnswer from a search-only key before any lookup, search or model call", async () => {
+      const response = await aggregate(keyActor(["search"]), { generateAnswer: true });
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "forbidden" } });
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
+    it("refuses a chat-only key (search is still required)", async () => {
+      expect((await aggregate(keyActor(["chat"]), { generateAnswer: true })).status).toBe(403);
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+    });
+
+    it("refuses generateAnswer from a browser key, even with chat", async () => {
+      const response = await aggregate(keyActor(["search", "chat"], "client"), { generateAnswer: true, workspaces: ["ws-1"] });
+      expect(response.status).toBe(403);
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
+    it("answers 400 when an answer would span organizations", async () => {
+      aggregateWorkspaceRagSearch.mockRejectedValueOnce(Object.assign(new Error("generateAnswer needs workspaces from one organization"), { name: "AggregateAnswerScopeError" }));
+      const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });
+    });
+
+    it("runs a default request from a search-only key with every model-calling step off", async () => {
+      aggregateWorkspaceRagSearch.mockResolvedValueOnce(empty);
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
+      expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({
+        request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, compression: false, queryDecompose: false, stepback: false }),
+      }));
+    });
+
+    it("counts an answer as chat-ai and refuses when that allowance is spent", async () => {
+      aggregateWorkspaceRagSearch.mockResolvedValue(empty);
+      enforceActorCategoryRateLimit.mockClear();
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
+      expect(enforceActorCategoryRateLimit).not.toHaveBeenCalled();
+      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
+      expect(enforceActorCategoryRateLimit).toHaveBeenCalledWith(expect.anything(), "chat-ai");
+      aggregateWorkspaceRagSearch.mockClear();
+      enforceActorCategoryRateLimit.mockResolvedValueOnce(new Response(null, { status: 429 }));
+      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(429);
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      aggregateWorkspaceRagSearch.mockReset();
+    });
+
+    it("answers for a key with search and chat", async () => {
+      aggregateWorkspaceRagSearch.mockResolvedValueOnce({ ...empty, answer: "Answer [1]." });
+      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
+      expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ generateAnswer: true }) }));
+    });
   });
 
   it("forwards a verified API actor and preserves scope and workspace denials", async () => {

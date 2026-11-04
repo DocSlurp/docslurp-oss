@@ -5,8 +5,9 @@
 //   worker  (docslurp_worker)   DML only on the tables below; denied auth, credential and billing tables
 //   backup  (docslurp_backup)   pg_read_all_data (granted by the superuser, see ops scripts)
 //
-// Roles are created outside migrations (they are cluster-wide and need
-// CREATEROLE). `reconcileRoleGrants` runs as the owner after every migration
+// Runtime login roles are created outside migrations (cluster-wide CREATEROLE).
+// Migration 0120 separately provisions its isolated non-login publisher, or
+// requires an administrator to provision it for a restricted migration owner. `reconcileRoleGrants` runs as the owner after every migration
 // (migrate.mjs) and grants only to the roles that exist, so a database without
 // them behaves exactly as before. It is idempotent: the worker's table grants
 // are revoked and re-granted from WORKER_TABLES each time, and the app's come
@@ -28,7 +29,7 @@ const DML = ["select", "insert", "update", "delete"];
 /**
  * Relations the worker uses, with the privileges it needs and where. Column
  * lists restrict SELECT to the named columns. Rows written by triggers count:
- * trigger functions here are SECURITY INVOKER, so they run with the worker's
+ * most trigger functions are SECURITY INVOKER, so they run with the worker's
  * privileges (foreign-key cascades run as the table owner and need nothing).
  */
 export const WORKER_TABLES = Object.freeze({
@@ -68,6 +69,7 @@ export const WORKER_TABLES = Object.freeze({
   org_teardown_failures: { privileges: ["select", "insert"], evidence: "worker/src/sandbox/source-quarantine.ts (recordOrgFailure insert ... returning; orgFailures count); operators delete rows" },
   page_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts page stage state" },
   page_work_tasks: { privileges: DML, evidence: "worker/src/db/page-task-store.ts" },
+  run_terminal_receipts: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts finalizeRun reads and inserts immutable generation receipts" },
   parser_eval_results: { privileges: ["insert"], evidence: "worker/src/db/store.ts parser evaluations" },
   performance_log: { privileges: DML, evidence: "worker/src/db/store.ts perf log and pruning" },
   pii_detections: { privileges: DML, evidence: "worker/src/stages/pii-detect.ts" },
@@ -121,6 +123,11 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   chat_answer_evidence_spans: "chat (API only)",
   chat_message_feedback: "chat (API only)",
   chat_sessions: "chat (API only)",
+  chat_operations: "first-party chat identity/session/budget metadata (API/native chat executor only)",
+  chat_operation_events: "retained chat output (API/native chat executor only)",
+  chat_run_dependencies: "authorized chat task discovery links (API only); ingestion publishes through document_page_states",
+  realtime_revision_counters: "private numeric publication storage; only validated triggers may write",
+  realtime_revisions: "aggregate dashboard revision view (API only); ingestion triggers use realtime_revision_counters",
   extracts: "extract retention, charges and deletion (API maintenance sweep only); the worker reads runs' storage_prefix",
   chat_turns: "chat (API only)",
   connector_sync_log: "connector administration (API only)",
@@ -189,7 +196,7 @@ export function quoteIdent(name) {
  * public relation names that exist, `sequences` maps a sequence name to the
  * table that owns it. `migrationsTable` says drizzle.__drizzle_migrations exists.
  */
-export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false }) {
+export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, nativeSchema = false }) {
   const statements = [];
   const has = (role) => present.includes(role);
   const ownerIdent = quoteIdent(owner);
@@ -240,6 +247,39 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       );
     }
   }
+  if (relations.includes("realtime_revision_counters")) {
+    // Schema-wide application grants must never expose publication internals.
+    const functions = "public.realtime_changed(),public.realtime_search_session_changed(),public.realtime_materialization_changed(),public.realtime_record_change(text),public.realtime_fold_committed(text),public.realtime_compact_revisions(text)";
+    statements.push(`revoke all on function ${functions} from public`,
+      "revoke all on public.realtime_revision_counters,public.realtime_revisions from public");
+    for (const role of [roles.app, roles.worker].filter(has)) {
+      statements.push(`revoke all on public.realtime_revision_counters,public.realtime_revisions from ${quoteIdent(role)}`,
+        `revoke all on function ${functions} from ${quoteIdent(role)}`);
+    }
+    if (has(roles.app)) statements.push(`grant select on public.realtime_revisions to ${quoteIdent(roles.app)}`,
+      `grant execute on function public.realtime_compact_revisions(text) to ${quoteIdent(roles.app)}`);
+  }
+  if (nativeSchema) {
+    // Native chat execution is an application service, never the ingestion role.
+    statements.push("revoke all on schema docslurp_mastra from public",
+      "revoke all on all tables in schema docslurp_mastra from public",
+      "revoke all on all sequences in schema docslurp_mastra from public");
+    if (has(roles.app)) {
+      const app = quoteIdent(roles.app);
+      statements.push(`grant usage on schema docslurp_mastra to ${app}`,
+        `revoke create on schema docslurp_mastra from ${app}`,
+        `grant select, insert, update, delete on all tables in schema docslurp_mastra to ${app}`,
+        `grant usage, select, update on all sequences in schema docslurp_mastra to ${app}`,
+        `alter default privileges for role ${ownerIdent} in schema docslurp_mastra grant select, insert, update, delete on tables to ${app}`,
+        `alter default privileges for role ${ownerIdent} in schema docslurp_mastra grant usage, select, update on sequences to ${app}`);
+    }
+    if (has(roles.worker)) {
+      const worker = quoteIdent(roles.worker);
+      statements.push(`revoke all on schema docslurp_mastra from ${worker}`,
+        `revoke all on all tables in schema docslurp_mastra from ${worker}`,
+        `revoke all on all sequences in schema docslurp_mastra from ${worker}`);
+    }
+  }
   if (has(roles.backup)) {
     // pg_read_all_data (granted by the superuser) covers reads; usage keeps
     // pg_dump working on clusters older than PostgreSQL 14 when SELECT is granted instead.
@@ -275,7 +315,9 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
     where s.relkind = 'S' and n.nspname = 'public'
   `);
   const { rows: [{ migrations }] } = await client.query("select to_regclass('drizzle.__drizzle_migrations') is not null as migrations");
+  const { rows: [{ native }] } = await client.query("select to_regnamespace('docslurp_mastra') is not null as native");
   const statements = roleGrantStatements({
+    nativeSchema: native === true,
     owner,
     migrationsTable: migrations === true,
     roles,

@@ -1,6 +1,6 @@
 {
   "name": "@docslurp/contrib-algolia-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Server-side Algolia-style wrapper for syncing settings, synonyms, rules and imports into DocSlurp.",
   "license": "MIT",
   "homepage": "https://docslurp.io/docs/packages/contrib-algolia-server",
@@ -32,7 +32,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "publishConfig": {
     "access": "public"

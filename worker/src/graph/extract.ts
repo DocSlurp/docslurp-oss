@@ -13,6 +13,8 @@ import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 
 const MAX_KNOWN_ENTITY_HINTS = 40;
 const CO_MENTION_CONFIDENCE = 0.45;
+/** Ceiling for the larger-budget retry of a window whose answer was cut off. */
+const MAX_EXPANDED_OUTPUT_TOKENS = 6_400;
 
 export interface GraphChunk {
   id: string;
@@ -129,48 +131,57 @@ export async function extractDocumentGraph(args: {
   if (llmAttempted) {
     let llmGraph: DocumentGraphExtraction = { entities: [], relationships: [] };
     let succeeded = false;
-    for (const [index, window] of windows.entries()) {
-      let result: Awaited<ReturnType<typeof extractWindowWithLlm>>;
-      try {
-        result = await extractWindowWithLlm({
-          context,
-          apiKey: context.apiKey!,
-          filename: args.filename,
-          text: window,
-          part: windows.length > 1 ? { index: index + 1, total: windows.length } : undefined,
-          entityTypes,
-          knownEntities: llmGraph.entities
-            .slice(0, MAX_KNOWN_ENTITY_HINTS)
-            .map((entity) => `${entity.name} (${entity.type})`),
-          maxOutputTokens: profile.maxOutputTokens,
-        });
-      } catch (error) {
-        if (context.signal?.aborted) throw error;
-        // Status and type only: provider error bodies may contain document content.
-        // generateOpenRouterText's observation sends the full telemetry to SigNoz.
-        const failure = operationErrorAttributes(error);
-        console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error ${operationErrorSummary(failure)}`);
-        // The SDK already retried 429s and 5xx. A route-level refusal (an
-        // unservable model or route, auth, credit) fails every later window too.
-        if (isRouteLevelProviderFailure(failure)) { stoppedEarly = index < windows.length - 1; break; }
-        continue;
-      }
-      inputTokens += result.usage.inputTokens;
-      outputTokens += result.usage.outputTokens;
-      // Outside either catch: a recorder failure must fail the stage, not silently lose billing.
-      context.onUsage?.(result.usage, { window: index + 1, finishReason: result.finishReason });
-      if (!context.onUsage) console.log(`[ai-usage] graphrag-extract model=${context.model} input_tokens=${result.usage.inputTokens} output_tokens=${result.usage.outputTokens}`);
-      try {
-        const graph = parseGraphExtraction(result.text, allowedTypes);
-        windowsRead += 1;
-        llmGraph = {
-          entities: mergeEntities(llmGraph.entities, graph.entities.filter((entity) => entity.confidence >= profile.minConfidence)),
-          relationships: mergeRelationships(llmGraph.relationships, graph.relationships.filter((relationship) => relationship.confidence >= profile.minConfidence)),
-        };
-        succeeded = true;
-      } catch (error) {
-        if (context.signal?.aborted) throw error;
-        console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=invalid-json finishReason=${result.finishReason} outputTokens=${result.usage.outputTokens}`);
+    windowLoop: for (const [index, window] of windows.entries()) {
+      const request = (maxOutputTokens: number) => extractWindowWithLlm({
+        context,
+        apiKey: context.apiKey!,
+        filename: args.filename,
+        text: window,
+        part: windows.length > 1 ? { index: index + 1, total: windows.length } : undefined,
+        entityTypes,
+        knownEntities: llmGraph.entities
+          .slice(0, MAX_KNOWN_ENTITY_HINTS)
+          .map((entity) => `${entity.name} (${entity.type})`),
+        maxOutputTokens,
+      });
+      // Reasoning starts at the model's floor; a cut-off answer retries with double the budget, up to the ceiling.
+      let maxOutputTokens = profile.maxOutputTokens;
+      for (;;) {
+        let result: Awaited<ReturnType<typeof extractWindowWithLlm>>;
+        try {
+          result = await request(maxOutputTokens);
+        } catch (error) {
+          if (context.signal?.aborted) throw error;
+          // Status and type only: provider error bodies may contain document content.
+          // generateOpenRouterText's observation sends the full telemetry to SigNoz.
+          const failure = operationErrorAttributes(error);
+          console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error ${operationErrorSummary(failure)}`);
+          // The SDK already retried 429s and 5xx. A route-level refusal (an
+          // unservable model or route, auth, credit) fails every later window too.
+          if (isRouteLevelProviderFailure(failure)) { stoppedEarly = index < windows.length - 1; break windowLoop; }
+          break;
+        }
+        inputTokens += result.usage.inputTokens;
+        outputTokens += result.usage.outputTokens;
+        // Outside either catch: a recorder failure must fail the stage, not silently lose billing.
+        context.onUsage?.(result.usage, { window: index + 1, finishReason: result.finishReason });
+        if (!context.onUsage) console.log(`[ai-usage] graphrag-extract model=${context.model} input_tokens=${result.usage.inputTokens} output_tokens=${result.usage.outputTokens}`);
+        try {
+          const graph = parseGraphExtraction(result.text, allowedTypes);
+          windowsRead += 1;
+          llmGraph = {
+            entities: mergeEntities(llmGraph.entities, graph.entities.filter((entity) => entity.confidence >= profile.minConfidence)),
+            relationships: mergeRelationships(llmGraph.relationships, graph.relationships.filter((relationship) => relationship.confidence >= profile.minConfidence)),
+          };
+          succeeded = true;
+          break;
+        } catch (error) {
+          if (context.signal?.aborted) throw error;
+          const expand = result.finishReason === "length" && maxOutputTokens < MAX_EXPANDED_OUTPUT_TOKENS;
+          console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=invalid-json finishReason=${result.finishReason} outputTokens=${result.usage.outputTokens}${expand ? " retry=expanded" : ""}`);
+          if (!expand) break;
+          maxOutputTokens = Math.min(MAX_EXPANDED_OUTPUT_TOKENS, maxOutputTokens * 2);
+        }
       }
     }
     if (succeeded) extraction = llmGraph;

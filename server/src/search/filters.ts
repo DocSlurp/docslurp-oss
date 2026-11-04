@@ -11,7 +11,10 @@ export interface SearchFilters {
   documentIds?: string[];
   runId?: string;
   workspaceId?: string;
+  /** Case-insensitive literal substring of the filename; `%`, `_` and backslash are not wildcards. */
   filenameContains?: string;
+  /** Exact, case-sensitive filename match. */
+  filenameEquals?: string;
   mimeTypes?: string[];
   tags?: string[];
   pageRange?: { from?: number; to?: number };
@@ -61,4 +64,9 @@ export function parseFilters(query: Record<string, string>): SearchFilters {
   }
 
   return filters;
+}
+
+/** Escape backslash, `%` and `_` so a value matches literally inside a LIKE/ILIKE pattern (backslash is the escape character). */
+export function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }

@@ -93,15 +93,17 @@ export async function resolveApiKeyActor(
  */
 export async function resolveBetterAuthSessionActor(
   headers: Headers,
-  refreshedHeadersOrOptions?: Headers | { allowMfaPolicyBlocked?: boolean },
-  options: { allowMfaPolicyBlocked?: boolean } = {},
+  refreshedHeadersOrOptions?: Headers | { allowMfaPolicyBlocked?: boolean; signal?: AbortSignal },
+  options: { allowMfaPolicyBlocked?: boolean; signal?: AbortSignal } = {},
 ): Promise<SessionRequestActor | null> {
   const responseHeaders = refreshedHeadersOrOptions instanceof Headers ? refreshedHeadersOrOptions : undefined;
   if (!(refreshedHeadersOrOptions instanceof Headers)) options = refreshedHeadersOrOptions ?? options;
+  options.signal?.throwIfAborted();
   const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
     headers: Headers | null;
     response: { session: { id: string; userId: string; mfaVerified?: boolean | null }; user: SessionUser } | null;
   } | null;
+  options.signal?.throwIfAborted();
   const session = result?.response ?? null;
   if (responseHeaders) {
     for (const cookie of result?.headers?.getSetCookie() ?? []) responseHeaders.append("set-cookie", cookie);
@@ -119,9 +121,11 @@ export async function resolveBetterAuthSessionActor(
     return null;
   }
   const mfaPolicyBlocked = mfaVerified ? false : (await evaluateMfaPolicy(appDbPool, session.user.id, false)).enforced;
+  options.signal?.throwIfAborted();
   if (mfaPolicyBlocked && !options.allowMfaPolicyBlocked) return null;
 
   session.user.isAdmin = await isConfiguredAdminUser(appDbPool, session.user.id);
+  options.signal?.throwIfAborted();
 
   return {
     type: "session",
@@ -256,6 +260,7 @@ export function assertActorWorkspaceOrgScope(
 export async function loadActorScopedWorkspace(
   workspaceRef: string,
   actor: RequestActor,
+  options: { refineNames?: boolean } = {},
 ): Promise<WorkspaceRecord | null> {
   // A blank reference (e.g. a missing stored ID) is never the default workspace here.
   if (!workspaceRef?.trim()) return null;
@@ -268,7 +273,7 @@ export async function loadActorScopedWorkspace(
         ? (await findWorkspaceForInput(ref, actorWorkspaceScope(actor)))?.id
         : undefined;
   if (!workspaceId) return null;
-  const workspace = await getWorkspace(workspaceId, actor.userId);
+  const workspace = await getWorkspace(workspaceId, actor.userId, options);
   if (!workspace) {
     return null;
   }

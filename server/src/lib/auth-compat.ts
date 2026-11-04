@@ -8,7 +8,7 @@
  * walk the seam inventory in docs/better-auth-upgrade-contract.md, run the
  * auth database suites, then change this constant.
  */
-export const REVIEWED_BETTER_AUTH_VERSION = "1.7.14";
+export const REVIEWED_BETTER_AUTH_VERSION = "1.7.15";
 
 /** Throws unless a native plugin or package reports the reviewed release. */
 export function assertReviewedBetterAuth(component: string, version: string | undefined): void {

@@ -1,6 +1,6 @@
 {
   "name": "@docslurp/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript client for DocSlurp document ingestion and cited search, with embeddable React and Web Component surfaces at @docslurp/sdk/embed.",
   "license": "MIT",
   "homepage": "https://docslurp.io/docs/packages/sdk",
@@ -77,7 +77,7 @@
     "@types/react-dom": "19.3.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=20"

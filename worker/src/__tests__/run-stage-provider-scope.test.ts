@@ -2,20 +2,18 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
 import { currentProviderPolicy, currentProviderRateOrg } from "../lib/provider-rate-limit.js";
-import { createStageExecution } from "../pipeline/stage-execution.js";
-import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
+import { createStageExecution } from "../pipeline/stage-execution.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
 /**
- * Run-level stages (graph-enrich, page-range shards) call providers from
- * stage.run itself, not through runDocumentStage. On 2026-11-02 they ran with
- * no provider scope: every graph call was restricted to non-China providers and
- * 404ed for a model only Alibaba serves, though the run allowed it, and its
- * requests counted against no org in the fair-share limiter.
+ * Run-level stages (graph-enrich, community summaries) call providers outside any per-document scope. They must
+ * carry the run's own org and China-provider policy: without it every call failed closed to non-China providers,
+ * which 404s for models only China-based providers serve (2026-11-01).
  */
 let db: PGlite;
 let server: PGLiteSocketServer;
@@ -26,14 +24,6 @@ beforeAll(async () => {
   const served = await serveOnRandomPort(db);
   server = served.server;
   store = new Store(`postgres://postgres@127.0.0.1:${served.port}/postgres`, 60_000, { poolMax: 1, workerSlots: { ttlMs: 60_000, globalCap: 0, defaultOrgSlots: 2 } });
-  await db.exec(`
-    insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
-    insert into organizations(id, name, slug, created_by_user_id, allow_china_providers) values
-      ('o-allow', 'Allow', 'allow', 'u1', true), ('o-deny', 'Deny', 'deny', 'u1', false);
-    insert into workspaces(id, org_id, user_id, name, allow_china_providers) values
-      ('w-allow', 'o-allow', 'u1', 'A', true), ('w-deny-in-allowing-org', 'o-allow', 'u1', 'B', false),
-      ('w-allow-in-denying-org', 'o-deny', 'u1', 'C', true);
-  `);
 }, 120_000);
 
 afterAll(async () => {
@@ -43,53 +33,70 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.exec(`delete from workspace_runs`);
+  await db.exec(`
+    delete from workspace_runs; delete from workspaces; delete from organizations;
+    insert into "user"(id, name, email) values ('u1', 'A', 'a@x') on conflict do nothing;
+    insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1'), ('o2', 'Other', 'other', 'u1');
+    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2');
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);
+  `);
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
-type Seen = { orgId: string | null; allowChinaProviders: boolean };
-
-async function scopeSeenByRunStage(orgId: string, workspaceId: string, runId = "r1", during?: () => Promise<void>) {
-  await db.query(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
-    values ($3, $1, 'u1', $2, 'upload', 'processing', 'graph-enrich', '{}', 0, 0)`, [orgId, workspaceId, runId]);
-  const seen: Seen[] = [];
-  const read = () => seen.push({ orgId: currentProviderRateOrg(), allowChinaProviders: currentProviderPolicy().allowChinaProviders });
-  const stage: Stage = {
-    name: "graph-enrich",
-    // Read before and after yielding, so a concurrent run's scope would show.
-    run: async () => { read(); await during?.(); read(); },
-  };
+async function observedScope() {
+  let seen: { policy: ReturnType<typeof currentProviderPolicy>; org: string | null } | undefined;
+  const stage: Stage = { name: "graph-enrich", run: async () => { seen = { policy: currentProviderPolicy(), org: currentProviderRateOrg() }; } };
   const execution = createStageExecution({ store, stages: [stage], config: { workerDocConcurrency: 1, workerAdaptiveTuning: false } as Config });
-  await execution.runStage({ stageName: "graph-enrich", runId, totalStages: 1, artifacts: {} },
+  await execution.runStage({ stageName: "graph-enrich", runId: "r1", totalStages: 1, artifacts: {} },
     { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1 });
-  expect(new Set(seen.map((value) => JSON.stringify(value))).size).toBe(1);
-  return seen[0];
+  return seen!;
 }
 
 describe("run-level stage provider scope", () => {
-  it("attributes provider calls to the run's org and applies its policy", async () => {
-    expect(await scopeSeenByRunStage("o-allow", "w-allow")).toEqual({ orgId: "o-allow", allowChinaProviders: true });
+  it("carries the run's org and allows China-based providers only when the org and workspace both do", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = true;`);
+    expect(await observedScope()).toEqual({ policy: { allowChinaProviders: true, speedBoost: false }, org: "o1" });
   });
 
-  it("stays restricted when the workspace or the org does not allow China-based providers", async () => {
-    expect(await scopeSeenByRunStage("o-allow", "w-deny-in-allowing-org")).toEqual({ orgId: "o-allow", allowChinaProviders: false });
-    await db.exec(`delete from workspace_runs`);
-    expect(await scopeSeenByRunStage("o-deny", "w-allow-in-denying-org")).toEqual({ orgId: "o-deny", allowChinaProviders: false });
+  it("stays restricted when the workspace turned China-based providers off", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = false where id = 'w';
+      update workspaces set allow_china_providers = true where id = 'w2';`);
+    expect((await observedScope()).policy.allowChinaProviders).toBe(false);
   });
 
-  it("keeps concurrent runs of different orgs in their own scopes", async () => {
+  it("stays restricted when the run's org turned them off, whatever another org allows", async () => {
+    await db.exec(`update organizations set allow_china_providers = (id = 'o2'); update workspaces set allow_china_providers = true;`);
+    expect(await observedScope()).toEqual({ policy: { allowChinaProviders: false, speedBoost: false }, org: "o1" });
+  });
+
+  it("keeps concurrent runs' scopes apart", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = (id = 'w');
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);`);
+    const seen = new Map<string, { allow: boolean; org: string | null }>();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const [allowing, denying] = await Promise.all([
-      scopeSeenByRunStage("o-allow", "w-allow", "r-allow", () => gate),
-      (async () => { const seen = await scopeSeenByRunStage("o-deny", "w-allow-in-denying-org", "r-deny"); release(); return seen; })(),
-    ]);
-    expect(allowing).toEqual({ orgId: "o-allow", allowChinaProviders: true });
-    expect(denying).toEqual({ orgId: "o-deny", allowChinaProviders: false });
+    // r1 reads its policy only after r2's stage has started, so both scopes are live at once.
+    const stage: Stage = {
+      name: "graph-enrich",
+      run: async (state) => {
+        if (state.run.id === "r1") await gate;
+        else release();
+        seen.set(state.run.id, { allow: currentProviderPolicy().allowChinaProviders, org: currentProviderRateOrg() });
+      },
+    };
+    const execution = createStageExecution({ store, stages: [stage], config: { workerDocConcurrency: 1, workerAdaptiveTuning: false } as Config });
+    const runtime = { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1 };
+    await Promise.all(["r1", "r2"].map((runId) => execution.runStage({ stageName: "graph-enrich", runId, totalStages: 1, artifacts: {} }, runtime)));
+    expect(Object.fromEntries(seen)).toEqual({ r1: { allow: true, org: "o1" }, r2: { allow: false, org: "o2" } });
   });
 
-  it("restricts provider calls outside any run scope", () => {
+  it("leaves no scope behind after the stage", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = true;`);
+    await observedScope();
     expect(currentProviderPolicy().allowChinaProviders).toBe(false);
     expect(currentProviderRateOrg()).toBeNull();
   });

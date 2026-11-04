@@ -137,7 +137,9 @@ describe("workspace knowledge graph persistence", () => {
     await sql`update workspace_runs set artifacts = ${sql.json({ "source:embeddings": artifactUri })} where id = 'run-source'`;
     await sql`update documents set reused_from_document_id = 'source' where id = 'copy'`;
     await sql`delete from document_chunks where document_id = 'copy'`;
-    expect(await store.seedReusedStageOutputs("run-copy", ["embed"]))
+    await sql`update workspace_runs set status = 'queued' where id = 'run-copy'`;
+    const [ownership] = await sql`select org_id, workspace_id, execution_generation from workspace_runs where id = 'run-copy'`;
+    expect(await store.seedReusedStageOutputs("run-copy", ["embed"], { runId: "run-copy", orgId: ownership!.org_id, workspaceId: ownership!.workspace_id, executionGeneration: ownership!.execution_generation ?? undefined }))
       .toEqual({ seededDocuments: 1, unavailable: [] });
     if (purgeSource) await sql`delete from document_chunks where document_id = 'source'`;
 
@@ -350,6 +352,19 @@ describe("workspace knowledge graph persistence", () => {
     expect(generateOpenRouterText).toHaveBeenCalledTimes(4);
   });
 
+  it("retries a cut-off community summary once with a larger budget", async () => {
+    await seedDocument("d1", "Acme supplies Globex and Hooli");
+    await write("d1", documentGraph("d1", "Acme", ["Globex", "Hooli"]));
+    vi.mocked(generateOpenRouterText)
+      .mockResolvedValueOnce({ text: "Acme supplies", finishReason: "length", usage: { inputTokens: 10, outputTokens: 220 } })
+      .mockResolvedValue({ text: "Acme supplies Globex and Hooli.", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 12 } });
+    const result = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null,
+      context: { scope: "Supply chain", model: "test-model", privacyMode: "standard", apiKey: "mock-only" } });
+    expect(result).toMatchObject({ communities: 1, summarized: 1, inputTokens: 20, outputTokens: 232 });
+    expect(vi.mocked(generateOpenRouterText).mock.calls.map(([call]) => call.maxOutputTokens)).toEqual([220, 440]);
+    expect(await sql`select summary from kg_communities`).toEqual([{ summary: "Acme supplies Globex and Hooli." }]);
+  });
+
   it("keeps a failed model extraction stale so retries and rebuilds extract it again", async () => {
     const configHash = graphConfigFingerprint(defaultGraphConfig, "test-model");
     await seedDocument("d1", "Acme supplies Globex");
@@ -415,7 +430,8 @@ describe("workspace graph rebuild jobs", () => {
         (metadata->>'providerCostCents')::numeric as provider_cost
       from usage_attribution where metric = 'graphrag-extract' and metadata->>'graphJobId' = 'job-usage'
     `;
-    expect(events).toHaveLength(1);
+    // The cut-off answer is retried with larger budgets (3,200 then 6,400); every attempt is persisted.
+    expect(events).toHaveLength(3);
     expect(Number(events[0]!.input_tokens)).toBe(100);
     expect(Number(events[0]!.output_tokens)).toBe(1600);
     expect(Number(events[0]!.cost_cents)).toBe(0);

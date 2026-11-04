@@ -14,6 +14,9 @@ Choose a tool based on the result you need:
 | `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
 | `openUploader` | MCP Apps upload widget; only listed when `DOCSLURP_MCP_APPS_UI_ENABLED=true` ([details](#mcp-apps-uploader-openuploader)) | None |
 | `getUploadStatus` | Session acceptance with `sessionId`, or how the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
+| `extract` | Same inputs as `upload` plus `retentionDays`, `notifyEmail` and `download`; the files and every output are deleted when the retention window ends (48 hours free by default) | Workspace ingestion settings |
+| `getMediaEvidence` | An indexed video or audio document's transcript, timestamped frame descriptions and summary, with `nextOffset` for continuation | None |
+| `webSearch` | Ranked public web results (URL, title, snippet, date), optionally with page Markdown; listed only when the deployment enables web tools (`WEB_TOOLS_ENABLED=true`) and a provider is configured ([web tools](web-tools.md)) | None (charged in web credits) |
 
 Search and chat need only a question:
 
@@ -23,7 +26,7 @@ Search and chat need only a question:
 
 Without `workspace`, tools use the organization default workspace. Add `"workspace":"legal-contracts"` (a workspace ID, slug or name: `"Legal Contracts"` finds the same workspace) to target another one. The `upload` tool creates the workspace when a name matches none of yours, so agents should pass a new name only when the user asks for a new workspace; every other tool answers `workspace_not_found`. See [Workspaces](https://docslurp.io/docs/http#workspaces).
 
-Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check workspace access against the authenticated organization. OAuth clients get both unless they request narrower scopes (`search`, `chat`, `read`, `ingest`).
+Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check workspace access against the authenticated organization. An OAuth client that omits `scope` is granted all four MCP scopes (`search`, `chat`, `read`, `ingest`); request fewer to narrow it.
 
 Run multiple retrieval queries in one call:
 
@@ -36,7 +39,7 @@ Run multiple retrieval queries in one call:
 }
 ```
 
-Parallel retrieval defaults to at most four in-flight queries; set `concurrency` from 1 through 4 when needed. Each query supports optional `workspace`, `limit`, `minScore` (relevance floor, 0 disables it; responses carry `noMatch` when nothing relevant remains), `documentId`, `filenameContains`, and comma-separated `tags`. The batch envelope is validated before retrieval starts. Results stay in input order:
+Parallel retrieval defaults to at most four in-flight queries; set `concurrency` from 1 through 8 when needed. Each query supports optional `workspace`, `limit`, `minScore` (relevance floor, 0 disables it; responses carry `noMatch` when nothing relevant remains), `documentId`, `filenameContains`, and comma-separated `tags`. The batch envelope is validated before retrieval starts. Results stay in input order:
 
 ```json
 {
@@ -49,7 +52,7 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 
 Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, `reprocessEstimate` needs `ingest` on a server key, and `searchSettingsEstimate` is available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
-The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
+The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` (alias `docslurp mcp`) from `@docslurp/cli`; it relays to the REST tool adapters (`/v1/mcp/tools`) and exposes the same tools except `openUploader`, which needs an MCP Apps host. It uses a stored `docslurp login` or `DOCSLURP_API_KEY`. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
 ## MCP Apps uploader (openUploader)
 
@@ -294,11 +297,6 @@ confirmation); unsupported browsers retain the normal interface. Set
 `DOCSLURP_WEBMCP_ENABLED=false` to turn it off.
 Neither path requires creating a server API key. Remote `/v1/mcp` remains
 bearer-authenticated.
-
-
-
-See the integration notes and remaining tool gaps
-for authentication boundaries, feature flags and the API parity roadmap.
 
 ## Protocol and file-handling conventions
 

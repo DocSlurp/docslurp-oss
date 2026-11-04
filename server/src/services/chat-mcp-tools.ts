@@ -204,7 +204,7 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  */
 // The agent generates the answer itself. A nested chat starts another paid answer
 // generator under a short tool deadline and can block otherwise usable retrieval.
-const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
  * Workspace settings tools: offered to the chat agent only for the first-party

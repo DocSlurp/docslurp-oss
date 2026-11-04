@@ -785,6 +785,69 @@
       "when": 1793576223525,
       "tag": "0111_speed_boost_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1793664000000,
+      "tag": "0112_run_execution_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1793750400000,
+      "tag": "0113_run_terminal_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1793750400001,
+      "tag": "0114_chat_operations",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1793750400002,
+      "tag": "0115_realtime_revisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1793750400003,
+      "tag": "0116_realtime_viewer_suggestions",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1793750400004,
+      "tag": "0117_chat_run_dependencies",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1793750400005,
+      "tag": "0118_native_mastra",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1793750400006,
+      "tag": "0119_native_operation_bindings",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1793750400007,
+      "tag": "0120_realtime_nonblocking_revisions",
+      "breakpoints": true
     }
   ]
 }

@@ -16,6 +16,11 @@ a call.
 | `POST /v1/web/crawl` | `webCrawl` | Up to 100 same-site pages, 3 link hops, returned and not stored | 0.25 per page read |
 | `POST /v1/web/ingest` | `ingestWebsite` | Crawl, then ingest each page as a Markdown document | 0.25 per page, plus normal ingestion |
 
+MCP clients and the chat assistant currently see only `webSearch`; the other
+MCP tools stay hidden until their capability is enabled
+(`webCapabilityAvailable` in `server/src/services/web/service.ts`). Use the REST
+routes for fetch, map, crawl and ingest.
+
 Server API keys need the `search` scope (`ingest` for `/v1/web/ingest`).
 Browser (client) keys also need the opt-in `web` scope, which requires a
 workspace allowlist; without it they get `403 web_scope_required`. Every
@@ -27,7 +32,7 @@ canonical ID is its URL.
 
 ### Chat
 
-The chat assistant gets only `webSearch` and `webFetch`. It never gets crawl,
+The chat assistant can only ever get `webSearch` and `webFetch` (today only `webSearch` is listed). It never gets crawl,
 map or ingest. In chat, `webFetch` reads only URLs from the user's own messages
 or from `webSearch` results in the same turn. This stops document or web text
 from steering the model into fetching an attacker URL that carries workspace

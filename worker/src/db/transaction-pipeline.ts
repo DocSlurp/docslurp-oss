@@ -54,3 +54,16 @@ export async function pipelineTransaction<T extends readonly PendingQuery<any>[]
     tx.release();
   }
 }
+
+/** Execute ordered statements on a transaction owned by the caller. Never commits. */
+export async function pipelineInTransaction<T extends readonly PendingQuery<any>[]>(
+  client: Client,
+  statements: (tx: Client) => readonly [...T],
+  after?: (tx: Client, results: { [K in keyof T]: Awaited<T[K]> }) => Promise<void>,
+): Promise<{ [K in keyof T]: Awaited<T[K]> }> {
+  const results = [] as unknown[];
+  for (const statement of statements(client)) results.push(await statement);
+  const typed = results as { [K in keyof T]: Awaited<T[K]> };
+  await after?.(client, typed);
+  return typed;
+}

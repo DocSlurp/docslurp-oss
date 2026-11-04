@@ -439,7 +439,7 @@ describe("mcpRoutes", () => {
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
     expect(await listed({ scopes: ["search", "ingest", "workspaces:manage"], keyType: "server" })).toEqual([
-      "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "indexingModeEstimate", "graphRebuildEstimate",
+      "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
     ]);
     expect(await listed({ scopes: ["ingest"] })).toEqual(["uploadEstimate", "fullIndexEstimate", "reprocessEstimate"]);
     expect(await listed({ scopes: ["search"] })).toEqual([]);
@@ -476,9 +476,14 @@ describe("mcpRoutes", () => {
       expect((await post("updateEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
       expect((await post("reprocessEstimate", { runId: "r1" })).status).toBe(403);
-      // The search-settings mutation accepts no API key, so neither does its estimate.
+      // The search-settings estimate needs the mutation's workspaces:manage server key.
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest", "chat"] });
+      expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, keyType: "client", scopes: ["search", "workspaces:manage"] });
       expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
       expect(forwardInProcess).toHaveBeenCalledTimes(1);
+      expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(200);
+      expect(forwardInProcess).toHaveBeenLastCalledWith(expect.anything(), "POST", "/v1/workspaces/ws-1/search-settings/estimate", {}, expect.anything());
     });
 
     it("getJob forwards to /v1/jobs/:id and surfaces route_unavailable", async () => {

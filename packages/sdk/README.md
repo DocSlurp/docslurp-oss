@@ -2,7 +2,7 @@
 
 [Package docs](https://docslurp.io/docs/packages/sdk) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/sdk) · [npm](https://www.npmjs.com/package/@docslurp/sdk)
 
-> **Version:** These examples target `@docslurp/sdk` 0.3.0 or newer, including URL uploads through `upload`, batch `search({ queries })`, workspace discovery and upload-session methods. Upgrade the SDK separately when updating a self-hosted API.
+> **Version:** This reference matches `@docslurp/sdk` 0.4.0. 0.4.0 names workspaces with one `workspace` field (ID, slug or name; `workspace` in the embeds) and adds `extract()`, `chatStream()`, `accessToken`, `listRuns()`, `createCapability()` and the document, tag, job, estimate, retention, re-index and workspace-settings methods. 0.3.0 and older use `workspaceId` and `workspaceName` (`workspaceId` and `workspace-id` in the embeds). Upgrade the SDK separately when updating a self-hosted API.
 
 The SDK covers DocSlurp's three jobs from Node.js: upload documents and follow their extraction, search them for passages that cite their document and page, and ask the workspace chat endpoint for a cited answer. You keep your own application and LLM: use the results as evidence for your model, or let DocSlurp write the answer. The SDK has no runtime npm dependencies and ships TypeScript declarations.
 
@@ -12,14 +12,14 @@ Start with the [quickstart](#from-file-to-search-results). Then see [live progre
 
 *A five-second illustration with sample data and compressed timing. [Watch the 20-second walkthrough](https://docslurp.io/demos/integration.mp4).*
 
-**Versions:** progress, workspace state, organizations, `streamActivity`, canonical IDs and the integration exports need v0.2.0 or newer; v0.1.x has only upload, search, chat, raw streaming and wait methods. `buildDocumentPreviewPages` and the browser key check (`assertBrowserSafeApiKey`, `apiKeyKind`, `UnsafeApiKeyError`) are not in the published 0.2.0. `@docslurp/sdk/embed` (formerly `@docslurp/embed-sdk`) and the [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat) package arrive with these in 0.3.0, which is not published yet.
+**Versions:** progress, workspace state, organizations, `streamActivity`, canonical IDs and the integration exports need v0.2.0 or newer; v0.1.x has only upload, search, chat, raw streaming and wait methods. `buildDocumentPreviewPages`, the browser key check (`assertBrowserSafeApiKey`, `apiKeyKind`, `UnsafeApiKeyError`), `@docslurp/sdk/embed` (formerly `@docslurp/embed-sdk`) and the [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat) package need 0.3.0.
 
 ## From file to search results
 
 You need **Node.js 20+** and ESM (`.mjs` files, or `"type": "module"`); TypeScript works the same way. Create a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes.
 
 ```bash
-npm install @docslurp/sdk@^0.3.0
+npm install @docslurp/sdk@^0.4.0
 export DOCSLURP_API_KEY='your-server-key'
 ```
 
@@ -135,7 +135,7 @@ const followup = await client.chat({
 console.log(followup.answer);
 ```
 
-This continues the quickstart. Send follow-ups in a session one at a time, and omit `sessionId` to start a new chat. `chat()` returns a promise with the whole answer; to stream the answer as it's written, use the [OpenAI-compatible chat API](https://docslurp.io/docs/chat).
+This continues the quickstart. Send follow-ups in a session one at a time, and omit `sessionId` to start a new chat. `chat()` returns a promise with the whole answer. `chatStream()` takes the same input (except `retrieval` and `agent`) and yields a retrieval `status` event, a `message` event with the whole `ChatResponse`, then `done`; it throws if the stream ends before `done`. To stream the answer token by token as it's written, use the [OpenAI-compatible chat API](https://docslurp.io/docs/chat).
 
 ### Upload several files without reading them all into RAM
 
@@ -171,13 +171,13 @@ DocSlurp must be able to reach the URLs. URL ingestion is retried only when you 
 `extract()` takes everything `upload()` takes, but the files and every output are deleted when the retention window ends: 48 hours free by default, or `retentionDays` (charged as storage, up to 30 days by default). The response adds `extract` with its `id`, `expiresAt` and download state, and the requester is emailed a sign-in download link when it finishes unless `notifyEmail: false`.
 
 ```ts
-const { run, extract } = await client.extract([await openAsBlob("report.pdf")], { retentionDays: 7, download: "markdown" });
+const { run, extract } = await client.extract([{ data: await openAsBlob("report.pdf"), filename: "report.pdf" }], { retentionDays: 7, download: "markdown" });
 await client.waitForRun(run.id);
 const status = await client.getExtract(extract.id); // DocSlurpApiError 410 once it has expired
 const zipUrl = await client.getExtractDownloadUrl(extract.id); // two-minute signed URL; server key with artifacts
 ```
 
-See [Extract mode](https://docslurp.io/docs/extract) for retention, pricing and deletion.
+`retentionDays` must be a whole number of days. `listExtracts({ limit? })` lists your extracts and `deleteExtract(id)` expires one now. Fetch the download URL without DocSlurp credentials, and ask again once it expires. See [Extract mode](https://docslurp.io/docs/extract) for retention, pricing and deletion.
 
 ### Search several questions in one request
 
@@ -259,13 +259,25 @@ Organization methods work with a signed-in session or a server key that has the 
 
 ## Search adapters and website integrations
 
-To keep existing Algolia, Pagefind, Meilisearch or Typesense search calls, use [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat), or the Meilisearch, Typesense and Pagefind adapters at `@docslurp/sdk/search-adapters`. For an Astro site, [`@docslurp/contrib-astro`](https://docslurp.io/docs/packages/contrib-astro) wraps the search box. To add a search box, mount `@docslurp/sdk/astro` in Astro or register `@docslurp/sdk/widget` in any other framework. The [integration guide](https://docslurp.io/docs/search-integrations) covers which calls are supported, WordPress setup, Next.js examples, migration tips and troubleshooting. On [Integrations](https://docslurp.io/docs/integrations), each platform has a **Copy prompt for an agent** button that hands setup to a coding agent.
+To keep existing Algolia, Pagefind, Meilisearch or Typesense search calls, use [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat), or the Algolia, Meilisearch, Typesense and Pagefind clients at `@docslurp/sdk/search-adapters` (`createDocSlurpAlgoliaClient`, `createDocSlurpMeilisearchClient`, `createDocSlurpTypesenseClient`, `createDocSlurpPagefind`). For an Astro site, [`@docslurp/contrib-astro`](https://docslurp.io/docs/packages/contrib-astro) wraps the search box. To add a search box, mount `@docslurp/sdk/astro` in Astro or register `@docslurp/sdk/widget` in any other framework. The [integration guide](https://docslurp.io/docs/search-integrations) covers which calls are supported, WordPress setup, Next.js examples, migration tips and troubleshooting. On [Integrations](https://docslurp.io/docs/integrations), each platform has a **Copy prompt for an agent** button that hands setup to a coding agent.
 
-The adapters keep the supported search call shapes and return cited results. They don't cover ingestion (use the SDK), advanced provider filters, the stock Pagefind UI loaders or full provider administration, so read the guide before you migrate. The runnable [adapter example](examples/search-adapters.mjs) reads its configuration from environment variables and exercises all four clients.
+The adapters keep the supported search call shapes and return cited results. They don't cover ingestion (use the SDK), advanced provider filters, the stock Pagefind UI loaders or full provider administration, so read the guide before you migrate. Unsupported options throw `SearchCompatibilityError`. The runnable [adapter example](examples/search-adapters.mjs) reads its configuration from environment variables and exercises all four clients.
+
+### Search box widget (`@docslurp/sdk/widget`)
+
+`defineDocSlurpSearch()` registers a framework-free `<docslurp-search-box>` element; calling it during SSR does nothing. It takes `client-key` (a `dslp_pub_` browser key; server keys are refused), optional `workspace` (ID, slug or name; default `default`), `api-url` (default `https://docslurp.io`) and `placeholder`. To keep the key off the page, set `search-endpoint` to your own proxy instead: the widget posts `{ q }` to it and expects a search response. `@docslurp/sdk/astro` renders this element from `clientKey`, `workspace`, `apiUrl` and `placeholder` props.
+
+```html
+<script type="module">
+  import { defineDocSlurpSearch } from "@docslurp/sdk/widget";
+  defineDocSlurpSearch();
+</script>
+<docslurp-search-box client-key="dslp_pub_…" workspace="product-manuals"></docslurp-search-box>
+```
 
 ## Embeds and offline search (`@docslurp/sdk/embed`)
 
-Moved here from the former `@docslurp/embed-sdk` package; the exports are unchanged. React (19) is an optional peer dependency, needed only for `SearchEmbed`, `ChatEmbed` and `ViewerEmbed`; `@huggingface/transformers` and `@lancedb/lancedb` are optional peers for offline search.
+Moved here from the former `@docslurp/embed-sdk` package with the same exports. The `workspaceId` prop and `workspace-id` attribute are now `workspace`. React (19) is an optional peer dependency, needed only for `SearchEmbed`, `ChatEmbed` and `ViewerEmbed`; `@huggingface/transformers` and `@lancedb/lancedb` are optional peers for offline search.
 
 Add DocSlurp search, chat and a document viewer to your site as React components or Web Components. You can also build an offline search bundle so a static site searches without calling the API.
 
@@ -278,7 +290,7 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; chat and the embed widget also need `chat`), and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
+Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; `ChatEmbed` also needs `chat`), and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
 
 For `ViewerEmbed`, pass `apiUrl=""` for the same-origin API and `documentId`, with no `clientKey`. On your own site, authenticate users in a backend proxy and authorize each requested document there. Keep the server key in that backend. Proxy both document metadata and artifact URLs (rewrite artifact URLs to same-origin authenticated routes): the viewer iframe uses cookies and cannot attach a bearer header. Never put server credentials into an embed or an artifact URL.
 
@@ -413,9 +425,14 @@ Environment variables are read once, when the client is created, and only on the
 | --- | --- | --- |
 | `upload(fileOrStream, options?)` | `{ workspace, run, documents, warnings? }` | `ingest` |
 | `upload({ files, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
-| `upload({ urls, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
+| `upload({ urls, ...metadata }, options?)` | Same accepted ingestion response (`uploadUrls(input)` is the same call) | `ingest` |
+| `extract(input, options?)` | The upload response plus `extract` (`id`, `expiresAt`, download state) | `ingest` |
+| `getExtract(id, request?)` / `listExtracts({ limit? }?)` | Extract record / records | `ingest` or `artifacts` |
+| `deleteExtract(id, request?)` | `{ extract }`, expired now | `ingest` |
+| `getExtractDownloadUrl(id, request?)` | Two-minute signed zip URL | Server key with `artifacts` |
 | `listWorkspaces(options?)` | Accessible workspace records | `ingest`, `search`, `artifacts` or `workspaces:manage` |
 | `getWorkspace(id, options?)` | Workspace record | Same as listing |
+| `listWorkspaceTags(workspace?, request?)` | `[{ tag, documentCount }]` | Same as listing |
 | `createUploadSession(input, options?)` | Session ID, status and signed transfer descriptors | `ingest` |
 | `getUploadSession(id, options?)` | Session status, accepted `result` and refreshed transfer URLs | `ingest` |
 | `signUploadParts(id, fileId, partNumbers, options?)` | Signed URLs for requested multipart parts | `ingest` |
@@ -423,6 +440,7 @@ Environment variables are read once, when the client is created, and only on the
 | `completeUploadSession(id, options?)` | Explicit fallback for ingestion acceptance; normal uploads finalize automatically | `ingest` |
 | `abortUploadSession(id, options?)` | Cleanup confirmation | `ingest` |
 | `getRun(runId, request?)` | Run record (not the progress envelope) | Any of `ingest`, `search`, `artifacts` |
+| `listRuns(request?)` | Your recent runs, newest first | Server key with any of `ingest`, `search`, `artifacts` |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
 | `streamProgress(runId, options?)` | Async iterable of full snapshots with polling fallback | Same as `getRun` |
 | `getWorkspaceState(workspace?, options?)` | Current workspace counts, MB, searches, recent performance and usage | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
@@ -432,13 +450,16 @@ Environment variables are read once, when the client is created, and only on the
 | `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and workspace UUID | Same as `getRun` |
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | `search` |
 | `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
-| `chat({ q, workspace?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `search` |
+| `chat({ q, workspace?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `chat` |
+| `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `workspace`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |
+| `listDocuments({ workspace?, runId?, tags? }?, request?)` | Document records, newest first | `artifacts` |
 | `listDocumentVersions(documentId, request?)` | Version chain, newest first | `artifacts` |
 | `updateWorkspace(id, input, request?)` | `{ workspace, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"` | `workspaces:manage` |
 | `updateWorkspaceEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `workspaces:manage` |
+| `fullIndex({ workspace?, documentIds? }?, request?)` / `fullIndexDocument(documentId, request?)` | `{ runId, pages, estimatedCredits, billing?, job? }`; indexes unindexed pages in the background | `ingest` |
 | `fullIndexEstimate({ documentId } or { workspace?, documentIds? }, request?)` / `uploadEstimate({ files, workspace? }, request?)` | `{ estimate, billing }` | `ingest` |
 | `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `workspaces:manage` |
-| `updateSearchSettingsEstimate(id, input, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutation accepts no API key |
+| `updateSearchSettings(id, input, request?)` / `updateSearchSettingsEstimate(id, input, request?)` | The stored search settings (`retrievalDefaults`, `chat`, ranking controls) / `{ impact, estimate, billing }` | Server key with `workspaces:manage`; the key owner must be able to edit the workspace |
 | `reprocessRun(runId, { stageFrom?, stages? }?, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ run, job?, warnings }` / `{ estimate, billing }`. Reprocessing re-extracts files a re-upload of identical bytes would not | Server key with `ingest` |
 | `deleteDocument(documentId, request?)` / `setDocumentTags(documentId, tags, request?)` | Removed identities / `{ documentId, tags }` | Server key with `ingest` |
 | `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`) | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's workspaces |
@@ -446,6 +467,7 @@ Environment variables are read once, when the client is created, and only on the
 | `setRetention({ orgId } or { workspace? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
 | `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |
+| `createCapability({ workspaceIds?, policy?, ttlSeconds?, boundClientKeyId?, allowedOrigins? }?, request?)` | `{ token, expiresAt }`: a sealed `X-DocSlurp-Capability` token for a browser | Server API key with `search` (not an OAuth token) |
 | `listOrganizations(request?)` / `getOrganization(id, request?)` | Organization records | `organizations:read` or `organizations:manage` |
 | `getOrganizationDetails(id, request?)` / `getOrganizationAccess(id, request?)` | Counts and capabilities / actor access | Same as organization reads |
 | `createOrganization(input, request?)` | New organization record | Session only |
@@ -460,8 +482,9 @@ Environment variables are read once, when the client is created, and only on the
 | `formatSearchContext(searchResponse)` | Numbered source excerpts as a string | None (no request) |
 | `buildDocumentPreviewPages({ documentId, artifacts, manifest })` | Page images for a document viewer, by page number (after 0.2.0) | None (no request) |
 
-- **`SearchInput`:** `q` (required); optional `workspace` (ID, slug, former slug, name or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains` and `tags` (a string). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
-- **Upload metadata:** `workspace` (ID, slug or name; created when none matches), `newWorkspace`, `orgId`, `templateKey`, `idempotencyKey`, and `canonicalId` (in upload options for one file, or on each `{ data, filename, canonicalId }` entry). Direct sessions ignore `idempotencyKey`; HTTP bulk and URL ingestion support it. Set canonical IDs per URL for URL ingestion.
+- **`SearchInput`:** `q` (required); optional `workspace` (ID, slug, former slug, name or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains`, `tags` (a string), `candidateDepth` (per-retriever candidate cap, 1 to 200), `resultOrder` (`relevance`, or `prompt` to pack the same passages for a prompt) and `geo` (a radius, bounding-box or polygon filter on a GeoJSON field; coordinates are `[longitude, latitude]`). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
+- **Upload metadata:** `workspace` (ID, slug or name; created when none matches), `newWorkspace`, `orgId`, `templateKey`, `idempotencyKey`, `tags` (labels for every accepted document), `quality` (`fast`, `auto` or `good`; omitted uses the workspace's), `indexingMode` (`full`, `map` or `visual`), `speedBoost` (explicit opt-in at 4× service credits), and `canonicalId` and `path` (a folder such as `contracts/2025`) in upload options for one file, or on each `{ data, filename, canonicalId, path }` entry. Canonical IDs must not start with `docslurp:`. Files the server rejects come back in `rejected` while the rest are accepted. Direct sessions ignore `idempotencyKey`; HTTP bulk and URL ingestion support it. Set canonical IDs per URL for URL ingestion.
+- **`ChatInput`:** `q` (required); optional `workspace`, `sessionId`, `sessionToken` (browser keys: the token from the previous answer, needed to continue `sessionId`), `model` (an unavailable model returns HTTP 400 `model_not_allowed`), `filters` (`documentIds`, `mimeTypes`, `tags`, `dateFrom`, `dateTo`, `geo`), `retrieval` overrides for this request (`resultCount` 1 to 12, `useHyDE`, `useRerank`, `useMmr`, `mmrLambda`, `parentRetrieval`), `agent` budgets (`maxSteps`, `maxToolCalls`, `searchConcurrency`, `tools`, `web`; `chat()` only) and `speedBoost`.
 - **Template keys:** `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - **Citations:** `documentId`, `filename`, `pageNumber`, `pageNumbers`, `headingPath`, `chunkIndex`, `blockIds` and `source`. Some formats have no meaningful page numbers; when the list is empty, don't invent a page.
 - **Locators:** `citation.locator` says exactly where the evidence is, keyed by `kind`: `page` (`pageNumber`, `charStart`/`charEnd`, normalized `boxes`), `slide` (`slideNumber`, `notes`, `boxes`), `sheet` (`sheetName`, A1 `range`, `headerRow`), `media` (`startSeconds`, `endSeconds`, `mode` of `said` or `shown`, `speaker`, `timing` of `word`, `segment` or `chunk`) and `image` (`boxes`). It is `null` or absent for content indexed before locators existed (re-index to get them); for recordings, decks and sheets branch on `kind` rather than `pageNumber`. The `CitationLocator` type is exported.

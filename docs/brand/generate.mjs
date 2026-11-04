@@ -54,18 +54,22 @@ const wordmark = (fill) =>
   `<g class="w" transform="translate(${WX} ${WY})"${fill ? ` fill="${fill}"` : ""}><path d="${word.doc}"/><path d="${word.slurp}"/></g>`;
 const lock = (c, fill) => `${cup(c)}${wordmark(fill)}`;
 
+// The primary icon: the paper cup inside the 80% maskable safe zone on a full-bleed
+// Deck square. App, PWA, plugin and favicon artwork all use it.
+const primary = svg(tile(0.6));
+
 const files = {
   "docslurp-mark.svg": svg(adaptive + cup(INK)),
   "docslurp-mark-dark.svg": svg(cup(INK)),
   "docslurp-mark-inverse.svg": svg(cup(PAPER)),
   "docslurp-mark-mono.svg": svg(mono(P.ink, "m")),
   "docslurp-mark-mono-white.svg": svg(mono("#fff", "w")),
-  "docslurp-app-icon.svg": svg(tile(0.8)),
+  "docslurp-app-icon.svg": primary,
   "docslurp-app-icon-rounded.svg": svg(tile(0.92, 14)),
-  "docslurp-app-icon-maskable.svg": svg(tile(0.6)),
+  "docslurp-app-icon-maskable.svg": primary,
   "docslurp-product-plan.svg": svg(product(P.deck, PAPER)),
   "docslurp-product-credits.svg": svg(product(P.paper, INK)),
-  "favicon.svg": svg(adaptive + cup(INK)),
+  "favicon.svg": primary,
   "docslurp-lockup.svg": svg(adaptive + lock(INK), LOCK_VB),
   "docslurp-lockup-dark.svg": svg(lock(INK, P.ink), LOCK_VB),
   "docslurp-lockup-white.svg": svg(lock(PAPER, "#fff"), LOCK_VB),

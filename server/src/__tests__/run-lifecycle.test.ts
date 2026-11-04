@@ -22,8 +22,9 @@ function lifecycle(startWorkflow: (...args: unknown[]) => Promise<void>) {
   queries = [];
   const sql = (async (strings: TemplateStringsArray) => {
     queries.push(strings.join("?").replace(/\s+/g, " ").trim());
-    return strings.join("?").includes("select id from workspace_runs") ? [{ id: "run-1" }] : [];
+    return strings.join("?").includes("select id, execution_generation from workspace_runs") ? [{ id: "run-1", execution_generation: "generation-1" }] : [];
   }) as unknown as SqlClient;
+  Object.assign(sql, { begin: async (fn: (tx: SqlClient) => Promise<unknown>) => fn(sql) });
   return createRunLifecycle({ sql, startWorkflow, failureThreshold: 3 });
 }
 
@@ -33,7 +34,7 @@ describe("Run Lifecycle start", () => {
   it("starts the workflow", async () => {
     const startWorkflow = vi.fn(async () => {});
     await expect(lifecycle(startWorkflow).start(run)).resolves.toEqual({ status: "started" });
-    expect(startWorkflow).toHaveBeenCalledWith("run-1", defaultPipelineFeatures, undefined);
+    expect(startWorkflow).toHaveBeenCalledWith("run-1", defaultPipelineFeatures, { executionGeneration: "generation-1" });
     expect(queries).toHaveLength(2);
   });
 
@@ -46,9 +47,10 @@ describe("Run Lifecycle start", () => {
   it("still reports the outcome when the start marker cannot be written", async () => {
     vi.spyOn(console, "warn").mockImplementationOnce(() => {});
     const sql = (async (strings: TemplateStringsArray) => {
-      if (strings.join("?").includes("select id from workspace_runs")) return [{ id: "run-1" }];
+      if (strings.join("?").includes("select id, execution_generation from workspace_runs")) return [{ id: "run-1", execution_generation: "generation-1" }];
       throw new Error("db down");
     }) as unknown as SqlClient;
+    Object.assign(sql, { begin: async (fn: (tx: SqlClient) => Promise<unknown>) => fn(sql) });
     const outcome = await createRunLifecycle({ sql, startWorkflow: vi.fn(async () => {}), failureThreshold: 3 }).start(run);
     expect(outcome).toEqual({ status: "started" });
   });
@@ -69,7 +71,7 @@ describe("Run Lifecycle retry", () => {
     const startWorkflow = vi.fn(async () => {});
     const outcome = await lifecycle(startWorkflow).retry({ ...run, status: "queued" });
     expect(outcome).toEqual({ status: "restarted", start: { status: "started" } });
-    expect(startWorkflow).toHaveBeenCalledWith("run-1", defaultPipelineFeatures, { restartExisting: true });
+    expect(startWorkflow).toHaveBeenCalledWith("run-1", defaultPipelineFeatures, { restartExisting: true, executionGeneration: "generation-1" });
   });
 
   it("reports deferral when a queued Run still cannot reach Temporal", async () => {

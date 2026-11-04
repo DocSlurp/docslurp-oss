@@ -1,6 +1,6 @@
 {
   "name": "@docslurp/contrib-astro",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Astro search component for DocSlurp cited search, with a framework-free browser widget.",
   "license": "MIT",
   "homepage": "https://docslurp.io/docs/packages/contrib-astro",

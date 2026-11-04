@@ -1,4 +1,5 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
+import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
 /**
  * Temporal worker entry point.
@@ -556,6 +557,8 @@ async function main(): Promise<void> {
     `dbPoolMax=${cfg.workerDbPoolMax} ` +
     `maintenance=${cfg.workerRunMaintenance} maintenanceLeader=${maintenanceLeader}`
   );
+  // Boolean env flags this worker booted with (MEDIA_REMOTE_ENABLED, PAGE_ROUTER_MODE, ...); unset ones use code defaults.
+  console.log(`[temporal-worker] env-flags ${formatEnvFlags(envFlags())}`);
 
   // Capability handshake (db/worker-capabilities.ts): register before polling
   // so the app never counts this worker's pollers as an unknown older build.
@@ -587,6 +590,10 @@ async function main(): Promise<void> {
     // Recreate the connection and workers after any non-fatal stop (connection loss, poller
     // failure, a worker run() that returned unasked); only fatal states throw out of here.
     await superviseTemporalWorkers({
+      onFatal: () => {
+        process.exitCode = 1;
+        setTimeout(() => process.exit(1), 2_000).unref();
+      },
       createSession,
       signal: controller.signal,
       onSession: (session) => { activeSession = session; },
