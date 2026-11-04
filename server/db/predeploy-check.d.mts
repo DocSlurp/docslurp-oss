@@ -1,6 +1,6 @@
 // Types for predeploy-check.mjs (plain JS so it runs from the app image without a build step).
 import type { QueryClient } from "./folded-search-index.mjs";
-export type ReportLevel = "OK" | "WARN" | "BLOCKER";
+export type ReportLevel = "ok" | "warn" | "blocker";
 export type ReportSection = { title: string; level: ReportLevel; lines: string[] };
 export type MigrationJournal = { entries?: Array<{ tag: string; when: number }> };
 export declare function pendingMigrations(journal: MigrationJournal, newestAppliedMs: number): string[];
