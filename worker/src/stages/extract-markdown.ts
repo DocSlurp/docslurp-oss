@@ -1,5 +1,5 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
-import { embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
+import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
@@ -2609,8 +2609,9 @@ export class ExtractMarkdownStage implements Stage {
         steps: [...result.steps],
         outputCount: persisted.length - 1,
         latencyMs: Date.now() - startedAt,
-        // Every child is recorded as a document artifact slot, so the artifact and PII guards (and exports) see it.
-        artifactUris: persisted.slice(1).map(ref => ref.uri),
+        // Image children and the media map are recorded as document artifact slots, so the artifact and PII guards
+        // (and exports) see them, whichever producer made them.
+        artifactUris: persisted.slice(1).filter(ref => EMBEDDED_IMAGE_TARGETS.has(ref.kind) || ref.kind === "page/embedded-image-mask").map(ref => ref.uri),
         ...(result.stats ? { stats: result.stats } : {}),
       };
     } finally {
