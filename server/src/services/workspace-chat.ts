@@ -21,7 +21,6 @@ import {
   requestsSearchConfiguration,
   withThreadRetrieval,
 } from "./chat-search-options.js";
-import { refineWorkspaceNames } from "./workspace-naming.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -1247,7 +1246,7 @@ async function chatWorkspaceTurn(
     args.filters?.documentIds !== undefined || args.filters?.geo || args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
   );
   const history = args.history ?? await listRecentTurns(sessionId, 20);
-  if (workspace && !publicClientKey && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
+  // Workspace names never come from a chat message: a member's private first question is not the shared name (services/workspace-naming.ts).
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
   // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
   // Chat-only keys may receive grounded answers, but cannot invoke raw search

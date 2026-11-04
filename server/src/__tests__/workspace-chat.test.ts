@@ -232,16 +232,17 @@ describe("chatWorkspace", () => {
         expect(configureSearchFromChat).toHaveBeenCalledWith(expect.objectContaining({
           workspaceId: "ws-1", userId: "user-1", query,
         }));
-        expect(refineWorkspaceNames).toHaveBeenCalledExactlyOnceWith(["ws-1"], query);
       }
+      // A chat message never names the workspace.
+      expect(refineWorkspaceNames).not.toHaveBeenCalled();
       expect(hybridSearch).toHaveBeenCalledOnce();
     },
   );
 
   it.each([
-    { keyType: "server", renames: true },
-    { keyType: "client", renames: false },
-  ])("never changes thread settings from an API key's message ($keyType key)", async ({ keyType, renames }) => {
+    { keyType: "server" },
+    { keyType: "client" },
+  ])("never changes thread settings or the workspace name from an API key's message ($keyType key)", async ({ keyType }) => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
     loadWorkspaceWholeCorpusContext.mockResolvedValue({
@@ -253,9 +254,8 @@ describe("chatWorkspace", () => {
     const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "key-1", userId: "user-1", orgId: "org-1", keyType, scopes: ["search", "chat", "workspaces:manage"], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
     await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query, history: [], actor, agent: { suggestions: true } as never });
     expect(configureSearchFromChat).not.toHaveBeenCalled();
-    // Public (client) key visitors cannot rename the customer's workspace either.
-    if (renames) expect(refineWorkspaceNames).toHaveBeenCalledOnce();
-    else expect(refineWorkspaceNames).not.toHaveBeenCalled();
+    // No key type renames the customer's workspace from a message.
+    expect(refineWorkspaceNames).not.toHaveBeenCalled();
   });
 
   it.each([
