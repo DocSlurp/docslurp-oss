@@ -19,7 +19,7 @@ function memoryStorage(initial: Record<string, string>) {
     bucket: "bucket",
     uri: (key: string) => `s3://bucket/${key}`,
     getBytes: async (key: string) => {
-      if (!objects.has(key)) throw new Error(`missing ${key}`);
+      if (!objects.has(key)) throw Object.assign(new Error(`missing ${key}`), { name: "NoSuchKey" });
       return Buffer.from(String(objects.get(key)), "utf8");
     },
     putJson: async (key: string, value: unknown) => void objects.set(key, value),
@@ -138,14 +138,26 @@ describe("structured extraction of long documents", () => {
     expect(enqueue.mock.calls.map(([event]) => event).find((event) => String(event.metric).includes("structured"))?.costCents).toBe(featureCredits("structuredFields", 2));
   });
 
-  it("fails the stage with a retryable error when the markdown artifact cannot be read", async () => {
+  it("records a permanent failure for the document when the markdown artifact does not exist", async () => {
     const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s" } as Document;
     const { storage } = memoryStorage({});
     const state = stateFor(document, schema);
     await new StructuredExtractStage(storage, config).run(state);
-    // The stage records the failure for the document (to be retried) and never answers from nothing.
+    // The object is gone: the stage records the failure for the document and never answers from nothing.
     expect(state.documentStage("doc", "structured-extract")?.status).toBe("failed");
     expect(String(state.documentStage("doc", "structured-extract")?.error)).toMatch(/could not be read/);
+    expect(vi.mocked(generateOpenRouterText)).not.toHaveBeenCalled();
+  });
+});
+
+describe("structured extraction when storage fails", () => {
+  const schema = { type: "object", properties: { total: { type: "number" } } };
+  it("rethrows a failed read so the stage retries instead of failing the document", async () => {
+    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s" } as Document;
+    const { storage } = memoryStorage({ "markdown/doc.md": "Invoice" });
+    (storage as unknown as { getBytes: unknown }).getBytes = async () => { throw new Error("503 Service Unavailable"); };
+    const state = stateFor(document, schema);
+    await expect(new StructuredExtractStage(storage, config).run(state)).rejects.toMatchObject({ name: "ArtifactReadError", retryable: true });
     expect(vi.mocked(generateOpenRouterText)).not.toHaveBeenCalled();
   });
 });
