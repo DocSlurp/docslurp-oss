@@ -1,3 +1,4 @@
+import { normalizeNfc, wordParts } from "../lib/unicode-text.js";
 import type { SegmentTiming, SpeakerTurn, Transcription, TranscriptSegment, TranscriptWord } from "./types.js";
 
 /** A transcript segment with absolute time (seconds from media start) and an honest precision label. */
@@ -24,19 +25,41 @@ export function planChunkWindows(duration: number, chunkSeconds: number, overlap
 }
 
 /**
- * A text-only response to an overlapped window contains speech from the neighbouring slices too. Keep the words
- * that fall proportionally inside the owned slice (speech rate is close enough to uniform over a few seconds), so
+ * A text-only response to an overlapped window contains speech from the neighbouring slices too. Keep the speech
+ * that falls proportionally inside the owned slice (speech rate is close enough to uniform over a few seconds), so
  * boundaries are neither duplicated nor dropped. Without overlap the text is returned unchanged.
+ *
+ * Speech is measured in words (one per word, one per ideographic character) cut at boundaries from the Unicode
+ * word segmenter, not at whitespace: Japanese, Chinese and Thai transcripts have no spaces, so a whitespace "word count" saw one word and
+ * either kept the whole overlap or dropped the whole window. The text keeps its own spacing.
  */
 export function trimToOwnedSlice(text: string, window: ChunkWindow): string {
   const total = window.end - window.start;
   const lead = window.ownStart - window.start; const tail = window.end - window.ownEnd;
   if (!text || total <= 0 || (lead <= 0 && tail <= 0)) return text;
-  const words = text.split(/\s+/);
-  const from = Math.round(words.length * (lead / total));
-  const to = Math.round(words.length * ((total - tail) / total));
-  return words.slice(from, Math.max(from, to)).join(" ");
+  const parts = wordParts(normalizeNfc(text)).map(part => ({ text: part.text, weight: part.wordLike ? speechWeight(part.text) : 0 }));
+  const speech = parts.reduce((sum, part) => sum + part.weight, 0);
+  if (speech === 0) return text;
+  const boundaryAt = (target: number) => {
+    // The unit boundary whose cumulative speech is closest to the target.
+    let best = 0; let bestDistance = Infinity; let cumulative = 0;
+    for (let i = 0; i <= parts.length; i++) {
+      const distance = Math.abs(cumulative - target);
+      if (distance < bestDistance) { best = i; bestDistance = distance; }
+      if (i < parts.length) cumulative += parts[i].weight;
+    }
+    return best;
+  };
+  const from = boundaryAt(speech * (lead / total));
+  const to = Math.max(from, boundaryAt(speech * ((total - tail) / total)));
+  return parts.slice(from, to).map(part => part.text).join("").trim();
 }
+
+/** A word is one unit of speech; each ideographic character is one syllable, so a run of kanji weighs its length. */
+const speechWeight = (word: string) => {
+  const ideographic = word.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu)?.length ?? 0;
+  return ideographic || 1;
+};
 
 /** Convert one provider response to absolute-time segments; word timestamps tighten segment bounds. */
 export function toTimedSegments(result: Pick<Transcription, "text" | "segments">, window: ChunkWindow): TimedSegment[] {
