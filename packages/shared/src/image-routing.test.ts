@@ -1,16 +1,14 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { IMAGE_ROUTING, planImageRouting, routeCounts } from "./image-routing.js";
 import { embeddedImageFactsSchema, type EmbeddedImageFacts, type ImageClass, type PixelSignals } from "./media-map.js";
 
-type Corpus = { entries: Array<{ label: string; width: number; height: number; coverage: number; encoding: EmbeddedImageFacts["source"]["encoding"]; role: "image"; signals: PixelSignals | null }> };
-const corpus = JSON.parse(readFileSync(new URL("../test-vectors/image-routing-corpus.json", import.meta.url), "utf8")) as Corpus;
-
+// Hand-built signals, not measurements: round values chosen to sit well inside one class each. The boundary tests below
+// move one field at a time to the edge of its threshold and one step past it.
 const flat: PixelSignals = { version: "pixel-signals@1", lumaMean: 255, lumaStdDev: 0, bilevel: true, quantizedColors: 1, topColorShare: 1, saturation: 0, entropy: 0, edgeShare: 0, inkShare: 0, textBands: 0, bandPitchSpread: null, alphaMean: null, dhash: "0000000000000000", sample: [8, 8] };
-const textual: PixelSignals = { ...flat, lumaMean: 233, lumaStdDev: 34, quantizedColors: 10, topColorShare: 0.67, entropy: 3, edgeShare: 0.3, inkShare: 0.12, textBands: 40, bandPitchSpread: 0.04, dhash: "90909090909090d0" };
-const photoish: PixelSignals = { ...flat, lumaMean: 142, lumaStdDev: 21, bilevel: false, quantizedColors: 305, topColorShare: 0.013, saturation: 94, entropy: 6.4, edgeShare: 0.005, dhash: "f0e0c08010203040" };
-const chartish: PixelSignals = { ...flat, lumaMean: 216, lumaStdDev: 62, bilevel: false, quantizedColors: 24, topColorShare: 0.7, saturation: 54, entropy: 1.7, edgeShare: 0.045, inkShare: 0.29, textBands: 2, dhash: "00183868e8a8a8a8" };
+const textual: PixelSignals = { ...flat, lumaMean: 230, lumaStdDev: 30, bilevel: false, quantizedColors: 8, topColorShare: 0.7, entropy: 3, edgeShare: 0.2, inkShare: 0.1, textBands: 50, bandPitchSpread: 0.1, dhash: "1111111111111111" };
+const photoish: PixelSignals = { ...flat, lumaMean: 128, lumaStdDev: 50, bilevel: false, quantizedColors: 512, topColorShare: 0.05, saturation: 80, entropy: 7, edgeShare: 0.1, inkShare: 0.3, textBands: 4, dhash: "f0e0c08010203040" };
+const chartish: PixelSignals = { ...flat, lumaMean: 220, lumaStdDev: 60, bilevel: false, quantizedColors: 16, topColorShare: 0.6, saturation: 50, entropy: 2, edgeShare: 0.05, inkShare: 0.3, textBands: 4, dhash: "00ff00ff00ff00ff" };
 
 function image(over: Partial<EmbeddedImageFacts> & { coverage?: number; bbox?: [number, number, number, number]; pageTextOps?: number } = {}): EmbeddedImageFacts {
   const { coverage = 0.3, bbox = [100, 200, 400, 500], pageTextOps = 0, ...rest } = over;
@@ -135,38 +133,126 @@ describe("planImageRouting", () => {
 
 describe("what is not a photograph", () => {
   it("a colourful, text-laden screenshot is an unclassified figure, not a photo to caption", () => {
-    const screenshot: PixelSignals = { ...photoish, quantizedColors: 195, topColorShare: 0.29, entropy: 5.45, edgeShare: 0.1, inkShare: 0.27, textBands: 41, bandPitchSpread: 0.78 };
+    const screenshot: PixelSignals = { ...photoish, quantizedColors: 200, topColorShare: 0.3, entropy: 5.5, edgeShare: 0.1, inkShare: 0.25, textBands: 40, bandPitchSpread: 0.8 };
     const [p] = plan([image({ signals: screenshot })]);
     expect(p!.classification.label).toBe("figure");
     expect(p!.route.action).toBe("keep");
   });
 });
 
-describe("classification accuracy on the authored raster corpus", () => {
-  const labels: Record<string, ImageClass> = { "text-scan": "text-scan", "chart-diagram": "chart-diagram", photo: "photo", blank: "blank" };
-  const results = corpus.entries.map((entry, index) => {
-    const planned = plan([image({
-      occurrence: 0, pageNumber: index + 1, width: entry.width, height: entry.height, coverage: entry.coverage, signals: entry.signals,
-      sha256: index.toString(16).padStart(4, "0").repeat(16), bbox: [60, 80, 60 + 400 * entry.coverage, 80 + 400 * entry.coverage],
-      source: { ...image().source, encoding: entry.encoding, objectId: { num: index + 1, gen: 0 } },
-    })], 200)[0]!;
-    return { expected: labels[entry.label]!, got: planned.classification.label };
+describe("every class and route boundary of the threshold table", () => {
+  const T = IMAGE_ROUTING;
+  const labelOf = (over: Parameters<typeof image>[0], pageCount = 10) => plan([image(over)], pageCount)[0]!.classification.label;
+  /** At the threshold the image is `cls`; one step past it, it is not. */
+  const flips = (cls: ImageClass, at: Parameters<typeof image>[0], past: Parameters<typeof image>[0]) => {
+    expect(labelOf(at), "at the threshold").toBe(cls);
+    expect(labelOf(past), "one step past it").not.toBe(cls);
+  };
+  const scan = (signals: Partial<PixelSignals>, over: Parameters<typeof image>[0] = {}) => ({ width: 1700, height: 2200, coverage: 0.95, signals: { ...textual, ...signals }, ...over });
+  const chart = (signals: Partial<PixelSignals>, over: Parameters<typeof image>[0] = {}) => ({ signals: { ...chartish, ...signals }, ...over });
+  const photo = (signals: Partial<PixelSignals>, over: Parameters<typeof image>[0] = {}) => ({ signals: { ...photoish, ...signals }, ...over });
+
+  it("blank: one colour, a flat field, or an inkless scan", () => {
+    expect(labelOf({ signals: { ...chartish, quantizedColors: 1 } })).toBe("blank");
+    const field = { ...flat, quantizedColors: 2, inkShare: 0.01, dhash: "0123456789abcdef" };
+    flips("blank", { signals: { ...field, lumaStdDev: T.blankMaxLumaStdDev, edgeShare: T.blankMaxEdgeShare } },
+      { signals: { ...field, lumaStdDev: T.blankMaxLumaStdDev + 0.01, edgeShare: T.blankMaxEdgeShare } });
+    flips("blank", { signals: { ...field, lumaStdDev: T.blankMaxLumaStdDev, edgeShare: T.blankMaxEdgeShare } },
+      { signals: { ...field, lumaStdDev: T.blankMaxLumaStdDev, edgeShare: T.blankMaxEdgeShare + 0.0001 } });
+    const paper = { ...field, inkShare: T.blankScanMaxInkShare, edgeShare: T.blankMaxEdgeShare, lumaStdDev: T.blankScanMaxLumaStdDev };
+    flips("blank", { signals: paper }, { signals: { ...paper, inkShare: T.blankScanMaxInkShare + 0.0001 } });
+    flips("blank", { signals: paper }, { signals: { ...paper, lumaStdDev: T.blankScanMaxLumaStdDev + 0.01 } });
+    expect(plan([image({ signals: paper })])[0]!.route).toEqual({ action: "skip", reason: "blank-or-solid" });
   });
 
-  it("meets the recorded per-class floors (print the confusion matrix with VITEST_VERBOSE_ROUTING=1)", () => {
-    const classes = ["text-scan", "chart-diagram", "photo", "blank"] as const;
-    const matrix: Record<string, Record<string, number>> = {};
-    for (const r of results) { matrix[r.expected] ??= {}; matrix[r.expected]![r.got] = (matrix[r.expected]![r.got] ?? 0) + 1; }
-    if (process.env.VITEST_VERBOSE_ROUTING) console.log(JSON.stringify(matrix, null, 1));
-    for (const cls of classes) {
-      const rows = results.filter((r) => r.expected === cls);
-      const recall = rows.filter((r) => r.got === cls).length / rows.length;
-      expect(recall, `${cls} recall`).toBeGreaterThanOrEqual(0.9);
-    }
-    const accuracy = results.filter((r) => r.expected === r.got).length / results.length;
-    expect(accuracy).toBeGreaterThanOrEqual(0.92);
-    // A photo is never called a scan or a chart's text-like bands, and vice versa: cross-confusion between the content classes.
-    const confused = (a: string, b: string) => results.filter((r) => r.expected === a && r.got === b).length;
-    expect(confused("photo", "text-scan") + confused("text-scan", "photo") + confused("chart-diagram", "text-scan")).toBe(0);
+  it("decorative by shape: tiny, tiny on the page, rule, header or footer band", () => {
+    flips("decorative", { width: T.tinyMaxSidePx, height: 300, coverage: T.tinyMaxCoverage }, { width: T.tinyMaxSidePx + 1, height: 300, coverage: T.tinyMaxCoverage });
+    flips("decorative", { width: T.tinyMaxSidePx, height: 300, coverage: T.tinyMaxCoverage }, { width: T.tinyMaxSidePx, height: 300, coverage: T.tinyMaxCoverage + 0.001 });
+    flips("decorative", { bbox: [100, 200, 100 + T.tinyMaxSidePt - 0.1, 500] }, { bbox: [100, 200, 100 + T.tinyMaxSidePt, 500] });
+    flips("decorative", { width: 20 * T.ruleMinAspectRatio, height: 20 }, { width: 20 * T.ruleMinAspectRatio - 1, height: 20 });
+    const band = T.furnitureBandShare * 792;
+    flips("decorative", { coverage: T.furnitureBandMaxCoverage, bbox: [200, 10, 400, band] }, { coverage: T.furnitureBandMaxCoverage + 0.001, bbox: [200, 10, 400, band] });
+    flips("decorative", { coverage: T.furnitureBandMaxCoverage, bbox: [200, 792 - band, 400, 780] }, { coverage: T.furnitureBandMaxCoverage, bbox: [200, 792 - band - 0.1, 400, 780] });
+    expect(labelOf({ placement: { status: "unknown", reason: "encrypted" }, width: T.tinyMaxSidePx, height: T.tinyMaxSidePx })).toBe("decorative");
+    expect(labelOf({ placement: { status: "unknown", reason: "encrypted" }, width: T.tinyMaxSidePx + 1, height: T.tinyMaxSidePx })).not.toBe("decorative");
+  });
+
+  it("decorative by repetition: the page count and share floors, and the near-duplicate hash and shape limits", () => {
+    const pages = T.repeatedMinPages;
+    const pageCount = Math.floor(pages / T.repeatedMinShare);
+    const logo = (page: number, signals: Partial<PixelSignals> = {}, over: Parameters<typeof image>[0] = {}) => image({
+      pageNumber: page, sha256: page.toString(16).padStart(64, "0"), source: { ...image().source, objectId: { num: 300 + page, gen: 0 } }, signals: { ...chartish, ...signals }, ...over,
+    });
+    const reasons = (images: EmbeddedImageFacts[], count: number) => planImageRouting(images, { pageCount: count }).map((p) => p.route.reason);
+    const onPages = (n: number) => Array.from({ length: n }, (_, i) => logo(i + 1));
+    expect(reasons(onPages(pages), pageCount)[0]).toBe(`decorative:repeated-similar-${pages}-pages`);
+    expect(reasons(onPages(pages - 1), pageCount)[0]).toBe("chart-or-diagram");
+    expect(reasons(onPages(pages), pageCount + 1)[0]).toBe("chart-or-diagram"); // under the share floor
+    // Hamming distance: 0x0 -> 0xf flips four bits; one more nibble flips a fifth.
+    const near = (dhash: string) => [logo(1), logo(2, { dhash }), logo(3, { dhash })];
+    expect(reasons(near("f0ff00ff00ff00ff"), pageCount)[0]).toMatch(/^decorative:repeated-similar/);
+    expect(reasons(near("f8ff00ff00ff00ff"), pageCount)[0]).toBe("chart-or-diagram");
+    // Aspect ratio: 200x160 (1.25) against 180x160 (1.125) differs by exactly the limit (0.1); 179 wide is past it.
+    const shaped = (width: number) => [logo(1, {}, { width: 200, height: 160 }), logo(2, {}, { width, height: 160 }), logo(3, {}, { width, height: 160 })];
+    expect(T.nearDuplicateMaxAspectRatioDelta).toBe(0.1);
+    expect(reasons(shaped(180), pageCount)[0]).toMatch(/^decorative:repeated-similar/);
+    expect(reasons(shaped(179), pageCount)[0]).toBe("chart-or-diagram");
+    // Flat pictures never count as near duplicates of each other.
+    expect(reasons([1, 2, 3].map((p) => logo(p, { edgeShare: 0.0019, lumaStdDev: 30 })), pageCount)[0]).not.toMatch(/^decorative/);
+  });
+
+  it("text-scan: band count and regularity, ink share, page size and colour", () => {
+    flips("text-scan", scan({ textBands: T.textScanMinBands }), scan({ textBands: T.textScanMinBands - 1 }));
+    flips("text-scan", scan({ bandPitchSpread: T.textScanMaxBandPitchSpread }), scan({ bandPitchSpread: T.textScanMaxBandPitchSpread + 0.01 }));
+    expect(labelOf(scan({ bandPitchSpread: null }))).toBe("text-scan");
+    flips("text-scan", scan({ inkShare: T.textScanMinInkShare }), scan({ inkShare: T.textScanMinInkShare - 0.0001 }));
+    flips("text-scan", scan({ inkShare: T.textScanMaxInkShare }), scan({ inkShare: T.textScanMaxInkShare + 0.01 }));
+    flips("text-scan", scan({}, { coverage: T.textScanMinCoverage }), scan({}, { coverage: T.textScanMinCoverage - 0.01 }));
+    const unplaced = { placement: { status: "unknown", reason: "encrypted" } } as const;
+    flips("text-scan", scan({}, { ...unplaced, width: 1000, height: 800 }), scan({}, { ...unplaced, width: 999, height: 800 }));
+    // Colour: any one of bilevel, few colours or low saturation is enough; all three failing is not a scan.
+    const colourful = { quantizedColors: T.textScanMaxColors + 1, saturation: T.textScanMaxSaturation, bilevel: false };
+    flips("text-scan", scan({ ...colourful, quantizedColors: T.textScanMaxColors }), scan(colourful));
+    flips("text-scan", scan({ ...colourful, saturation: T.textScanMaxSaturation - 0.1 }), scan(colourful));
+    expect(labelOf(scan({ ...colourful, bilevel: true }))).toBe("text-scan");
+  });
+
+  it("text-scan routes: ocr unless the page already has a text layer", () => {
+    const routeOf = (pageTextOps: number) => plan([image(scan({}, { pageTextOps }))])[0]!.route;
+    expect(routeOf(T.textLayerPresentMinTextOps)).toEqual({ action: "keep", reason: "text-layer-present" });
+    expect(routeOf(T.textLayerPresentMinTextOps - 1)).toEqual({ action: "ocr", reason: "text-bearing-scan" });
+  });
+
+  it("text-scan without raster statistics: only a stored-bilevel image of page size", () => {
+    const stored = (encoding: EmbeddedImageFacts["source"]["encoding"], coverage: number, role: EmbeddedImageFacts["role"] = "image") =>
+      ({ role, coverage, signals: null, signalsUnavailable: "decode-failed", source: { ...image().source, encoding } });
+    flips("text-scan", stored("ccitt", T.bilevelScanMinCoverage), stored("ccitt", T.bilevelScanMinCoverage - 0.01));
+    expect(labelOf(stored("jbig2", T.bilevelScanMinCoverage))).toBe("text-scan");
+    expect(labelOf(stored("image", T.bilevelScanMinCoverage, "stencil"))).toBe("text-scan");
+    expect(labelOf(stored("jpeg", 1))).toBe("figure");
+  });
+
+  it("chart-diagram: colours, entropy, ground, edges, size and bands", () => {
+    flips("chart-diagram", chart({ quantizedColors: T.chartMaxColors }), chart({ quantizedColors: T.chartMaxColors + 1 }));
+    flips("chart-diagram", chart({ entropy: T.chartMaxEntropy }), chart({ entropy: T.chartMaxEntropy + 0.01 }));
+    flips("chart-diagram", chart({ topColorShare: T.chartMinTopColorShare }), chart({ topColorShare: T.chartMinTopColorShare - 0.01 }));
+    flips("chart-diagram", chart({ edgeShare: T.chartMinEdgeShare }), chart({ edgeShare: T.chartMinEdgeShare - 0.0001 }));
+    flips("chart-diagram", chart({ edgeShare: T.chartMaxEdgeShare }), chart({ edgeShare: T.chartMaxEdgeShare + 0.01 }));
+    flips("chart-diagram", chart({}, { width: T.chartMinSidePx, height: 600 }), chart({}, { width: T.chartMinSidePx - 1, height: 600 }));
+    flips("chart-diagram", chart({}, { coverage: T.chartMinCoverage }), chart({}, { coverage: T.chartMinCoverage - 0.001 }));
+    // Irregular bands so the text-scan shape does not decide first.
+    flips("chart-diagram", chart({ textBands: T.chartMaxBands, bandPitchSpread: 0.9 }), chart({ textBands: T.chartMaxBands + 1, bandPitchSpread: 0.9 }));
+    expect(labelOf(chart({ textBands: T.textScanMinBands, bandPitchSpread: 0.1 }))).not.toBe("chart-diagram");
+    expect(plan([image(chart({}))])[0]!.route).toEqual({ action: "vision", reason: "chart-or-diagram" });
+  });
+
+  it("photo: colours, entropy, no dominant ground, few bands and room", () => {
+    flips("photo", photo({ quantizedColors: T.photoMinColors }), photo({ quantizedColors: T.photoMinColors - 1 }));
+    flips("photo", photo({ entropy: T.photoMinEntropy }), photo({ entropy: T.photoMinEntropy - 0.01 }));
+    flips("photo", photo({ topColorShare: T.photoMaxTopColorShare }), photo({ topColorShare: T.photoMaxTopColorShare + 0.01 }));
+    flips("photo", photo({ textBands: T.photoMaxBands }), photo({ textBands: T.photoMaxBands + 1 }));
+    flips("photo", photo({}, { width: T.chartMinSidePx, height: 600 }), photo({}, { width: T.chartMinSidePx - 1, height: 600 }));
+    expect(plan([image(photo({}))])[0]!.route).toEqual({ action: "label", reason: "photo" });
+    expect(plan([image(photo({ entropy: T.photoMinEntropy - 0.01 }))])[0]!.route).toEqual({ action: "keep", reason: "unclassified-figure" });
   });
 });

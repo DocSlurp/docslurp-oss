@@ -57,7 +57,7 @@ export const IMAGE_ROUTING = {
   bilevelScanMinCoverage: 0.5,
 
   // -- chart / diagram: flat colours on a plain ground, with edges, and not lines of text. Luma entropy separates it
-  // from a photograph (charts measured at 3.1 bits or less, photographs at 4.9 or more): a gap, not a boundary.
+  // from a photograph: the chart ceiling sits below the photograph floor, leaving a gap rather than one boundary.
   chartMaxColors: 256,
   chartMaxEntropy: 4,
   chartMinTopColorShare: 0.35,

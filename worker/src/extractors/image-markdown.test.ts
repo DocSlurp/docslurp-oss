@@ -11,7 +11,8 @@ import { imageFact } from "../test/image-facts.js";
 
 const webp = Buffer.from("UklGRh4AAABXRUJQVlA4TBEAAAAvAYAAAAdQqCrUsv+BiOh/AAA=", "base64");
 const sha = createHash("sha256").update(webp).digest("hex");
-const chartSignals = { version: "pixel-signals@1" as const, lumaMean: 216, lumaStdDev: 62, bilevel: false, quantizedColors: 24, topColorShare: 0.7, saturation: 54, entropy: 1.7, edgeShare: 0.045, inkShare: 0.29, textBands: 2, bandPitchSpread: null, alphaMean: null, dhash: "00183868e8a8a8a8", sample: [134, 100] as [number, number] };
+// Hand-built chart-like signals (round values inside the chart class), not a measurement.
+const chartSignals = { version: "pixel-signals@1" as const, lumaMean: 220, lumaStdDev: 60, bilevel: false, quantizedColors: 16, topColorShare: 0.6, saturation: 50, entropy: 2, edgeShare: 0.05, inkShare: 0.3, textBands: 4, bandPitchSpread: null, alphaMean: null, dhash: "00ff00ff00ff00ff", sample: [100, 100] as [number, number] };
 
 // A second asset with different bytes (a flipped payload byte; the host checks the hash, not pixels).
 const webp2 = Buffer.from(webp); webp2[26] ^= 0xff;
