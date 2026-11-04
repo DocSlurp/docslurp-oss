@@ -207,8 +207,9 @@ export class ToCanonicalStage implements Stage {
             };
           }
 
-          // Office, EPUB and spreadsheet files arrive counted as one page. Measure what the converted document really
-          // holds and write it to documents.page_count before the completion charge reads it (page-base-fee.ts).
+          // Office, EPUB and spreadsheet files arrive counted as one page. Measure what the document really holds and record it as
+          // documents.billing_pages before the completion charge reads it (page-base-fee.ts). The page basis (page_count) stays what
+          // the text splits into: these formats' text has no page breaks.
           const pages = await recordMeasuredPageCount(state, {
             runner: this.runner,
             signal,
@@ -227,6 +228,8 @@ export class ToCanonicalStage implements Stage {
               strategy,
               normalizedFormat,
               pageCount: pages.pages ?? pages.intakePages,
+              // The pages the text splits into (citations, page rows); `pageCount` above is what the document bills.
+              pageBasis: document.pageCount,
               pageCountMethod: pages.method,
             },
           };

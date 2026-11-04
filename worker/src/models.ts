@@ -59,6 +59,13 @@ export interface Document {
   status: string;
   extractionMode: string;
   pageCount: number;
+  /**
+   * Pages the document bills when they differ from `pageCount` (the page basis the text splits into): the worker's measured count of an
+   * Office, slide, sheet or EPUB file (documents.billing_pages). Null/absent: it bills `pageCount`.
+   */
+  billingPages?: number | null;
+  /** How `billingPages` was found (documents.billing_pages_method); a layout conversion's count is capped by the text it holds when features bill. */
+  billingPagesMethod?: string | null;
   /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
   fileFacts?: import("@docslurp/shared").FileFacts | null;
   createdAt: Date;

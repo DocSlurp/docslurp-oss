@@ -77,8 +77,10 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       // Rich reads are read through usage_attribution (the one spend reader the worker may use).
       client<{ document_id: string; pages: number; rich_read: number }[]>`
       with docs as (
+        -- billing_pages: the worker's measured count of an Office, slide, sheet or EPUB file; page_count (the page basis the text
+        -- splits into) bills for every other document.
         select d.id, d.page_count as page_count,
-          greatest(0, d.page_count - case when ${state.run.kind === "full-index"} then (
+          greatest(0, coalesce(d.billing_pages, d.page_count) - case when ${state.run.kind === "full-index"} then (
             select count(*) from document_page_states s where s.document_id = d.previous_version_id
               -- A stale stamp (its run charged nothing and can no longer commit) paid nothing, so this run charges it.
               -- A page whose read was charged and then failed (read_billed_run) paid its one charge.

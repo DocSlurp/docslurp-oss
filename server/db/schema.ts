@@ -353,6 +353,11 @@ export const documents = pgTable(
     previousVersionId: text("previous_version_id"),
     sourceSha256: text("source_sha256"),
     fileFacts: jsonb("file_facts"),
+    /** Pages billed when they differ from `pageCount` (the page basis): the worker's measured count of an Office or EPUB file (migration 0126). */
+    billingPages: integer("billing_pages"),
+    billingPagesMethod: text("billing_pages_method"),
+    /** `counted` or `assumed` (intake could not count the pages; migration 0126). */
+    pageCountSource: text("page_count_source").default("counted").notNull(),
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),

@@ -6,6 +6,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { StructuredExtractStage, findStructuredField, STRUCTURED_MAX_WINDOWS, STRUCTURED_WINDOW_CHARS } from "../stages/structured-extract.js";
 import { generateOpenRouterText } from "../lib/ai.js";
 import { featureCredits } from "@docslurp/shared";
+import type { UsageEvent } from "../models.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { Document, WorkspaceRun } from "../models.js";
 
@@ -34,6 +35,11 @@ function stateFor(document: Document, schema: Record<string, unknown>) {
   } as unknown as WorkspaceRun, [document]);
   state.artifactLedger.recordDocument(document.id, "markdown", "s3://bucket/markdown/doc.md");
   return state;
+}
+
+/** The credits every structured-fields charge of the run enqueued (first charge plus top-ups). */
+function structuredCredits(enqueue: { mock: { calls: Array<[UsageEvent, ...unknown[]]> } }): number {
+  return enqueue.mock.calls.map(([event]) => event).filter((event) => String(event.metric).includes("structured")).reduce((sum, event) => sum + event.costCents, 0);
 }
 
 const answer = (fields: Record<string, unknown>) => ({
@@ -84,10 +90,10 @@ describe("structured extraction of long documents", () => {
     expect(envelope.fields.total!.value).toBe(4200);
 
     // Billed on the pages actually read, not on all 300.
-    const charge = enqueue.mock.calls.map(([event]) => event).find((event) => String(event.metric).includes("structured"));
-    expect(charge?.costCents).toBe(featureCredits("structuredFields", envelope.coverage.pagesRead));
+    const charged = structuredCredits(enqueue);
+    expect(charged).toBe(featureCredits("structuredFields", envelope.coverage.pagesRead));
     if (envelope.coverage.truncated) {
-      expect(charge!.costCents).toBeLessThan(featureCredits("structuredFields", 300));
+      expect(charged).toBeLessThan(featureCredits("structuredFields", 300));
       expect(envelope.overallPolicy).not.toBe("auto-accept");
       // A field absent from the pages read carries the warning.
       for (const field of Object.values(envelope.fields)) if (field.value === null) expect(field.errors.join(" ")).toMatch(/not read/);
@@ -117,9 +123,10 @@ describe("structured extraction of long documents", () => {
     expect(envelope.coverage.pagesRead).toBeLessThan(300);
     expect(envelope.overallPolicy).not.toBe("auto-accept");
     expect(envelope.fields.signer!.errors.join(" ")).toMatch(/was not read/);
-    const charge = enqueue.mock.calls.map(([event]) => event).find((event) => String(event.metric).includes("structured"));
-    expect(charge?.costCents).toBe(featureCredits("structuredFields", envelope.coverage.pagesRead));
-    expect(charge!.costCents).toBeLessThan(featureCredits("structuredFields", 300));
+    // The 8 windows read 800,000 characters: 229 pages of text, more than the 186 pages they cover, still fewer than all 300.
+    expect(envelope.coverage.charsRead).toBeGreaterThanOrEqual(7 * STRUCTURED_WINDOW_CHARS);
+    expect(structuredCredits(enqueue)).toBe(featureCredits("structuredFields", Math.ceil(envelope.coverage.charsRead / 3_500)));
+    expect(structuredCredits(enqueue)).toBeLessThan(featureCredits("structuredFields", 300));
   });
 
   it("makes one call for a short document and bills its pages", async () => {
@@ -135,7 +142,84 @@ describe("structured extraction of long documents", () => {
     expect(vi.mocked(generateOpenRouterText)).toHaveBeenCalledTimes(1);
     const envelope = objects.get("user/run/structured/doc.json") as { coverage: { truncated: boolean; pagesRead: number } };
     expect(envelope.coverage).toMatchObject({ truncated: false, pagesRead: 2, windows: 1 });
-    expect(enqueue.mock.calls.map(([event]) => event).find((event) => String(event.metric).includes("structured"))?.costCents).toBe(featureCredits("structuredFields", 2));
+    expect(structuredCredits(enqueue)).toBe(featureCredits("structuredFields", 2));
+  });
+
+  it("bills a 1-page PDF holding 800,000 characters for the text its 8 windows read, not for 1 page", async () => {
+    // 800,000 characters of prose on one page: 8 windows of 100,000 characters. By page count that was 1 credit.
+    const prose = "Clause text with several words in it. ".repeat(21_200).slice(0, 8 * STRUCTURED_WINDOW_CHARS);
+    const document = { id: "doc", userId: "user", runId: "run", filename: "dump.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s" } as Document;
+    const { storage } = memoryStorage({ "markdown/doc.md": prose });
+    const state = stateFor(document, schema);
+    const enqueue = vi.spyOn(state.usageLedger, "enqueue");
+    vi.mocked(generateOpenRouterText).mockResolvedValue(answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } }) as never);
+    await new StructuredExtractStage(storage, config).run(state);
+    expect(vi.mocked(generateOpenRouterText)).toHaveBeenCalledTimes(8);
+    // 800,000 characters is 229 pages of text: 23 started 10-page blocks (23 credits), where the page count billed 1.
+    expect(featureCredits("structuredFields", 1)).toBe(1);
+    expect(structuredCredits(enqueue)).toBe(featureCredits("structuredFields", 229));
+    expect(structuredCredits(enqueue)).toBe(23);
+  });
+
+  it("bills the windows that finished when a later one fails, and a retry that re-reads them bills only what is new", async () => {
+    const window = (index: number) => `Window ${index} ` + "text ".repeat(19_000);
+    const markdown = Array.from({ length: 4 }, (_, index) => window(index)).join("\f");
+    const document = { id: "doc", userId: "user", runId: "run", filename: "long.pdf", mimeType: "application/pdf", pageCount: 4, sourceKey: "s" } as Document;
+    const { storage } = memoryStorage({ "markdown/doc.md": markdown });
+    const state = stateFor(document, schema);
+    const enqueue = vi.spyOn(state.usageLedger, "enqueue");
+    const ok = answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } });
+    // Window 3 of 4 fails on the first attempt (calls are concurrent, so fail the third started call).
+    let started = 0;
+    vi.mocked(generateOpenRouterText).mockImplementation((async () => {
+      started += 1;
+      if (started === 3) throw new Error("provider 500");
+      return ok;
+    }) as never);
+    await new StructuredExtractStage(storage, config).run(state);
+    expect(state.documentStage("doc", "structured-extract")?.status).toBe("failed");
+    const afterFailure = structuredCredits(enqueue);
+    // Three windows were read (about 285,000 characters, 82 pages of text): billed, not 0.
+    expect(afterFailure).toBeGreaterThan(0);
+    expect(afterFailure).toBe(featureCredits("structuredFields", Math.ceil(3 * 95_000 / 3_500)));
+    // The retry (a new attempt: its state is rebuilt from the persisted artifacts) reads every window again; the document is
+    // 4 pages of 95,000 characters. It adds only the difference to what the failed attempt already billed.
+    const retry = stateFor(document, schema);
+    retry.artifactLedger.record("feature-charge:structuredFields:doc", String(afterFailure));
+    const retryEnqueue = vi.spyOn(retry.usageLedger, "enqueue");
+    vi.mocked(generateOpenRouterText).mockReset();
+    vi.mocked(generateOpenRouterText).mockResolvedValue(ok as never);
+    await new StructuredExtractStage(storage, config).run(retry);
+    const total = featureCredits("structuredFields", Math.ceil(4 * 95_000 / 3_500));
+    expect(structuredCredits(retryEnqueue)).toBeCloseTo(total - afterFailure);
+    expect(afterFailure + structuredCredits(retryEnqueue)).toBeCloseTo(total);
+    const ids = [...enqueue.mock.calls, ...retryEnqueue.mock.calls].map(([event]) => event.id).filter((id) => String(id).includes("structuredFields"));
+    expect(new Set(ids).size).toBe(ids.length); // top-ups carry distinct ids; a replayed checkpoint cannot insert one twice
+  });
+
+  it("stops reading windows once the run's cost cap is reached, by the stage's own spend", async () => {
+    const markdown = Array.from({ length: 8 }, (_, index) => `Window ${index} ` + "text ".repeat(19_000)).join("\f");
+    const document = { id: "doc", userId: "user", runId: "run", filename: "long.pdf", mimeType: "application/pdf", pageCount: 8, sourceKey: "s" } as Document;
+    const { storage, objects } = memoryStorage({ "markdown/doc.md": markdown });
+    const state = stateFor(document, schema);
+    state.run.pipeline = { ...state.run.pipeline, maxCostCents: 5 } as typeof state.run.pipeline;
+    vi.mocked(generateOpenRouterText).mockResolvedValue(answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } }) as never);
+    const enqueue = vi.spyOn(state.usageLedger, "enqueue");
+    await new StructuredExtractStage(storage, config).run(state);
+    // One window (28 pages of text, 3 credits) and a second (6 credits) cross the 5-credit cap; the third on is not read.
+    expect(vi.mocked(generateOpenRouterText).mock.calls.length).toBeLessThan(8);
+    const envelope = objects.get("user/run/structured/doc.json") as { coverage: { truncated: boolean } };
+    expect(envelope.coverage.truncated).toBe(true);
+    expect(structuredCredits(enqueue)).toBeGreaterThan(0);
+  });
+
+  it("lets DOCSLURP_STRUCTURED_MAX_WINDOWS lower the reads per document, never above the ceiling of 8", async () => {
+    const { structuredMaxWindows } = await import("../stages/structured-extract.js");
+    expect(structuredMaxWindows({})).toBe(8);
+    expect(structuredMaxWindows({ DOCSLURP_STRUCTURED_MAX_WINDOWS: "3" })).toBe(3);
+    expect(structuredMaxWindows({ DOCSLURP_STRUCTURED_MAX_WINDOWS: "50" })).toBe(8);
+    expect(structuredMaxWindows({ DOCSLURP_STRUCTURED_MAX_WINDOWS: "0" })).toBe(8);
+    expect(structuredMaxWindows({ DOCSLURP_STRUCTURED_MAX_WINDOWS: "abc" })).toBe(8);
   });
 
   it("fails the stage with a retryable error when the markdown artifact cannot be read", async () => {

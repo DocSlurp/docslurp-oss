@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { listZipEntryNames, textPageCount } from "@docslurp/shared";
+import { listZipEntryNames, pagesFromSize, textPageCount, workerCountedFormat, type WorkerCountedFormat } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -12,18 +12,24 @@ import type { CommandRunner } from "../tools/runner.js";
  *
  *  - Word, OpenDocument, RTF and legacy Office files: pages of the file converted to PDF (LibreOffice, in the sandbox);
  *  - PowerPoint: slides;
- *  - spreadsheets: the pages of each sheet's CSV under the text rule (60 lines or 3,500 characters), summed;
+ *  - spreadsheets: the pages of each sheet's non-empty CSV rows under the text rule (60 lines or 3,500 characters), summed;
  *  - EPUB: the text rule over the chapters' text.
+ *
+ * When LibreOffice is not on the worker (the lean production image has none) a Word, RTF or legacy .doc file is counted by the
+ * same text rule over its extracted text (`text-rule`); a file no text tool reads falls back to its size at the format's typical
+ * bytes per page (`size-estimate`). A long document is never left at the intake count of one page.
  */
-export type PageCountMethod = "pdf-conversion" | "slides" | "sheet-rows" | "text-pages";
+export type PageCountMethod = "pdf-conversion" | "slides" | "sheet-rows" | "text-pages" | "text-rule" | "size-estimate";
 export interface PageCountResult { pages: number; method: PageCountMethod }
 
 /** Hard ceiling for a measured count: more than this is a parser fault, not a document. */
 export const MAX_COUNTED_PAGES = 100_000;
 const CONVERT_TIMEOUT_MS = 180_000;
+/** Extracted text is read from a sandboxed tool's stdout; counting stops reading past this many characters (a page is 3,500). */
+const MAX_COUNTED_TEXT_CHARS = MAX_COUNTED_PAGES * 3_500;
 
 export interface PageCountDeps {
-  runner: Pick<CommandRunner, "run" | "officeToPdf" | "pdfInfo" | "pptxExtract" | "xlsxExtractPy" | "epubExtract">;
+  runner: Pick<CommandRunner, "run" | "officeToPdf" | "pdfInfo" | "pptxExtract" | "xlsxExtractPy" | "epubExtract" | "mammothMarkdown" | "docToText" | "rtfToHtml">;
   /** Downloads the document's source to a local temp file and returns its path (callers delete it). */
   downloadSource: (document: Document) => Promise<string>;
   signal?: AbortSignal;
@@ -50,9 +56,20 @@ export function formatNeedsMeasuredPages(format: string | undefined): boolean {
   return format === "office-word" || format === "office-other" || format === "office-pptx" || format === "office-excel" || format === "epub";
 }
 
+/**
+ * The lines of `text` that hold something: a blank line, or a line of only separators (the commas of a spreadsheet row with no
+ * cells, a lone quote), is not read. Empty spreadsheet rows, in particular, must not bill as pages of text.
+ */
+export function contentLines(text: string): string {
+  return text.split(/\r?\n/).filter((line) => /[^\s,"';\t|]/.test(line)).join("\n");
+}
+
 /** Pages of one text split into chunks that each already fit the text rule, summed as one body of text. */
 export function textBodyPages(bodies: readonly string[]): number {
-  return Math.max(1, bodies.reduce((total, body) => total + (body.trim() ? textPageCount(body) : 0), 0));
+  return Math.max(1, bodies.reduce((total, body) => {
+    const content = contentLines(body);
+    return total + (content.trim() ? textPageCount(content) : 0);
+  }, 0));
 }
 
 async function pdfPagesOfConversion(deps: PageCountDeps, sourcePath: string): Promise<number | null> {
@@ -84,7 +101,40 @@ async function sidecarJson(deps: PageCountDeps, sourcePath: string, suffix: stri
   }
 }
 
-/** The measured page count of a converted document, or null when it could not be measured (the caller keeps the intake count). */
+/** The text of a Word, RTF or legacy .doc file from the sandboxed text tools the lean worker image has, or null. */
+async function extractedTextForCounting(deps: PageCountDeps, document: Document, sourcePath: string, format: string): Promise<{ text: string; markup: boolean } | null> {
+  const extension = path.extname(document.filename).toLowerCase();
+  const attempt = async <T>(read: () => Promise<T | null>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch (error) {
+      if (deps.signal?.aborted) throw error;
+      console.warn(`[page-count] text extraction unavailable document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  };
+  if (format === "office-word" && extension !== ".doc") {
+    const payload = await attempt(() => sidecarJson(deps, sourcePath, "mammoth", (output) => deps.runner.mammothMarkdown(sourcePath, output))) as { text?: unknown } | null;
+    if (typeof payload?.text === "string") return { text: payload.text.slice(0, MAX_COUNTED_TEXT_CHARS), markup: false };
+  }
+  if (extension === ".rtf") {
+    const html = await attempt(async () => {
+      const plan = await deps.runner.rtfToHtml(sourcePath);
+      return plan.available ? (await deps.runner.run(plan, withTimeout(deps.signal, 120_000))).stdout : null;
+    });
+    if (html !== null) return { text: html.slice(0, MAX_COUNTED_TEXT_CHARS), markup: true };
+  }
+  if (extension === ".doc") {
+    const text = await attempt(async () => {
+      const plan = await deps.runner.docToText(sourcePath);
+      return plan.available ? (await deps.runner.run(plan, withTimeout(deps.signal, 120_000))).stdout : null;
+    });
+    if (text !== null) return { text: text.slice(0, MAX_COUNTED_TEXT_CHARS), markup: false };
+  }
+  return null;
+}
+
+/** The measured page count of a converted document, or null when it could not be measured at all. */
 export async function measureDocumentPages(deps: PageCountDeps, document: Document, format: string): Promise<PageCountResult | null> {
   if (!formatNeedsMeasuredPages(format)) return null;
   const sourcePath = await deps.downloadSource(document);
@@ -112,8 +162,27 @@ export async function measureDocumentPages(deps: PageCountDeps, document: Docume
       return pages ? { pages, method: "text-pages" } : null;
     }
     // Word, OpenDocument, RTF, legacy .doc/.ppt/.xls: the layout engine decides the pages.
-    const pages = bounded(await pdfPagesOfConversion(deps, sourcePath) ?? 0);
-    return pages ? { pages, method: "pdf-conversion" } : null;
+    let converted: number | null = null;
+    try {
+      converted = await pdfPagesOfConversion(deps, sourcePath);
+    } catch (error) {
+      if (deps.signal?.aborted) throw error;
+      console.warn(`[page-count] conversion unavailable document=${document.id} format=${format}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const pages = bounded(converted ?? 0);
+    if (pages) return { pages, method: "pdf-conversion" };
+    // No layout engine (the lean worker image has no LibreOffice) or it failed: count the text the file holds, by the text rule.
+    const extracted = await extractedTextForCounting(deps, document, sourcePath, format);
+    if (extracted) {
+      const content = contentLines(extracted.text);
+      const textPages = bounded(content.trim() ? textPageCount(content, { markup: extracted.markup }) : 1);
+      if (textPages) return { pages: textPages, method: "text-rule" };
+    }
+    // No text tool read it either: its size at the format's typical bytes per page, never the one page intake assumed.
+    const size = await stat(sourcePath).then((entry) => entry.size, () => 0);
+    const counted = workerCountedFormat({ name: document.filename, type: document.mimeType }) ?? (format as WorkerCountedFormat);
+    const estimated = size > 0 ? bounded(pagesFromSize(counted, size)) : null;
+    return estimated ? { pages: estimated, method: "size-estimate" } : null;
   } finally {
     await rm(sourcePath, { force: true });
     await rm(path.dirname(sourcePath), { recursive: true, force: true }).catch(() => undefined);
@@ -121,11 +190,13 @@ export async function measureDocumentPages(deps: PageCountDeps, document: Docume
 }
 
 /**
- * Measures the document's pages and writes them to `documents.page_count` (and the in-memory document) before billing reads it.
- * Best effort: when the count cannot be measured the intake count stands and the stage reports why.
+ * Measures the document's pages and records them as `documents.billing_pages` (and on the in-memory document) before billing reads
+ * them. The page basis (`page_count`, what the text splits into) is left alone: these formats' text has no page breaks, so
+ * replacing it would make the page index drop every page. Best effort: when the count cannot be measured at all the document bills
+ * its intake count and the stage reports why.
  */
 export async function recordMeasuredPageCount(
-  state: { run: { id: string }; store?: { setDocumentPageCount?(runId: string, documentId: string, pageCount: number): Promise<boolean> } | null },
+  state: { run: { id: string }; store?: { setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> } | null },
   deps: PageCountDeps,
   document: Document,
   format: string,
@@ -140,8 +211,12 @@ export async function recordMeasuredPageCount(
     console.warn(`[page-count] unavailable document=${document.id} format=${format}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (!measured) return { pages: null, method: null, intakePages };
-  if (!state.store?.setDocumentPageCount) throw new Error("page count measured but the store cannot persist it");
-  await state.store.setDocumentPageCount(state.run.id, document.id, measured.pages);
-  document.pageCount = measured.pages;
+  if (measured.method !== "pdf-conversion" && measured.method !== "slides") {
+    console.warn(`[page-count] document=${document.id} format=${format} counted by ${measured.method}: ${measured.pages} pages (intake ${intakePages})`);
+  }
+  if (!state.store?.setDocumentBillingPages) throw new Error("page count measured but the store cannot persist it");
+  await state.store.setDocumentBillingPages(state.run.id, document.id, measured.pages, measured.method);
+  document.billingPages = measured.pages;
+  document.billingPagesMethod = measured.method;
   return { pages: measured.pages, method: measured.method, intakePages };
 }

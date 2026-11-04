@@ -61,8 +61,8 @@ export interface CheckpointStore {
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.
    */
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
-  /** Persists the page count the worker measured after conversion (documents.page_count), which completion billing reads. */
-  setDocumentPageCount?(runId: string, documentId: string, pageCount: number): Promise<boolean>;
+  /** Persists the pages the worker measured after conversion (documents.billing_pages), which completion billing and features read. */
+  setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
   /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
   loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }

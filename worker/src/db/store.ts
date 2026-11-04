@@ -120,6 +120,8 @@ type DocumentRow = {
   status: string;
   extraction_mode: string;
   page_count: number;
+  billing_pages?: number | null;
+  billing_pages_method?: string | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
   created_at: string | Date;
   updated_at: string | Date;
@@ -2685,12 +2687,13 @@ export class Store {
   }
 
   /**
-   * Replaces intake's page count with the one the worker measured after converting the document (Word, slides, sheets, EPUB), so
-   * the completion charge bills the pages actually read. Scoped to the run's own document.
+   * Records the pages the worker measured for an Office, slide, sheet or EPUB document (documents.billing_pages), so the completion
+   * charge and the optional features bill what the file really holds. `page_count`, the page basis the text splits into, is not
+   * touched: those formats' text has no page breaks. Scoped to the run's own document.
    */
-  async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
+  async setDocumentBillingPages(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> {
     const rows = await this.sql`
-      update documents set page_count = ${pageCount}, updated_at = now()
+      update documents set billing_pages = ${billingPages}, billing_pages_method = ${method}, updated_at = now()
       where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
       returning id
     `;
@@ -4272,6 +4275,8 @@ function mapDocument(row: DocumentRow): Document {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
+    billingPages: row.billing_pages ?? null,
+    billingPagesMethod: row.billing_pages_method ?? null,
     fileFacts: row.file_facts ?? null,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
