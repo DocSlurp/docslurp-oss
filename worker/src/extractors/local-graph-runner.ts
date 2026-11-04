@@ -18,6 +18,8 @@ export interface LocalPdfGraphInput {
   maxOutputs?: number;
   maxSourceBytes?: number;
   maxArtifactBytes?: number;
+  /** OCR language setting (`auto` or Tesseract codes); the workspace's documentExtraction.ocr.language. */
+  ocrLanguage?: string;
 }
 
 export interface LocalPdfGraphOutput {
@@ -65,7 +67,7 @@ export async function runLocalPdfArtifactGraph(input: LocalPdfGraphInput): Promi
     placements: [],
     producer: { id: "source", optionsDigest: actualHash },
   };
-  const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes });
+  const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes, ocrLanguage: input.ocrLanguage });
   const result = await executeArtifactGraph({
     sourceDocumentId: input.sourceDocumentId,
     initial: [source],

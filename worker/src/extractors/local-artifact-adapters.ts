@@ -5,6 +5,7 @@ import type { ExtractionArtifactRef } from "@docslurp/shared";
 import type { ArtifactGraphAdapter } from "./artifact-graph.js";
 import { CommandRunner, resolveVenvBin } from "../tools/runner.js";
 import { ensureBinary } from "../tools/python-deps.js";
+import { ocrImageText } from "../lib/ocr-language.js";
 
 /** The caller owns outputDir and its lifetime. Each run writes immutable files there. */
 export interface LocalArtifactAdapterOptions {
@@ -12,6 +13,11 @@ export interface LocalArtifactAdapterOptions {
   maxBytes?: number;
   timeoutMs?: number;
   imageScaleTo?: number;
+  /**
+   * OCR language: `auto` (the default; DOCSLURP_OCR_LANGUAGE overrides it) detects the page's script and runs the
+   * matching installed packs, or Tesseract codes such as `eng+deu` from the workspace.
+   */
+  ocrLanguage?: string;
 }
 
 const defaultMaxBytes = 32 * 1024 * 1024;
@@ -161,8 +167,12 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
     } },
     { id: "tesseract-page-ocr", accepts: ["page/image"], emits: ["page/text"], scope: "page", cost: 4, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await runLocalArtifactCommand("tesseract", [filePath(input), "stdout", "-l", "eng"], maxBytes, timeoutMs, ctx.signal);
-      return [await emit("tesseract-page-ocr", "page/text", input, bytes, "text/plain; charset=utf-8", "txt", number)];
+      const ocr = await ocrImageText({
+        image: filePath(input),
+        setting: options.ocrLanguage,
+        run: async (args) => (await runLocalArtifactCommand("tesseract", args, maxBytes, timeoutMs, ctx.signal)).toString("utf8"),
+      });
+      return [await emit("tesseract-page-ocr", "page/text", input, Buffer.from(ocr.text, "utf8"), "text/plain; charset=utf-8", "txt", number)];
     } },
     { id: "pandoc-text-markdown", accepts: ["page/text"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);

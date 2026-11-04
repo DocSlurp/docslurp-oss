@@ -120,6 +120,12 @@ export const ocrLanguageSchema = z.string().trim()
   .max(64);
 
 /**
+ * Workspace OCR language: `auto` detects each page's script and runs the matching installed packs; anything else
+ * is Tesseract codes. English was the only language before, which turned Arabic, Chinese and Hindi scans into junk.
+ */
+export const ocrLanguageSettingSchema = z.union([z.literal("auto"), ocrLanguageSchema]);
+
+/**
  * Dolphin options a workspace may set. The repository and model paths, and the Python binary, come only from the
  * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a workspace would
  * let it choose which script the worker runs.
@@ -218,7 +224,7 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
   if (!isPlainObject(value)) return { value, dropped: [] };
   const next: Record<string, unknown> = structuredClone(value);
   const dropped: string[] = [];
-  if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSchema.safeParse(next.ocr.language).success) {
+  if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSettingSchema.safeParse(next.ocr.language).success) {
     delete next.ocr.language;
     dropped.push("documentExtraction.ocr.language");
   }
@@ -260,9 +266,9 @@ export const documentExtractionConfigSchema = z.object({
   options: documentExtractorOptionsSchema.default({}),
   forceOcr: z.boolean().default(false),
   ocr: z.object({
-    language: ocrLanguageSchema.default("eng"),
+    language: ocrLanguageSettingSchema.default("auto"),
     autoRotate: z.boolean().default(true),
-  }).default({ language: "eng", autoRotate: true }),
+  }).default({ language: "auto", autoRotate: true }),
 });
 export type DocumentExtractionConfig = z.infer<typeof documentExtractionConfigSchema>;
 
@@ -275,7 +281,7 @@ export const defaultDocumentExtractionConfig: DocumentExtractionConfig = {
   voting: { enabled: false, secondary: "next-in-order" },
   options: {},
   forceOcr: false,
-  ocr: { language: "eng", autoRotate: true },
+  ocr: { language: "auto", autoRotate: true },
 };
 
 export const extractionImageSchema = z.object({

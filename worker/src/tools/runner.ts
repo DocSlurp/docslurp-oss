@@ -10,7 +10,7 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { withObservation } from "@docslurp/shared/observability";
-import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL, ocrLanguageSchema } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
@@ -986,7 +986,8 @@ export class CommandRunner {
     outputBase: string,
     langs?: string,
   ): Promise<CommandPlan> {
-    const langArg = langs ?? "eng";
+    // Tesseract codes only (`eng`, `chi_sim`, `eng+deu`); language selection per page is ocrImageText (lib/ocr-language.ts).
+    const langArg = langs === undefined ? "eng" : ocrLanguageSchema.parse(langs);
     return await this.plan(
       "tesseract",
       source,
