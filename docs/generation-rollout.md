@@ -29,6 +29,39 @@ workspace_runs table and already-migrated installations skip this one-time gate.
 
 ## Required sequence
 
+The supported migrator keeps its advisory lock, admission checks, Drizzle
+migration, optional PostGIS migrations and grant reconciliation on one direct
+PostgreSQL connection. The generation barrier is checked while the authenticated
+superuser is still `current_user`. Only after that check does it `SET ROLE` to
+the owner of `public.documents` (or the database owner for a fresh database).
+New tables, migration ledgers and default privileges therefore belong to the
+intended application owner, not the administrator performing admission. No
+runtime role receives superuser privileges or membership in the administrator.
+
+`MIGRATION_OWNER_ROLE` may explicitly confirm that owner; it must match the
+inferred owner. Only conventional ASCII role identifiers up to 63 bytes are
+accepted. Missing roles, preconfigured session role overrides, mismatched owners,
+delegation to an elevated role, or insufficient owner privileges fail closed.
+The owner must already have the required publisher-role membership described in
+[database roles](self-host/database-roles.md). Pre-provision this through the
+administrator before downtime; the migrator does not grant it on the owner's
+behalf. Normal owner connections and fresh databases remain supported without
+the one-time generation attestation when their schema does not require it.
+The connection resets its role before releasing the advisory lock and closing.
+
+Validation of the owner-preserving path uses real PostgreSQL 17, including an
+existing pre-0112 database and the actual `node server/db/migrate.mjs` entrypoint.
+Eight cases cover owner/ledger/default-privilege preservation, blocked runtime
+logins, unchanged session identity, subsequent owner migrations, fresh installs,
+PostGIS ownership, missing publisher membership rollback, unsafe identifiers,
+wrong/elevated owners, role overrides, unfinished runs, and missing or unsafe
+barriers. All 36 registered database/Redis files passed without skips; the seven
+existing generation-barrier tests and eleven safety/registration/error-redaction
+tests also passed. CI uses a pinned PostGIS-enabled PostgreSQL 17 image to execute
+the optional spatial case. These are local verification results, not a production
+drain attestation. Independent security review and CI remain required before
+using the repaired migrator for a coordinated rollout.
+
 1. Pause admission at the ingress and every producer: uploads, API/SDK/CLI/MCP,
    connectors, schedules, retries, admin actions and automated recovery. Keep old
    workers available to finish existing work. Prevent autoscaling/restarts and

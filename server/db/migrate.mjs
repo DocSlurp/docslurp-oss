@@ -1,18 +1,14 @@
 // The one way to create or update the database schema: apply server/db/migrations
-// with drizzle-kit. Used by the Fly release command, the compose `migrate`
+// with Drizzle on the same locked connection. Used by the Fly release command, the compose `migrate`
 // service, and API startup (RUN_STARTUP_MIGRATIONS). A session advisory lock
 // serializes concurrent migrators (several app instances, release + app), so
 // two processes never apply the same migration at once.
 import path from "node:path";
-import { assertGenerationRollout } from "./generation-rollout.mjs";
-import { migratePostgis } from "./migrate-postgis.mjs";
+import { applyOwnedMigrations } from "./owned-migrations.mjs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { readFileSync } from "node:fs";
 import { migrationFailureDetail } from "./migration-error.mjs";
-import { assertMigrationOwner, reconcileRoleGrants } from "./roles.mjs";
 
 const MIGRATION_LOCK_KEY = 7_142_771_001; // arbitrary, stable app-wide key
 
@@ -45,14 +41,6 @@ const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "
 // its predecessor (e.g. from a long-lived branch) would be skipped silently on
 // existing databases. Refuse to migrate instead. Same rule as
 // worker/src/test/migrated-db.ts, which tests the journal in CI.
-function findBin(start, name) {
-  for (let dir = start; ; dir = path.dirname(dir)) {
-    const bin = path.join(dir, "node_modules", ".bin", name);
-    if (existsSync(bin)) return bin;
-    if (path.dirname(dir) === dir) throw new Error(`${name} is not installed in any node_modules/.bin at or above ${start}`);
-  }
-}
-
 const journal = JSON.parse(readFileSync(path.join(repoRoot, "server/db/migrations/meta/_journal.json"), "utf8"));
 const journalProblems = journal.entries.flatMap((entry, position) => {
   const previous = journal.entries[position - 1];
@@ -67,7 +55,6 @@ if (journalProblems.length > 0) {
 
 const require = createRequire(import.meta.url);
 const { Client } = require("pg");
-const execFileAsync = promisify(execFile);
 
 const client = new Client({ connectionString: databaseUrl });
 await client.connect();
@@ -89,27 +76,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   console.log(`[migrate] lock acquired after ${Date.now() - started}ms; applying server/db/migrations`);
-  // Fail clearly when the URL is a restricted runtime role (docslurp_app,
-  // docslurp_worker) instead of the owner: set MIGRATION_DATABASE_URL.
-  const migrator = await assertMigrationOwner(client);
-  await assertGenerationRollout(client);
-  // Call the installed binary directly: images and hosts may not have pnpm on PATH.
-  // It is a root devDependency, so it sits in the nearest node_modules/.bin at or
-  // above this repo: /app/core/... in the private app image installs it at /app.
-  const drizzleKit = findBin(repoRoot, "drizzle-kit");
-  const { stdout, stderr } = await execFileAsync(
-    drizzleKit,
-    ["migrate", "--config", "drizzle.config.ts"],
-    { cwd: repoRoot, env: { ...process.env, DATABASE_URL: databaseUrl }, maxBuffer: 16 * 1024 * 1024 },
-  );
-  const output = `${stdout}\n${stderr}`.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").trim();
-  if (output) console.log(output.split("\n").filter((line) => !/applying migrations\.\.\./.test(line)).join("\n"));
-  // Grants for the least-privilege roles, when they exist (server/db/roles.mjs).
-  // Still under the migration lock, so the new tables are granted before any
-  // runtime role can be handed code that uses them.
-  if (process.env.POSTGIS_MIGRATIONS === "1") await migratePostgis(client);
-  const reconciled = await reconcileRoleGrants(client);
-  if (reconciled.length === 0) console.log(`[migrate] no least-privilege roles found; ${migrator} remains the only role in use`);
+  await applyOwnedMigrations(client, { migrationsFolder: path.join(repoRoot, "server/db/migrations") });
   console.log(`[migrate] complete in ${Date.now() - started}ms`);
 } catch (error) {
   console.error(`[migrate] failed: ${migrationFailureDetail(error)}`);
