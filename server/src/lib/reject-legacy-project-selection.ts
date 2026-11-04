@@ -18,10 +18,14 @@ export const rejectLegacyProjectSelection: MiddlewareHandler = async (c, next) =
   if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method)) {
     const contentType = c.req.header("content-type") ?? "";
     if (/\bjson\b/i.test(contentType)) {
-      // Hono caches this read for the route. The preceding body limiter bounds it.
-      const body: unknown = await c.req.json().catch(() => null);
+      // Clone preserves raw transport consumers such as MCP. Prior limits bound bytes.
+      const body: unknown = await c.req.raw.clone().json().catch(() => null);
       if (hasLegacyProjectSelection(body)) return reject();
       if (body && typeof body === "object" && "docslurp" in body && hasLegacyProjectSelection(body.docslurp)) return reject();
+      if (body && typeof body === "object" && "params" in body) {
+        const params = body.params;
+        if (params && typeof params === "object" && "arguments" in params && hasLegacyProjectSelection(params.arguments)) return reject();
+      }
     } else if (/multipart\/form-data|application\/x-www-form-urlencoded/i.test(contentType)) {
       const body = await c.req.parseBody({ all: true }).catch(() => null);
       if (hasLegacyProjectSelection(body)) return reject();

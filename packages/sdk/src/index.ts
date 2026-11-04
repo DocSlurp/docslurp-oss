@@ -936,7 +936,14 @@ function isStreamBody(body: unknown): boolean {
   return typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
 }
 
+function rejectLegacyProjectOptions(input: object): void {
+  if (["workspace", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace"].some(key => Object.hasOwn(input, key))) {
+    throw new Error("Legacy workspace selection is no longer supported; use project or newProject.");
+  }
+}
+
 export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
+  rejectLegacyProjectOptions(options);
   // Read server configuration at construction time; never import it into browser bundles.
   const env = typeof window === "undefined" && typeof process !== "undefined" ? process.env : undefined;
   const apiUrl = normalizeApiUrl(options.apiUrl ?? (env?.DOCSLURP_URL?.trim() || "https://docslurp.io"));
@@ -970,6 +977,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return await forcedRefresh;
   }
   assertSecureApiOrigin(apiUrl);
+  if (!options.project?.trim() && (env?.DOCSLURP_WORKSPACE?.trim() || env?.DOCSLURP_WORKSPACE_ID?.trim())) throw new Error("Legacy workspace environment selection is no longer supported; set DOCSLURP_PROJECT.");
   const clientProject = options.project?.trim() || env?.DOCSLURP_PROJECT?.trim() || DEFAULT_PROJECT;
   const fetchImpl = options.fetch ?? fetch;
 
@@ -1345,6 +1353,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    * self-titled project, and anything else goes to the client project.
    */
   function intakeTarget(input: { newProject?: boolean; templateKey?: string; project?: string }): { newProject: boolean; project?: string } {
+    rejectLegacyProjectOptions(input);
     const explicit = input.project?.trim();
     if (explicit) return { newProject: false, project: explicit };
     if (input.newProject || input.templateKey) return { newProject: true };
@@ -1353,6 +1362,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
   /** Per-call project, else the client project ("default" unless configured). */
   function inProject<T extends { project?: string }>(input: T): T {
+    rejectLegacyProjectOptions(input);
     return { ...input, project: input.project?.trim() || clientProject };
   }
 

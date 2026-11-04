@@ -81,7 +81,7 @@ export const suggestQueriesInput = z.object({
   project: projectRef,
   q: z.string().max(10_000).optional(),
   limit: z.number().int().min(1).max(25).optional(),
-});
+}).strict();
 
 /**
  * The search tool accepts one query (`q` plus its options) or a batch

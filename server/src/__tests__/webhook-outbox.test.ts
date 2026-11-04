@@ -64,6 +64,13 @@ describe("webhook outbox", () => {
     expect(state.dispatched).toEqual([{ id: "ob-4", error: "Skipped: subscriber no longer has access to this project" }]);
   });
 
+  it.each([{}, { workspaceId: "w" }, { projectId: "" }, { projectId: "   " }])("refuses outbox events without canonical scope: %j", async payload => {
+    state.outbox = [{ id: "stale", user_id: "u1", event_type: "document.replaced", payload }];
+    await drainWebhookOutbox();
+    expect(state.requests).toHaveLength(0);
+    expect(state.dispatched).toHaveLength(1);
+  });
+
   it("skips events from a project that turned webhook notifications off", async () => {
     state.projectPipeline = { webhooks: { enabled: false, events: [] } };
     state.outbox = [{ id: "ob-2", user_id: "u1", event_type: "document.replaced", payload: { projectId: "w" } }];

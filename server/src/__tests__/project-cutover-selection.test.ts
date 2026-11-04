@@ -28,4 +28,11 @@ describe("project cutover rejects stale scope instead of selecting default", () 
     expect(await response.json()).toEqual(body);
     expect(await (await app().request("/")).json()).toEqual({ project: "default" });
   });
+  it("preserves raw JSON transport readers and rejects stale MCP arguments", async () => {
+    const raw = new Hono().use("*", rejectLegacyProjectSelection).post("/", async c => c.json(await c.req.raw.json()));
+    const valid = { method: "tools/call", params: { arguments: { project: "mine" } } };
+    expect(await (await raw.request("/", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(valid) })).json()).toEqual(valid);
+    expect((await raw.request("/", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ params: { arguments: { workspaceId: "other" } } }) })).status).toBe(400);
+  });
+
 });

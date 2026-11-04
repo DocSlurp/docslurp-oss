@@ -15,13 +15,13 @@ const good = () => ({
 });
 
 test("accepts a well-formed package", () => assert.deepEqual(checkPackage(good()), []));
-test("rejects project specifiers, missing targets and shipped sources", () => {
+test("rejects workspace specifiers, missing targets and shipped sources", () => {
   const input = good();
   input.manifest.dependencies = { a: "workspace:^" };
   input.files.add("src/index.ts");
   input.files.delete("dist/index.js");
   const problems = checkPackage(input).join("\n");
-  assert.match(problems, /project:/);
+  assert.match(problems, /workspace:/);
   assert.match(problems, /not in the tarball/);
   assert.match(problems, /must not ship: src\/index\.ts/);
 });

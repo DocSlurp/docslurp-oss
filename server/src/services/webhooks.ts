@@ -509,7 +509,7 @@ export async function drainWebhookOutbox(limit = 25): Promise<number> {
     const payloadProjectId = typeof (event.payload as { projectId?: unknown } | null)?.projectId === "string"
       ? (event.payload as { projectId: string }).projectId
       : null;
-    if (payloadProjectId && !(await getProjectAccess(payloadProjectId, event.user_id))) {
+    if (!payloadProjectId || !payloadProjectId.trim() || !(await getProjectAccess(payloadProjectId, event.user_id))) {
       await sql`
         update webhook_outbox
         set dispatched_at = now(), last_error = ${"Skipped: subscriber no longer has access to this project"}

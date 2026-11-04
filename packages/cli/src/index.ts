@@ -27,6 +27,7 @@ function resolveApiUrl(flags: Record<string, string | boolean>): string {
  * default project). A project is an ID, slug or name; names match by slug.
  */
 function resolveProject(flags: Record<string, string | boolean>): string {
+  if (process.env.DOCSLURP_WORKSPACE?.trim() || process.env.DOCSLURP_WORKSPACE_ID?.trim()) throw new Error("Legacy workspace environment selection is no longer supported; set DOCSLURP_PROJECT.");
   const explicit = typeof flags.project === "string" ? flags.project.trim() : "";
   return explicit || process.env.DOCSLURP_PROJECT?.trim() || "default";
 }
@@ -271,6 +272,7 @@ function parseCliArgs(argv: string[]) {
   let i = 1;
   while (i < argv.length) {
     const arg = argv[i];
+    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg ?? "")) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
     if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force") {
       flags[arg.slice(2)] = true;
       i++;

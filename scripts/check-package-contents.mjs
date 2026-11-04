@@ -38,7 +38,7 @@ export function checkPackage({ manifest, files, readme, license }) {
   if (!files.has("README.md")) problems.push("README.md missing from tarball");
   else if (!readme.split("\n", 1)[0].startsWith(`# ${name}`) || !/\[Package docs\]\(https:\/\/docslurp\.io\/docs\/packages\/[^)]+\) · \[GitHub\]\(.+\) · \[npm\]\(.+\)/.test(readme.split("\n").slice(1, 4).join("\n"))) problems.push("README must start with the title then a `Package docs · GitHub · npm` line");
   for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
-    for (const [dep, range] of Object.entries(manifest[field] ?? {})) if (/^(project|link|file):/.test(range)) problems.push(`${field}.${dep} is ${range}`);
+    for (const [dep, range] of Object.entries(manifest[field] ?? {})) if (/^(workspace|link|file):/.test(range)) problems.push(`${field}.${dep} is ${range}`);
   }
   const entries = new Set();
   for (const field of ["main", "module", "types", "bin", "exports"]) targets(manifest[field], entries);

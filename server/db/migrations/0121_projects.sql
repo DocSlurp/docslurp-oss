@@ -1,6 +1,17 @@
 -- Breaking terminology cutover. Stop old producers and drain jobs first.
 -- Preserve tenant IDs, allowlists, storage keys and historical migrations.
 -- Catalog operations are restricted to application-owned public objects.
+DO $preflight$
+DECLARE r record; conflict boolean;
+BEGIN
+  FOR r IN SELECT * FROM (VALUES ('usage_events','metadata'),('search_sessions','metadata'),('webhook_outbox','payload'),('storage_cleanup_queue','payload')) AS fields(table_name,column_name) LOOP
+    EXECUTE format('SELECT EXISTS(SELECT 1 FROM public.%I WHERE %I ? ''workspaceId'' AND %I ? ''projectId'' AND %I->''workspaceId'' IS DISTINCT FROM %I->''projectId'')',r.table_name,r.column_name,r.column_name,r.column_name,r.column_name) INTO conflict;
+    IF conflict THEN RAISE EXCEPTION 'conflicting project selectors in %.%',r.table_name,r.column_name; END IF;
+    EXECUTE format('SELECT EXISTS(SELECT 1 FROM public.%I WHERE %I ? ''workspaceIds'' AND %I ? ''projectIds'' AND %I->''workspaceIds'' IS DISTINCT FROM %I->''projectIds'')',r.table_name,r.column_name,r.column_name,r.column_name,r.column_name) INTO conflict;
+    IF conflict THEN RAISE EXCEPTION 'conflicting project selector arrays in %.%',r.table_name,r.column_name; END IF;
+  END LOOP;
+END $preflight$;
+--> statement-breakpoint
 DO $migration$
 DECLARE r record; definition text; body text; argument text;
 BEGIN
@@ -107,3 +118,14 @@ ALTER TABLE documents ADD CONSTRAINT documents_dedup_scope_check CHECK (dedup_sc
 UPDATE documents SET dedup_scope='project' WHERE dedup_scope='workspace';
 ALTER TABLE documents VALIDATE CONSTRAINT documents_dedup_scope_check;
 UPDATE project_runs SET pause_reason='project_budget_paused' WHERE pause_reason='workspace_budget_paused';
+
+--> statement-breakpoint
+-- Persisted protocol selectors must retain exactly the same scope across cutover.
+UPDATE api_keys SET scopes=array_replace(scopes,'workspaces:manage','projects:manage')
+WHERE 'workspaces:manage'=ANY(scopes);
+--> statement-breakpoint
+UPDATE webhook_outbox SET payload=(payload-'workspaceId')||jsonb_build_object('projectId',payload->'workspaceId')
+WHERE payload ? 'workspaceId';
+--> statement-breakpoint
+UPDATE storage_cleanup_queue SET payload=(payload-'workspaceId')||jsonb_build_object('projectId',payload->'workspaceId')
+WHERE payload ? 'workspaceId';

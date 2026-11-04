@@ -13,7 +13,7 @@ This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and 
 - `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress` and `shared` (contracts shared by server and clients).
 - `docs/`: public documentation. Self-host instructions are in `docs/self-host/`.
 
-Keep new code in the package that owns it. `server/` must not import from outside the project packages it declares.
+Keep new code in the package that owns it. `server/` must not import from outside the workspace packages it declares.
 
 ## Prefer native Mastra agent features
 
@@ -51,7 +51,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 **Boundaries in scope:**
 
 - **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native bindings such as the private PDF engine, and the code that stages inputs and outputs for them.
-- **Tenant data boundaries:** organization, project, user and API-key scoping in queries, search and vector indexes, storage prefixes, caches, exports, webhooks, MCP tools and chat retrieval.
+- **Tenant data boundaries:** organization, workspace, user and API-key scoping in queries, search and vector indexes, storage prefixes, caches, exports, webhooks, MCP tools and chat retrieval.
 - **Identity and access:** sessions, API keys and their scopes, OAuth and MCP consent, SSO, CSRF and origin checks.
 - **Secrets and egress:** credential storage and distribution, user-supplied URLs, connectors and any outbound fetch driven by user input.
 - **Billing and credits:** anything that can let one tenant spend, see or reset another tenant's balance.
