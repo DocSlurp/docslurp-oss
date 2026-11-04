@@ -28,7 +28,7 @@ export function assertSessionReplayable(
 ): void {
   const inAllowlist = !caller.allowedWorkspaceIds?.length || Boolean(session.workspace_id && caller.allowedWorkspaceIds.includes(session.workspace_id));
   if ((session.org_id ?? null) !== (caller.orgId ?? null) || (session.api_key_id ?? null) !== (caller.apiKeyId ?? null) || !inAllowlist) {
-    throw new WorkspaceIntakeError("This Idempotency-Key belongs to an upload session this credential cannot use; use a new Idempotency-Key", 409, undefined, "idempotency_conflict");
+    throw new WorkspaceIntakeError("This Idempotency-Key belongs to an upload session this credential cannot use; use a new Idempotency-Key", 409, undefined, "idempotency_key_reused");
   }
   if (["failed", "aborted"].includes(session.status)) {
     throw new WorkspaceIntakeError(`The upload session created with this Idempotency-Key was ${session.status}; create a new one with a new Idempotency-Key`, 409, undefined, "upload_session_closed");
@@ -62,7 +62,7 @@ export async function createSessionIdempotently<T extends CreatedSession>(args: 
       cached = await deps.getCached({ idempotencyKey: scoped, routeKey: DIRECT_SESSION_ROUTE_KEY, requestHash });
     } catch (error) {
       // Only the conflict is the caller's to see; a database fault stays a server error with its detail in telemetry.
-      if (error instanceof IdempotencyConflictError) throw new WorkspaceIntakeError(error.message, 409, undefined, "idempotency_conflict");
+      if (error instanceof IdempotencyConflictError) throw new WorkspaceIntakeError(error.message, 409, undefined, "idempotency_key_reused");
       throw error;
     }
     const cachedId = typeof cached?.body.sessionId === "string" ? cached.body.sessionId : null;

@@ -110,3 +110,71 @@ test("direct session rejections are reported under the user's filenames while th
     assert.match(result.stderr, /1 of 2 files were not uploaded/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test("--idempotency-key is the key a direct upload sends", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    // Over the bulk transport's cap, so the upload goes through a direct session.
+    const file = join(dir, "a.pdf");
+    await writeFile(file, Buffer.alloc(21 * 1024 * 1024, 0x41));
+    const result = await invoke(["upload", file, "--idempotency-key", "my-retry-key"], (request, count, base) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        const body = JSON.parse(request.body.toString());
+        return { status: 201, body: { sessionId: "s1", files: body.files.map((f, index) => ({ index, clientId: f.clientId, id: `f${index}`, filename: f.filename, mimeType: f.mimeType, sizeBytes: f.sizeBytes, mode: "single", putUrl: `${base}/storage/${index}` })) } };
+      }
+      if (request.url.startsWith("/storage/")) return { headers: { etag: '"e"' }, body: {} };
+      if (request.url.endsWith("/files/complete")) return { body: { ok: true } };
+      if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+      return { status: 404, body: {} };
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const create = result.requests.find((request) => request.url === "/v1/uploads/direct/sessions");
+    assert.equal(create.headers["idempotency-key"], "my-retry-key");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a coded in-flight 409 on session create is retried with the same key instead of failing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    // Over the bulk transport's cap, so the upload goes through a direct session.
+    const file = join(dir, "a.pdf");
+    await writeFile(file, Buffer.alloc(21 * 1024 * 1024, 0x41));
+    let creates = 0;
+    const result = await invoke(["upload", file], (request, count, base) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        if (++creates <= 2) return { status: 409, body: { error: { code: "idempotency_in_flight", message: "still being processed" } } };
+        const body = JSON.parse(request.body.toString());
+        return { status: 201, body: { sessionId: "s1", files: body.files.map((f, index) => ({ index, clientId: f.clientId, id: `f${index}`, filename: f.filename, mimeType: f.mimeType, sizeBytes: f.sizeBytes, mode: "single", putUrl: `${base}/storage/${index}` })) } };
+      }
+      if (request.url.startsWith("/storage/")) return { headers: { etag: '"e"' }, body: {} };
+      if (request.url.endsWith("/files/complete")) return { body: { ok: true } };
+      if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+      return { status: 404, body: {} };
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const attempts = result.requests.filter((request) => request.url === "/v1/uploads/direct/sessions");
+    assert.equal(attempts.length, 3);
+    assert.equal(new Set(attempts.map((request) => request.headers["idempotency-key"])).size, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("any other 409 on session create is reported at once, without a retry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    // Over the bulk transport's cap, so the upload goes through a direct session.
+    const file = join(dir, "a.pdf");
+    await writeFile(file, Buffer.alloc(21 * 1024 * 1024, 0x41));
+    const result = await invoke(["upload", file], (request) => (
+      request.url === "/v1/uploads/direct/sessions" ? { status: 409, body: { error: { code: "idempotency_key_reused", message: "used for another request" } } } : { status: 404, body: {} }
+    ));
+    assert.notEqual(result.code, 0);
+    assert.equal(result.requests.filter((request) => request.url === "/v1/uploads/direct/sessions").length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

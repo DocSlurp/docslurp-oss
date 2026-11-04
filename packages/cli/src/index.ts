@@ -60,7 +60,7 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
 
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
+  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
@@ -286,7 +286,7 @@ function parseCliArgs(argv: string[]) {
       i++;
     } else if (arg === "--workspace-name" || arg === "--workspace-id") {
       throw new Error(`${arg} was removed: pass a workspace ID, slug or name with --workspace (a name that matches no workspace is created on upload).`);
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality") {
+    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--idempotency-key") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -365,14 +365,39 @@ function isLostResponse(error: unknown): boolean {
 
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
+/** The server's coded 409 for a request whose Idempotency-Key is still being processed. */
+async function isInFlightConflict(response: Response): Promise<boolean> {
+  try {
+    const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
+    const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
+    return code === "idempotency_in_flight";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Sends a request that is safe to repeat (it carries an Idempotency-Key, or is a read): a lost response or a transient status is retried
  * with backoff, so a timeout never makes a second session or a second charge.
  */
 async function apiFetchRepeatable(pathname: string, flags: Record<string, string | boolean>, init: RequestInit, timeoutMs?: number): Promise<Response> {
+  // A coded 409 means the first request with this Idempotency-Key is still being processed: its session is the one wanted, so wait
+  // and send the same key again until the request timeout rather than failing and orphaning it.
+  const waitLimitMs = Number.isFinite(Number(flags.timeout ?? 30)) && Number(flags.timeout ?? 30) > 0 ? Number(flags.timeout ?? 30) * 1000 : 30_000;
+  const giveUpAt = Date.now() + waitLimitMs;
+  let inFlight = 0;
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await apiFetch(pathname, flags, init, timeoutMs);
+      if (response.status === 409 && await isInFlightConflict(response)) {
+        const wait = Math.min(2_000, 250 * 2 ** inFlight++);
+        if (Date.now() + wait < giveUpAt) {
+          await response.body?.cancel();
+          await sleepMs(wait);
+          attempt--;
+          continue;
+        }
+      }
       if (attempt >= 3 || !RETRYABLE_STATUSES.has(response.status)) return response;
       const wait = Math.min(10, retryAfterSeconds(response.headers.get("retry-after")) ?? 0.25 * 2 ** attempt);
       await response.body?.cancel();

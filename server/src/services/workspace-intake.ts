@@ -61,10 +61,10 @@ export type WorkspaceIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 
 
 /**
  * Machine-readable causes clients act on. `idempotency_in_flight`: the first request with this Idempotency-Key is still being
- * processed, so retry with the same key. `idempotency_conflict`: the key was used for a different request. `upload_session_closed`:
+ * processed, so retry with the same key. `idempotency_key_reused`: the key was used for a different request. `upload_session_closed`:
  * the session remembered for the key can no longer take uploads, so use a new key.
  */
-export type WorkspaceIntakeErrorCode = "remote_format_disabled" | "idempotency_in_flight" | "idempotency_conflict" | "upload_session_closed";
+export type WorkspaceIntakeErrorCode = "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed";
 
 export class WorkspaceIntakeError extends Error {
   constructor(

@@ -184,7 +184,7 @@ describe("upload-session idempotency across credentials", () => {
     const { deps } = memoryDeps();
     const { create, describe } = sessions();
     await createSessionIdempotently({ key: "k", scope: base, request, create, describe }, deps);
-    await expect(createSessionIdempotently({ key: "k", scope: base, request: { files: [] }, create, describe }, deps)).rejects.toMatchObject({ statusCode: 409, code: "idempotency_conflict" });
+    await expect(createSessionIdempotently({ key: "k", scope: base, request: { files: [] }, create, describe }, deps)).rejects.toMatchObject({ statusCode: 409, code: "idempotency_key_reused" });
   });
 });
 
@@ -203,7 +203,7 @@ describe("assertSessionReplayable", () => {
     ["another organization", { ...caller, orgId: "org-2" }],
     ["a key whose allowlist excludes the workspace", { ...caller, allowedWorkspaceIds: ["ws-2"] }],
   ])("refuses %s with a 409 and never returns the session", (_label, other) => {
-    expect(() => assertSessionReplayable(session, other)).toThrowError(expect.objectContaining({ statusCode: 409, code: "idempotency_conflict" }));
+    expect(() => assertSessionReplayable(session, other)).toThrowError(expect.objectContaining({ statusCode: 409, code: "idempotency_key_reused" }));
   });
 
   it("refuses a session that is unassigned to a workspace for an allowlisted key", () => {
