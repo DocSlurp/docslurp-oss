@@ -125,9 +125,9 @@
   "scanned": 0
  },
  "quoteHighMix": {
-  "text": 0.2,
-  "complex": 0.3,
-  "scanned": 0.5
+  "text": 0,
+  "complex": 0,
+  "scanned": 1
  },
  "defaultProfile": {
   "cardVersion": "2026-10-25b",
@@ -171,6 +171,7 @@
   "text": [
    "txt",
    "md",
+   "markdown",
    "html",
    "htm",
    "mhtml",
@@ -178,6 +179,7 @@
    "tsv",
    "json",
    "jsonl",
+   "ndjson",
    "tex"
   ]
  },
@@ -207,5 +209,5 @@
   "repeatedImageMinShare": 0.2,
   "unspacedCharsPerWord": 2
  },
- "revision": "78a4eda3c3be86403853f609964505f4a272f990df4e959c105418e5abc1eba7"
+ "revision": "0cff9834aeacda724f34a22105c7265b89a1e06a62cd1bc07e016e2b159608c9"
 }
