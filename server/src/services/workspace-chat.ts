@@ -789,8 +789,11 @@ async function ensureChatSession(args: {
       insert into chat_sessions (id, workspace_id, user_id, created_at)
       values (${sessionId}, ${args.workspaceId}, ${args.userId}, now())
     `;
-  } catch {
-    return sessionId;
+  } catch (error) {
+    // Returning an id that was never stored makes every later turn and evidence span for it fail
+    // against a missing session. Refuse the request instead of answering into a void.
+    reportPublicError(error, { operation: "chat.session-create" });
+    throw new Error("Unable to create chat session");
   }
 
   return sessionId;
@@ -810,8 +813,11 @@ async function listRecentTurns(
     `;
 
     return rows.reverse().map(mapTurn);
-  } catch {
-    return [];
+  } catch (error) {
+    // An empty history is a different conversation: "and the second one?" would be answered without its
+    // referent. A database failure is surfaced, not turned into a fresh thread.
+    reportPublicError(error, { operation: "chat.history-load" });
+    throw new Error("Unable to load chat history");
   }
 }
 
@@ -826,8 +832,9 @@ async function appendTurn(
       insert into chat_turns (id, session_id, role, content, created_at)
       values (${turnId}, ${sessionId}, ${role}, ${content}, now())
     `;
-  } catch {
-    // Schema rollout can lag application deploys in this prerelease repo.
+  } catch (error) {
+    // The answer is already generated (and billed); a lost history row must not fail it, but it must be visible.
+    reportPublicError(error, { operation: "chat.turn-persist" });
   }
 }
 
@@ -899,8 +906,9 @@ async function persistEvidenceSpans(args: {
         )
       `;
     }
-  } catch {
-    // Schema rollout can lag application deploys in this prerelease repo.
+  } catch (error) {
+    // The answer is already generated (and billed); a lost history row must not fail it, but it must be visible.
+    reportPublicError(error, { operation: "chat.turn-persist" });
   }
 }
 

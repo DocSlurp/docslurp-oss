@@ -125,6 +125,28 @@ process.env.BETTER_AUTH_SECRET ||= "workspace-chat-test-secret-with-enough-entro
 const appSessionActor = { type: "session", userId: "user-1", sessionId: "app-session-1", user: { id: "user-1", email: "u@example.test", name: "User" } } as never;
 
 describe("chatWorkspace", () => {
+  it("refuses a request whose new chat session cannot be stored instead of answering into a missing session", async () => {
+    sqlMock.mockImplementation(async (strings) => {
+      const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
+      if (text.includes("insert into chat_sessions")) throw new Error("connection reset");
+      return [];
+    });
+    await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello" })).rejects.toThrow("Unable to create chat session");
+    expect(hybridSearch).not.toHaveBeenCalled();
+    expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
+  });
+
+  it("does not answer a follow-up as a fresh conversation when its history cannot be read", async () => {
+    sqlMock.mockImplementation(async (strings) => {
+      const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
+      if (text.includes("from chat_turns")) throw new Error("statement timeout");
+      return [];
+    });
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "and the second one?" })).rejects.toThrow("Unable to load chat history");
+    expect(hybridSearch).not.toHaveBeenCalled();
+  });
+
   it("fails closed when ownership of a caller-provided session cannot be checked", async () => {
     sqlMock.mockRejectedValueOnce(new Error("database unavailable"));
     await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1",
