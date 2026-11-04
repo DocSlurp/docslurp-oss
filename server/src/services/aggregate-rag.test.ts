@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   isWorkspaceChatEnabled: vi.fn(),
 }));
 
-vi.mock("./search.js", () => ({ hybridSearch: mocks.hybridSearch }));
+vi.mock("./search.js", () => ({ hybridSearch: mocks.hybridSearch, WorkspaceNotFoundError: class extends Error { constructor() { super("Workspace not found"); } } }));
 vi.mock("./workspaces.js", () => ({ getWorkspace: mocks.getWorkspace, listWorkspaces: mocks.listWorkspaces }));
 vi.mock("./billing/spend-guard.js", () => ({ assertCanSpend: mocks.assertCanSpend }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.recordUsageEvent }));
