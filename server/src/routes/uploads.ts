@@ -9,7 +9,8 @@ import {
   WORKSPACE_INPUT_MAX_LENGTH,
   workspaceTemplateKeySchema,
   indexingModeSchema,
-  pageMixSchema,
+  estimateCardRevision,
+  quoteFileSchema,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -516,19 +517,7 @@ export async function directUploadTarget(
 
 const uploadEstimateSchema = z.object({
   speedBoost: z.boolean().optional(),
-  files: z.array(z.object({
-    name: z.string().min(1).max(1024),
-    size: z.number().int().nonnegative(),
-    pages: z.number().int().positive().optional(),
-    /** MIME type, so audio and video are priced by duration even when the name has no extension. */
-    type: z.string().max(255).optional(),
-    /** Length in seconds when the client can read it; otherwise estimated from the size. */
-    durationSeconds: z.number().positive().max(24 * 3600).optional(),
-    /** Page mix the client measured (offline probe, `@docslurp/estimate`); narrows the price range. Estimate only, never billed. */
-    mix: pageMixSchema.optional(),
-    /** 0-1 trust in `mix`; default 1. */
-    mixConfidence: z.number().min(0).max(1).optional(),
-  })).min(1).max(1000),
+  files: z.array(quoteFileSchema).min(1).max(1000),
   workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
 });
@@ -557,9 +546,17 @@ export const uploadEstimateRoutes = new Hono().post(
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     const { estimate, media, profile } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
-    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` lets
-    // offline estimators quote later batches for this workspace without calling back.
-    return c.json({ estimate, media, profile, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` and
+    // `cardRevision` let offline estimators quote later batches for this workspace and notice a newer card.
+    return c.json({
+      estimate,
+      media,
+      profile,
+      cardRevision: estimateCardRevision(),
+      billing: billingState(),
+      orgId: workspace.orgId,
+      billingExempt: isBillingExemptOrg(workspace.orgId),
+    });
   },
 );
 acceptApiKeys(uploadEstimateRoutes);

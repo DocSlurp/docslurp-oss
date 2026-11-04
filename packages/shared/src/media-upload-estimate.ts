@@ -1,23 +1,39 @@
 import { z } from "zod";
 
 import { MEDIA_BYTES_PER_MINUTE, mediaRichPages, pageCredits } from "./billing.js";
+import { extensionsOf, fileExtension } from "./file-formats.js";
 
 /** Audio and video are priced by duration, not by page. */
 export type UploadMediaKind = "audio" | "video";
 
-const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "wav", "weba"]);
-const VIDEO_EXTENSIONS = new Set(["mp4", "webm"]);
+/** Extensions priced by duration when the MIME type does not say: the worker's media formats, plus browser `weba`. */
+export const AUDIO_EXTENSIONS: ReadonlySet<string> = new Set([...extensionsOf("audio"), "weba"]);
+export const VIDEO_EXTENSIONS: ReadonlySet<string> = new Set(extensionsOf("video"));
+/** Image files: read whole as images, so a page bills Rich in the auto and good profiles (page-base-fee.ts). */
+export const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set(extensionsOf("image"));
+
+function declaredType(type: string | null | undefined): string {
+  return (type ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+function extensionOf(name: string): string {
+  return fileExtension(name).slice(1);
+}
 
 /** Which media kind a file is, from its MIME type then its extension; null for everything priced per page. */
 export function uploadMediaKind(file: { name: string; type?: string | null }): UploadMediaKind | null {
-  const type = (file.type ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  const type = declaredType(file.type);
   if (type.startsWith("audio/")) return "audio";
   if (type.startsWith("video/")) return "video";
-  const dot = file.name.lastIndexOf(".");
-  const extension = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : "";
+  const extension = extensionOf(file.name);
   if (AUDIO_EXTENSIONS.has(extension)) return "audio";
   if (VIDEO_EXTENSIONS.has(extension)) return "video";
   return null;
+}
+
+/** Whether a file is an image (MIME type `image/*`, else its extension), billed as Rich pages read whole. */
+export function isUploadImageFile(file: { name: string; type?: string | null }): boolean {
+  return declaredType(file.type).startsWith("image/") || IMAGE_EXTENSIONS.has(extensionOf(file.name));
 }
 
 export const uploadMediaEstimateSchema = z.object({

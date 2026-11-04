@@ -1,6 +1,7 @@
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   adaptiveRoutingArtifactSchema,
+  PAGE_RASTER_ROUTING,
   splitTextIntoPages,
   type AdaptiveDocumentComplexity,
   type AdaptivePageRoute,
@@ -473,17 +474,17 @@ export function prioritizePagesWithoutNativeText<T extends Pick<AdaptivePageRout
   return pages.slice().sort((left, right) => Number(pageLacksNativeText(right)) - Number(pageLacksNativeText(left)));
 }
 /** A page without native text whose largest image covers at least this share holds its content as pixels. */
-export const RASTER_PAGE_MIN_LARGEST_IMAGE_COVERAGE = 0.25;
+export const RASTER_PAGE_MIN_LARGEST_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.rasterPageMinLargestImageCoverage;
 /** ...or whose significant images together cover at least this share (banded or tiled scans). */
-export const RASTER_PAGE_MIN_TOTAL_IMAGE_COVERAGE = 0.35;
+export const RASTER_PAGE_MIN_TOTAL_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.rasterPageMinTotalImageCoverage;
 /**
  * A page whose native text is only a stamp, page number or generated footer ("Page 1 of 2",
  * a Bates number) over an image covering at least this share is a scan placed with margins.
  */
-export const STAMP_TEXT_MAX_WORDS = 10;
-export const STAMPED_SCAN_MIN_IMAGE_COVERAGE = 0.5;
+export const STAMP_TEXT_MAX_WORDS = PAGE_RASTER_ROUTING.stampTextMaxWords;
+export const STAMPED_SCAN_MIN_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.stampedScanMinImageCoverage;
 /** A page with a little more native text (title, caption) needs an image this large to be a scan. */
-export const SPARSE_TEXT_FULL_PAGE_IMAGE_COVERAGE = 0.85;
+export const SPARSE_TEXT_FULL_PAGE_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.sparseTextFullPageImageCoverage;
 
 /**
  * OCR authorization from raster evidence alone (no structured parser evidence): the

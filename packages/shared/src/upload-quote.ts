@@ -13,7 +13,7 @@ import {
   pipelineProfileIdSchema,
 } from "./billing.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
-import { estimateUploadMedia, uploadMediaKind, type UploadMediaEstimate, type UploadMediaFile } from "./media-upload-estimate.js";
+import { estimateUploadMedia, isUploadImageFile, uploadMediaKind, type UploadMediaEstimate, type UploadMediaFile } from "./media-upload-estimate.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 
 /*
@@ -31,19 +31,37 @@ export const QUOTE_LOW_MIX: Readonly<PageMix> = { text: 1, complex: 0, scanned: 
 /** The expensive end when the mix is unknown: a scan-heavy corpus. */
 export const QUOTE_HIGH_MIX: Readonly<PageMix> = { text: 0.2, complex: 0.3, scanned: 0.5 };
 
-export const pageMixSchema = z.object({
+export const pageMixSchema = z.strictObject({
   text: z.number().nonnegative(),
   complex: z.number().nonnegative(),
   scanned: z.number().nonnegative(),
 });
 
+/** Every page scanned: an image file read whole. */
+const IMAGE_FILE_MIX: Readonly<PageMix> = { text: 0, complex: 0, scanned: 1 };
+
+/** One file of an upload quote, as `POST /v1/uploads/estimate` accepts it. Unknown fields are ignored. */
+export const quoteFileSchema = z.object({
+  name: z.string().min(1).max(1024),
+  size: z.number().int().nonnegative(),
+  pages: z.number().int().positive().optional(),
+  /** MIME type, so audio, video and images are priced as such even when the name has no extension. */
+  type: z.string().max(255).optional(),
+  /** Length in seconds when the client can read it; otherwise estimated from the size. */
+  durationSeconds: z.number().positive().max(24 * 3600).optional(),
+  /** Page mix the client measured (offline probe, `@docslurp/estimate`); narrows the price range. Estimate only, never billed. */
+  mix: pageMixSchema.optional(),
+  /** 0-1 trust in `mix`; default 1. */
+  mixConfidence: z.number().min(0).max(1).optional(),
+});
+
 /** What pricing an upload reads from a workspace: its compiled pipeline and org capacity, nothing else. */
-export const estimateProfileSchema = z.object({
+export const estimateProfileSchema = z.strictObject({
   /** PRICE_CARD_VERSION the profile was built against. */
   cardVersion: z.string(),
   quality: pipelineProfileIdSchema,
   /** Optional per-document features whose stage runs on upload. */
-  documentFeatures: z.object({
+  documentFeatures: z.strictObject({
     documentSummary: z.boolean(),
     structuredFields: z.boolean(),
     knowledgeGraph: z.boolean(),
@@ -81,17 +99,30 @@ export function estimateProfileFor(
   };
 }
 
+/**
+ * `mix` is normalized, so any non-negative weights work; `mixConfidence` (default 1) is the share of each end of the
+ * range taken from `mix`, the rest staying at the unknown-mix bound.
+ */
 export type QuoteFile = UploadMediaFile & {
   pages?: number;
-  /** Page mix measured on the client (offline probe); normalized, any positive weights work. */
   mix?: PageMix;
-  /** 0-1 trust in `mix`; the rest of each end of the range stays at the unknown-mix bound. Default 1. */
   mixConfidence?: number;
 };
 
-/** Pages a non-media file counts as: its known page count, else its size at ASSUMED_BYTES_PER_PAGE (at least 1). */
-export function quoteFilePages(file: { size: number; pages?: number }): number {
-  return Math.max(1, Math.round(file.pages ?? Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE)));
+/**
+ * Pages a non-media file counts as: its known page count; else 1 for an image file and its size at
+ * ASSUMED_BYTES_PER_PAGE for anything else (at least 1).
+ */
+export function quoteFilePages(file: { name: string; type?: string | null; size: number; pages?: number }): number {
+  const pages = file.pages ?? (isUploadImageFile(file) ? 1 : Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE));
+  return Math.max(1, Math.round(pages));
+}
+
+/** A file's known page mix and its trust: measured, or every page scanned for an image file. */
+function knownMix(file: QuoteFile): { mix: PageMix; confidence: number } | null {
+  if (file.mix) return { mix: file.mix, confidence: file.mixConfidence ?? 1 };
+  if (isUploadImageFile(file)) return { mix: IMAGE_FILE_MIX, confidence: 1 };
+  return null;
 }
 
 function blendedMix(mix: PageMix, confidence: number, bound: Readonly<PageMix>): PageMix {
@@ -106,15 +137,16 @@ function blendedMix(mix: PageMix, confidence: number, bound: Readonly<PageMix>):
 }
 
 /** The low and high page mixes of a set of paged files: page-weighted, measured where a file carries a mix. */
-function quoteMixes(files: readonly QuoteFile[]): { low: PageMix; high: PageMix; measured: number } {
-  const measured = files.filter((file) => file.mix).length;
-  if (measured === 0) return { low: { ...QUOTE_LOW_MIX }, high: { ...QUOTE_HIGH_MIX }, measured };
+function quoteMixes(files: readonly QuoteFile[]): { low: PageMix; high: PageMix; known: number } {
+  const known = files.filter((file) => knownMix(file)).length;
+  if (known === 0) return { low: { ...QUOTE_LOW_MIX }, high: { ...QUOTE_HIGH_MIX }, known };
   const low: PageMix = { text: 0, complex: 0, scanned: 0 };
   const high: PageMix = { text: 0, complex: 0, scanned: 0 };
   for (const file of files) {
     const pages = quoteFilePages(file);
-    const fileLow = file.mix ? blendedMix(file.mix, file.mixConfidence ?? 1, QUOTE_LOW_MIX) : QUOTE_LOW_MIX;
-    const fileHigh = file.mix ? blendedMix(file.mix, file.mixConfidence ?? 1, QUOTE_HIGH_MIX) : QUOTE_HIGH_MIX;
+    const mix = knownMix(file);
+    const fileLow = mix ? blendedMix(mix.mix, mix.confidence, QUOTE_LOW_MIX) : QUOTE_LOW_MIX;
+    const fileHigh = mix ? blendedMix(mix.mix, mix.confidence, QUOTE_HIGH_MIX) : QUOTE_HIGH_MIX;
     low.text += pages * fileLow.text;
     low.complex += pages * fileLow.complex;
     low.scanned += pages * fileLow.scanned;
@@ -122,7 +154,7 @@ function quoteMixes(files: readonly QuoteFile[]): { low: PageMix; high: PageMix;
     high.complex += pages * fileHigh.complex;
     high.scanned += pages * fileHigh.scanned;
   }
-  return { low, high, measured };
+  return { low, high, known };
 }
 
 function roundUp5(value: number): number {
@@ -138,7 +170,8 @@ export function quoteUpload(args: {
   profile: EstimateProfile;
   speedBoost?: boolean;
 }): { estimate: CostEstimate; media: UploadMediaEstimate | null } {
-  const { profile } = args;
+  // A profile from a newer server (unknown quality or feature) is refused rather than priced as something cheaper.
+  const profile = estimateProfileSchema.parse(args.profile);
   const multiplier = speedBoostMultiplier(args.speedBoost === true);
   const paged = args.files.filter((file) => !uploadMediaKind(file));
   const pages = Math.max(0, Math.round(paged.reduce((sum, file) => sum + quoteFilePages(file), 0)));
@@ -161,9 +194,11 @@ export function quoteUpload(args: {
   const low = run(mixes.low);
   const high = run(mixes.high);
   const seconds = (wall: number) => (pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) + FIXED_OVERHEAD_SECONDS : 0);
-  const range = mixes.measured === 0
+  const range = mixes.known === 0
     ? "range from all-text to scan-heavy pages"
-    : `page mix measured for ${mixes.measured} of ${documents} files, others range from all-text to scan-heavy pages`;
+    : mixes.known === documents
+      ? "page mix known for every file"
+      : `page mix known for ${mixes.known} of ${documents} files, others range from all-text to scan-heavy pages`;
   const pagedEstimate = costEstimateSchema.parse({
     pages,
     documents,

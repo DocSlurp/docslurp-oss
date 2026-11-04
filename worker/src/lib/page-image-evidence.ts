@@ -13,16 +13,17 @@
  */
 
 import { open } from "node:fs/promises";
+import { PAGE_RASTER_ROUTING } from "@docslurp/shared";
 
 import type { CommandRunner } from "../tools/runner.js";
 import { embeddedImageBytesByPage } from "./page-yield-evidence.js";
 
 /** Pages with fewer native words than this are "sparse" and get raster evidence. */
-export const SPARSE_PAGE_WORDS = 30;
+export const SPARSE_PAGE_WORDS = PAGE_RASTER_ROUTING.sparsePageWords;
 /** Images covering less than this share of the page (logos, bullets, rules, tracking pixels) are ignored. */
-export const MIN_SIGNIFICANT_IMAGE_COVERAGE = 0.02;
+export const MIN_SIGNIFICANT_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.minSignificantImageCoverage;
 /** Images with a shorter side than this (in pixels) carry no readable content. */
-export const MIN_SIGNIFICANT_IMAGE_PIXELS = 32;
+export const MIN_SIGNIFICANT_IMAGE_PIXELS = PAGE_RASTER_ROUTING.minSignificantImagePixels;
 /** Parsing stops after this many `pdfimages` rows; the rest of a hostile list is ignored. */
 export const MAX_IMAGE_ROWS = 100_000;
 

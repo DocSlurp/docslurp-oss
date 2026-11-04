@@ -6,10 +6,12 @@ import { describe, expect, it } from "vitest";
 
 import { estimateUploadMedia } from "./media-upload-estimate.js";
 import { estimatePipelineWork } from "./config-change.js";
-import { buildEstimateCard, buildEstimateGoldenCases } from "./estimate-card.js";
+import { buildEstimateCard, ESTIMATE_RULES } from "./estimate-card.js";
+import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golden.js";
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
 import { speedBoostMultiplier } from "./billing.js";
-import { estimateProfileFor, quoteUpload, type QuoteFile } from "./upload-quote.js";
+import { estimateProfileFor, quoteFileSchema, quoteUpload, type QuoteFile } from "./upload-quote.js";
+import { isUploadImageFile, uploadMediaKind } from "./media-upload-estimate.js";
 
 const estimateDir = join(dirname(fileURLToPath(import.meta.url)), "../../estimate");
 const files = {
@@ -23,7 +25,7 @@ function serialize(value: unknown): string {
 
 describe("offline estimator card", () => {
   it("matches the committed card and golden cases (UPDATE_ESTIMATE_CARD=1 rewrites them)", () => {
-    const expected = { card: serialize(buildEstimateCard()), golden: serialize(buildEstimateGoldenCases()) };
+    const expected = { card: serialize(buildEstimateCard()), golden: serializeGoldenCases(buildEstimateGoldenCases()) };
     if (process.env.UPDATE_ESTIMATE_CARD === "1") {
       mkdirSync(dirname(files.golden), { recursive: true });
       writeFileSync(files.card, expected.card);
@@ -32,6 +34,13 @@ describe("offline estimator card", () => {
     const hint = "price card or estimate rules changed: run UPDATE_ESTIMATE_CARD=1 pnpm --filter @docslurp/shared test estimate-card";
     expect(readFileSync(files.card, "utf8"), hint).toBe(expected.card);
     expect(readFileSync(files.golden, "utf8"), hint).toBe(expected.golden);
+  });
+
+  it("identifies the card by rules version and content revision", () => {
+    const card = buildEstimateCard();
+    expect(card.rules).toBe(ESTIMATE_RULES);
+    expect(card.revision).toMatch(/^[0-9a-f]{64}$/);
+    expect(buildEstimateCard().revision).toBe(card.revision);
   });
 });
 
@@ -63,7 +72,7 @@ describe("quoteUpload", () => {
   ];
   const batches: QuoteFile[][] = [
     [{ name: "a.pdf", size: 2_000_000 }],
-    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000 }, { name: "c.png", size: 4_000_000 }],
+    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000 }, { name: "c.html", size: 4_000_000 }],
     [{ name: "talk.mp3", size: 30_000_000 }, { name: "deck.pptx", size: 8_000_000, pages: 42 }, { name: "clip.mp4", size: 1, durationSeconds: 125 }],
   ];
 
@@ -89,6 +98,34 @@ describe("quoteUpload", () => {
     }
   }
 
+  it("prices an image file as one scanned page", () => {
+    const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+    const photo = quoteUpload({ files: [{ name: "photo.JPG", size: 4_000_000 }], profile }).estimate;
+    const scannedPage = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 1, mix: { text: 0, complex: 0, scanned: 1 } }], profile }).estimate;
+    expect(photo.pages).toBe(1);
+    expect(photo.credits).toEqual(scannedPage.credits);
+    expect(isUploadImageFile({ name: "scan", type: "image/heic" })).toBe(true);
+    expect(isUploadImageFile({ name: "notes.pdf" })).toBe(false);
+  });
+
+  it("prices every media format the worker accepts by duration", () => {
+    for (const name of ["a.flac", "a.ogg", "a.opus", "a.aac", "a.mp3", "a.weba"]) expect(uploadMediaKind({ name }), name).toBe("audio");
+    for (const name of ["a.MOV", "a.mkv", "a.avi", "a.mp4"]) expect(uploadMediaKind({ name }), name).toBe("video");
+    const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+    const movie = quoteUpload({ files: [{ name: "film.mov", size: 1_000_000_000, durationSeconds: 300 }], profile });
+    expect(movie.estimate.pages).toBe(0);
+    expect(movie.media?.videoFiles).toBe(1);
+  });
+
+  it("refuses profiles and mixes from a newer contract instead of under-quoting", () => {
+    const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+    const file = { name: "a.pdf", size: 1, pages: 10 };
+    expect(() => quoteUpload({ files: [file], profile: { ...profile, quality: "ultra" as never } })).toThrow();
+    expect(() => quoteUpload({ files: [file], profile: { ...profile, documentFeatures: { ...profile.documentFeatures, citations: true } as never } })).toThrow();
+    expect(quoteFileSchema.safeParse({ ...file, mix: { text: 1 } }).success).toBe(false);
+    expect(quoteFileSchema.safeParse({ ...file, mixConfidence: 1.5 }).success).toBe(false);
+  });
+
   it("narrows the range around a measured page mix", () => {
     const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
     const unknown = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100 }], profile }).estimate.credits!;
@@ -97,7 +134,7 @@ describe("quoteUpload", () => {
     expect(allText.credits).toEqual({ low: unknown.low, high: unknown.low });
     expect(scanned.credits!.low).toBe(scanned.credits!.high);
     expect(scanned.credits!.low).toBeGreaterThan(unknown.high);
-    expect(allText.basis).toContain("page mix measured for 1 of 1 files");
+    expect(allText.basis).toContain("page mix known for every file");
   });
 
   it("keeps the unknown-mix bounds when the measured mix has no confidence", () => {

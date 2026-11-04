@@ -129,7 +129,11 @@ export type UploadMediaEstimate = {
 };
 
 /** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
-export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean };
+export type EstimateResponse = {
+  estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean;
+  /** Upload estimates only: the workspace's estimate profile and the price card revision, for offline quotes. */
+  profile?: EstimateProfile; cardRevision?: string;
+};
 
 /** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateWorkspaceInput = JsonObject & {
@@ -147,7 +151,26 @@ export type WorkspaceSearchSettingsResponse = { workspaceId: string; retrievalDe
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
 export type UploadEstimateInput = {
   /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
-  speedBoost?: boolean; files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
+  speedBoost?: boolean;
+  files: Array<{
+    name: string; size: number; pages?: number; type?: string; durationSeconds?: number;
+    /** Page weights measured locally (for example by `@docslurp/estimate`); narrows the range. Never billed. */
+    mix?: { text: number; complex: number; scanned: number };
+    /** 0-1 trust in `mix`; default 1. */
+    mixConfidence?: number;
+  }>;
+  workspace?: string };
+
+/** What upload pricing reads from a workspace; returned by `uploadEstimate` for offline quotes. */
+export type EstimateProfile = {
+  cardVersion: string;
+  quality: "fast" | "auto" | "good";
+  documentFeatures: { documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean };
+  videoFrames: boolean;
+  workerSlots?: number;
+  stageCount: number;
+  billing: "enforced" | "disabled";
+};
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };

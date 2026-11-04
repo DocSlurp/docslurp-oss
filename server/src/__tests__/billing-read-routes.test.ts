@@ -58,3 +58,17 @@ describe("billing reads for an org the caller does not belong to", () => {
     expect(await response.json()).toEqual({ creditBalanceCents: 1_250, orgId: "org-own" });
   });
 });
+
+describe("estimate card", () => {
+  it("serves the public estimator card with its revision as the ETag, and 304 when unchanged", async () => {
+    const response = await buildApp().request("/v1/billing/estimate-card");
+    expect(response.status).toBe(200);
+    const card = await response.json() as { revision: string; rules: number; schema: number; version: string };
+    expect(card).toMatchObject({ rules: expect.any(Number), schema: expect.any(Number), version: expect.any(String) });
+    expect(response.headers.get("ETag")).toBe(`"${card.revision}"`);
+
+    const cached = await buildApp().request("/v1/billing/estimate-card", { headers: { "If-None-Match": `"${card.revision}"` } });
+    expect(cached.status).toBe(304);
+    expect(listOrganizations).not.toHaveBeenCalled();
+  });
+});
