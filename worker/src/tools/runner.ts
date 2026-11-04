@@ -1,5 +1,4 @@
-import { VM_TIMEOUT_MS, type DopplerVmJob } from "../sandbox/providers/modal/doppler-vm.js";
-import { dopplerShardSettings, executeDopplerShards, type DopplerShardDeps } from "../sandbox/providers/modal/doppler-shards.js";
+import { requireSandboxedPdfProvider, type SandboxedPdfJob, type SandboxedPdfRunContext } from "../extractors/plugins.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
@@ -56,8 +55,8 @@ import {
 } from "../pipeline/local-compute-cost.js";
 
 export interface CommandPlan {
-  /** Fixed dedicated-VM job; dispatched before any local provider or backend. */
-  dopplerVm?: DopplerVmJob;
+  /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
+  sandboxedPdf?: SandboxedPdfJob;
   binary: string;
   args: string[];
   available: boolean;
@@ -98,7 +97,7 @@ export interface CommandRunnerOptions {
    * (registered by the worker with setDefaultParserSandbox, else initialized from the env).
    */
   openSession?: (activityId: string) => Promise<SandboxSession>;
-  /** Measured shard profiles (DB-backed); without it Doppler shards plan from the priors. */
+  /** Measured shard profiles (DB-backed); without it a provider's shards plan from its prior. */
   shardCalibration?: Pick<ShardCalibration, "profile">;
 }
 
@@ -629,16 +628,14 @@ export class CommandRunner {
     });
   }
 
-  /** Private PDF tools execute only in a fresh, offline VM; never probe or load them on the host. */
-  async dopplerMarkdown(source: string, output: string): Promise<CommandPlan> {
+  /** A provider's PDF tools execute only in its fresh, offline VM; never probe or load them on the host. */
+  async sandboxedPdfMarkdown(source: string, output: string): Promise<CommandPlan> {
     if (!path.isAbsolute(source) || !path.isAbsolute(output) || source === output) {
-      throw new Error("Doppler requires distinct absolute input and output paths");
+      throw new Error("The VM PDF extractor requires distinct absolute input and output paths");
     }
-    if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(process.env.DOCSLURP_DOPPLER_VM_IMAGE ?? "")) {
-      throw new Error("Doppler requires a digest-pinned DOCSLURP_DOPPLER_VM_IMAGE; refusing local fallback");
-    }
-    return { binary: "doppler-vm", args: [], available: true,
-      dopplerVm: { operation: "doppler-markdown", input: source, output } };
+    const provider = requireSandboxedPdfProvider();
+    provider.assertConfigured();
+    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output } };
   }
 
   async extractText(source: string, preservePageBreaks = false): Promise<CommandPlan> {
@@ -1331,26 +1328,25 @@ export class CommandRunner {
    * Start a command through the activity's sandbox session. Vector-writer commands hold
    * backend credentials and run outside the sandbox. Callers must `release()` when done.
    */
-  private dopplerShardDeps(): DopplerShardDeps {
+  private sandboxedPdfContext(pages: number, profileKey: string | undefined): SandboxedPdfRunContext {
     const calibration = this.shardCalibration;
     return {
-      ...(calibration ? { profile: () => calibration.profile("extract-markdown:doppler-vm") } : {}),
+      pages,
+      ...(calibration && profileKey ? { profile: () => calibration.profile(profileKey) } : {}),
       recordTiming: (timing) => recordShardTimingInContext(timing),
-      onProgress: () => noteWorkProgress("command:doppler-shard"),
+      onProgress: () => noteWorkProgress("command:vm-pdf-shard"),
     };
   }
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
     await admitCommand();
-    if (plan.dopplerVm) {
-      // DOCSLURP_DOPPLER_SHARDS=on fans long PDFs out across parallel VMs (needs a doppler-vm@3 image).
-      const settings = dopplerShardSettings();
+    if (plan.sandboxedPdf) {
+      const provider = requireSandboxedPdfProvider();
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
-      // Long documents split even with optional sharding off; shards also note progress as they finish.
-      const waves = settings.rangesSupported ? Math.ceil(settings.maxShards / settings.vmParallel) + 1 : 1;
+      // The provider shards long documents itself and notes progress as shards finish.
       return {
-        remote: executeDopplerShards(plan.dopplerVm, pages, signal, settings, this.dopplerShardDeps()),
-        timeoutMs: VM_TIMEOUT_MS * waves,
+        remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal),
+        timeoutMs: provider.timeoutMs(pages),
         release: async () => {},
       };
     }

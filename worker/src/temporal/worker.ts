@@ -30,6 +30,7 @@ import { createSandboxActivityInterceptor } from "../sandbox/activity-intercepto
 import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
+import { loadExtractorPlugins } from "../extractors/plugins.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
@@ -119,6 +120,11 @@ async function main(): Promise<void> {
   // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
   const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
     throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  });
+  // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
+  // configuration that selects the VM PDF extractor without a provider, refuses to start.
+  await loadExtractorPlugins(process.env).catch((error) => {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
   // Load the native PDF engine before taking work: its state is logged once, and an image that ships it
   // (or a mode that needs it) refuses to start without it rather than serving every PDF without it.

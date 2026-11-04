@@ -50,7 +50,7 @@ async function harness(args: {
     streamText: async (key: string, text: string) => { objects.set(key, Buffer.from(text)); },
   };
   const runner = {
-    dopplerMarkdown: async () => ({ binary: "doppler-vm", args: [], available: true }),
+    sandboxedPdfMarkdown: async () => ({ binary: "test-vm", args: [], available: true }),
     kreuzbergMarkdown: async (_source: string, _output: string, configJson?: string) => {
       configs.kreuzberg = configJson;
       return { binary: "node", args: [], available: true };
@@ -96,8 +96,8 @@ async function harness(args: {
 describe("image documents whose OCR cannot run", () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it("keeps an empty Doppler scan healthy and skips implicit native enrichment", async () => {
-    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "doppler");
+  it("keeps an empty VM PDF scan healthy and skips implicit native enrichment", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_PDF_ENGINE", "shadow");
     const h = await harness({ format: "pdf", extract: async () => ({ text: "" }) });
     const internals = h.stage as any;
@@ -106,7 +106,7 @@ describe("image documents whose OCR cannot run", () => {
     internals.recordPageImageEvidence = async () => null;
     try {
       await h.stage.run(h.state);
-      expect(h.attempted).toEqual(["doppler"]);
+      expect(h.attempted).toEqual(["vm-pdf"]);
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.state.documents[0]?.status).not.toBe("failed");
       expect(payload).not.toHaveBeenCalled();

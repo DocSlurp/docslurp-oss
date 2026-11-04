@@ -1,31 +1,20 @@
 /**
  * Prior cost profiles for page-range shards, per stage and executor class.
  *
- * Workflow-safe: constants only. `calibrateShardProfile` refines these from observed shard timings.
+ * Workflow-safe: constants only. `calibrateShardProfile` refines these from observed shard timings. An extractor
+ * plugin that shards its own work registers its prior with `registerShardProfile` at worker startup.
  *
  * Sources (performance/pdf-page-sharding-2026-10-28 in the app repo):
  * - per-page and fixed costs: Theil-Sen fits over 14 production PDFs (3-477 pages, 2026-10-27/28) of
- *   checkpoint stage durations; the Doppler VM call is the extract-markdown fit less ~0.6 s of post-VM writes;
- * - memory: VM limits from the Doppler guest (RLIMIT_AS 768 MiB inside a 1 GiB VM) and the worker slot
- *   allocation (2 GB); per-page memory is a conservative prior until shard RSS is observed;
- * - prices: Modal VM ceiling from `dopplerVmUsage`, Fly shared-cpu-8x slot $0.0211/slot-hour.
+ *   checkpoint stage durations;
+ * - memory: the worker slot allocation (2 GB); per-page memory is a conservative prior until shard RSS is observed;
+ * - prices: Fly shared-cpu-8x slot $0.0211/slot-hour.
  */
 import type { ShardCapacity, ShardCostProfile } from "./page-shards.js";
 
 const FLY_SLOT_USD_PER_SECOND = 0.0211 / 3600;
-const DOPPLER_VM_USD_PER_SECOND = 0.00003942 + 0.00000667;
 
 export const SHARD_PROFILES = {
-  /**
-   * Offline Doppler VM, 0.5 core with one-core burst, 1 GiB. 32-page alignment keeps output identical to the
-   * guest's own chunks; the guest converts 32 pages at a time, so memory does not grow with shard size.
-   */
-  "extract-markdown:doppler-vm": {
-    stage: "extract-markdown", executor: "doppler-vm",
-    fixedMs: 1_900, perPageMs: 12.6, baseMiB: 200, perPageMiB: 0, memoryLimitMiB: 768,
-    maxShardMs: 90_000, minShardPages: 32, maxShardPages: 10_000, pageAlign: 32,
-    usdPerSecond: DOPPLER_VM_USD_PER_SECOND,
-  },
   /** Page probe on a worker slot (1 vCPU / 2 GB on shared-cpu-8x); fixed cost is the shard activity boundary. */
   "route-pages:fly-shared-slot": {
     stage: "route-pages", executor: "fly-shared-slot",
@@ -48,21 +37,35 @@ export const SHARD_PROFILES = {
   },
 } as const satisfies Record<string, ShardCostProfile>;
 
-export type ShardProfileKey = keyof typeof SHARD_PROFILES;
+/** A built-in profile key, or one a plugin registered. */
+export type ShardProfileKey = keyof typeof SHARD_PROFILES | (string & {});
+
+const registeredProfiles = new Map<string, ShardCostProfile>();
+
+/** Add a plugin's prior. Built-in keys cannot be replaced, and a key keeps its first profile. */
+export function registerShardProfile(key: string, profile: ShardCostProfile): void {
+  if (!/^[a-z0-9-]+:[a-z0-9-]+$/.test(key) || Object.hasOwn(SHARD_PROFILES, key)) throw new Error(`Invalid shard profile key ${key}`);
+  const existing = registeredProfiles.get(key);
+  if (existing && existing !== profile) throw new Error(`Shard profile ${key} is already registered`);
+  registeredProfiles.set(key, profile);
+}
+
+/** The prior for a key; unknown keys throw rather than plan from a guess. */
+export function shardProfile(key: ShardProfileKey): ShardCostProfile {
+  const profile = (SHARD_PROFILES as Record<string, ShardCostProfile>)[key] ?? registeredProfiles.get(key);
+  if (!profile) throw new Error(`Unknown shard profile ${key}`);
+  return profile;
+}
 
 /**
- * Capacity a run can count on. Worker slots: idle slots now, the org's slot share as ceiling, and the
- * machine start time as scale-up delay (prior; not yet measured). Doppler VMs: a provider-side
- * parallelism cap with VM boot already inside `fixedMs`.
+ * Capacity a run can count on on worker slots: idle slots now, the org's slot share as ceiling, and the machine start
+ * time as scale-up delay (prior; not yet measured). An executor outside the worker fleet (a provider's VMs) sets its
+ * own capacity.
  */
 export function shardCapacity(
-  executor: ShardCostProfile["executor"],
-  fleet: { idleSlots: number; orgSlots: number; vmParallel: number; machineStartMs?: number },
+  _executor: ShardCostProfile["executor"],
+  fleet: { idleSlots: number; orgSlots: number; machineStartMs?: number },
 ): ShardCapacity {
-  if (executor === "doppler-vm") {
-    const vms = Math.max(1, Math.floor(fleet.vmParallel));
-    return { readySlots: vms, maxSlots: vms, scaleUpMs: 0 };
-  }
   const ceiling = Math.max(1, Math.floor(fleet.orgSlots));
   return {
     readySlots: Math.max(1, Math.min(ceiling, Math.floor(fleet.idleSlots))),

@@ -415,7 +415,7 @@ export function createActivities(deps: ActivityDependencies) {
       if (!PAGE_RANGE_SHARDABLE_STAGES.includes(input.stageName)) return { shards: [] };
       if (!pageRangeExecutorIsolated(input.stageName)) return { shards: [] };
       const key = `${input.stageName}:fly-shared-slot` as ShardProfileKey;
-      const prior = SHARD_PROFILES[key];
+      const prior = (SHARD_PROFILES as Record<string, unknown>)[key];
       if (!prior) return { shards: [] };
       const state = await loadRunState(store, input.runId, { hydrate: false });
       const pipeline = state.run.pipeline;

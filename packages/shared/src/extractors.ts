@@ -1,5 +1,5 @@
-/** Maximum PDF source size supported by the bounded Doppler VM route. */
-export const DOPPLER_MAX_PDF_BYTES = 500 * 1024 * 1024;
+/** Maximum PDF source size the isolated VM PDF route (`vm-pdf`) accepts. */
+export const VM_PDF_MAX_SOURCE_BYTES = 500 * 1024 * 1024;
 
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
 import type { UsageEvent } from "./usage.js";
@@ -120,8 +120,8 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
     capabilities: { formats: ["pdf"], produces: ["text"], costClass: "local-cpu" },
   },
   {
-    id: "doppler", kind: "document", label: "Doppler PDF",
-    description: "Layout-aware PDF Markdown and tables from private vendored tools in a dedicated offline VM.",
+    id: "vm-pdf", kind: "document", label: "Isolated VM PDF",
+    description: "Layout-aware PDF Markdown and tables from a deployment-provided extractor, one offline VM per document.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages"], costClass: "local-cpu" },
   },
@@ -172,8 +172,8 @@ export interface ExtractionArtifactRef {
  * hidden unless the deployment reports the engine as installed
  * (`DOCSLURP_NATIVE_PDF_INSTALLED=1`, or a configured module / vendored package).
  */
-export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; dopplerInstalled?: boolean }): ExtractorDescriptor[] {
+export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; vmPdfInstalled?: boolean }): ExtractorDescriptor[] {
   return builtInDocumentExtractorDescriptors.filter(
-    (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "doppler" || options.dopplerInstalled === true),
+    (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "vm-pdf" || options.vmPdfInstalled === true),
   );
 }

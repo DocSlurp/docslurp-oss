@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ExtractionArtifactRef } from "@docslurp/shared";
+import { mediaMapSchema, type ExtractionArtifactRef } from "@docslurp/shared";
 import { createLocalArtifactAdapters, availableLocalArtifactAdapters, localArtifactToolAvailability } from "./local-artifact-adapters.js";
 import { executeArtifactGraph } from "./artifact-graph.js";
 
@@ -72,9 +72,13 @@ describe("local artifact adapters", () => {
       expect(text).toContain("<!-- page 1;");
       expect(text).toContain("<!-- page 2;");
       expect(markdown.derivedFrom).toHaveLength(2);
-      const map = JSON.parse(await readFile(media.uri, "utf8")) as { images: Array<{ pageNumber: number; artifactId: string; placement: string; uri?: string }> };
+      const map = mediaMapSchema.parse(JSON.parse(await readFile(media.uri, "utf8")));
       expect(map.images.map(image => image.pageNumber)).toEqual([1, 2]);
-      expect(map.images.every(image => image.placement === "page-only" && image.uri === undefined)).toBe(true);
+      expect(map).toMatchObject({ pageCount: 2, encoding: "png", placementSource: "none" });
+      // pdfimages reports what is stored, not where it is drawn: placement stays unknown and nothing is in the Markdown.
+      expect(map.images.every(image => image.placement.status === "unknown" && image.markdown.included === false && image.mediaType === "image/png")).toBe(true);
+      expect(map.images.map(image => [image.role, image.source.encoding, image.width, image.height])).toEqual([["image", "image", 820, 1060], ["image", "image", 820, 1060]]);
+      expect(map.images.map(image => image.markdown.anchor)).toEqual(["p1o0", "p2o0"]);
       expect(media.derivedFrom).toHaveLength(2);
       expect(result.artifacts.filter(ref => ref.kind === "page/embedded-image").map(ref => ref.id)).toEqual(map.images.map(image => image.artifactId));
       expect(media.placements).toEqual([]);
@@ -96,8 +100,9 @@ describe("local artifact adapters", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       const media = result.targets.find(ref => ref.kind === "document/media-map")!;
-      const map = JSON.parse(await readFile(media.uri, "utf8")) as { images: unknown[] };
+      const map = mediaMapSchema.parse(JSON.parse(await readFile(media.uri, "utf8")));
       expect(map.images).toEqual([]);
+      expect(map.pageCount).toBe(3);
       expect(media.derivedFrom).toHaveLength(3);
       expect(result.artifacts.filter(ref => ref.kind === "page/embedded-image-set")).toHaveLength(3);
       expect(result.artifacts.filter(ref => ref.kind === "page/embedded-image")).toHaveLength(0);

@@ -9,7 +9,7 @@ import {
 
 const vm: ShardCostProfile = {
   stage: "extract-markdown",
-  executor: "doppler-vm",
+  executor: "test-vm",
   fixedMs: 2_000,
   perPageMs: 15,
   baseMiB: 200,
@@ -127,18 +127,16 @@ describe("calibrateShardProfile", () => {
   });
 });
 
-describe("calibrated priors", () => {
-  it("fans long PDFs out across Doppler VMs and leaves short ones whole", async () => {
-    const { SHARD_PROFILES, shardCapacity } = await import("../temporal/page-shard-profiles.js");
-    const profile = SHARD_PROFILES["extract-markdown:doppler-vm"];
-    const capacity = shardCapacity("doppler-vm", { idleSlots: 0, orgSlots: 0, vmParallel: 16 });
-    const short = planPageShards(21, profile, capacity, { maxCostOverhead: 1, maxShards: 32 });
-    expect(short.shards).toHaveLength(1);
-    const long = planPageShards(477, profile, capacity, { maxCostOverhead: 1, maxShards: 32 });
+describe("registered priors", () => {
+  it("plans from a plugin's registered prior and refuses unknown keys", async () => {
+    const { registerShardProfile, shardProfile } = await import("../temporal/page-shard-profiles.js");
+    registerShardProfile("extract-markdown:test-vm", vm);
+    expect(shardProfile("extract-markdown:test-vm")).toBe(vm);
+    expect(() => registerShardProfile("extract-markdown:test-vm", { ...vm })).toThrow("already registered");
+    expect(() => registerShardProfile("render-images:fly-shared-slot", vm)).toThrow("Invalid shard profile key");
+    expect(() => shardProfile("extract-markdown:missing")).toThrow("Unknown shard profile");
+    const long = planPageShards(477, shardProfile("extract-markdown:test-vm"), { readySlots: 16, maxSlots: 16, scaleUpMs: 0 }, { maxCostOverhead: 1, maxShards: 32 });
     expect(long.shardPages % 32).toBe(0);
     expect(long.predictedWallMs).toBeLessThan(long.unshardedWallMs / 2);
-    // The production 477-page VM call took ~7.6-10.3 s; the prior predicts the same order of magnitude unsharded.
-    expect(long.unshardedWallMs).toBeGreaterThan(6_000);
-    expect(long.unshardedWallMs).toBeLessThan(10_000);
   });
 });

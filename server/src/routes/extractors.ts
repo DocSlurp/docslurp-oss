@@ -13,5 +13,5 @@ export function nativePdfInstalled(env: NodeJS.ProcessEnv = process.env, cwd = p
 
 /** Catalog metadata is shared with the worker. Availability is worker-local. */
 export const extractorRoutes = new Hono().get("/", (c) =>
-  c.json({ extractors: publicDocumentExtractorDescriptors({ nativePdfInstalled: nativePdfInstalled(), dopplerInstalled: process.env.DOCSLURP_DOPPLER_INSTALLED === "1" }) }),
+  c.json({ extractors: publicDocumentExtractorDescriptors({ nativePdfInstalled: nativePdfInstalled(), vmPdfInstalled: process.env.DOCSLURP_VM_PDF_INSTALLED === "1" }) }),
 );
