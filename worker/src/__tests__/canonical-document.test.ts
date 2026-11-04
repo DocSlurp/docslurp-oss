@@ -43,7 +43,7 @@ describe("buildCanonicalDocumentFromMarkdown", () => {
     expect(text).toContain("- bullet");
   });
 
-  it("applies the shared fallback page splitter when no form-feed exists", () => {
+  it("labels blocks page-unknown when no page break exists for a multi-page document", () => {
     const document = buildCanonicalDocumentFromMarkdown({
       documentId: "doc-2b",
       text: "alpha beta gamma delta epsilon zeta",
@@ -51,9 +51,33 @@ describe("buildCanonicalDocumentFromMarkdown", () => {
       extractor: "pandoc"
     });
 
-    expect(document.blocks.some((block) => block.pageNumber === 1)).toBe(true);
-    expect(document.blocks.some((block) => block.pageNumber === 2)).toBe(true);
+    expect(document.blocks.length).toBeGreaterThan(0);
+    expect(document.blocks.every((block) => block.pageNumber === null)).toBe(true);
     expect(document.stats.pageCount).toBe(2);
+  });
+
+  it("does not shift later pages when one form feed is missing from a 10-page document", () => {
+    const pages = Array.from({ length: 10 }, (_, index) => `Page marker ${index + 1}.`);
+    // Pages 4 and 5 lost the break between them.
+    const text = pages.map((page, index) => (index === 4 ? page : page + "\f")).join("").replace(/\f$/, "");
+    const document = buildCanonicalDocumentFromMarkdown({ documentId: "doc-ff", text, pageCount: 10, extractor: "pdftotext" });
+    expect(document.blocks.every((block) => block.pageNumber === null)).toBe(true);
+    const chunks = buildCanonicalChunksFromDocument(document, "fallback");
+    expect(chunks.every((chunk) => chunk.pageNumber === null && chunk.pageNumbers.length === 0)).toBe(true);
+  });
+
+  it("keeps page numbers when the form feeds match the page count, empty pages included", () => {
+    const document = buildCanonicalDocumentFromMarkdown({
+      documentId: "doc-ff-ok", text: "one\f\fthree\f", pageCount: 3, extractor: "pdftotext"
+    });
+    expect(document.blocks.map((block) => block.pageNumber)).toEqual([1, 3]);
+  });
+
+  it("does not read horizontal rules as page breaks", () => {
+    const document = buildCanonicalDocumentFromMarkdown({
+      documentId: "doc-rule", text: "alpha\n\n---\n\nbravo", pageCount: 2, extractor: "pandoc"
+    });
+    expect(document.blocks.every((block) => block.pageNumber === null)).toBe(true);
   });
 });
 

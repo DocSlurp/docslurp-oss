@@ -2,7 +2,7 @@ import { tableChunks, TableBoundary } from "../pipeline/table-chunking.js";
 import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
-  splitTextIntoPages,
+  splitTextIntoPagesStrict,
   type CanonicalBlock,
   type CanonicalBlockType,
   type CanonicalDocument,
@@ -57,7 +57,12 @@ export function buildCanonicalDocumentFromMarkdown(args: {
   sourceArtifactUri?: string | null;
   extractor: string;
 }): CanonicalDocument {
-  const pages = splitTextIntoPages(args.text, args.pageCount);
+  // Page numbers come only from page breaks that match the page count. On a
+  // mismatch the whole text is one section with an unknown page, so a citation
+  // never points at a page the text did not come from.
+  const strictPages = splitTextIntoPagesStrict(args.text, args.pageCount);
+  const pagesKnown = strictPages !== null;
+  const pages = strictPages ?? (args.text.trim() ? [args.text.replace(/\r\n/g, "\n").replace(/\f/g, "\n").trim()] : []);
   const headingStack: Array<{ level: number; text: string }> = [];
   const blocks: CanonicalBlock[] = [];
   let order = 0;
@@ -80,7 +85,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
 
       const startLine = lineIndex + 1;
       const line = lines[lineIndex] ?? "";
-      const pageNumber = pageIndex + 1;
+      const pageNumber = pagesKnown ? pageIndex + 1 : null;
 
       if (CODE_FENCE_RE.test(line.trim())) {
         const codeLines = [line];
@@ -280,7 +285,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
       paragraphCount: countBlocks(blocks, "paragraph"),
       codeBlockCount: countBlocks(blocks, "code"),
       tableCount: countBlocks(blocks, "table"),
-      pageCount: Math.max(args.pageCount, pages.length)
+      pageCount: pagesKnown ? Math.max(args.pageCount, pages.length) : args.pageCount
     },
     blocks
   };
