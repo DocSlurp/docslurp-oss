@@ -32,7 +32,7 @@ import { encodeLanceChunkHydration, lancePageNumberValue } from "@docslurp/share
 import type postgres from "postgres";
 
 import { connectLanceDb } from "./lancedb-connection.js";
-import { CHUNK_TEXT_FTS_INDEX_NAME, chunkTextFtsIndex, hasChunkTextFtsIndex } from "./lancedb-maintenance.js";
+import { chunkTextFtsIndex, chunkTextFtsIndexName, hasChunkTextFtsIndex } from "./lancedb-maintenance.js";
 import { ensureLanceHydrationColumns, isRetryableLanceCommitError } from "./lancedb-writer.js";
 
 export interface LanceNativeBackfillScope {
@@ -199,7 +199,7 @@ async function backfillTable(args: {
       if (!skipFts && !dryRun && !result.ftsPresent) {
         const ftsStarted = performance.now();
         try {
-          await withRetry(() => table.createIndex("text", { config: chunkTextFtsIndex(), name: CHUNK_TEXT_FTS_INDEX_NAME, replace: false }));
+          await withRetry(() => table.createIndex("text", { config: chunkTextFtsIndex(), name: chunkTextFtsIndexName(), replace: false }));
           result.ftsBuilt = true;
           log(`[backfill] fts index built in ${Math.round(performance.now() - ftsStarted)} ms`);
         } catch (error) {

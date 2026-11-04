@@ -169,6 +169,11 @@ export type LanceDbMaintenanceResult = {
   /** Vector index segments and rows not yet covered by it, after this run. */
   indexSegments?: number | null;
   unindexedRows?: number | null;
+  /** The chunk-text FTS index was (re)built by this pass, and how long that took. */
+  ftsRebuilt?: boolean;
+  ftsMs?: number;
+  /** The FTS build failed (the older index keeps serving) or is waiting out its back-off. */
+  ftsError?: string;
   /** Fragments merged away by compaction and old versions / bytes removed by cleanup. */
   fragmentsRemoved?: number;
   versionsRemoved?: number;
@@ -269,8 +274,8 @@ export function lanceDbFtsIndexEnabled(env: NodeJS.ProcessEnv = process.env): bo
 }
 
 /**
- * Name of the current chunk-text FTS index. An index under any other name was
- * built with the old English-only analyzer and is replaced by maintenance.
+ * Name of the chunk-text FTS index for the language-neutral (ICU) analyzer. An index under any other name was built
+ * with another analyzer and is replaced by maintenance, once the current one exists.
  */
 export const CHUNK_TEXT_FTS_INDEX_NAME = "text_fts_icu_v1";
 
@@ -287,6 +292,18 @@ export const CHUNK_TEXT_FTS_INDEX_NAME = "text_fts_icu_v1";
 export function chunkTextFtsLanguage(env: NodeJS.ProcessEnv = process.env): string | null {
   const value = (env.LANCEDB_FTS_LANGUAGE ?? "").trim();
   return !value || value.toLowerCase() === "auto" ? null : value;
+}
+
+/**
+ * The current index's name, which carries its analyzer: `text_fts_icu_v1` for the language-neutral one,
+ * `text_fts_<language>_v1` for a named language. Changing LANCEDB_FTS_LANGUAGE therefore changes the name, and
+ * maintenance rebuilds under the new name instead of keeping an index built with the old analyzer.
+ */
+export function chunkTextFtsIndexName(env: NodeJS.ProcessEnv = process.env): string {
+  const language = chunkTextFtsLanguage(env);
+  if (!language) return CHUNK_TEXT_FTS_INDEX_NAME;
+  const slug = language.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+  return `text_fts_${slug || "language"}_v1`;
 }
 
 /** The chunk-text FTS index: no positions (no phrase queries). */
@@ -307,19 +324,71 @@ export function hasChunkTextFtsIndex(indices: IndexInfo[]): boolean {
   return indices.some(isTextFtsIndex);
 }
 
-/** True when the table's FTS index on `text` is the current multilingual one. */
-export function hasCurrentChunkTextFtsIndex(indices: IndexInfo[]): boolean {
-  return indices.some((index) => isTextFtsIndex(index) && index.name === CHUNK_TEXT_FTS_INDEX_NAME);
+/** True when the table's FTS index on `text` is the current one (current analyzer and version). */
+export function hasCurrentChunkTextFtsIndex(indices: IndexInfo[], env: NodeJS.ProcessEnv = process.env): boolean {
+  const current = chunkTextFtsIndexName(env);
+  return indices.some((index) => isTextFtsIndex(index) && index.name === current);
 }
 
-/** Builds the current index, first dropping an older English-only one so two analyzers never serve one column. */
-export async function ensureChunkTextFtsIndex(table: Table, indices: IndexInfo[]): Promise<boolean> {
-  if (hasCurrentChunkTextFtsIndex(indices)) return false;
-  for (const stale of indices.filter(isTextFtsIndex)) {
-    if (stale.name) await table.dropIndex(stale.name);
+/** Failed rebuilds back off per table: a full FTS build is expensive and every maintenance pass would retry it. */
+const FTS_RETRY_BASE_MS = 10 * 60_000;
+const FTS_RETRY_MAX_MS = 6 * 60 * 60_000;
+const ftsFailures = new Map<string, { failedAt: number; failures: number }>();
+
+/** Milliseconds until a failed FTS rebuild of `key` may be tried again (0 when it may be tried now). */
+export function ftsRebuildBackoffMs(key: string, now = Date.now()): number {
+  const failure = ftsFailures.get(key);
+  if (!failure) return 0;
+  const wait = Math.min(FTS_RETRY_MAX_MS, FTS_RETRY_BASE_MS * 2 ** (failure.failures - 1));
+  return Math.max(0, failure.failedAt + wait - now);
+}
+
+export function resetFtsRebuildBackoff(): void {
+  ftsFailures.clear();
+}
+
+export interface FtsEnsureResult {
+  /** The current index was built by this call. */
+  rebuilt: boolean;
+  /** Time spent building (and dropping the old index), 0 when nothing was built. */
+  ms: number;
+  /** A failed rebuild is waiting out its back-off; the older index, if any, keeps serving. */
+  backedOff?: boolean;
+  /** The build failed; the older index, if any, keeps serving. */
+  error?: string;
+}
+
+/**
+ * Makes the current FTS index exist. The new index is built under its own name first and the old one is dropped only
+ * after the build succeeded, so search never has a gap and a failed build leaves the old index serving. A failed
+ * build is not thrown (the rest of maintenance still counts) and is not retried until its back-off passes.
+ */
+export async function ensureChunkTextFtsIndex(
+  table: Table,
+  indices: IndexInfo[],
+  options: { key?: string; env?: NodeJS.ProcessEnv; now?: number } = {},
+): Promise<FtsEnsureResult> {
+  const env = options.env ?? process.env;
+  if (hasCurrentChunkTextFtsIndex(indices, env)) return { rebuilt: false, ms: 0 };
+  const key = options.key ?? "";
+  const now = options.now ?? Date.now();
+  if (ftsRebuildBackoffMs(key, now) > 0) return { rebuilt: false, ms: 0, backedOff: true };
+  const name = chunkTextFtsIndexName(env);
+  const started = performance.now();
+  try {
+    await table.createIndex("text", { config: chunkTextFtsIndex(env), name, replace: true });
+  } catch (error) {
+    const failures = (ftsFailures.get(key)?.failures ?? 0) + 1;
+    ftsFailures.set(key, { failedAt: now, failures });
+    return { rebuilt: false, ms: Math.round(performance.now() - started), error: error instanceof Error ? error.message : String(error) };
   }
-  await table.createIndex("text", { config: chunkTextFtsIndex(), name: CHUNK_TEXT_FTS_INDEX_NAME, replace: true });
-  return true;
+  ftsFailures.delete(key);
+  // Only now is the older analyzer's index redundant. A failed drop leaves a spare index and is retried next pass.
+  for (const stale of indices.filter((index) => isTextFtsIndex(index) && index.name !== name)) {
+    if (stale.name) await table.dropIndex(stale.name).catch((error: unknown) => console.warn(
+      `[lancedb] could not drop the old fts index ${stale.name}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+  return { rebuilt: true, ms: Math.round(performance.now() - started) };
 }
 
 /** Choose ANN parameters; L2 matches the app's default vectorSearch distance. */
@@ -341,6 +410,7 @@ export async function runLanceDbMaintenance(
   let optimizedMs: number | null = null;
   let indexCreated = false;
   let consolidated = false;
+  let fts: FtsEnsureResult | null = null;
   try {
     db = await connectLanceDb(uri);
     table = await db.openTable(tableName);
@@ -379,7 +449,8 @@ export async function runLanceDbMaintenance(
       await table.createIndex("id", { config: Index.btree(), replace: false });
     }
     if (lanceDbFtsIndexEnabled() && rows > 0) {
-      await ensureChunkTextFtsIndex(table, indices);
+      fts = await ensureChunkTextFtsIndex(table, indices, { key: lanceMaintenanceKey(uri, tableName) });
+      if (fts.error) console.warn(`[lancedb] fts rebuild failed table=${tableName} fts_ms=${fts.ms} error=${fts.error.split("\n")[0]}`);
     }
     if (indexCreated || consolidated) {
       indices = await table.listIndices();
@@ -394,11 +465,14 @@ export async function runLanceDbMaintenance(
       `[lancedb] maintenance table=${tableName} rows=${rows} optimized_ms=${optimizedMs} ` +
         `fragments_removed=${fragmentsRemoved} versions_removed=${versionsRemoved} bytes_removed=${bytesRemoved} ` +
         `index_created=${indexCreated} consolidated=${consolidated} index_segments=${indexSegments ?? "-"} ` +
-        `unindexed_rows=${unindexedRows ?? "-"} total_ms=${Math.round(performance.now() - started)}`,
+        `unindexed_rows=${unindexedRows ?? "-"} fts_rebuilt=${fts?.rebuilt ?? false} fts_ms=${fts?.ms ?? 0} ` +
+        `total_ms=${Math.round(performance.now() - started)}`,
     );
     return {
       ok: true, rows, optimizedMs, indexCreated, consolidated, indexSegments, unindexedRows,
       fragmentsRemoved, versionsRemoved, bytesRemoved,
+      ftsRebuilt: fts?.rebuilt ?? false, ftsMs: fts?.ms ?? 0,
+      ...(fts?.error ? { ftsError: fts.error } : fts?.backedOff ? { ftsError: "rebuild backed off after a failure" } : {}),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
