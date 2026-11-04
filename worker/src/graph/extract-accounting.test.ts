@@ -108,3 +108,39 @@ it("stops expanding at the ceiling", async () => {
   expect(graph).toMatchObject({ source: "heuristic", llmFailed: true });
   expect(vi.mocked(generateOpenRouterText).mock.calls.map(([call]) => call.maxOutputTokens)).toEqual([1600, 3200, 6400]);
 });
+
+it("stops after a route-level provider refusal, but keeps reading windows after a rate limit or a per-request 4xx", async () => {
+  const { APICallError } = await import("ai");
+  const refusal = (statusCode: number) => new APICallError({ message: "No allowed providers are available for the selected model.",
+    url: "https://openrouter.ai/api/v1/chat/completions", requestBodyValues: {}, statusCode, isRetryable: statusCode === 429 });
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const extract = () => extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example ".repeat(4000) }],
+    context: { config: { ...defaultGraphConfig, depth: "standard" }, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} },
+  });
+
+  vi.mocked(generateOpenRouterText).mockReset().mockRejectedValue(refusal(404));
+  expect(await extract()).toMatchObject({ source: "heuristic", llmFailed: true });
+  expect(generateOpenRouterText).toHaveBeenCalledTimes(1);
+  expect(warning).toHaveBeenCalledWith(expect.stringContaining("outcome=provider-error (HTTP 404, not retryable)"));
+
+  for (const status of [429, 400, 403, 413, 422]) {
+    vi.mocked(generateOpenRouterText).mockReset().mockRejectedValue(refusal(status));
+    await extract();
+    expect(vi.mocked(generateOpenRouterText).mock.calls.length).toBeGreaterThan(1);
+  }
+});
+
+it("marks a graph cut short by a route-level refusal after a partial success as failed, so it stays stale", async () => {
+  const { APICallError } = await import("ai");
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.mocked(generateOpenRouterText).mockReset()
+    .mockResolvedValueOnce({ text: '{"entities":[{"name":"Example System","type":"concept","confidence":1}],"relationships":[]}', finishReason: "stop", usage: { inputTokens: 10, outputTokens: 5 } })
+    .mockRejectedValue(new APICallError({ message: "Insufficient credits", url: "https://openrouter.ai/api/v1/chat/completions", requestBodyValues: {}, statusCode: 402, isRetryable: false }));
+  const graph = await extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example System ".repeat(3000) }],
+    context: { config: { ...defaultGraphConfig, depth: "standard" }, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} },
+  });
+  expect(generateOpenRouterText).toHaveBeenCalledTimes(2);
+  expect(graph).toMatchObject({ source: "llm", llmFailed: true, windows: 1 });
+});
