@@ -2,6 +2,10 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sqlMock = vi.fn();
+const access = vi.hoisted(() => ({ allowed: true }));
+vi.mock("../services/organizations.js", () => ({
+  getWorkspaceAccess: vi.fn(async () => access.allowed ? { role: "owner" } : null),
+}));
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, { unsafe: vi.fn() })
@@ -29,12 +33,20 @@ describe("suggestRoutes", () => {
   let app: Hono;
 
   beforeEach(() => {
+    access.allowed = true;
     sqlMock.mockReset();
     sqlMock.mockResolvedValue([]);
     app = buildApp();
   });
 
-  it("falls back to the default workspace when workspaceId is omitted", async () => {
+  it("refuses inaccessible workspaces before reading suggestions", async () => {
+    access.allowed = false;
+    const res = await app.request("/v1/suggest?workspace=foreign-workspace");
+    expect(res.status).toBe(404);
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the default workspace when workspace is omitted", async () => {
     const res = await app.request("/v1/suggest?q=co");
     expect(res.status).toBe(200);
     expect(JSON.stringify(sqlMock.mock.calls)).toContain("ws-default");
@@ -47,14 +59,14 @@ describe("suggestRoutes", () => {
 
   it("reports ready when only failed or superseded documents remain outside the corpus", async () => {
     mockSemanticRow({ indexed_chunk_count: 12, completed_documents: 3, in_flight_documents: 0 });
-    const res = await app.request("/v1/suggest?workspaceId=ws-1");
+    const res = await app.request("/v1/suggest?workspace=ws-1");
     const body = await res.json();
     expect(body.semantic).toEqual({ status: "ready", indexedChunkCount: 12, completedDocuments: 3, totalDocuments: 3 });
   });
 
   it("reports partial only while current documents are in flight", async () => {
     mockSemanticRow({ indexed_chunk_count: 12, completed_documents: 3, in_flight_documents: 1 });
-    const res = await app.request("/v1/suggest?workspaceId=ws-1");
+    const res = await app.request("/v1/suggest?workspace=ws-1");
     const body = await res.json();
     expect(body.semantic).toEqual({ status: "partial", indexedChunkCount: 12, completedDocuments: 3, totalDocuments: 4 });
     const semanticQuery = sqlMock.mock.calls
@@ -65,7 +77,7 @@ describe("suggestRoutes", () => {
   });
 
   it("only suggests filenames of current, searchable files (never failed or replaced ones)", async () => {
-    await app.request("/v1/suggest?workspaceId=ws-1&q=b");
+    await app.request("/v1/suggest?workspace=ws-1&q=b");
     const filenameQueries = sqlMock.mock.calls.map(call => (call[0] as TemplateStringsArray).join("?"))
       .filter(text => /d\.filename/.test(text));
     expect(filenameQueries.length).toBeGreaterThan(0);
@@ -73,7 +85,7 @@ describe("suggestRoutes", () => {
   });
 
   it("returns suggestions array", async () => {
-    const res = await app.request("/v1/suggest?workspaceId=ws-1&q=cont&limit=5");
+    const res = await app.request("/v1/suggest?workspace=ws-1&q=cont&limit=5");
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body.suggestions)).toBe(true);
@@ -89,7 +101,7 @@ describe("suggestRoutes", () => {
       if (query.includes("from documents d")) return [{ phrase: "catalog.pdf", weight: 5 }];
       return [];
     });
-    const body = await (await app.request("/v1/suggest?workspaceId=ws-1")).json();
+    const body = await (await app.request("/v1/suggest?workspace=ws-1")).json();
     expect(body.suggestions).toEqual(["catalog.pdf"]);
   });
 });

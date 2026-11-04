@@ -8,6 +8,8 @@ import {
 
 export const workspaceRunSchema = z.object({
   id: z.string(),
+  /** Effective parent job identity; each child retains its own run ID. */
+  jobId: z.string().optional(),
   userId: z.string(),
   orgId: z.string(),
   workspaceId: z.string(),

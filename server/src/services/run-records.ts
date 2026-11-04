@@ -16,6 +16,7 @@ import type { RunUsageCostSummary } from "./usage-attribution.js";
 // imports neither runs.ts nor run-creation.ts, which both depend on it.
 
 export type WorkspaceRunRow = {
+  job_id?: string | null;
   id: string;
   org_id: string;
   user_id: string;
@@ -108,6 +109,7 @@ function failedDocumentsOf(stats: Record<string, unknown>): number {
 export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): WorkspaceRun {
   return workspaceRunSchema.parse({
     id: row.id,
+    jobId: row.job_id ?? row.id,
     userId: row.user_id,
     orgId: row.org_id,
     workspaceId: row.workspace_id,

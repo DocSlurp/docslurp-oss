@@ -615,13 +615,13 @@ export async function ensurePersonalDefaultWorkspace(userId: string): Promise<vo
   await insertDefaultWorkspace(sql, { orgId: organization.id, userId });
 }
 
-export async function getWorkspace(workspaceId: string, userId: string): Promise<WorkspaceRecord | null> {
+export async function getWorkspace(workspaceId: string, userId: string, options: { refineNames?: boolean } = {}): Promise<WorkspaceRecord | null> {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) {
     return null;
   }
 
-  await refineWorkspaceNames([workspaceId]);
+  if (options.refineNames !== false) await refineWorkspaceNames([workspaceId]);
   const [row] = await sql<WorkspaceRow[]>`
     select
       w.id,

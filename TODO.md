@@ -31,3 +31,5 @@
 - [ ] Validate full OCR/vision → canonical storage → retrieval → renderer coverage for scans and rotated pages; native-only comparison currently fails.
 - [ ] Evaluate general borderless-table and orientation recovery on independent held-out documents, preserving ambiguous source text.
 - [ ] Expand the table parity corpus to degraded scans, diverse financial layouts and cross-page continuation before broad parity claims. See docs/evals/table-preservation-2026-11-01.md.
+
+- Issue 319 durable chat follow-up: integrate the authorized operation provider with the realtime host and first-party client; supervise/drain the dedicated executor; add explicit subagent/retry/dependency launch APIs and link existing Temporal job results; finish council review and matched recovery/load acceptance before enabling the flag. See docs/durable-chat-operations.md.

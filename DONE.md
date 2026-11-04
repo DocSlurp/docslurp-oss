@@ -1,3 +1,7 @@
+## Opt-in first-party realtime transport and durable chat integration (2026-11-03)
+
+- Add the session-only Node Upgrade adapter, mounted-host export, bounded shared dashboard/suggestions/viewer projections, commit-visible revision reconciliation, durable operation provider hookup and shared tree reconciliation. Preserve parent job/child run identities and existing HTTP mutation/cancellation ownership. Flags remain off pending app integration, independent council review and measured canary gates; see `docs/realtime-protocol.md`.
+
 ## Compatible npm dependency upgrades (2026-11-03)
 
 - Update current stable packages, including SimpleWebAuthn 14 and TypeScript 7 in independent SDK/CLI packages; retain documented peer/API compatibility holds. See `docs/reviews/dependencies-2026-11-03.md` for council findings and validation limits.
@@ -209,5 +213,6 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Offer a costed chat settings proposal for verified empty retrieval indexes even with Suggestions off. The existing card lets users opt into re-indexing and ask again; no processing starts from model text. Ordinary zero-hit queries do not establish a missing index.
 
+- Added opt-in durable chat operation queue, output journal, authorized recovery adapter and scoped task cancellation for issue 319; legacy client migration and full acceptance remain open (docs/durable-chat-operations.md).
 - Make successful Temporal finalization atomic with the ownership-fenced terminal receipt, progress, usage/page charges, document cutover, completion events and webhook intents; retain pending usage on rollback (2026-11-03). Council review pending in #277.
 - Make the maskable app icon the primary icon: `favicon.svg`, raster favicons, apple-touch, PWA and Claude plugin icons are all rendered from `docslurp-app-icon-maskable.svg`.

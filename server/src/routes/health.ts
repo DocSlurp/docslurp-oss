@@ -1,3 +1,4 @@
+import { realtimeMetricLines } from "../realtime/metrics.js";
 import { Hono } from "hono";
 import { timingSafeEqual } from "node:crypto";
 
@@ -230,6 +231,7 @@ async function buildPrometheusPayload(): Promise<string> {
   ];
   appendQueueMetricLines(lines, queue);
   appendAlertMetricLines(lines);
+  lines.push(...realtimeMetricLines());
   await appendGatedFeatureMetricLines(lines);
 
   return `${lines.join("\n")}\n`;

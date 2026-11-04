@@ -1,3 +1,4 @@
+import { chatOperationRoutes, durableChatLaunchHandler } from "./chat-operations.js";
 import { GeoSearchError } from "../search/geo-scope.js";
 import { geoPredicateSchema } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
@@ -173,6 +174,9 @@ function sameOriginBrowserRequest(c: Context): boolean {
 
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
 async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
+  if (mode === "public" && process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
+    return durableChatLaunchHandler(c);
+  }
   // Lets clients join a turn to its trace (the trace id is the second field).
   const traceparent = activeTraceparent();
   if (traceparent) c.header("traceparent", traceparent);
@@ -234,6 +238,7 @@ async function failChatTurn(turn: ChatTurn, reason: string): Promise<ChatTurnUsa
 const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
 
 export const workspaceChatRoutes = new Hono()
+  .route("/operations", chatOperationRoutes)
   .use("*", nativeApiErrors)
   .post("/", workspaceChatHandler)
   .get("/stream", workspaceChatStreamHandler);
@@ -246,6 +251,9 @@ export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).
  * chat settings and spend checks as `POST /v1/chat` apply.
  */
 async function workspaceChatStreamHandler(c: Context) {
+  if (process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
+    return c.json({ error: "Use POST /v1/chat/operations with Idempotency-Key, then resume the operation" }, 409);
+  }
   // Paid GET turns from cookie sessions require same-origin browser evidence.
   if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");

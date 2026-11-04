@@ -1,3 +1,4 @@
+import { realtimeMetrics } from "./realtime/broker.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
@@ -6,6 +7,7 @@ import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
+import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -137,6 +139,10 @@ export function createApiApp(): Hono {
   app.use("*", serviceCors(env.corsAllowedOrigins));
   app.use("/dashboard/*", sessionAuth);
   app.use("/v1/*", sessionAuth);
+  app.use("/v1/*", async (c, next) => {
+    if (c.req.method === "GET" && c.req.header("X-Docslurp-Realtime-Fallback") === "1") realtimeMetrics.fallbackRequests++;
+    await next();
+  });
   // Records which client surface (web, SDK, CLI, MCP, ...) each user reaches us through.
   app.use("/v1/*", clientSurfaceMiddleware);
   app.use("/compat/*", clientSurfaceMiddleware);
@@ -181,6 +187,7 @@ export function createApiApp(): Hono {
   app.route("/v1/waitlist", waitlistRoutes);
   app.route("/v1/organizations", organizationsRoutes);
   app.route("/v1/organizations", ssoRoutes);
+  app.get("/v1/realtime", c => c.json({ error: "WebSocket Upgrade required" }, process.env.REALTIME_ENABLED === "true" ? 426 : 404));
   app.route("/v1/runs", runsRoutes);
   app.route("/v1/jobs", jobsRoutes);
   app.route("/v1/workspaces", workspacesRoutes);
@@ -249,11 +256,13 @@ function shouldRunStartupMigrations(): boolean {
 }
 
 let startupPromise: Promise<void> | null = null;
+let stopRevisionMaintenance: (() => Promise<void>) | undefined;
 // LISTEN subscriptions retry until their dependency returns (lib/start-with-retry.ts).
 let listenerStarts: StartWithRetry[] = [];
 
 /** Stops this module instance's timers and LISTEN subscription. */
 async function stopApiBackgroundTasks(): Promise<void> {
+  await stopRevisionMaintenance?.();
   for (const pending of listenerStarts) pending.stop();
   listenerStarts = [];
   stopMaintenanceSweeper();
@@ -289,6 +298,7 @@ export function ensureApiStartup(): Promise<void> {
       // After a dev module reload, stop the previous instance's tasks first:
       // they would keep running (and querying) alongside the new ones.
       await replaceProcessTask("api-background-tasks", stopApiBackgroundTasks)?.();
+      stopRevisionMaintenance = startRevisionMaintenance(env.databaseUrl);
       startMaintenanceSweeper();
       startDirectUploadReconciler();
       // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.

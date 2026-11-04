@@ -61,3 +61,24 @@ it.skipIf(!url)("retirement-first holds the Run claim through commit so retry ca
   expect((await observer.query("select status,superseded_by_document_id from documents where id='retire-first-old-doc'")).rows)
     .toEqual([{ status: 'cancelled', superseded_by_document_id: 'retire-first-new-doc' }]);
 });
+
+it.skipIf(!url)("same-org publishers commit out of order without waiting or losing rolled-back revisions", async () => {
+  const first=await connect(),second=await connect(),observer=await connect();
+  await seed(first,'revision-order');
+  const revision=async()=>BigInt((await observer.query("select revision from realtime_revisions where org_id='revision-order'")).rows[0].revision);
+  const before=await revision();
+  await first.query('begin');
+  await first.query("update workspace_runs set stage='first' where id='revision-order-old'");
+  await second.query('begin');
+  await second.query("update workspace_runs set stage='second' where id='revision-order-new'");
+  await second.query('commit');
+  expect(await revision()).toBe(before+1n);
+  await first.query('rollback');
+  expect(await revision()).toBe(before+1n);
+  await first.query('begin');
+  for(let i=0;i<20;i++)await first.query("update workspace_runs set stage='first-again' where id='revision-order-old'");
+  await second.query("update workspace_runs set stage='second-again' where id='revision-order-new'");
+  expect(await revision()).toBe(before+2n);
+  await first.query('commit');
+  expect(await revision()).toBe(before+3n);
+});
