@@ -558,7 +558,8 @@ describe("hybridSearch", () => {
             run_id: "run-1",
             chunk_index: 0,
             text: "MATH 1010 Calculus 1",
-            heading_path: ["Mathematics"],
+            // "classes" is a content word of the query, so the hit must mention it to clear the relevance floor.
+            heading_path: ["Math classes"],
             page_number: 12,
             token_estimate: 4,
             rank: 1,
