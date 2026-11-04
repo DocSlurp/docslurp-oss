@@ -22,15 +22,20 @@ import {
 
 /**
  * Usage metrics that mean a vision or OCR model read one page (hosted vision,
- * local OCR, page mapping OCR, image labelling). Each such page bills as a Rich
- * page (PRICE_CARD), once per run, plus one more per extra 1,000 output tokens.
- * A Fast-mode page that falls back to vision is billed Rich the same way.
+ * local OCR of any kind, page mapping OCR, image labelling). Each such page bills as a
+ * Rich page (PRICE_CARD), once per run, plus one more per extra 1,000 output tokens.
+ * A Fast-mode page that falls back to vision is billed Rich the same way. Tesseract is an OCR model:
+ * `image-ocr` (an uploaded image), `tesseract-page-ocr` (a page the router or the local graph OCR'd) and
+ * `pdf-ocr` (Kreuzberg's OCR of a scanned PDF page) bill the same as a vision read.
  */
 export const RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set([
   "page-analysis",
   "document-map-ocr",
   "ocr-native-pdf",
   "image-label",
+  "image-ocr",
+  "tesseract-page-ocr",
+  "pdf-ocr",
 ]);
 
 /** Events taken for one checkpoint write; `commit()` once it has persisted. */
@@ -65,8 +70,13 @@ export class PipelineUsageEventLedger {
   private readonly pending: UsageEvent[] = [];
   private readonly lifetime = { inputTokens: 0, outputTokens: 0, costCents: 0 };
   private pendingBillable = 0;
-  /** Rich pages charged by this ledger, by `documentId:pageNumber`. */
-  private readonly richCharged = new Map<string, number>();
+  /**
+   * Rich pages charged by this ledger, by `documentId:pageNumber`: how many (`pages`, the page's Rich units so far) and the
+   * output tokens each reader (`metric:model`) has produced for the page (`readers`). A page's total is the sum over its readers
+   * of each reader's largest read: OCR then a vision model both count, while a reader reading the page again (a retry) adds only
+   * what its biggest read exceeds its earlier ones.
+   */
+  private readonly richCharged = new Map<string, { pages: number; readers: Map<string, number> }>();
 
   /** Run being billed; set by WorkflowState. Rich page charges need it for their idempotent ids. */
   runId: string | null = null;
@@ -110,6 +120,11 @@ export class PipelineUsageEventLedger {
     return this.buffer(event);
   }
 
+  /** Rich pages (units) this ledger has charged for a page: 0 when no model read it. */
+  richPagesCharged(documentId: string, pageNumber: number): number {
+    return this.richCharged.get(`${documentId}:${pageNumber}`)?.pages ?? 0;
+  }
+
   /** Whether this ledger already charged the page as Rich. */
   hasRichCharge(documentId: string, pageNumber: number): boolean {
     return this.richCharged.has(`${documentId}:${pageNumber}`);
@@ -132,8 +147,12 @@ export class PipelineUsageEventLedger {
   }
 
   /**
-   * A vision/OCR read of a page: buffer one billable Rich page charge for it
-   * (once per page per run; the id makes a retried checkpoint a no-op).
+   * A vision/OCR read of a page: buffer its billable Rich page charges. The page's first read charges one Rich page (the id
+   * makes a retried checkpoint a no-op); every reader's output tokens count toward the page's running total, and the page owes one
+   * more Rich unit per started `richExtraPageOutputTokens` past `richIncludedOutputTokens` (richPagesForOutputTokens). Each unit
+   * after the first is its own event with a deterministic id (`rich:<run>:<document>:<page>:unit:<n>`), so a read that comes
+   * after a cheaper one (a vision call after OCR, a retry with a larger output budget) raises the charge to what the
+   * total owes, and a retried checkpoint, or a retry that reads again, can never charge a unit twice.
    */
   private chargeRichPageRead(
     event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null },
@@ -145,23 +164,31 @@ export class PipelineUsageEventLedger {
     const pageNumber = event.metadata?.pageNumber;
     if (typeof documentId !== "string" || typeof pageNumber !== "number" || !Number.isInteger(pageNumber)) return;
     const key = `${documentId}:${pageNumber}`;
-    if (this.richCharged.has(key)) return;
     const outputTokens = Math.max(0, Number(event.outputTokens ?? 0) || 0);
-    const pages = richPagesForOutputTokens(outputTokens);
-    this.richCharged.set(key, pages);
-    this.buffer({
-      id: `rich:${this.runId}:${key}`,
+    const before = this.richCharged.get(key);
+    const readers = before?.readers ?? new Map<string, number>();
+    const reader = `${event.metric}:${event.model ?? ""}`;
+    readers.set(reader, Math.max(readers.get(reader) ?? 0, outputTokens));
+    const total = [...readers.values()].reduce((sum, tokens) => sum + tokens, 0);
+    const owed = richPagesForOutputTokens(total);
+    const charged = before?.pages ?? 0;
+    this.richCharged.set(key, { pages: Math.max(charged, owed), readers });
+    const unit = (n: number) => ({
+      id: n === 1 ? `rich:${this.runId}:${key}` : `rich:${this.runId}:${key}:unit:${n}`,
       provider: UNIT_CHARGE_PROVIDER,
       model: "price-card",
       metric: BILLABLE_UNIT_METRICS.richPage,
-      amount: pages,
+      amount: 1,
       unit: "page",
-      costCents: pageCredits("rich", pages),
+      costCents: pageCredits("rich", 1),
       inputTokens: 0,
       outputTokens: 0,
-      metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens }),
-      ...(visionAttemptTicket ? { visionAttemptTicket } : {}),
+      metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens: total, ...(n > 1 ? { unit: n } : {}) }),
     });
+    for (let n = Math.max(1, charged + 1); n <= owed; n += 1) {
+      // The vision call's request ticket rides on the page's first charge only: a later read of a charged page stays uncharged.
+      this.buffer(n === 1 && visionAttemptTicket ? { ...unit(n), visionAttemptTicket } : unit(n));
+    }
   }
 
   /** Number of events buffered since the last committed checkpoint. */
