@@ -1,6 +1,6 @@
 {
   "name": "@docslurp/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript client for DocSlurp document ingestion and cited search, with embeddable React and Web Component surfaces at @docslurp/sdk/embed.",
   "license": "MIT",
   "homepage": "https://docslurp.io/docs/packages/sdk",

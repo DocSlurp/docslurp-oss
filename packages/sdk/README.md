@@ -2,7 +2,7 @@
 
 [Package docs](https://docslurp.io/docs/packages/sdk) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/sdk) · [npm](https://www.npmjs.com/package/@docslurp/sdk)
 
-> **Version:** This reference follows the SDK source on `main`, which is ahead of the latest npm release, 0.3.0. With 0.3.0 you get uploads (files and URLs), batch `search({ queries })`, chat, run progress and streams, workspace discovery, upload sessions, workspace state, ingest reports, organizations and `@docslurp/sdk/embed`. 0.3.0 still names workspaces with `workspaceId` and `workspaceName` (`workspaceId` and `workspace-id` in the embeds) instead of one `workspace` field. It also lacks `extract()`, `chatStream()`, `accessToken`, `listRuns()`, `createCapability()` and the document, tag, job, estimate, retention, re-index and workspace-settings methods. These arrive in the next release. Upgrade the SDK separately when updating a self-hosted API.
+> **Version:** This reference matches `@docslurp/sdk` 0.4.0. 0.4.0 names workspaces with one `workspace` field (ID, slug or name; `workspace` in the embeds) and adds `extract()`, `chatStream()`, `accessToken`, `listRuns()`, `createCapability()` and the document, tag, job, estimate, retention, re-index and workspace-settings methods. 0.3.0 and older use `workspaceId` and `workspaceName` (`workspaceId` and `workspace-id` in the embeds). Upgrade the SDK separately when updating a self-hosted API.
 
 The SDK covers DocSlurp's three jobs from Node.js: upload documents and follow their extraction, search them for passages that cite their document and page, and ask the workspace chat endpoint for a cited answer. You keep your own application and LLM: use the results as evidence for your model, or let DocSlurp write the answer. The SDK has no runtime npm dependencies and ships TypeScript declarations.
 
@@ -19,7 +19,7 @@ Start with the [quickstart](#from-file-to-search-results). Then see [live progre
 You need **Node.js 20+** and ESM (`.mjs` files, or `"type": "module"`); TypeScript works the same way. Create a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes.
 
 ```bash
-npm install @docslurp/sdk@^0.3.0
+npm install @docslurp/sdk@^0.4.0
 export DOCSLURP_API_KEY='your-server-key'
 ```
 

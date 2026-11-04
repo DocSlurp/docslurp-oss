@@ -21,7 +21,7 @@ Each result has `text`, a `score` and a `citation` with the `filename`, `pageNum
 | [Deferred indexing modes](deferred-indexing.md) | On-demand page map and page images, query spend policies, capability tokens for browser clients |
 | [20-second demo](https://docslurp.io/demos/integration.mp4) | Seeing the workflow before you build it |
 
-> **Versions:** SDK examples target `@docslurp/sdk` 0.3.0 or newer. This includes URL uploads through `upload`, batch search, workspace discovery and upload-session methods. Self-hosted deployments must run an API version with these routes.
+> **Versions:** SDK examples target `@docslurp/sdk` 0.4.0 or newer. This includes URL uploads through `upload`, batch search, workspace discovery and upload-session methods. Self-hosted deployments must run an API version with these routes.
 
 ## The contract in one minute
 
