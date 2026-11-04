@@ -182,6 +182,10 @@ export interface WorkspaceIntakeResult {
 }
 
 export interface RejectedIntakeFile {
+  /** Position of the file in the request, so clients match by index instead of by (sanitized) filename. */
+  index?: number;
+  /** The client's own correlation id for the file, echoed back. */
+  clientId?: string;
   filename: string;
   /** HTTP status the file would have produced on its own. */
   statusCode: number;
@@ -189,7 +193,7 @@ export interface RejectedIntakeFile {
   message: string;
 }
 
-function rejectionCode(error: WorkspaceIntakeError): RejectedIntakeFile["code"] {
+export function rejectionCode(error: WorkspaceIntakeError): RejectedIntakeFile["code"] {
   if (error.code === "remote_format_disabled") return error.code;
   if (error.statusCode === 415) return "unsupported_type";
   if (error.statusCode === 413) return "file_too_large";
@@ -553,13 +557,13 @@ async function resolveIntakeTarget(
 }
 
 /** Every file was rejected: fail the request, naming each file. */
-function allRejectedError(rejected: RejectedIntakeFile[]): WorkspaceIntakeError {
+export function allRejectedError(rejected: RejectedIntakeFile[]): WorkspaceIntakeError {
   const statuses = new Set(rejected.map((file) => file.statusCode));
   const statusCode = (statuses.size === 1 ? rejected[0]!.statusCode : 422) as WorkspaceIntakeStatusCode;
   const message = rejected.length === 1
     ? rejected[0]!.message
     : `None of the ${rejected.length} files could be accepted: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
-  return new WorkspaceIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code })), rejected.every(file => file.code === "remote_format_disabled") ? "remote_format_disabled" : undefined);
+  return new WorkspaceIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code, ...(file.index !== undefined ? { index: file.index } : {}), ...(file.clientId ? { clientId: file.clientId } : {}) })), rejected.every(file => file.code === "remote_format_disabled") ? "remote_format_disabled" : undefined);
 }
 
 /**

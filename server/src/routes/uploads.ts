@@ -32,6 +32,8 @@ import {
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
+import { createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
@@ -97,6 +99,8 @@ const ingestUrlSchema = z.object({
 });
 
 export const directUploadFileSchema = z.object({
+  /** The client's own id for this file, echoed on the session's file and on a rejection. */
+  clientId: z.string().min(1).max(128).optional(),
   singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
@@ -116,7 +120,7 @@ const createDirectSessionSchema = z.object({
   newWorkspace: z.boolean().optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   pipeline: pipelineFeatureOverridesSchema.optional(),
-  files: z.array(directUploadFileSchema).min(1),
+  files: z.array(directUploadFileSchema).min(1).max(1000),
 });
 
 const completeDirectFileSchema = z.object({
@@ -270,19 +274,29 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the workspace pipeline and its template locks.
         const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
-        const session = await createDirectUploadSession({
-          userId,
-          orgId,
-          apiKeyId: c.get("apiKey")?.keyId ?? null,
-          allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
-          workspaceId: target.workspaceId,
-          workspaceName: target.workspaceName,
-          templateKey: input.templateKey ?? null,
-          pipeline,
-          files: input.files,
-          tags: input.tags,
+        const actor = getRequestActor(c);
+        const parsedKey = parseIdempotencyKey(c.req.header("Idempotency-Key"));
+        if ("error" in parsedKey) return apiStatusError(c, 400, parsedKey.error);
+        const { body: session, status, replayed } = await createSessionIdempotently({
+          key: parsedKey.key,
+          scope: { orgId, userId },
+          request: input,
+          create: () => createDirectUploadSession({
+            userId,
+            orgId,
+            apiKeyId: c.get("apiKey")?.keyId ?? null,
+            allowedWorkspaceIds: actorAllowedWorkspaceIds(actor),
+            workspaceId: target.workspaceId,
+            workspaceName: target.workspaceName,
+            templateKey: input.templateKey ?? null,
+            pipeline,
+            files: input.files,
+            tags: input.tags,
+          }),
+          describe: (sessionId) => getDirectUploadSessionDescription(sessionId, userId),
         });
-        return c.json(session, 201);
+        if (replayed) c.header("Idempotency-Replayed", "true");
+        return c.json(session, status);
       } catch (error) {
         const response = workspaceIntakeErrorResponse(c, error);
         if (response) return response;

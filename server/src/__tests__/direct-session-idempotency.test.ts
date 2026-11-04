@@ -1,0 +1,128 @@
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: vi.fn() }));
+
+import { createSessionIdempotently, type DirectSessionIdempotencyDeps } from "../services/direct-session-idempotency.js";
+import { hashIdempotencyPayload, parseIdempotencyKey, scopedIdempotencyKey } from "../services/idempotency.js";
+
+/** An in-memory idempotency cache and an uncontended lock, with the cache keyed exactly as the real one (key + route). */
+function memoryDeps() {
+  const cache = new Map<string, { requestHash: string; status: number; body: Record<string, unknown> }>();
+  const held = new Set<string>();
+  const deps: DirectSessionIdempotencyDeps = {
+    getCached: async ({ idempotencyKey, routeKey, requestHash }) => {
+      const row = cache.get(`${idempotencyKey}|${routeKey}`);
+      if (!row) return null;
+      if (row.requestHash !== requestHash) throw new Error("Idempotency-Key already exists for a different request payload.");
+      return { status: row.status, body: row.body };
+    },
+    store: async ({ idempotencyKey, routeKey, requestHash, status, body }) => { cache.set(`${idempotencyKey}|${routeKey}`, { requestHash, status, body }); },
+    lock: async (name, run) => {
+      if (held.has(name)) throw Object.assign(new Error("busy"), { statusCode: 409 });
+      held.add(name);
+      try { return await run(); } finally { held.delete(name); }
+    },
+  };
+  return { deps, cache, held };
+}
+
+function sessions() {
+  let count = 0;
+  const create = vi.fn(async () => ({ sessionId: `session-${++count}`, files: [{ id: "f", index: 0 }], rejected: undefined as undefined | Array<{ index: number }> }));
+  const describe = vi.fn(async (sessionId: string) => ({ sessionId, files: [{ id: "f", index: 0 }] }));
+  return { create, describe };
+}
+
+describe("createSessionIdempotently", () => {
+  const request = { files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 1 }] };
+
+  it("creates one session for a retried create with the same key, and replays it with fresh descriptors", async () => {
+    const { deps } = memoryDeps();
+    const { create, describe } = sessions();
+    const args = { key: "retry-1", scope: { orgId: "org-1", userId: "user-1" }, request, create, describe };
+    const first = await createSessionIdempotently(args, deps);
+    const second = await createSessionIdempotently(args, deps);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect([first.status, first.replayed]).toEqual([201, false]);
+    expect([second.status, second.replayed]).toEqual([200, true]);
+    expect(second.body.sessionId).toBe(first.body.sessionId);
+    expect(describe).toHaveBeenCalledWith("session-1");
+  });
+
+  it("replays the per-file rejections of the first request", async () => {
+    const { deps } = memoryDeps();
+    const create = vi.fn(async () => ({ sessionId: "s1", rejected: [{ index: 1, filename: "x.exe" }] }));
+    const describe = vi.fn(async (sessionId: string) => ({ sessionId }));
+    const args = { key: "k", scope: { orgId: "org-1", userId: "u" }, request, create, describe };
+    await createSessionIdempotently(args, deps);
+    const replay = await createSessionIdempotently(args, deps);
+    expect(replay.body).toMatchObject({ sessionId: "s1", rejected: [{ index: 1, filename: "x.exe" }] });
+  });
+
+  it("never shares a key between organizations: the same key in another org creates its own session", async () => {
+    const { deps } = memoryDeps();
+    const { create, describe } = sessions();
+    const a = await createSessionIdempotently({ key: "same", scope: { orgId: "org-a", userId: "user-a" }, request, create, describe }, deps);
+    const b = await createSessionIdempotently({ key: "same", scope: { orgId: "org-b", userId: "user-b" }, request, create, describe }, deps);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(b.replayed).toBe(false);
+    expect(b.body.sessionId).not.toBe(a.body.sessionId);
+    expect(describe).not.toHaveBeenCalled();
+  });
+
+  it("refuses the same key with a different request", async () => {
+    const { deps } = memoryDeps();
+    const { create, describe } = sessions();
+    const scope = { orgId: "org-1", userId: "user-1" };
+    await createSessionIdempotently({ key: "k", scope, request, create, describe }, deps);
+    const error = await createSessionIdempotently({ key: "k", scope, request: { files: [] }, create, describe }, deps).catch((caught) => caught);
+    expect(error.statusCode).toBe(409);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a fresh session when the remembered one is gone", async () => {
+    const { deps } = memoryDeps();
+    const { create } = sessions();
+    const describe = vi.fn(async () => null);
+    const scope = { orgId: "org-1", userId: "user-1" };
+    await createSessionIdempotently({ key: "k", scope, request, create, describe }, deps);
+    const again = await createSessionIdempotently({ key: "k", scope, request, create, describe }, deps);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(again.replayed).toBe(false);
+  });
+
+  it("serializes concurrent creates of one key: the second is told to retry, not given a second session", async () => {
+    const { deps, held } = memoryDeps();
+    const { create, describe } = sessions();
+    const scope = { orgId: "org-1", userId: "user-1" };
+    held.add(`idem:${scopedIdempotencyKey(scope, "k")}`);
+    await expect(createSessionIdempotently({ key: "k", scope, request, create, describe }, deps)).rejects.toMatchObject({ statusCode: 409 });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("without a key creates every time", async () => {
+    const { deps } = memoryDeps();
+    const { create, describe } = sessions();
+    await createSessionIdempotently({ key: null, scope: { userId: "u" }, request, create, describe }, deps);
+    await createSessionIdempotently({ key: null, scope: { userId: "u" }, request, create, describe }, deps);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("idempotency keys", () => {
+  it("scopes the stored key to organization and user", () => {
+    const a = scopedIdempotencyKey({ orgId: "org-a", userId: "u" }, "k");
+    expect(a).not.toBe(scopedIdempotencyKey({ orgId: "org-b", userId: "u" }, "k"));
+    expect(a).not.toBe(scopedIdempotencyKey({ orgId: "org-a", userId: "v" }, "k"));
+    expect(a).toBe(scopedIdempotencyKey({ orgId: "org-a", userId: "u" }, "k"));
+    expect(a).not.toContain("org-a");
+  });
+
+  it("validates the header", () => {
+    expect(parseIdempotencyKey("  abc-123  ")).toEqual({ key: "abc-123" });
+    expect(parseIdempotencyKey(undefined)).toEqual({ key: null });
+    expect(parseIdempotencyKey("has space")).toHaveProperty("error");
+    expect(parseIdempotencyKey("x".repeat(256))).toHaveProperty("error");
+    expect(hashIdempotencyPayload({ a: 1, b: 2 })).toBe(hashIdempotencyPayload({ b: 2, a: 1 }));
+  });
+});
