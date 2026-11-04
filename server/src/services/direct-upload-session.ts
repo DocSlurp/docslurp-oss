@@ -26,6 +26,7 @@ import {
   WorkspaceIntakeError,
   type IntakeExtract,
   type RejectedIntakeFile,
+  type WorkspaceIntakeErrorCode,
   type WorkspaceIntakeItem,
 } from "./workspace-intake.js";
 
@@ -424,11 +425,11 @@ export async function getDirectUploadSessionDescription(
 }
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly"): Promise<T> {
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode?: WorkspaceIntakeErrorCode): Promise<T> {
   const { connection, release } = await reserveDirectUploadLockConnection();
   try {
     const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
-    if (!lock?.acquired) throw new WorkspaceIntakeError(busyMessage, 409);
+    if (!lock?.acquired) throw new WorkspaceIntakeError(busyMessage, 409, undefined, busyCode);
     try { return await run(); }
     finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
   } finally { release(); }

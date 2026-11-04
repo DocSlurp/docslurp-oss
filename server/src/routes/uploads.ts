@@ -28,11 +28,13 @@ import {
   abortDirectUploadSession,
   completeDirectUploadFile,
   createDirectUploadSession,
+  describeDirectUploadSession,
   getDirectUploadSessionDescription,
+  loadDirectUploadSession,
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
-import { createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
 import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
@@ -279,7 +281,8 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         if ("error" in parsedKey) return apiStatusError(c, 400, parsedKey.error);
         const { body: session, status, replayed } = await createSessionIdempotently({
           key: parsedKey.key,
-          scope: { orgId, userId },
+          // The key and target are part of the scope: another key of this user, or a request for another workspace, never replays this session.
+          scope: { orgId, userId, apiKeyId: c.get("apiKey")?.keyId ?? null, workspace: target.workspaceId ?? (target.workspaceName ? `name:${target.workspaceName}` : null) },
           request: input,
           create: () => createDirectUploadSession({
             userId,
@@ -293,7 +296,13 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
             files: input.files,
             tags: input.tags,
           }),
-          describe: (sessionId) => getDirectUploadSessionDescription(sessionId, userId),
+          describe: async (sessionId) => {
+            // A replay is authorized like any session route: same organization, same key, inside the key's workspace allowlist.
+            const loaded = await loadDirectUploadSession(sessionId, userId);
+            if (!loaded) return null;
+            assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedWorkspaceIds: actorAllowedWorkspaceIds(actor) });
+            return await describeDirectUploadSession(loaded);
+          },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
         return c.json(session, status);
