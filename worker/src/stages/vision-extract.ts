@@ -566,6 +566,8 @@ export class VisionExtractStage implements Stage {
 
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +
+                `documentPages=${pages} selectedPages=${needsVision.selectedPages.length} failedPages=${failedPages.length} ` +
+                `routingVersion=${routingVersion(routingV2)} ` +
                 `processedPages=${outputs.length} inputTokens=${inputTokens} ` +
                 `outputTokens=${outputTokens} costCents=${costCents}`,
             );
@@ -581,6 +583,10 @@ export class VisionExtractStage implements Stage {
                 score: needsVision.score,
                 latencyMs: totalLatencyMs,
                 selectedPages: needsVision.selectedPages,
+                // Counts beside the page lists, so dashboards read selected vs read vs failed without unpacking arrays.
+                documentPages: pages,
+                selectedPageCount: needsVision.selectedPages.length,
+                failedPageCount: failedPages.length,
                 routingPolicy: needsVision.routing?.visionPolicy ?? null,
                 routingVersion: routingVersion(routingV2),
                 failedPages: failedPages.map((page) => ({ pageNumber: page.pageNumber, reason: page.outcome, fallbackText: page.fallbackText })),

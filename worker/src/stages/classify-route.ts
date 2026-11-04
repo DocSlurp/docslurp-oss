@@ -5,6 +5,7 @@ import {
   DRAWN_CONTENT_SIGNAL,
   GARBLED_TEXT_LAYER_SIGNAL,
   PAGE_RASTER_ROUTING,
+  TEXT_LAYER_DISAGREES_SIGNAL,
   assessTextLayer,
   decidePageRaster,
   rasterPageSignal,
@@ -99,6 +100,19 @@ export class ClassifyRouteStage implements Stage {
             state.artifactLedger.recordDocument(document.id, "parser-playbook", surface.suggestedPlaybook);
           }
 
+          const decisions = summarizeRoutingDecisions(surface.pages, {
+            intakePageCount: document.pageCount,
+            measuredPages: Math.max(imageEvidence?.pages.size ?? 0, structured?.pages.size ?? 0),
+            imageEvidence: imageEvidence?.pages,
+          });
+          console.log(
+            `[classify-route] run=${state.run.id} document=${document.id} routing=${routingVersion(routingV2)} ` +
+              `pages=${decisions.intakePages} measured=${decisions.measuredPages} read=${decisions.pagesRead} ` +
+              `reasons=${JSON.stringify(decisions.pagesReadByReason)} blank=${decisions.blankPages} ` +
+              `repeatedImagePages=${decisions.repeatedImagePages} textLayer=${JSON.stringify(decisions.textLayerVerdicts)} ` +
+              `ocrChecked=${decisions.textLayerOcrChecked}`,
+          );
+
           return {
             artifactUri: this.storage.uri(key),
             stats: {
@@ -112,7 +126,9 @@ export class ClassifyRouteStage implements Stage {
               specializedContentKinds: surface.specializedContentSummary.map((entry) => entry.kind),
               nonStraightforwardPages: surface.pages.filter((page) => page.route !== "straightforward-text").length,
               // Ingest report: tables observed (heuristic, from the extracted text).
-              tablePages: surface.pages.filter((page) => page.route === "table-heavy").length
+              tablePages: surface.pages.filter((page) => page.route === "table-heavy").length,
+              // What the routing decided, per document, so operators can see it in stage stats and SigNoz.
+              ...decisions,
             }
           };
         },
@@ -488,6 +504,66 @@ function buildEvidencePages(
 }
 
 export { DRAWN_CONTENT_SIGNAL };
+
+/** Why a page was sent to a vision/OCR read, from the signals of its routing decision. */
+export type PageReadReason = "raster" | "garbled" | "drawn" | "yield-deficit" | "other";
+
+export function pageReadReason(signals: readonly string[]): PageReadReason {
+  if (signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || signals.includes(TEXT_LAYER_DISAGREES_SIGNAL) ||
+      signals.includes("ocr-authorized:complexity-and-plausibility-failure")) return "garbled";
+  if (signals.includes(DRAWN_CONTENT_SIGNAL)) return "drawn";
+  if (signals.includes("ocr-authorized:structured-text-yield-deficit")) return "yield-deficit";
+  if (signals.some((signal) => signal.startsWith("ocr-authorized:"))) return "raster";
+  return "other";
+}
+
+/**
+ * Per-document counts of what routing decided (classify-route stage stats): pages sent to a read by reason, blank pages
+ * skipped, pages whose significant images are all repeated furniture and so were left out of the raster rule, the text-layer
+ * verdicts and how many suspect layers were cross-checked against an OCR, and the page count measured from evidence
+ * against the count recorded at intake. Pure; reads only the routing decision and the page evidence.
+ */
+export function summarizeRoutingDecisions(
+  pages: readonly AdaptivePageRoutingEntry[],
+  args: { intakePageCount: number; measuredPages: number; imageEvidence?: ReadonlyMap<number, PageImageEvidence> },
+) {
+  const pagesReadByReason: Record<PageReadReason, number> = { raster: 0, garbled: 0, drawn: 0, "yield-deficit": 0, other: 0 };
+  let pagesRead = 0;
+  let blankPages = 0;
+  for (const page of pages) {
+    if (page.ocrDecision?.authorized === true) {
+      pagesRead += 1;
+      pagesReadByReason[pageReadReason(page.ocrDecision.signals)] += 1;
+    } else if (page.ocrDecision?.signals.includes(BLANK_PAGE_SIGNAL)) {
+      blankPages += 1;
+    }
+  }
+  const textLayerVerdicts: Record<string, number> = {};
+  let repeatedImagePages = 0;
+  let textLayerOcrChecked = 0;
+  let textLayerOcrDisagrees = 0;
+  for (const evidence of args.imageEvidence?.values() ?? []) {
+    if ((evidence.repeatedImageCount ?? 0) > 0) repeatedImagePages += 1;
+    const layer = evidence.textLayer;
+    if (!layer) continue;
+    textLayerVerdicts[layer.verdict] = (textLayerVerdicts[layer.verdict] ?? 0) + 1;
+    if (layer.matchesOcr !== null && layer.matchesOcr !== undefined) {
+      textLayerOcrChecked += 1;
+      if (layer.matchesOcr === false) textLayerOcrDisagrees += 1;
+    }
+  }
+  return {
+    intakePages: args.intakePageCount,
+    measuredPages: args.measuredPages,
+    pagesRead,
+    pagesReadByReason,
+    blankPages,
+    repeatedImagePages,
+    textLayerVerdicts,
+    textLayerOcrChecked,
+    textLayerOcrDisagrees,
+  };
+}
 /** A document averaging fewer native words per page than this has no text layer worth the name. */
 const DRAWN_TEXT_MAX_WORDS_PER_PAGE = 3;
 const NO_NATIVE_TEXT_SIGNALS = new Set([

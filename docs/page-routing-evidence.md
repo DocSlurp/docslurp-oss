@@ -47,7 +47,7 @@ math and agreement thresholds derive from `TRUST_RULE`.
   boundaries are invented (`pageAlignedTexts` returns null).
 - Without routing evidence, a document that has text keeps it; the characters-per-page density rule that read every page of
   a sparse document is retired for evidence runs.
-- Per-run version: new runs pin `v2` (this routing) in `run:vision-routing-version`. `v1` stays only for runs already in
+- Per-run version: new runs pin `v3` (this routing) in `run:vision-routing-version`; the previous release's `v2` (keyword canary) is never read as this routing, and an old worker that sees `v3` routes the run as `v1`. `v1` stays only for runs already in
   flight and states without a pin; `VISION_ROUTING_V2` is gone, since a switch would only bring the keyword triggers back.
 
 Not covered (decided with the owner): formula, chart and form pages are no longer read on their words; vector-chart evidence
