@@ -1,6 +1,6 @@
 {
  "schema": 2,
- "rules": 2,
+ "rules": 3,
  "version": "2026-10-25b",
  "creditsPerDollar": 100,
  "priceCard": {
@@ -202,7 +202,10 @@
   "stampTextMaxWords": 10,
   "stampedScanMinImageCoverage": 0.5,
   "sparseTextFullPageImageCoverage": 0.85,
-  "drawnContentMinBytesPerPage": 16384
+  "drawnContentMinBytesPerPage": 16384,
+  "repeatedImageMinPages": 3,
+  "repeatedImageMinShare": 0.2,
+  "unspacedCharsPerWord": 2
  },
- "revision": "922673f06cd86426059c20f2ae8ef10b15a8c33a48fbb93b7b1107b2da837eef"
+ "revision": "78a4eda3c3be86403853f609964505f4a272f990df4e959c105418e5abc1eba7"
 }

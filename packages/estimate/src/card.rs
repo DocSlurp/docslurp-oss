@@ -13,7 +13,7 @@ use crate::error::{Error, ErrorCode};
 /// Card shape this build reads; a card with another `schema` is rejected.
 pub const CARD_SCHEMA: u32 = 2;
 /// Pricing formulas this build implements; a card for other `rules` is rejected rather than quoted with stale logic.
-pub const CARD_RULES: u32 = 2;
+pub const CARD_RULES: u32 = 3;
 
 const BUNDLED: &str = include_str!("../card.json");
 
@@ -107,6 +107,9 @@ pub struct PageRasterRouting {
     pub stamped_scan_min_image_coverage: f64,
     pub sparse_text_full_page_image_coverage: f64,
     pub drawn_content_min_bytes_per_page: f64,
+    pub repeated_image_min_pages: f64,
+    pub repeated_image_min_share: f64,
+    pub unspaced_chars_per_word: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

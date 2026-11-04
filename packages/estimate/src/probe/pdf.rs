@@ -1,14 +1,17 @@
 //! PDF probe: page count, and a page mix measured on sampled pages.
 //!
-//! Each sampled page is classified the way the worker routes it (`authorizeRasterPageOcr` in
-//! `worker/src/stages/classify-route.ts`, evidence from `worker/src/lib/page-image-evidence.ts`), with the thresholds
-//! the card carries: a page with no or almost no native words whose content is a large placed image is `scanned`
-//! (read by a vision model, billed Rich); a text page with sizeable images or heavy vector drawing is `complex`; the
-//! rest, blank pages included, are `text`. Words come from text runs, image coverage from each image's placement
-//! matrix over the page's CropBox, so nothing is rendered.
+//! Each sampled page is classified the way the worker routes it (`decidePageRaster` in
+//! `packages/shared/src/page-raster-routing.ts`, evidence from `worker/src/lib/page-image-evidence.ts`), with the
+//! thresholds the card carries: a page with no or almost no native words whose content is a large placed image is
+//! `scanned` (read by a vision model, billed Rich); a text page with sizeable images or heavy vector drawing is
+//! `complex`; the rest, blank pages included, are `text`. Words come from text runs, image coverage from each image's
+//! placement matrix over the page's CropBox, so nothing is rendered. An image object drawn on at least
+//! `repeatedImageMinPages` sampled pages and `repeatedImageMinShare` of them is page furniture (a logo, a letterhead,
+//! a slide background) and counts for nothing, as in the worker; an image no bigger than `minSignificantImagePixels`
+//! or `minSignificantImageCoverage` counts for nothing either, so a blank page with a 1x1 image is blank.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use lopdf::content::Content;
@@ -99,12 +102,13 @@ fn probe_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
         }
     }
     let budget_hit = readings.iter().any(|reading| reading.exhausted) || forms.document_budget_spent();
+    let repeated = repeated_images(routing, &readings);
     let drawn = !readings.is_empty()
-        && readings.iter().all(|reading| reading.blank)
+        && readings.iter().all(|reading| reading.blank(&repeated))
         && drawn_document(routing, document, file_bytes, pages.len());
     let mut counts = [0usize; 3];
     for reading in &readings {
-        let class = if drawn { PageClass::Scanned } else { reading.class };
+        let class = if drawn { PageClass::Scanned } else { classify(routing, reading.words, &reading.totals(&repeated), reading.path_operations) };
         counts[class as usize] += 1;
     }
     let measured = counts.iter().sum::<usize>();
@@ -130,6 +134,24 @@ fn probe_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
     result.mix_confidence = Some((confidence * 1000.0).round() / 1000.0);
     result.sampled_pages = Some(measured as u32);
     result
+}
+
+/// Image objects that are page furniture: drawn on at least `repeatedImageMinPages` of the sampled pages and on at least
+/// `repeatedImageMinShare` of them (a scan is a different image on every page).
+fn repeated_images(routing: &PageRasterRouting, readings: &[PageReading]) -> HashSet<ObjectId> {
+    let mut pages: HashMap<ObjectId, usize> = HashMap::new();
+    for reading in readings {
+        let on_page: HashSet<ObjectId> = reading.images.iter().filter_map(|image| image.id).collect();
+        for id in on_page {
+            *pages.entry(id).or_insert(0) += 1;
+        }
+    }
+    let scope = readings.len().max(1) as f64;
+    pages
+        .into_iter()
+        .filter(|(_, count)| *count as f64 >= routing.repeated_image_min_pages && *count as f64 / scope >= routing.repeated_image_min_share)
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// `count` indices spread evenly over `0..total`, first and last included.
@@ -280,8 +302,6 @@ struct WordCounter {
     run_length: usize,
     /// Glyphs shown since the last text move, to tell a next-character move from a word gap.
     run_glyphs: f64,
-    /// Any non-space text shown: the page has a text layer (`text_bytes > 0` in the worker's page facts).
-    shown_text: bool,
 }
 
 impl WordCounter {
@@ -297,9 +317,6 @@ impl WordCounter {
             return;
         }
         let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
-        if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
-            self.shown_text = true;
-        }
         if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
             let glyphs = bytes.len() as f64 / 2.0;
             self.end_run();
@@ -348,11 +365,41 @@ struct PageStats {
     interpreted_bytes: usize,
     form_calls: usize,
     exhausted: bool,
-    image_count: usize,
-    /// Every image drawn, however small (`image_count` in the worker's page facts counts them all).
-    any_images: usize,
-    image_coverage: f64,
-    largest_image_coverage: f64,
+    /// Significant images (pixels and placed area over the card's floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
+    /// totals the class is read from are taken after repeated objects are dropped (`ImageTotals`).
+    images: Vec<ImageUse>,
+}
+
+const MAX_TRACKED_IMAGES_PER_PAGE: usize = 64;
+
+#[derive(Debug, Clone, Copy)]
+struct ImageUse {
+    /// The image XObject, or none for an inline image (which has no identity to repeat).
+    id: Option<ObjectId>,
+    coverage: f64,
+}
+
+/// Significant, non-repeated image totals of one page.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ImageTotals {
+    count: usize,
+    coverage: f64,
+    largest: f64,
+}
+
+impl PageStats {
+    fn totals(&self, repeated: &HashSet<ObjectId>) -> ImageTotals {
+        let mut totals = ImageTotals::default();
+        for image in &self.images {
+            if image.id.is_some_and(|id| repeated.contains(&id)) {
+                continue;
+            }
+            totals.count += 1;
+            totals.coverage = (totals.coverage + image.coverage).min(1.0);
+            totals.largest = totals.largest.max(image.coverage);
+        }
+        totals
+    }
 }
 
 impl PageStats {
@@ -465,10 +512,21 @@ fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name
 }
 
 struct PageReading {
-    class: PageClass,
-    /// Neither native words nor significant images.
-    blank: bool,
+    words: f64,
+    path_operations: usize,
+    images: Vec<ImageUse>,
     exhausted: bool,
+}
+
+impl PageReading {
+    fn totals(&self, repeated: &HashSet<ObjectId>) -> ImageTotals {
+        PageStats { images: self.images.clone(), ..PageStats::default() }.totals(repeated)
+    }
+
+    /// Neither native words nor significant, non-repeated images.
+    fn blank(&self, repeated: &HashSet<ObjectId>) -> bool {
+        self.words == 0.0 && self.totals(repeated).count == 0
+    }
 }
 
 fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache) -> Option<PageReading> {
@@ -479,11 +537,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let mut stats = PageStats::default();
     let mut context = Context { document, routing, forms, area };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
-    Some(PageReading {
-        class: classify(routing, &stats),
-        blank: !stats.words.shown_text && stats.any_images == 0,
-        exhausted: stats.exhausted,
-    })
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -503,23 +557,20 @@ fn drawn_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
     drawn_per_page >= routing.drawn_content_min_bytes_per_page
 }
 
-fn classify(routing: &PageRasterRouting, stats: &PageStats) -> PageClass {
-    let words = stats.words.words();
-    if !stats.words.shown_text {
-        // No text layer: with any image the page bills Rich in auto and good (page-base-fee.ts, page facts with no
-        // text bytes and an image); without one it is blank (Fast) unless the whole document is drawn content,
-        // which probe_document decides.
-        return if stats.any_images > 0 { PageClass::Scanned } else { PageClass::Text };
+/// `decidePageRaster` for the sampled page: a page of `sparsePageWords` or more words is text; a sparse page is a scan
+/// when significant, non-repeated images hold its content; everything else is text, blank pages included (a page bills
+/// Rich only when a model reads it, and only scans are read).
+fn classify(routing: &PageRasterRouting, words: f64, images: &ImageTotals, path_operations: usize) -> PageClass {
+    if words < routing.sparse_page_words {
+        let raster = (words == 0.0
+            && (images.largest >= routing.raster_page_min_largest_image_coverage || images.coverage >= routing.raster_page_min_total_image_coverage))
+            || (words <= routing.stamp_text_max_words && images.largest >= routing.stamped_scan_min_image_coverage)
+            || images.largest >= routing.sparse_text_full_page_image_coverage;
+        if raster {
+            return PageClass::Scanned;
+        }
     }
-    let raster = (words == 0.0
-        && (stats.largest_image_coverage >= routing.raster_page_min_largest_image_coverage
-            || stats.image_coverage >= routing.raster_page_min_total_image_coverage))
-        || (words <= routing.stamp_text_max_words && stats.largest_image_coverage >= routing.stamped_scan_min_image_coverage)
-        || (words < routing.sparse_page_words && stats.largest_image_coverage >= routing.sparse_text_full_page_image_coverage);
-    if raster {
-        return PageClass::Scanned;
-    }
-    if stats.image_coverage >= COMPLEX_MIN_IMAGE_COVERAGE || stats.path_operations >= COMPLEX_MIN_PATH_OPERATIONS {
+    if images.coverage >= COMPLEX_MIN_IMAGE_COVERAGE || path_operations >= COMPLEX_MIN_PATH_OPERATIONS {
         return PageClass::Complex;
     }
     PageClass::Text
@@ -533,8 +584,7 @@ struct Context<'a, 'f> {
 }
 
 impl<'a> Context<'a, '_> {
-    fn record_image(&self, stats: &mut PageStats, ctm: &Matrix, width: f64, height: f64) {
-        stats.any_images += 1;
+    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64) {
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
         if !coverage.is_finite()
@@ -543,9 +593,14 @@ impl<'a> Context<'a, '_> {
         {
             return;
         }
-        stats.image_count += 1;
-        stats.image_coverage = (stats.image_coverage + coverage).min(1.0);
-        stats.largest_image_coverage = stats.largest_image_coverage.max(coverage);
+        if stats.images.len() < MAX_TRACKED_IMAGES_PER_PAGE {
+            stats.images.push(ImageUse { id, coverage });
+        } else if let Some(smallest) = stats.images.iter_mut().min_by(|a, b| a.coverage.total_cmp(&b.coverage)) {
+            // A page of hundreds of images keeps the largest ones: they decide the class.
+            if coverage > smallest.coverage {
+                *smallest = ImageUse { id, coverage };
+            }
+        }
     }
 
     fn image_size(&self, dict: &Dictionary, width_key: &[u8], height_key: &[u8]) -> (f64, f64) {
@@ -615,7 +670,7 @@ impl<'a> Context<'a, '_> {
                         if width == 0.0 {
                             (width, height) = self.image_size(&image.dict, b"Width", b"Height");
                         }
-                        self.record_image(stats, &ctm, width, height);
+                        self.record_image(stats, None, &ctm, width, height);
                     }
                 }
                 "Do" => {
@@ -625,7 +680,7 @@ impl<'a> Context<'a, '_> {
                     match subtype {
                         Some(Object::Name(kind)) if kind == b"Image" => {
                             let (width, height) = self.image_size(&xobject.dict, b"Width", b"Height");
-                            self.record_image(stats, &ctm, width, height);
+                            self.record_image(stats, id, &ctm, width, height);
                         }
                         Some(Object::Name(kind)) if kind == b"Form" && depth < MAX_FORM_DEPTH => {
                             stats.form_calls += 1;
@@ -693,27 +748,51 @@ mod tests {
 
     #[test]
     fn classifies_like_the_worker_router() {
-        let page = |words: f64, largest: f64, total: f64, images: usize| {
-            let mut stats =
-                PageStats { largest_image_coverage: largest, image_coverage: total, image_count: images, any_images: images, ..PageStats::default() };
-            stats.words.runs = words;
-            stats.words.shown_text = words > 0.0;
-            stats
-        };
         let routing = routing();
-        assert_eq!(classify(&routing, &page(0.0, 0.9, 0.9, 1)), PageClass::Scanned);
-        assert_eq!(classify(&routing, &page(8.0, 0.6, 0.6, 1)), PageClass::Scanned);
-        assert_eq!(classify(&routing, &page(25.0, 0.9, 0.9, 1)), PageClass::Scanned);
-        assert_eq!(classify(&routing, &page(400.0, 0.9, 0.9, 1)), PageClass::Complex);
-        assert_eq!(classify(&routing, &page(400.0, 0.0, 0.0, 0)), PageClass::Text);
+        let images = |count: usize, largest: f64, total: f64| ImageTotals { count, coverage: total, largest };
+        assert_eq!(classify(&routing, 0.0, &images(1, 0.9, 0.9), 0), PageClass::Scanned);
+        assert_eq!(classify(&routing, 8.0, &images(1, 0.6, 0.6), 0), PageClass::Scanned);
+        assert_eq!(classify(&routing, 25.0, &images(1, 0.9, 0.9), 0), PageClass::Scanned);
+        // A caption-sized amount of text over a mid-size image is a text page, not a scan.
+        assert_eq!(classify(&routing, 25.0, &images(1, 0.6, 0.6), 0), PageClass::Complex);
+        assert_eq!(classify(&routing, 400.0, &images(1, 0.9, 0.9), 0), PageClass::Complex);
+        assert_eq!(classify(&routing, 400.0, &images(0, 0.0, 0.0), 0), PageClass::Text);
         // Blank or vector-only pages bill Fast in the worker.
-        let mut drawn = page(0.0, 0.0, 0.0, 0);
-        drawn.path_operations = 5_000;
-        assert_eq!(classify(&routing, &drawn), PageClass::Text);
-        // No text layer and any image, however small, bills Rich.
-        let mut logo_only = page(0.0, 0.0, 0.0, 0);
-        logo_only.any_images = 1;
-        assert_eq!(classify(&routing, &logo_only), PageClass::Scanned);
+        assert_eq!(classify(&routing, 0.0, &images(0, 0.0, 0.0), 5_000), PageClass::Complex);
+        assert_eq!(classify(&routing, 0.0, &images(0, 0.0, 0.0), 0), PageClass::Text);
+        // Minor images alone never make a scan, and neither does a logo (no significant image at all).
+        assert_eq!(classify(&routing, 0.0, &images(1, 0.1, 0.1), 0), PageClass::Text);
+        assert_eq!(classify(&routing, 0.0, &images(4, 0.1, 0.34), 0), PageClass::Complex);
+        assert_eq!(classify(&routing, 0.0, &images(4, 0.1, 0.36), 0), PageClass::Scanned);
+    }
+
+    #[test]
+    fn drops_images_drawn_on_many_pages_as_page_furniture() {
+        let routing = routing();
+        let id = |number: u32| (number, 0);
+        let page = |ids: &[u32]| PageReading {
+            words: 0.0,
+            path_operations: 0,
+            images: ids.iter().map(|number| ImageUse { id: Some(id(*number)), coverage: 0.9 }).collect(),
+            exhausted: false,
+        };
+        // The same full-bleed background on four pages: furniture, so the pages are blank.
+        let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];
+        let repeated = repeated_images(&routing, &slides);
+        assert!(repeated.contains(&id(7)));
+        assert!(slides.iter().all(|reading| reading.blank(&repeated)));
+        // A different image on every page is a scan on every page.
+        let scans = vec![page(&[1]), page(&[2]), page(&[3]), page(&[4])];
+        let repeated = repeated_images(&routing, &scans);
+        assert!(repeated.is_empty());
+        assert!(scans.iter().all(|reading| !reading.blank(&repeated)));
+        // Two pages sharing an object are not furniture (a duplicated scan), nor three of a hundred.
+        assert!(repeated_images(&routing, &[page(&[9]), page(&[9])]).is_empty());
+        let mut hundred: Vec<PageReading> = (0..100).map(|number| page(&[100 + number])).collect();
+        for reading in hundred.iter_mut().take(3) {
+            reading.images = vec![ImageUse { id: Some(id(9)), coverage: 0.9 }];
+        }
+        assert!(repeated_images(&routing, &hundred).is_empty());
     }
 
     #[test]

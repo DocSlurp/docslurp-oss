@@ -39,7 +39,7 @@ export const ESTIMATE_CARD_SCHEMA = 2;
  * Version of the pricing formulas (quoteUpload, estimateIngest, estimateUploadMedia, the file-type rules). Bump it
  * with any change to them, so a port built for other rules refuses the card instead of quoting with stale logic.
  */
-export const ESTIMATE_RULES = 2;
+export const ESTIMATE_RULES = 3;
 
 function cardBody() {
   return {

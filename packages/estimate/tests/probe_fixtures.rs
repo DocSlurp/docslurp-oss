@@ -63,11 +63,12 @@ fn a_page_tree_cycle_returns() {
 }
 
 #[test]
-fn pages_without_text_but_with_any_image_bill_rich() {
-    // 20 pages, no text layer, a small logo on each: the worker bills every page Rich (page-base-fee.ts).
+fn pages_without_text_and_with_only_a_small_logo_bill_fast() {
+    // 20 pages, no text layer, a small logo on each: no model reads them, so the worker bills every page Fast
+    // (a page bills Rich only when a model read it).
     let result = probe_fixture("no_text_small_images.pdf");
     assert_eq!(result.pages, Some(20.0));
-    assert_eq!(scanned_share(&result), 1.0);
+    assert_eq!(scanned_share(&result), 0.0);
 }
 
 /// Many object streams that each decode to 15 MiB of spaces: under lopdf's per-stream limit, far over the probe's
