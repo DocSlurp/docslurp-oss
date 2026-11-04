@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Builds the GIN expression index behind the folded keyword leg (migration 0121, docs/rollout-search-index.md):
+// Builds the GIN expression index behind the folded keyword leg (migration 0121, docs/rollout-expand-contract-0121-0125.md):
 //
 //   node server/db/folded-search-index.mjs [--status] [--dry-run]
 //

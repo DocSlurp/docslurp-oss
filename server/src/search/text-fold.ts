@@ -1,6 +1,6 @@
 /**
  * Script-aware text folding for keyword search. `foldText` mirrors the database function
- * `docslurp_fold_text` (migration 0121) that builds `document_chunks.ts_folded`, so the query side
+ * `docslurp_fold_text` (migration 0121) behind the folded keyword index (to_tsvector('simple', docslurp_fold_text(text))), so the query side
  * and the indexed side agree: lowercase, Latin diacritics removed, and (in SQL) a space around every
  * CJK / kana / Hangul character. Nothing here guesses a language; it only decides how text is cut into terms.
  */

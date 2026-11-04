@@ -393,7 +393,7 @@ scales (cosine, BM25, graph).
 ### Keyword search beyond English
 
 Keyword search runs two Postgres text-search legs. The English leg stems English text. The folded leg
-(`document_chunks.ts_folded`, migration 0121) uses the `simple` configuration over lowercase, accent-stripped text
+(`to_tsvector('simple', docslurp_fold_text(text))`, migration 0121; its GIN index is built after the migration by `server/db/folded-search-index.mjs`, and until then the leg is slower and time-boxed) uses the `simple` configuration over lowercase, accent-stripped text
 in which every CJK, kana and Hangul character is its own token. It has no stop words, so negations such as "not"
 survive. A query with accents, a non-Latin script or CJK also uses the folded leg, and any query that finds nothing
 in the English leg falls back to it, so "Muller Gebuhren" finds "Müller Gebühren", "日本の首都" finds a passage

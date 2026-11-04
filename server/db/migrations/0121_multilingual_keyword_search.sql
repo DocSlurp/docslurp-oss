@@ -13,7 +13,7 @@
 --   to_tsvector('simple'::regconfig, docslurp_fold_text(text))
 -- which a GIN expression index serves once built. The index cannot be built here (CREATE INDEX CONCURRENTLY
 -- cannot run in a transaction); `node scripts/folded-search-index.mjs` builds it outside the migrator, idempotently
--- (docs/rollout-search-index.md). Until it is built the folded leg works by evaluating the expression for the
+-- (docs/rollout-expand-contract-0121-0125.md). Until it is built the folded leg works by evaluating the expression for the
 -- workspace's chunks, bounded by the search statement timeout, so keyword search never depends on the build.
 CREATE OR REPLACE FUNCTION docslurp_fold_text(input text) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT AS $$

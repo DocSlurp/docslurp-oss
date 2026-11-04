@@ -1281,7 +1281,7 @@ export async function textSearch(
     } catch (error) {
       if (indexed || !isSearchStatementTimeout(error)) throw error;
       countSearchEvent("foldedUnindexedTimeout");
-      console.warn(`[search] folded keyword leg cut off after ${foldedUnindexedTimeoutMs()}ms: ${FOLDED_INDEX_NAME} is not built (docs/rollout-search-index.md)`);
+      console.warn(`[search] folded keyword leg cut off after ${foldedUnindexedTimeoutMs()}ms: ${FOLDED_INDEX_NAME} is not built (docs/rollout-expand-contract-0121-0125.md)`);
       return [] as ChunkRow[];
     }
   };
