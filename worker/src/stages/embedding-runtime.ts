@@ -140,7 +140,19 @@ export interface ContextualChunkUsage {
 const CONTEXTUAL_CHUNK_SUMMARY_LIMIT = 240;
 const CONTEXTUAL_SOURCE_LIMIT = 12_000;
 
+/**
+ * The text of a document as it is chunked, embedded and indexed. Always NFC:
+ * "ü" typed as one character and as "u" plus a combining diaeresis must find the
+ * same chunks, and a decomposed Hangul or accented text must not split a query.
+ */
 export async function extractTextForEmbedding(
+  ...args: Parameters<typeof extractTextForEmbeddingRaw>
+): ReturnType<typeof extractTextForEmbeddingRaw> {
+  const extracted = await extractTextForEmbeddingRaw(...args);
+  return { ...extracted, text: normalizeNfc(extracted.text) };
+}
+
+async function extractTextForEmbeddingRaw(
   document: Document,
   runner: CommandRunner,
   storage: ArtifactStore,
