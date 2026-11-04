@@ -10,6 +10,8 @@ import {
   OcrLowConfidenceError,
   candidateLanguageSets,
   ocrImageText,
+  ocrMaxAttempts,
+  ocrPageBudgetMs,
   parseOsdOutput,
   parseTesseractTsv,
 } from "../lib/ocr-language.js";
@@ -93,6 +95,48 @@ describe("ocrImageText with a scripted tesseract", () => {
     const result = await ocrImageText({ image: "page.png", run: scripted({ eng: word(25, 3), "chi_sim+eng": word(30, 4), "rus+ukr+eng": word(30, 3), "ara+eng": word(90, 10) }, calls) });
     expect(result.languages).toBe("ara+eng");
     expect(result.script).toBeNull();
+  });
+
+  it("caps the trial runs per page at 3 once the script is known, so a hard page is not 6 tesseract runs", async () => {
+    const calls: string[][] = [];
+    // Han has three packs and English after them: the old limit ran all four.
+    const result = await ocrImageText({ image: "page.png", run: scripted({ osd: "Script: Han\nScript confidence: 3", "chi_sim+eng": word(50, 10), "chi_tra+eng": word(52, 10), "jpn+eng": word(51, 10), eng: word(90, 10) }, calls) });
+    // Script detection plus three trials, not detection plus the fourth set that would have read it.
+    expect(calls.filter((call) => call.includes("tsv"))).toHaveLength(3);
+    expect(result.attempts).toHaveLength(3);
+    expect(result.capped).toBe("attempts");
+    expect(result.languages).not.toBe("eng");
+    // An undetected script keeps five trials (an Arabic scan is the fourth set the unknown-script order tries).
+    const unknown = await ocrImageText({ image: "page.png", run: scripted({ eng: word(25, 3), "chi_sim+eng": word(30, 4), "rus+ukr+eng": word(30, 3), "ara+eng": word(90, 10) }) });
+    expect(unknown.languages).toBe("ara+eng");
+    // The cap can be set from 1 to 5, never past it.
+    expect(ocrMaxAttempts({})).toBe(3);
+    expect(ocrMaxAttempts({}, false)).toBe(5);
+    expect(ocrMaxAttempts({ DOCSLURP_OCR_MAX_ATTEMPTS: "1" })).toBe(1);
+    expect(ocrMaxAttempts({ DOCSLURP_OCR_MAX_ATTEMPTS: "9" })).toBe(5);
+    expect(ocrMaxAttempts({ DOCSLURP_OCR_MAX_ATTEMPTS: "0" })).toBe(3);
+    const single = await ocrImageText({ image: "page.png", env: { ...process.env, DOCSLURP_OCR_MAX_ATTEMPTS: "1" }, run: scripted({ eng: word(25, 3), "chi_sim+eng": word(90, 10) }) });
+    expect(single.attempts).toHaveLength(1);
+  });
+
+  it("starts no further trial once the page's OCR time budget is spent, but always runs the first", async () => {
+    let clock = 0;
+    const calls: string[][] = [];
+    const slow = async (args: string[]) => {
+      calls.push(args);
+      clock += 25_000; // every tesseract run takes 25 s
+      if (args.includes("osd")) return "Script: Han\nScript confidence: 3";
+      return word(50, 10);
+    };
+    const result = await ocrImageText({ image: "page.png", now: () => clock, run: slow });
+    // Detection 25 s, first trial 25 s, second trial 25 s (it started at 50 s, inside the 60 s budget), third refused at 75 s.
+    expect(calls.filter((call) => call.includes("tsv"))).toHaveLength(2);
+    expect(result.capped).toBe("time");
+    // A budget of 1 s still reads the page once.
+    clock = 0;
+    const one = await ocrImageText({ image: "page.png", now: () => clock, env: { ...process.env, DOCSLURP_OCR_PAGE_BUDGET_MS: "1000" }, run: slow });
+    expect(one.attempts).toHaveLength(1);
+    expect(ocrPageBudgetMs({})).toBe(60_000);
   });
 
   it("stops after two empty reads when the script is unknown: the page is blank", async () => {

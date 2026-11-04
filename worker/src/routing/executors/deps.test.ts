@@ -94,6 +94,8 @@ describe("production executor deps", () => {
     expect(await deps.pageText(1)).toBeNull();
     expect(await deps.nativePageText("kreuzberg", 1)).toBeNull();
     expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 1 })).text).toBe("scanned words");
+    // Tesseract read page 1: a model read, recorded so the ledger bills the page Rich.
+    expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 1, metric: "tesseract-page-ocr", model: "tesseract" }));
     const label = await deps.label({ path: image, mimeType: "image/png" }, { pageNumber: 3 });
     expect(label.text).toBe("a red bridge");
     expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 3, metric: "image-label", model: "microsoft/Florence-2-small-ft" }));

@@ -18,6 +18,8 @@ export interface LocalArtifactAdapterOptions {
    * matching installed packs, or Tesseract codes such as `eng+deu` from the workspace.
    */
   ocrLanguage?: string;
+  /** Called with a page's number when `tesseract-page-ocr` produced text for it: a model read that bills as a Rich page. */
+  onOcrRead?: (pageNumber: number) => void;
 }
 
 const defaultMaxBytes = 32 * 1024 * 1024;
@@ -172,7 +174,9 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
         setting: options.ocrLanguage,
         run: async (args) => (await runLocalArtifactCommand("tesseract", args, maxBytes, timeoutMs, ctx.signal)).toString("utf8"),
       });
-      return [await emit("tesseract-page-ocr", "page/text", input, Buffer.from(ocr.text, "utf8"), "text/plain; charset=utf-8", "txt", number)];
+      const emitted = await emit("tesseract-page-ocr", "page/text", input, Buffer.from(ocr.text, "utf8"), "text/plain; charset=utf-8", "txt", number);
+      if (/[\p{L}\p{N}]/u.test(ocr.text)) options.onOcrRead?.(number);
+      return [emitted];
     } },
     { id: "pandoc-text-markdown", accepts: ["page/text"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);

@@ -113,6 +113,7 @@ function documentGraph(documentId: string, supplier: string, customers: string[]
     source: "llm",
     llmFailed: false,
     windows: 1,
+    charsAttempted: 100,
     charsRead: 100,
     charsTotal: 100,
     truncated: false,

@@ -13,7 +13,7 @@ use crate::error::{Error, ErrorCode};
 /// Card shape this build reads; a card with another `schema` is rejected.
 pub const CARD_SCHEMA: u32 = 2;
 /// Pricing formulas this build implements; a card for other `rules` is rejected rather than quoted with stale logic.
-pub const CARD_RULES: u32 = 3;
+pub const CARD_RULES: u32 = 4;
 
 const BUNDLED: &str = include_str!("../card.json");
 
@@ -94,6 +94,42 @@ pub struct TextPages {
     pub chars: f64,
 }
 
+/// Bytes of source per page at the two ends of a quote's page range for a file whose pages were not counted: the densest
+/// (`min`, most pages, the high end) and the sparsest (`max`, fewest pages, the low end).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BytesPerPageRange {
+    pub min_bytes_per_page: f64,
+    pub max_bytes_per_page: f64,
+}
+
+/// As [`BytesPerPageRange`] plus the `typical` value that prices the middle (formats only the worker can count).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct BytesPerPageTriple {
+    pub min: f64,
+    pub typical: f64,
+    pub max: f64,
+}
+
+/// A format only the worker can count (Word, slides, sheets, EPUB): the MIME types and extensions (without the dot) that make a file one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerCountedFormatSpec {
+    pub format: String,
+    pub mime_types: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
+/// How a file of unknown page count is quoted over its size (`UNMEASURED_*` in `@docslurp/shared`'s `upload-quote.ts`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmeasuredPages {
+    pub default: BytesPerPageRange,
+    pub text: BytesPerPageRange,
+    pub worker_counted: BTreeMap<String, BytesPerPageTriple>,
+    pub formats: Vec<WorkerCountedFormatSpec>,
+}
+
 /// The worker's raster-page routing thresholds (`PAGE_RASTER_ROUTING` in `@docslurp/shared`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +168,10 @@ pub struct Card {
     pub funded_worker_slots: f64,
     pub speed_boost_multiplier: f64,
     pub assumed_bytes_per_page: f64,
+    pub unmeasured_pages: UnmeasuredPages,
+    /// Rich pages the high end of a quote counts for each page a vision model reads (a dense page's typical output).
+    pub quote_high_rich_page_factor: f64,
+    pub quote_high_rich_output_tokens: f64,
     pub quote_low_mix: PageMix,
     pub quote_high_mix: PageMix,
     pub default_profile: crate::quote::EstimateProfile,
@@ -160,6 +200,12 @@ impl Card {
             }
         }
         card.profile(&card.default_profile.quality)?;
+        // Every format the card lists must have its bytes per page, or a file of that format could not be quoted.
+        for spec in &card.unmeasured_pages.formats {
+            if !card.unmeasured_pages.worker_counted.contains_key(&spec.format) {
+                return Err(Error::invalid_card(format!("card lists format `{}` without its bytes per page", spec.format)));
+            }
+        }
         Ok(card)
     }
 

@@ -54,7 +54,7 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
+import { enforceRunSpend, enforceRunSpendForCharge, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
@@ -120,6 +120,8 @@ type DocumentRow = {
   status: string;
   extraction_mode: string;
   page_count: number;
+  billing_pages?: number | null;
+  billing_pages_method?: string | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
   created_at: string | Date;
   updated_at: string | Date;
@@ -1146,13 +1148,16 @@ export class Store {
         }
         state.refreshStats();
         await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
-        await recordPageBaseFee(client, state, { afterCommit });
+        const pageCharges = await recordPageBaseFee(client, state, { afterCommit });
+        // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
+        state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         await client`update workspace_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
+          stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
           lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
         await insertWorkspaceRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
@@ -2685,16 +2690,23 @@ export class Store {
   }
 
   /**
-   * Replaces intake's page count with the one the worker measured after converting the document (Word, slides, sheets, EPUB), so
-   * the completion charge bills the pages actually read. Scoped to the run's own document.
+   * Records the pages the worker measured for an Office, slide, sheet or EPUB document (documents.billing_pages), so the completion
+   * charge and the optional features bill what the file really holds. `page_count`, the page basis the text splits into, is not
+   * touched: those formats' text has no page breaks. Scoped to the run's own document.
    */
-  async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
+  async setDocumentBillingPages(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> {
     const rows = await this.sql`
-      update documents set page_count = ${pageCount}, updated_at = now()
+      update documents set billing_pages = ${billingPages}, billing_pages_method = ${method}, updated_at = now()
       where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
       returning id
     `;
     return rows.length > 0;
+  }
+
+  /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
+  async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }> {
+    const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
+    return { paused: result.paused };
   }
 
   async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
@@ -4272,6 +4284,8 @@ function mapDocument(row: DocumentRow): Document {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
+    billingPages: row.billing_pages ?? null,
+    billingPagesMethod: row.billing_pages_method ?? null,
     fileFacts: row.file_facts ?? null,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),

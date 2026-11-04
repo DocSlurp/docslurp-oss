@@ -275,11 +275,11 @@ pub struct MediaFile {
     pub duration_seconds: Option<f64>,
 }
 
-fn declared_type(mime_type: Option<&str>) -> String {
+pub fn declared_type(mime_type: Option<&str>) -> String {
     mime_type.unwrap_or("").split(';').next().unwrap_or("").trim().to_lowercase()
 }
 
-fn extension_of(name: &str) -> String {
+pub fn extension_of(name: &str) -> String {
     name.rfind('.').map(|dot| name[dot + 1..].to_lowercase()).unwrap_or_default()
 }
 
@@ -306,7 +306,7 @@ pub fn upload_media_kind(card: &Card, name: &str, mime_type: Option<&str>) -> Op
     None
 }
 
-fn is_generic_type(mime: &str) -> bool {
+pub fn is_generic_type(mime: &str) -> bool {
     mime.is_empty() || mime == "application/octet-stream"
 }
 

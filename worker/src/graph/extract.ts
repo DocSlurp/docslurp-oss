@@ -79,7 +79,9 @@ export interface DocumentGraph {
   /** The model was asked and no window succeeded; the heuristic graph stands in until a retry or rebuild. */
   llmFailed: boolean;
   windows: number;
-  /** Characters of chunk text the model read, out of `charsTotal` in the document; the price follows the share read. */
+  /** Characters of chunk text in windows the model answered (parsed or not): what it read, so what the price follows. Zero for a heuristic graph. */
+  charsAttempted: number;
+  /** Characters of chunk text in windows that parsed into the graph, out of `charsTotal` in the document. */
   charsRead: number;
   charsTotal: number;
   /** The depth's windows covered only part of the document. */
@@ -127,6 +129,8 @@ export async function extractDocumentGraph(args: {
   );
   const windows = plan.windows;
   let charsRead = 0;
+  // Windows the model answered, parsed or not (its tokens were spent reading them); provider errors read nothing.
+  const attempted = new Set<number>();
 
   let extraction: DocumentGraphExtraction | null = null;
   let windowsRead = 0;
@@ -171,6 +175,7 @@ export async function extractDocumentGraph(args: {
         }
         inputTokens += result.usage.inputTokens;
         outputTokens += result.usage.outputTokens;
+        attempted.add(index);
         // Outside either catch: a recorder failure must fail the stage, not silently lose billing.
         context.onUsage?.(result.usage, { window: index + 1, finishReason: result.finishReason });
         if (!context.onUsage) console.log(`[ai-usage] graphrag-extract model=${context.model} input_tokens=${result.usage.inputTokens} output_tokens=${result.usage.outputTokens}`);
@@ -216,6 +221,7 @@ export async function extractDocumentGraph(args: {
     // A graph cut short (credit ran out mid-document) stays stale, so it is extracted again later.
     llmFailed: llmAttempted && (source === "heuristic" || stoppedEarly),
     windows: windowsRead,
+    charsAttempted: source === "llm" ? [...attempted].reduce((sum, index) => sum + (windows[index]?.length ?? 0), 0) : 0,
     charsRead: source === "llm" ? charsRead : 0,
     charsTotal: plan.charsTotal,
     truncated: plan.truncated || (llmAttempted && charsRead < plan.charsTotal),

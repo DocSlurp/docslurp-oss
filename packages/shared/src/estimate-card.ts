@@ -24,7 +24,20 @@ import {
 } from "./media-upload-estimate.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { defaultPipelineFeatures } from "./pipeline.js";
-import { ASSUMED_BYTES_PER_PAGE, estimateProfileFor, QUOTE_HIGH_MIX, QUOTE_LOW_MIX } from "./upload-quote.js";
+import {
+  ASSUMED_BYTES_PER_PAGE,
+  estimateProfileFor,
+  QUOTE_HIGH_MIX,
+  QUOTE_HIGH_RICH_OUTPUT_TOKENS,
+  QUOTE_HIGH_RICH_PAGE_FACTOR,
+  QUOTE_LOW_MIX,
+  UNMEASURED_MAX_BYTES_PER_PAGE,
+  UNMEASURED_MIN_BYTES_PER_PAGE,
+  UNMEASURED_TEXT_MAX_BYTES_PER_PAGE,
+  UNMEASURED_TEXT_MIN_BYTES_PER_PAGE,
+  UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE,
+  workerCountedFormatTable,
+} from "./upload-quote.js";
 
 /*
  * The offline estimator's card (`packages/estimate`): every price, planning constant and routing threshold its Rust
@@ -39,7 +52,7 @@ export const ESTIMATE_CARD_SCHEMA = 2;
  * Version of the pricing formulas (quoteUpload, estimateIngest, estimateUploadMedia, the file-type rules). Bump it
  * with any change to them, so a port built for other rules refuses the card instead of quoting with stale logic.
  */
-export const ESTIMATE_RULES = 3;
+export const ESTIMATE_RULES = 4;
 
 function cardBody() {
   return {
@@ -58,6 +71,21 @@ function cardBody() {
     fundedWorkerSlots: FUNDED_WORKER_SLOTS,
     speedBoostMultiplier: speedBoostMultiplier(true),
     assumedBytesPerPage: ASSUMED_BYTES_PER_PAGE,
+    /**
+     * Bytes of source per page a file of unknown page count is quoted over: the densest file (most pages, the high end) to the
+     * sparsest (fewest, the low end). `workerCounted` formats (Word, slides, sheets, EPUB, which only the worker can count; intake
+     * assumes one page) have their own, with the typical value that prices the middle, and the MIME types and extensions that
+     * make a file one.
+     */
+    unmeasuredPages: {
+      default: { minBytesPerPage: UNMEASURED_MIN_BYTES_PER_PAGE, maxBytesPerPage: UNMEASURED_MAX_BYTES_PER_PAGE },
+      text: { minBytesPerPage: UNMEASURED_TEXT_MIN_BYTES_PER_PAGE, maxBytesPerPage: UNMEASURED_TEXT_MAX_BYTES_PER_PAGE },
+      workerCounted: Object.fromEntries(Object.entries(UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE).map(([format, bytes]) => [format, { ...bytes }])),
+      formats: workerCountedFormatTable(),
+    },
+    /** The high end of a quote counts each page a vision model reads as this many Rich pages (a dense page's typical output tokens). */
+    quoteHighRichPageFactor: QUOTE_HIGH_RICH_PAGE_FACTOR,
+    quoteHighRichOutputTokens: QUOTE_HIGH_RICH_OUTPUT_TOKENS,
     quoteLowMix: { ...QUOTE_LOW_MIX },
     quoteHighMix: { ...QUOTE_HIGH_MIX },
     /** A new hosted workspace with default settings, for quotes made without a workspace's profile. */

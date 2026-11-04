@@ -8,7 +8,8 @@ import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { measureOp } from "../lib/perf-context.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
-import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
+import { chargeFeatureForTextRead, cjkCount, textPagesOfText } from "../pipeline/feature-charges.js";
+import { isCostCapExceeded } from "../pipeline/checkpoints.js";
 import {
   runDocumentStage,
   runDocuments,
@@ -34,7 +35,15 @@ import { readCanonicalDocumentArtifact, readExtractedMarkdown } from "./embeddin
 
 /** Characters of document text per model read, and the most reads per document (about 800 pages of prose). */
 export const STRUCTURED_WINDOW_CHARS = 100_000;
+/** The ceiling on model reads per document; `DOCSLURP_STRUCTURED_MAX_WINDOWS` lowers it (an integer from 1 to this). */
 export const STRUCTURED_MAX_WINDOWS = 8;
+
+/** Reads per document this worker allows: the env value when it is an integer in 1..STRUCTURED_MAX_WINDOWS, else the ceiling. */
+export function structuredMaxWindows(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DOCSLURP_STRUCTURED_MAX_WINDOWS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isInteger(parsed) && parsed >= 1 ? Math.min(parsed, STRUCTURED_MAX_WINDOWS) : STRUCTURED_MAX_WINDOWS;
+}
 const STRUCTURED_WINDOW_CONCURRENCY = 3;
 
 function toError(error: unknown): Error {
@@ -277,7 +286,7 @@ export class StructuredExtractStage implements Stage {
               markdown: markdownText,
               pageCount,
               windowChars: STRUCTURED_WINDOW_CHARS,
-              maxWindows: STRUCTURED_MAX_WINDOWS,
+              maxWindows: structuredMaxWindows(),
             });
             if (plan.truncated) {
               console.warn(
@@ -288,8 +297,27 @@ export class StructuredExtractStage implements Stage {
             let usageOutputTokens = 0;
             let partialEnvelopeSaved = false;
             const windowFields: Array<Record<string, RawStructuredField>> = new Array(plan.windows.length);
+            // What the model has read so far: the price follows the text read (3,500 characters a page), window by window, so a
+            // window that finished before a later one failed is billed and a retry that re-reads it adds nothing.
+            let readChars = 0;
+            let readCjk = 0;
+            let windowsRead = 0;
+            let skippedForCap = 0;
+            const documentTextPages = textPagesOfText(markdownText);
+            const billRead = (floorPages: boolean) => chargeFeatureForTextRead(state, document, "structuredFields", {
+              chars: readChars,
+              cjk: readCjk,
+              floorPages,
+              textPages: documentTextPages,
+              ...(plan.truncated || skippedForCap > 0 ? { total: { chars: plan.charsTotal } } : {}),
+            });
 
             const readWindow = async (windowIndex: number) => {
+              // The run's cost cap counts this stage's own spend: once it is reached no further window is read.
+              if (isCostCapExceeded(state)) {
+                skippedForCap += 1;
+                return;
+              }
               const window = plan.windows[windowIndex]!;
               const task = buildTrustedDocumentTaskPrompt({
                 instruction: [
@@ -350,6 +378,10 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 throw llmError;
               }
               windowFields[windowIndex] = parseStructuredFields(result.text || "{}");
+              windowsRead += 1;
+              readChars += window.text.length;
+              readCjk += cjkCount(window.text);
+              billRead(false);
               const inputTokens = result.usage.inputTokens;
               const outputTokens = result.usage.outputTokens;
               usageInputTokens += inputTokens;
@@ -373,7 +405,17 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 },
               });
             };
-            await runBounded(plan.windows.length, STRUCTURED_WINDOW_CONCURRENCY, readWindow);
+            try {
+              await runBounded(plan.windows.length, STRUCTURED_WINDOW_CONCURRENCY, readWindow);
+            } catch (error) {
+              // The windows that finished were read and are billed (text read, no page floor); the failed one adds nothing.
+              billRead(false);
+              throw error;
+            }
+            if (skippedForCap > 0) {
+              console.warn(`[structured-extract] document=${document.id} cost cap reached; skipped ${skippedForCap} of ${plan.windows.length} windows`);
+            }
+            const capTruncated = skippedForCap > 0;
 
             const fields: Record<string, RawStructuredField> = {};
             for (const k of fieldKeys) {
@@ -447,9 +489,9 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 windows: plan.windows.length,
                 pagesRead: plan.pagesRead,
                 pagesTotal: plan.pagesTotal,
-                charsRead: plan.charsRead,
+                charsRead: capTruncated ? readChars : plan.charsRead,
                 charsTotal: plan.charsTotal,
-                truncated: plan.truncated,
+                truncated: plan.truncated || capTruncated,
               },
             };
 
@@ -503,9 +545,11 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                   `validationFailed=${toError(validationError).message}`,
               );
             }
-            if (plan.truncated) {
+            if (plan.truncated || capTruncated) {
               // A null here may only mean the value is beyond the pages read; never auto-accept such a result.
-              const warning = `not found in the first ${plan.pagesRead} of ${plan.pagesTotal} pages read; the rest of the document was not read`;
+              const warning = capTruncated
+                ? "not found in the windows read before the run's cost cap was reached; the rest of the document was not read"
+                : `not found in the first ${plan.pagesRead} of ${plan.pagesTotal} pages read; the rest of the document was not read`;
               for (const field of Object.values(envelope.fields)) {
                 if (field.value === null || field.value === undefined) field.errors.push(warning);
               }
@@ -540,9 +584,10 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
 
             const inputTokens = usageInputTokens;
             const outputTokens = usageOutputTokens;
-            // Price card: structured fields per started 10 pages, once per document per run
-            // (charged even on a policy reject: the extraction ran), on the pages the model read.
-            chargeDocumentFeature(state, document, "structuredFields", { read: plan.pagesRead, total: plan.pagesTotal });
+            // Price card: structured fields per started 10 pages, once per document per run (charged even on a policy
+            // reject: the extraction ran), on the text the model read: the document's pages at least, or their share when
+            // only part was read, and never fewer than the pages of text read (3,500 characters a page).
+            billRead(true);
 
             // Fail the stage on hard reject so it enters the review queue with schema_errors
             if (overallPolicy === "reject") {
@@ -568,7 +613,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 overallPolicy,
                 overallConfidence: envelope.overallConfidence,
                 pagesRead: plan.pagesRead,
-                truncated: plan.truncated,
+                truncated: plan.truncated || capTruncated,
               },
             );
 
@@ -582,9 +627,11 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 overallPolicy,
                 overallConfidence: envelope.overallConfidence,
                 windows: plan.windows.length,
+                windowsRead,
+                charsRead: readChars,
                 pagesRead: plan.pagesRead,
                 pagesTotal: plan.pagesTotal,
-                truncated: plan.truncated,
+                truncated: plan.truncated || capTruncated,
               },
             };
           },

@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { textBodyPages } from "../lib/office-page-count.js";
+
 const python = process.env.OFFICE_TEST_PYTHON ?? "python3";
 const scripts = path.resolve(import.meta.dirname, "../../scripts");
 const hasOfficeLibs = spawnSync(python, ["-c", "import pptx, openpyxl"]).status === 0;
@@ -35,5 +37,21 @@ describe.skipIf(!hasOfficeLibs)("office sidecar scripts on tricky inputs", () =>
     expect(orders.dataRows).toEqual([2, 4, 6]); // blank rows 3 and 5 are skipped but numbering stays absolute
     expect(orders.csv.trim().split("\n")).toHaveLength(1); // header row only
     expect(book.sheets.find(s => s.name === "Wide")!.truncated).toBe(true); // A1:XFD1048576 does not run for the whole timeout
+  });
+
+  it("writes a run of empty rows as one blank line, so a stray cell far down a sheet is a page, not thousands", () => {
+    const book = path.join(dir, "stray.xlsx");
+    // An 11-cell sheet with a note at A100000: the old sidecar wrote 99,999 rows of commas for the gap (1,667 pages by the 60-line rule).
+    execFileSync(python, ["-c", [
+      "import openpyxl, sys",
+      "wb = openpyxl.Workbook(); ws = wb.active",
+      "for row in range(1, 11): ws.cell(row=row, column=1, value=f'cell {row}')",
+      "ws['A100000'] = 'a note'",
+      "wb.save(sys.argv[1])",
+    ].join("\n"), book]);
+    run("xlsx_extract.py", book, `${book}.json`);
+    const sheet = (JSON.parse(readFileSync(`${book}.json`, "utf8")) as { sheets: { csv: string }[] }).sheets[0]!;
+    expect(sheet.csv.split(/\r?\n/).length).toBeLessThan(20);
+    expect(textBodyPages([sheet.csv])).toBe(1);
   });
 });

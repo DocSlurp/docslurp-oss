@@ -6,7 +6,7 @@ import { Store } from "../db/store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-/** documents.page_count: the worker replaces intake's count of an Office file with the pages it measured, scoped to its own run. */
+/** documents.billing_pages: the worker records the pages it measured for an Office file beside intake's page basis, scoped to its own run. */
 let db: PGlite;
 let server: PGLiteSocketServer;
 let store: Store;
@@ -42,20 +42,25 @@ afterAll(async () => {
   await db?.close();
 });
 
-describe("Store.setDocumentPageCount", () => {
-  it("ends a long DOCX with its measured page count, and loads the file facts intake persisted", async () => {
-    expect(await store.setDocumentPageCount("run1", "long-docx", 300)).toBe(true);
-    const [row] = (await db.query<{ page_count: number }>(`select page_count from documents where id = 'long-docx'`)).rows;
-    expect(row!.page_count).toBe(300);
+describe("Store.setDocumentBillingPages", () => {
+  it("records a long DOCX's measured pages as billing pages and leaves the page basis alone", async () => {
+    expect(await store.setDocumentBillingPages("run1", "long-docx", 300, "pdf-conversion")).toBe(true);
+    const [row] = (await db.query<{ page_count: number; billing_pages: number; billing_pages_method: string }>(
+      `select page_count, billing_pages, billing_pages_method from documents where id = 'long-docx'`)).rows;
+    expect(row).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion" });
     const document = await store.loadDocument("long-docx");
-    expect(document).toMatchObject({ pageCount: 300, fileFacts: { format: "office-word", mismatch: "same-family", declaredMimeType: "application/msword" } });
+    expect(document).toMatchObject({ pageCount: 1, billingPages: 300, fileFacts: { format: "office-word", mismatch: "same-family", declaredMimeType: "application/msword" } });
   }, 60_000);
 
   it("never writes another run's document or a deduplicated copy", async () => {
-    expect(await store.setDocumentPageCount("run1", "other-run", 999)).toBe(false);
-    expect(await store.setDocumentPageCount("run1", "copy", 999)).toBe(false);
-    expect(await store.setDocumentPageCount("run1", "missing", 999)).toBe(false);
-    const rows = (await db.query<{ id: string; page_count: number }>(`select id, page_count from documents where id in ('other-run','copy') order by id`)).rows;
-    expect(rows).toEqual([{ id: "copy", page_count: 1 }, { id: "other-run", page_count: 1 }]);
+    expect(await store.setDocumentBillingPages("run1", "other-run", 999, "pdf-conversion")).toBe(false);
+    expect(await store.setDocumentBillingPages("run1", "copy", 999, "pdf-conversion")).toBe(false);
+    expect(await store.setDocumentBillingPages("run1", "missing", 999, "pdf-conversion")).toBe(false);
+    const rows = (await db.query<{ id: string; billing_pages: number | null }>(`select id, billing_pages from documents where id in ('other-run','copy') order by id`)).rows;
+    expect(rows).toEqual([{ id: "copy", billing_pages: null }, { id: "other-run", billing_pages: null }]);
+  }, 60_000);
+
+  it("refuses a non-positive billing count at the database", async () => {
+    await expect(store.setDocumentBillingPages("run1", "long-docx", 0, "pdf-conversion")).rejects.toThrow();
   }, 60_000);
 });

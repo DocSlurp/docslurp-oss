@@ -1065,22 +1065,22 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 
 | Unit | Credits |
 | --- | --- |
-| Fast page (text-layer PDF, Office, HTML, Markdown, EPUB, text) | 5 per 1,000 pages |
-| Rich page (scanned page, image, or a page read by a vision model) | 250 per 1,000 pages; a page whose model output runs past 1,000 tokens counts once more per extra 1,000 tokens. In Fast quality nothing is read, so scans and images bill as Fast pages |
+| Fast page (any page no vision or OCR model read: a text-layer PDF page, Office, HTML, Markdown, EPUB, text, an unread scan or image) | 5 per 1,000 pages |
+| Rich page (a page a vision or OCR model read: a scanned page the extractor OCR'd, an image read by OCR, a page read by a vision model) | 250 per 1,000 pages; a page whose model output runs past 1,000 tokens counts once more per extra 1,000 tokens, summed over the models that read it. In Fast quality nothing is read, so scans and images bill as Fast pages |
 | Audio | 1 Rich page per minute |
 | Video (frames read) | 3 Rich pages per minute |
 | Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
 | Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
 | Chat answer | 1 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
 | Document summary (`summarize`) | 0.5 per document |
-| Structured fields (`outputSchema`) | 1 per started 10 pages per document |
-| Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
+| Structured fields (`outputSchema`) | 1 per started 10 pages per document, on the pages of text the model read (3,500 characters a page) when that is more than the page count |
+| Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document, on the same text-read basis |
 | Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
 | Web search (web tools) | 1 per search; a deep search, or one that returns page content, counts as 2 |
 | Web page read (fetch or crawl) | 0.25 per page |
 | Site map | 1 per started 50 discovered URLs |
 
-Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
+Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. A Word, slide, sheet or EPUB file arrives counted as one page; the worker measures its real pages after converting it and bills those (see [pricing and credits](pricing-and-credits.md)). `POST /v1/uploads/estimate` prices such a file you did not count over its size at the format's bytes per page, and says that the high end counts a dense page's typical vision output, not a ceiling. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
 
 Organizations that have bought credits (funded) run up to 250 workers at once; starter organizations run up to 50. Rate limits are the same for both. Larger ceilings and dedicated (private) machines are sold by sales.
 

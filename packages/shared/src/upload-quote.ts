@@ -14,12 +14,14 @@ import {
   type PipelineProfileId,
   pipelineProfileIdSchema,
 } from "./billing.js";
+import { fileExtension, FILE_FORMATS } from "./file-formats.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   estimateUploadMedia,
   isUploadImageFile,
   isUploadTextFile,
   TEXT_PAGE_CHARS,
+  TEXT_PAGE_MIME_PREFIXES,
   uploadMediaKind,
   type UploadMediaEstimate,
   type UploadMediaFile,
@@ -48,6 +50,83 @@ export const UNMEASURED_MAX_BYTES_PER_PAGE = 300 * 1024;
  */
 export const UNMEASURED_TEXT_MAX_BYTES_PER_PAGE = 7_000;
 export const UNMEASURED_TEXT_MIN_BYTES_PER_PAGE = 720;
+
+/**
+ * Formats whose page count only the worker can measure (it converts or parses the file): intake counts them as one page and the
+ * page count is `assumed`. A file of these is priced over its size, at bytes per page that hold for the format rather than for a scan:
+ * a Word, slide, sheet or EPUB file holds a page in a few KB to a few tens of KB, far below a PDF's 16 KB to 300 KB scanned page.
+ */
+export type WorkerCountedFormat = "office-word" | "office-other" | "office-excel" | "office-pptx" | "epub";
+export const WORKER_COUNTED_FORMATS: readonly WorkerCountedFormat[] = ["office-word", "office-other", "office-excel", "office-pptx", "epub"];
+/**
+ * Bytes of source per page for each of those formats, as `[min, typical, max]`: `min` is the densest file (the most pages: the
+ * high end of a quote), `typical` prices the middle, `max` is an image-heavy file (the fewest pages: the low end). Judgement
+ * from what the formats hold (compressed text, a page of a .docx is 1 to 7 KB; a slide is a few KB with no pictures and
+ * 100 KB or more with them; a sheet page is 3,500 characters of CSV, about 1 KB compressed). They are quoted, never billed:
+ * the worker measures the real count.
+ */
+export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCountedFormat, { min: number; typical: number; max: number }>> = {
+  "office-word": { min: 1_024, typical: 12 * 1024, max: 150 * 1024 },
+  "office-other": { min: 2_048, typical: 24 * 1024, max: 300 * 1024 },
+  "office-excel": { min: 512, typical: 4 * 1024, max: 300 * 1024 },
+  "office-pptx": { min: 2_048, typical: 40 * 1024, max: 300 * 1024 },
+  epub: { min: 1_024, typical: 6 * 1024, max: 300 * 1024 },
+};
+
+/**
+ * The MIME types and extensions that make a file one of those formats (the card ships them for ports that cannot import the table).
+ * A MIME type the API counts as text (`text/rtf`) is left out: intake counts such a file from its text.
+ */
+export function workerCountedFormatTable(): Array<{ format: WorkerCountedFormat; mimeTypes: string[]; extensions: string[] }> {
+  cachedFormatTable ??= WORKER_COUNTED_FORMATS.map((format) => {
+    const specs = FILE_FORMATS.filter((spec) => spec.format === format);
+    return {
+      format,
+      mimeTypes: [...new Set(specs.flatMap((spec) => [spec.mimeType, ...(spec.aliases ?? [])]))]
+        .filter((type) => !TEXT_PAGE_MIME_PREFIXES.some((prefix) => type.startsWith(prefix))),
+      extensions: [...new Set(specs.flatMap((spec) => spec.extensions.map((extension) => extension.slice(1))))],
+    };
+  });
+  return cachedFormatTable;
+}
+let cachedFormatTable: Array<{ format: WorkerCountedFormat; mimeTypes: string[]; extensions: string[] }> | null = null;
+
+/**
+ * The worker-counted format of a file: its declared MIME type when one of them claims it, else its extension when the type is absent
+ * or generic (the rule `isUploadImageFile` and `isUploadTextFile` follow, which the offline estimator's port repeats).
+ */
+export function workerCountedFormat(file: { name: string; type?: string | null }): WorkerCountedFormat | null {
+  const type = (file.type ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  const table = workerCountedFormatTable();
+  const byType = table.find((entry) => entry.mimeTypes.includes(type));
+  if (byType) return byType.format;
+  if (type !== "" && type !== "application/octet-stream") return null;
+  const extension = fileExtension(file.name).slice(1);
+  return table.find((entry) => entry.extensions.includes(extension))?.format ?? null;
+}
+
+/**
+ * Where intake's page count came from: `counted` (a PDF's own count, the text rule over a text file, an image's one page) or `assumed`
+ * (one page for a format only the worker can count). Stored as documents.page_count_source (migration 0126).
+ */
+export type PageCountSource = "counted" | "assumed";
+export function intakePageCountSource(file: { name: string; type?: string | null }): PageCountSource {
+  return workerCountedFormat(file) ? "assumed" : "counted";
+}
+
+/**
+ * The pages a cost forecast may pass as counted for a stored document: the worker's measured billing pages, else intake's page count
+ * when intake counted it. An assumed count is left out so the forecast prices the file's size instead of one page.
+ */
+export function countedPagesForForecast(document: { pageCount: number; billingPages?: number | null; pageCountSource?: string | null }): number | undefined {
+  if (Number(document.billingPages) > 0) return Number(document.billingPages);
+  return document.pageCountSource !== "assumed" && Number(document.pageCount) > 0 ? Number(document.pageCount) : undefined;
+}
+
+/** Pages of a file of `format` from its size alone, at the format's typical bytes per page (at least 1). */
+export function pagesFromSize(format: WorkerCountedFormat, sizeBytes: number): number {
+  return Math.max(1, Math.ceil(Math.max(0, sizeBytes) / UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE[format].typical));
+}
 
 /** The cheap end of a quote when a file's page mix is unknown: every page has a text layer. */
 export const QUOTE_LOW_MIX: Readonly<PageMix> = { text: 1, complex: 0, scanned: 0 };
@@ -148,13 +227,16 @@ export type PageRange = { low: number; central: number; high: number; measured: 
  * for a text file, and its size at ASSUMED_BYTES_PER_PAGE for anything else (at least 1).
  */
 export function quoteFilePages(file: { name: string; type?: string | null; size: number; pages?: number }): number {
+  const counted = file.pages === undefined ? workerCountedFormat(file) : null;
   const pages = file.pages
     ?? (isUploadImageFile(file)
       ? 1
       // Text pages count characters (TEXT_PAGE_CHARS each); bytes bound them from above for UTF-8.
       : isUploadTextFile(file)
         ? Math.ceil(file.size / TEXT_PAGE_CHARS)
-        : Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE));
+        : counted
+          ? pagesFromSize(counted, file.size)
+          : Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE));
   return Math.max(1, Math.round(pages));
 }
 
@@ -162,9 +244,12 @@ export function quoteFilePages(file: { name: string; type?: string | null; size:
 export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number }): PageRange {
   const central = quoteFilePages(file);
   if (file.pages !== undefined || isUploadImageFile(file)) return { low: central, central, high: central, measured: true };
+  const counted = workerCountedFormat(file);
   const [lowDivisor, highDivisor] = isUploadTextFile(file)
     ? [UNMEASURED_TEXT_MAX_BYTES_PER_PAGE, UNMEASURED_TEXT_MIN_BYTES_PER_PAGE]
-    : [UNMEASURED_MAX_BYTES_PER_PAGE, UNMEASURED_MIN_BYTES_PER_PAGE];
+    : counted
+      ? [UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE[counted].max, UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE[counted].min]
+      : [UNMEASURED_MAX_BYTES_PER_PAGE, UNMEASURED_MIN_BYTES_PER_PAGE];
   return {
     low: Math.max(1, Math.min(central, Math.round(Math.ceil(file.size / lowDivisor)))),
     central,
@@ -232,6 +317,14 @@ function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: Pag
     high.scanned += range.high * fileHigh.scanned * richFactor;
   }
   return { low, high, known, unmeasured, rangeLow, rangeHigh };
+}
+
+/**
+ * What the high end of a quote assumes of a page a vision model reads: a dense page's typical output, `factor` Rich pages. A
+ * longer output bills one more Rich page per 1,000 tokens past the first 1,000, so the high end is typical, not a ceiling.
+ */
+function richHighEnd(factor: number): string {
+  return `high end assumes ${factor} Rich pages for each page a vision model reads (a dense page's typical ${QUOTE_HIGH_RICH_OUTPUT_TOKENS.toLocaleString("en-US")}-token output; each further 1,000 output tokens bills one more, so it is typical, not a ceiling)`;
 }
 
 /** The bitrates durations are assumed at when a media file's length is not known, for the quote's basis text. */
@@ -303,6 +396,7 @@ export function quoteUpload(args: {
       ? { pagesRange: { low: Math.max(0, Math.round(mixes.rangeLow)), high: Math.max(0, Math.round(mixes.rangeHigh)) }, unmeasuredFiles: mixes.unmeasured }
       : {}),
     basis: `${profile.quality} profile, ${profile.stageCount} of ${profile.stageCount} stages; ${range}; `
+      + (profile.quality === "fast" ? "" : `${richHighEnd(QUOTE_HIGH_RICH_PAGE_FACTOR)}; `)
       + "modeled averages, not measured for this corpus",
   });
 

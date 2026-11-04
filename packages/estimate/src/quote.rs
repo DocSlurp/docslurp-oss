@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::card::{Card, PageMix};
 use crate::error::Error;
 use crate::price::{
-    estimate_ingest, estimate_upload_media, is_image_file, is_text_file, js_round, upload_media_kind, CreditRange, IngestEstimate,
-    IngestInput, MediaFile, UploadMediaEstimate,
+    declared_type, estimate_ingest, estimate_upload_media, extension_of, is_generic_type, is_image_file, is_text_file, js_round,
+    upload_media_kind, CreditRange, IngestEstimate, IngestInput, MediaFile, UploadMediaEstimate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,8 +186,24 @@ pub struct Quote {
     pub warnings: Vec<String>,
 }
 
+/// Port of `workerCountedFormat`: the format (Word, slides, sheets, EPUB) a file is, by declared MIME type when one claims it,
+/// else by extension when the type is absent or generic. `None` for any other file.
+fn worker_counted_format<'a>(card: &'a Card, name: &str, mime_type: Option<&str>) -> Option<&'a str> {
+    let mime = declared_type(mime_type);
+    let formats = &card.unmeasured_pages.formats;
+    if let Some(spec) = formats.iter().find(|spec| spec.mime_types.iter().any(|candidate| *candidate == mime)) {
+        return Some(&spec.format);
+    }
+    if !is_generic_type(&mime) {
+        return None;
+    }
+    let extension = extension_of(name);
+    formats.iter().find(|spec| spec.extensions.iter().any(|candidate| *candidate == extension)).map(|spec| spec.format.as_str())
+}
+
 /// Pages a non-media file counts as: its known page count; else 1 for an image file, its size over the card's
-/// characters per text page for a text file, and its size at the card's bytes per page for anything else (at least 1).
+/// characters per text page for a text file, its size at the format's typical bytes per page for a Word, slide, sheet or EPUB
+/// file, and its size at the card's bytes per page for anything else (at least 1).
 pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
     let pages = file.pages.unwrap_or_else(|| {
         let mime = file.mime_type.as_deref();
@@ -196,6 +212,8 @@ pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
         } else if is_text_file(card, &file.name, mime) {
             // Text pages count characters; bytes bound them from above for UTF-8.
             (file.size / card.text_pages.chars).ceil()
+        } else if let Some(bytes) = worker_counted_format(card, &file.name, mime).and_then(|format| card.unmeasured_pages.worker_counted.get(format)) {
+            (file.size.max(0.0) / bytes.typical).ceil()
         } else {
             (file.size / card.assumed_bytes_per_page).ceil()
         }
@@ -206,14 +224,9 @@ pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
 const IMAGE_FILE_MIX: PageMix = PageMix::new(0.0, 0.0, 1.0);
 const TEXT_FILE_MIX: PageMix = PageMix::new(1.0, 0.0, 0.0);
 
-// The ends of the page range of a file whose pages were not counted (`upload-quote.ts`: UNMEASURED_* and QUOTE_HIGH_RICH_*).
-// The golden cases hold these in step with the TypeScript.
-const UNMEASURED_MIN_BYTES_PER_PAGE: f64 = 16.0 * 1024.0;
-const UNMEASURED_MAX_BYTES_PER_PAGE: f64 = 300.0 * 1024.0;
-const UNMEASURED_TEXT_MAX_BYTES_PER_PAGE: f64 = 7_000.0;
-const UNMEASURED_TEXT_MIN_BYTES_PER_PAGE: f64 = 720.0;
-/// `richPagesForOutputTokens(2000)`: a dense page's output bills the included 1,000 tokens plus one extra Rich page.
-const QUOTE_HIGH_RICH_PAGE_FACTOR: f64 = 2.0;
+// The ends of the page range of a file whose pages were not counted, and the Rich pages the high end counts for a page a vision
+// model reads, are on the card (`unmeasuredPages`, `quoteHighRichPageFactor`; `upload-quote.ts` is the source). The golden cases hold
+// this port in step with the TypeScript.
 
 /// Where a file's page count sits: the cheap end, the middle and the expensive end; `measured` when the client counted them.
 struct PageRange {
@@ -229,10 +242,13 @@ fn quote_file_page_range(card: &Card, file: &QuoteFile) -> PageRange {
     if file.pages.is_some() || is_image_file(card, &file.name, mime) {
         return PageRange { low: central, high: central, measured: true };
     }
+    let unmeasured = &card.unmeasured_pages;
     let (low_divisor, high_divisor) = if is_text_file(card, &file.name, mime) {
-        (UNMEASURED_TEXT_MAX_BYTES_PER_PAGE, UNMEASURED_TEXT_MIN_BYTES_PER_PAGE)
+        (unmeasured.text.max_bytes_per_page, unmeasured.text.min_bytes_per_page)
+    } else if let Some(bytes) = worker_counted_format(card, &file.name, mime).and_then(|format| unmeasured.worker_counted.get(format)) {
+        (bytes.max, bytes.min)
     } else {
-        (UNMEASURED_MAX_BYTES_PER_PAGE, UNMEASURED_MIN_BYTES_PER_PAGE)
+        (unmeasured.default.max_bytes_per_page, unmeasured.default.min_bytes_per_page)
     };
     PageRange {
         low: 1f64.max(central.min((file.size / low_divisor).ceil())),
@@ -315,6 +331,33 @@ fn quote_mixes(card: &Card, files: &[&QuoteFile], rich_factor: f64) -> QuoteMixe
     QuoteMixes { low, high, known, unmeasured, range_low, range_high }
 }
 
+/// What the high end of a quote assumes of a page a vision model reads (`richHighEnd`): typical, not a ceiling.
+fn rich_high_end(card: &Card) -> String {
+    format!(
+        "high end assumes {} Rich pages for each page a vision model reads (a dense page's typical {}-token output; each further 1,000 output tokens bills one more, so it is typical, not a ceiling)",
+        js_number(card.quote_high_rich_page_factor),
+        thousands(card.quote_high_rich_output_tokens)
+    )
+}
+
+/// A JavaScript number as a template literal prints it, for the whole numbers the card holds.
+fn js_number(value: f64) -> String {
+    if value.fract() == 0.0 { format!("{}", value as i64) } else { format!("{value}") }
+}
+
+/// `toLocaleString("en-US")` for a whole number: comma-grouped thousands.
+fn thousands(value: f64) -> String {
+    let digits = format!("{}", value.abs() as u64);
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if value < 0.0 { format!("-{grouped}") } else { grouped }
+}
+
 /// The bitrates durations are assumed at when a media file's length is not known, for the quote's basis text.
 fn assumed_bitrates(card: &Card) -> String {
     let kbps = |bytes_per_minute: f64| js_round(bytes_per_minute * 8.0 / 60.0 / 1000.0);
@@ -342,7 +385,7 @@ pub fn quote_upload(
     let pages = 0f64.max(js_round(paged.iter().fold(0.0, |sum, file| sum + quote_file_pages(card, file))));
     let documents = paged.len() as f64;
     // Fast never reads a page with a model, so no page can bill the extra Rich pages of a long output.
-    let mixes = quote_mixes(card, &paged, if profile.quality == "fast" { 1.0 } else { QUOTE_HIGH_RICH_PAGE_FACTOR });
+    let mixes = quote_mixes(card, &paged, if profile.quality == "fast" { 1.0 } else { card.quote_high_rich_page_factor });
     let features: std::collections::BTreeMap<String, bool> = card
         .document_features
         .iter()
@@ -409,8 +452,11 @@ pub fn quote_upload(
         },
         seconds: Some(CreditRange { low: round_up5(seconds(low.wall_seconds)), high: round_up5(seconds(high.wall_seconds)) }),
         basis: format!(
-            "{} profile, {} of {} stages; {range}; modeled averages, not measured for this corpus",
-            profile.quality, profile.stage_count, profile.stage_count
+            "{} profile, {} of {} stages; {range}; {}modeled averages, not measured for this corpus",
+            profile.quality,
+            profile.stage_count,
+            profile.stage_count,
+            if profile.quality == "fast" { String::new() } else { format!("{}; ", rich_high_end(card)) }
         ),
     };
 

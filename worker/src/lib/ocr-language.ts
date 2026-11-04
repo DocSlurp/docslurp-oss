@@ -23,8 +23,31 @@ export const OCR_RETRY_BELOW_CONFIDENCE = 60;
 export const OCR_REJECT_BELOW_CONFIDENCE = 40;
 /** A result with fewer words than this cannot be judged junk. */
 const MIN_WORDS_TO_JUDGE = 8;
-/** Trial runs per page: the first plus at most this many more. */
-const MAX_ATTEMPTS = 5;
+/**
+ * Trial runs per page in `auto`: the language sets tried before the best reading stands. Script detection plus five sets
+ * ran ~40-50 s on a hard page. With the script detected, three sets cover its own pack, its wider pack and English. With
+ * the script unknown (detection fails on a page with little text, and an Arabic scan then needs the fourth common script)
+ * the cap is the five sets the unknown-script order reaches, still bounded by the page's time budget and by the rule that
+ * two empty reads end a blank page. `DOCSLURP_OCR_MAX_ATTEMPTS` (1 to 5) overrides both; a language the workspace names is one
+ * run whatever this says.
+ */
+export const OCR_MAX_ATTEMPTS = 3;
+export const OCR_MAX_ATTEMPTS_UNKNOWN_SCRIPT = 5;
+/** Wall-clock budget for one page across script detection and every trial run; no further trial starts past it. */
+export const OCR_PAGE_BUDGET_MS = 60_000;
+
+/** Trial runs per page this worker allows (`DOCSLURP_OCR_MAX_ATTEMPTS`, an integer from 1 to 5, else the default for the script). */
+export function ocrMaxAttempts(env: NodeJS.ProcessEnv = process.env, scriptKnown = true): number {
+  const parsed = Number(env.DOCSLURP_OCR_MAX_ATTEMPTS?.trim());
+  if (Number.isInteger(parsed) && parsed >= 1) return Math.min(5, parsed);
+  return scriptKnown ? OCR_MAX_ATTEMPTS : OCR_MAX_ATTEMPTS_UNKNOWN_SCRIPT;
+}
+
+/** Milliseconds one page's OCR may run before no further trial starts (`DOCSLURP_OCR_PAGE_BUDGET_MS`, at least 1,000). */
+export function ocrPageBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.DOCSLURP_OCR_PAGE_BUDGET_MS?.trim());
+  return Number.isFinite(parsed) && parsed >= 1_000 ? Math.floor(parsed) : OCR_PAGE_BUDGET_MS;
+}
 
 export class OcrLowConfidenceError extends Error {
   constructor(readonly languages: string, readonly meanConfidence: number, readonly words: number, readonly script: string | null) {
@@ -125,6 +148,8 @@ export interface OcrOutcome {
   meanConfidence: number | null;
   /** More than one language set was tried for the page. */
   escalated: boolean;
+  /** Trials were cut short by the attempt cap or the page's time budget before a confident reading. */
+  capped: "attempts" | "time" | null;
   attempts: Array<{ languages: string; words: number; meanConfidence: number | null }>;
 }
 
@@ -152,8 +177,11 @@ export function candidateLanguageSets(script: string | null, env: NodeJS.Process
  * OCR of one page image. `setting` is `auto` (detect the script, retry on low
  * confidence) or the workspace's own language codes.
  */
-export async function ocrImageText(args: { image: string; setting?: string; run: TesseractRun; env?: NodeJS.ProcessEnv }): Promise<OcrOutcome> {
+export async function ocrImageText(args: { image: string; setting?: string; run: TesseractRun; env?: NodeJS.ProcessEnv; now?: () => number }): Promise<OcrOutcome> {
   const env = args.env ?? process.env;
+  const now = args.now ?? Date.now;
+  const started = now();
+  const budgetMs = ocrPageBudgetMs(env);
   const setting = (args.setting ?? ocrLanguageSettingFromEnv(env)).trim() || OCR_AUTO;
   const attempts: OcrOutcome["attempts"] = [];
   let script: string | null = null;
@@ -172,16 +200,21 @@ export async function ocrImageText(args: { image: string; setting?: string; run:
     candidates = [parsed.data];
   }
 
+  const maxAttempts = ocrMaxAttempts(env, script !== null);
   let best: (TsvResult & { languages: string }) | null = null;
   // Confidence counts in full once a result has a handful of words; fewer words cannot outvote a longer reading.
   const score = (result: TsvResult) => (result.meanConfidence ?? 0) * Math.min(1, result.words / 5);
-  for (const languages of candidates.slice(0, MAX_ATTEMPTS)) {
+  let capped: OcrOutcome["capped"] = null;
+  for (const [index, languages] of candidates.entries()) {
+    if (index >= maxAttempts) { capped = "attempts"; break; }
+    // The first trial always runs; a later one starts only inside the page's time budget.
+    if (index > 0 && now() - started >= budgetMs) { capped = "time"; break; }
     const result = parseTesseractTsv(await args.run([args.image, "stdout", "-l", languages, "--psm", "3", "tsv"]));
     attempts.push({ languages, words: result.words, meanConfidence: result.meanConfidence });
     if (!best || score(result) > score(best)) best = { ...result, languages };
     // Confident text needs no second opinion. Nothing read is a blank page once the script is known, or once two
     // different packs both found nothing (script detection also fails on blank pages).
-    if ((result.meanConfidence ?? 0) >= OCR_RETRY_BELOW_CONFIDENCE) break;
+    if ((result.meanConfidence ?? 0) >= OCR_RETRY_BELOW_CONFIDENCE) { capped = null; break; }
     if (result.words === 0 && (script !== null || attempts.filter((attempt) => attempt.words === 0).length >= 2 || setting !== OCR_AUTO)) break;
   }
 
@@ -196,6 +229,7 @@ export async function ocrImageText(args: { image: string; setting?: string; run:
     words: outcome.words,
     meanConfidence: outcome.meanConfidence,
     escalated: attempts.length > 1,
+    capped,
     attempts,
   };
 }

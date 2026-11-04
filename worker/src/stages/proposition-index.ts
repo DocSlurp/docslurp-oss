@@ -6,7 +6,7 @@ import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
-import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
+import { chargeDocumentFeature, textPagesOfText } from "../pipeline/feature-charges.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
@@ -200,7 +200,8 @@ export class PropositionIndexStage implements Stage {
               },
             );
             // Price card (provisional): propositions per started 10 pages, once per document per run.
-            chargeDocumentFeature(state, document, "propositions");
+            // Priced on the pages the document bills, but never on more pages than its text holds (a layout-measured count of blank pages).
+            chargeDocumentFeature(state, document, "propositions", undefined, { textPages: textPagesOfText(paragraphs.join("\n")) });
 
             // Record usage for embedding calls
             const embeddingTokens =

@@ -1,7 +1,7 @@
 {
  "schema": 2,
- "rules": 3,
- "version": "2026-10-25b",
+ "rules": 4,
+ "version": "2026-11-04",
  "creditsPerDollar": 100,
  "priceCard": {
   "fastPer1kPages": 5,
@@ -119,6 +119,100 @@
  "fundedWorkerSlots": 250,
  "speedBoostMultiplier": 4,
  "assumedBytesPerPage": 76800,
+ "unmeasuredPages": {
+  "default": {
+   "minBytesPerPage": 16384,
+   "maxBytesPerPage": 307200
+  },
+  "text": {
+   "minBytesPerPage": 720,
+   "maxBytesPerPage": 7000
+  },
+  "workerCounted": {
+   "office-word": {
+    "min": 1024,
+    "typical": 12288,
+    "max": 153600
+   },
+   "office-other": {
+    "min": 2048,
+    "typical": 24576,
+    "max": 307200
+   },
+   "office-excel": {
+    "min": 512,
+    "typical": 4096,
+    "max": 307200
+   },
+   "office-pptx": {
+    "min": 2048,
+    "typical": 40960,
+    "max": 307200
+   },
+   "epub": {
+    "min": 1024,
+    "typical": 6144,
+    "max": 307200
+   }
+  },
+  "formats": [
+   {
+    "format": "office-word",
+    "mimeTypes": [
+     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ],
+    "extensions": [
+     "docx"
+    ]
+   },
+   {
+    "format": "office-other",
+    "mimeTypes": [
+     "application/msword",
+     "application/vnd.oasis.opendocument.text",
+     "application/rtf"
+    ],
+    "extensions": [
+     "doc",
+     "odt",
+     "rtf"
+    ]
+   },
+   {
+    "format": "office-excel",
+    "mimeTypes": [
+     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+     "application/vnd.ms-excel"
+    ],
+    "extensions": [
+     "xlsx",
+     "xls"
+    ]
+   },
+   {
+    "format": "office-pptx",
+    "mimeTypes": [
+     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+     "application/vnd.ms-powerpoint"
+    ],
+    "extensions": [
+     "pptx",
+     "ppt"
+    ]
+   },
+   {
+    "format": "epub",
+    "mimeTypes": [
+     "application/epub+zip"
+    ],
+    "extensions": [
+     "epub"
+    ]
+   }
+  ]
+ },
+ "quoteHighRichPageFactor": 2,
+ "quoteHighRichOutputTokens": 2000,
  "quoteLowMix": {
   "text": 1,
   "complex": 0,
@@ -130,7 +224,7 @@
   "scanned": 1
  },
  "defaultProfile": {
-  "cardVersion": "2026-10-25b",
+  "cardVersion": "2026-11-04",
   "quality": "auto",
   "documentFeatures": {
    "documentSummary": false,
@@ -209,5 +303,5 @@
   "repeatedImageMinShare": 0.2,
   "unspacedCharsPerWord": 2
  },
- "revision": "0cff9834aeacda724f34a22105c7265b89a1e06a62cd1bc07e016e2b159608c9"
+ "revision": "0cfbb0410888c2f6f7a39f9e90d704b4c97b6556fb08817cb73df415661792b1"
 }
