@@ -13,25 +13,35 @@ pub(super) fn probe(input: &ProbeInput<'_>) -> Option<ProbeResult> {
         let brand = &head[8..12];
         let audio_only = matches!(brand, b"M4A " | b"M4B " | b"M4P ");
         let kind = if audio_only || input.mime().starts_with("audio/") { ProbeKind::Audio } else { ProbeKind::Video };
-        let format = if audio_only { "m4a" } else if brand == b"qt  " { "mov" } else { "mp4" };
-        return Some(finish(ProbeResult::new(kind, format), mp4_duration(input)));
+        let (format, mime) = match (kind, brand) {
+            (ProbeKind::Audio, _) => ("m4a", "audio/mp4"),
+            (_, b"qt  ") => ("mov", "video/quicktime"),
+            _ => ("mp4", "video/mp4"),
+        };
+        return Some(finish(ProbeResult::new(kind, format, Some(mime)), mp4_duration(input)));
     }
     if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
-        return Some(finish(ProbeResult::new(ProbeKind::Audio, "wav"), wav_duration(input)));
+        return Some(finish(ProbeResult::new(ProbeKind::Audio, "wav", Some("audio/wav")), wav_duration(input)));
     }
     if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         let kind = if input.mime().starts_with("audio/") || input.extension() == "weba" { ProbeKind::Audio } else { ProbeKind::Video };
-        let format = if find(head, b"webm", 64).is_some() { "webm" } else { "mkv" };
-        return Some(finish(ProbeResult::new(kind, format), ebml_duration(head)));
+        let webm = find(head, b"webm", 64).is_some();
+        let (format, mime) = match (webm, kind) {
+            (true, ProbeKind::Audio) => ("webm", "audio/webm"),
+            (true, _) => ("webm", "video/webm"),
+            (false, ProbeKind::Audio) => ("mka", "audio/x-matroska"),
+            (false, _) => ("mkv", "video/x-matroska"),
+        };
+        return Some(finish(ProbeResult::new(kind, format, Some(mime)), ebml_duration(head)));
     }
     if head.starts_with(b"fLaC") {
-        return Some(finish(ProbeResult::new(ProbeKind::Audio, "flac"), flac_duration(head)));
+        return Some(finish(ProbeResult::new(ProbeKind::Audio, "flac", Some("audio/flac")), flac_duration(head)));
     }
     if head.starts_with(b"OggS") {
-        return Some(finish(ProbeResult::new(ProbeKind::Audio, "ogg"), ogg_duration(input)));
+        return Some(finish(ProbeResult::new(ProbeKind::Audio, "ogg", Some("audio/ogg")), ogg_duration(input)));
     }
     if head.starts_with(b"ID3") || mp3_frame_at(head, 0).is_some() {
-        return Some(finish(ProbeResult::new(ProbeKind::Audio, "mp3"), mp3_duration(input)));
+        return Some(finish(ProbeResult::new(ProbeKind::Audio, "mp3", Some("audio/mpeg")), mp3_duration(input)));
     }
     None
 }
@@ -58,14 +68,15 @@ fn mp4_duration(input: &ProbeInput<'_>) -> Option<f64> {
             size = u64_be(header, 8)?;
             header_len = 16;
         } else if size == 0 {
-            size = input.size - offset;
+            size = input.size.checked_sub(offset)?;
         }
         if size < header_len {
             return None;
         }
         if kind == b"moov" {
-            let body_len = (size - header_len).min(64 * 1024 * 1024);
-            let body = input.range(offset + header_len, body_len)?;
+            // mvhd is the first child of moov, so a moov longer than the bytes read (a faststart file with a large
+            // sample table) still yields it from whatever part was read.
+            let body = input.available(offset.checked_add(header_len)?, size - header_len)?;
             return mvhd_duration(body);
         }
         offset = offset.checked_add(size)?;
@@ -78,9 +89,9 @@ fn mp4_duration(input: &ProbeInput<'_>) -> Option<f64> {
 
 fn mvhd_duration(moov: &[u8]) -> Option<f64> {
     let mut at = 0usize;
-    while at + 8 <= moov.len() {
-        let size = u32_be(moov, at)? as usize;
-        if &moov[at + 4..at + 8] == b"mvhd" {
+    while at.checked_add(8)? <= moov.len() {
+        let size = usize::try_from(u32_be(moov, at)?).ok()?;
+        if moov.get(at + 4..at + 8)? == b"mvhd" {
             let body = moov.get(at + 8..)?;
             let version = *body.first()?;
             let (timescale, duration) = if version == 1 {
@@ -104,21 +115,21 @@ fn mvhd_duration(moov: &[u8]) -> Option<f64> {
 // ---- WAV --------------------------------------------------------------------------------------------------------
 
 fn wav_duration(input: &ProbeInput<'_>) -> Option<f64> {
-    let head = input.head;
-    let mut at = 12usize;
+    // Offsets are u64: chunk sizes are attacker-chosen u32s that overflow a 32-bit usize (wasm32).
+    let mut at = 12u64;
     let mut byte_rate = None;
     for _ in 0..64 {
-        let id = head.get(at..at + 4)?;
-        let size = u32_le(head, at + 4)?;
-        if id == b"fmt " {
-            byte_rate = u32_le(head, at + 16).filter(|rate| *rate > 0);
-        } else if id == b"data" {
+        let header = input.range(at, 8)?;
+        let size = u32_le(header, 4)?;
+        if &header[0..4] == b"fmt " {
+            byte_rate = input.range(at + 8, 12).and_then(|fmt| u32_le(fmt, 8)).filter(|rate| *rate > 0);
+        } else if &header[0..4] == b"data" {
             let rate = f64::from(byte_rate?);
             // Streams written before their length is known leave the size at 0 or u32::MAX; use the file size.
-            let data = if size == 0 || size == u32::MAX { input.size.saturating_sub(at as u64 + 8) as f64 } else { f64::from(size) };
+            let data = if size == 0 || size == u32::MAX { input.size.saturating_sub(at + 8) as f64 } else { f64::from(size) };
             return Some(data / rate);
         }
-        at = at.checked_add(8 + size as usize + (size as usize & 1))?;
+        at = at.checked_add(8)?.checked_add(u64::from(size))?.checked_add(u64::from(size & 1))?;
     }
     None
 }
@@ -168,10 +179,10 @@ fn mp3_duration(input: &ProbeInput<'_>) -> Option<f64> {
     let mut start = 0usize;
     if head.starts_with(b"ID3") {
         let size = head.get(6..10)?.iter().fold(0usize, |acc, byte| (acc << 7) | usize::from(byte & 0x7F));
-        start = 10 + size + if head.get(5)? & 0x10 != 0 { 10 } else { 0 };
+        start = size.checked_add(10 + if head.get(5)? & 0x10 != 0 { 10 } else { 0 })?;
     }
     // Find the first frame within 64 KB of the tag.
-    let limit = head.len().min(start + 64 * 1024);
+    let limit = head.len().min(start.saturating_add(64 * 1024));
     let at = (start..limit.saturating_sub(4)).find(|at| mp3_frame_at(head, *at).is_some())?;
     let frame = mp3_frame_at(head, at)?;
     // A Xing/Info or VBRI header carries the frame count of a variable bitrate file.
@@ -205,7 +216,7 @@ fn ebml_vint(bytes: &[u8], at: usize, keep_marker: bool) -> Option<(u64, usize)>
     }
     let mut value = if keep_marker { u64::from(first) } else { u64::from(first) & ((1u64 << (8 - len)) - 1) };
     for i in 1..len {
-        value = (value << 8) | u64::from(*bytes.get(at + i)?);
+        value = (value << 8) | u64::from(*bytes.get(at.checked_add(i)?)?);
     }
     Some((value, len))
 }
@@ -223,26 +234,27 @@ fn ebml_duration(head: &[u8]) -> Option<f64> {
             return None;
         }
         let (id, id_len) = ebml_vint(head, at, true)?;
-        let (size, size_len) = ebml_vint(head, at + id_len, false)?;
-        let body = at + id_len + size_len;
+        let (size, size_len) = ebml_vint(head, at.checked_add(id_len)?, false)?;
+        let body = at.checked_add(id_len)?.checked_add(size_len)?;
         let unknown_size = size == (1u64 << (7 * size_len)) - 1;
         match id {
             SEGMENT => {
                 at = body;
                 if !unknown_size {
-                    end = end.min(body.saturating_add(size as usize));
+                    end = end.min(body.saturating_add(usize::try_from(size).unwrap_or(usize::MAX)));
                 }
             }
             INFO => {
-                let info_end = head.len().min(body.saturating_add(size as usize));
+                let info_end = head.len().min(body.saturating_add(usize::try_from(size).unwrap_or(usize::MAX)));
                 let mut scale = 1_000_000f64;
                 let mut duration = None;
                 let mut cursor = body;
                 while cursor < info_end {
                     let (child, child_len) = ebml_vint(head, cursor, true)?;
-                    let (child_size, child_size_len) = ebml_vint(head, cursor + child_len, false)?;
-                    let value_at = cursor + child_len + child_size_len;
-                    let value = head.get(value_at..value_at + child_size as usize)?;
+                    let (child_size, child_size_len) = ebml_vint(head, cursor.checked_add(child_len)?, false)?;
+                    let value_at = cursor.checked_add(child_len)?.checked_add(child_size_len)?;
+                    let value_end = value_at.checked_add(usize::try_from(child_size).ok()?)?;
+                    let value = head.get(value_at..value_end)?;
                     match child {
                         TIMECODE_SCALE => scale = value.iter().fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte)) as f64,
                         DURATION => {
@@ -254,7 +266,7 @@ fn ebml_duration(head: &[u8]) -> Option<f64> {
                         }
                         _ => {}
                     }
-                    cursor = value_at + child_size as usize;
+                    cursor = value_end;
                 }
                 return duration.map(|ticks| ticks * scale / 1e9);
             }
@@ -342,6 +354,7 @@ mod tests {
     fn reads_wav_duration() {
         let bytes = wav(3);
         let result = probe(&ProbeInput::whole("a.wav", None, &bytes)).unwrap();
+        assert_eq!(result.mime_type.as_deref(), Some("audio/wav"));
         assert_eq!(result.kind, ProbeKind::Audio);
         assert_eq!(result.duration_seconds, Some(3.0));
     }
@@ -369,6 +382,32 @@ mod tests {
         let result = probe(&input).unwrap();
         assert_eq!(result.kind, ProbeKind::Video);
         assert_eq!(result.duration_seconds, Some(90.5));
+    }
+
+    #[test]
+    fn survives_chunk_sizes_that_overflow_32_bit_offsets() {
+        let mut bytes = wav(1);
+        bytes[16..20].copy_from_slice(&0xFFFF_FFF9u32.to_le_bytes()); // fmt chunk size
+        let result = probe(&ProbeInput::whole("a.wav", None, &bytes)).unwrap();
+        assert_eq!(result.duration_seconds, None);
+    }
+
+    #[test]
+    fn reads_mvhd_from_a_faststart_moov_longer_than_the_head() {
+        let mut mvhd = vec![0u8; 100];
+        mvhd[12..16].copy_from_slice(&600u32.to_be_bytes());
+        mvhd[16..20].copy_from_slice(&36_000u32.to_be_bytes());
+        let moov_len = 5_000_000u32;
+        let mut head = Vec::new();
+        head.extend_from_slice(&16u32.to_be_bytes());
+        head.extend_from_slice(b"ftypisom\0\0\0\0");
+        head.extend_from_slice(&moov_len.to_be_bytes());
+        head.extend_from_slice(b"moov");
+        head.extend_from_slice(&(8 + mvhd.len() as u32).to_be_bytes());
+        head.extend_from_slice(b"mvhd");
+        head.extend_from_slice(&mvhd);
+        let input = ProbeInput { name: "a.mp4", mime_type: None, size: 900_000_000, head: &head, tail: Some(&[0u8; 64]) };
+        assert_eq!(probe(&input).unwrap().duration_seconds, Some(60.0));
     }
 
     #[test]

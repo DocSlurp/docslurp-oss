@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::card::{Card, PageCost, PageMix, PageMode};
+use crate::error::Error;
 
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -71,8 +72,9 @@ pub fn feature_credits(card: &Card, feature: &str, pages: f64) -> f64 {
 #[serde(rename_all = "camelCase")]
 pub struct IngestInput {
     pub pages: f64,
+    /// Partial weights are allowed here, as in `estimateIngest` (missing classes weigh 0).
     #[serde(default)]
-    pub mix: PageMix,
+    pub mix: PartialMix,
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
@@ -86,6 +88,23 @@ pub struct IngestInput {
     /// Optional per-document features to price (`documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`).
     #[serde(default)]
     pub features: BTreeMap<String, bool>,
+}
+
+/// `Partial<PageMix>` as `estimateIngest` takes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PartialMix {
+    #[serde(default)]
+    pub text: f64,
+    #[serde(default)]
+    pub complex: f64,
+    #[serde(default)]
+    pub scanned: f64,
+}
+
+impl From<PageMix> for PartialMix {
+    fn from(mix: PageMix) -> Self {
+        Self { text: mix.text, complex: mix.complex, scanned: mix.scanned }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,7 +152,7 @@ pub struct IngestEstimate {
     pub storage: IngestStorage,
 }
 
-fn normalize_mix(mix: &PageMix) -> PageMix {
+fn normalize_mix(mix: &PartialMix) -> PageMix {
     let text = non_negative(Some(mix.text));
     let complex = non_negative(Some(mix.complex));
     let scanned = non_negative(Some(mix.scanned));
@@ -145,8 +164,9 @@ fn normalize_mix(mix: &PageMix) -> PageMix {
 }
 
 /// Port of `estimateIngest`: credits, time and storage for a corpus of `pages` pages with a page-class mix.
-pub fn estimate_ingest(card: &Card, input: &IngestInput) -> IngestEstimate {
-    let (profile_id, profile) = card.profile(input.profile.as_deref().unwrap_or("auto"));
+pub fn estimate_ingest(card: &Card, input: &IngestInput) -> Result<IngestEstimate, Error> {
+    let profile_id = input.profile.as_deref().unwrap_or("auto");
+    let profile = card.profile(profile_id)?;
     let slots = js_round(non_negative(Some(input.worker_slots.unwrap_or(card.funded_worker_slots))));
     let workers = 1f64.max(if slots == 0.0 || slots.is_nan() { card.funded_worker_slots } else { slots });
     let pages = 0f64.max(js_round(non_negative(Some(input.pages))));
@@ -218,7 +238,7 @@ pub fn estimate_ingest(card: &Card, input: &IngestInput) -> IngestEstimate {
     let pages_per_minute = if wall_seconds > 0.0 { pages / (wall_seconds / 60.0) } else { 0.0 };
     let dollars = total_credits / card.credits_per_dollar;
 
-    IngestEstimate {
+    Ok(IngestEstimate {
         pages,
         profile: profile_id.to_string(),
         workers,
@@ -240,7 +260,7 @@ pub fn estimate_ingest(card: &Card, input: &IngestInput) -> IngestEstimate {
             index_bytes,
             monthly_credits: (non_negative(Some(bytes)) / BYTES_PER_GB) * card.price_card.storage_gb_month,
         },
-    }
+    })
 }
 
 /// A file as the upload estimate sees it: name, size, MIME type, and duration when the client knows it.
@@ -255,23 +275,40 @@ pub struct MediaFile {
     pub duration_seconds: Option<f64>,
 }
 
+fn declared_type(mime_type: Option<&str>) -> String {
+    mime_type.unwrap_or("").split(';').next().unwrap_or("").trim().to_lowercase()
+}
+
+fn extension_of(name: &str) -> String {
+    name.rfind('.').map(|dot| name[dot + 1..].to_lowercase()).unwrap_or_default()
+}
+
+fn listed(extensions: &[String], extension: &str) -> bool {
+    extensions.iter().any(|candidate| candidate == extension)
+}
+
 /// Port of `uploadMediaKind`: MIME type first, then the extension; `None` for files priced per page.
 pub fn upload_media_kind(card: &Card, name: &str, mime_type: Option<&str>) -> Option<MediaKind> {
-    let mime = mime_type.unwrap_or("").split(';').next().unwrap_or("").trim().to_lowercase();
+    let mime = declared_type(mime_type);
     if mime.starts_with("audio/") {
         return Some(MediaKind::Audio);
     }
     if mime.starts_with("video/") {
         return Some(MediaKind::Video);
     }
-    let extension = name.rfind('.').map(|dot| name[dot + 1..].to_lowercase()).unwrap_or_default();
-    if card.media_extensions.audio.iter().any(|candidate| *candidate == extension) {
+    let extension = extension_of(name);
+    if listed(&card.extensions.audio, &extension) {
         return Some(MediaKind::Audio);
     }
-    if card.media_extensions.video.iter().any(|candidate| *candidate == extension) {
+    if listed(&card.extensions.video, &extension) {
         return Some(MediaKind::Video);
     }
     None
+}
+
+/// Port of `isUploadImageFile`: an `image/*` MIME type or an image extension.
+pub fn is_image_file(card: &Card, name: &str, mime_type: Option<&str>) -> bool {
+    declared_type(mime_type).starts_with("image/") || listed(&card.extensions.image, &extension_of(name))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

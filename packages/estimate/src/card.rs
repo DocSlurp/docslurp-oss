@@ -8,8 +8,12 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-/// Card shape this build reads; `card.json` with another `schema` is rejected.
-pub const CARD_SCHEMA: u32 = 1;
+use crate::error::{Error, ErrorCode};
+
+/// Card shape this build reads; a card with another `schema` is rejected.
+pub const CARD_SCHEMA: u32 = 2;
+/// Pricing formulas this build implements; a card for other `rules` is rejected rather than quoted with stale logic.
+pub const CARD_RULES: u32 = 1;
 
 const BUNDLED: &str = include_str!("../card.json");
 
@@ -51,13 +55,12 @@ pub struct PriceCard {
     pub propositions_per10_pages: f64,
 }
 
+/// Page-class weights. All three are required, as the server requires them (`pageMixSchema`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PageMix {
-    #[serde(default)]
     pub text: f64,
-    #[serde(default)]
     pub complex: f64,
-    #[serde(default)]
     pub scanned: f64,
 }
 
@@ -73,17 +76,36 @@ pub struct MediaPair {
     pub video: f64,
 }
 
+/// Extensions (lower case, without the dot) priced as media or image files when the MIME type does not say.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MediaExtensions {
+pub struct Extensions {
     pub audio: Vec<String>,
     pub video: Vec<String>,
+    pub image: Vec<String>,
+}
+
+/// The worker's raster-page routing thresholds (`PAGE_RASTER_ROUTING` in `@docslurp/shared`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageRasterRouting {
+    pub sparse_page_words: f64,
+    pub min_significant_image_coverage: f64,
+    pub min_significant_image_pixels: f64,
+    pub raster_page_min_largest_image_coverage: f64,
+    pub raster_page_min_total_image_coverage: f64,
+    pub stamp_text_max_words: f64,
+    pub stamped_scan_min_image_coverage: f64,
+    pub sparse_text_full_page_image_coverage: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {
     pub schema: u32,
+    pub rules: u32,
     pub version: String,
+    /// sha256 of the card's content; the server's `cardRevision` and the card endpoint's ETag.
+    pub revision: String,
     pub credits_per_dollar: f64,
     pub price_card: PriceCard,
     pub profiles: BTreeMap<String, ProfilePages>,
@@ -98,20 +120,31 @@ pub struct Card {
     pub assumed_bytes_per_page: f64,
     pub quote_low_mix: PageMix,
     pub quote_high_mix: PageMix,
-    pub media_extensions: MediaExtensions,
     pub default_profile: crate::quote::EstimateProfile,
+    pub extensions: Extensions,
+    pub page_raster_routing: PageRasterRouting,
 }
 
 impl Card {
-    /// Parse a card (the `card.json` shape). Rejects unknown schema versions and cards without the `auto` profile.
-    pub fn from_json(json: &str) -> Result<Card, String> {
-        let card: Card = serde_json::from_str(json).map_err(|error| format!("invalid price card: {error}"))?;
+    /// Parse a card (the `card.json` / `GET /v1/billing/estimate-card` shape). Rejects other schemas and rules, and
+    /// cards whose default profile or features this build cannot price.
+    pub fn from_json(json: &str) -> Result<Card, Error> {
+        let card: Card = serde_json::from_str(json).map_err(|error| Error::invalid_card(error.to_string()))?;
         if card.schema != CARD_SCHEMA {
-            return Err(format!("price card schema {} is not supported (expected {CARD_SCHEMA})", card.schema));
+            return Err(Error::invalid_card(format!("schema {} is not supported (expected {CARD_SCHEMA})", card.schema)));
         }
-        if !card.profiles.contains_key("auto") {
-            return Err("price card has no `auto` profile".into());
+        if card.rules != CARD_RULES {
+            return Err(Error::new(
+                ErrorCode::UnsupportedRules,
+                format!("card rules {} need a newer estimator (this build implements rules {CARD_RULES})", card.rules),
+            ));
         }
+        for feature in &card.document_features {
+            if crate::quote::DocumentFeature::parse(feature).is_none() {
+                return Err(Error::new(ErrorCode::UnsupportedRules, format!("card prices unknown feature `{feature}`")));
+            }
+        }
+        card.profile(&card.default_profile.quality)?;
         Ok(card)
     }
 
@@ -121,14 +154,10 @@ impl Card {
         CARD.get_or_init(|| Card::from_json(BUNDLED).expect("bundled card.json is valid"))
     }
 
-    /// Profile pages for `id`, falling back to `auto` for an unknown id (as the server's schema default does).
-    pub fn profile(&self, id: &str) -> (&str, &ProfilePages) {
-        match self.profiles.get_key_value(id) {
-            Some((key, pages)) => (key.as_str(), pages),
-            None => {
-                let (key, pages) = self.profiles.get_key_value("auto").expect("card has an auto profile");
-                (key.as_str(), pages)
-            }
-        }
+    /// Profile pages for quality `id`. An unknown quality is an error, never priced as another one.
+    pub fn profile(&self, id: &str) -> Result<&ProfilePages, Error> {
+        self.profiles
+            .get(id)
+            .ok_or_else(|| Error::new(ErrorCode::UnsupportedRules, format!("quality `{id}` is not on this price card")))
     }
 }

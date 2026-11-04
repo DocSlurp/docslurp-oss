@@ -1,36 +1,31 @@
 //! Offline DocSlurp credit estimator.
 //!
-//! [`probe`] reads a file locally (PDF pages and text layer, media duration, Office page counts, images) and
-//! [`quote::quote_upload`] prices an upload with the published price card ([`card::Card`]), the same way
-//! `POST /v1/uploads/estimate` does. Nothing leaves the machine. Bindings: WebAssembly (`wasm` feature,
-//! `@docslurp/estimate` on npm) and Python (`python` feature).
+//! [`probe()`] reads a file on the user's own machine (PDF pages and page mix, media duration, Office page counts,
+//! the real file type) and [`quote()`] prices an upload with the published price card exactly as
+//! `POST /v1/uploads/estimate` does. One WebAssembly build serves every host through the JSON ABI in [`abi`]:
+//! the `@docslurp/estimate` npm package (browsers, Node, Deno, Workers), Python on wasmtime, Go on wazero.
+//!
+//! The pricing rules are ports of `@docslurp/shared` (`quoteUpload`, `estimateIngest`, `estimateUploadMedia`), held
+//! to them bit for bit by `golden/cases.json`. See DESIGN.md.
 
+pub mod abi;
 pub mod card;
+pub mod error;
 pub mod price;
 pub mod probe;
 pub mod quote;
 
-#[cfg(feature = "wasm")]
-mod wasm;
-
-#[cfg(feature = "python")]
-mod python;
-
-pub use card::{Card, PageMix};
-pub use price::{estimate_ingest, IngestEstimate, IngestInput};
-pub use probe::{probe, ProbeInput, ProbeResult};
-pub use quote::{quote_upload, EstimateProfile, Quote, QuoteFile};
-
 use serde::{Deserialize, Serialize};
 
-/// The default profile: a new hosted workspace with default settings.
-pub fn default_profile(card: &Card) -> EstimateProfile {
-    card.default_profile.clone()
-}
+pub use card::{Card, PageMix};
+pub use error::{Error, ErrorCode};
+pub use probe::{probe, read_plan, FileMeta, ProbeInput, ProbeResult, ReadPlan};
+pub use quote::{quote_upload, CardSource, EstimateProfile, Quote, QuoteFile};
 
-/// One request for [`quote_json`]: files (probe results already merged in), an optional workspace profile and card.
+/// One quote request: files (probe results already applied), an optional workspace profile (the card's default
+/// workspace when absent) and speed boost. Unknown fields are refused.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuoteRequest {
     pub files: Vec<QuoteFile>,
     #[serde(default)]
@@ -39,24 +34,21 @@ pub struct QuoteRequest {
     pub speed_boost: Option<bool>,
 }
 
-/// Quote with an explicit card (bundled when `card` is `None`) and the request's profile (card default when absent).
-pub fn quote(card: Option<&Card>, request: &QuoteRequest) -> Quote {
-    let card = card.unwrap_or_else(|| Card::bundled());
-    let profile = request.profile.clone().unwrap_or_else(|| default_profile(card));
-    quote_upload(card, &request.files, &profile, request.speed_boost.unwrap_or(false))
-}
-
-/// JSON in, JSON out, for bindings without a richer type bridge. `card_json` overrides the bundled card.
-pub fn quote_json(request_json: &str, card_json: Option<&str>) -> Result<String, String> {
-    let request: QuoteRequest = serde_json::from_str(request_json).map_err(|error| format!("invalid quote request: {error}"))?;
-    let card = card_json.map(Card::from_json).transpose()?;
-    serde_json::to_string(&quote(card.as_ref(), &request)).map_err(|error| error.to_string())
-}
-
-/// Port of `estimateIngest` over JSON.
-pub fn estimate_ingest_json(input_json: &str, card_json: Option<&str>) -> Result<String, String> {
-    let input: IngestInput = serde_json::from_str(input_json).map_err(|error| format!("invalid ingest input: {error}"))?;
-    let card = card_json.map(Card::from_json).transpose()?;
-    let card = card.as_ref().unwrap_or_else(|| Card::bundled());
-    serde_json::to_string(&estimate_ingest(card, &input)).map_err(|error| error.to_string())
+/// Price a request with `card` (supplied, e.g. from `GET /v1/billing/estimate-card`) or the bundled card.
+pub fn quote(card: Option<&Card>, request: &QuoteRequest) -> Result<Quote, Error> {
+    let (card, source) = match card {
+        Some(card) => (card, CardSource::Supplied),
+        None => (Card::bundled(), CardSource::Bundled),
+    };
+    if request.files.is_empty() || request.files.len() > 1000 {
+        return Err(Error::invalid_request("files must hold 1-1000 files"));
+    }
+    for file in &request.files {
+        file.validate()?;
+    }
+    let profile = request.profile.clone().unwrap_or_else(|| card.default_profile.clone());
+    if profile.worker_slots.is_some_and(|slots| !(slots >= 1.0 && slots.fract() == 0.0 && slots.is_finite())) {
+        return Err(Error::invalid_request("profile.workerSlots must be a positive integer"));
+    }
+    quote_upload(card, source, &request.files, &profile, request.speed_boost.unwrap_or(false))
 }
