@@ -7,7 +7,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
+import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -2016,37 +2016,23 @@ export class Store {
    * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
    */
   async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
-    const [run] = await client<Array<{
-      user_id: string;
-      workspace_id: string;
-      status: string;
-      stage: string;
-      processed_documents: number;
-      pages_processed: number;
-      failed_documents: number;
-      error: string | null;
-    }>>`
-      select r.user_id, r.workspace_id, r.status, r.stage, r.processed_documents, r.pages_processed,
-        coalesce((r.stats->>'failedDocuments')::int, 0) as failed_documents, r.error
+    // One statement: the run is read inside the outbox insert. Subscribers include teammates and external systems, so the
+    // raw worker error (stack frames, hosts, provider text) stays in the run record and telemetry; the payload carries its
+    // public copy, the same mapping as publicDocumentError (reviewed copy for known markers, else the generic message).
+    await this.enqueueWebhookEvent(event, client`
+      select r.user_id, jsonb_build_object(
+        'event', ${event}::text,
+        'runId', r.id,
+        'workspaceId', r.workspace_id,
+        'status', r.status,
+        'stage', r.stage,
+        'processedDocuments', r.processed_documents,
+        'pagesProcessed', r.pages_processed,
+        'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
+        'error', ${publicErrorSql(client, "r.error")}
+      ) as payload
       from workspace_runs r
       where r.id = ${runId}
-    `;
-    if (!run) return;
-    // Subscribers include teammates and external systems: the raw worker error (stack frames, hosts, provider text) stays in the
-    // run record and telemetry, and only its public copy is queued.
-    const payload = {
-      event,
-      runId,
-      workspaceId: run.workspace_id,
-      status: run.status,
-      stage: run.stage,
-      processedDocuments: run.processed_documents,
-      pagesProcessed: run.pages_processed,
-      failedDocuments: run.failed_documents,
-      error: publicDocumentError(run.error),
-    };
-    await this.enqueueWebhookEvent(event, client`
-      select ${run.user_id}::text as user_id, ${this.toJson(payload)}::jsonb as payload
     `, client, logicalId);
   }
 
@@ -4356,4 +4342,18 @@ export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<stri
     else byPrefix.set(prefix, [key]);
   }
   return { byPrefix, ungrouped };
+}
+
+/**
+ * SQL for publicDocumentError over a text column: null stays null, a known failure marker maps to its reviewed public
+ * copy, anything else to the generic processing message. Built from the same tables, so the two cannot drift.
+ */
+function publicErrorSql(client: Sql<Record<string, unknown>>, column: "r.error"): postgres.PendingQuery<postgres.Row[]> {
+  const value = client.unsafe(column);
+  let expression = client`case when ${value} is null or ${value} = '' then null::text`;
+  for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
+    const message = PUBLIC_ERROR_MESSAGES[key as keyof typeof DOCUMENT_FAILURE_MARKERS];
+    expression = client`${expression} when strpos(${value}, ${marker}::text) > 0 then ${message}::text`;
+  }
+  return client`${expression} else ${PUBLIC_ERROR_MESSAGES.processing}::text end`;
 }

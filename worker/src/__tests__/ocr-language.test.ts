@@ -58,6 +58,8 @@ describe("language sets", () => {
 });
 
 describe("ocrImageText with a scripted tesseract", () => {
+  // Every pack counts as installed, so the outcome does not depend on the machine's tessdata.
+  const allPacks = () => true;
   const word = (conf: number, count: number, text = "word") => tsv(Array.from({ length: count }, (_, i) => [1, 1, 1, conf, `${text}${i}`]));
   const scripted = (responses: Record<string, string>, calls: string[][] = []) => async (args: string[]) => {
     calls.push(args);
@@ -70,7 +72,7 @@ describe("ocrImageText with a scripted tesseract", () => {
 
   it("does not run English on a Cyrillic page", async () => {
     const calls: string[][] = [];
-    const result = await ocrImageText({
+    const result = await ocrImageText({ exists: allPacks,
       image: "page.png",
       run: scripted({ osd: "Script: Cyrillic\nScript confidence: 6", "rus+ukr+eng": word(92, 12, "слово") }, calls),
     });
@@ -81,7 +83,7 @@ describe("ocrImageText with a scripted tesseract", () => {
   });
 
   it("retries other packs when confidence is low and keeps the better result", async () => {
-    const result = await ocrImageText({
+    const result = await ocrImageText({ exists: allPacks,
       image: "page.png",
       run: scripted({ osd: "Script: Han\nScript confidence: 3", "chi_sim+eng": word(35, 10), "chi_tra+eng": word(88, 10) }),
     });
@@ -92,7 +94,7 @@ describe("ocrImageText with a scripted tesseract", () => {
 
   it("tries the common scripts when script detection fails", async () => {
     const calls: string[][] = [];
-    const result = await ocrImageText({ image: "page.png", run: scripted({ eng: word(25, 3), "chi_sim+eng": word(30, 4), "rus+ukr+eng": word(30, 3), "ara+eng": word(90, 10) }, calls) });
+    const result = await ocrImageText({ exists: allPacks, image: "page.png", run: scripted({ eng: word(25, 3), "chi_sim+eng": word(30, 4), "rus+ukr+eng": word(30, 3), "ara+eng": word(90, 10) }, calls) });
     expect(result.languages).toBe("ara+eng");
     expect(result.script).toBeNull();
   });
@@ -100,14 +102,14 @@ describe("ocrImageText with a scripted tesseract", () => {
   it("caps the trial runs per page at 3 once the script is known, so a hard page is not 6 tesseract runs", async () => {
     const calls: string[][] = [];
     // Han has three packs and English after them: the old limit ran all four.
-    const result = await ocrImageText({ image: "page.png", run: scripted({ osd: "Script: Han\nScript confidence: 3", "chi_sim+eng": word(50, 10), "chi_tra+eng": word(52, 10), "jpn+eng": word(51, 10), eng: word(90, 10) }, calls) });
+    const result = await ocrImageText({ exists: allPacks, image: "page.png", run: scripted({ osd: "Script: Han\nScript confidence: 3", "chi_sim+eng": word(50, 10), "chi_tra+eng": word(52, 10), "jpn+eng": word(51, 10), eng: word(90, 10) }, calls) });
     // Script detection plus three trials, not detection plus the fourth set that would have read it.
     expect(calls.filter((call) => call.includes("tsv"))).toHaveLength(3);
     expect(result.attempts).toHaveLength(3);
     expect(result.capped).toBe("attempts");
     expect(result.languages).not.toBe("eng");
     // An undetected script keeps five trials (an Arabic scan is the fourth set the unknown-script order tries).
-    const unknown = await ocrImageText({ image: "page.png", run: scripted({ eng: word(25, 3), "chi_sim+eng": word(30, 4), "rus+ukr+eng": word(30, 3), "ara+eng": word(90, 10) }) });
+    const unknown = await ocrImageText({ exists: allPacks, image: "page.png", run: scripted({ eng: word(25, 3), "chi_sim+eng": word(30, 4), "rus+ukr+eng": word(30, 3), "ara+eng": word(90, 10) }) });
     expect(unknown.languages).toBe("ara+eng");
     // The cap can be set from 1 to 5, never past it.
     expect(ocrMaxAttempts({})).toBe(3);
@@ -115,7 +117,7 @@ describe("ocrImageText with a scripted tesseract", () => {
     expect(ocrMaxAttempts({ DOCSLURP_OCR_MAX_ATTEMPTS: "1" })).toBe(1);
     expect(ocrMaxAttempts({ DOCSLURP_OCR_MAX_ATTEMPTS: "9" })).toBe(5);
     expect(ocrMaxAttempts({ DOCSLURP_OCR_MAX_ATTEMPTS: "0" })).toBe(3);
-    const single = await ocrImageText({ image: "page.png", env: { ...process.env, DOCSLURP_OCR_MAX_ATTEMPTS: "1" }, run: scripted({ eng: word(25, 3), "chi_sim+eng": word(90, 10) }) });
+    const single = await ocrImageText({ exists: allPacks, image: "page.png", env: { ...process.env, DOCSLURP_OCR_MAX_ATTEMPTS: "1" }, run: scripted({ eng: word(25, 3), "chi_sim+eng": word(90, 10) }) });
     expect(single.attempts).toHaveLength(1);
   });
 
@@ -128,20 +130,20 @@ describe("ocrImageText with a scripted tesseract", () => {
       if (args.includes("osd")) return "Script: Han\nScript confidence: 3";
       return word(50, 10);
     };
-    const result = await ocrImageText({ image: "page.png", now: () => clock, run: slow });
+    const result = await ocrImageText({ exists: allPacks, image: "page.png", now: () => clock, run: slow });
     // Detection 25 s, first trial 25 s, second trial 25 s (it started at 50 s, inside the 60 s budget), third refused at 75 s.
     expect(calls.filter((call) => call.includes("tsv"))).toHaveLength(2);
     expect(result.capped).toBe("time");
     // A budget of 1 s still reads the page once.
     clock = 0;
-    const one = await ocrImageText({ image: "page.png", now: () => clock, env: { ...process.env, DOCSLURP_OCR_PAGE_BUDGET_MS: "1000" }, run: slow });
+    const one = await ocrImageText({ exists: allPacks, image: "page.png", now: () => clock, env: { ...process.env, DOCSLURP_OCR_PAGE_BUDGET_MS: "1000" }, run: slow });
     expect(one.attempts).toHaveLength(1);
     expect(ocrPageBudgetMs({})).toBe(60_000);
   });
 
   it("stops after two empty reads when the script is unknown: the page is blank", async () => {
     const calls: string[][] = [];
-    const result = await ocrImageText({ image: "blank.png", run: scripted({}, calls) });
+    const result = await ocrImageText({ exists: allPacks, image: "blank.png", run: scripted({}, calls) });
     expect(result.text).toBe("");
     expect(calls.filter((call) => call.includes("tsv"))).toHaveLength(2);
   });
@@ -154,13 +156,13 @@ describe("ocrImageText with a scripted tesseract", () => {
   });
 
   it("accepts a blank page and a short low-confidence fragment", async () => {
-    expect((await ocrImageText({ image: "blank.png", run: scripted({ osd: "Script: Latin\nScript confidence: 1", eng: tsv([]) }) })).text).toBe("");
-    expect((await ocrImageText({ image: "x.png", run: scripted({ osd: "Script: Latin\nScript confidence: 1", eng: word(20, 3) }) })).words).toBe(3);
+    expect((await ocrImageText({ exists: allPacks, image: "blank.png", run: scripted({ osd: "Script: Latin\nScript confidence: 1", eng: tsv([]) }) })).text).toBe("");
+    expect((await ocrImageText({ exists: allPacks, image: "x.png", run: scripted({ osd: "Script: Latin\nScript confidence: 1", eng: word(20, 3) }) })).words).toBe(3);
   });
 
   it("uses the workspace language as given, and rejects anything that is not Tesseract codes", async () => {
     const calls: string[][] = [];
-    const result = await ocrImageText({ image: "page.png", setting: "eng+deu", run: scripted({ "eng+deu": word(90, 10) }, calls) });
+    const result = await ocrImageText({ exists: allPacks, image: "page.png", setting: "eng+deu", run: scripted({ "eng+deu": word(90, 10) }, calls) });
     expect(result.languages).toBe("eng+deu");
     expect(calls).toHaveLength(1);
     await expect(ocrImageText({ image: "page.png", setting: "eng --psm 0", run: scripted({}) })).rejects.toThrow(/invalid OCR language/);
