@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   assertPipelineSpeedBoost,
+  countedPagesForForecast,
   documentVersionKey,
   effectiveIndexingMode,
+  intakePageCountSource,
   pageRouterModeSchema,
   sanitizeStoredPipeline,
   stageSelectionKeys,
@@ -123,6 +125,16 @@ function sourceMetadata(value: unknown): Record<string, never> {
     try { parsed = JSON.parse(parsed); } catch { parsed = null; }
   }
   return (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Record<string, never>;
+}
+
+/**
+ * `pages` for a forecast file: only a count (the worker's measured billing pages, or intake's count of a PDF, text file or image). An
+ * assumed count, the one page intake gives an Office, slide, sheet or EPUB file, would price a 5 MB deck as a page, so the forecast
+ * prices that file from its size instead (countedPagesForForecast).
+ */
+function forecastPages(doc: { page_count: number; billing_pages?: number | null; page_count_source?: string | null }): { pages?: number } {
+  const pages = countedPagesForForecast({ pageCount: doc.page_count, billingPages: doc.billing_pages, pageCountSource: doc.page_count_source });
+  return pages === undefined ? {} : { pages };
 }
 
 function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
@@ -751,7 +763,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
-            status, extraction_mode, page_count, source_sha256, file_facts,
+            status, extraction_mode, page_count, page_count_source, source_sha256, file_facts,
             deduped_from_document_id, dedup_scope, version_number, previous_version_id,
             canonical_id, source_path, file_size, metadata, indexing_mode
           )
@@ -768,6 +780,8 @@ export function createRunCreation(deps: RunCreationDeps) {
             'queued',
             'hybrid',
             ${metadata.pageCount},
+            -- A PDF's own count, the text rule over a text file and an image's one page are counted; a format only the worker can count is assumed.
+            ${intakePageCountSource({ name: filename, type: metadata.fileFacts.mimeType })},
             ${metadata.sourceSha256},
             ${sql.json(JSON.parse(JSON.stringify(metadata.fileFacts)))},
             -- Point at the vector owner, not an intermediate copy, so purge keeps
@@ -836,7 +850,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
-            status, extraction_mode, page_count, file_size, source_sha256, file_facts,
+            status, extraction_mode, page_count, page_count_source, file_size, source_sha256, file_facts,
             canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
           values (
@@ -852,6 +866,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${source.extraction_mode},
             -- A new version starts from the source's page_count; the worker re-counts Office and EPUB pages after conversion.
             ${source.page_count ?? 0},
+            ${source.page_count_source ?? "counted"},
             ${Number(source.file_size ?? 0) || 0},
             ${source.source_sha256 ?? null},
             ${source.file_facts ? sql.json(source.file_facts as never) : null},
@@ -961,7 +976,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         filename: doc.filename,
         mimeType: doc.mime_type,
         sizeBytes: Math.max(0, Math.round(Number(doc.file_size) || 0)),
-        ...(doc.page_count > 0 ? { pages: doc.page_count } : {}),
+        ...forecastPages(doc),
       }));
     // The preview schema needs at least one file; with none (an empty run) the call only validates the pipeline.
     const validationFiles = forecastFilesOfSources();
@@ -996,7 +1011,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       filename: doc.filename,
       mimeType: doc.mime_type,
       sizeBytes: Math.max(0, Math.round(Number((doc as { file_size?: unknown }).file_size) || 0)),
-      ...(doc.page_count > 0 ? { pages: doc.page_count } : {}),
+      ...forecastPages(doc),
     })));
 
     // The Run is committed from here on: failing the request now would leave a

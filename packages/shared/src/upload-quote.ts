@@ -90,6 +90,24 @@ export function workerCountedFormatTable(): Array<{ format: WorkerCountedFormat;
   });
 }
 
+/**
+ * Where intake's page count came from: `counted` (a PDF's own count, the text rule over a text file, an image's one page) or `assumed`
+ * (one page for a format only the worker can count). Stored as documents.page_count_source (migration 0126).
+ */
+export type PageCountSource = "counted" | "assumed";
+export function intakePageCountSource(file: { name: string; type?: string | null }): PageCountSource {
+  return workerCountedFormat(file) ? "assumed" : "counted";
+}
+
+/**
+ * The pages a cost forecast may pass as counted for a stored document: the worker's measured billing pages, else intake's page count
+ * when intake counted it. An assumed count is left out so the forecast prices the file's size instead of one page.
+ */
+export function countedPagesForForecast(document: { pageCount: number; billingPages?: number | null; pageCountSource?: string | null }): number | undefined {
+  if (Number(document.billingPages) > 0) return Number(document.billingPages);
+  return document.pageCountSource !== "assumed" && Number(document.pageCount) > 0 ? Number(document.pageCount) : undefined;
+}
+
 /** Pages of a file of `format` from its size alone, at the format's typical bytes per page (at least 1). */
 export function pagesFromSize(format: WorkerCountedFormat, sizeBytes: number): number {
   return Math.max(1, Math.ceil(Math.max(0, sizeBytes) / UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE[format].typical));
