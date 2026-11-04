@@ -204,7 +204,7 @@ describe("algolia compat", () => {
     expect(body.facets.filename["a.pdf"]).toBe(1);
   });
 
-  it("uses page-aware overfetching and trims attributes on single-index search", async () => {
+  it("retrieves a 100-passage window, reports the passages found in it and trims attributes on single-index search", async () => {
     hybridSearchMock.mockResolvedValue({
       sessionId: "session-1",
       results: [makeResult(0), makeResult(1), makeResult(2), makeResult(3), makeResult(4)]
@@ -229,7 +229,7 @@ describe("algolia compat", () => {
 
     expect(res.status).toBe(200);
     expect(hybridSearchMock).toHaveBeenCalledWith("alpha", "demo-user", expect.objectContaining({
-      limit: 5,
+      limit: 100,
       filters: expect.objectContaining({
         workspaceId: "ws-1",
         tags: ["finance"],
@@ -247,10 +247,35 @@ describe("algolia compat", () => {
       pageNumber: 3,
       _highlightResult: undefined
     });
+    // Five passages came back from a window of 100, so the window was not full: that is the whole result set.
     expect(body.nbHits).toBe(5);
     expect(body.nbPages).toBe(3);
-    expect(body.exhaustiveNbHits).toBe(false);
+    expect(body.exhaustiveNbHits).toBe(true);
     expect(body.facets.filename["doc-0.pdf"]).toBe(1);
+  });
+
+  it("reports a full window as a floor, never inventing one more hit", async () => {
+    hybridSearchMock.mockResolvedValue({
+      sessionId: "session-1",
+      results: Array.from({ length: 100 }, (_, index) => makeResult(index))
+    });
+    const res = await app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "alpha", hitsPerPage: 10, page: 0 })
+    });
+    const body = await res.json();
+    expect(body.hits).toHaveLength(10);
+    expect(body.nbHits).toBe(100);
+    expect(body.nbPages).toBe(10);
+    expect(body.exhaustiveNbHits).toBe(false);
+    // A deeper page widens the window instead of reading past it.
+    await app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "alpha", hitsPerPage: 50, page: 3 })
+    });
+    expect(hybridSearchMock).toHaveBeenLastCalledWith("alpha", "demo-user", expect.objectContaining({ limit: 201 }));
   });
 
   it.each([null, { query: {} }, { facetQuery: 1 }, { maxFacetHits: -1 }])("rejects invalid facet requests before retrieval: %j", async (payload) => {

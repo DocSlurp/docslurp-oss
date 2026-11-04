@@ -38,6 +38,23 @@ const queryBodySchema = z.object({
   highlightPostTag: z.string().optional(),
 }).passthrough();
 
+/** Ranked passages retrieved per compat query, so counts describe a real window (the SDK search adapters use the same 100). */
+const COMPAT_COUNT_WINDOW = 100;
+const COMPAT_MAX_FETCH = 1000;
+
+/** The window covers the requested page plus one passage, and at least COMPAT_COUNT_WINDOW passages. */
+function compatFetchLimit(pageStart: number, hitsPerPage: number): number {
+  return Math.max(1, Math.min(COMPAT_MAX_FETCH, Math.max(COMPAT_COUNT_WINDOW, pageStart + hitsPerPage + 1)));
+}
+
+/**
+ * nbHits is the number of passages found in the retrieved window. A window that came back full may have more
+ * beyond it, so the count is only a floor and `exhaustive` is false; a short window is the whole result set.
+ */
+function compatHitCount(found: number, fetchLimit: number): { nbHits: number; exhaustive: boolean } {
+  return { nbHits: found, exhaustive: found < fetchLimit };
+}
+
 const batchQuerySchema = z.object({
   requests: z.array(queryBodySchema.extend({ indexName: z.string().min(1) })).max(10),
 });
@@ -413,7 +430,7 @@ export const algoliaCompatRoutes = new Hono()
     const hitsPerPage = Math.max(1, Math.min(1000, body.hitsPerPage ?? Number(settings.compatSettings.hitsPerPage ?? 10)));
     const page = Math.max(0, body.page ?? 0);
     const pageStart = page * hitsPerPage;
-    const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
+    const fetchLimit = compatFetchLimit(pageStart, hitsPerPage);
     filters.workspaceId = workspace.id;
 
     const { results, sessionId } = await hybridSearch(query, apiKey.userId, {
@@ -425,7 +442,6 @@ export const algoliaCompatRoutes = new Hono()
       mmrLambda: undefined,
     } as never);
 
-    const hasMore = results.length > pageStart + hitsPerPage;
     const pageResults = results.slice(pageStart, pageStart + hitsPerPage);
     const mappedHits = pageResults.map((result) => buildAlgoliaHit({
       result,
@@ -436,9 +452,9 @@ export const algoliaCompatRoutes = new Hono()
     const facetHits = results
       .slice(0, Math.min(results.length, pageStart + hitsPerPage))
       .map((result) => buildAlgoliaHit({ result }));
-    const nbHits = hasMore
-      ? pageStart + mappedHits.length + 1
-      : Math.min(results.length, pageStart + mappedHits.length);
+    // The hits found in the ranked window we asked for. Full means more may exist beyond it: nbHits is then a
+    // floor, and exhaustiveNbHits says so, instead of inventing "one more hit" for the next page.
+    const { nbHits, exhaustive } = compatHitCount(results.length, fetchLimit);
 
     const response = {
       hits: mappedHits,
@@ -451,7 +467,7 @@ export const algoliaCompatRoutes = new Hono()
       queryID: sessionId,
       params: "",
       facets: buildFacetResponse(body.facets ?? [], facetHits),
-      exhaustiveNbHits: !hasMore && fetchLimit < 1000
+      exhaustiveNbHits: exhaustive
     };
 
     return c.json(response);
@@ -481,7 +497,7 @@ export const algoliaCompatRoutes = new Hono()
       const hitsPerPage = Math.max(1, Math.min(1000, request.hitsPerPage ?? 10));
       const page = Math.max(0, request.page ?? 0);
       const pageStart = page * hitsPerPage;
-      const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
+      const fetchLimit = compatFetchLimit(pageStart, hitsPerPage);
       const filters = { ...requestFilters[index]!, workspaceId: workspace.id };
       const response = await hybridSearch(request.query, apiKey.userId, {
         limit: fetchLimit,
@@ -489,11 +505,8 @@ export const algoliaCompatRoutes = new Hono()
         variant: "algolia-compat",
         ...compatRetrievalOptions,
       });
-      const hasMore = response.results.length > pageStart + hitsPerPage;
       const pageResults = response.results.slice(pageStart, pageStart + hitsPerPage);
-      const nbHits = hasMore
-        ? pageStart + pageResults.length + 1
-        : Math.min(response.results.length, pageStart + pageResults.length);
+      const { nbHits, exhaustive } = compatHitCount(response.results.length, fetchLimit);
       results.push({
         hits: pageResults.map((result) => buildAlgoliaHit({
           result,
@@ -515,7 +528,7 @@ export const algoliaCompatRoutes = new Hono()
             .slice(0, Math.min(response.results.length, pageStart + hitsPerPage))
             .map((result) => buildAlgoliaHit({ result }))
         ),
-        exhaustiveNbHits: !hasMore && fetchLimit < 1000
+        exhaustiveNbHits: exhaustive
       });
     }
 
