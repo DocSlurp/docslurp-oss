@@ -16,7 +16,7 @@ import {
   defaultDocumentExtractionConfig,
   isProviderCallAllowed,
   resolveVisionRoute,
-  splitTextIntoPages,
+  splitTextIntoPagesStrict,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   qualityAllowsPageReading,
@@ -137,13 +137,15 @@ type SelfCritiqueResult = {
   costCents: number;
 };
 
-function buildPerPageHeatmap(
+export function buildPerPageHeatmap(
   text: string,
   pageCount: number,
   strategy: string,
 ): PageHeatmapEntry[] {
-  const pageTexts = splitTextIntoPages(text, pageCount);
-  if (pageTexts.length === 0) {
+  // Only page breaks the text itself carries: equal-length slices would score invented pages, and the critique
+  // that reads this heatmap would re-read and rewrite them.
+  const pageTexts = splitTextIntoPagesStrict(text, pageCount);
+  if (pageTexts === null || pageTexts.length === 0) {
     return [];
   }
 
@@ -1112,7 +1114,7 @@ export class ExtractMarkdownStage implements Stage {
       const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
       const derived = deriveDocumentTitle({
         metadataTitles,
-        pages: splitTextIntoPages(markdown, document.pageCount).slice(0, 2),
+        pages: (splitTextIntoPagesStrict(markdown, document.pageCount) ?? [markdown]).slice(0, 2),
         filename: document.filename,
       });
       if (!derived) return;
@@ -1683,6 +1685,14 @@ export class ExtractMarkdownStage implements Stage {
       process.env.DOCSLURP_CRITIQUE_MAX_COST_PER_PAGE_CENTS ??
         String(maxCostCents),
     );
+    // Critique rewrites single pages and joins them with form feeds, which later stages trust as page breaks. Text
+    // without reliable page breaks (the form feeds do not describe exactly `pageCount` pages) has no pages to
+    // rewrite: skip the critique rather than invent boundaries.
+    const pageTexts = splitTextIntoPagesStrict(args.winningText, Math.max(1, args.document.pageCount));
+    if (pageTexts === null || pageTexts.length === 0) {
+      console.warn(`[extract-markdown] self-critique skipped document=${args.document.id}: text has no reliable page breaks pageCount=${args.document.pageCount}`);
+      return null;
+    }
     const critiquePages = budgetCritiquePages(
       selectCritiquePages(args.heatmapPages),
       maxCostCents,
@@ -1701,10 +1711,6 @@ export class ExtractMarkdownStage implements Stage {
       return null;
     }
 
-    const pageTexts = splitTextIntoPages(
-      args.winningText,
-      Math.max(1, args.document.pageCount),
-    );
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-critique-"));
     const critiqueArtifactKey = `${runArtifactRoot(args.state.run, args.document.userId)}/critique/${args.document.id}.json`;
     const correctedTextKey = `${runArtifactRoot(args.state.run, args.document.userId)}/markdown/${args.document.id}.critique.md`;
@@ -2678,8 +2684,10 @@ export function mergeCritiquedPages(
   pageCount: number,
   corrections: Array<{ pageNumber: number; text: string }>,
 ): string {
-  const pages = splitTextIntoPages(originalText, pageCount);
-  if (pages.length === 0) {
+  // Strict: a text whose page breaks do not match the page count has no pages to replace, and joining slices with
+  // form feeds would write boundaries the text never had.
+  const pages = splitTextIntoPagesStrict(originalText, pageCount);
+  if (pages === null || pages.length === 0) {
     return originalText;
   }
 
