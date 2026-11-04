@@ -1,6 +1,18 @@
 -- Breaking terminology cutover. Stop old producers and drain jobs first.
 -- Preserve tenant IDs, allowlists, storage keys and historical migrations.
 -- Catalog operations are restricted to application-owned public objects.
+-- Recreating the OUT-column routine cannot flatten delegated grant chains:
+-- subsequent REVOKE CASCADE behavior is part of the authorization contract.
+-- Refuse unsupported chains before any data/schema change instead of widening.
+DO $acl_preflight$
+BEGIN
+  IF EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+    WHERE n.nspname='public' AND p.proname='org_spend_status' AND a.grantor<>p.proowner) THEN
+    RAISE EXCEPTION 'Projects migration refuses delegated grants on org_spend_status; preserve the grant chain before retrying';
+  END IF;
+END $acl_preflight$;
+--> statement-breakpoint
 -- Older sessions may store protocol metadata as a JSON string containing an
 -- object. Normalize only recognized scope-bearing session objects; customer
 -- strings and nested metadata are not rewritten.

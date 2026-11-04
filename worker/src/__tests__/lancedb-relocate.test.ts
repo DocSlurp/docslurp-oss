@@ -184,7 +184,8 @@ describe("lancedb relocate", () => {
     const oldUri = `${lanceDir}/org1/vectors/provider%2Fmodel%2Ev1/4`;
     await sql`insert into vector_index_outbox (table_key, lance_uri, lance_table, org_id, document_id, run_id, artifact_key, metadata, record_count)
       values (${`${oldUri}#chunks`}, ${oldUri}, 'chunks', 'org1', 'b', 'run-w2', 'k', '{}', 1)`;
-    await sql.unsafe(rewrite);
+    // Exercise historical relocation SQL against the renamed column in this fixture.
+    await sql.unsafe(rewrite.replaceAll("workspace_id", "project_id"));
     const newUri = `${lanceDir}/org1/w2/vectors-provider%2Fmodel%2Ev1-4`;
     expect(newUri).toBe(projectUri("w2"));
     expect(await sql`select lance_uri, table_key from vector_index_outbox where document_id = 'b'`)

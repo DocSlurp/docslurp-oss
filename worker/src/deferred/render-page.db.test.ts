@@ -39,12 +39,12 @@ beforeAll(async () => {
   db = await createMigratedDatabase({ stopBefore: "page_render_dpi" });
   await db.exec(`insert into "user"(id,name,email) values('u','User','u@example.invalid');
     insert into organizations(id,name,created_by_user_id) values('o','Org','u');
-    insert into projects(id,org_id,user_id,name) values('w','o','u','Project');
-    insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,total_documents,pipeline)
+    insert into workspaces(id,org_id,user_id,name) values('w','o','u','Project');
+    insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,total_documents,pipeline)
       values('run','o','u','w','bulk-upload','completed','completed',1,'{}');
-    insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count)
+    insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count)
       values('doc','o','u','w','run','a.pdf','application/pdf','source','completed',1);
-    insert into document_page_renders(document_id,run_id,page_number,org_id,project_id,quality,expires_at)
+    insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,expires_at)
       values('doc','run',1,'o','w','reader',now()+interval '10 minutes'),('doc','run',1,'o','w','export',now()+interval '10 minutes');`);
   await applyRemainingMigrations(db, "page_render_dpi");
   const served = await serveOnRandomPort(db);

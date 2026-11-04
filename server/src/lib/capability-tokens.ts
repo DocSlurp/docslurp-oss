@@ -108,6 +108,7 @@ const isStringArray = (value: unknown): value is string[] => Array.isArray(value
 export function peekCapabilityToken(token: string): CapabilityClaims | null {
   if (!token || token.length > CAPABILITY_MAX_TOKEN_CHARS || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
   const raw = Buffer.from(token, "base64url");
+  if (raw.toString("base64url") !== token) return null;
   if (raw.length <= IV_BYTES + TAG_BYTES) return null;
   try {
     const decipher = createDecipheriv("aes-256-gcm", capabilityKey(), raw.subarray(0, IV_BYTES));

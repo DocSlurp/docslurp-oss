@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { openCapabilityToken, resetCapabilityKeyForTests, sealCapabilityToken, sealedTokenFamily } from "../lib/capability-tokens.js";
+import { openCapabilityToken, resetCapabilityKeyForTests, sealCapabilityToken, sealedTokenFamily, peekCapabilityToken } from "../lib/capability-tokens.js";
 import type { CapabilityClaims } from "@docslurp/shared";
 
 const now = 1_900_000_000_000;
@@ -34,6 +34,15 @@ describe("search capability tokens", () => {
     expect(openCapabilityToken(raw.subarray(0, 30).toString("base64url"), now)).toBeNull();
     expect(openCapabilityToken("not a token", now)).toBeNull();
     expect(openCapabilityToken(sealCapabilityToken({ ...claims, exp: Math.floor(now / 1000) }), now)).toBeNull();
+  });
+
+  it("requires canonical encoding when inspecting capability claims", () => {
+    for (let length = 0; length < 3; length++) {
+      const token = sealCapabilityToken({ ...claims, jti: "canonical" + "x".repeat(length) });
+      expect(peekCapabilityToken(token)).not.toBeNull();
+      expect(peekCapabilityToken(token + "x")).toBeNull();
+      expect(peekCapabilityToken(token + "=")).toBeNull();
+    }
   });
 
   it("does not open under a different secret", () => {

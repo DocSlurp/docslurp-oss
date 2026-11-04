@@ -1217,6 +1217,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
   /** What switching a project to `mode` would cost. */
   function estimateIndexingMode(mode: IndexingMode, input: { project?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+      rejectLegacyProjectOptions(input);
     return request(`${wsPath(input.project)}/indexing-mode/estimate`, jsonRequest("POST", { mode, speedBoost: input.speedBoost }), requestOptions);
   }
 
@@ -1734,10 +1735,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
     /** Cost of fully indexing one document (`{ documentId }`) or a project (`{ project?, documentIds? }`). */
     fullIndexEstimate(input: { documentId: string; speedBoost?: boolean } | { project?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      rejectLegacyProjectOptions(input);
       if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, { speedBoost: input.speedBoost }, requestOptions);
       return estimateAt(`${wsPath(input.project)}/full-index/estimate`, { documentIds: input.documentIds, speedBoost: input.speedBoost }, requestOptions);
     },
     rebuildGraphEstimate(input: { project?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      rejectLegacyProjectOptions(input);
       const { project, ...body } = input;
       return estimateAt(`${wsPath(typeof project === "string" ? project : undefined)}/graph/jobs/estimate`, body, requestOptions);
     },
@@ -1750,6 +1753,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Pass `project` for a project override, `orgId` for the organization default.
      */
     setRetention(target: { orgId: string } | { project?: string }, retainDocumentVersions: number | null, requestOptions?: RequestOptions): Promise<JsonObject> {
+      rejectLegacyProjectOptions(target);
       if (retainDocumentVersions !== null && (!Number.isInteger(retainDocumentVersions) || retainDocumentVersions < 1 || retainDocumentVersions > 100)) {
         throw new RangeError("retainDocumentVersions must be an integer from 1 to 100 (or null to clear).");
       }
@@ -1879,6 +1883,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /** Documents in a project (the client default unless one is passed), newest first. */
     async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
+      rejectLegacyProjectOptions(input);
       const params = new URLSearchParams({ project: input.project?.trim() || clientProject });
       if (input.runId) params.set("runId", input.runId);
       if (input.tags) params.set("tags", input.tags);
@@ -1987,6 +1992,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /** Indexes every unindexed page of a project (or the given documents) in the background. */
     fullIndex(input: { project?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      rejectLegacyProjectOptions(input);
       return request<FullIndexResponse>(`${wsPath(input.project)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds, speedBoost: input.speedBoost }), requestOptions);
     },
 

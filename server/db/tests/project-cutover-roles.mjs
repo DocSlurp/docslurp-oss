@@ -47,11 +47,23 @@ try {
     }
   }
   const snapshot = async () => (await client.query(`SELECT p.oid,p.proname,pg_get_userbyid(p.proowner) AS owner,p.prosecdef,p.proconfig,
-    ARRAY(SELECT format('%s:%s:%s',a.grantee,a.privilege_type,a.is_grantable) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a ORDER BY a.grantee,a.privilege_type) AS acl
+    ARRAY(SELECT format('%s:%s:%s:%s',a.grantor,a.grantee,a.privilege_type,a.is_grantable) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a ORDER BY a.grantor,a.grantee,a.privilege_type) AS acl
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
     AND p.proname IN ('org_spend_status','realtime_changed') ORDER BY p.proname`)).rows;
   const before = await snapshot();
   assert.equal(before.length, 2);
+  if (process.env.PROJECT_CUTOVER_DELEGATED_ACL === "1") {
+    await client.query("SET ROLE projects_acl_reader; GRANT EXECUTE ON FUNCTION org_spend_status(text,text,numeric) TO projects_acl_recipient; RESET ROLE");
+    const delegated = await snapshot();
+    await assert.rejects(migrate(drizzle(client), { migrationsFolder: source }), error => {
+      const cause = error.cause ?? error;
+      return cause.code === "P0001" && cause.message.startsWith("Projects migration refuses delegated grants on org_spend_status");
+    });
+    assert.deepEqual(await snapshot(),delegated);
+    assert.equal((await client.query("SELECT to_regclass('public.workspaces') IS NOT NULL AS legacy")).rows[0].legacy,true);
+    await client.query("SET ROLE projects_acl_reader; REVOKE EXECUTE ON FUNCTION org_spend_status(text,text,numeric) FROM projects_acl_recipient; RESET ROLE");
+    console.log("PASS: delegated ACL chain refuses and rolls back without changing owner, grantor, grants or historical schema");
+  }
   await migrate(drizzle(client), { migrationsFolder: source });
   if (process.env.PROJECT_CUTOVER_POSTGIS === "1") {
     await migratePostgis(client);
