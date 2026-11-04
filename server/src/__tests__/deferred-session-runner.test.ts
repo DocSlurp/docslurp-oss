@@ -7,7 +7,6 @@ vi.mock("../search/session-planner.js", () => ({
     effectiveOptions: args.effectiveOptions, selfQueryReasons: [], effectiveQuery: "q", queryVector: [1, 0], textQuery: "q",
   })),
 }));
-vi.mock("../search/graph-expansion.js", () => ({ expandGraphTextQuery: vi.fn(async (a: { textQuery: string }) => a.textQuery) }));
 vi.mock("../search/session-execution.js", () => ({
   executeSearchSessionRetrieval: vi.fn(async (input: { retrieveCandidateLists: () => Promise<unknown[][]> }) => {
     const lists = await input.retrieveCandidateLists();
