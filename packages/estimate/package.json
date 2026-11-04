@@ -29,6 +29,7 @@
     "js",
     "dist",
     "card.json",
+    "README.md",
     "LICENSE"
   ],
   "engines": {
@@ -36,7 +37,8 @@
   },
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "test:wasm": "node scripts/build-wasm.mjs && node ../../scripts/node-test.mjs test/*.test.mjs"
+    "test:wasm": "node scripts/build-wasm.mjs && node ../../scripts/node-test.mjs test/*.test.mjs",
+    "test:python": "node scripts/build-wasm.mjs && node scripts/build-python.mjs && cd python && uv run --isolated --with wasmtime --with-editable . python -I -m unittest discover -s tests -v"
   },
   "devDependencies": {
     "@docslurp/shared": "workspace:*"

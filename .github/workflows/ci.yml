@@ -194,7 +194,7 @@ jobs:
         run: node scripts/run-database-tests.mjs
 
   # The offline estimator (packages/estimate): Rust unit, golden-parity and probe-fixture tests, then the wasm build
-  # (size budget) and its JS tests, which replay random quotes against @docslurp/shared's quoteUpload.
+  # (size budget), its JS tests (random quotes against @docslurp/shared's quoteUpload) and the Python package tests.
   estimate:
     name: offline estimator
     timeout-minutes: 20
@@ -218,6 +218,12 @@ jobs:
       - run: pnpm --filter @docslurp/shared build
       - name: Build the wasm module and run its JS tests
         run: pnpm --filter @docslurp/estimate test:wasm
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.0'
+          python-version: '3.11'
+      - name: Python package tests (wasmtime)
+        run: pnpm --filter @docslurp/estimate test:python
 
   ci-success:
     # A stable required check. Never mask failures.

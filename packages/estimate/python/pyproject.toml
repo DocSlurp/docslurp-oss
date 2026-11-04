@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docslurp-estimate"
+version = "0.4.0"
+description = "Offline DocSlurp credit estimates: probe files locally and quote an upload with the published price card."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["wasmtime>=30"]
+
+[project.urls]
+Documentation = "https://docslurp.io/docs/packages/estimate"
+Source = "https://github.com/DocSlurp/docslurp-oss/tree/main/packages/estimate"
+Issues = "https://github.com/DocSlurp/docslurp-oss/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docslurp_estimate"]
+# The module is built by `node ../scripts/build-wasm.mjs` and copied in by `scripts/build-python.mjs`.
+artifacts = ["src/docslurp_estimate/docslurp_estimate.wasm"]
