@@ -6,6 +6,8 @@
  */
 import { embeddedImageFactsSchema, type EmbeddedImageFacts, type EmbeddedImageSource, type ImageRole } from "@docslurp/shared";
 
+import { pdfImagesListFields } from "../lib/page-yield-evidence.js";
+
 export interface PdfImagesListRow {
   page: number;
   num: number;
@@ -46,19 +48,19 @@ export function parsePdfImagesList(text: string): PdfImagesListRow[] {
   const rows: PdfImagesListRow[] = [];
   for (const line of lines.slice(separator + 1)) {
     if (!line.trim()) continue;
-    const cells = line.trim().split(/\s+/);
-    // page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio
-    // An inline image prints `[inline]` in place of the two object columns.
+    // page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio; an inline (`[inline]`) or
+    // unreferenced (`[none]`) image's object columns are one token, padded back to 16 columns by pdfImagesListFields.
+    const cells = pdfImagesListFields(line);
     const inline = cells[10] === "[inline]";
     const [page, num, type, width, height, color, comp, bpc, enc, interp] = cells;
-    const rest = cells.slice(inline ? 11 : 12);
+    const rest = cells.slice(12);
     const role = type as ImageRole;
     const pageNumber = integer(page), index = integer(num), w = integer(width), h = integer(height);
-    if (pageNumber === null || index === null || w === null || h === null || !ROLES.has(role) || (!inline && cells.length < 14)) {
+    if (pageNumber === null || index === null || w === null || h === null || !ROLES.has(role) || cells.length < 15) {
       throw new Error("Unreadable pdfimages -list row");
     }
-    const objectNum = inline ? null : integer(cells[10]);
-    const objectGen = inline ? null : integer(cells[11]);
+    const objectNum = integer(cells[10]);
+    const objectGen = integer(cells[11]);
     rows.push({
       page: pageNumber, num: index, role, width: w, height: h,
       source: {
