@@ -25,6 +25,8 @@ import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
 import { estimateTokens, normalizeNfc } from "../lib/unicode-text.js";
+import { ArtifactReadError } from "../lib/artifact-read-error.js";
+export { ArtifactReadError };
 import type { CommandRunner } from "../tools/runner.js";
 import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
 import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
@@ -274,15 +276,6 @@ export async function extractTextForEmbedding(
   throw new Error(`no extractor produced text for ${document.filename}`);
 }
 
-/** A recorded artifact that could not be read. Retried by the stage; never answered from the raw source. */
-export class ArtifactReadError extends Error {
-  readonly retryable = true;
-  constructor(readonly artifactUri: string, reason: string, options?: { cause?: unknown }) {
-    super(`artifact ${artifactUri} could not be read: ${reason}`, options);
-    this.name = "ArtifactReadError";
-  }
-}
-
 function artifactKeyOf(artifactUri: string): string {
   return artifactUri.replace(/^s3:\/\/[^/]+\//, "");
 }
@@ -298,7 +291,7 @@ async function readUtf8Artifact(storage: ArtifactStore, artifactUri: string): Pr
   return data.toString("utf8");
 }
 
-async function readExtractedMarkdown(
+export async function readExtractedMarkdown(
   storage: ArtifactStore,
   artifactUri: string,
 ): Promise<string> {
@@ -319,7 +312,7 @@ async function readExtractedMarkdown(
   return normalizeNfc(await readUtf8Artifact(storage, parsed.textArtifactUri));
 }
 
-async function readCanonicalDocumentArtifact(
+export async function readCanonicalDocumentArtifact(
   storage: ArtifactStore,
   artifactUri: string,
 ): Promise<CanonicalDocument> {

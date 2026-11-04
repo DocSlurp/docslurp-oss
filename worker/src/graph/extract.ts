@@ -10,6 +10,7 @@ import {
 import { isRouteLevelProviderFailure, operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
+import { atomize, normalizeNfc } from "../lib/unicode-text.js";
 
 const MAX_KNOWN_ENTITY_HINTS = 40;
 const CO_MENTION_CONFIDENCE = 0.45;
@@ -213,7 +214,7 @@ export async function extractDocumentGraph(args: {
   };
 }
 
-function assembleDocumentGraph(args: {
+export function assembleDocumentGraph(args: {
   chunks: GraphChunk[];
   extraction: DocumentGraphExtraction;
   allowedTypes: ReadonlySet<string>;
@@ -268,9 +269,9 @@ function assembleDocumentGraph(args: {
   for (const entity of args.extraction.entities) ensureNode(entity);
 
   for (const chunk of args.chunks) {
-    const chunkText = chunk.text.toLowerCase();
+    const chunkText = foldCase(chunk.text);
     const documentEntitiesInChunk = args.extraction.entities.filter((entity) =>
-      [entity.name, ...(entity.aliases ?? [])].some((name) => chunkText.includes(name.toLowerCase())),
+      [entity.name, ...(entity.aliases ?? [])].some((name) => mentionsName(chunkText, name)),
     );
     const chunkLevel = args.chunkHeuristics
       ? mergeEntities(extractEntitiesFromText(chunk.text, args.allowedTypes), documentEntitiesInChunk)
@@ -398,9 +399,11 @@ export function buildExtractionWindows(texts: string[], windowChars: number, max
   for (const text of texts) {
     const trimmed = text.trim();
     if (!trimmed) continue;
-    // Split oversized chunks rather than silently discarding their tail.
-    for (let offset = 0; offset < trimmed.length; offset += windowChars) {
-      const part = trimmed.slice(offset, offset + windowChars);
+    // Split oversized chunks rather than silently discarding their tail; cut at
+    // sentence, word or grapheme boundaries, never inside a surrogate pair.
+    for (const piece of atomize(trimmed, { maxChars: windowChars })) {
+      const part = piece.trim();
+      if (!part) continue;
       if (current && current.length + part.length + 2 > windowChars) {
         windows.push(current);
         current = "";
@@ -507,12 +510,28 @@ function mergeRelationships(
   return [...merged.values()];
 }
 
-function extractEntitiesFromText(text: string, allowedTypes: ReadonlySet<string>): ExtractedEntity[] {
+const LETTER_OR_NUMBER = "\\p{L}\\p{N}\\p{M}";
+const NOT_AFTER_WORD = `(?<![${LETTER_OR_NUMBER}])`;
+const NOT_BEFORE_WORD = `(?![${LETTER_OR_NUMBER}])`;
+const CAPITALIZED = "\\p{Lu}\\p{Ll}+";
+const ORGANIZATION_SUFFIX =
+  "Inc|LLC|Ltd|Corporation|Corp|Company|University|Agency|Committee|Department|GmbH|AG|SA|BV|NV|Oy|AB|Pty|Universität|Université|Università|Universidad";
+const MONTH = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*";
+
+/**
+ * Candidate entities when no model read the document: multi-word capitalized
+ * phrases, acronyms, organizations by legal-form suffix, and dates. A single
+ * capitalized word is not an entity (every sentence starts with one), and a
+ * phrase's first word is dropped when only the sentence start capitalized it.
+ * Scripts without capitals (Han, kana, Arabic) yield nothing here; the model
+ * extraction handles them.
+ */
+export function extractEntitiesFromText(text: string, allowedTypes: ReadonlySet<string>): ExtractedEntity[] {
   const entities: ExtractedEntity[] = [];
   const seen = new Set<string>();
   const pushEntity = (name: string, type: string, confidence: number) => {
     const cleaned = name.trim().replace(/[.,;:]+$/g, "");
-    if (cleaned.length < 3) return;
+    if (Array.from(cleaned).length < (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(cleaned) ? 2 : 3)) return;
     const constrained = constrainEntityType(type, allowedTypes);
     const key = graphNodeKey(normalizeName(cleaned), constrained);
     if (seen.has(key)) return;
@@ -520,21 +539,28 @@ function extractEntitiesFromText(text: string, allowedTypes: ReadonlySet<string>
     entities.push({ name: cleaned, type: constrained, confidence });
   };
 
-  for (const match of text.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b/g)) {
-    pushEntity(match[1]!, "concept", 0.55);
+  for (const match of text.matchAll(new RegExp(`${NOT_AFTER_WORD}(${CAPITALIZED}(?:[ \\t]+${CAPITALIZED}){1,3})${NOT_BEFORE_WORD}`, "gu"))) {
+    let phrase = match[1]!;
+    const before = text.slice(0, match.index).trimEnd();
+    const startsSentence = before === "" || /[.!?:\n\f]$/.test(before) || /(^|\n)\s*(?:[-*>#]+\s*|\d+[.)]\s*)$/.test(text.slice(0, match.index));
+    if (startsSentence) phrase = phrase.replace(new RegExp(`^${CAPITALIZED}[ \\t]+`, "u"), "");
+    if (phrase.includes(" ") || phrase.includes("\t")) pushEntity(phrase, "concept", 0.55);
   }
-  for (const match of text.matchAll(/\b([A-Z]{2,}(?:\s+[A-Z]{2,})*)\b/g)) {
+  for (const match of text.matchAll(new RegExp(`${NOT_AFTER_WORD}(\\p{Lu}{2,6}(?:[ \\t]+\\p{Lu}{2,6})*)${NOT_BEFORE_WORD}`, "gu"))) {
     pushEntity(match[1]!, "organization", 0.65);
   }
   for (const match of text.matchAll(
-    /\b((?:19|20)\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+(?:19|20)\d{2})\b/g,
+    new RegExp(`${NOT_AFTER_WORD}((?:19|20)\\d{2}-\\d{2}-\\d{2}|(?:19|20)\\d{2}|${MONTH}\\s+\\d{1,2},\\s+(?:19|20)\\d{2}|\\d{1,2}\\s+${MONTH}\\s+(?:19|20)\\d{2})${NOT_BEFORE_WORD}`, "gu"),
   )) {
     pushEntity(match[1]!, "date", 0.8);
   }
   for (const match of text.matchAll(
-    /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+(?:Inc|LLC|Ltd|Corporation|Corp|Company|University|Agency|Committee|Department))\b/g,
+    new RegExp(`${NOT_AFTER_WORD}(${CAPITALIZED}(?:[ \\t]+${CAPITALIZED}){0,2}[ \\t]+(?:${ORGANIZATION_SUFFIX}))${NOT_BEFORE_WORD}`, "gu"),
   )) {
     pushEntity(match[1]!, "organization", 0.8);
+  }
+  for (const match of text.matchAll(/(?:株式会社|有限会社)\p{Script=Han}{1,12}|\p{Script=Han}{1,12}(?:株式会社|有限会社)/gu)) {
+    pushEntity(match[0], "organization", 0.8);
   }
   return entities.slice(0, 64);
 }
@@ -563,12 +589,65 @@ function findNode<T extends GraphNodeDraft>(nodes: Map<GraphNodeKey, T>, name: s
   return null;
 }
 
+/** NFC plus lower case: the form names are compared in. */
+function foldCase(value: string): string {
+  return normalizeNfc(value).toLowerCase();
+}
+
+/**
+ * Identity key of an entity name: NFC, lower case, letters and numbers of any
+ * script. The symbols that tell names apart stay (`+`, `#`, `&`, and a `.`
+ * inside a name), so C, C++ and C# are three entities and `.NET` is not
+ * `NET`; punctuation around a name does not count. Underscores and quotes are
+ * dropped, whitespace collapses.
+ */
 export function normalizeName(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, " ");
+  return foldCase(value)
+    .replace(/['’`_]/g, "")
+    .replace(/[^\p{L}\p{N}\p{M}\s+#&.\-]/gu, " ")
+    .replace(/(?<![\p{L}\p{N}\p{M}+#&.\-])[+#&.\-]+|[.\-]+(?![\p{L}\p{N}\p{M}])|(?<![\p{L}\p{N}\p{M}+#])[+#]+/gu, (run, offset: number, whole: string) =>
+      // Keep a leading dot of a name like .NET; drop other loose punctuation.
+      run === "." && /[\p{L}\p{N}]/u.test(whole[offset + 1] ?? "") ? run : " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const IDEOGRAPHIC = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const NAME_CHAR = /[\p{L}\p{N}\p{M}_]/u;
+
+/**
+ * Whether a folded chunk text mentions a name as a whole token. Substring
+ * search found "ai" in "said" and "C" in "C++". A name edge needs a boundary
+ * unless it is ideographic, which is written without spaces and can only be
+ * matched where it appears.
+ */
+export function mentionsName(foldedText: string, name: string): boolean {
+  const needle = foldCase(name).trim();
+  if (!needle) return false;
+  const first = Array.from(needle)[0]!;
+  const last = Array.from(needle).at(-1)!;
+  let from = 0;
+  for (;;) {
+    const at = foldedText.indexOf(needle, from);
+    if (at < 0) return false;
+    from = at + 1;
+    const end = at + needle.length;
+    if (!IDEOGRAPHIC.test(first) && at > 0) {
+      const previous = Array.from(foldedText.slice(Math.max(0, at - 2), at)).at(-1)!;
+      // A dot inside a longer name (node.js) or a symbol prefix (.net, @user) is part of that other token.
+      const insideDotted = previous === "." && /[\p{L}\p{N}]/u.test(foldedText[at - 2] ?? "");
+      if (NAME_CHAR.test(previous) || insideDotted) continue;
+    }
+    if (!IDEOGRAPHIC.test(last) && end < foldedText.length) {
+      const next = foldedText[end]!;
+      const afterNext = foldedText[end + 1] ?? "";
+      const extendsName = NAME_CHAR.test(String.fromCodePoint(foldedText.codePointAt(end)!))
+        || ((next === "+" || next === "#") && !/[+#]$/.test(needle))
+        || (next === "." && /[\p{L}\p{N}]/u.test(afterNext));
+      if (extendsName) continue;
+    }
+    return true;
+  }
 }
 
 function normalizePredicate(value: string): string {

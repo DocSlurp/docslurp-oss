@@ -26,10 +26,16 @@ export function featurePages(state: WorkflowState, document: Pick<Document, "id"
  * that skips the stage pays nothing for it. The id makes a retried checkpoint
  * a no-op; the model tokens themselves are provider cost (billed 0).
  */
-export function chargeDocumentFeature(state: WorkflowState, document: Pick<Document, "id" | "pageCount">, feature: DocumentFeature): void {
+export function chargeDocumentFeature(
+  state: WorkflowState,
+  document: Pick<Document, "id" | "pageCount">,
+  feature: DocumentFeature,
+  /** Pages the feature's model actually read, when that is fewer than the document's (long documents are read in part). */
+  pagesRead?: number,
+): void {
   const slot = `feature-charge:${feature}:${document.id}`;
   if (state.artifactLedger.read(slot)) return;
-  const pages = featurePages(state, document);
+  const pages = pagesRead === undefined ? featurePages(state, document) : Math.min(featurePages(state, document), Math.max(1, pagesRead));
   const credits = featureCredits(feature, pages);
   state.usageLedger.enqueue({
     id: `feature:${feature}:${state.run.id}:${document.id}`,
