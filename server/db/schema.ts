@@ -1031,11 +1031,18 @@ export const documentChunks = pgTable(
     tsContent: tsvector("ts_content").generatedAlwaysAs(
       sql`to_tsvector('english'::regconfig, text)`,
     ),
+    tsFolded: tsvector("ts_folded").generatedAlwaysAs(
+      sql`to_tsvector('simple'::regconfig, docslurp_fold_text(text))`,
+    ),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
   },
   (table) => [
+    index("document_chunks_ts_folded_idx").using(
+      "gin",
+      table.tsFolded.asc().nullsLast().op("tsvector_ops"),
+    ),
     index("document_chunks_ts_content_idx").using(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),

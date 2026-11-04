@@ -549,7 +549,8 @@ describe("hybridSearch", () => {
         text.includes("to_tsquery('english'") &&
         !text.includes("websearch_to_tsquery")
       ) {
-        expect(values).toContain("math");
+        // "classes" is an ordinary content word, not a stop word; the OR query keeps it.
+        expect(values).toContain("math | classes");
         return [
           {
             id: "chunk-1",
