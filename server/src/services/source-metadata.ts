@@ -88,9 +88,17 @@ export function estimateNonPdfPageCount(
     return 1;
   }
 
-  // Decoded by the file's own encoding (a UTF-16 CSV is not UTF-8), with HTML markup removed.
-  return textPageCount(decodeTextBytes(bytes, encoding), { markup: contentType.startsWith("text/html") });
+  // Decoded by the file's own encoding (a UTF-16 CSV is not UTF-8), with HTML markup removed. Only the first
+  // TEXT_MEASURE_SAMPLE_BYTES are decoded and the count is scaled by the file's size, so a large or hostile file costs
+  // the API a bounded amount of work.
+  const markup = contentType.startsWith("text/html");
+  if (bytes.length <= TEXT_MEASURE_SAMPLE_BYTES) return textPageCount(decodeTextBytes(bytes, encoding), { markup });
+  const sampled = textPageCount(decodeTextBytes(bytes.subarray(0, TEXT_MEASURE_SAMPLE_BYTES), encoding), { markup });
+  return Math.max(1, Math.ceil(sampled * (bytes.length / TEXT_MEASURE_SAMPLE_BYTES)));
 }
+
+/** Bytes of a text file the API decodes to count its pages. */
+const TEXT_MEASURE_SAMPLE_BYTES = 2_000_000;
 
 const PDFINFO_ENV = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C" } as const;
 
@@ -151,8 +159,10 @@ export async function resolveSourceMetadata(file: {
 }): Promise<SourceMetadata> {
   const bytes = await downloadSourceBytes(file.sourceKey);
   const sourceSha256 = sha256Hex(bytes);
-  const fileFacts = fileFactsFor(bytes, { filename: file.filename, declaredMimeType: file.mimeType });
-  // A declaration the bytes contradict (text declared as a PDF, a plain ZIP declared as a DOCX) is refused for this file
+  // Header depth: magic bytes in the first few KB plus the declared type. ZIP and OLE containers are not opened and text is
+  // not classified here; the worker's quarantine stage inspects them before any parser and persists the full facts.
+  const fileFacts = fileFactsFor(bytes, { filename: file.filename, declaredMimeType: file.mimeType }, { depth: "header" });
+  // A declaration the magic bytes contradict (text declared as a PDF, a PNG declared as a DOCX) is refused for this file
   // alone (partial ingest) instead of reaching a parser that would trust the label.
   if (fileFacts.mismatch === "unresolved") {
     throw new UnreadableSourceError(

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createDocSlurpClient } from "../dist/index.js";
+import { createDocSlurpClient, DocSlurpApiError } from "../dist/index.js";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const uploadResult = { workspace: { id: "workspace" }, run: { id: "run" }, documents: [] };
@@ -125,4 +125,39 @@ test("a failed part resumes from the server's pendingParts instead of re-sending
   assert.ok(calls.includes("PUT https://storage.invalid/b/2"));
   assert.ok(calls.includes("PUT https://storage.invalid/b/3"));
   assert.ok(!calls.includes("PUT https://storage.invalid/a/3"));
+});
+
+
+test("a coded in-flight 409 is retried with the same key until the first request's session comes back", async () => {
+  const api = server();
+  let inFlight = 2;
+  const fetch = async (url, init = {}) => {
+    if (String(url).endsWith("/v1/uploads/direct/sessions") && init.method === "POST" && inFlight-- > 0) {
+      return json({ error: { code: "idempotency_in_flight", message: "A request with this Idempotency-Key is still being processed." } }, 409);
+    }
+    return api.fetch(url, init);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  const result = await client.upload(new Blob(["hello"], { type: "text/plain" }), { filename: "a.txt", idempotencyKey: "raced-key" });
+  assert.equal(result.run.id, "run");
+  const creates = api.calls.filter((call) => call.method === "POST" && call.url.endsWith("/direct/sessions"));
+  assert.deepEqual(creates.map((call) => call.key), ["raced-key"]);
+  assert.equal(api.created(), 1);
+});
+
+test("an in-flight 409 that outlasts the request timeout is reported, and other 409s are never retried", async () => {
+  let calls = 0;
+  const stuck = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", timeoutMs: 700, fetch: async () => {
+    calls++;
+    return json({ error: { code: "idempotency_in_flight", message: "busy" } }, 409);
+  } });
+  await assert.rejects(stuck.upload(new Blob(["x"]), { filename: "a.txt" }), (error) => error instanceof DocSlurpApiError && error.status === 409 && error.code === "idempotency_in_flight");
+  assert.ok(calls >= 2 && calls <= 5, `retried a bounded number of times, got ${calls}`);
+
+  for (const code of ["idempotency_key_reused", "upload_session_closed", "conflict"]) {
+    let attempts = 0;
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async () => { attempts++; return json({ error: { code, message: "no" } }, 409); } });
+    await assert.rejects(client.upload(new Blob(["x"]), { filename: "a.txt" }), (error) => error instanceof DocSlurpApiError && error.code === code);
+    assert.equal(attempts, 1, `${code} must not be retried`);
+  }
 });

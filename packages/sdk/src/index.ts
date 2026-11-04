@@ -1750,10 +1750,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const init = jsonRequest("POST", body);
     const headers = new Headers(init.headers);
     headers.set("Idempotency-Key", key);
+    // The server answers a coded 409 while the first request with this key is still being processed (a retry that raced it). The
+    // session it makes is the one this call wants, so wait and send the same key again until the request timeout, instead of
+    // failing and orphaning that session.
+    const giveUpAt = Date.now() + (options.timeoutMs ?? defaultTimeoutMs);
+    let inFlight = 0;
     for (let attempt = 0; ; attempt++) {
       try {
         return await request<T>(path, { ...init, headers }, options, true);
       } catch (error) {
+        if (error instanceof DocSlurpApiError && error.status === 409 && error.code === "idempotency_in_flight" && !options.signal?.aborted) {
+          const wait = Math.min(2_000, 250 * 2 ** inFlight++);
+          if (Date.now() + wait >= giveUpAt) throw error;
+          await sleep(wait, options.signal ?? new AbortController().signal);
+          attempt--; // Waiting on the first request is not one of the lost-response retries.
+          continue;
+        }
         // HTTP statuses were already retried by request(); only a lost response or a timeout needs the same key sent again.
         if (attempt >= 3 || options.signal?.aborted || !(error instanceof DocSlurpTimeoutError || error instanceof TypeError)) throw error;
         await sleep(250 * 2 ** attempt, options.signal ?? new AbortController().signal);

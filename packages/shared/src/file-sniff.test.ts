@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { fileFactsFor, sniffFileBytes, decodeTextBytes } from "./file-sniff.js";
+import { fileFactsFor, listZipEntryNames, sniffFileBytes, decodeTextBytes } from "./file-sniff.js";
 
 const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const DOC = "application/msword";
@@ -45,8 +45,18 @@ function utf16le(text: string, bom = true): Buffer {
   return Buffer.concat([bom ? Buffer.from([0xff, 0xfe]) : Buffer.alloc(0), Buffer.from(text, "utf16le")]);
 }
 
+/** An OLE2 file whose directory (after the 512-byte header sector) holds a root entry and one stream. */
 function ole(stream: string): Buffer {
-  return Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]), Buffer.alloc(512), Buffer.from(stream, "utf16le")]);
+  const entry = (name: string, type: number) => {
+    const record = Buffer.alloc(128);
+    record.write(name, 0, "utf16le");
+    record.writeUInt16LE((name.length + 1) * 2, 64);
+    record.writeUInt8(type, 66);
+    return record;
+  };
+  const header = Buffer.alloc(512);
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(header);
+  return Buffer.concat([header, entry("Root Entry", 5), entry(stream, 2)]);
 }
 
 describe("sniffFileBytes", () => {
@@ -146,5 +156,120 @@ describe("fileFactsFor", () => {
     const facts = fileFactsFor(utf16le("this is text, not audio at all"), { filename: "a.mp3", declaredMimeType: "audio/mpeg" });
     expect(facts.mismatch).toBe("unresolved");
     expect(facts.encoding).toBe("utf-16le");
+  });
+});
+
+
+describe("full inspection of containers", () => {
+  const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+  it("does not call any ZIP with a word/ entry a DOCX", () => {
+    expect(sniffFileBytes(zip([{ name: "word/payload.bin" }]), "x.docx").mimeType).toBe("application/zip");
+    expect(sniffFileBytes(zip([{ name: "xl/anything" }]), "x.xlsx").mimeType).toBe("application/zip");
+    expect(sniffFileBytes(zip([{ name: "word/document.xml" }]), "x.bin").mimeType).toBe(DOCX);
+    expect(sniffFileBytes(zip([{ name: "xl/workbook.xml" }]), "x.bin").mimeType).toBe(XLSX);
+    expect(fileFactsFor(zip([{ name: "word/payload.bin" }]), { filename: "x.docx", declaredMimeType: DOCX }).mismatch).toBe("unresolved");
+  });
+
+  it("rejects a central directory whose offset points outside the archive or past the end record", () => {
+    const good = Buffer.from(zip([{ name: "word/document.xml" }]));
+    expect(listZipEntryNames(good)).toEqual(["word/document.xml"]);
+    const wild = Buffer.from(good);
+    wild.writeUInt32LE(wild.length + 1000, wild.length - 22 + 16);
+    expect(listZipEntryNames(wild)).toBeNull();
+    const oversize = Buffer.from(good);
+    oversize.writeUInt32LE(0x00ffffff, oversize.length - 22 + 12);
+    expect(listZipEntryNames(oversize)).toBeNull();
+  });
+
+  it("rejects an entry count that disagrees with the directory", () => {
+    const lying = Buffer.from(zip([{ name: "word/document.xml" }]));
+    lying.writeUInt16LE(5, lying.length - 22 + 10);
+    expect(listZipEntryNames(lying)).toBeNull();
+    expect(sniffFileBytes(lying, "a.docx").mimeType).toBe("application/zip");
+  });
+
+  it("reads the directory of a ZIP64 archive", () => {
+    const base = Buffer.from(zip([{ name: "word/document.xml" }]));
+    const eocd = base.subarray(base.length - 22);
+    const directory = base.subarray(base.length - 22 - 46 - "word/document.xml".length, base.length - 22);
+    const directoryOffset = base.length - 22 - directory.length;
+    const record = Buffer.alloc(56);
+    record.writeUInt32LE(0x06064b50, 0);
+    record.writeBigUInt64LE(44n, 4);
+    record.writeBigUInt64LE(1n, 24);
+    record.writeBigUInt64LE(1n, 32);
+    record.writeBigUInt64LE(BigInt(directory.length), 40);
+    record.writeBigUInt64LE(BigInt(directoryOffset), 48);
+    const locator = Buffer.alloc(20);
+    locator.writeUInt32LE(0x07064b50, 0);
+    locator.writeBigUInt64LE(BigInt(base.length - 22), 8);
+    locator.writeUInt32LE(1, 16);
+    const end = Buffer.from(eocd);
+    end.writeUInt16LE(0xffff, 8);
+    end.writeUInt16LE(0xffff, 10);
+    end.writeUInt32LE(0xffffffff, 12);
+    end.writeUInt32LE(0xffffffff, 16);
+    const archive = Buffer.concat([base.subarray(0, base.length - 22), record, locator, end]);
+    expect(listZipEntryNames(archive)).toEqual(["word/document.xml"]);
+    expect(sniffFileBytes(archive, "a.bin").mimeType).toBe(DOCX);
+  });
+
+  it("finds an OLE application stream only as a real directory entry, not as bytes anywhere in the file", () => {
+    const entry = (name: string) => {
+      const record = Buffer.alloc(128);
+      record.write(name, 0, "utf16le");
+      record.writeUInt16LE((name.length + 1) * 2, 64);
+      record.writeUInt8(2, 66);
+      return record;
+    };
+    const signature = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    const real = Buffer.concat([signature, Buffer.alloc(504), entry("Root Entry"), entry("WordDocument")]);
+    expect(sniffFileBytes(real, "a.bin")).toMatchObject({ mimeType: DOC, container: "ole" });
+    const smuggled = Buffer.concat([signature, Buffer.alloc(504), Buffer.alloc(77), Buffer.from("WordDocument", "utf16le")]);
+    expect(sniffFileBytes(smuggled, "a.bin").mimeType).toBe("application/x-ole-storage");
+  });
+});
+
+describe("header-only inspection (what the API does with customer bytes)", () => {
+  const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  const header = { depth: "header" } as const;
+
+  it("never opens a ZIP or OLE container: the type stays generic until the worker inspects it", () => {
+    expect(sniffFileBytes(zip([{ name: "word/document.xml" }]), "a.bin", header)).toMatchObject({ mimeType: "application/zip", container: "zip" });
+    expect(sniffFileBytes(ole("WordDocument"), "a.bin", header)).toMatchObject({ mimeType: "application/x-ole-storage", container: "ole" });
+  });
+
+  it("does not scan, list or decode past the first few KB of a very large container or text", () => {
+    const hugeZip = Buffer.alloc(64 * 1024 * 1024);
+    hugeZip.writeUInt32LE(0x04034b50, 0);
+    hugeZip.writeUInt32LE(0x06054b50, hugeZip.length - 22);
+    const started = performance.now();
+    expect(fileFactsFor(hugeZip, { filename: "a.docx", declaredMimeType: DOCX }, header)).toMatchObject({ mimeType: DOCX, container: "zip", inspection: "header" });
+    const hugeText = Buffer.alloc(64 * 1024 * 1024, "line of text\n");
+    expect(fileFactsFor(hugeText, { filename: "a.txt", declaredMimeType: "text/plain" }, header)).toMatchObject({ mimeType: "text/plain", encoding: "utf-8" });
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it("keeps a declared container type as provisional and marks it header-inspected", () => {
+    expect(fileFactsFor(zip([{ name: "x" }]), { filename: "r.docx", declaredMimeType: DOCX }, header)).toMatchObject({ mimeType: DOCX, mismatch: "none", inspection: "header" });
+    expect(fileFactsFor(zip([{ name: "x" }]), { filename: "r.xlsx", declaredMimeType: "application/octet-stream" }, header)).toMatchObject({ mimeType: XLSX, mismatch: "none" });
+    expect(fileFactsFor(ole("x"), { filename: "r.doc", declaredMimeType: DOC }, header)).toMatchObject({ mimeType: DOC, mismatch: "none" });
+    expect(fileFactsFor(zip([{ name: "x" }]), { filename: "r.zip" }, header)).toMatchObject({ mimeType: "application/zip" });
+  });
+
+  it("still refuses what the magic bytes alone contradict", () => {
+    expect(fileFactsFor(zip([{ name: "x" }]), { filename: "r.pdf", declaredMimeType: "application/pdf" }, header).mismatch).toBe("unresolved");
+    expect(fileFactsFor(ole("x"), { filename: "r.docx", declaredMimeType: "image/png" }, header).mismatch).toBe("unresolved");
+    expect(fileFactsFor(Buffer.from("plain words, no magic\nsecond line\n"), { filename: "fake.pdf", declaredMimeType: "application/pdf" }, header).mismatch).toBe("unresolved");
+    expect(fileFactsFor(Buffer.from("%PDF-1.7\n%âãÏÓ\n"), { filename: "r.pdf", declaredMimeType: "text/plain" }, header)).toMatchObject({ mimeType: "application/pdf", mismatch: "corrected" });
+  });
+
+  it("does not classify text (CSV, JSON, HTML) from content", () => {
+    expect(sniffFileBytes(Buffer.from("a,b\n1,2\n3,4\n"), "x.bin", header)).toMatchObject({ mimeType: "text/plain", encoding: "utf-8" });
+  });
+
+  it("full inspection is the default and marks its facts", () => {
+    expect(fileFactsFor(zip([{ name: "word/document.xml" }]), { filename: "r.docx", declaredMimeType: DOCX }).inspection).toBe("full");
   });
 });

@@ -340,23 +340,54 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
   };
 }
 
-/** Raw `stats` keys that describe the worker machine rather than the customer's run. */
-const OPERATOR_STAT_KEY = /^(cpu|rss|peakRss|worker|region|machine)/i;
+/**
+ * Keys that describe the worker machine rather than the customer's run: CPU and RAM (`cpuUserMs`, `rssBytes`, `peakRssMb`),
+ * the machine, the worker and its settings (`workerClass`, `workerId`), and the region it ran in (`region`, `regions`).
+ * Layout `regionBoxes` and the like are the customer's data and stay.
+ */
+const OPERATOR_KEY = /^(?:cpu|rss|peakRss|machine|worker|flyRegion|regions?$)/i;
+/** Nesting below which the walk stops and drops the subtree, so a hostile or runaway structure cannot hide a key. */
+const OPERATOR_KEY_MAX_DEPTH = 12;
+
+/** `value` without operator keys at any depth. Returns a copy; a subtree nested deeper than the limit is dropped (fail closed). */
+export function redactOperatorKeys<T>(value: T, depth = 0): T {
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= OPERATOR_KEY_MAX_DEPTH) return null as T;
+  if (Array.isArray(value)) return value.map((item) => redactOperatorKeys(item, depth + 1)) as T;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !OPERATOR_KEY.test(key))
+      .map(([key, item]) => [key, redactOperatorKeys(item, depth + 1)]),
+  ) as T;
+}
+
+/** A run event for a caller that is not a platform operator: heartbeat metrics, stats and progress without worker diagnostics. */
+export function redactOperatorEvent<E extends { progress?: unknown; stats?: unknown; payload?: unknown }>(event: E): E {
+  const redacted: E = { ...event };
+  for (const field of ["progress", "stats", "payload"] as const) if (field in event) redacted[field] = redactOperatorKeys(event[field]) as E[typeof field];
+  return redacted;
+}
 
 /**
- * Platform-operator-only diagnostics: worker CPU and RAM per run and stage, and
- * which worker classes and regions served it. Customers (including org owners
- * and admins) see cost, speed and page counts, not the machines behind them, so
- * this is removed on the server for every caller that is not a platform
- * operator rather than hidden in a client. Returns a copy; the input is not mutated.
+ * Platform-operator-only diagnostics: worker CPU and RAM per run, stage and event, and which worker classes and regions
+ * served it. Customers (including org owners and admins) see cost, speed and page counts, not the machines behind them, so
+ * this is removed on the server for every caller that is not a platform operator rather than hidden in a client: from the
+ * snapshot's stats, rollups and totals, and by key from the heartbeat events, stage stats and run stats it carries.
+ * Returns a copy; the input is not mutated.
  */
 export function redactOperatorRunFields(snapshot: WorkspaceRunProgressSnapshot): WorkspaceRunProgressSnapshot {
-  const stats = Object.fromEntries(Object.entries(snapshot.stats).filter(([key]) => !OPERATOR_STAT_KEY.test(key)));
   const progress = snapshot.progress && {
     ...snapshot.progress,
     stageRollups: snapshot.progress.stageRollups.map((rollup) => ({ ...rollup, cpuMs: 0, peakRssBytes: 0 })),
     usageTotals: { ...snapshot.progress.usageTotals, workerClasses: [], regions: [] },
     resourceTotals: { ...snapshot.progress.resourceTotals, cpuUserMs: 0, cpuSystemMs: 0, cpuTotalMs: 0, rssDeltaBytes: 0, peakRssBytes: 0 },
   };
-  return { ...snapshot, stats, progress };
+  return {
+    ...snapshot,
+    run: { ...snapshot.run, stats: redactOperatorKeys(snapshot.run.stats) },
+    stages: snapshot.stages.map((stage) => ({ ...stage, stats: redactOperatorKeys(stage.stats) })),
+    recentEvents: snapshot.recentEvents.map(redactOperatorEvent),
+    stats: redactOperatorKeys(snapshot.stats),
+    progress,
+  };
 }

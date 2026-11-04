@@ -1042,13 +1042,34 @@ export function normalizeStoredPipelineFeatures(
   return normalizePipelineFeatures(sanitizeStoredPipeline(stored, source));
 }
 
-/** Drops invalid stored extractor settings (see normalizeStoredPipelineFeatures), logging what it dropped. */
+/**
+ * Drops what a stored pipeline holds that the strict schemas now reject (see normalizeStoredPipelineFeatures), logging
+ * what it dropped: invalid extractor settings, and PII detector names that no longer exist (the policy, its action and the
+ * other detectors stay). New writes stay strict.
+ */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
-  if (!isPlainRecord(stored) || !isPlainRecord(stored.documentExtraction)) return stored;
-  const { value, dropped } = sanitizeStoredDocumentExtraction(stored.documentExtraction);
+  if (!isPlainRecord(stored)) return stored;
+  let next: Record<string, unknown> = stored;
+  const dropped: string[] = [];
+  if (isPlainRecord(stored.documentExtraction)) {
+    const extraction = sanitizeStoredDocumentExtraction(stored.documentExtraction);
+    if (extraction.dropped.length > 0) {
+      next = { ...next, documentExtraction: extraction.value };
+      dropped.push(...extraction.dropped);
+    }
+  }
+  if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
+    const patterns = stored.piiPolicy.patterns;
+    const known = patterns.filter((pattern) => piiPatternTypeSchema.safeParse(pattern).success);
+    if (known.length !== patterns.length) {
+      const unknown = patterns.filter((pattern) => !piiPatternTypeSchema.safeParse(pattern).success);
+      next = { ...next, piiPolicy: { ...stored.piiPolicy, patterns: known } };
+      dropped.push(...unknown.map((pattern) => `piiPolicy.patterns[${typeof pattern === "string" ? pattern.slice(0, 64) : typeof pattern}]`));
+    }
+  }
   if (dropped.length === 0) return stored;
-  console.error(`[pipeline] stored pipeline of ${source} has extractor settings the schema rejects; dropped ${dropped.join(", ")}`);
-  return { ...stored, documentExtraction: value } as T;
+  console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
+  return next as T;
 }
 
 /** Keys whose override value replaces the base value instead of merging into it. */

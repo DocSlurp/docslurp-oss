@@ -40,7 +40,7 @@ export type DocumentVersionChangelog = {
   currentSource: "markdown" | "page-text" | "missing";
   baselineSource: "markdown" | "page-text" | "missing";
   summary: string[];
-  stats: { currentBlocks: number; baselineBlocks: number; matchedBlocks: number; additions: number; deletions: number; rewrites: number; contradictions: number; changedRatio: number };
+  stats: { currentBlocks: number; baselineBlocks: number; matchedBlocks: number; additions: number; deletions: number; rewrites: number; contradictions: number; changedRatio: number; truncated?: boolean };
   additions: DocumentVersionChangelogEntry[]; deletions: DocumentVersionChangelogEntry[];
   rewrites: DocumentVersionChangelogEntry[]; contradictions: DocumentVersionChangelogEntry[];
 };

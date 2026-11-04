@@ -454,11 +454,8 @@ async function normalizeKeyWorkspaceIds(tx: KeyTransaction, orgId: string, userI
   const rows = await tx<{ id: string }[]>`
     select w.id from workspaces w
     where w.id = any(${tx.array(requested)}) and w.org_id = ${orgId}
-      and (
-        w.user_id = ${userId}
-        or exists (select 1 from workspace_members wm where wm.workspace_id = w.id and wm.user_id = ${userId})
-        or exists (select 1 from org_memberships om where om.org_id = w.org_id and om.user_id = ${userId} and (om.role in ('owner', 'admin') or w.is_default))
-      )`;
+      -- The one definition of "may this user see this workspace" (migration 0124), not a copy of it.
+      and docslurp_workspace_access(w.id, ${userId})`;
   const found = new Set(rows.map(row => row.id));
   const missing = requested.filter(id => !found.has(id));
   if (missing.length > 0) {

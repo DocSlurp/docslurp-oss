@@ -106,7 +106,8 @@ describe("org-keyed webhooks", () => {
 
   it("stops delivering a workspace's events once the webhook's creator lost access to it (G-06)", async () => {
     await sql`insert into org_memberships(org_id, user_id, role) values ('team', 'removed', 'member')`;
-    await hook("removed-hook", "removed", "team", null, "https://hooks.example/removed");
+    await hook("removed-a", "removed", "team", "ws-a", "https://hooks.example/removed");
+    await hook("removed-b", "removed", "team", "ws-b", "https://hooks.example/removed-private");
     // The default workspace is readable to every member; ws-b is not.
     await outbox("ob-default", "admin", "run.completed", { workspaceId: "ws-a" });
     await outbox("ob-private", "admin", "run.completed", { workspaceId: "ws-b" });
@@ -148,6 +149,8 @@ describe("creating a webhook", () => {
     vi.stubEnv("SECRETS_ENCRYPTION_KEY", "ab".repeat(32));
     const base = { userId: "mate", url: "https://hooks.example/x", secret: "s".repeat(16) };
     await expect(webhooks.createWebhook({ ...base, orgId: "other" })).rejects.toBeInstanceOf(webhooks.WebhookScopeError);
+    // Any member may watch a workspace they can read; the whole organization's events are for owners and admins.
+    await expect(webhooks.createWebhook({ ...base, orgId: "team" })).rejects.toBeInstanceOf(webhooks.WebhookForbiddenError);
     await expect(webhooks.createWebhook({ ...base, orgId: "team", workspaceId: "ws-b" })).rejects.toBeInstanceOf(webhooks.WebhookScopeError);
     await expect(webhooks.createWebhook({ ...base, orgId: "team", workspaceId: "ws-other" })).rejects.toBeInstanceOf(webhooks.WebhookScopeError);
     const created = await webhooks.createWebhook({ ...base, orgId: "team", workspaceId: "ws-a" });
@@ -156,11 +159,49 @@ describe("creating a webhook", () => {
     vi.unstubAllEnvs();
   });
 
+  it("lets an owner or admin register an organization-wide webhook", async () => {
+    vi.stubEnv("SECRETS_ENCRYPTION_KEY", "ab".repeat(32));
+    const base = { url: "https://hooks.example/x", secret: "s".repeat(16), orgId: "team" };
+    expect(await webhooks.createWebhook({ ...base, userId: "admin" })).toMatchObject({ orgId: "team", workspaceId: null, userId: "admin" });
+    await sql`insert into org_memberships(org_id, user_id, role) values ('team', 'removed', 'admin') on conflict (org_id, user_id) do update set role = 'admin'`;
+    try {
+      expect(await webhooks.createWebhook({ ...base, userId: "removed" })).toMatchObject({ workspaceId: null });
+    } finally {
+      await sql`delete from org_memberships where org_id = 'team' and user_id = 'removed'`;
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("deliverWebhook reaches org webhooks for a run its creator did not start, but not other organizations'", async () => {
     await sql`insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, job_id) values ('run-x', 'team', 'mate', 'ws-a', 'upload', 'completed', 'completed', 'j')`;
     await hook("team-hook", "admin", "team", null, "https://hooks.example/team");
     await hook("other-hook", "bob", "other", null, "https://hooks.example/other");
     await webhooks.deliverWebhook("run-x", "run.completed");
     expect(urls()).toEqual(["https://hooks.example/team"]);
+  });
+});
+
+
+describe("organization-wide webhooks need an owner or admin creator", () => {
+  it("stops an organization-wide webhook once its creator is demoted to member, but keeps a workspace-scoped one", async () => {
+    await sql`insert into org_memberships(org_id, user_id, role) values ('team', 'removed', 'admin') on conflict (org_id, user_id) do update set role = 'admin'`;
+    await hook("org-wide", "removed", "team", null, "https://hooks.example/org");
+    await hook("scoped", "removed", "team", "ws-a", "https://hooks.example/scoped");
+    await outbox("ob-1", "admin", "run.completed", { workspaceId: "ws-a" });
+    await webhooks.drainWebhookOutbox();
+    expect(urls()).toEqual(["https://hooks.example/org", "https://hooks.example/scoped"]);
+    requests.length = 0;
+    await sql`update org_memberships set role = 'member' where org_id = 'team' and user_id = 'removed'`;
+    await outbox("ob-2", "admin", "run.completed", { workspaceId: "ws-a" });
+    await webhooks.drainWebhookOutbox();
+    expect(urls()).toEqual(["https://hooks.example/scoped"]);
+    await sql`delete from org_memberships where org_id = 'team' and user_id = 'removed'`;
+  });
+
+  it("does not deliver a run's event to an organization-wide webhook whose creator is only a member (deliverWebhook)", async () => {
+    await sql`insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, job_id) values ('run-m', 'team', 'mate', 'ws-a', 'upload', 'completed', 'completed', 'j2')`;
+    await hook("member-org-wide", "mate", "team", null, "https://hooks.example/member");
+    await webhooks.deliverWebhook("run-m", "run.completed");
+    expect(requests).toEqual([]);
   });
 });

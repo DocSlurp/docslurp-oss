@@ -95,46 +95,81 @@ function indexOfAsciiInsensitive(text: string, needle: string, from: number): nu
   return -1;
 }
 
-/** The visible text of HTML: tags, comments, scripts and styles removed. Markup is not content a page holds. */
+/** Longest stretch of text measured in full; a longer file is measured on its first part and scaled. */
+export const TEXT_MEASURE_SAMPLE_CHARS = 2_000_000;
+
+/**
+ * The visible text of HTML: tags, comments, scripts and styles removed. Markup is not content a page holds.
+ * One forward pass: every search starts at the cursor and a search that finds nothing is never repeated, so
+ * hostile input ("<a" repeated, unclosed comments or scripts) costs O(n).
+ */
 export function stripHtmlMarkup(text: string): string {
-  let out = "";
+  const parts: string[] = [];
+  // Literal text from `pending` is not yet copied: a "<" that is not markup stays in it, so a flood of them is
+  // one slice instead of one part each.
+  let pending = 0;
   let at = 0;
+  // Position of the next ">" at or after the last search, or -1 once none remains, so a "<" that never
+  // closes does not rescan the rest of the file.
+  let nextClose = -2;
+  const closeFrom = (from: number): number => {
+    if (nextClose === -1 || nextClose >= from) return nextClose;
+    nextClose = text.indexOf(">", from);
+    return nextClose;
+  };
+  const skip = (open: number, resume: number, replacement: string) => {
+    if (open > pending) parts.push(text.slice(pending, open));
+    if (replacement) parts.push(replacement);
+    pending = resume;
+    at = resume;
+  };
   while (at < text.length) {
     const open = text.indexOf("<", at);
-    if (open < 0) { out += text.slice(at); break; }
-    out += text.slice(at, open);
+    if (open < 0) break;
     if (text.startsWith("<!--", open)) {
       const close = text.indexOf("-->", open + 4);
-      at = close < 0 ? text.length : close + 3;
+      skip(open, close < 0 ? text.length : close + 3, "");
       continue;
     }
-    const block = ["script", "style"].find((name) => {
+    const first = text.charCodeAt(open + 1);
+    const lowerFirst = asciiLower(first);
+    // Only "<s..." can open a script or style.
+    const block = lowerFirst === 115 ? ["script", "style"].find((name) => {
       if (indexOfAsciiInsensitive(text.slice(open, open + name.length + 2), `<${name}`, 0) !== 0) return false;
       const next = text.charAt(open + name.length + 1);
       return next === ">" || next === "/" || next === " " || next === "\t" || next === "\n" || next === "\r" || next === "\f";
-    });
+    }) : undefined;
     if (block) {
+      // No closing tag swallows the rest of the file, as a browser would.
       const close = indexOfAsciiInsensitive(text, `</${block}`, open);
       const end = close < 0 ? -1 : text.indexOf(">", close);
-      at = end < 0 ? text.length : end + 1;
+      skip(open, end < 0 ? text.length : end + 1, "");
       continue;
     }
-    const end = text.indexOf(">", open);
-    const first = text.charCodeAt(open + 1);
-    const tagStart = first === 33 || first === 47 || first === 63 || (asciiLower(first) >= 97 && asciiLower(first) <= 122);
-    if (end < 0 || !tagStart) { out += "<"; at = open + 1; continue; }
-    out += "\n";
-    at = end + 1;
+    const tagStart = first === 33 || first === 47 || first === 63 || (lowerFirst >= 97 && lowerFirst <= 122);
+    const end = tagStart ? closeFrom(open) : -1;
+    if (end < 0) {
+      // Not a tag, or no ">" anywhere after it: a literal "<".
+      at = open + 1;
+      continue;
+    }
+    skip(open, end + 1, "\n");
   }
-  return out;
+  if (pending < text.length) parts.push(text.slice(pending));
+  return parts.join("");
 }
 
 /**
  * Pages of a text file: one per TEXT_PAGE_LINES lines or per TEXT_PAGE_CHARS characters, whichever is more. East Asian
  * characters count TEXT_PAGE_CJK_WEIGHT each. With `markup` (HTML) the tags, scripts and styles are removed first and
- * only non-blank lines count, so markup and inline code do not bill as pages of reading.
+ * only non-blank lines count, so markup and inline code do not bill as pages of reading. The first
+ * TEXT_MEASURE_SAMPLE_CHARS are measured and a longer text is scaled by its length, so the cost is bounded.
  */
 export function textPageCount(text: string, options: { markup?: boolean } = {}): number {
+  if (text.length > TEXT_MEASURE_SAMPLE_CHARS) {
+    const sampled = textPageCount(text.slice(0, TEXT_MEASURE_SAMPLE_CHARS), options);
+    return Math.max(1, Math.ceil(sampled * (text.length / TEXT_MEASURE_SAMPLE_CHARS)));
+  }
   const visible = options.markup ? stripHtmlMarkup(text) : text;
   const lines = options.markup ? visible.split(/\r?\n/).filter((line) => line.trim() !== "").length : visible.split(/\r?\n/).length;
   const trimmed = visible.trim();

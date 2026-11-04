@@ -41,7 +41,7 @@ afterAll(async () => {
 async function reset() {
   for (const table of [
     "workspaces", "document_cleanup_queue", "storage_cleanup_queue", "org_memberships", "api_keys",
-    "credit_ledger", "usage_events", "audit_log", "webhooks", "session", "account",
+    "credit_ledger", "usage_events", "audit_log", "webhooks", "webhook_outbox", "session", "account",
   ]) {
     await sql`delete from ${sql(table)}`;
   }
@@ -222,6 +222,16 @@ describe("account deletion", () => {
     await expect(offboarding.deleteAccount({ userId: "leaver", confirmation: "leaver@example.test" }, deps))
       .rejects.toMatchObject({ status: 409, code: "ownership_transfer_required" });
     expect(await sql`select count(*)::int as count from workspaces`).toEqual([{ count: 2 }]);
+  });
+
+  it("keeps queued webhook events of an organization the user only leaves, and drops those of the organizations it purges", async () => {
+    await sql`update org_memberships set role = 'owner' where org_id = 'team' and user_id = 'teammate'`;
+    await sql`insert into webhook_outbox (id, user_id, event_type, payload) values
+      ('queued-team', 'leaver', 'run.completed', ${sql.json({ workspaceId: "shared", runId: "shared-done" } as never)}),
+      ('queued-mine', 'leaver', 'run.completed', ${sql.json({ workspaceId: "mine", runId: "mine-done" } as never)}),
+      ('queued-teammate', 'teammate', 'run.completed', ${sql.json({ workspaceId: "shared", runId: "shared-live" } as never)})`;
+    await offboarding.deleteAccount({ userId: "leaver", confirmation: "leaver@example.test" }, deps);
+    expect((await sql`select id from webhook_outbox order by id`).map((row) => row.id)).toEqual(["queued-team", "queued-teammate"]);
   });
 
   it("purges personal and solo orgs, leaves team orgs with their content, and tombstones the user", async () => {

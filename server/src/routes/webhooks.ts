@@ -8,6 +8,7 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   createWebhook,
+  WebhookForbiddenError,
   WebhookScopeError,
   deleteWebhook,
   listWebhookDeliveries,
@@ -18,7 +19,6 @@ import {
   updateWebhook
 } from "../services/webhooks.js";
 import { apiStatusError } from "../lib/api-error.js";
-import { getRequestActor } from "../lib/request-actor.js";
 import { ensurePersonalOrganization } from "../services/organizations.js";
 import { validationHook } from "../lib/validation.js";
 
@@ -26,9 +26,9 @@ const createWebhookSchema = z.object({
   url: z.string().url(),
   secret: z.string().min(16),
   events: z.array(z.string()).optional(),
-  /** The organization to receive events for: an API key's own organization, else this or the personal one. */
+  /** The organization to receive events for; omitted means the personal one. */
   orgId: z.string().min(1).optional(),
-  /** Narrow to one workspace of that organization; omitted means every workspace. */
+  /** Narrow to one workspace of that organization; omitted means every workspace, which only owners and admins may do. */
   workspaceId: z.string().min(1).optional()
 });
 
@@ -69,18 +69,9 @@ export const webhooksRoutes = new Hono()
   .post("/", zValidator("json", createWebhookSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const actor = getRequestActor(c);
-    // A key can only register webhooks for its own organization; a session names one or uses its personal one.
-    if (actor.type === "apiKey" && body.orgId && body.orgId !== actor.apiKey.orgId) {
-      return apiStatusError(c, 404, "Organization not found");
-    }
-    // A key limited to some workspaces may only watch those: org-wide would hand it events from the rest.
-    if (actor.type === "apiKey" && (actor.apiKey.workspaceIds ?? []).length > 0
-      && !(body.workspaceId && actor.apiKey.workspaceIds.includes(body.workspaceId))) {
-      return apiStatusError(c, 404, "Workspace not found");
-    }
-    const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : (body.orgId ?? (await ensurePersonalOrganization(userId)).id);
-    if (!orgId) return apiStatusError(c, 404, "Organization not found");
+    // Webhook routes are session-only (they do not accept API keys), so the caller is a signed-in user; the service checks that
+    // user's membership and role in the organization it names.
+    const orgId = body.orgId ?? (await ensurePersonalOrganization(userId)).id;
     let webhook;
     try {
       webhook = await createWebhook({
@@ -93,6 +84,7 @@ export const webhooksRoutes = new Hono()
       });
     } catch (error) {
       if (error instanceof WebhookScopeError) return apiStatusError(c, 404, error.message);
+      if (error instanceof WebhookForbiddenError) return apiStatusError(c, 403, error.message);
       return apiStatusError(c, 400, reportPublicError(error));
     }
     await appendAuditLog({

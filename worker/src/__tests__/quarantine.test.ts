@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildQuarantineStats, inspectArchive, scanDocumentForQuarantine, sniffMimeType } from "../lib/quarantine.js";
+import { buildQuarantineStats, inspectArchive, scanDocumentForQuarantine, sniffMimeType, verifyIntakeFileFacts } from "../lib/quarantine.js";
 
 function buildZipBuffer(entries: Array<{ name: string; compressedSize: number; uncompressedSize: number }>): Buffer {
   const localParts: Buffer[] = [];
@@ -327,5 +327,45 @@ describe("quarantine file facts", () => {
   it("still quarantines a PDF stored under text/plain and text stored as an image", async () => {
     expect((await scan("report.pdf", "text/plain", Buffer.from("%PDF-1.7\nhello"))).decision).toBe("quarantined");
     expect((await scan("photo.png", "image/png", Buffer.from("just text, not a png at all\nsecond line\n"))).decision).toBe("quarantined");
+  });
+});
+
+
+describe("verifyIntakeFileFacts (the worker inspects what the API only glanced at)", () => {
+  const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const intake = (declared: string, mimeType = declared) => ({
+    filename: "report.docx",
+    mimeType,
+    fileFacts: { declaredMimeType: declared, sniffedMimeType: "application/zip", mimeType, format: "office-word", container: "zip", encoding: null, mismatch: "none", inspection: "header" } as never,
+  });
+
+  it("opens the container, upgrades a header-only record to full facts and keeps a real DOCX", () => {
+    const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
+    const verified = verifyIntakeFileFacts(intake(DOCX), zip);
+    expect(verified).toMatchObject({ refused: false, facts: { mimeType: DOCX, inspection: "full", sniffedMimeType: DOCX } });
+  });
+
+  it("refuses a generic ZIP the API accepted as a DOCX, and keeps the declaration for the quarantine verdict", () => {
+    const zip = buildZipBuffer([{ name: "payload.bin", compressedSize: 12, uncompressedSize: 64 }]);
+    const verified = verifyIntakeFileFacts(intake(DOCX), zip);
+    expect(verified).toMatchObject({ refused: true, scanDeclaredMimeType: DOCX });
+  });
+
+  it("refuses a ZIP whose only word/ entry is not the document part", () => {
+    const zip = buildZipBuffer([{ name: "word/evil.bin", compressedSize: 12, uncompressedSize: 64 }]);
+    expect(verifyIntakeFileFacts(intake(DOCX), zip)?.refused).toBe(true);
+  });
+
+  it("routes a mislabelled XLSX on its bytes instead of the declaration", () => {
+    const zip = buildZipBuffer([{ name: "xl/workbook.xml", compressedSize: 12, uncompressedSize: 64 }]);
+    const verified = verifyIntakeFileFacts(intake(DOCX), zip);
+    expect(verified).toMatchObject({ refused: false, facts: { mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", mismatch: "corrected" } });
+    expect(verified?.scanDeclaredMimeType).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  });
+
+  it("does nothing for records the API did not leave provisional", () => {
+    const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
+    expect(verifyIntakeFileFacts({ ...intake(DOCX), fileFacts: { ...(intake(DOCX).fileFacts as object), inspection: "full" } as never }, zip)).toBeNull();
+    expect(verifyIntakeFileFacts({ filename: "a.docx", mimeType: DOCX, fileFacts: null }, zip)).toBeNull();
   });
 });

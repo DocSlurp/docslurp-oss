@@ -67,8 +67,9 @@ describe("estimate parity", () => {
 
   it("upload estimate centres on pages assumed from size, and says the count is a range, when the client does not know them", async () => {
     const workspace = { pipeline: defaultPipelineFeatures, orgId: "o1" };
-    const sized = await work.estimateUpload({ files: [{ name: "a.pdf", size: 75 * 1024 * 10 }], workspace });
-    const known = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace });
+    // An explicit empty environment: billing off, whatever STRIPE_SECRET_KEY the machine running the test has.
+    const sized = await work.estimateUpload({ files: [{ name: "a.pdf", size: 75 * 1024 * 10 }], workspace, env: {} });
+    const known = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace, env: {} });
     expect(sized.estimate.pages).toBe(10);
     // Counted pages are exact; uncounted ones span the pages the size allows, so the range is wider and says so.
     expect(known.estimate.pagesRange).toBeUndefined();
