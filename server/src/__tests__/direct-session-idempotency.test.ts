@@ -165,7 +165,7 @@ describe("upload-session idempotency across credentials", () => {
     const { deps } = memoryDeps();
     const { create } = sessions();
     const scope = { ...base, apiKeyId: "key-a", workspace: "ws-1" };
-    await createSessionIdempotently({ key: "k", scope, request, create, describe: async (id) => ({ sessionId: id }) }, deps);
+    await createSessionIdempotently({ key: "k", scope, request, create, describe: async (id) => ({ sessionId: id, files: [] }) }, deps);
     const denied = Object.assign(new Error("not yours"), { statusCode: 409 });
     await expect(createSessionIdempotently({ key: "k", scope, request, create, describe: async () => { throw denied; } }, deps)).rejects.toBe(denied);
     expect(create).toHaveBeenCalledTimes(1);
