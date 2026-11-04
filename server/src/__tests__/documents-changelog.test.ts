@@ -111,3 +111,51 @@ describe("buildSemanticDocumentChangelog on long documents", () => {
     expect(changelog.summary.join(" ")).toContain("Only the first 2000 blocks");
   });
 });
+
+
+describe("buildSemanticDocumentChangelog under adversarial input", () => {
+  const snapshot = (text: string) => ({ source: "markdown" as const, text, document: { id: "d", filename: "f.md", versionNumber: 1, updatedAt: "2026-01-01T00:00:00Z" } });
+  // Every token appears in about 64 blocks (the posting-list cap), so each block nominates nearly every
+  // block of the other version, and each blocks carries ~90 distinct tokens: 2000 x 2000 x 90 set lookups.
+  const flood = (offset: number, blocks = 2000, perBlock = 90) => {
+    const vocabulary = Math.ceil((blocks * perBlock) / 64);
+    return Array.from({ length: blocks }, (_, i) =>
+      Array.from({ length: perBlock }, (_, k) => `tok${((i * perBlock + k + offset) * 31) % vocabulary}x`).join(" ")
+    ).join("\n\n");
+  };
+
+  it("bounds a crafted pair of versions and reports the changelog as truncated", () => {
+    const current = flood(0);
+    const baseline = flood(17);
+    expect(current.length).toBeGreaterThan(900_000);
+    const started = performance.now();
+    const changelog = buildSemanticDocumentChangelog({ current: snapshot(current) as never, baseline: snapshot(baseline) as never });
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(750);
+    expect(changelog.stats.truncated).toBe(true);
+    expect(changelog.summary.join(" ")).toMatch(/truncated|Only the first|bounded/i);
+  });
+
+  it("bounds multi-megabyte versions without scanning all of the text", () => {
+    const current = flood(0, 2000, 400);
+    const baseline = flood(5, 2000, 400);
+    expect(current.length).toBeGreaterThan(3_500_000);
+    const started = performance.now();
+    const changelog = buildSemanticDocumentChangelog({ current: snapshot(current) as never, baseline: snapshot(baseline) as never });
+    expect(performance.now() - started).toBeLessThan(750);
+    expect(changelog.stats.truncated).toBe(true);
+  });
+
+  it("bounds one enormous single-block version", () => {
+    const huge = "lorem ipsum ".repeat(400_000);
+    const started = performance.now();
+    const changelog = buildSemanticDocumentChangelog({ current: snapshot(huge) as never, baseline: snapshot(`${huge} extra`) as never });
+    expect(performance.now() - started).toBeLessThan(750);
+    expect(changelog.stats.truncated).toBe(true);
+  });
+
+  it("does not mark an ordinary comparison as truncated", () => {
+    const changelog = buildSemanticDocumentChangelog({ current: snapshot("## A\n\nfirst clause here") as never, baseline: snapshot("## A\n\nfirst clause here") as never });
+    expect(changelog.stats.truncated).toBe(false);
+  });
+});

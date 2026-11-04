@@ -107,6 +107,7 @@ function parseAggregateInt(value: number | string | null | undefined): number {
 
 function normalizeSemanticText(value: string): string {
   return value
+    .slice(0, MAX_BLOCK_CHARS)
     .replace(/\r/g, "\n")
     .replace(/\f/g, "\n\n")
     .replace(/[`*_>#~]/g, " ")
@@ -117,13 +118,16 @@ function normalizeSemanticText(value: string): string {
     .toLowerCase();
 }
 
+/** Distinct tokens kept per block: bounds every comparison's cost whatever the block's size. */
 function tokenizeSemanticText(value: string): string[] {
-  return Array.from(new Set(
-    normalizeSemanticText(value)
-      .split(" ")
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 3 || /\d/.test(token))
-  ));
+  const tokens = new Set<string>();
+  for (const token of normalizeSemanticText(value).split(" ")) {
+    if (token.length >= 3 || /\d/.test(token)) {
+      tokens.add(token);
+      if (tokens.size >= MAX_BLOCK_TOKENS) break;
+    }
+  }
+  return Array.from(tokens);
 }
 
 function extractSemanticNumbers(value: string): string[] {
@@ -143,7 +147,8 @@ function excerptSemanticText(value: string, maxChars = 260): string {
   return `${compact.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
-export function extractSemanticBlocks(text: string): SemanticBlock[] {
+export function extractSemanticBlocks(input: string): SemanticBlock[] {
+  const text = input.length > MAX_VERSION_CHARS ? input.slice(0, MAX_VERSION_CHARS) : input;
   const rawSections = text
     .replace(/\r/g, "\n")
     .replace(/\f/g, "\n\n")
@@ -209,14 +214,16 @@ export function extractSemanticBlocks(text: string): SemanticBlock[] {
   return blocks.slice(0, MAX_SEMANTIC_BLOCKS);
 }
 
+/** Jaccard score of two token sets, iterating the smaller one. */
 function jaccardSimilarity(left: Set<string>, right: Set<string>): number {
   if (left.size === 0 || right.size === 0) {
     return 0;
   }
 
+  const [small, large] = left.size <= right.size ? [left, right] : [right, left];
   let intersection = 0;
-  for (const token of left) {
-    if (right.has(token)) {
+  for (const token of small) {
+    if (large.has(token)) {
       intersection += 1;
     }
   }
@@ -254,27 +261,45 @@ function describeRewriteSignals(previousBlock: SemanticBlock, currentBlock: Sema
   return { reasons, contradictionReasons };
 }
 
+type BlockMatchCandidate = { currentIndex: number; baselineIndex: number; score: number };
+
 /**
  * Block pairs similar enough to be the same passage in two versions. Small documents compare every pair.
  * Larger ones find candidates through an inverted index of the baseline's tokens, skipping tokens that
- * appear in many blocks (they say nothing about which block matches) and scoring only the blocks that
- * share a token, so the work follows the amount of shared vocabulary instead of blocks x blocks.
+ * appear in many blocks (they say nothing about which block matches), nominating at most
+ * `MAX_NOMINATIONS_PER_BLOCK` blocks per block (those sharing the rarest tokens) and scoring only those.
+ *
+ * Both versions are customer content, so the work has a hard budget (`MAX_COMPARISON_WORK` token lookups
+ * over every scored pair) that crafted versions cannot exceed; when it runs out the remaining blocks are
+ * left unmatched and `exhausted` tells the caller to say so.
  */
 function candidateBlockMatches(
   currentBlocks: SemanticBlock[],
   baselineBlocks: SemanticBlock[],
-): Array<{ currentIndex: number; baselineIndex: number; score: number }> {
-  const candidates: Array<{ currentIndex: number; baselineIndex: number; score: number }> = [];
-  const consider = (currentBlock: SemanticBlock, baselineBlock: SemanticBlock) => {
+): { candidates: BlockMatchCandidate[]; exhausted: boolean } {
+  const candidates: BlockMatchCandidate[] = [];
+  let work = 0;
+  let exhausted = false;
+  const consider = (currentBlock: SemanticBlock, baselineBlock: SemanticBlock): boolean => {
+    work += Math.min(currentBlock.tokenSet.size, baselineBlock.tokenSet.size) + 1;
+    if (work > MAX_COMPARISON_WORK) {
+      exhausted = true;
+      return false;
+    }
     const score = jaccardSimilarity(currentBlock.tokenSet, baselineBlock.tokenSet);
     if (score >= MATCH_CANDIDATE_THRESHOLD) {
       candidates.push({ currentIndex: currentBlock.index, baselineIndex: baselineBlock.index, score });
     }
+    return true;
   };
 
   if (currentBlocks.length * baselineBlocks.length <= EXHAUSTIVE_BLOCK_PAIRS) {
-    for (const currentBlock of currentBlocks) for (const baselineBlock of baselineBlocks) consider(currentBlock, baselineBlock);
-    return candidates;
+    for (const currentBlock of currentBlocks) {
+      for (const baselineBlock of baselineBlocks) {
+        if (!consider(currentBlock, baselineBlock)) return { candidates, exhausted };
+      }
+    }
+    return { candidates, exhausted };
   }
 
   const postings = new Map<string, number[]>();
@@ -286,19 +311,26 @@ function candidateBlockMatches(
     }
   }
   for (const currentBlock of currentBlocks) {
-    const nominated = new Set<number>();
+    const lists: number[][] = [];
     for (const token of currentBlock.tokenSet) {
       const list = postings.get(token);
-      if (!list || list.length > MAX_TOKEN_POSTINGS) continue;
-      for (const baselineIndex of list) nominated.add(baselineIndex);
+      if (list && list.length <= MAX_TOKEN_POSTINGS) lists.push(list);
+    }
+    lists.sort((left, right) => left.length - right.length);
+    const nominated = new Set<number>();
+    nominate: for (const list of lists) {
+      for (const baselineIndex of list) {
+        nominated.add(baselineIndex);
+        if (nominated.size >= MAX_NOMINATIONS_PER_BLOCK) break nominate;
+      }
     }
     // Skipped common tokens still count: nominated pairs are scored on their full token sets.
     for (const baselineIndex of nominated) {
       const baselineBlock = baselineBlocks[baselineIndex];
-      if (baselineBlock) consider(currentBlock, baselineBlock);
+      if (baselineBlock && !consider(currentBlock, baselineBlock)) return { candidates, exhausted };
     }
   }
-  return candidates;
+  return { candidates, exhausted };
 }
 
 function sortChangelogEntries(entries: DocumentVersionChangelogEntry[]): DocumentVersionChangelogEntry[] {
@@ -327,7 +359,8 @@ export function buildSemanticDocumentChangelog(args: {
         deletions: 0,
         rewrites: 0,
         contradictions: 0,
-        changedRatio: 0
+        changedRatio: 0,
+        truncated: args.current.text.length > MAX_VERSION_CHARS
       },
       additions: [],
       deletions: [],
@@ -338,7 +371,7 @@ export function buildSemanticDocumentChangelog(args: {
 
   const currentBlocks = extractSemanticBlocks(args.current.text);
   const baselineBlocks = extractSemanticBlocks(args.baseline.text);
-  const candidates = candidateBlockMatches(currentBlocks, baselineBlocks);
+  const { candidates, exhausted: comparisonExhausted } = candidateBlockMatches(currentBlocks, baselineBlocks);
 
   candidates.sort((left, right) => right.score - left.score);
 
@@ -417,7 +450,9 @@ export function buildSemanticDocumentChangelog(args: {
       previousExcerpt: excerptSemanticText(block.text)
     }));
 
-  const truncated = currentBlocks.length >= MAX_SEMANTIC_BLOCKS || baselineBlocks.length >= MAX_SEMANTIC_BLOCKS;
+  const blocksTruncated = currentBlocks.length >= MAX_SEMANTIC_BLOCKS || baselineBlocks.length >= MAX_SEMANTIC_BLOCKS;
+  const textTruncated = args.current.text.length > MAX_VERSION_CHARS || args.baseline.text.length > MAX_VERSION_CHARS;
+  const truncated = blocksTruncated || textTruncated || comparisonExhausted;
   const changedCount = additions.length + deletions.length + rewrites.length;
   const totalReferenceBlocks = Math.max(currentBlocks.length, baselineBlocks.length, 1);
   const changedRatio = Math.min(1, changedCount / totalReferenceBlocks);
@@ -429,7 +464,9 @@ export function buildSemanticDocumentChangelog(args: {
           ? `${contradictions.length} likely contradiction${contradictions.length === 1 ? "" : "s"} need operator review.`
           : "No likely contradictions were detected by the heuristic pass."
       ];
-  if (truncated) summary.push(`Only the first ${MAX_SEMANTIC_BLOCKS} blocks of each version were compared.`);
+  if (blocksTruncated) summary.push(`Only the first ${MAX_SEMANTIC_BLOCKS} blocks of each version were compared.`);
+  if (textTruncated) summary.push(`Only the first ${MAX_VERSION_CHARS.toLocaleString("en-US")} characters of each version were compared.`);
+  if (comparisonExhausted) summary.push("The comparison was truncated at its work limit, so some blocks are listed as added or removed that may be unchanged.");
 
   return {
     available: true,
@@ -451,7 +488,8 @@ export function buildSemanticDocumentChangelog(args: {
       deletions: deletions.length,
       rewrites: rewrites.length,
       contradictions: contradictions.length,
-      changedRatio
+      changedRatio,
+      truncated
     },
     additions: sortChangelogEntries(additions),
     deletions: sortChangelogEntries(deletions),
@@ -580,6 +618,16 @@ const MAX_SEMANTIC_BLOCKS = 2000;
 const EXHAUSTIVE_BLOCK_PAIRS = 40_000;
 /** A token in more baseline blocks than this does not nominate candidates. */
 const MAX_TOKEN_POSTINGS = 64;
+/** Text read from each version; a longer version is compared on its first part and reported as truncated. */
+const MAX_VERSION_CHARS = 400_000;
+/** Characters of one block that are normalised and tokenised. */
+const MAX_BLOCK_CHARS = 20_000;
+/** Distinct tokens kept per block. */
+const MAX_BLOCK_TOKENS = 64;
+/** Baseline blocks scored per current block in indexed mode, rarest shared tokens first. */
+const MAX_NOMINATIONS_PER_BLOCK = 48;
+/** Hard budget for the whole comparison: token lookups across all scored pairs (tens of milliseconds). */
+const MAX_COMPARISON_WORK = 2_000_000;
 
 /** Explains a status the user did not ask for, such as a PII policy block. */
 function documentStatusReason(row: Pick<DocumentRow, "status" | "metadata">): string | null {
