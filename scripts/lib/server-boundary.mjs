@@ -115,3 +115,27 @@ function checkAstroServerImports(root, appDir) {
   }
   return violations;
 }
+
+// Customer files are probed only on the customer's machine. The offline estimator (`@docslurp/estimate`) parses
+// file bytes in-process, so the API, the worker and the shared contracts must never load it: on DocSlurp hosts
+// untrusted files are parsed only behind the VM boundary (CLAUDE.md, untrusted file processing).
+export function checkEstimatorBoundary(root, dirs = ["server", "worker", "packages/shared"]) {
+  const violations = [];
+  for (const dir of dirs) {
+    for (const file of sourceFiles(resolve(root, dir))) {
+      const text = readFileSync(file, "utf8");
+      for (const match of text.matchAll(SPECIFIER)) {
+        const specifier = match[2];
+        const target = specifier.startsWith(".") ? resolve(dirname(file), specifier) : null;
+        if (
+          specifier === "@docslurp/estimate"
+          || specifier.startsWith("@docslurp/estimate/")
+          || (target && (target === resolve(root, "packages/estimate") || target.startsWith(resolve(root, "packages/estimate") + sep)))
+        ) {
+          violations.push(`${relative(root, file)}: ${specifier} (probing runs only on the customer's machine)`);
+        }
+      }
+    }
+  }
+  return violations;
+}

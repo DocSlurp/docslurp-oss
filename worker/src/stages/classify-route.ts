@@ -408,7 +408,7 @@ const NO_NATIVE_TEXT_SIGNALS = new Set([
  * Bytes per page above which a PDF with no extractable text holds drawn content. Blank pages
  * need well under 1 KB; a page of text drawn as paths needs tens to hundreds of KB.
  */
-export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = 16 * 1024;
+export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = PAGE_RASTER_ROUTING.drawnContentMinBytesPerPage;
 /** Extracted words on a page with neither a text layer nor images that make it drawn text, not blank. */
 export const DRAWN_TEXT_MIN_WORDS = 10;
 const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);

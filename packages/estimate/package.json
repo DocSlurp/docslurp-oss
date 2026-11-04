@@ -1,0 +1,44 @@
+{
+  "name": "@docslurp/estimate",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Offline DocSlurp credit estimates: probe files locally and quote an upload with the published price card.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://docslurp.io/docs/packages/estimate",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DocSlurp/docslurp-oss.git",
+    "directory": "packages/estimate"
+  },
+  "bugs": {
+    "url": "https://github.com/DocSlurp/docslurp-oss/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./js/index.d.ts",
+      "import": "./js/index.mjs"
+    },
+    "./node": {
+      "types": "./js/node.d.ts",
+      "import": "./js/node.mjs"
+    },
+    "./docslurp_estimate.wasm": "./dist/docslurp_estimate.wasm"
+  },
+  "files": [
+    "js",
+    "dist",
+    "card.json",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test:wasm": "node scripts/build-wasm.mjs && node ../../scripts/node-test.mjs test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@docslurp/shared": "workspace:*"
+  }
+}

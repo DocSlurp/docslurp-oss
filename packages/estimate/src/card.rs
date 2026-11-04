@@ -96,6 +96,7 @@ pub struct PageRasterRouting {
     pub stamp_text_max_words: f64,
     pub stamped_scan_min_image_coverage: f64,
     pub sparse_text_full_page_image_coverage: f64,
+    pub drawn_content_min_bytes_per_page: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

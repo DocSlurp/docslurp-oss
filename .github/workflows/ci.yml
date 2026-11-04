@@ -193,9 +193,35 @@ jobs:
       - name: Run gated database and Redis tests
         run: node scripts/run-database-tests.mjs
 
+  # The offline estimator (packages/estimate): Rust unit, golden-parity and probe-fixture tests, then the wasm build
+  # (size budget) and its JS tests, which replay random quotes against @docslurp/shared's quoteUpload.
+  estimate:
+    name: offline estimator
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Install the pinned Rust toolchain (packages/estimate/rust-toolchain.toml)
+        working-directory: packages/estimate
+        run: rustup toolchain install
+      - name: Rust tests
+        working-directory: packages/estimate
+        run: cargo test --locked
+      - run: pnpm --filter @docslurp/shared build
+      - name: Build the wasm module and run its JS tests
+        run: pnpm --filter @docslurp/estimate test:wasm
+
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [test, database]
+    needs: [test, database, estimate]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

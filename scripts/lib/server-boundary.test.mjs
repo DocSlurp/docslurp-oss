@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { checkAppServerImports, checkServerBoundary } from "./server-boundary.mjs";
+import { checkAppServerImports, checkEstimatorBoundary, checkServerBoundary } from "./server-boundary.mjs";
 
 function fixture(files) {
   const root = mkdtempSync(join(tmpdir(), "boundary-"));
@@ -63,4 +63,15 @@ test("app code may import only the server mount and the auth entry", () => {
     assert.equal(violations.length, 3);
     assert.match(violations.join("\n"), /lib\/b\.ts[\s\S]*c\.astro|c\.astro[\s\S]*lib\/b\.ts/);
   } finally { rmSync(root, { recursive: true }); }
+});
+
+test("keeps the offline estimator's file probes out of the API, worker and shared contracts", () => {
+  const root = fixture({
+    "server/src/a.ts": 'import { createEstimator } from "@docslurp/estimate";',
+    "worker/src/b.ts": 'const probe = await import("@docslurp/estimate/node");',
+    "packages/shared/src/c.ts": 'import card from "../../estimate/card.json";',
+    "packages/shared/src/d.ts": 'import { quoteUpload } from "./upload-quote.js";',
+    "packages/sdk/src/e.ts": 'import { createEstimator } from "@docslurp/estimate";',
+  });
+  try { assert.equal(checkEstimatorBoundary(root).length, 3); } finally { rmSync(root, { recursive: true }); }
 });

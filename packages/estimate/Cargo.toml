@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Offline DocSlurp credit estimator: probe files locally and price an upload with the published price card."
-license = "Apache-2.0"
+license = "MIT"
 homepage = "https://docslurp.io/docs/packages/estimate"
 repository = "https://github.com/DocSlurp/docslurp-oss/tree/main/packages/estimate"
 publish = false
@@ -16,7 +16,8 @@ crate-type = ["cdylib", "rlib"]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 lopdf = { version = "0.47", default-features = false }
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Raw deflate for Office/EPUB entries (already in the tree through lopdf's flate2).
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 
 [profile.release]
 opt-level = "s"

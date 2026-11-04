@@ -177,6 +177,7 @@ name = "docslurp-estimate"
 version = "0.1.0"
 dependencies = [
  "lopdf",
+ "miniz_oxide",
  "serde",
  "serde_json",
  "zip",

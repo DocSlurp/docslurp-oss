@@ -177,7 +177,8 @@
   "rasterPageMinTotalImageCoverage": 0.35,
   "stampTextMaxWords": 10,
   "stampedScanMinImageCoverage": 0.5,
-  "sparseTextFullPageImageCoverage": 0.85
+  "sparseTextFullPageImageCoverage": 0.85,
+  "drawnContentMinBytesPerPage": 16384
  },
- "revision": "b52d5af97a7dcf8e7dd231711f7ce0f9f626de9c854826d930e863c3d84cb0d5"
+ "revision": "b2d3c5a6724274b79a838520b43053126ab921738dc41e14904a68a57f636883"
 }

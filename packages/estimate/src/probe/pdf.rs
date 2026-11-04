@@ -52,12 +52,12 @@ pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     }
     let options = LoadOptions { max_decompressed_size: Some(MAX_LOAD_STREAM_BYTES), ..LoadOptions::default() };
     match Document::load_mem_with_options(input.head, options) {
-        Ok(document) => probe_document(&card.page_raster_routing, &document, result),
+        Ok(document) => probe_document(&card.page_raster_routing, &document, input.head.len(), result),
         Err(error) => fallback_page_count(input.head, result).note(format!("PDF did not parse ({error})")),
     }
 }
 
-fn probe_document(routing: &PageRasterRouting, document: &Document, mut result: ProbeResult) -> ProbeResult {
+fn probe_document(routing: &PageRasterRouting, document: &Document, file_bytes: usize, mut result: ProbeResult) -> ProbeResult {
     let pages: Vec<ObjectId> = document.get_pages().into_values().collect();
     if pages.is_empty() {
         return result.note("PDF has no pages");
@@ -67,11 +67,17 @@ fn probe_document(routing: &PageRasterRouting, document: &Document, mut result: 
         return result.note("encrypted PDF; page mix not measured");
     }
     let mut forms = FormCache::default();
+    let readings: Vec<PageReading> = sample_indices(pages.len(), MAX_SAMPLED_PAGES)
+        .into_iter()
+        .filter_map(|index| classify_page(routing, document, pages[index], &mut forms))
+        .collect();
+    let budget_hit = readings.iter().any(|reading| reading.exhausted);
+    let drawn = !readings.is_empty()
+        && readings.iter().all(|reading| reading.blank)
+        && drawn_document(routing, document, file_bytes, pages.len());
     let mut counts = [0usize; 3];
-    let mut budget_hit = false;
-    for index in sample_indices(pages.len(), MAX_SAMPLED_PAGES) {
-        let Some((class, exhausted)) = classify_page(routing, document, pages[index], &mut forms) else { continue };
-        budget_hit |= exhausted;
+    for reading in &readings {
+        let class = if drawn { PageClass::Scanned } else { reading.class };
         counts[class as usize] += 1;
     }
     let measured = counts.iter().sum::<usize>();
@@ -88,6 +94,11 @@ fn probe_document(routing: &PageRasterRouting, document: &Document, mut result: 
     if budget_hit {
         confidence -= 0.2;
         result.notes.push("a page hit the probe's content budget; its class is approximate".into());
+    }
+    if drawn {
+        // Newer worker routing also requires OCR to find words on drawn pages before billing them Rich.
+        confidence -= 0.25;
+        result.notes.push("no text layer and heavy vector content: priced as drawn text read by vision".into());
     }
     result.mix_confidence = Some((confidence * 1000.0).round() / 1000.0);
     result.sampled_pages = Some(measured as u32);
@@ -140,17 +151,27 @@ impl FormCache {
     }
 }
 
-/// Words in shown text, counted the way extracted text splits: runs of non-space glyphs, broken by spaces and by
-/// text moves that leave a gap. Two-byte (CID) strings rarely contain a space code, so they count glyphs per word.
+/// Native words as the worker counts them on extracted text (`pageEvidenceWordCount`): runs of 2+ letters or
+/// digits, or letters and digits / 6 for scripts without spaces, whichever is larger. Shown strings are joined
+/// the way text extraction joins them: text moves within a word's advance continue it, larger moves and line
+/// changes break it. Two-byte (CID) strings carry glyph ids, not characters, so they count as letters only.
 #[derive(Default)]
 struct WordCounter {
-    words: f64,
-    in_word: bool,
+    runs: f64,
+    characters: f64,
+    run_length: usize,
     /// Glyphs shown since the last text move, to tell a next-character move from a word gap.
     run_glyphs: f64,
 }
 
 impl WordCounter {
+    fn end_run(&mut self) {
+        if self.run_length >= 2 {
+            self.runs += 1.0;
+        }
+        self.run_length = 0;
+    }
+
     fn show(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -158,24 +179,25 @@ impl WordCounter {
         let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
         if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
             let glyphs = bytes.len() as f64 / 2.0;
-            self.words += (glyphs / 6.0).ceil();
-            self.in_word = false;
+            self.end_run();
+            self.characters += glyphs;
             self.run_glyphs += glyphs;
             return;
         }
         for byte in bytes {
-            if byte.is_ascii_whitespace() {
-                self.in_word = false;
-            } else if !self.in_word {
-                self.in_word = true;
-                self.words += 1.0;
+            // Bytes above ASCII are accented letters in the common single-byte encodings.
+            if byte.is_ascii_alphanumeric() || *byte >= 0xC0 {
+                self.run_length += 1;
+                self.characters += 1.0;
+            } else {
+                self.end_run();
             }
         }
         self.run_glyphs += bytes.len() as f64;
     }
 
     fn gap(&mut self) {
-        self.in_word = false;
+        self.end_run();
         self.run_glyphs = 0.0;
     }
 
@@ -184,9 +206,14 @@ impl WordCounter {
     fn moved(&mut self, tx: f64, ty: f64, font_size: f64) {
         let advance = (self.run_glyphs * 0.6 + 0.3) * font_size.abs().max(1.0);
         if ty.abs() > 0.01 || tx < 0.0 || tx > advance {
-            self.in_word = false;
+            self.end_run();
         }
         self.run_glyphs = 0.0;
+    }
+
+    fn words(&self) -> f64 {
+        let pending = if self.run_length >= 2 { 1.0 } else { 0.0 };
+        (self.runs + pending).max((self.characters / 6.0).floor())
     }
 }
 
@@ -312,24 +339,48 @@ fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name
     })
 }
 
-fn classify_page(
-    routing: &PageRasterRouting,
-    document: &Document,
-    page_id: ObjectId,
-    forms: &mut FormCache,
-) -> Option<(PageClass, bool)> {
+struct PageReading {
+    class: PageClass,
+    /// Neither native words nor significant images.
+    blank: bool,
+    exhausted: bool,
+}
+
+fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache) -> Option<PageReading> {
     let content = document.get_page_content_with_limit(page_id, MAX_STREAM_BYTES).ok()?;
     let resources = page_resources(document, page_id);
     let area = page_area(document, page_id);
     let mut stats = PageStats::default();
     let mut context = Context { document, routing, forms, area };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
-    Some((classify(routing, &stats), stats.exhausted))
+    Some(PageReading {
+        class: classify(routing, &stats),
+        blank: stats.words.words() == 0.0 && stats.image_count == 0,
+        exhausted: stats.exhausted,
+    })
+}
+
+/// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
+/// less embedded images, exceed the threshold per page holds text drawn as paths, and its pages go to vision.
+fn drawn_document(routing: &PageRasterRouting, document: &Document, file_bytes: usize, pages: usize) -> bool {
+    let image_bytes: usize = document
+        .objects
+        .values()
+        .filter_map(|object| match object {
+            Object::Stream(stream) => Some(stream),
+            _ => None,
+        })
+        .filter(|stream| matches!(stream.dict.get(b"Subtype"), Ok(Object::Name(kind)) if kind == b"Image"))
+        .map(|stream| stream.content.len())
+        .sum();
+    let drawn_per_page = file_bytes.saturating_sub(image_bytes) as f64 / pages.max(1) as f64;
+    drawn_per_page >= routing.drawn_content_min_bytes_per_page
 }
 
 fn classify(routing: &PageRasterRouting, stats: &PageStats) -> PageClass {
-    let words = stats.words.words;
-    // A page with neither words nor images is blank to the worker (it bills Fast), even if it draws vectors.
+    let words = stats.words.words();
+    // A page with neither words nor images is blank to the worker (it bills Fast) unless the whole document is
+    // drawn content, which probe_document decides.
     if words == 0.0 && stats.image_count == 0 {
         return PageClass::Text;
     }
@@ -507,7 +558,7 @@ mod tests {
     fn classifies_like_the_worker_router() {
         let page = |words: f64, largest: f64, total: f64, images: usize| {
             let mut stats = PageStats { largest_image_coverage: largest, image_coverage: total, image_count: images, ..PageStats::default() };
-            stats.words.words = words;
+            stats.words.runs = words;
             stats
         };
         let routing = routing();
@@ -525,8 +576,9 @@ mod tests {
     #[test]
     fn counts_words_from_text_runs() {
         let mut counter = WordCounter::default();
-        counter.show(b"hello brave new world");
-        assert_eq!(counter.words, 4.0);
+        counter.show(b"hello brave new world, a b");
+        // Single letters are not words to the worker.
+        assert_eq!(counter.words(), 4.0);
 
         // A title drawn one character at a time with next-character moves is one word, not one per glyph.
         let mut title = WordCounter::default();
@@ -534,17 +586,17 @@ mod tests {
             title.show(&[*glyph]);
             title.moved(7.0, 0.0, 12.0);
         }
-        assert_eq!(title.words, 1.0);
+        assert_eq!(title.words(), 1.0);
 
         // A move to the next line starts a new word.
         let mut lines = WordCounter::default();
         lines.show(b"first");
         lines.moved(0.0, -14.0, 12.0);
         lines.show(b"second");
-        assert_eq!(lines.words, 2.0);
+        assert_eq!(lines.words(), 2.0);
 
         let mut cid = WordCounter::default();
-        cid.show(&[0, 41, 0, 42, 0, 43, 0, 44, 0, 45, 0, 46, 0, 47]);
-        assert_eq!(cid.words, 2.0);
+        cid.show(&[0, 41, 0, 42, 0, 43, 0, 44, 0, 45, 0, 46, 0, 47, 0, 48, 0, 49, 0, 50, 0, 51, 0, 52]);
+        assert_eq!(cid.words(), 2.0);
     }
 }

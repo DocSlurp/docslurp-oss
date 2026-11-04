@@ -22,4 +22,9 @@ export const PAGE_RASTER_ROUTING = {
   stampedScanMinImageCoverage: 0.5,
   /** A page with a little more native text (title, caption) needs an image this large to be a scan. */
   sparseTextFullPageImageCoverage: 0.85,
+  /**
+   * Bytes per page above which a PDF with no extractable text holds drawn content. Blank pages need well under 1 KB;
+   * a page of text drawn as paths needs tens to hundreds of KB.
+   */
+  drawnContentMinBytesPerPage: 16 * 1024,
 } as const;
