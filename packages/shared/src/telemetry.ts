@@ -1,5 +1,6 @@
 import { observabilityRuntimeKey } from "./telemetry-state.js";
 import { isCancellation } from "./cancellation.js";
+import { operationErrorAttributes, operationErrorSummary, spanSafeErrorAttributes } from "./operation-error.js";
 import { logs as logsApi } from "@opentelemetry/api-logs";
 // Server-only runtime. One provider owns context; exporters never own app lifecycle.
 import { hostname } from "node:os";
@@ -314,7 +315,8 @@ export function setActiveSpanAttributes(attributes: Attributes): void {
   bestEffort(() => active.setAttributes(safeAttributes(attributes)));
 }
 
-export function observationTelemetry(name: string, type: string, durationSeconds: number, outcome: "ok" | "error" | "cancelled", metadata: Record<string, unknown>): void {
+/** `error` is the failure of an "error" outcome; its type, status and (when safe) message go to telemetry. */
+export function observationTelemetry(name: string, type: string, durationSeconds: number, outcome: "ok" | "error" | "cancelled", metadata: Record<string, unknown>, error?: unknown): void {
   const failed = outcome === "error";
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
@@ -328,10 +330,13 @@ export function observationTelemetry(name: string, type: string, durationSeconds
   // Retrieval run by the chat search agent links back to its conversation.
   const chat = typeof metadata.chatSessionId === "string" ? { "docslurp.chat.session_id": metadata.chatSessionId } : {};
   for (const [key, value] of Object.entries({ ...correlations, ...media, ...chat })) bestEffort(() => active?.setAttribute(key, value));
+  const errorAttributes = failed && error !== undefined ? operationErrorAttributes(error) : undefined;
+  if (errorAttributes) bestEffort(() => active?.setAttributes(spanSafeErrorAttributes(errorAttributes)));
   if (outcome !== "ok" || name.startsWith("worker.stage.")) emitTelemetryLog({
     eventName: "docslurp.operation.completed", severityText: failed ? "error" : "info",
-    body: `${name.slice(0, 200)} ${failed ? "failed" : outcome === "cancelled" ? "cancelled" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`,
-    attributes: { ...attributes, ...correlations, duration_ms: Math.round(durationSeconds * 1000) },
+    body: `${name.slice(0, 200)} ${failed ? "failed" : outcome === "cancelled" ? "cancelled" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`
+      + (errorAttributes ? ` ${operationErrorSummary(errorAttributes)}` : ""),
+    attributes: { ...attributes, ...correlations, ...errorAttributes, duration_ms: Math.round(durationSeconds * 1000) },
   });
 }
 

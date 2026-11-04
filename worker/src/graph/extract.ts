@@ -7,6 +7,7 @@ import {
   type TextGenerationProfile,
 } from "@docslurp/shared";
 
+import { isRouteLevelProviderFailure, operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 
@@ -124,11 +125,13 @@ export async function extractDocumentGraph(args: {
   let inputTokens = 0;
   let outputTokens = 0;
   const llmAttempted = Boolean(context.useLlm && context.apiKey && windows.length);
+  // Set when a route-level refusal skipped the remaining windows.
+  let stoppedEarly = false;
 
   if (llmAttempted) {
     let llmGraph: DocumentGraphExtraction = { entities: [], relationships: [] };
     let succeeded = false;
-    for (const [index, window] of windows.entries()) {
+    windowLoop: for (const [index, window] of windows.entries()) {
       const request = (maxOutputTokens: number) => extractWindowWithLlm({
         context,
         apiKey: context.apiKey!,
@@ -149,8 +152,13 @@ export async function extractDocumentGraph(args: {
           result = await request(maxOutputTokens);
         } catch (error) {
           if (context.signal?.aborted) throw error;
-          // Do not log provider error bodies: they may contain document content.
-          console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error`);
+          // Status and type only: provider error bodies may contain document content.
+          // generateOpenRouterText's observation sends the full telemetry to SigNoz.
+          const failure = operationErrorAttributes(error);
+          console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error ${operationErrorSummary(failure)}`);
+          // The SDK already retried 429s and 5xx. A route-level refusal (an
+          // unservable model or route, auth, credit) fails every later window too.
+          if (isRouteLevelProviderFailure(failure)) { stoppedEarly = index < windows.length - 1; break windowLoop; }
           break;
         }
         inputTokens += result.usage.inputTokens;
@@ -196,7 +204,8 @@ export async function extractDocumentGraph(args: {
   return {
     ...graph,
     source,
-    llmFailed: llmAttempted && source === "heuristic",
+    // A graph cut short (credit ran out mid-document) stays stale, so it is extracted again later.
+    llmFailed: llmAttempted && (source === "heuristic" || stoppedEarly),
     windows: windowsRead,
     inputTokens,
     outputTokens,
