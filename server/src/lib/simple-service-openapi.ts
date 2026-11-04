@@ -113,7 +113,7 @@ export const simpleServiceSchemas = {
     type: "object", additionalProperties: false, required: ["model", "messages"],
     description: "Text-only workspace chat. Include history; end with a nonempty user message. Unsupported controls are rejected.",
     properties: {
-      model: { type: "string", pattern: "^workspace:(?:default|[0-9a-fA-F-]{36})$", description: "workspace:default for the organization default workspace, or workspace:<uuid> from GET /v1/models." },
+      model: { type: "string", pattern: "^workspace:(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)$", description: "The workspace to answer from, not an inference model: workspace:default for the organization default workspace, workspace:<slug>, or workspace:<uuid> from GET /v1/models. Choose the inference model with docslurp.model." },
       messages: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", additionalProperties: false, required: ["role", "content"], properties: {
         role: { enum: ["system", "developer", "user", "assistant"] },
         content: { oneOf: [{ type: "string", maxLength: 64000 }, { type: "array", minItems: 1, maxItems: 16, items: { type: "object", additionalProperties: false, required: ["type", "text"], properties: { type: { const: "text" }, text: { type: "string", maxLength: 64000 } } } }] },
@@ -125,6 +125,8 @@ export const simpleServiceSchemas = {
       n: { const: 1 }, user: { type: "string", maxLength: 256 },
       tool_choice: { enum: ["auto", "none"], default: "auto", description: "auto: the workspace agent may call its own search, web and settings tools before answering. none: a direct grounded answer from one retrieval and one model call (lower latency and fewer tokens; still streams). Client-defined tools are not supported, so `tools` and other tool_choice forms are rejected with 400." },
       docslurp: { type: "object", additionalProperties: false, description: "DocSlurp extension (extra_body in OpenAI SDKs).", properties: {
+        model: { type: "string", maxLength: 256, examples: ["llm://openrouter/anthropic/claude-haiku-5.5"], description: "Inference model for this request, as model on POST /v1/chat: an llm://openrouter/<vendor>/<model> URI (or the bare OpenRouter id) from the chat model catalog. Omitted: the default. A model you may not use is refused with 400 model_not_allowed, never swapped for the default." },
+        speedBoost: { type: "boolean", default: false, description: "Opt in to Nitro throughput routing for this request." },
         retrieval: { ...nestedSchema(chatRetrievalOverridesSchema), description: "Retrieval overrides for this request only, as retrieval on POST /v1/chat. Example: { \"parentRetrieval\": false } cites matched chunks without whole parent pages." },
       } },
     },
