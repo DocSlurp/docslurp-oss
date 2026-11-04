@@ -95,6 +95,30 @@ describe("workspace input resolution", () => {
   });
 });
 
+describe("workspace names that exist in more than one of the caller's organizations", () => {
+  it("answers 409 instead of picking one, and resolves once the organization is named", async () => {
+    await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org-c', 'Org C', 'org-c', 'alice')`;
+    await sql`insert into org_memberships (org_id, user_id, role) values ('org-c', 'alice', 'owner')`;
+    const inA = await workspaces.createWorkspace({ userId: "alice", orgId: "org-a", name: "Contracts", slug: "contracts" });
+    const inC = await workspaces.createWorkspace({ userId: "alice", orgId: "org-c", name: "Contracts", slug: "contracts" });
+    // Without an organization neither the slug owner nor the oldest match wins.
+    await expect(find("Contracts", { userId: "alice" })).rejects.toMatchObject({ status: 409, code: "workspace_ambiguous" });
+    await expect(find("contracts", { userId: "alice" })).rejects.toMatchObject({ status: 409, code: "workspace_ambiguous" });
+    expect(await find("Contracts", { userId: "alice", orgId: "org-a" })).toBe(inA.id);
+    expect(await find("Contracts", { userId: "alice", orgId: "org-c" })).toBe(inC.id);
+    // A UUID is never ambiguous.
+    expect(await find(inC.id, { userId: "alice" })).toBe(inC.id);
+  });
+
+  it("does not count organizations the caller cannot use, and never reveals them", async () => {
+    // Bob's org-b also has "Legal Contracts"; Alice is not a member, so her lookup is not ambiguous.
+    expect(await find("Legal Contracts", { userId: "alice" })).toBe(legalId);
+    // A key allowlist narrows the candidates before ambiguity is judged.
+    const inC = (await workspaces.listWorkspaces("alice")).find((workspace) => workspace.orgId === "org-c" && workspace.name === "Contracts")!;
+    expect(await find("Contracts", { userId: "alice", allowedWorkspaceIds: [inC.id] })).toBe(inC.id);
+  });
+});
+
 describe("request actor workspace boundary", () => {
   const session = { type: "session" as const, userId: "alice", sessionId: "s", user: { id: "alice", email: "alice@example.test", name: "Alice" } };
   const key = (workspaceIds: string[]) => ({

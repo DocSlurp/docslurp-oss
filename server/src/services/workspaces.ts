@@ -515,6 +515,8 @@ export interface WorkspaceInputScope {
  * `workspace: "Legal Contracts"` pointing at the workspace an upload created
  * for it. Workspaces outside the caller's access, the scope's organization or
  * the key allowlist are never returned, so the answer never reveals them.
+ * Without `scope.orgId`, a slug or name that matches usable workspaces in more
+ * than one organization throws a 409 `workspace_ambiguous` rather than choosing.
  */
 export async function findWorkspaceForInput(
   ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>,
@@ -533,10 +535,9 @@ export async function findWorkspaceForInput(
   const [bySlug] = await sql<{ workspace_id: string }[]>`
     select workspace_id from workspace_slugs where slug = ${ref.slug}
   `;
-  if (bySlug) {
-    const workspace = await usable(bySlug.workspace_id);
-    if (workspace) return workspace;
-  }
+  const bySlugUsable = bySlug ? await usable(bySlug.workspace_id) : null;
+  // With an organization named, the first usable match inside it wins (slug owner, then oldest name).
+  if (bySlugUsable && scope.orgId) return bySlugUsable;
 
   const named = await sql<{ id: string; name: string }[]>`
     select w.id, w.name
@@ -546,12 +547,20 @@ export async function findWorkspaceForInput(
       and w.id <> ${bySlug?.workspace_id ?? ""}
     order by (w.archived_at is not null), w.created_at, w.id
   `;
+  const matches: { id: string; orgId: string }[] = bySlugUsable ? [bySlugUsable] : [];
   for (const row of named) {
     if (slugifyWorkspaceName(row.name) !== ref.slug) continue;
     const workspace = await usable(row.id);
-    if (workspace) return workspace;
+    if (!workspace) continue;
+    matches.push(workspace);
+    if (scope.orgId) break;
   }
-  return null;
+  // Without an organization the name may exist in several of the caller's organizations. Never
+  // pick one by age or slug ownership: that would put data in whichever tenant happened to be first.
+  if (!scope.orgId && new Set(matches.map((match) => match.orgId)).size > 1) {
+    throw new WorkspaceAccessError(409, "workspace_ambiguous", `More than one of your organizations has a workspace named "${ref.slug}"`, { workspaceSlug: ref.slug });
+  }
+  return matches[0] ?? null;
 }
 
 /**

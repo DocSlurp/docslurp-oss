@@ -143,4 +143,10 @@ describe("aggregateWorkspaceRagSearch spend", () => {
     expect(mocks.hybridSearch).not.toHaveBeenCalled();
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
   });
+  it("fails closed for a key that carries no organization", async () => {
+    const apiKey = { keyId: "k", userId: "u1", orgId: null, keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] };
+    await expect(aggregateWorkspaceRagSearch({ userId: "u1", request: request({ generateAnswer: true }), apiKey })).rejects.toThrow("Workspace not found");
+    expect(mocks.hybridSearch).not.toHaveBeenCalled();
+    expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
+  });
 });

@@ -12,7 +12,7 @@ import { ensurePersonalOrganization, getOrganization, OrganizationError, withOrg
 type ApiKeyRow = {
   id: string;
   user_id: string;
-  org_id: string | null;
+  org_id: string;
   key_hash: string;
   name: string;
   key_type: string | null;
@@ -71,7 +71,7 @@ export type ApiKeyType = (typeof apiKeyTypes)[number];
 export interface ApiKey {
   id: string;
   userId: string;
-  orgId: string | null;
+  orgId: string;
   name: string;
   keyType: ApiKeyType;
   allowedDomains: string[];

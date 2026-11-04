@@ -197,15 +197,9 @@ export async function loadSearchWorkspaceContext(workspaceId: string, userId: st
       s.workspace_id as settings_workspace_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
       s.boosts, s.pinned_results, s.synonyms, s.compat_settings, s.rules, s.compat_metadata
     from workspaces w
-    join organizations o on o.id = w.org_id
-    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-    left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
     left join workspace_search_settings s on s.workspace_id = w.id
     where w.id = ${workspaceId}
-      and (
-        (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-        or (wm.user_id is not null and o.is_personal)
-      )
+      and docslurp_workspace_access(w.id, ${userId})
     limit 1
   `;
   const allowlist = currentRequestApiKeyWorkspaceIds();
@@ -258,19 +252,8 @@ async function resolveSearchWorkspaceScope(args: {
       select distinct d.workspace_id, w.org_id
       from documents d
       join workspaces w on w.id = d.workspace_id
-      left join org_memberships om
-        on om.org_id = w.org_id
-        and om.user_id = ${args.userId}
-      left join workspace_members wm
-        on wm.workspace_id = w.id
-        and wm.user_id = ${args.userId}
       where d.id = any(${sql.array(documentIds)})
-        and (
-          -- G-06: team-org access always requires org membership; only a
-          -- personal org's direct shares stand alone.
-          (om.user_id is not null and (w.user_id = ${args.userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-          or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal))
-        )
+        and docslurp_workspace_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
     `;
 
@@ -290,19 +273,8 @@ async function resolveSearchWorkspaceScope(args: {
       select runs.workspace_id, w.org_id
       from workspace_runs runs
       join workspaces w on w.id = runs.workspace_id
-      left join org_memberships om
-        on om.org_id = w.org_id
-        and om.user_id = ${args.userId}
-      left join workspace_members wm
-        on wm.workspace_id = w.id
-        and wm.user_id = ${args.userId}
       where runs.id = ${args.runId}
-        and (
-          -- G-06: team-org access always requires org membership; only a
-          -- personal org's direct shares stand alone.
-          (om.user_id is not null and (w.user_id = ${args.userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-          or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal))
-        )
+        and docslurp_workspace_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
       limit 1
     `;

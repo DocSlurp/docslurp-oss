@@ -1287,7 +1287,7 @@ export const apiKeys = pgTable(
       .defaultNow()
       .notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
-    orgId: text("org_id"),
+    orgId: text("org_id").notNull(),
     materializationPolicy: jsonb("materialization_policy").default({}).notNull(),
   },
   (table) => [
