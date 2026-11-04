@@ -87,3 +87,27 @@ Legacy renewal clause remains in effect.
     expect(changelog.stats.baselineBlocks).toBe(0);
   });
 });
+
+
+describe("buildSemanticDocumentChangelog on long documents", () => {
+  const section = (n: number, body = `clause ${n} covers topic${n} with unique${n} wording about subject${n}`) => `## Section ${n}\n\n${body} and shared filler words appear here`;
+  const document = (count: number, edit?: (n: number) => string | undefined) =>
+    Array.from({ length: count }, (_, i) => section(i, edit?.(i))).join("\n\n");
+  const snapshot = (text: string) => ({ source: "markdown" as const, text, document: { id: "d", filename: "f.md", versionNumber: 1, updatedAt: "2026-01-01T00:00:00Z" } });
+
+  it("compares blocks past the old 120-block cut-off and finds an edit near the end", () => {
+    const baseline = document(900);
+    const current = document(900, (n) => (n === 850 ? `clause 850 now covers topic850 with unique850 wording and a changed deposit of 4500 dollars` : undefined));
+    const started = performance.now();
+    const changelog = buildSemanticDocumentChangelog({ current: snapshot(current) as never, baseline: snapshot(baseline) as never });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(changelog.stats.currentBlocks).toBe(900);
+    expect(changelog.rewrites.some((entry) => entry.currentExcerpt?.includes("4500"))).toBe(true);
+  });
+
+  it("says when a version was longer than the comparison limit", () => {
+    const long = document(2100);
+    const changelog = buildSemanticDocumentChangelog({ current: snapshot(long) as never, baseline: snapshot(long) as never });
+    expect(changelog.summary.join(" ")).toContain("Only the first 2000 blocks");
+  });
+});
