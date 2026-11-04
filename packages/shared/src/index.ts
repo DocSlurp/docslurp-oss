@@ -35,6 +35,7 @@ export * from "./jobs.js";
 export * from "./media-upload-estimate.js";
 export * from "./file-formats.js";
 export * from "./page-raster-routing.js";
+export * from "./text-layer-quality.js";
 export { buildEstimateCard, estimateCard, estimateCardRevision, ESTIMATE_CARD_SCHEMA, ESTIMATE_RULES, type EstimateCard } from "./estimate-card.js";
 export * from "./upload-quote.js";
 export * from "./config-change.js";
