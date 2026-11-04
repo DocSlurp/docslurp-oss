@@ -339,13 +339,44 @@ The server verifies the stored parts. It cannot infer EOF from an idle stream
 or from its current byte total. The `/confirm` endpoint remains available as an
 explicit fallback, but automatic ingestion does not require it.
 
+### Matching files, partial acceptance and idempotency
+
+`POST /v1/uploads/direct/sessions` takes `files[]`, each with an optional
+`clientId` (up to 128 characters) that the server echoes back. The server
+sanitizes filenames (`What is RAG?.pdf` is stored as `What is RAG-.pdf`), so
+**match the response to your files by `index` (the position in your request) or
+`clientId`, never by filename.** Each entry of the response's `files[]` carries
+`index` and `clientId`.
+
+One bad file never fails the request. Accepted files get session entries; the
+others come back in a top-level `rejected[]` with the same `index` and
+`clientId`, plus `filename`, `statusCode` (`415` unsupported type, `413` too
+large), `code` and `message`. The request fails (with every file named) only
+when nothing can be accepted. A file whose bytes contradict its declared type
+(text declared as a PDF, a plain ZIP declared as a DOCX) is refused for that
+file when its session is confirmed, under `rejected[]` with `unreadable_source`.
+
+Send an `Idempotency-Key` header (1-255 printable ASCII characters) with the
+create request. A repeated create with the same key and body returns the first
+session (`200` with `Idempotency-Replayed: true`, fresh signed URLs and the
+original `rejected[]`) instead of making a second session. The same key with a
+different body is `409`; a second request while the first is still being
+processed is `409` too (retry shortly). Keys are scoped to your organization
+and user, so another tenant's identical key never matches yours. The SDK and CLI
+always send one, and send it again after a timeout or dropped connection.
+
 ### Timeouts, retries and abandoned uploads
 
 Keep the session ID when implementing your own transfer. A polling timeout is
 not proof that ingestion failed: check the same session before creating another
 upload. Repeated status reads and duplicate notifications reuse that session's
-accepted result. A new session is a new upload, not a retry of the old one. Direct sessions do
-not support `Idempotency-Key`; that key applies to HTTP bulk and URL ingestion.
+accepted result. A new session without the original `Idempotency-Key` is a new
+upload, not a retry of the old one.
+
+A part or file that fails mid-transfer resumes: read the session without
+`statusOnly=true`. For a multipart file, `pendingParts` lists only the parts
+storage does not yet hold at their expected size, with fresh signed URLs, and
+`completedParts` the ones it does.
 
 Signed URLs expire after 15 minutes. A session GET without `statusOnly=true`
 returns fresh transfer URLs for pending files; use `statusOnly=true` when you only
