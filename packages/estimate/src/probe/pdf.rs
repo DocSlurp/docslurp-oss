@@ -242,7 +242,8 @@ fn budget_object_streams(id: ObjectId, object: &mut Object) -> Option<(ObjectId,
 
 /// Whether the file contains the PDF name `/<name>`, with `#xx` escapes decoded as a PDF parser decodes them.
 fn has_name(bytes: &[u8], name: &[u8]) -> bool {
-    let delimiter = |byte: u8| byte.is_ascii_whitespace() || b"()<>[]{}/%".contains(&byte);
+    // PDF white space includes NUL, as lopdf reads it.
+    let delimiter = |byte: u8| byte.is_ascii_whitespace() || b"\0()<>[]{}/%".contains(&byte);
     let hex = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
     let mut at = 0usize;
     while let Some(offset) = bytes.get(at..).and_then(|rest| rest.iter().position(|byte| *byte == b'/')) {
@@ -677,6 +678,7 @@ mod tests {
     fn finds_names_with_escapes_and_ignores_prefixes() {
         assert!(has_name(b"<< /Encrypt 5 0 R >>", b"Encrypt"));
         assert!(has_name(b"<</Encr#79pt 5 0 R>>", b"Encrypt"));
+        assert!(has_name(b"<< /Encrypt\x005 0 R >>", b"Encrypt"));
         assert!(!has_name(b"<< /Encrypted true /EncryptMetadata false >>", b"Encrypt"));
         assert!(!has_name(b"(no names here)", b"Encrypt"));
     }

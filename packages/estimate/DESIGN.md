@@ -70,8 +70,10 @@ The `complex` page class changes only the time estimate. Probe effort goes where
 ## Probes: bounded and closer to the worker
 
 Hostile-input budgets **[D]**, tightened after the merge council (adversarial H1/M2):
-- The module's linear memory is capped at 256 MiB (`--max-memory`): anything that escapes a budget traps, and the
-  host recreates the instance, instead of exhausting the host's memory.
+- The module imports its memory (`env.memory`, at most 256 MiB). Each host creates one memory per estimator and,
+  after a trap, zeroes it and instantiates the module into it again, so anything that escapes a budget (lopdf also
+  decodes object streams lazily while resolving indirect `/Length` values, outside the load hook) costs one bounded,
+  reused memory, never a fresh allocation per crash waiting for the garbage collector.
 - PDF: object streams are decoded inside lopdf's load hook, with lopdf's own name parsing and filter chain, against a
   64 MiB document budget (lopdf only limits each stream; a raw-text preflight was bypassed by `#`-escaped names and
   nested filters in the council re-review). Encrypted files, whose load path skips the hook, are not loaded;

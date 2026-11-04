@@ -6,7 +6,6 @@ its JSON ABI (`ds_alloc`, `ds_free`, `ds_card`, `ds_read_plan`, `ds_probe`, `ds_
 
 from __future__ import annotations
 
-import gc
 import json
 import os
 import urllib.request
@@ -18,6 +17,9 @@ import wasmtime
 __all__ = ["Estimator", "EstimatorError", "apply_probe", "fetch_estimate_card"]
 
 _MASK64 = (1 << 64) - 1
+# The module's imported memory, in 64 KiB pages: 16 MiB initial, 256 MiB maximum (.cargo/config.toml).
+_MEMORY_INITIAL_PAGES = 256
+_MEMORY_MAXIMUM_PAGES = 4096
 
 
 class EstimatorError(Exception):
@@ -50,14 +52,24 @@ class Estimator:
                 module_bytes = handle.read()
         self._module = wasmtime.Module(self._engine, module_bytes)
         self._card_json = None if card is None else (card if isinstance(card, str) else json.dumps(card)).encode()
+        # One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into
+        # it again, so hostile files cost at most this memory, never a fresh allocation per crash.
+        self._store = wasmtime.Store(self._engine)
+        limits = wasmtime.Limits(_MEMORY_INITIAL_PAGES, _MEMORY_MAXIMUM_PAGES)
+        self._memory = wasmtime.Memory(self._store, wasmtime.MemoryType(limits))
         self._instantiate()
 
     def _instantiate(self) -> None:
-        self._store = wasmtime.Store(self._engine)
-        instance = wasmtime.Instance(self._store, self._module, [])
+        instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
-        self._memory = exports["memory"]
         self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_card", "ds_read_plan", "ds_probe", "ds_quote")}
+
+    def _reset(self) -> None:
+        size = self._memory.data_len(self._store)
+        chunk = bytes(16 * 1024 * 1024)
+        for offset in range(0, size, len(chunk)):
+            self._memory.write(self._store, chunk[: min(len(chunk), size - offset)], offset)
+        self._instantiate()
 
     def _call(self, name: str, *inputs: Optional[bytes]) -> Any:
         store = self._store
@@ -74,13 +86,9 @@ class Estimator:
         try:
             packed = self._fn[name](store, *args) & _MASK64
         except wasmtime.Trap as error:
-            # A panic traps the module and may leave its memory inconsistent: start a fresh instance, and release the
-            # old one's linear memory (up to the module's 256 MiB cap) now rather than at the next collection.
-            self._memory = None
-            self._fn = {}
-            self._store = None
-            gc.collect()
-            self._instantiate()
+            # A trap (a panic, or a file that hit the memory cap) leaves the heap inconsistent: zero the memory and
+            # instantiate the module into it again, exactly as on first load.
+            self._reset()
             raise EstimatorError("crashed", f"the estimator stopped on this input ({error})") from None
         for pointer, length in allocated:
             self._fn["ds_free"](store, pointer, length)

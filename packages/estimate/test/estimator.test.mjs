@@ -6,6 +6,7 @@ import { PRICE_CARD_VERSION, estimateProfileFor, defaultPipelineFeatures, quoteU
 
 import { createEstimator, EstimatorError } from "../js/index.mjs";
 import { probePath, quotePaths } from "../js/node.mjs";
+import { lazyObjectStreamBomb } from "./hostile.mjs";
 
 const fixture = (name) => new URL(`../tests/fixtures/${name}`, import.meta.url).pathname;
 const bundledCard = JSON.parse(readFileSync(new URL("../card.json", import.meta.url), "utf8"));
@@ -119,10 +120,29 @@ describe("@docslurp/estimate (wasm)", () => {
     }
   });
 
-  it("caps the module's memory so a hostile file traps instead of exhausting the host", async () => {
+  it("imports a memory capped at 256 MiB", async () => {
     const module = await WebAssembly.compile(readFileSync(new URL("../dist/docslurp_estimate.wasm", import.meta.url)));
-    const instance = new WebAssembly.Instance(module, {});
-    assert.throws(() => instance.exports.memory.grow(4_097)); // 256 MiB is 4,096 pages
+    assert.deepEqual(WebAssembly.Module.imports(module), [{ module: "env", name: "memory", kind: "memory" }]);
+    assert.throws(() => new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 256, maximum: 8_192 }) } }));
+  });
+
+  it("survives hostile PDFs that escape every budget, reusing one bounded memory", () => {
+    const bomb = lazyObjectStreamBomb();
+    const file = { name: "bomb.pdf", size: bomb.length };
+    const before = process.memoryUsage().rss;
+    for (let round = 0; round < 6; round += 1) {
+      try {
+        const probe = estimator.probe(file, bomb);
+        assert.equal(probe.mix, undefined); // refused by a budget: fine too
+      } catch (error) {
+        assert.ok(error instanceof EstimatorError);
+        assert.equal(error.code, "crashed");
+      }
+    }
+    // Six crashes reuse the same 256 MiB memory instead of leaving six behind for the garbage collector.
+    assert.ok(process.memoryUsage().rss - before < 512 * 1024 * 1024, `rss grew ${(process.memoryUsage().rss - before) >> 20} MiB`);
+    const quote = estimator.quote({ files: [{ name: "a.pdf", size: 10, pages: 2 }] });
+    assert.equal(quote.estimate.pages, 2);
   });
 
   it("reads a WAV duration from its header and prices it as audio without a name hint", () => {

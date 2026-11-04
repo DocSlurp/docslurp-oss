@@ -40,9 +40,9 @@ const estimator = await createEstimator({ module: wasm });
   `unsupported_rules`, never quoted with stale logic.
 - **Errors.** `EstimatorError.code` is `invalid_request`, `invalid_card`, `unsupported_rules` or `crashed`. After
   `crashed`, the estimator has already started a fresh module instance.
-- **Browsers and servers.** Large PDFs are parsed on the calling thread; run the estimator in a Web Worker or
-  worker thread for big batches of untrusted files, and terminate it after a `crashed` error to free its memory
-  (at most 256 MiB) at once.
+- **Memory.** An estimator uses one WebAssembly memory of at most 256 MiB for its lifetime; after a `crashed`
+  error it reuses it. Large PDFs are parsed on the calling thread, so run the estimator in a Web Worker or worker
+  thread for big batches.
 
 ## Development
 

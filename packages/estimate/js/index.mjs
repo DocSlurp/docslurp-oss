@@ -3,6 +3,9 @@
 // (src/abi.rs); this file loads it in browsers, Node, Deno and edge runtimes and wraps the calls.
 
 const WASM_URL = new URL("../dist/docslurp_estimate.wasm", import.meta.url);
+/** The module's imported memory, in 64 KiB pages: 16 MiB initial, 256 MiB maximum (.cargo/config.toml). */
+const MEMORY_INITIAL_PAGES = 256;
+const MEMORY_MAXIMUM_PAGES = 4096;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -38,7 +41,11 @@ async function compile(source) {
  */
 export async function createEstimator(options = {}) {
   const module = await compile(options.module);
-  let instance = new WebAssembly.Instance(module, {});
+  // One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into it
+  // again, so hostile files cost at most this memory, never a fresh allocation per crash.
+  const memory = new WebAssembly.Memory({ initial: MEMORY_INITIAL_PAGES, maximum: MEMORY_MAXIMUM_PAGES });
+  const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
+  let instance = instantiate();
   const cardBytes = options.card ? encoder.encode(typeof options.card === "string" ? options.card : JSON.stringify(options.card)) : null;
 
   function call(name, ...inputs) {
@@ -52,7 +59,7 @@ export async function createEstimator(options = {}) {
       }
       const bytes = input instanceof Uint8Array ? input : new Uint8Array(input.buffer ?? input, input.byteOffset ?? 0, input.byteLength);
       const pointer = exports.ds_alloc(bytes.byteLength);
-      new Uint8Array(exports.memory.buffer, pointer, bytes.byteLength).set(bytes);
+      new Uint8Array(memory.buffer, pointer, bytes.byteLength).set(bytes);
       allocated.push([pointer, bytes.byteLength]);
       args.push(pointer, bytes.byteLength);
     }
@@ -61,11 +68,10 @@ export async function createEstimator(options = {}) {
       packed = BigInt.asUintN(64, BigInt(exports[name](...args)));
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
-        // A panic traps the module and may leave its memory inconsistent: start a fresh instance. The old one's
-        // memory (up to the module's 256 MiB cap) is freed at the next collection; hosts probing untrusted files in
-        // bulk should run the estimator in a worker they can terminate.
-        instance = new WebAssembly.Instance(module, {});
-        globalThis.gc?.();
+        // A trap (a panic, or a file that hit the memory cap) leaves the heap inconsistent: zero the memory and
+        // instantiate the module into it again, exactly as on first load.
+        new Uint8Array(memory.buffer).fill(0);
+        instance = instantiate();
         throw new EstimatorError("crashed", `the estimator stopped on this input (${error.message})`);
       }
       throw error;
@@ -73,7 +79,7 @@ export async function createEstimator(options = {}) {
     for (const [pointer, length] of allocated) exports.ds_free(pointer, length);
     const pointer = Number(packed >> 32n);
     const length = Number(packed & 0xffffffffn);
-    const json = decoder.decode(new Uint8Array(exports.memory.buffer, pointer, length));
+    const json = decoder.decode(new Uint8Array(memory.buffer, pointer, length));
     exports.ds_free(pointer, length);
     const envelope = JSON.parse(json);
     if (!envelope.ok) throw new EstimatorError(envelope.error.code, envelope.error.message);

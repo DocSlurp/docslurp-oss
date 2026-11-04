@@ -1,6 +1,13 @@
 # lopdf pulls in getrandom (PDF encryption) through rand; the estimator never encrypts, and wasm32-unknown-unknown
 # has no entropy source without JS glue, so select getrandom's "unsupported" backend for the plain-ABI build.
+#
+# Memory is imported (env.memory), not defined: each host creates one memory of at most 256 MiB per estimator and,
+# after a trap, zeroes it and instantiates the module into it again. A hostile file that escapes every budget costs
+# one bounded, reused memory, never a fresh allocation per crash waiting for the host's garbage collector.
 [target.wasm32-unknown-unknown]
-# The module may grow to 256 MiB at most: a hostile file traps (and the host recreates the instance) instead of
-# exhausting the host's memory.
-rustflags = ["--cfg", 'getrandom_backend="unsupported"', "-C", "link-arg=--max-memory=268435456"]
+rustflags = [
+  "--cfg", 'getrandom_backend="unsupported"',
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--initial-memory=16777216",
+  "-C", "link-arg=--max-memory=268435456",
+]
