@@ -25,6 +25,7 @@ import {
   materializationPolicyOverridesSchema,
 } from "./deferred-indexing.js";
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
+import { normalizeHostedModelRef } from "./model-uri.js";
 
 export const organizationRoleSchema = z.enum([
   "owner",
@@ -200,11 +201,14 @@ export const pipelineTextOperationSchema = z.enum([
   "graph-extraction", "community-summary", "contextual-chunk-preamble",
 ]);
 export type PipelineTextOperation = z.infer<typeof pipelineTextOperationSchema>;
-// OpenRouter model id, or an operator-registered private endpoint route
+// `llm://openrouter/<id>` (stored as the bare OpenRouter id, which is also
+// accepted), or an operator-registered private endpoint route
 // (`llm://private/<alias>/<model>`); no other llm:// providers serve text stages.
-const configuredTextModelSchema = z.string().trim().min(1).max(200).refine(
-  (value) => !value.startsWith("llm://") || parsePrivateModelUri(value) !== null,
-  "Text model routes must be OpenRouter ids or llm://private/<alias>/<model>",
+const configuredTextModelSchema = z.string().trim().min(1).max(220).transform(normalizeHostedModelRef).pipe(
+  z.string().min(1).max(200).refine(
+    (value) => !value.startsWith("llm://") || parsePrivateModelUri(value) !== null,
+    "Text model routes must be llm://openrouter/<vendor>/<model> (or the bare OpenRouter id) or llm://private/<alias>/<model>",
+  ),
 );
 export const textGenerationProfileSchema = z.enum(["provider-default", "grounded-low"]);
 export type TextGenerationProfile = z.infer<typeof textGenerationProfileSchema>;

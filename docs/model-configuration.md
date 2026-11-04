@@ -6,6 +6,37 @@ independently of the pipeline models below. Override `DOCSLURP_JUDGE_MODEL` and
 pricing, logs actual usage, and persists provider charges in its scoped SQLite
 evidence store. See the judge calibration and adoption tickets.
 
+## Model URIs (`llm://`)
+
+Every API field that names a model takes an `llm://` model URI:
+
+```text
+llm://<provider>/<model-id>
+```
+
+| Form | Meaning | Example |
+| --- | --- | --- |
+| `llm://openrouter/<vendor>/<model>` | A hosted model routed through OpenRouter. Variant suffixes such as `:nitro` stay on the model id. | `llm://openrouter/anthropic/claude-haiku-5.5` |
+| `llm://private/<alias>/<model>` | A model on an operator-registered private endpoint ([Private model endpoints](#private-model-endpoints)). Takes no query string; the registry supplies the URL and credentials. | `llm://private/gpu1/Qwen/Qwen3-Embedding-0.6B` |
+| `llm://perplexity/<model>`, `llm://openai/<model>` | A native provider route, for the stages that support it (embeddings). | `llm://perplexity/pplx-embed-v1-0.6b` |
+| `llm://transformers.js/<model>`, `llm://local-cli/<model>`, `llm://vllm/<model>` | A model running in-process, as a local command or on a loopback server (self-hosted deployments). | `llm://transformers.js/Xenova/bge-m3` |
+| `<vendor>/<model>` | Shorthand for `llm://openrouter/<vendor>/<model>`, accepted wherever a hosted model is. | `anthropic/claude-haiku-5.5` |
+
+Where each field accepts them:
+
+| Field | Accepts | Notes |
+| --- | --- | --- |
+| `model` on `POST /v1/chat`, `/v1/chat/stream`, chat operations | `llm://openrouter/...` or the bare id, from the chat model catalog | An unavailable model is a 400 `model_not_allowed`, never the default. |
+| `docslurp.model` on `POST /v1/chat/completions` | Same as `/v1/chat` | `model` on this endpoint selects a workspace (`workspace:default`); an `llm://` value there is a 400 naming `docslurp.model`. |
+| `pipeline.textGeneration.model`, `.models.<task>`, `pipeline.structuredExtraction.model` | `llm://openrouter/...`, the bare id, or `llm://private/...` | Hosted URIs are stored as the bare OpenRouter id. |
+| `pipeline.vision.modelUri`, `.remoteFallbackModelUri` | An `llm://` URI from the vision catalog | Bare ids are not accepted. |
+| `pipeline.embedding.modelUri` | An `llm://` URI from the embedding catalog | Bare ids are not accepted. |
+| `DOCSLURP_SEARCH_MODEL`, `DOCSLURP_CHAT_EVAL_MODELS` | `llm://openrouter/...` or the bare id | |
+
+Model URIs never carry credentials: a URI with a user name or password is
+rejected. Responses report the hosted model by its bare OpenRouter id (for
+example `debug.model` on a chat answer).
+
 Workspace pipeline settings own ingestion model choices. Configure them when
 creating or updating a workspace through the API/SDK; runs snapshot those settings.
 Workspace changes affect new runs, while existing runs retain their captured
@@ -16,17 +47,18 @@ executes each task.
 {
   "pipeline": {
     "textGeneration": {
-      "model": "provider/model-id",
+      "model": "llm://openrouter/qwen/qwen3.5-flash-02-23",
       "models": {
-        "document-summary": "provider/summary-model-id",
-        "graph-extraction": "provider/graph-model-id"
+        "document-summary": "llm://openrouter/z-ai/glm-5.3-flash",
+        "graph-extraction": "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8"
       }
     }
   }
 }
 ```
 
-Text-generation tasks use OpenRouter model IDs. Supported task override keys are
+Text-generation tasks take `llm://openrouter/<vendor>/<model>` (or the bare
+OpenRouter id) or `llm://private/<alias>/<model>`. Supported task override keys are
 `document-summary`, `proposition-extraction`, `structured-extraction`,
 `graph-extraction`, `community-summary`, and `contextual-chunk-preamble`.
 
@@ -39,7 +71,8 @@ default is now `null`, so it inherits this same chain.
 
 API search and helper calls use `DOCSLURP_SEARCH_MODEL`, falling back to the
 workspace chat catalog's default. The environment override must be one of the
-allowed workspace chat models. Explicit request model selections still win.
+allowed workspace chat models (bare id or `llm://openrouter/<id>`). Explicit
+request model selections still win.
 
 Vision uses `pipeline.vision.modelUri` and its configured fallback; embeddings
 use `pipeline.embedding.modelUri`. Chat uses its existing model selector.

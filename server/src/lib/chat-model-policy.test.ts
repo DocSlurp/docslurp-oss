@@ -53,6 +53,26 @@ describe("chat model resolution", () => {
     expect(error).toMatchObject({ status: 400, code: "model_not_allowed" });
   });
 
+  it("accepts llm://openrouter/<id> wherever a bare id works, resolving to the bare id", () => {
+    expect(resolveChatModelRequest({ requested: " llm://openrouter/anthropic/claude-haiku-5.5 ", isAdmin: false, evalModels })).toEqual({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: "LLM://OpenRouter/z-ai/glm-5.3-flash:nitro", isAdmin: false, evalModels })).toEqual({ model: "z-ai/glm-5.3-flash:nitro", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: "llm://openrouter/inception/mercury-3", isAdmin: true, evalModels })).toEqual({ model: "inception/mercury-3", source: "eval" });
+    expect(chatTurnNeedsEvalAccess("llm://openrouter/anthropic/claude-haiku-5.5")).toBe(false);
+    expect(chatTurnNeedsEvalAccess("llm://openrouter/inception/mercury-3")).toBe(true);
+    expect(parseChatEvalModels("llm://openrouter/inception/mercury-3").models).toEqual(["inception/mercury-3"]);
+  });
+
+  it("refuses llm:// URIs that do not name an allowed hosted chat model", () => {
+    for (const requested of [
+      "llm://openrouter/", "llm://openrouter/anthropic/claude-haiku-5.5?x=1", "llm://openrouter/anthropic/claude-haiku-5.5#a",
+      "llm://anthropic/claude-haiku-5.5", "llm://private/gpu1/anthropic/claude-haiku-5.5", "llm://openrouter/openai/gpt-6-sol-pro",
+      "llm://openrouter/inception/mercury-3",
+    ]) {
+      expect(() => resolveChatModelRequest({ requested, isAdmin: false, evalModels }), requested).toThrow(ChatModelNotAllowedError);
+    }
+    expect(() => resolveChatModelRequest({ requested: "llm://openrouter/openai/gpt-6-sol-pro", isAdmin: true, evalModels: new Set(["openai/gpt-6-sol-pro"]) })).toThrow(ChatModelNotAllowedError);
+  });
+
   it("allows eval models to admins only", () => {
     expect(resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: true, evalModels })).toEqual({ model: "inception/mercury-3", source: "eval" });
     expect(() => resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: false, evalModels })).toThrow(ChatModelNotAllowedError);

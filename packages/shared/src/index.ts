@@ -36,6 +36,7 @@ export * from "./media-upload-estimate.js";
 export * from "./config-change.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";
+export * from "./model-uri.js";
 export * from "./graph.js";
 export * from "./run.js";
 export * from "./run-failure.js";

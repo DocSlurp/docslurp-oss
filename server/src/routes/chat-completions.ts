@@ -24,6 +24,7 @@ import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { isChatTurnDeadlineError } from "../services/chat-turn-deadline.js";
+import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 
 const textContent = z.union([
   z.string().max(64_000),
@@ -31,7 +32,12 @@ const textContent = z.union([
 ]);
 const requestSchema = z.object({
   // workspace:<uuid>, workspace:<slug> (current or former) or workspace:default.
-  model: z.string().regex(/^workspace:(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+(?:-[a-z0-9]+)*)$/i),
+  // The inference model is docslurp.model (an llm:// URI), never this field.
+  model: z.string().regex(/^workspace:(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+(?:-[a-z0-9]+)*)$/i, {
+    error: (issue) => typeof issue.input === "string" && /^llm:\/\//i.test(issue.input.trim())
+      ? "model selects a workspace (workspace:default, workspace:<slug> or an id from GET /v1/models). Send the llm:// inference model as docslurp.model instead."
+      : "model must be workspace:default, workspace:<slug> or a workspace model id from GET /v1/models",
+  }),
   messages: z.array(z.object({
     role: z.enum(["system", "developer", "user", "assistant"]),
     content: textContent,
@@ -51,6 +57,8 @@ const requestSchema = z.object({
   /** DocSlurp extension (send it with extra_body in OpenAI SDKs), mirroring the response's `docslurp` field. */
   docslurp: z.object({
     speedBoost: z.boolean().default(false),
+    /** Inference model for this request, as `model` on POST /v1/chat: `llm://openrouter/<vendor>/<model>` or the bare id. */
+    model: z.string().trim().min(1).max(256).optional(),
     /** Per-request retrieval overrides, as `retrieval` on POST /v1/chat. */
     retrieval: chatRetrievalOverridesSchema.optional(),
   }).strict().optional(),
@@ -186,6 +194,10 @@ export const chatCompletionsRoutes = new Hono()
     if (chatDisabled) {
       return c.json(errorBody(chatDisabled.error, "permission_error", chatDisabled.code, "model"), 403);
     }
+    // Refused before any streaming starts, as on POST /v1/chat.
+    if (input.docslurp?.model && await chatModelRefused(actor, input.docslurp.model, workspaceId)) {
+      return c.json(errorBody(new ChatModelNotAllowedError().message, "invalid_request_error", "model_not_allowed", "docslurp.model"), 400);
+    }
     // A browser (client) key is public: anyone who reads the page can send any
     // messages. Its callers' system/developer messages would sit beside the
     // workspace instructions with system authority, so they are dropped; only
@@ -214,6 +226,7 @@ export const chatCompletionsRoutes = new Hono()
       userId: actor.userId,
       actor, allowAgentTools: env.publicChatAgentEnabled && input.tool_choice !== "none", signal: c.req.raw.signal,
       ...(input.docslurp?.retrieval ? { retrieval: input.docslurp.retrieval } : {}),
+      ...(input.docslurp?.model ? { model: input.docslurp.model } : {}),
       query: contentText(input.messages.at(-1)!.content),
       history,
       maxOutputTokens: input.max_completion_tokens ?? input.max_tokens,
@@ -234,6 +247,7 @@ export const chatCompletionsRoutes = new Hono()
         });
       } catch (error) {
         if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
+        if (error instanceof ChatModelNotAllowedError) return c.json(errorBody(error.message, "invalid_request_error", error.code, "docslurp.model"), 400);
         if (error instanceof ChatToolBlockedError) return c.json(errorBody(error.message, "server_error", error.code), error.statusCode);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), error.statusCode);
         reportPublicError(error, { operation: "chat-completions" }, c.req.raw.signal);
