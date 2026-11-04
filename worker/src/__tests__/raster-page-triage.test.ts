@@ -103,7 +103,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     const state = {
       artifactLedger: DocumentArtifactLedger.create({
         "doc-1:classification": "s3://bucket/classification.json",
-        [VISION_ROUTING_VERSION_SLOT]: "v2",
+        [VISION_ROUTING_VERSION_SLOT]: "v3",
       }),
       pendingPerformance: [],
       run: { pipeline: { quality: "auto", vision: {} } },

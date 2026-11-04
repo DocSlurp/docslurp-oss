@@ -243,8 +243,9 @@ export function createStageExecution(deps: {
       : store.hydrateState(state));
     const { run, documents } = state;
 
-    // Legacy vision routing version: read from the environment once, here, and persisted with the
-    // run's artifacts by the progress write below, so every stage, shard and page task agrees.
+    // Legacy vision routing version: pinned once, here (evidence routing, v3, unless the run already carries a
+    // pin), and persisted with the run's artifacts by the progress write below, so every stage, shard and page
+    // task agrees. There is no environment switch.
     const visionRoutingVersion = pinRunRoutingVersion(state);
 
     // Mark run as processing

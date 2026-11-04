@@ -433,7 +433,7 @@ Outside the guard: the decision-model verifier (off unless a workspace values qu
 0.50 USD per unit; stops at the run cost cap), page-image embeddings and media frame description,
 which are not page transcription calls and keep their own bounds.
 
-Telemetry: `classify-route` and `vision-extract` record `routingVersion` (`v1` or `v2`) in their
+Telemetry: `classify-route` and `vision-extract` record `routingVersion` (`v1` or `v3`; `v3` is evidence routing, and a `v2` pin from the previous release's canary routes as `v1`) in their
 stage stats, the vision manifest and the `vision-text-density-score`, `vision-fail-open` and
 `vision-attempt-failure` performance metadata. Per document, vision-extract logs
 `[vision-rejections] org=<id> run=<id> document=<id> rejected=<n> attempted=<n> rate=<r>` and records
