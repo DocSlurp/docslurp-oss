@@ -353,7 +353,7 @@ function mapWorkspaceRun(row: WorkspaceRunRow): WorkspaceRun {
 async function assertWorkspaceAccess(workspaceId: string, userId: string) {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
   return access;
 }
@@ -1082,11 +1082,11 @@ async function mutateWorkspaceArchiveState(args: {
   const current = await getWorkspace(args.workspaceId, args.userId);
   const access = await getWorkspaceAccess(args.workspaceId, args.userId);
   if (!current || !access) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   if (!canManageWorkspace(access, args.userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   if (current.isDefault && args.action === "archive") {
@@ -1105,7 +1105,7 @@ async function mutateWorkspaceArchiveState(args: {
 
   const updated = await getWorkspace(args.workspaceId, args.userId);
   if (!updated) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   return updated;
@@ -1145,11 +1145,11 @@ export async function deleteWorkspace(
   const current = await getWorkspace(workspaceId, userId);
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!current || !access) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   if (!canManageWorkspace(access, userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   if (current.isDefault) {
@@ -1180,12 +1180,12 @@ export async function cloneWorkspace(
 ): Promise<WorkspaceRecord> {
   const current = await getWorkspace(workspaceId, userId);
   if (!current) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   const access = await assertWorkspaceAccess(workspaceId, userId);
   if (!canEditWorkspace(access, userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   return await createWorkspace({
@@ -1245,7 +1245,7 @@ export async function rollbackWorkspaceVersion(
 ): Promise<WorkspaceRecord> {
   const access = await assertWorkspaceAccess(workspaceId, userId);
   if (!canEditWorkspace(access, userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   const [row] = await sql<WorkspaceVersionRow[]>`
@@ -1278,7 +1278,7 @@ export async function rollbackWorkspaceVersion(
   });
 
   if (!updated) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   return updated;
