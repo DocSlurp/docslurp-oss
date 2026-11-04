@@ -123,7 +123,7 @@ test("upload over the multipart cap goes straight to storage through a direct se
       "POST /v1/uploads/direct/sessions/s1/files/complete",
       "POST /v1/uploads/direct/sessions/s1/confirm",
     ]);
-    assert.deepEqual(JSON.parse(result.requests[0].body), { workspace: "workspace", files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: size }] });
+    assert.deepEqual(JSON.parse(result.requests[0].body), { workspace: "workspace", files: [{ clientId: "0", filename: "scan.pdf", mimeType: "application/octet-stream", sizeBytes: size }] });
     assert.equal(result.requests[1].headers.authorization, undefined, "storage never receives the API key");
     assert.equal(result.requests[1].body.length, size);
     assert.match(result.stdout, /Run ID:\s+run/);
