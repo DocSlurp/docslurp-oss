@@ -1672,7 +1672,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       try {
         return await request<T>(path, { ...init, headers }, options, true);
       } catch (error) {
-        if (attempt >= 3 || options.signal?.aborted || !isTransientTransferError(error) || (error instanceof DocSlurpApiError && error.status === 403)) throw error;
+        // HTTP statuses were already retried by request(); only a lost response or a timeout needs the same key sent again.
+        if (attempt >= 3 || options.signal?.aborted || !(error instanceof DocSlurpTimeoutError || error instanceof TypeError)) throw error;
         await sleep(250 * 2 ** attempt, options.signal ?? new AbortController().signal);
       }
     }
