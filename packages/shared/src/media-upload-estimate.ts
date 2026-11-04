@@ -7,7 +7,7 @@ import { extensionsOf, fileExtension } from "./file-formats.js";
 export type UploadMediaKind = "audio" | "video";
 
 /** Extensions priced by duration when the MIME type does not say: the worker's media formats, plus browser `weba`. */
-export const AUDIO_EXTENSIONS: ReadonlySet<string> = new Set([...extensionsOf("audio"), "weba"]);
+export const AUDIO_EXTENSIONS: ReadonlySet<string> = new Set(extensionsOf("audio"));
 export const VIDEO_EXTENSIONS: ReadonlySet<string> = new Set(extensionsOf("video"));
 /** Image files: read whole as images, so a page bills Rich in the auto and good profiles (page-base-fee.ts). */
 export const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set(extensionsOf("image"));
