@@ -187,6 +187,7 @@ Compose runs `server/db/migrate.mjs` once in the `migrate` service and sets `RUN
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MIGRATION_DATABASE_URL` | `DATABASE_URL` | Direct owner connection for migrations. Required when `DATABASE_URL` is a restricted role ([Database roles](database-roles.md)) or a transaction-mode pooler. |
+| `MIGRATION_OWNER_ROLE` | Existing documents owner, otherwise database owner | Optional explicit confirmation of the DDL owner. Must match the inferred owner; the supported migrator checks admission before switching roles on the same connection. See [generation rollout](../generation-rollout.md). |
 | `MIGRATION_LOCK_WAIT_MS` | `240000` | How long a migrator waits for the advisory migration lock before failing. |
 | `POSTGIS_MIGRATIONS` | unset | `1` also applies the optional spatial journal in `server/db/migrations/postgis/`. It needs an installed `postgis` extension; the Compose `postgres:17-bookworm` image has none, so the run fails. See [PostGIS](postgis.md). |
 

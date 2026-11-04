@@ -159,7 +159,8 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+        # PostgreSQL 17 plus the optional extension exercised by owner migration tests.
+        image: postgis/postgis:17-3.5@sha256:01a6a70e41e6c4467c8f55f6063555ed72db2d6662cd0d571040d42eadaeb6f6
         env:
           POSTGRES_USER: docslurp
           POSTGRES_PASSWORD: ci-only-password
