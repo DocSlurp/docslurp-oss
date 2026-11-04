@@ -79,6 +79,11 @@ export interface DocumentGraph {
   /** The model was asked and no window succeeded; the heuristic graph stands in until a retry or rebuild. */
   llmFailed: boolean;
   windows: number;
+  /** Characters of chunk text the model read, out of `charsTotal` in the document; the price follows the share read. */
+  charsRead: number;
+  charsTotal: number;
+  /** The depth's windows covered only part of the document. */
+  truncated: boolean;
   inputTokens: number;
   outputTokens: number;
   durationMs: number;
@@ -115,11 +120,13 @@ export async function extractDocumentGraph(args: {
   const profile = graphDepthProfiles[context.config.depth];
   const entityTypes = effectiveGraphEntityTypes(context.config);
   const allowedTypes = new Set([...entityTypes, "concept"]);
-  const windows = buildExtractionWindows(
+  const plan = planExtractionWindows(
     args.chunks.map((chunk) => chunk.text),
     profile.windowChars,
     profile.windows,
   );
+  const windows = plan.windows;
+  let charsRead = 0;
 
   let extraction: DocumentGraphExtraction | null = null;
   let windowsRead = 0;
@@ -170,6 +177,7 @@ export async function extractDocumentGraph(args: {
         try {
           const graph = parseGraphExtraction(result.text, allowedTypes);
           windowsRead += 1;
+          charsRead += window.length;
           llmGraph = {
             entities: mergeEntities(llmGraph.entities, graph.entities.filter((entity) => entity.confidence >= profile.minConfidence)),
             relationships: mergeRelationships(llmGraph.relationships, graph.relationships.filter((relationship) => relationship.confidence >= profile.minConfidence)),
@@ -208,6 +216,9 @@ export async function extractDocumentGraph(args: {
     // A graph cut short (credit ran out mid-document) stays stale, so it is extracted again later.
     llmFailed: llmAttempted && (source === "heuristic" || stoppedEarly),
     windows: windowsRead,
+    charsRead: source === "llm" ? charsRead : 0,
+    charsTotal: plan.charsTotal,
+    truncated: plan.truncated || (llmAttempted && charsRead < plan.charsTotal),
     inputTokens,
     outputTokens,
     durationMs: Date.now() - started,
@@ -394,6 +405,15 @@ async function extractWindowWithLlm(args: {
  * document needs more windows than the depth allows, keeps an even spread.
  */
 export function buildExtractionWindows(texts: string[], windowChars: number, maxWindows: number): string[] {
+  return planExtractionWindows(texts, windowChars, maxWindows).windows;
+}
+
+/** The windows to read, plus how much of the document's text they cover. */
+export function planExtractionWindows(
+  texts: string[],
+  windowChars: number,
+  maxWindows: number,
+): { windows: string[]; charsTotal: number; truncated: boolean } {
   const windows: string[] = [];
   let current = "";
   for (const text of texts) {
@@ -412,10 +432,15 @@ export function buildExtractionWindows(texts: string[], windowChars: number, max
     }
   }
   if (current) windows.push(current);
-  if (windows.length <= maxWindows) return windows;
-  if (maxWindows <= 1) return windows.slice(0, 1);
+  const charsTotal = windows.reduce((sum, window) => sum + window.length, 0);
+  if (windows.length <= maxWindows) return { windows, charsTotal, truncated: false };
+  if (maxWindows <= 1) return { windows: windows.slice(0, 1), charsTotal, truncated: true };
   const step = (windows.length - 1) / (maxWindows - 1);
-  return Array.from({ length: maxWindows }, (_, index) => windows[Math.round(index * step)] ?? "");
+  return {
+    windows: Array.from({ length: maxWindows }, (_, index) => windows[Math.round(index * step)] ?? ""),
+    charsTotal,
+    truncated: true,
+  };
 }
 
 export function parseGraphExtraction(text: string, allowedTypes: ReadonlySet<string>): DocumentGraphExtraction {

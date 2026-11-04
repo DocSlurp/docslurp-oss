@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assembleDocumentGraph, buildExtractionWindows, extractEntitiesFromText, mentionsName, normalizeName, parseGraphExtraction } from "./extract.js";
+import { assembleDocumentGraph, buildExtractionWindows, planExtractionWindows, extractEntitiesFromText, mentionsName, normalizeName, parseGraphExtraction } from "./extract.js";
 
 describe("buildExtractionWindows", () => {
   it("packs whole chunks into windows up to the size limit", () => {
@@ -158,5 +158,23 @@ describe("assembleDocumentGraph", () => {
     expect(byChunk("c1")).toEqual(["москва", "東京"]);
     expect(byChunk("c2")).toEqual(["c", "c++"]);
     expect(graph.edges.some((edge) => edge.predicate === "near")).toBe(true);
+  });
+});
+
+describe("planExtractionWindows", () => {
+  it("reports how much of the document the windows cover", () => {
+    const chunks = Array.from({ length: 10 }, (_, index) => `chunk-${index}`);
+    const plan = planExtractionWindows(chunks, 7, 3);
+    expect(plan.windows).toEqual(["chunk-0", "chunk-5", "chunk-9"]);
+    expect(plan.charsTotal).toBe(70);
+    expect(plan.truncated).toBe(true);
+    expect(planExtractionWindows(chunks, 7, 20)).toMatchObject({ truncated: false, charsTotal: 70 });
+  });
+
+  it("splits an oversized chunk without cutting a surrogate pair", () => {
+    const text = "𠮷".repeat(30);
+    const windows = buildExtractionWindows([text], 7, 20);
+    for (const window of windows) expect(window).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(windows.join("")).toBe(text);
   });
 });

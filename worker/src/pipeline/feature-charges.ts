@@ -2,6 +2,7 @@ import {
   DOCUMENT_FEATURE_METRICS,
   UNIT_CHARGE_PROVIDER,
   featureCredits,
+  featurePagesRead,
   unitChargeMetadata,
   type DocumentFeature,
 } from "@docslurp/shared";
@@ -30,12 +31,16 @@ export function chargeDocumentFeature(
   state: WorkflowState,
   document: Pick<Document, "id" | "pageCount">,
   feature: DocumentFeature,
-  /** Pages the feature's model actually read, when that is fewer than the document's (long documents are read in part). */
-  pagesRead?: number,
+  /**
+   * How much of the document the feature's model read (pages, or characters), when that is less than all of it:
+   * long documents are read in windows. The price is the document's pages pro rata on that share.
+   */
+  read?: { read: number; total: number },
 ): void {
   const slot = `feature-charge:${feature}:${document.id}`;
   if (state.artifactLedger.read(slot)) return;
-  const pages = pagesRead === undefined ? featurePages(state, document) : Math.min(featurePages(state, document), Math.max(1, pagesRead));
+  const documentPages = featurePages(state, document);
+  const pages = read ? featurePagesRead(documentPages, read.read, read.total) : documentPages;
   const credits = featureCredits(feature, pages);
   state.usageLedger.enqueue({
     id: `feature:${feature}:${state.run.id}:${document.id}`,

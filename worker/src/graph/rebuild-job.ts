@@ -19,7 +19,7 @@ import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { allowHostedCallForWorkspace, openRouterTextCall, runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { runWithProviderRateScope, workspaceProviderScope } from "../lib/provider-rate-limit.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
-import { DOCUMENT_FEATURE_METRICS, UNIT_CHARGE_PROVIDER, featureCredits, unitChargeMetadata } from "@docslurp/shared";
+import { DOCUMENT_FEATURE_METRICS, UNIT_CHARGE_PROVIDER, featureCredits, featurePagesRead, unitChargeMetadata } from "@docslurp/shared";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -219,7 +219,8 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
           if (graph.llmFailed) console.warn(`[graph-job] llm_fallback job=${job.id} document=${document.id} model=${job.model}`);
           if (graph.source === "llm") {
             // Price card: knowledge graph per started 10 pages, once per document per rebuild job.
-            const pages = Math.max(1, Number(document.page_count) || 0);
+            // Billed on the share of the document the model read.
+            const pages = featurePagesRead(Math.max(1, Number(document.page_count) || 0), graph.charsRead, graph.charsTotal);
             usage.push({
               id: `feature:knowledgeGraph:job:${job.id}:${document.id}`,
               provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: DOCUMENT_FEATURE_METRICS.knowledgeGraph,

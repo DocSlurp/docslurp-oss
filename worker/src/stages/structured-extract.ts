@@ -542,7 +542,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
             const outputTokens = usageOutputTokens;
             // Price card: structured fields per started 10 pages, once per document per run
             // (charged even on a policy reject: the extraction ran), on the pages the model read.
-            chargeDocumentFeature(state, document, "structuredFields", plan.pagesRead);
+            chargeDocumentFeature(state, document, "structuredFields", { read: plan.pagesRead, total: plan.pagesTotal });
 
             // Fail the stage on hard reject so it enters the review queue with schema_errors
             if (overallPolicy === "reject") {
