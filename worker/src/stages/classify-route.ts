@@ -5,6 +5,8 @@ import {
   DRAWN_CONTENT_SIGNAL,
   GARBLED_TEXT_LAYER_SIGNAL,
   PAGE_RASTER_ROUTING,
+  SPARSE_FULL_PAGE_IMAGE_SIGNAL,
+  STAMPED_RASTER_SIGNAL,
   assessTextLayer,
   decidePageRaster,
   rasterPageSignal,
@@ -493,6 +495,9 @@ const DRAWN_TEXT_MAX_WORDS_PER_PAGE = 3;
 const NO_NATIVE_TEXT_SIGNALS = new Set([
   "ocr-authorized:no-native-text",
   "ocr-authorized:raster-page-without-text",
+  // A scan with a stamp or a few words of text layer: its content is still pixels only a read can recover.
+  STAMPED_RASTER_SIGNAL,
+  SPARSE_FULL_PAGE_IMAGE_SIGNAL,
   DRAWN_CONTENT_SIGNAL,
 ]);
 /**
