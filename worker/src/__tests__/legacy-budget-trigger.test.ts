@@ -9,25 +9,25 @@ import { applyRemainingMigrations, createMigratedDatabase } from "../test/migrat
  * The definition below is copied verbatim from production app-db (2026-10-28).
  */
 const LEGACY_TRIGGER = `
-create or replace function enforce_project_run_budget()
+create or replace function enforce_workspace_run_budget()
 returns trigger language plpgsql as $$
 declare
-  project_budget integer; project_spend integer; org_budget integer; org_spend integer;
+  workspace_budget integer; workspace_spend integer; org_budget integer; org_spend integer;
 begin
-  select monthly_budget_cents into project_budget from projects where id = new.project_id;
-  if project_budget is not null and project_budget > 0 then
-    select coalesce(sum(ue.cost_cents), 0)::integer into project_spend
-    from usage_events ue join project_runs wr on wr.id = ue.run_id
-    where wr.project_id = new.project_id and ue.created_at >= date_trunc('month', now());
-    if project_spend >= project_budget then
+  select monthly_budget_cents into workspace_budget from workspaces where id = new.workspace_id;
+  if workspace_budget is not null and workspace_budget > 0 then
+    select coalesce(sum(ue.cost_cents), 0)::integer into workspace_spend
+    from usage_events ue join workspace_runs wr on wr.id = ue.run_id
+    where wr.workspace_id = new.workspace_id and ue.created_at >= date_trunc('month', now());
+    if workspace_spend >= workspace_budget then
       raise exception using errcode = 'P0001',
-        message = format('project monthly budget exceeded for project %s', new.project_id);
+        message = format('workspace monthly budget exceeded for workspace %s', new.workspace_id);
     end if;
   end if;
   select monthly_budget_cents into org_budget from organizations where id = new.org_id;
   if org_budget is not null and org_budget > 0 then
     select coalesce(sum(ue.cost_cents), 0)::integer into org_spend
-    from usage_events ue join project_runs wr on wr.id = ue.run_id
+    from usage_events ue join workspace_runs wr on wr.id = ue.run_id
     where wr.org_id = new.org_id and ue.created_at >= date_trunc('month', now());
     if org_spend >= org_budget then
       raise exception using errcode = 'P0001',
@@ -37,8 +37,8 @@ begin
   return new;
 end;
 $$;
-create trigger project_runs_budget_guard before insert on project_runs
-for each row execute function enforce_project_run_budget();
+create trigger workspace_runs_budget_guard before insert on workspace_runs
+for each row execute function enforce_workspace_run_budget();
 `;
 
 /** A project with a 100-cent budget and 150 cents of run-attributed spend this month. */
@@ -46,25 +46,25 @@ async function seedOverBudgetProject(db: PGlite): Promise<void> {
   await db.exec(`
     insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com');
     insert into organizations (id, name, slug, created_by_user_id) values ('o1', 'Org', 'org-1', 'u1');
-    insert into projects (id, org_id, user_id, name, monthly_budget_cents) values ('w1', 'o1', 'u1', 'W', 100);
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage)
+    insert into workspaces (id, org_id, user_id, name, monthly_budget_cents) values ('w1', 'o1', 'u1', 'W', 100);
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage)
       values ('r1', 'o1', 'u1', 'w1', 'upload', 'completed', 'completed');
-    insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, unit, amount, cost_cents)
+    insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, unit, amount, cost_cents)
       values ('e1', 'u1', 'r1', 'o1', 'w1', 'openai', 'm', 'embedding', 'tokens', 1, 150);
   `);
 }
 
 /** The reindex path's insert for a budget-blocked change (config-change.ts createReindexRuns). */
-const insertBlockedReindexRun = (db: PGlite) =>
-  db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, blocked_reason, stage)
+const insertBlockedReindexRun = (db: PGlite, legacy = false) =>
+  db.exec(`insert into ${legacy ? "workspace_runs" : "project_runs"} (id, org_id, user_id, ${legacy ? "workspace_id" : "project_id"}, kind, status, blocked_reason, stage)
     values ('r2', 'o1', 'u1', 'w1', 'reindex', 'blocked', 'budget', 'queued')`);
 
 const triggerCount = async (db: PGlite) =>
   (await db.query<{ n: number }>(
-    `select count(*)::int as n from pg_trigger where tgname = 'project_runs_budget_guard'`,
+    `select count(*)::int as n from pg_trigger where tgname IN ('workspace_runs_budget_guard','project_runs_budget_guard')`,
   )).rows[0]!.n +
   (await db.query<{ n: number }>(
-    `select count(*)::int as n from pg_proc where proname = 'enforce_project_run_budget'`,
+    `select count(*)::int as n from pg_proc where proname IN ('enforce_workspace_run_budget','enforce_project_run_budget')`,
   )).rows[0]!.n;
 
 describe("migration 0096 drop_legacy_budget_trigger", () => {
@@ -72,7 +72,7 @@ describe("migration 0096 drop_legacy_budget_trigger", () => {
     const db = await createMigratedDatabase({ stopBefore: "drop_legacy_budget_trigger" });
     await db.exec(LEGACY_TRIGGER);
     await seedOverBudgetProject(db);
-    await expect(insertBlockedReindexRun(db)).rejects.toThrow(/project monthly budget exceeded/);
+    await expect(insertBlockedReindexRun(db, true)).rejects.toThrow(/workspace monthly budget exceeded/);
 
     await applyRemainingMigrations(db, "drop_legacy_budget_trigger");
 
@@ -93,13 +93,13 @@ describe("migration 0096 drop_legacy_budget_trigger", () => {
     await db.exec(`
       insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com'), ('u2', 'V', 'u2@example.com');
       insert into organizations (id, name, slug, created_by_user_id) values ('o1', 'Org', 'org-1', 'u1'), ('o2', 'Other', 'org-2', 'u2');
-      insert into projects (id, org_id, user_id, name, monthly_budget_cents)
+      insert into workspaces (id, org_id, user_id, name, monthly_budget_cents)
         values ('w1', 'o1', 'u1', 'W', 100), ('w2', 'o2', 'u2', 'X', 100);
-      insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, unit, amount, cost_cents)
+      insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, unit, amount, cost_cents)
         values ('e1', 'u1', null, 'o1', 'w1', 'openai', 'm', 'chat', 'tokens', 1, 150);
     `);
     // The trigger only summed run-joined spend, so it let this over-budget project start a run.
-    await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage)
+    await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage)
       values ('r1', 'o1', 'u1', 'w1', 'upload', 'queued', 'queued')`);
 
     await applyRemainingMigrations(db, "drop_legacy_budget_trigger");

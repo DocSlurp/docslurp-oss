@@ -27,18 +27,18 @@ beforeAll(async () => {
     insert into notification_prefs (user_id, cost_alert) values ('u1', false);
     insert into organizations (id, name, slug, created_by_user_id) values
       ('org-1', 'One', 'one', 'u1'), ('org-2', 'Two', 'two', 'u1');
-    insert into projects (id, org_id, user_id, name) values
+    insert into workspaces (id, org_id, user_id, name) values
       ('ws-a', 'org-1', 'u1', 'A'), ('ws-b', 'org-1', 'u1', 'B'), ('ws-c', 'org-2', 'u1', 'C');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values
       ('run-a', 'org-1', 'u1', 'ws-a', 'bulk-upload', 'completed', 'completed', '{}');
     -- legacy double-encoded session metadata
     insert into search_sessions (id, user_id, query, metadata) values
-      ('sess-b', 'u1', 'q', to_jsonb('{"projectId":"ws-b"}'::text));
+      ('sess-b', 'u1', 'q', to_jsonb('{"workspaceId":"ws-b"}'::text));
     insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, input_tokens, output_tokens, cost_cents, metadata) values
       ('ingest', 'u1', 'run-a', 'openrouter', 'm', 'llm', 0, 'token', 100, 0, 10, '{}'),
-      ('search-ws', 'u1', null, 'openrouter', 'm', 'llm', 0, 'token', 40, 10, 4, '{"projectId":"ws-a"}'),
+      ('search-ws', 'u1', null, 'openrouter', 'm', 'llm', 0, 'token', 40, 10, 4, '{"workspaceId":"ws-a"}'),
       ('search-session', 'u1', null, 'openrouter', 'm', 'llm', 0, 'token', 20, 0, 2, '{"sessionId":"sess-b"}'),
-      ('aggregate', 'u1', null, 'openrouter', 'm', 'llm', 0, 'token', 60, 0, 6, '{"projectIds":["ws-a","ws-b","ws-c"]}'),
+      ('aggregate', 'u1', null, 'openrouter', 'm', 'llm', 0, 'token', 60, 0, 6, '{"workspaceIds":["ws-a","ws-b","ws-c"]}'),
       ('org-only', 'u1', null, 'openrouter', 'm', 'llm', 0, 'token', 5, 0, 1, '{"orgId":"org-2"}');
     insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, created_at) values
       ('last-year', 'u1', 'run-a', 'openrouter', 'm', 'llm', 0, 'token', 1000, '{}', now() - interval '400 days');

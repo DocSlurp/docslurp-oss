@@ -141,8 +141,8 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
       expect(after.costCents - before.costCents).toBeCloseTo(0);
       expect(after.tokens - before.tokens).toBe(50);
       expect(after.eventCount - before.eventCount).toBe(2);
-      const aiRows = await tx<{ project_id: string | null; org_id: string | null; cost_cents: number; metadata: Record<string, unknown> }[]>`
-        select au.project_id, au.org_id, au.cost_cents::double precision as cost_cents, au.metadata
+      const aiRows = await tx<{ metric: string; project_id: string | null; org_id: string | null; cost_cents: number; metadata: Record<string, unknown> }[]>`
+        select au.metric, au.project_id, au.org_id, au.cost_cents::double precision as cost_cents, au.metadata
         from ${attributedUsage("month", tx)} au
         where au.org_id = ${ids.org2} and au.metric in ('project-chat', 'query-rewrite')
         order by au.metric
@@ -153,7 +153,7 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
         expect(row.metadata).toMatchObject({ billable: false, costRole: "provider" });
       }
       // Provider cost is preserved for internal cost reports.
-      expect(aiRows.map((row) => row.metadata.providerCostCents)).toEqual([1, 3]);
+      expect(Object.fromEntries(aiRows.map((row) => [row.metric, row.metadata.providerCostCents]))).toEqual({ "project-chat": 3, "query-rewrite": 1 });
 
       // Billable unit charges are the spend that counts and debits credits.
       await recordUnitCharge({

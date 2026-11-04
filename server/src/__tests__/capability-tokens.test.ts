@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { openCapabilityToken, resetCapabilityKeyForTests, sealCapabilityToken } from "../lib/capability-tokens.js";
+import { openCapabilityToken, resetCapabilityKeyForTests, sealCapabilityToken, sealedTokenFamily } from "../lib/capability-tokens.js";
 import type { CapabilityClaims } from "@docslurp/shared";
 
 const now = 1_900_000_000_000;
@@ -108,5 +108,19 @@ describe("POST /v1/capabilities", () => {
     expect((await post({ ttlSeconds: 60 })).status).toBe(403);
     actorRef.current = key("server");
     expect((await post({ ttlSeconds: 7200 })).status).toBe(400);
+  });
+});
+
+
+describe("sealed token canonical encoding", () => {
+  it("rejects dangling base64 characters even when decoded bytes match", () => {
+    const family = sealedTokenFamily("canonical-test:v1");
+    for (let length = 0; length < 3; length++) {
+      const claims = { text: "x".repeat(length) };
+      const token = family.seal(claims);
+      expect(family.open(token)).toEqual(claims);
+      expect(family.open(token + "x")).toBeNull();
+      expect(family.open(token + "=")).toBeNull();
+    }
   });
 });

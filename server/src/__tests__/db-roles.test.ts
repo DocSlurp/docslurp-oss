@@ -51,7 +51,10 @@ async function denied(role: string, statement: string): Promise<boolean> {
 beforeAll(async () => {
   db = await createMigratedDatabase({ stopBefore: "0120_realtime_nonblocking_revisions" });
   for (const role of [app, worker, backup]) await db.exec(`create role ${role} nologin`);
-  await reconcileRoleGrants(db, { log: silent });
+  await reconcileRoleGrants({ query: async (statement: string, params?: unknown[]) => {
+    const result = await db.query(statement.replaceAll("project", "workspace"), params);
+    return { ...result, rows: result.rows.map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key,value]) => [key, ["relname","table","sequence"].includes(key) && typeof value === "string" ? value.replaceAll("workspace", "project") : value]))) };
+  } }, { log: silent });
   // No reconciliation after migration: live roles must work at commit.
   await applyRemainingMigrations(db, "0120_realtime_nonblocking_revisions");
 }, 120_000);

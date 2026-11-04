@@ -74,12 +74,12 @@ describe("canonical replacement of failed-run pending history", () => {
       await db.exec(`
         insert into "user" (id, name, email) values ('u', 'Test', 'retro@example.test');
         insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Test', 'retro', 'u');
-        insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test');
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state) values
+        insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test');
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state) values
           ('old', 'o', 'u', 'w', 'upload', 'failed', 'embed', '{}', null),
           ('new', 'o', 'u', 'w', 'upload', 'completed', 'completed', '{}', null),
           ('active', 'o', 'u', 'w', 'upload', 'processing', 'embed', '{}', 'cancel_requested');
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at, lexical_searchable_at) values
+        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at, lexical_searchable_at) values
           ('old-doc', 'o', 'u', 'w', 'old', 'a.txt', 'text/plain', 'old', 'queued', '/a.txt', '2026-01-01', now()),
           ('active-doc', 'o', 'u', 'w', 'active', 'a.txt', 'text/plain', 'active', 'queued', '/a.txt', '2026-01-01', null),
           ('unmatched', 'o', 'u', 'w', 'old', 'b.txt', 'text/plain', 'unmatched', 'queued', '/b.txt', '2026-01-01', null),

@@ -7,12 +7,12 @@ it("backfills readiness for complete legacy manifests without publishing incompl
     await db.exec(`
       insert into "user" (id, name, email) values ('u', 'U', 'u@example.test');
       insert into organizations (id, name, slug, created_by_user_id) values ('o', 'O', 'o', 'u');
-      insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W');
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents)
+      insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'W');
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents)
       values ('complete', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', 1),
         ('partial', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', 2),
         ('started', 'o', 'u', 'w', 'bulk-upload', 'processing', 'extract', 2);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
       values ('d1', 'o', 'u', 'w', 'complete', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued'),
         ('d2', 'o', 'u', 'w', 'partial', 'b.pdf', 'application/pdf', 'raw/b.pdf', 'queued');
     `);

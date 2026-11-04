@@ -9,6 +9,7 @@ describe("project terminology upgrade", () => {
         INSERT INTO "user" (id,name,email) VALUES ('rename-user','Rename test','rename@example.com');
         INSERT INTO organizations (id,name,created_by_user_id) VALUES ('rename-org-a','A','rename-user'),('rename-org-b','B','rename-user');
         INSERT INTO workspaces (id,org_id,user_id,name,is_default) VALUES ('rename-a','rename-org-a','rename-user','A',true),('rename-b','rename-org-b','rename-user','B',true);
+        INSERT INTO search_sessions(id,user_id,query,metadata) VALUES ('rename-session','rename-user','test',to_jsonb('{"workspaceId":"rename-a","customer":{"workspaceId":"unchanged"}}'::text));
         INSERT INTO api_keys(id,user_id,key_hash,name,org_id,scopes,workspace_ids) VALUES ('rename-key','rename-user','rename-test-hash','Upgrade','rename-org-a',ARRAY['search','workspaces:manage'],ARRAY['rename-a']);
         INSERT INTO webhook_outbox(id,user_id,event_type,payload) VALUES ('rename-webhook','rename-user','run.completed','{"workspaceId":"rename-a"}');
         INSERT INTO storage_cleanup_queue(kind,org_id,target,payload,reason) VALUES ('vector_table','rename-org-a','rename-vector','{"workspaceId":"rename-a","uri":"opaque-existing-key"}','test');
@@ -28,6 +29,7 @@ describe("project terminology upgrade", () => {
       expect(metadata.projectIds).toEqual(["rename-a", "rename-b"]);
       expect(metadata.customer).toEqual({ workspaceId: "keep-me" });
       expect(metadata).not.toHaveProperty("workspaceIds");
+      expect((await db.query("SELECT metadata FROM search_sessions WHERE id='rename-session'")).rows).toEqual([{ metadata: { projectId: "rename-a", customer: { workspaceId: "unchanged" } } }]);
       expect((await db.query("SELECT scopes,project_ids FROM api_keys WHERE id='rename-key'")).rows).toEqual([{ scopes: ["search", "projects:manage"], project_ids: ["rename-a"] }]);
       expect((await db.query("SELECT payload FROM webhook_outbox WHERE id='rename-webhook'")).rows).toEqual([{ payload: { projectId: "rename-a" } }]);
       expect((await db.query("SELECT payload FROM storage_cleanup_queue WHERE target='rename-vector'")).rows).toEqual([{ payload: { projectId: "rename-a", uri: "opaque-existing-key" } }]);

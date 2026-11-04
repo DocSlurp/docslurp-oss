@@ -8,8 +8,8 @@ describe("verified direct-upload byte backfill", () => {
       await db.exec(`
         insert into "user" (id, name, email) values ('u', 'Test', 'bytes-a@example.test'), ('u2', 'Other', 'bytes-b@example.test');
         insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Test', 'bytes-a', 'u'), ('o2', 'Other', 'bytes-b', 'u2');
-        insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test'), ('w2', 'o2', 'u2', 'Other'), ('w3', 'o', 'u', 'Another project');
-        insert into upload_sessions (id, user_id, org_id, project_id, status) values
+        insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test'), ('w2', 'o2', 'u2', 'Other'), ('w3', 'o', 'u', 'Another project');
+        insert into upload_sessions (id, user_id, org_id, workspace_id, status) values
           ('s', 'u', 'o', 'w', 'confirmed'), ('pending', 'u', 'o', 'w', 'uploading'),
           ('other-org', 'u2', 'o2', 'w2', 'confirmed'), ('other-user', 'u2', 'o', 'w', 'confirmed'),
           ('other-project', 'u', 'o', 'w3', 'confirmed');
@@ -25,7 +25,7 @@ describe("verified direct-upload byte backfill", () => {
           ('measured', 's', 'a.txt', 'text/plain', 42, 'measured-zero', 'single', 'completed'),
           ('conflict-a', 's', 'a.txt', 'text/plain', 42, 'conflict', 'single', 'completed'),
           ('conflict-b', 's', 'a.txt', 'text/plain', 84, 'conflict', 'single', 'completed');
-        insert into documents (id, user_id, org_id, project_id, filename, mime_type, source_key, status, file_size, metadata)
+        insert into documents (id, user_id, org_id, workspace_id, filename, mime_type, source_key, status, file_size, metadata)
           select id, 'u', 'o', 'w', 'a.txt', 'text/plain', id, 'completed',
             case when id = 'known' then 99 else 0 end,
             case when id = 'measured-zero' then '{"sourceSizeMeasured":true}'::jsonb

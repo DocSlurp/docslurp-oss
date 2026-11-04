@@ -46,10 +46,14 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
       await migration.query(readFileSync(new URL(`${entry.tag}.sql`, dir), "utf8"));
       await migration.query("commit");
     }
-    await reconcileRoleGrants(migration, { log: () => {} });
+    // Bootstrap the historical grant policy before the project rename.
+    await reconcileRoleGrants({ query: async (statement: string, params?: unknown[]) => {
+      const result = await migration.query(statement.replaceAll("project", "workspace"), params);
+      return { ...result, rows: result.rows.map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key,value]) => [key,["relname","table","sequence"].includes(key) && typeof value === "string" ? value.replaceAll("workspace","project") : value]))) };
+    } }, { log: () => {} });
     await migration.query(`insert into "user"(id,name,email) values('upgrade','Test','upgrade@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('upgrade','Test','upgrade','upgrade');
-      insert into projects(id,org_id,user_id,name) values('upgrade','upgrade','upgrade','Test')`);
+      insert into workspaces(id,org_id,user_id,name) values('upgrade','upgrade','upgrade','Test')`);
     await app.connect(); await worker.connect();
     await app.query("set session authorization docslurp_app");
     await worker.query("set session authorization docslurp_worker");
@@ -58,7 +62,7 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
     await migration.query("commit");
     // Deliberately no post-migration reconcileRoleGrants call.
     const before = BigInt((await app.query("select revision from realtime_revisions where org_id='upgrade'")).rows[0].revision);
-    await worker.query("update projects set name='after-upgrade' where id='upgrade'");
+    await worker.query("update workspaces set name='after-upgrade' where id='upgrade'");
     expect(BigInt((await app.query("select revision from realtime_revisions where org_id='upgrade'")).rows[0].revision)).toBe(before + 1n);
     await expect(worker.query("select realtime_record_change('foreign-org')")).rejects.toMatchObject({ code: "42501" });
     await expect(app.query("delete from realtime_revision_counters")).rejects.toMatchObject({ code: "42501" });

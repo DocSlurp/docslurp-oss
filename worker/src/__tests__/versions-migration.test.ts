@@ -138,7 +138,8 @@ describe("migration 0065 versions, retention and config jobs", () => {
     const stmts = m.split("--> statement-breakpoint").map((s) => s.trim())
       .filter((s) => /^(--[^\n]*\n)*\s*(WITH RECURSIVE[\s\S]*?\)\s*)?UPDATE documents/i.test(s) && !/ALTER|CREATE/i.test(s.slice(0, 40)));
     expect(stmts).toHaveLength(2);
-    for (const s of stmts) await db.exec(s);
+    // Rebind only the historical backfill column to this fully migrated fixture.
+    for (const s of stmts) await db.exec(s.replaceAll("workspace_id", "project_id"));
     const rows = await db.query<{ id: string; canonical_id: string; superseded_at: unknown; by: string | null }>(
       `select id, canonical_id, superseded_at, superseded_by_document_id by from documents
        where id in ('u1a','u2a','c1','c2','f1','f2') order by id`);

@@ -1,6 +1,22 @@
 -- Breaking terminology cutover. Stop old producers and drain jobs first.
 -- Preserve tenant IDs, allowlists, storage keys and historical migrations.
 -- Catalog operations are restricted to application-owned public objects.
+-- Older sessions may store protocol metadata as a JSON string containing an
+-- object. Normalize only recognized scope-bearing session objects; customer
+-- strings and nested metadata are not rewritten.
+DO $sessions$
+DECLARE r record; parsed jsonb;
+BEGIN
+  FOR r IN SELECT id,metadata FROM search_sessions WHERE jsonb_typeof(metadata)='string' LOOP
+    BEGIN parsed := (r.metadata #>> '{}')::jsonb;
+    EXCEPTION WHEN invalid_text_representation THEN CONTINUE;
+    END;
+    IF jsonb_typeof(parsed)='object' AND parsed ?| ARRAY['workspaceId','workspaceIds'] THEN
+      UPDATE search_sessions SET metadata=parsed WHERE id=r.id;
+    END IF;
+  END LOOP;
+END $sessions$;
+--> statement-breakpoint
 DO $preflight$
 DECLARE r record; conflict boolean;
 BEGIN

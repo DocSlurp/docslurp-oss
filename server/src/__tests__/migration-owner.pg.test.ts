@@ -95,8 +95,8 @@ it.skipIf(!url)("refuses missing attestation, an open barrier, competing session
     await other.end();
     await c.query(`insert into "user"(id,name,email) values('unfinished','Test','unfinished@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('unfinished','Test','unfinished','unfinished');
-      insert into projects(id,org_id,user_id,name) values('unfinished','unfinished','unfinished','Test');
-      insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
+      insert into workspaces(id,org_id,user_id,name) values('unfinished','unfinished','unfinished','Test');
+      insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage)
         values('unfinished','unfinished','unfinished','unfinished','upload','queued','queued')`);
     await expect(applyOwnedMigrations(c, { migrationsFolder: folder, env: attested })).rejects.toThrow("unfinished SQL runs");
     await c.query(`set session authorization ${owner}`);

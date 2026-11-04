@@ -15,8 +15,8 @@ import { serveOnRandomPort } from "../test/migrated-postgres.js";
  */
 const TENANT_MIGRATION = "usage_event_tenant_columns";
 
-async function seedTenants(db: PGlite) {
-  await db.exec(`
+async function seedTenants(db: PGlite, legacy = false) {
+  const seed = `
     insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com');
     insert into organizations (id, name, slug, created_by_user_id) values
       ('org-1', 'One', 'one', 'u1'), ('org-2', 'Two', 'two', 'u1');
@@ -26,7 +26,8 @@ async function seedTenants(db: PGlite) {
       ('run-a', 'org-1', 'u1', 'ws-a', 'bulk-upload', 'processing', 'embed', '{}', '{"apiKeyId":"key-run"}');
     insert into search_sessions (id, user_id, query, metadata) values
       ('sess-b', 'u1', 'q', to_jsonb('{"projectId":"ws-b"}'::text));
-  `);
+  `;
+  await db.exec(legacy ? seed.replaceAll("projects", "workspaces").replaceAll("project_", "workspace_").replaceAll("projectId", "workspaceId") : seed);
 }
 
 type Columns = { id: string; org_id: string | null; project_id: string | null; api_key_id: string | null };
@@ -49,14 +50,14 @@ describe("usage_events tenant column backfill", () => {
 
   beforeAll(async () => {
     db = await createMigratedDatabase({ stopBefore: TENANT_MIGRATION });
-    await seedTenants(db);
+    await seedTenants(db, true);
     // Rows in the pre-0042 shape: scope only in run_id and metadata.
     await db.exec(`
       insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata) values
         ('ingest', 'u1', 'run-a', 'openrouter', 'm', 'llm', 1, 'token', 10, '{}'),
-        ('search-ws', 'u1', null, 'openrouter', 'm', 'llm', 1, 'token', 4, '{"projectId":"ws-a","apiKeyId":"key-req"}'),
+        ('search-ws', 'u1', null, 'openrouter', 'm', 'llm', 1, 'token', 4, '{"workspaceId":"ws-a","apiKeyId":"key-req"}'),
         ('search-session', 'u1', null, 'openrouter', 'm', 'llm', 1, 'token', 2, '{"sessionId":"sess-b"}'),
-        ('aggregate', 'u1', null, 'openrouter', 'm', 'llm', 1, 'token', 6, '{"projectIds":["ws-c","ws-a"]}'),
+        ('aggregate', 'u1', null, 'openrouter', 'm', 'llm', 1, 'token', 6, '{"workspaceIds":["ws-c","ws-a"]}'),
         ('org-only', 'u1', null, 'openrouter', 'm', 'llm', 1, 'token', 1, '{"orgId":"org-2"}');
     `);
     await applyRemainingMigrations(db, TENANT_MIGRATION);

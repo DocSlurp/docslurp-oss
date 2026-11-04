@@ -386,10 +386,10 @@ describe("migration 0063 backfill", () => {
       await db.exec(`
         insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
         insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-        insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+        insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
         values ('r', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '{}'::jsonb);
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
         values ('a', 'o1', 'u1', 'w', 'r', 'a.pdf', 'application/pdf', 'raw/a', 'completed', 3),
                ('b', 'o1', 'u1', 'w', 'r', 'b.pdf', 'application/pdf', 'raw/b', 'completed', 2),
                ('empty', 'o1', 'u1', 'w', 'r', 'e.pdf', 'application/pdf', 'raw/e', 'completed', 1);

@@ -231,11 +231,11 @@ describe("migration 0056 backfill", () => {
       await old.exec(`
         insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
         insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-        insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents)
+        insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, input_cost_cents)
           values ('a', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', '{}', 1.5),
                  ('b', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}', 0);
-        insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, project_id, org_id) values
+        insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, workspace_id, org_id) values
           ('e1', 'u1', 'a', 'openrouter', 'm', 'page-analysis', 1, 'request', 0.25, 'w', 'o1'),
           ('e2', 'u1', 'a', 'local-compute', 'w', 'worker-stage', 1, 'cent', 0.75, 'w', 'o1'),
           ('e3', 'u1', 'a', 'local-compute', 'w', 'worker-stage', 1, 'cent', 0, 'w', 'o1');
