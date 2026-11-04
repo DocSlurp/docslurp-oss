@@ -4,7 +4,7 @@ import { normalizePipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, type CanonicalD
 
 import { fromEnv } from "../config.js";
 import { buildCanonicalChunksFromDocument } from "../lib/canonical-document.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { indexableDocuments, isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage } from "../stages/embed.js";
@@ -114,7 +114,7 @@ function setup(action: "flag_for_review" | "block_indexing" | "redact_artifacts"
       allowlistPatterns: options.allowlistPatterns ?? [],
     },
   });
-  const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "pii-detect", status: "processing", pipeline, stats: {}, artifacts } as unknown as WorkspaceRun;
+  const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stage: "pii-detect", status: "processing", pipeline, stats: {}, artifacts } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   const stage = new PiiDetectStage({} as CommandRunner, storage as unknown as ArtifactStore, fromEnv(), sink);
   return { storage, sink, state, stage, document, prefix, documentId };

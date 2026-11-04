@@ -1,6 +1,6 @@
 # Spatial search with explicit column opt-in
 
-Spatial indexing consumes extra storage and processing. Only a workspace output-schema property explicitly declared `{"type":"object","format":"geojson"}` activates it. Shape detection is advisory; ordinary JSON, addresses and coordinate-looking fields remain unindexed. GeoJSON positions use longitude then latitude. No geocoding or new endpoint is introduced.
+Spatial indexing consumes extra storage and processing. Only a project output-schema property explicitly declared `{"type":"object","format":"geojson"}` activates it. Shape detection is advisory; ordinary JSON, addresses and coordinate-looking fields remain unindexed. GeoJSON positions use longitude then latitude. No geocoding or new endpoint is introduced.
 
 ```json
 {"type":"object","properties":{"site":{"type":"object","format":"geojson"}}}
@@ -27,7 +27,7 @@ Unavailable spatial infrastructure returns 503; missing/stale selected-document 
 
 ## Boundary and validation
 
-Workspace/API-key authorization precedes spatial access. Spatial eligibility intersects normal document filters before ranking and paid inference. Every SQL evidence adapter checks current scoped generation and schema digest; unsupported native Lance filtering uses the scoped SQL path. Geo responses bypass response caching, batch embedding prefetch and unrestricted community/summary expansion. Spatial requests do not trigger deferred cold-page model routing or materialization: only already indexed evidence with current accepted geometry is searched. This avoids spending on documents whose geometry revision cannot be fenced throughout deferred work. Spatial SQL uses the existing search statement timeout and request cancellation controls; timeout/abort remains a query failure, not invalid topology.
+Project/API-key authorization precedes spatial access. Spatial eligibility intersects normal document filters before ranking and paid inference. Every SQL evidence adapter checks current scoped generation and schema digest; unsupported native Lance filtering uses the scoped SQL path. Geo responses bypass response caching, batch embedding prefetch and unrestricted community/summary expansion. Spatial requests do not trigger deferred cold-page model routing or materialization: only already indexed evidence with current accepted geometry is searched. This avoids spending on documents whose geometry revision cannot be fenced throughout deferred work. Spatial SQL uses the existing search statement timeout and request cancellation controls; timeout/abort remains a query failure, not invalid topology.
 
 Run `GEO_QUERY_INTEGRATION=1 bash scripts/postgis/lifecycle-test.sh` for the disposable digest-pinned PostGIS lifecycle, two-backend race and actual hybrid-search integration. It has no network or application-secret mounts; query tests mount only their disposable Unix-socket directory. Focused contract, route, API-key, native-capability and retrieval-scope tests also cover malformed requests, advertised schemas, cache bypass and empty scopes. These are local tests, not production readiness or geographic performance claims. Independent council review and hosted CI remain merge gates.
 

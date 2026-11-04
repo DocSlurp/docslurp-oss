@@ -11,7 +11,7 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
     examplePayload: {
       event: "document.replaced",
       runId: "run_123",
-      workspaceId: "ws_123",
+      projectId: "ws_123",
       documentId: "doc_new",
       canonicalId: "/products",
       previousVersionId: "doc_old",
@@ -21,11 +21,11 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
   },
   {
     type: "run.completed",
-    description: "Emitted when a workspace run finishes. failedDocuments counts Documents that failed and were skipped; retry the Run to reprocess them.",
+    description: "Emitted when a project run finishes. failedDocuments counts Documents that failed and were skipped; retry the Run to reprocess them.",
     examplePayload: {
       event: "run.completed",
       runId: "run_123",
-      workspaceId: "ws_123",
+      projectId: "ws_123",
       status: "completed",
       processedDocuments: 14,
       failedDocuments: 0,
@@ -40,7 +40,7 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
     examplePayload: {
       event: "run.failed",
       runId: "run_123",
-      workspaceId: "ws_123",
+      projectId: "ws_123",
       status: "failed",
       stage: "extract-markdown",
       error: "pdftotext exited non-zero",

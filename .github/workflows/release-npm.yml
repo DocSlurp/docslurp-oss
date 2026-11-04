@@ -99,7 +99,7 @@ jobs:
           for package in $(node scripts/package-release.mjs list); do
             pnpm --dir "$package" pack --pack-destination "$RUNNER_TEMP/npm-packages"
           done
-      # Licence, metadata, README line, export/bin targets present, no sources or workspace: ranges.
+      # Licence, metadata, README line, export/bin targets present, no sources or project: ranges.
       - name: Check packed tarball contents
         run: node scripts/check-package-contents.mjs "$RUNNER_TEMP"/npm-packages/*.tgz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

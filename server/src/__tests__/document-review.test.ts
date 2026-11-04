@@ -100,11 +100,11 @@ describe("deriveCorrectionPatternSignals", () => {
 });
 
 describe("buildCorrectionProfileSummary", () => {
-  it("aggregates workspace correction history by document type and exposes reusable examples", () => {
+  it("aggregates project correction history by document type and exposes reusable examples", () => {
     const summary = buildCorrectionProfileSummary({
       document: {
         id: "doc-current",
-        workspace_id: "ws-1",
+        project_id: "ws-1",
         filename: "invoice.pdf",
         mime_type: "application/pdf",
         extraction_mode: "balanced"
@@ -133,7 +133,7 @@ describe("buildCorrectionProfileSummary", () => {
       history: [
         {
           document_id: "doc-current",
-          workspace_id: "ws-1",
+          project_id: "ws-1",
           filename: "invoice.pdf",
           mime_type: "application/pdf",
           extraction_mode: "balanced",
@@ -154,7 +154,7 @@ describe("buildCorrectionProfileSummary", () => {
         },
         {
           document_id: "doc-peer",
-          workspace_id: "ws-1",
+          project_id: "ws-1",
           filename: "invoice-2.pdf",
           mime_type: "application/pdf",
           extraction_mode: "balanced",
@@ -175,7 +175,7 @@ describe("buildCorrectionProfileSummary", () => {
         },
         {
           document_id: "doc-other-type",
-          workspace_id: "ws-1",
+          project_id: "ws-1",
           filename: "meeting.mp3",
           mime_type: "audio/mpeg",
           extraction_mode: "balanced",

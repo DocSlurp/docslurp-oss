@@ -78,7 +78,7 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     await runtime.query(`select * from chat_operations limit 1;
       insert into "user"(id,name,email) values('owner-test','Test','owner-test@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('owner-test','Test','owner-test','owner-test');
-      insert into workspaces(id,org_id,user_id,name) values('owner-test','owner-test','owner-test','Test');
+      insert into projects(id,org_id,user_id,name) values('owner-test','owner-test','owner-test','Test');
       select * from realtime_revisions;`);
     // A normal subsequent owner migration must remain supported and idempotent.
     await applyOwnedMigrations(runtime, { migrationsFolder: folder, env: {} });
@@ -95,8 +95,8 @@ it.skipIf(!url)("refuses missing attestation, an open barrier, competing session
     await other.end();
     await c.query(`insert into "user"(id,name,email) values('unfinished','Test','unfinished@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('unfinished','Test','unfinished','unfinished');
-      insert into workspaces(id,org_id,user_id,name) values('unfinished','unfinished','unfinished','Test');
-      insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage)
+      insert into projects(id,org_id,user_id,name) values('unfinished','unfinished','unfinished','Test');
+      insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
         values('unfinished','unfinished','unfinished','unfinished','upload','queued','queued')`);
     await expect(applyOwnedMigrations(c, { migrationsFolder: folder, env: attested })).rejects.toThrow("unfinished SQL runs");
     await c.query(`set session authorization ${owner}`);
@@ -155,7 +155,7 @@ it.skipIf(!url)("refuses missing publisher membership and rolls back pending sch
   const c = await connect(name);
   try {
     await expect(applyOwnedMigrations(c, { migrationsFolder: folder, env: attested })).rejects.toThrow();
-    expect((await c.query("select exists(select 1 from information_schema.columns where table_name='workspace_runs' and column_name='execution_generation') as applied")).rows[0].applied).toBe(false);
+    expect((await c.query("select exists(select 1 from information_schema.columns where table_name='project_runs' and column_name='execution_generation') as applied")).rows[0].applied).toBe(false);
     expect((await c.query("select current_user=session_user as restored")).rows[0].restored).toBe(true);
   } finally { await c.end(); await admin.query(`grant docslurp_realtime_publisher to ${owner}`); }
 }, 60_000);

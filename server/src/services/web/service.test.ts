@@ -6,7 +6,7 @@ import { CHAT_SHORTENED_NOTE, runWebCapability, setWebServiceDeps, type WebServi
 import type { WebInput, WebProviderAdapter } from "./types.js";
 
 const search: WebInput<"search"> = { query: "solar output", limit: 5, depth: "fast", includeContent: false, maxCharacters: 1000 };
-const ctx = { userId: "user-1", orgId: "org-1", workspaceId: "ws-1", surface: "api" as const };
+const ctx = { userId: "user-1", orgId: "org-1", projectId: "ws-1", surface: "api" as const };
 
 function setup(overrides: Partial<WebServiceDeps> = {}, config: Partial<typeof env.web> = {}) {
   const run = vi.fn(async () => ({
@@ -24,7 +24,7 @@ function setup(overrides: Partial<WebServiceDeps> = {}, config: Partial<typeof e
       if (/169\.254|localhost/.test(url)) throw new Error("blocked");
       return url;
     },
-    workspaceAccess: async () => "allowed" as const,
+    projectAccess: async () => "allowed" as const,
     assertCanSpend: async () => undefined,
     recordCost, recordCharge,
     ...overrides,
@@ -41,7 +41,7 @@ describe("runWebCapability", () => {
     expect(result).toMatchObject({ cached: false, usage: { credits: 1 }, results: [{ url: "https://example.com/a" }] });
     expect(JSON.stringify(result)).not.toMatch(/\b(jina|tavily|exa|firecrawl|tokens)\b/i);
     expect(t.recordCost).toHaveBeenCalledWith(expect.objectContaining({
-      scope: { orgId: "org-1", workspaceId: "ws-1" },
+      scope: { orgId: "org-1", projectId: "ws-1" },
       // Our cost, never customer spend: zero cost_cents, provider cost in metadata.
       event: expect.objectContaining({ provider: "jina", model: "web-search", metric: "web-search", costCents: 0,
         metadata: expect.objectContaining({ providerCostCents: 0.07, billable: false, costRole: "provider" }) }),
@@ -61,7 +61,7 @@ describe("runWebCapability", () => {
 
   it.each([
     { orgId: "org-2" },
-    { workspaceId: "ws-2" },
+    { projectId: "ws-2" },
     { userId: "user-2" },
   ])("isolates cached query history from another scope: %j", async scope => {
     const t = setup({}, { orgPerMinute: 20 });
@@ -100,7 +100,7 @@ describe("runWebCapability", () => {
     expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: 2 }) }));
   });
 
-  it("refuses when disabled, for private URLs, for opted-out or privacy-restricted workspaces and over the org rate limit", async () => {
+  it("refuses when disabled, for private URLs, for opted-out or privacy-restricted projects and over the org rate limit", async () => {
     setup({}, { enabled: false });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 404, code: "web_disabled" });
 
@@ -108,10 +108,10 @@ describe("runWebCapability", () => {
     await expect(runWebCapability("fetch", { urls: ["http://169.254.169.254/latest"], depth: "fast", maxCharacters: 1000 }, ctx))
       .rejects.toMatchObject({ status: 403, code: "web_target_fetch_disabled" });
 
-    setup({ workspaceAccess: async () => "privacy" as const });
+    setup({ projectAccess: async () => "privacy" as const });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 403, code: "privacy_mode_blocked" });
 
-    setup({ workspaceAccess: async () => "disabled" as const });
+    setup({ projectAccess: async () => "disabled" as const });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 403, code: "web_disabled" });
 
     const t = setup();

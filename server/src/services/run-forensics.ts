@@ -1,7 +1,7 @@
 import { instrumentS3Client } from "@docslurp/shared/observability";
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
-import type { DocumentRecord, WorkspaceRun, WorkspaceRunStageState } from "@docslurp/shared";
+import type { DocumentRecord, ProjectRun, ProjectRunStageState } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { sql } from "../db.js";
@@ -15,7 +15,7 @@ type RunDocumentRow = {
   id: string;
   org_id: string;
   user_id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string | null;
   filename: string;
   mime_type: string;
@@ -25,7 +25,7 @@ type RunDocumentRow = {
   page_count: number;
   source_sha256?: string | null;
   deduped_from_document_id?: string | null;
-  dedup_scope?: "workspace" | "org" | null;
+  dedup_scope?: "project" | "org" | null;
   version_number: number;
   previous_version_id: string | null;
   canonical_id?: string | null;
@@ -103,7 +103,7 @@ export interface RunForensicsTimelineEntry {
   scope: "run" | "document";
   documentId: string | null;
   documentFilename: string | null;
-  status: WorkspaceRunStageState["status"];
+  status: ProjectRunStageState["status"];
   attempts: number;
   retries: number;
   durationMs: number | null;
@@ -145,7 +145,7 @@ export interface RunDocumentForensicsEntry {
 }
 
 export interface RunForensicsPayload {
-  run: WorkspaceRun;
+  run: ProjectRun;
   summary: RunForensicsSummary;
   timeline: RunForensicsTimelineEntry[];
   artifacts: RunArtifactEconomicsEntry[];
@@ -161,7 +161,7 @@ function mapDocument(row: RunDocumentRow): DocumentRecord {
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     runId: row.run_id,
     filename: row.filename,
     mimeType: row.mime_type,
@@ -314,7 +314,7 @@ function timestampMs(value: string | null): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-export function durationForStage(stage: WorkspaceRunStageState): number | null {
+export function durationForStage(stage: ProjectRunStageState): number | null {
   const statsDuration = numericStat(stage.stats?.durationMs);
   if (statsDuration !== null) {
     return statsDuration;
@@ -342,7 +342,7 @@ export async function getRunForensics(runId: string, userId: string): Promise<Ru
         id,
         org_id,
         user_id,
-        workspace_id,
+        project_id,
         run_id,
         filename,
         mime_type,

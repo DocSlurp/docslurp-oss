@@ -49,7 +49,7 @@ import {
 } from "../temporal/failure-classification.js";
 import { CommandRunner, resolveScriptsDir } from "../tools/runner.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 
 // Reproduces the #234 round-5 council findings. Real processes where a process matters.
 const linux = process.platform === "linux";
@@ -225,9 +225,9 @@ describe.skipIf(!linux)("H1: an activity whose command teardown failed always en
   });
 });
 
-function makeRun(): WorkspaceRun {
+function makeRun(): ProjectRun {
   return {
-    id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload", status: "processing",
+    id: "run-1", orgId: "org-1", userId: "user-1", projectId: "ws-1", kind: "bulk-upload", status: "processing",
     stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures }, error: null, stats: {}, artifacts: {}, claimId: null,
     createdAt: new Date(), updatedAt: new Date(),
@@ -285,12 +285,12 @@ describe("M3: source quarantine", () => {
     const records: Array<{ documentId: string; runId?: string; stage?: string }> = [];
     const store: SourceQuarantineStore = {
       async find(documentId) {
-        return listed.has(documentId) ? { sourceSha256: `sha-${documentId}`, orgId: "org-1", workspaceId: "ws-1" } : null;
+        return listed.has(documentId) ? { sourceSha256: `sha-${documentId}`, orgId: "org-1", projectId: "ws-1" } : null;
       },
       async record(entry) {
         records.push(entry);
         listed.add(entry.documentId);
-        return { sourceSha256: `sha-${entry.documentId}`, orgId: "org-1", workspaceId: "ws-1" };
+        return { sourceSha256: `sha-${entry.documentId}`, orgId: "org-1", projectId: "ws-1" };
       },
       async noteRefusal() {},
       async recordOrgFailure() {
@@ -304,7 +304,7 @@ describe("M3: source quarantine", () => {
   }
 
   const inDocument = <T>(fn: () => Promise<T>) =>
-    runWithPerfContext({ runId: "run-1", documentId: "doc-1", orgId: "org-1", workspaceId: "ws-1", scope: "document", stageName: "render-images", pushPerformance: () => {} }, fn);
+    runWithPerfContext({ runId: "run-1", documentId: "doc-1", orgId: "org-1", projectId: "ws-1", scope: "document", stageName: "render-images", pushPerformance: () => {} }, fn);
 
   it("records the document of an unverified teardown, attributed, and refuses its source afterwards", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -313,14 +313,14 @@ describe("M3: source quarantine", () => {
     await inDocument(async () => expect(admitCommandSource()).resolves.toBeUndefined());
     const teardown = new CommandTeardownError("pdftoppm teardown could not be verified", { attributable: true });
     recordUnverifiedTeardown(teardown, "label=pdftoppm", {
-      attribution: { org_id: "org-1", workspace_id: "ws-1", run_id: "run-1", document_id: "doc-1", stage: "render-images" },
+      attribution: { org_id: "org-1", project_id: "ws-1", run_id: "run-1", document_id: "doc-1", stage: "render-images" },
     });
     await flushSourceQuarantine();
     // stagedSha256: null (nothing staged in this test): the store falls back to the server's hash.
     expect(records).toEqual([{ documentId: "doc-1", stagedSha256: null, runId: "run-1", stage: "render-images", detail: teardown.message, ttlHours: 168 }]);
     const logs = errors.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(logs).toMatch(/status=teardown-unverified .*org_id=org-1 workspace_id=ws-1 run_id=run-1 document_id=doc-1/);
-    expect(logs).toMatch(/status=source-quarantined .*org=org-1 workspace=ws-1 run=run-1 document=doc-1 .*source_sha256=sha-doc-1/);
+    expect(logs).toMatch(/status=teardown-unverified .*org_id=org-1 project_id=ws-1 run_id=run-1 document_id=doc-1/);
+    expect(logs).toMatch(/status=source-quarantined .*org=org-1 project=ws-1 run=run-1 document=doc-1 .*source_sha256=sha-doc-1/);
     // A new activity (another worker) refuses the document before any command.
     await inDocument(() => expect(admitCommandSource()).rejects.toBeInstanceOf(QuarantinedSourceError));
   });

@@ -67,7 +67,7 @@ export class DocumentStageError extends Error {
 
 /**
  * The run's spend for the run cost cap: billed spend committed to
- * usage_events (`workspace_runs.spent_cents`, as of this state's last
+ * usage_events (`project_runs.spent_cents`, as of this state's last
  * checkpoint, including other shards' and page tasks' commits) plus the
  * billable events still buffered in the ledger. Every usage event counts:
  * AI tokens, embeddings, vision, media, per-page fees and billed worker
@@ -286,7 +286,7 @@ export async function runDocumentStage(
         runId: state.run.id,
         documentId: document.id,
         orgId: state.run.orgId,
-        ...(state.run.workspaceId ? { workspaceId: state.run.workspaceId } : {}),
+        ...(state.run.projectId ? { projectId: state.run.projectId } : {}),
         pageCount: document.pageCount,
         scope: "document",
         stageName,

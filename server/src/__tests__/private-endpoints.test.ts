@@ -7,8 +7,8 @@ vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 
 const { embedConfiguredText, generateOpenRouterDocumentText, generateOpenRouterText } = await import("../lib/ai.js");
-const { privateTextModelForWorkspace } = await import("../lib/privacy.js");
-const { WorkspaceChatVoice, privateSttModelFor, wavDurationSeconds } = await import("../lib/chat-voice.js");
+const { privateTextModelForProject } = await import("../lib/privacy.js");
+const { ProjectChatVoice, privateSttModelFor, wavDurationSeconds } = await import("../lib/chat-voice.js");
 
 const BASE_URL = "https://gpu1.example.com/v1";
 const TEXT = "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8";
@@ -86,7 +86,7 @@ describe("API private endpoint text", () => {
   it("calls the registered endpoint with operator auth, audits strict-privacy and reports usage", async () => {
     const result = await generateOpenRouterText({
       apiKey: "", operation: "api.search.hyde", model: TEXT, prompt: "Expand this query.", maxOutputTokens: 64,
-      privacyMode: "strict-privacy", auditScope: { workspaceId: "ws-1" },
+      privacyMode: "strict-privacy", auditScope: { projectId: "ws-1" },
     });
     expect(serverFetch).toHaveBeenCalledOnce();
     expect(serverFetch.mock.calls[0]![0]).toBe(`${BASE_URL}/chat/completions`);
@@ -96,7 +96,7 @@ describe("API private endpoint text", () => {
     expect(result.usage.costCents).toBeCloseTo((200 * 0.5 + 40 * 2) / 1_000_000 * 100);
     expect(auditInserts()).toHaveLength(1);
     expect(auditRows()).toEqual([expect.objectContaining({
-      workspace_id: "ws-1", model_id: "private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", endpoint: "private:gpu1:api.search.hyde", privacy_mode: "strict-privacy",
+      project_id: "ws-1", model_id: "private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", endpoint: "private:gpu1:api.search.hyde", privacy_mode: "strict-privacy",
     })]);
   });
 
@@ -114,18 +114,18 @@ describe("API private endpoint text", () => {
   it("blocks unregistered aliases without sending anything", async () => {
     await expect(generateOpenRouterText({
       apiKey: "", model: "llm://private/gpu9/Qwen/Qwen3.6-35B-A3B-FP8", prompt: "x", maxOutputTokens: 8,
-      privacyMode: "strict-privacy", auditScope: { workspaceId: "ws-1" },
+      privacyMode: "strict-privacy", auditScope: { projectId: "ws-1" },
     })).rejects.toBeInstanceOf(PrivacyModeViolationError);
     expect(serverFetch).not.toHaveBeenCalled();
     expect(auditInserts()).toHaveLength(0);
   });
 
-  it("selects a private text model only for non-standard workspaces", () => {
-    expect(privateTextModelForWorkspace({ textGeneration: { model: TEXT } }, "standard")).toBeUndefined();
-    expect(privateTextModelForWorkspace({ textGeneration: { model: TEXT } }, "strict-privacy")).toBe(TEXT);
-    expect(privateTextModelForWorkspace({ textGeneration: { model: "qwen/qwen3.5-flash-02-23" } }, "strict-privacy")).toBeUndefined();
+  it("selects a private text model only for non-standard projects", () => {
+    expect(privateTextModelForProject({ textGeneration: { model: TEXT } }, "standard")).toBeUndefined();
+    expect(privateTextModelForProject({ textGeneration: { model: TEXT } }, "strict-privacy")).toBe(TEXT);
+    expect(privateTextModelForProject({ textGeneration: { model: "qwen/qwen3.5-flash-02-23" } }, "strict-privacy")).toBeUndefined();
     vi.stubEnv("DOCSLURP_PRIVATE_TEXT_MODEL", TEXT);
-    expect(privateTextModelForWorkspace({}, "local-only")).toBe(TEXT);
+    expect(privateTextModelForProject({}, "local-only")).toBe(TEXT);
   });
 });
 
@@ -133,7 +133,7 @@ describe("API private endpoint embeddings", () => {
   it("embeds queries through the private endpoint with cost", async () => {
     const result = await embedConfiguredText({
       value: "query", runtime: "remote", provider: "private", model: "gpu1/Qwen/Qwen3-Embedding-0.6B",
-      modelUri: "llm://private/gpu1/Qwen/Qwen3-Embedding-0.6B", privacyMode: "strict-privacy", auditScope: { workspaceId: "ws-1" },
+      modelUri: "llm://private/gpu1/Qwen/Qwen3-Embedding-0.6B", privacyMode: "strict-privacy", auditScope: { projectId: "ws-1" },
     });
     expect(serverFetch.mock.calls[0]![0]).toBe(`${BASE_URL}/embeddings`);
     expect(authOf(serverFetch.mock.calls[0]!)).toBe("Bearer app-secret");
@@ -145,12 +145,12 @@ describe("API private endpoint embeddings", () => {
 });
 
 describe("API private endpoint speech-to-text", () => {
-  const context = { userId: "user", scope: { workspaceId: "ws-1", orgId: "org" } };
+  const context = { userId: "user", scope: { projectId: "ws-1", orgId: "org" } };
 
-  it("transcribes through the private endpoint for strict-privacy workspaces and records usage", async () => {
+  it("transcribes through the private endpoint for strict-privacy projects and records usage", async () => {
     vi.stubEnv("DOCSLURP_PRIVATE_STT_MODEL", STT);
     expect(privateSttModelFor("standard")).toBeUndefined();
-    const voice = new WorkspaceChatVoice(context, "strict-privacy");
+    const voice = new ProjectChatVoice(context, "strict-privacy");
     expect(await voice.getListener()).toEqual({ enabled: true });
     expect(await voice.listen(new Blob([Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVE")])], { type: "audio/wav" }))).toBe("Private question?");
     const [url, init] = serverFetch.mock.calls[0]! as [string, RequestInit];
@@ -161,11 +161,11 @@ describe("API private endpoint speech-to-text", () => {
       provider: "private", model: "gpu1/CohereLabs/cohere-transcribe-03-2026", metric: "chat.transcription", amount: 3, unit: "second",
       metadata: expect.objectContaining({ endpointAlias: "gpu1", secondsSource: "provider" }),
     }) });
-    expect(auditRows()).toEqual([expect.objectContaining({ workspace_id: "ws-1", endpoint: "private:gpu1:api.chat.transcription" })]);
+    expect(auditRows()).toEqual([expect.objectContaining({ project_id: "ws-1", endpoint: "private:gpu1:api.chat.transcription" })]);
   });
 
   it("keeps hosted STT disabled when no private route is configured", async () => {
-    const voice = new WorkspaceChatVoice(context, "strict-privacy");
+    const voice = new ProjectChatVoice(context, "strict-privacy");
     expect(await voice.getListener()).toEqual({ enabled: false });
   });
 

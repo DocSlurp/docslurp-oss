@@ -11,7 +11,7 @@ Keep your existing search calls and get DocSlurp results with citations. One pac
 | `@docslurp/contrib-search-compat/typesense` | Typesense | `createDocSlurpTypesenseClient()` |
 | `@docslurp/contrib-search-compat/pagefind` | Pagefind | `createDocSlurpPagefind()` |
 
-Requires `@docslurp/sdk` 0.4.0 or newer. The Meilisearch, Typesense and Pagefind subpaths are the same adapters you can import from `@docslurp/sdk/search-adapters`. In the browser, pass a browser key as `clientKey`. Workspace references (`indexName`, `index(...)`, `collections(...)`, `workspace`) accept a workspace ID, slug or `default`; the `workspace` option also accepts a name.
+Requires `@docslurp/sdk` 0.4.0 or newer. The Meilisearch, Typesense and Pagefind subpaths are the same adapters you can import from `@docslurp/sdk/search-adapters`. In the browser, pass a browser key as `clientKey`. Project references (`indexName`, `index(...)`, `collections(...)`, `project`) accept a project ID, slug or `default`; the `project` option also accepts a name.
 
 Renamed from `@docslurp/compat-algolia`, `@docslurp/compat-meilisearch`, `@docslurp/compat-typesense` and `@docslurp/compat-pagefind`; see [`docs/releases.md`](https://github.com/DocSlurp/docslurp-oss/blob/main/docs/releases.md) for the migration.
 
@@ -30,7 +30,7 @@ const client = docslurpAlgoliaClient({
   glossary: { ml: ["machine learning"] } // Optional synonyms, expanded locally before each query.
 });
 
-// indexName is a workspace slug, UUID or "default".
+// indexName is a project slug, UUID or "default".
 const res = await client.searchSingleIndex({
   indexName: "product-manuals",
   searchParams: { query: "ml models", hitsPerPage: 10 }
@@ -50,12 +50,12 @@ await client.clickedObjectIDsAfterSearch({ indexName: "product-manuals", queryID
 
 ### Sync settings, synonyms and rules from your server
 
-Reads such as `getSettings` work with a browser key. Writes (`setSettings`, `saveSynonyms`, `saveRules`, `importIndex`) need a server key with the `workspaces:manage` scope, which only organization owners and admins can grant, and the key owner must be able to edit the workspace. Run them from a backend job or migration script, never in the browser:
+Reads such as `getSettings` work with a browser key. Writes (`setSettings`, `saveSynonyms`, `saveRules`, `importIndex`) need a server key with the `projects:manage` scope, which only organization owners and admins can grant, and the key owner must be able to edit the project. Run them from a backend job or migration script, never in the browser:
 
 ```ts
 const admin = docslurpAlgoliaClient({
   apiUrl: "https://docslurp.io",
-  clientKey: process.env.DOCSLURP_API_KEY!, // A server key with the workspaces:manage scope. The option is named clientKey.
+  clientKey: process.env.DOCSLURP_API_KEY!, // A server key with the projects:manage scope. The option is named clientKey.
 });
 
 const settings = await admin.getSettings({ indexName: "product-manuals" });
@@ -80,7 +80,7 @@ await admin.saveRules({ indexName: "product-manuals", rules: [{ objectID: "rule-
 
 ## Meilisearch
 
-`createDocSlurpMeilisearchClient()` supports `index(workspace).search(q, params)`.
+`createDocSlurpMeilisearchClient()` supports `index(project).search(q, params)`.
 
 ```ts
 import { createDocSlurpMeilisearchClient } from "@docslurp/contrib-search-compat/meilisearch";
@@ -88,7 +88,7 @@ import { createDocSlurpMeilisearchClient } from "@docslurp/contrib-search-compat
 
 ## Typesense
 
-`createDocSlurpTypesenseClient()` supports `collections(workspace).documents().search(params)` and `multiSearch.perform()` (up to 10 searches).
+`createDocSlurpTypesenseClient()` supports `collections(project).documents().search(params)` and `multiSearch.perform()` (up to 10 searches).
 
 ```ts
 import { createDocSlurpTypesenseClient } from "@docslurp/contrib-search-compat/typesense";
@@ -96,7 +96,7 @@ import { createDocSlurpTypesenseClient } from "@docslurp/contrib-search-compat/t
 
 ## Pagefind
 
-`createDocSlurpPagefind()` supports `search(term)` with lazy `data()` results. It requires `workspace` and a `resolveUrl` function that maps each citation to a public page URL.
+`createDocSlurpPagefind()` supports `search(term)` with lazy `data()` results. It requires `project` and a `resolveUrl` function that maps each citation to a public page URL.
 
 ```ts
 import { createDocSlurpPagefind } from "@docslurp/contrib-search-compat/pagefind";

@@ -21,7 +21,7 @@ export interface SearchSessionMetadataInput {
   effectiveQuery?: string;
   filters?: SearchFilters | Record<string, unknown>;
   options: SearchSessionOptions;
-  workspaceId: string;
+  projectId: string;
   selfQueryReasons?: string[];
   availability?: unknown;
   retrievalChain?: unknown;
@@ -67,7 +67,7 @@ export interface SearchSessionOptions {
  * Search Session journal. It is the Usage Recorder for every strategy call in
  * one search: `record()` logs and buffers, `adoptUsage()` takes child-search
  * events (already logged by the child) without logging them again, and
- * `persist()` writes buffered events stamped `{sessionId, workspaceId, orgId}`.
+ * `persist()` writes buffered events stamped `{sessionId, projectId, orgId}`.
  */
 export interface SearchSessionJournal extends UsageRecorder {
   readonly sessionId: string;
@@ -176,7 +176,7 @@ export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void
 }
 
 export interface SearchSessionScope {
-  workspaceId?: string | null;
+  projectId?: string | null;
   orgId?: string | null;
 }
 
@@ -287,14 +287,14 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
     // Snapshot now: the metadata and duration describe the search as it answered.
     const durationMs = Date.now() - this.startedAtMs;
     if (this.writeBehind) {
-      await this.flushUsageInline(input.userId, this.scope.workspaceId ?? input.metadata.workspaceId);
+      await this.flushUsageInline(input.userId, this.scope.projectId ?? input.metadata.projectId);
     }
     return await this.enqueue(() => this.persistSnapshot(input, durationMs), "persist");
   }
 
   async flushUsage(userId: string): Promise<void> {
     if (this.writeBehind) {
-      await this.flushUsageInline(userId, this.scope.workspaceId);
+      await this.flushUsageInline(userId, this.scope.projectId);
       return;
     }
     return await this.enqueue(async () => {
@@ -310,8 +310,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
    * snapshot's own flush picking up an event whose inline write failed,
    * cannot bill twice.
    */
-  private flushUsageInline(userId: string, workspaceId: string | null | undefined): Promise<void> {
-    const scope = { sessionId: this.sessionId, workspaceId: workspaceId ?? null, orgId: this.scope.orgId ?? null };
+  private flushUsageInline(userId: string, projectId: string | null | undefined): Promise<void> {
+    const scope = { sessionId: this.sessionId, projectId: projectId ?? null, orgId: this.scope.orgId ?? null };
     const flush = () => this.usage.flush({ userId, scope });
     const pending = this.usageTail
       .then(flush)
@@ -351,7 +351,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
           metadata = excluded.metadata,
           variant = excluded.variant
         where search_sessions.user_id = excluded.user_id
-          and search_sessions.metadata ->> 'workspaceId' = excluded.metadata ->> 'workspaceId'
+          and search_sessions.metadata ->> 'projectId' = excluded.metadata ->> 'projectId'
           and search_sessions.metadata ->> 'queryHash' = excluded.metadata ->> 'queryHash'
         returning id, (xmax = 0) as inserted
       `;
@@ -383,7 +383,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
         userId: input.userId,
         scope: {
           sessionId: this.sessionId,
-          workspaceId: this.scope.workspaceId ?? input.metadata.workspaceId,
+          projectId: this.scope.projectId ?? input.metadata.projectId,
           orgId: this.scope.orgId ?? null,
         },
       });
@@ -403,7 +403,7 @@ export function buildSearchSessionMetadata(
       : null,
     filters: toSearchMetadataRecord(args.filters),
     selfQueryReasons: args.selfQueryReasons ?? [],
-    workspaceId: args.workspaceId,
+    projectId: args.projectId,
     runId: args.options.runId ?? null,
     useHyDE: args.options.useHyDE ?? false,
     useRerank: args.options.useRerank ?? false,

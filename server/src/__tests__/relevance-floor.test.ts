@@ -37,7 +37,7 @@ function chunk(id: string, overrides: Partial<SearchChunk> = {}): SearchChunk {
 
 const availability = (status: SearchAvailability["status"]): SearchAvailability => ({
   status, isPartial: status === "partial" || status === "pending", keywordOnly: false,
-  scope: { workspaceId: "ws-1", runId: null },
+  scope: { projectId: "ws-1", runId: null },
   coverage: { totalDocuments: 1, indexedDocuments: 1, pageIndexedDocuments: 0, searchableDocuments: 1, pageOnlyDocuments: 0,
     keywordOnlyDocuments: 0, failedDocuments: 0, inProgressDocuments: 0, totalPages: 1, searchablePages: 1, indexedChunkCount: 1, queuedRuns: 0, processingRuns: 0 },
   resultBreakdown: { indexedResultCount: 0, pageResultCount: 0 }, message: null,
@@ -55,7 +55,7 @@ async function run(args: {
   wholeCorpusFallback?: () => Promise<never[]>; limit?: number; candidateDepth?: number; resultOrder?: "relevance" | "prompt";
 }) {
   return executeSearchSessionRetrieval({
-    query: "q", userId: "user-1", session: session(), workspaceId: "ws-1", limit: args.limit ?? 10,
+    query: "q", userId: "user-1", session: session(), projectId: "ws-1", limit: args.limit ?? 10,
     options: { minScore: args.minScore, useRerank: false, useMmr: false, candidateDepth: args.candidateDepth, resultOrder: args.resultOrder },
     retrieveCandidateLists: async () => args.lists,
     buildAvailability: () => availability(args.status ?? "complete"),
@@ -285,7 +285,7 @@ describe("relevance floor across recursive search modes", () => {
     const { finalizeSearchSessionExecution } = await import("../search/session-execution.js");
     const wholeCorpusFallback = vi.fn(async () => [] as never[]);
     const response = await finalizeSearchSessionExecution({
-      query: "q", userId: "user-1", session: session(), options: {}, workspaceId: "ws-1",
+      query: "q", userId: "user-1", session: session(), options: {}, projectId: "ws-1",
       availability: availability("complete"), chunks: plan!.chunks, effectiveQuery: "q", filters: undefined,
       selfQueryReasons: [], wholeCorpusFallback,
       relevanceFloor: { minScore: DEFAULT_MIN_SCORE, dropped: plan!.relevanceFloorDropped },
@@ -323,7 +323,7 @@ describe("fallback failures retain spatial and query bounds",()=>{
   const error=kind==="timeout"?new SearchStatementTimeoutError(100):kind==="abort"?new SearchAbortedError():new GeoSearchError("Stale geometry",409);
   const persist=vi.fn();
   const journal={sessionId:"s",persist,usageEvents:()=>[],diagnostics:()=>({}),recordDiagnostic:vi.fn(),adoptUsage:vi.fn()};
-  await expect(finalizeSearchSessionExecution({query:"q",userId:"u",session:journal,options:{},workspaceId:"w",
+  await expect(finalizeSearchSessionExecution({query:"q",userId:"u",session:journal,options:{},projectId:"w",
    availability:availability("complete"),chunks:[],effectiveQuery:"q",selfQueryReasons:[],
    wholeCorpusFallback:async()=>{throw error;}} as never)).rejects.toBe(error);
   expect(persist).not.toHaveBeenCalled();

@@ -16,15 +16,15 @@ let lancedbDir: string | null = null;
 
 const MODEL = "provider/small";
 
-type Scope = { orgId?: string; workspaceId?: string; model?: string };
+type Scope = { orgId?: string; projectId?: string; model?: string };
 
-/** Opens (creating) the LanceDB table of one workspace and embedding space. */
-async function openWorkspaceTable(
+/** Opens (creating) the LanceDB table of one project and embedding space. */
+async function openProjectTable(
   records: Array<Record<string, unknown> & { vector: number[] }>,
   scope: Scope = {},
 ): Promise<{ table: lancedb.Table; close: () => void }> {
   const location = VectorNamespaceManager.getEmbeddingLocation(
-    lancedbDir!, scope.orgId ?? "org-a", scope.workspaceId ?? "ws-a", scope.model ?? MODEL, records[0]!.vector.length,
+    lancedbDir!, scope.orgId ?? "org-a", scope.projectId ?? "ws-a", scope.model ?? MODEL, records[0]!.vector.length,
   );
   const db = await lancedb.connect(location.uri);
   const table = await db.createTable(location.table, records);
@@ -35,12 +35,12 @@ async function createLanceDbTable(
   records: Array<{ id: string; documentId: string; text: string; vector: number[] }>,
   scope: Scope = {},
 ): Promise<void> {
-  (await openWorkspaceTable(records, scope)).close();
+  (await openProjectTable(records, scope)).close();
 }
 
 /** A search in org-a / ws-a with the default model unless overridden. */
-function search(args: Omit<Parameters<typeof lanceDbVectorSearch>[0], "orgId" | "workspaceId" | "embeddingModel"> & Partial<Pick<Parameters<typeof lanceDbVectorSearch>[0], "orgId" | "workspaceId" | "embeddingModel">>) {
-  return lanceDbVectorSearch({ orgId: "org-a", workspaceId: "ws-a", embeddingModel: MODEL, ...args });
+function search(args: Omit<Parameters<typeof lanceDbVectorSearch>[0], "orgId" | "projectId" | "embeddingModel"> & Partial<Pick<Parameters<typeof lanceDbVectorSearch>[0], "orgId" | "projectId" | "embeddingModel">>) {
+  return lanceDbVectorSearch({ orgId: "org-a", projectId: "ws-a", embeddingModel: MODEL, ...args });
 }
 
 describe("lanceDbVectorSearch tenant isolation", () => {
@@ -62,25 +62,25 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     }
   });
 
-  it("opens only the workspace's own database, never another workspace's or org's", async () => {
-    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "workspace a", vector: [1, 0] }]);
-    await createLanceDbTable([{ id: "chunk-sibling", documentId: "doc-a", text: "same org, other workspace", vector: [1, 0] }], { workspaceId: "ws-b" });
-    await createLanceDbTable([{ id: "chunk-other-org", documentId: "doc-a", text: "other org, same workspace id", vector: [1, 0] }], { orgId: "org-b" });
+  it("opens only the project's own database, never another project's or org's", async () => {
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "project a", vector: [1, 0] }]);
+    await createLanceDbTable([{ id: "chunk-sibling", documentId: "doc-a", text: "same org, other project", vector: [1, 0] }], { projectId: "ws-b" });
+    await createLanceDbTable([{ id: "chunk-other-org", documentId: "doc-a", text: "other org, same project id", vector: [1, 0] }], { orgId: "org-b" });
 
-    // Even an unscoped search (no document filter) sees only this workspace's rows.
+    // Even an unscoped search (no document filter) sees only this project's rows.
     expect((await search({ queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
     expect((await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
-    expect((await search({ workspaceId: "ws-b", queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-sibling"]);
+    expect((await search({ projectId: "ws-b", queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-sibling"]);
   });
 
-  it("never widens explicit empty eligibility to the workspace", async () => {
+  it("never widens explicit empty eligibility to the project", async () => {
     await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "private", vector: [1, 0] }]);
     expect(await search({ queryVector: [1, 0], limit: 10, documentIds: [] })).toEqual([]);
     expect((await search({ queryVector: [1, 0], limit: 10 })).map(hit => hit.id)).toEqual(["chunk-a"]);
     expect(await search({ queryVector: [1, 0], limit: 10, documentIds: [] })).toEqual([]);
   });
 
-  it("searches workspace/model/dimension databases without mixing vector spaces", async () => {
+  it("searches project/model/dimension databases without mixing vector spaces", async () => {
     for (const [model, dims, id] of [
       [MODEL, 2, "wanted"],
       ["provider/other", 2, "other-model"],
@@ -94,7 +94,7 @@ describe("lanceDbVectorSearch tenant isolation", () => {
 
   it("keeps search results on tables the worker has optimized and vector-indexed", async () => {
     const vector = (seed: number) => Array.from({ length: 8 }, (_, i) => Math.sin(seed * 7 + i));
-    const { table, close } = await openWorkspaceTable(Array.from({ length: 40 }, (_, i) => ({
+    const { table, close } = await openProjectTable(Array.from({ length: 40 }, (_, i) => ({
       id: `chunk-${i}`, documentId: `doc-${i % 4}`, text: `chunk ${i}`, vector: vector(i),
     })));
     // Mirrors worker/src/stages/lancedb-maintenance.ts: optimize, then an L2 IVF_HNSW_SQ index.
@@ -111,7 +111,7 @@ describe("lanceDbVectorSearch tenant isolation", () => {
 
   it("supports opt-in refinement for indexed unscoped/scoped search and the fresh tail", async () => {
     process.env.LANCEDB_REFINE_FACTOR = "16";
-    const { table, close } = await openWorkspaceTable(Array.from({ length: 256 }, (_, i) => ({
+    const { table, close } = await openProjectTable(Array.from({ length: 256 }, (_, i) => ({
       id: `refine-${i}`, documentId: "doc-a", vector: [Math.cos(i), Math.sin(i), 0, 0, 0, 0, 0, 0],
     })));
     try {
@@ -140,20 +140,20 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     expect(second).toEqual(first);
   });
 
-  it("finds a new workspace's first rows soon after an earlier search missed its table", async () => {
+  it("finds a new project's first rows soon after an earlier search missed its table", async () => {
     process.env.LANCEDB_MISSING_TABLE_TTL_SECONDS = "0";
     expect(await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).toEqual([]);
     await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "first upload", vector: [1, 0] }]);
     expect((await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
   });
 
-  it("keeps a bounded number of workspace tables open and reopens evicted ones", async () => {
+  it("keeps a bounded number of project tables open and reopens evicted ones", async () => {
     process.env.LANCEDB_MAX_OPEN_TABLES = "1";
-    for (const workspaceId of ["ws-a", "ws-b"]) {
-      await createLanceDbTable([{ id: `chunk-${workspaceId}`, documentId: "doc", text: workspaceId, vector: [1, 0] }], { workspaceId });
+    for (const projectId of ["ws-a", "ws-b"]) {
+      await createLanceDbTable([{ id: `chunk-${projectId}`, documentId: "doc", text: projectId, vector: [1, 0] }], { projectId });
     }
-    for (const workspaceId of ["ws-a", "ws-b", "ws-a"]) {
-      expect((await search({ workspaceId, queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual([`chunk-${workspaceId}`]);
+    for (const projectId of ["ws-a", "ws-b", "ws-a"]) {
+      expect((await search({ projectId, queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual([`chunk-${projectId}`]);
     }
   });
 
@@ -182,7 +182,7 @@ describe("lanceDbVectorSearch tenant isolation", () => {
       id: `chunk-${i}`, documentId: `doc-${i % 200}`, vector: Array.from({ length: 64 }, random),
     }));
     const queryVector = Array.from({ length: 64 }, random);
-    const { table, close } = await openWorkspaceTable(records);
+    const { table, close } = await openProjectTable(records);
     try {
       await table.createIndex("vector", { config: lancedb.Index.hnswSq({ distanceType: "l2", numPartitions: 1 }) });
       // The previous adapter requested 1,000 rows. An all-document scope must
@@ -209,11 +209,11 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     expect(await search({ documentIds: ["missing' OR TRUE --"], queryVector: [1, 0], limit: 3 })).toEqual([]);
   });
 
-  it("fails closed when the org or workspace namespace is missing", async () => {
+  it("fails closed when the org or project namespace is missing", async () => {
     await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "tenant a", vector: [1, 0] }]);
 
     await expect(search({ orgId: " ", queryVector: [1, 0], limit: 10 })).resolves.toEqual([]);
-    await expect(search({ workspaceId: " ", queryVector: [1, 0], limit: 10 })).resolves.toEqual([]);
+    await expect(search({ projectId: " ", queryVector: [1, 0], limit: 10 })).resolves.toEqual([]);
   });
 });
 

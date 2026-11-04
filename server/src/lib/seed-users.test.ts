@@ -47,8 +47,8 @@ describe("automatic seed users", () => {
     expect(statements.filter(statement => statement.includes('insert into "user"'))).toHaveLength(2);
     expect(statements.filter(statement => statement.includes('insert into "account"'))).toHaveLength(2);
     expect(statements.filter(statement => statement.includes('"emailVerified" = true'))).toHaveLength(2);
-    expect(statements.some(statement => statement.includes("insert into workspace_members"))).toBe(true);
-    expect(statements.some(statement => statement.includes("insert into workspace_runs"))).toBe(false);
+    expect(statements.some(statement => statement.includes("insert into project_members"))).toBe(true);
+    expect(statements.some(statement => statement.includes("insert into project_runs"))).toBe(false);
     expect(statements[0]).toContain("pg_advisory_xact_lock");
     expect(database.end).toHaveBeenCalledOnce();
   });
@@ -75,6 +75,6 @@ describe("automatic seed users", () => {
     await seedNonProductionUsers({ includeFixtures: true });
     const statements = database.query.mock.calls.map(([strings]) => strings.join("?"));
     expect(statements.some(statement => statement.includes('insert into "user"'))).toBe(true);
-    expect(statements.some(statement => statement.includes("insert into workspace_runs"))).toBe(true);
+    expect(statements.some(statement => statement.includes("insert into project_runs"))).toBe(true);
   });
 });

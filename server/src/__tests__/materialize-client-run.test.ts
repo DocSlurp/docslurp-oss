@@ -27,9 +27,9 @@ vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: spend.enf
 const { defaultMaterializeDeps } = await import("../search/deferred/materialize-client.js");
 
 describe("materialize run rows", () => {
-  it("inherit the source document's run pipeline (then the workspace's), never an empty default", async () => {
+  it("inherit the source document's run pipeline (then the project's), never an empty default", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
     const { text, values } = mocks.calls[0]!;
     expect(text).toMatch(/join documents d on d\.id = \?/);
     expect(text).toMatch(/r\.pipeline.*w\.pipeline/s);
@@ -41,12 +41,12 @@ describe("materialize run rows", () => {
     mocks.sourcePipeline = { quality: "good", documentExtraction: { options: { dolphin: { mode: "page", repoPath: "/tmp/attacker" }, liteparse: {} } } };
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
+      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
     } finally {
       mocks.sourcePipeline = null;
       errors.mockRestore();
     }
-    const insert = mocks.calls.find((call) => call.text.includes("insert into workspace_runs"))!;
+    const insert = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     const stored = insert.values.find((value) => typeof value === "object" && value !== null && "quality" in (value as object));
     expect(stored).toEqual({ quality: "good", documentExtraction: { options: { dolphin: { mode: "page" } } } });
     expect(JSON.stringify(insert.values)).not.toContain("/tmp/attacker");
@@ -54,8 +54,8 @@ describe("materialize run rows", () => {
 
   it("start `processing` with a confirmed workflow start so recovery and sweepers never pick them up", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
-    const { text } = mocks.calls.find((call) => call.text.includes("insert into workspace_runs"))!;
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    const { text } = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     expect(text).toContain("'processing'");
     expect(text).toContain("workflow_started_at");
     expect(text).not.toContain("'queued'");
@@ -63,8 +63,8 @@ describe("materialize run rows", () => {
 
   it("start with a lease so stale-lease alerts only fire when the worker stops renewing it", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", workspaceId: "w", documentId: "d1", documents: 1, pages: 3 });
-    const insert = mocks.calls.find((call) => call.text.includes("insert into workspace_runs"))!;
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    const insert = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     expect(insert.text).toMatch(/lease_expires_at[\s\S]*now\(\) \+ interval '15 minutes'/);
     expect(insert.text).not.toMatch(/interval '[1-5] minutes?'/);
   });
@@ -80,7 +80,7 @@ describe("materialize run rows", () => {
 describe("materialize spend gate", () => {
   it("checks the live monthly caps before inserting runs, not only the cached budget_paused flag", async () => {
     spend.canSpend.mockClear();
-    spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new BlockedError("workspace_budget_paused"));
+    spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new BlockedError("project_budget_paused"));
     await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).resolves.toBe(false);
     expect(spend.enforceLiveBudgetCaps).toHaveBeenCalledWith("ws-1", "org-1");
     expect(spend.canSpend).not.toHaveBeenCalled();
@@ -94,7 +94,7 @@ describe("materialize spend gate", () => {
   });
 
   it("fails closed on an unexpected error", async () => {
-    spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new Error("Workspace not found"));
-    await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).rejects.toThrow("Workspace not found");
+    spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new Error("Project not found"));
+    await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).rejects.toThrow("Project not found");
   });
 });

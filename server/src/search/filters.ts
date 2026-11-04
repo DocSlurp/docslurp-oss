@@ -10,7 +10,7 @@ export interface SearchFilters {
   documentId?: string;
   documentIds?: string[];
   runId?: string;
-  workspaceId?: string;
+  projectId?: string;
   /** Case-insensitive literal substring of the filename; `%`, `_` and backslash are not wildcards. */
   filenameContains?: string;
   /** Exact, case-sensitive filename match. */
@@ -33,7 +33,7 @@ export function parseFilters(query: Record<string, string>): SearchFilters {
 
   if (query.documentId) filters.documentId = query.documentId;
   if (query.runId) filters.runId = query.runId;
-  if (query.workspaceId) filters.workspaceId = query.workspaceId;
+  if (query.projectId) filters.projectId = query.projectId;
   if (query.filenameContains) filters.filenameContains = query.filenameContains;
   if (query.language) filters.language = query.language;
   if (query.mimeTypes) {

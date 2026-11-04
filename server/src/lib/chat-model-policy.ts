@@ -11,12 +11,12 @@ import {
   type ChatAgentLimitsInput,
 } from "@docslurp/shared";
 import {
-  DEFAULT_WORKSPACE_CHAT_MODEL,
-  isWorkspaceChatModelId,
+  DEFAULT_PROJECT_CHAT_MODEL,
+  isProjectChatModelId,
   normalizeChatModelRef,
-} from "@docslurp/shared/workspace-chat-models";
+} from "@docslurp/shared/project-chat-models";
 import { isPlatformAdminActor, type RequestActor } from "./request-actor.js";
-import { getWorkspaceAccess } from "../services/organizations.js";
+import { getProjectAccess } from "../services/organizations.js";
 
 /** An explicit chat `model` the caller may not use. Answered as HTTP 400 `model_not_allowed`. */
 export class ChatModelNotAllowedError extends Error {
@@ -67,7 +67,7 @@ export function configuredChatEvalModels(raw = process.env.DOCSLURP_CHAT_EVAL_MO
   return loaded.models;
 }
 
-/** DOCSLURP_CHAT_EVAL_ORG_IDS: organizations whose workspaces may run eval models and the admin limit range. */
+/** DOCSLURP_CHAT_EVAL_ORG_IDS: organizations whose projects may run eval models and the admin limit range. */
 export function configuredChatEvalOrgIds(raw = process.env.DOCSLURP_CHAT_EVAL_ORG_IDS ?? ""): ReadonlySet<string> {
   return new Set(raw.split(",").map(id => id.trim()).filter(Boolean));
 }
@@ -75,28 +75,28 @@ export function configuredChatEvalOrgIds(raw = process.env.DOCSLURP_CHAT_EVAL_OR
 /**
  * Eval access for one chat turn: eval models and the full agent limit range,
  * and nothing else. Platform admins have it everywhere. Otherwise the turn's
- * workspace must be owned by an org in DOCSLURP_CHAT_EVAL_ORG_IDS (the owning
+ * project must be owned by an org in DOCSLURP_CHAT_EVAL_ORG_IDS (the owning
  * org, not the caller's memberships), and an API key must be a server key.
  */
-export async function chatEvalAccess(actor: RequestActor | undefined, workspaceId: string | undefined): Promise<boolean> {
+export async function chatEvalAccess(actor: RequestActor | undefined, projectId: string | undefined): Promise<boolean> {
   if (!actor) return false;
   if (await isPlatformAdminActor(actor)) return true;
   const orgIds = configuredChatEvalOrgIds();
-  if (!orgIds.size || !workspaceId) return false;
+  if (!orgIds.size || !projectId) return false;
   if (actor.type === "apiKey" && actor.apiKey.keyType !== "server") return false;
-  // Access row only (owning org, membership, key allowlist): no workspace stats on the chat hot path.
-  const access = await getWorkspaceAccess(workspaceId, actor.userId);
+  // Access row only (owning org, membership, key allowlist): no project stats on the chat hot path.
+  const access = await getProjectAccess(projectId, actor.userId);
   return Boolean(access && orgIds.has(access.orgId));
 }
 
 /**
  * True only when the turn asks for something eval access decides: an explicit
  * model outside the catalog, or an agent limit above its default. Default and
- * catalog requests skip the admin and workspace lookups entirely.
+ * catalog requests skip the admin and project lookups entirely.
  */
 export function chatTurnNeedsEvalAccess(model: string | null | undefined, agent?: ChatAgentLimitsInput): boolean {
   const requested = model ? normalizeChatModelRef(model) : undefined;
-  if (requested && !isWorkspaceChatModelId(requested)) return true;
+  if (requested && !isProjectChatModelId(requested)) return true;
   return (Object.keys(CHAT_AGENT_LIMIT_DEFAULTS) as ChatAgentLimitName[])
     .some(name => typeof agent?.[name] === "number" && Math.trunc(agent[name]!) > CHAT_AGENT_LIMIT_DEFAULTS[name]);
 }
@@ -111,8 +111,8 @@ export type ChatModelSource = "default" | "catalog" | "eval";
  */
 export function resolveChatModelRequest(args: { requested: string | null | undefined; isAdmin: boolean; evalModels?: ReadonlySet<string> }): { model: string; source: ChatModelSource } {
   const requested = args.requested ? normalizeChatModelRef(args.requested) : undefined;
-  if (!requested) return { model: DEFAULT_WORKSPACE_CHAT_MODEL, source: "default" };
-  if (isWorkspaceChatModelId(requested)) return { model: requested, source: "catalog" };
+  if (!requested) return { model: DEFAULT_PROJECT_CHAT_MODEL, source: "default" };
+  if (isProjectChatModelId(requested)) return { model: requested, source: "catalog" };
   const evalModels = args.evalModels ?? configuredChatEvalModels();
   if (args.isAdmin && evalModels.has(requested) && !isProhibitedRoutingModelId(requested)) return { model: requested, source: "eval" };
   throw new ChatModelNotAllowedError();
@@ -120,7 +120,7 @@ export function resolveChatModelRequest(args: { requested: string | null | undef
 
 /**
  * Per-request agent budgets. Callers with eval access (platform admins or an
- * eval org's workspace) may use the full schema range; everyone else may only lower a limit, and a raised value is clamped to the default
+ * eval org's project) may use the full schema range; everyone else may only lower a limit, and a raised value is clamped to the default
  * and listed in `clamped`.
  */
 export function resolveChatAgentLimits(requested: ChatAgentLimitsInput | undefined, isAdmin: boolean): ChatAgentLimits {
@@ -139,11 +139,11 @@ export function resolveChatAgentLimits(requested: ChatAgentLimitsInput | undefin
   return { maxSteps, baseSteps, maxToolCalls: pick("maxToolCalls"), searchConcurrency: pick("searchConcurrency"), clamped };
 }
 
-/** True when `model` would be refused for this actor and workspace; routes answer 400 before streaming. */
-export async function chatModelRefused(actor: RequestActor | undefined, model: string | null | undefined, workspaceId?: string): Promise<boolean> {
+/** True when `model` would be refused for this actor and project; routes answer 400 before streaming. */
+export async function chatModelRefused(actor: RequestActor | undefined, model: string | null | undefined, projectId?: string): Promise<boolean> {
   if (!chatTurnNeedsEvalAccess(model)) return false;
   try {
-    resolveChatModelRequest({ requested: model, isAdmin: await chatEvalAccess(actor, workspaceId) });
+    resolveChatModelRequest({ requested: model, isAdmin: await chatEvalAccess(actor, projectId) });
     return false;
   } catch (error) {
     if (error instanceof ChatModelNotAllowedError) return true;

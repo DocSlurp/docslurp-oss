@@ -35,7 +35,7 @@ import type { EvidenceRetrievalResult } from "./retrieval-adapters.js";
 import { flattenEvidenceResults } from "./retrieval-adapters.js";
 import { stopWords, tokenize } from "./rerank.js";
 
-/** Built-in floor, in the rescaled 0..1 relevance space. Overridden by SEARCH_MIN_SCORE, the workspace default or the request. */
+/** Built-in floor, in the rescaled 0..1 relevance space. Overridden by SEARCH_MIN_SCORE, the project default or the request. */
 export const DEFAULT_MIN_SCORE = 0.1;
 
 /** A lexical hit only counts when more than this share of the query's content terms appear in the chunk (a strict majority). */

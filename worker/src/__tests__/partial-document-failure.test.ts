@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
-import type { Document, StageState, WorkspaceRun, WorkspaceRunEvent } from "../models.js";
+import type { Document, StageState, ProjectRun, ProjectRunEvent } from "../models.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { CheckpointStore, Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { createStageExecution, type StageExecutionStore } from "../pipeline/stage-execution.js";
@@ -21,25 +21,25 @@ function doc(id: string): Document {
 
 /** Persists document stage checkpoints between stage activities, like document_run_stage_states. */
 class MemoryStore implements StageExecutionStore {
-  run: WorkspaceRun;
+  run: ProjectRun;
   documents: Document[];
   docStages = new Map<string, StageState>();
   runStatus = "processing";
   completedWith: WorkflowState | null = null;
   failures: Array<{ stage: string; message: string }> = [];
   documentFailures: Array<{ documentId: string; stageName: string; message: string }> = [];
-  events: WorkspaceRunEvent[] = [];
-  documentEvents: WorkspaceRunEvent[] = [];
+  events: ProjectRunEvent[] = [];
+  documentEvents: ProjectRunEvent[] = [];
   readonly pageTasks = { completed: async () => new Map() } as unknown as StageExecutionStore["pageTasks"];
 
   constructor(ids: string[]) {
     this.documents = ids.map(doc);
     this.run = {
-      id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload",
+      id: "run-1", orgId: "org-1", userId: "user-1", projectId: "ws-1", kind: "bulk-upload",
       status: "processing", stage: "queued", totalDocuments: ids.length, processedDocuments: 0,
       pagesTotal: ids.length * 2, pagesProcessed: 0, spentCents: 0, pipeline: defaultPipelineFeatures,
       error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-    } as WorkspaceRun;
+    } as ProjectRun;
   }
 
   private checkpoints: CheckpointStore = {
@@ -56,7 +56,7 @@ class MemoryStore implements StageExecutionStore {
     startRunStage: async () => undefined,
     completeRunStage: async () => undefined,
     failRunStage: async () => undefined,
-    appendEvent: async (event: WorkspaceRunEvent) => { this.documentEvents.push(event); },
+    appendEvent: async (event: ProjectRunEvent) => { this.documentEvents.push(event); },
     setPageStageComplete: async () => undefined,
     getCompletedPages: async () => new Set<number>(),
   } as unknown as CheckpointStore;
@@ -73,7 +73,7 @@ class MemoryStore implements StageExecutionStore {
   async finishShard() {}
   async failRunStage() { return 1; }
   async updateProgress() {}
-  async appendEvent(event: WorkspaceRunEvent) { this.events.push(event); }
+  async appendEvent(event: ProjectRunEvent) { this.events.push(event); }
   async completeRun(state: WorkflowState) { this.runStatus = "completed"; this.completedWith = state; state.refreshStats(); }
   async failRun(_runId: string, stage: string, message: string) { this.runStatus = "failed"; this.failures.push({ stage, message }); }
   async currentRunStage() { return null; }
@@ -169,7 +169,7 @@ describe("a failing Document does not stop the Run", () => {
   });
 });
 
-function failedDocumentEvents(store: MemoryStore): WorkspaceRunEvent[] {
+function failedDocumentEvents(store: MemoryStore): ProjectRunEvent[] {
   return store.documentEvents.filter((event) => event.documentId && event.status === "failed");
 }
 

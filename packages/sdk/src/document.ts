@@ -1,9 +1,9 @@
-import type { DocumentRecord, JsonObject, WorkspaceRun } from "./index.js";
+import type { DocumentRecord, JsonObject, ProjectRun } from "./index.js";
 
 export type ViewerDocumentRecord = DocumentRecord & {
   userId: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   runId: string | null;
   mimeType: string;
   sourceKey: string;
@@ -11,7 +11,7 @@ export type ViewerDocumentRecord = DocumentRecord & {
   pageCount: number;
   sourceSha256?: string | null;
   dedupedFromDocumentId?: string | null;
-  dedupScope?: "workspace" | "org" | null;
+  dedupScope?: "project" | "org" | null;
   tags: string[];
   versionNumber?: number;
   previousVersionId?: string | null;
@@ -58,7 +58,7 @@ export type DocumentViewerPayload = {
   artifacts: DocumentArtifactEntry[];
   source: DocumentSourceEntry;
   pageStats: { pageCount: number; chunkCount: number; pageTextCount: number };
-  run: { id: string; workspaceId: string; stage: string; status: WorkspaceRun["status"]; updatedAt: string } | null;
+  run: { id: string; projectId: string; stage: string; status: ProjectRun["status"]; updatedAt: string } | null;
   usage: {
     document: { inputTokens: number; outputTokens: number; costCents: number; events: number };
     run: { inputTokens: number; outputTokens: number; costCents: number; computeEstimated: boolean; totalDocuments: number; events: number } | null;

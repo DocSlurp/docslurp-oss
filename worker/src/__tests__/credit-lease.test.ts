@@ -49,19 +49,19 @@ let sql: Sql;
 async function seedOrg(client: Sql, orgId: string, credits: number) {
   await client`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
     values (${orgId}, ${orgId}, ${orgId}, 'u1', ${credits})`;
-  await client`insert into workspaces (id, org_id, user_id, name) values (${`ws-${orgId}`}, ${orgId}, 'u1', 'W')`;
+  await client`insert into projects (id, org_id, user_id, name) values (${`ws-${orgId}`}, ${orgId}, 'u1', 'W')`;
 }
 
 async function seedRuns(client: Sql, orgId: string, count: number, prefix = orgId): Promise<string[]> {
   const ids = Array.from({ length: count }, (_, index) => `${prefix}-run-${index}`);
   for (const id of ids) {
-    await client`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    await client`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
       values (${id}, ${orgId}, 'u1', ${`ws-${orgId}`}, 'bulk-upload', 'processing', 'vision-extract', '{}')`;
   }
   return ids;
 }
 
-const runOf = (orgId: string, id: string) => ({ id, orgId, workspaceId: `ws-${orgId}`, userId: "u1" });
+const runOf = (orgId: string, id: string) => ({ id, orgId, projectId: `ws-${orgId}`, userId: "u1" });
 
 /** A checkpoint: debit and lease consumption in one transaction, as Store does. */
 async function spend(client: Sql, orgId: string, runId: string, credits: number) {
@@ -113,14 +113,14 @@ beforeEach(async () => {
   // Lease mechanics without the chat reserve; "chat reserve" below covers it.
   setChatReserveConfig(noReserve);
   vi.restoreAllMocks();
-  await sql`delete from workspace_run_events`;
+  await sql`delete from project_run_events`;
   await sql`delete from page_work_tasks`;
   await sql`delete from usage_events`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
   await sql`delete from credit_leases`;
   await sql`delete from credit_debits_pending`;
-  await sql`delete from workspaces`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
 });
 
@@ -223,9 +223,9 @@ describe("grant_credit_lease", () => {
     await seedOrg(sql, "a", 100);
     await seedOrg(sql, "b", 100);
     const [runA] = await seedRuns(sql, "a", 1);
-    await expect(grantRunCreditLease(sql, { id: runA!, orgId: "b", workspaceId: "ws-b" }, config))
+    await expect(grantRunCreditLease(sql, { id: runA!, orgId: "b", projectId: "ws-b" }, config))
       .rejects.toThrow(/not in org/);
-    await expect(grantRunCreditLease(sql, { id: runA!, orgId: "a", workspaceId: "ws-b" }, config))
+    await expect(grantRunCreditLease(sql, { id: runA!, orgId: "a", projectId: "ws-b" }, config))
       .rejects.toThrow(/not in org/);
     await grantRunCreditLease(sql, runOf("a", runA!), config);
     // Consuming with the wrong org touches nothing.
@@ -301,14 +301,14 @@ describe("settlement, expiry, budgets and exemptions", () => {
     for (const runId of [done!, paused!, cancelled!]) await grantRunCreditLease(sql, runOf("o", runId), config);
     await spend(sql, "o", done!, 4);
     expect(await outstanding(sql, "o")).toBe(26);
-    await sql`update workspace_runs set status = 'completed' where id = ${done!}`;
-    await sql`update workspace_runs set control_state = 'paused' where id = ${paused!}`;
-    await sql`update workspace_runs set control_state = 'cancel_requested' where id = ${cancelled!}`;
+    await sql`update project_runs set status = 'completed' where id = ${done!}`;
+    await sql`update project_runs set control_state = 'paused' where id = ${paused!}`;
+    await sql`update project_runs set control_state = 'cancel_requested' where id = ${cancelled!}`;
     expect(await outstanding(sql, "o")).toBe(0);
     const rows = await sql<{ status: string }[]>`select status from credit_leases order by holder_id`;
     expect(rows.map((row) => row.status)).toEqual(["released", "released", "released"]);
     // Re-granting after a resume starts a fresh lease from what was consumed.
-    await sql`update workspace_runs set control_state = null where id = ${paused!}`;
+    await sql`update project_runs set control_state = null where id = ${paused!}`;
     expect((await grantRunCreditLease(sql, runOf("o", paused!), config)).remaining).toBe(10);
     // An inactive run gets nothing.
     expect((await grantRunCreditLease(sql, runOf("o", done!), config)).blockReason).toBe("run_inactive");
@@ -338,16 +338,16 @@ describe("settlement, expiry, budgets and exemptions", () => {
     expect(await leasesWithinAvailable(sql, "o")).toBe(true);
   });
 
-  it("refuses and revokes leases when the workspace or org budget is paused", async () => {
+  it("refuses and revokes leases when the project or org budget is paused", async () => {
     await seedOrg(sql, "o", 100);
     const [runId] = await seedRuns(sql, "o", 1);
     await grantRunCreditLease(sql, runOf("o", runId!), config);
-    await sql`update workspaces set budget_paused = true where id = 'ws-o'`;
+    await sql`update projects set budget_paused = true where id = 'ws-o'`;
     // The trigger revokes the scope's live leases at once.
     expect(await outstanding(sql, "o")).toBe(0);
     expect(await consumeRunCreditLease(sql, { id: runId!, orgId: "o" }, 0)).toMatchObject({ live: false });
-    expect(await grantRunCreditLease(sql, runOf("o", runId!), config)).toMatchObject({ remaining: 0, blockReason: "workspace_budget_paused" });
-    await sql`update workspaces set budget_paused = false where id = 'ws-o'`;
+    expect(await grantRunCreditLease(sql, runOf("o", runId!), config)).toMatchObject({ remaining: 0, blockReason: "project_budget_paused" });
+    await sql`update projects set budget_paused = false where id = 'ws-o'`;
     await sql`update organizations set budget_paused = true where id = 'o'`;
     expect(await grantRunCreditLease(sql, runOf("o", runId!), config)).toMatchObject({ remaining: 0, blockReason: "org_budget_paused" });
     await sql`update organizations set budget_paused = false where id = 'o'`;
@@ -372,7 +372,7 @@ describe("settlement, expiry, budgets and exemptions", () => {
 
 describe("worker checkpoints", () => {
   async function seedPage(runId: string, orgId: string, pageNumber: number) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
       values (${`doc-${runId}`}, ${orgId}, 'u1', ${`ws-${orgId}`}, ${runId}, 'a.pdf', 'application/pdf', 'raw/a', 'processing')
       on conflict do nothing`;
     await sql`insert into page_work_tasks (run_id, document_id, page_number) values (${runId}, ${`doc-${runId}`}, ${pageNumber})`;
@@ -395,7 +395,7 @@ describe("worker checkpoints", () => {
 
   const control = async (runId: string) =>
     (await sql<{ control_state: string | null; pause_reason: string | null }[]>`
-      select control_state, pause_reason from workspace_runs where id = ${runId}`)[0]!;
+      select control_state, pause_reason from project_runs where id = ${runId}`)[0]!;
 
   it("consumes the lease in page checkpoints, renews in the background at 80%, and skips the cadence counters", async () => {
     await seedOrg(sql, "o", 1_000);
@@ -415,7 +415,7 @@ describe("worker checkpoints", () => {
     [lease] = await sql<{ granted: number; consumed: number }[]>`select granted, consumed from credit_leases where holder_id = ${runId!}`;
     expect(Number(lease!.granted) - Number(lease!.consumed)).toBeGreaterThan(2);
     const [run] = await sql<{ pages: number; credits: number; cost: number }[]>`
-      select spend_unchecked_pages as pages, spend_unchecked_credits as credits, spent_cents as cost from workspace_runs where id = ${runId!}`;
+      select spend_unchecked_pages as pages, spend_unchecked_credits as credits, spent_cents as cost from project_runs where id = ${runId!}`;
     expect(run).toMatchObject({ pages: 0 });
     expect(Number(run!.credits)).toBe(0);
     expect(Number(run!.cost)).toBe(8);
@@ -438,7 +438,7 @@ describe("worker checkpoints", () => {
     await vi.waitFor(async () => expect((await control(runId!)).control_state).toBe("paused"));
     expect((await control(runId!)).pause_reason).toBe("credit_exhausted");
     const events = await sql<{ payload: { spendPause: { reason: string } } }[]>`
-      select payload from workspace_run_events where run_id = ${runId!}`;
+      select payload from project_run_events where run_id = ${runId!}`;
     expect(events.map((event) => event.payload.spendPause.reason)).toEqual(["credit_exhausted"]);
     // Paused: the lease is settled.
     expect(await outstanding(sql, "o")).toBe(0);
@@ -452,7 +452,7 @@ describe("worker checkpoints", () => {
     const [runId] = await seedRuns(sql, "o", 1);
     const leases = new RunCreditLeases(sql);
     // A scope the grant refuses (raises): the fallback reads org_spend_status and pauses.
-    const result = await leases.afterConsume({ ...runOf("o", runId!), workspaceId: "ws-other" }, null, "checkpoint-interval");
+    const result = await leases.afterConsume({ ...runOf("o", runId!), projectId: "ws-other" }, null, "checkpoint-interval");
     expect(result).toMatchObject({ paused: true, reason: "plan_not_entitled" });
     expect(leases.grants).toBe(1);
   });
@@ -477,7 +477,7 @@ describe("worker checkpoints", () => {
     expect(leases.grants).toBe(0);
     expect(await sql`select 1 from credit_leases`).toHaveLength(0);
     const [run] = await sql<{ pages: number; credits: number }[]>`
-      select spend_unchecked_pages as pages, spend_unchecked_credits as credits from workspace_runs where id = ${runId!}`;
+      select spend_unchecked_pages as pages, spend_unchecked_credits as credits from project_runs where id = ${runId!}`;
     expect(run!.pages).toBe(1);
     expect(Number(run!.credits)).toBe(2);
   });
@@ -504,8 +504,8 @@ describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
   beforeEach(async () => {
     await pg`delete from credit_leases`;
     await pg`delete from credit_debits_pending where org_id like 'cc-%'`;
-    await pg`delete from workspace_runs where org_id like 'cc-%'`;
-    await pg`delete from workspaces where org_id like 'cc-%'`;
+    await pg`delete from project_runs where org_id like 'cc-%'`;
+    await pg`delete from projects where org_id like 'cc-%'`;
     await pg`delete from organizations where id like 'cc-%'`;
   });
 
@@ -593,7 +593,7 @@ describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
     const listener = await pg.listen("org_spend_changed", (payload) => payloads.push(payload));
     try {
       await grantRunCreditLease(pg, runOf("cc-n", runId!), config);
-      await pg`update workspace_runs set control_state = 'paused' where id = ${runId!}`;
+      await pg`update project_runs set control_state = 'paused' where id = ${runId!}`;
       await pg`select grant_org_credits('cc-n', 'topup', 'cc-n-topup', 10)`;
       await vi.waitFor(() => expect(payloads.length).toBeGreaterThanOrEqual(2));
       const reasons = payloads.map((payload) => JSON.parse(payload) as { orgId: string; reason: string });

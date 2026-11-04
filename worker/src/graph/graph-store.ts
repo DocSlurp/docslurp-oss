@@ -19,15 +19,15 @@ function json(client: Client, value: unknown) {
   return client.json(JSON.parse(JSON.stringify(value ?? {})) as JSONValue);
 }
 
-/** Serializes graph writes per workspace so batch upserts cannot deadlock. */
-export async function lockWorkspaceGraph(client: Client, workspaceId: string): Promise<void> {
-  await client`select pg_advisory_xact_lock(hashtextextended(${`kg:${workspaceId}`}, 0))`;
+/** Serializes graph writes per project so batch upserts cannot deadlock. */
+export async function lockProjectGraph(client: Client, projectId: string): Promise<void> {
+  await client`select pg_advisory_xact_lock(hashtextextended(${`kg:${projectId}`}, 0))`;
 }
 
 export interface ReplaceDocumentGraphInput {
-  workspaceId: string;
+  projectId: string;
   userId: string;
-  /** Run attributed as the latest writer; null for workspace rebuild jobs. */
+  /** Run attributed as the latest writer; null for project rebuild jobs. */
   runId: string | null;
   documentId: string;
   configHash: string;
@@ -43,9 +43,9 @@ export function graphStateHash(configHash: string, graph: Pick<DocumentGraph, "l
 }
 
 /**
- * Replaces one document's contribution to the workspace graph: its chunk
+ * Replaces one document's contribution to the project graph: its chunk
  * mentions and edge evidence are swapped for the new extraction, nodes and
- * edges upsert on their workspace keys, and every touched node/edge is
+ * edges upsert on their project keys, and every touched node/edge is
  * re-derived. Running it twice for the same document is a no-op, so pipeline
  * runs, retries and rebuild jobs can all write progressively.
  */
@@ -55,7 +55,7 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
 }> {
   return await sql.begin(async (tx) => {
     const client = tx as unknown as Client;
-    await lockWorkspaceGraph(client, input.workspaceId);
+    await lockProjectGraph(client, input.projectId);
 
     const [document] = await client<{ run_id: string }[]>`
       select run_id from documents where id = ${input.documentId}
@@ -92,7 +92,7 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
         ? [{
             edge_id: id,
             document_id: input.documentId,
-            workspace_id: input.workspaceId,
+            project_id: input.projectId,
             weight: edge.weight,
             confidence: edge.confidence,
           }]
@@ -100,7 +100,7 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
     });
     for (const batch of batches(evidence)) {
       await client`
-        insert into kg_edge_evidence ${client(batch, "edge_id", "document_id", "workspace_id", "weight", "confidence")}
+        insert into kg_edge_evidence ${client(batch, "edge_id", "document_id", "project_id", "weight", "confidence")}
         on conflict (edge_id, document_id) do update set weight = excluded.weight, confidence = excluded.confidence
       `;
     }
@@ -112,7 +112,7 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
       return nodeId && node
         ? [{
             chunk_id: mention.chunkId,
-            workspace_id: input.workspaceId,
+            project_id: input.projectId,
             run_id: document.run_id,
             user_id: input.userId,
             node_id: nodeId,
@@ -128,7 +128,7 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
       await client`
         insert into chunk_entities ${client(
           batch,
-          "chunk_id", "workspace_id", "run_id", "user_id", "node_id",
+          "chunk_id", "project_id", "run_id", "user_id", "node_id",
           "entity_name", "entity_type", "mention_count", "confidence", "metadata",
         )}
         on conflict (chunk_id, node_id) do update set
@@ -146,16 +146,16 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
     const graph = input.graph;
     await client`
       insert into kg_document_state (
-        document_id, workspace_id, config_hash, source, windows, entities, relationships,
+        document_id, project_id, config_hash, source, windows, entities, relationships,
         input_tokens, output_tokens, duration_ms, extracted_at
       )
       values (
-        ${input.documentId}, ${input.workspaceId}, ${graphStateHash(input.configHash, graph)}, ${graph.source}, ${graph.windows},
+        ${input.documentId}, ${input.projectId}, ${graphStateHash(input.configHash, graph)}, ${graph.source}, ${graph.windows},
         ${graph.nodes.length}, ${graph.edges.length}, ${graph.inputTokens}, ${graph.outputTokens},
         ${graph.durationMs}, now()
       )
       on conflict (document_id) do update set
-        workspace_id = excluded.workspace_id,
+        project_id = excluded.project_id,
         config_hash = excluded.config_hash,
         source = excluded.source,
         windows = excluded.windows,
@@ -177,7 +177,7 @@ async function upsertNodes(client: Client, input: ReplaceDocumentGraphInput): Pr
   for (const batch of batches(nodes)) {
     const rows = batch.map((node) => ({
       id: randomUUID(),
-      workspace_id: input.workspaceId,
+      project_id: input.projectId,
       run_id: input.runId,
       user_id: input.userId,
       canonical_name: node.canonicalName,
@@ -192,10 +192,10 @@ async function upsertNodes(client: Client, input: ReplaceDocumentGraphInput): Pr
     const persisted = await client<{ id: string; normalized_name: string; entity_type: string }[]>`
       insert into kg_nodes ${client(
         rows,
-        "id", "workspace_id", "run_id", "user_id", "canonical_name", "normalized_name",
+        "id", "project_id", "run_id", "user_id", "canonical_name", "normalized_name",
         "entity_type", "aliases", "metadata", "mention_count", "source_document_count", "confidence",
       )}
-      on conflict (workspace_id, normalized_name, entity_type) do update set
+      on conflict (project_id, normalized_name, entity_type) do update set
         canonical_name = case
           when length(excluded.canonical_name) > length(kg_nodes.canonical_name) then excluded.canonical_name
           else kg_nodes.canonical_name
@@ -237,7 +237,7 @@ async function upsertEdges(
       const [left, right] = graphEdgeEndpoints(source, target, edge.normalizedPredicate);
       return [{
         id: randomUUID(),
-        workspace_id: input.workspaceId,
+        project_id: input.projectId,
         run_id: input.runId,
         user_id: input.userId,
         source_node_id: left,
@@ -262,10 +262,10 @@ async function upsertEdges(
     }[]>`
       insert into kg_edges ${client(
         batch,
-        "id", "workspace_id", "run_id", "user_id", "source_node_id", "target_node_id",
+        "id", "project_id", "run_id", "user_id", "source_node_id", "target_node_id",
         "predicate", "normalized_predicate", "confidence", "weight", "metadata",
       )}
-      on conflict (workspace_id, source_node_id, target_node_id, normalized_predicate) do update set
+      on conflict (project_id, source_node_id, target_node_id, normalized_predicate) do update set
         run_id = coalesce(excluded.run_id, kg_edges.run_id),
         updated_at = now()
       returning id, source_node_id, target_node_id, normalized_predicate

@@ -9,7 +9,7 @@ describe("apiKeyCanUseWebTools", () => {
     const ids = (scopes: string[]) => mcpManifest("https://example.test", scopes, "server", { audience: "api", firstPartyApp: true }).capabilities.map(tool => tool.id);
     expect(ids(["search"])).not.toContain("webSearch");
     expect(ids(["search", "web"])).toContain("webSearch");
-    expect(ids(["search", "web", "workspaces:manage"])).not.toContain("getWorkspaceSettings");
+    expect(ids(["search", "web", "projects:manage"])).not.toContain("getProjectSettings");
   });
   it("keeps web tools for server keys with search, and website ingestion with ingest", () => {
     expect(apiKeyCanUseWebTools({ keyType: "server", scopes: ["search"] })).toBe(true);

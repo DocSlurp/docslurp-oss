@@ -165,7 +165,7 @@ export const documentCleanupQueue = pgTable(
     documentId: text("document_id").primaryKey().notNull(),
     orgId: text("org_id").notNull(),
     userId: text("user_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     runId: text("run_id"),
     sourceKey: text("source_key"),
     deleteSource: boolean("delete_source").default(false).notNull(),
@@ -188,10 +188,10 @@ export const documentCleanupQueue = pgTable(
 );
 
 /** Current-corpus counters (completed, non-superseded documents), maintained by a documents trigger. */
-export const workspaceCorpusStats = pgTable(
-  "workspace_corpus_stats",
+export const projectCorpusStats = pgTable(
+  "project_corpus_stats",
   {
-    workspaceId: text("workspace_id").primaryKey().notNull(),
+    projectId: text("project_id").primaryKey().notNull(),
     documentCount: bigint("document_count", { mode: "number" }).default(0).notNull(),
     pageCount: bigint("page_count", { mode: "number" }).default(0).notNull(),
     sourceBytes: bigint("source_bytes", { mode: "number" }).default(0).notNull(),
@@ -201,9 +201,9 @@ export const workspaceCorpusStats = pgTable(
   },
   (table) => [
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_corpus_stats_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_corpus_stats_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -289,21 +289,21 @@ export const usageEvents = pgTable(
       .notNull(),
     inputTokens: integer("input_tokens").default(0).notNull(),
     outputTokens: integer("output_tokens").default(0).notNull(),
-    // Stamped at write time, no FKs: spend outlives the run, workspace and key (migration 0041).
+    // Stamped at write time, no FKs: spend outlives the run, project and key (migration 0041).
     orgId: text("org_id"),
-    workspaceId: text("workspace_id"),
+    projectId: text("project_id"),
     apiKeyId: text("api_key_id"),
   },
   (table) => [
     index("usage_events_org_created_idx").on(table.orgId, table.createdAt),
-    index("usage_events_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    index("usage_events_project_created_idx").on(table.projectId, table.createdAt),
     index("usage_events_run_id_idx").using(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "usage_events_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -327,7 +327,7 @@ export const documents = pgTable(
     sourceMaterializationBlocked: boolean("source_materialization_blocked").default(false).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     runId: text("run_id"),
     filename: text().notNull(),
     mimeType: text("mime_type").notNull(),
@@ -374,19 +374,19 @@ export const documents = pgTable(
     index("documents_superseded_unpurged_idx")
       .using("btree", table.supersededAt.asc().nullsLast().op("timestamptz_ops"))
       .where(sql`(superseded_at IS NOT NULL) AND (purged_at IS NULL)`),
-    index("documents_workspace_deferred_idx")
-      .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
+    index("documents_project_deferred_idx")
+      .using("btree", table.projectId.asc().nullsLast().op("text_ops"))
       .where(sql`indexing_mode <> 'full'`),
-    index("documents_workspace_in_flight_idx")
-      .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
+    index("documents_project_in_flight_idx")
+      .using("btree", table.projectId.asc().nullsLast().op("text_ops"))
       .where(sql`status NOT IN ('completed', 'failed', 'cancelled')`),
-    index("documents_workspace_failed_idx")
-      .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
+    index("documents_project_failed_idx")
+      .using("btree", table.projectId.asc().nullsLast().op("text_ops"))
       .where(sql`status = 'failed' AND superseded_at IS NULL AND archived_at IS NULL AND purged_at IS NULL`),
-    index("documents_workspace_canonical_idx")
+    index("documents_project_canonical_idx")
       .using(
         "btree",
-        table.workspaceId.asc().nullsLast().op("text_ops"),
+        table.projectId.asc().nullsLast().op("text_ops"),
         table.canonicalId.asc().nullsLast().op("text_ops"),
         table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
       )
@@ -411,26 +411,26 @@ export const documents = pgTable(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
     ),
-    index("documents_workspace_id_idx").using(
+    index("documents_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("timestamptz_ops"),
+      table.projectId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("documents_workspace_source_sha256_idx")
+    index("documents_project_source_sha256_idx")
       .using(
         "btree",
-        table.workspaceId.asc().nullsLast().op("text_ops"),
+        table.projectId.asc().nullsLast().op("text_ops"),
         table.sourceSha256.asc().nullsLast().op("text_ops"),
       )
       .where(sql`(source_sha256 IS NOT NULL)`),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "documents_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "documents_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "documents_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -450,7 +450,7 @@ export const documents = pgTable(
     }).onDelete("set null"),
     check(
       "documents_dedup_scope_check",
-      sql`dedup_scope = ANY (ARRAY['workspace'::text, 'org'::text])`,
+      sql`dedup_scope = ANY (ARRAY['project'::text, 'org'::text])`,
     ),
   ],
 );
@@ -492,7 +492,7 @@ export const performanceLog = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "performance_log_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -508,8 +508,8 @@ export const performanceLog = pgTable(
   ],
 );
 
-export const workspaceRunEvents = pgTable(
-  "workspace_run_events",
+export const projectRunEvents = pgTable(
+  "project_run_events",
   {
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
@@ -527,39 +527,39 @@ export const workspaceRunEvents = pgTable(
       .notNull(),
   },
   (table) => [
-    index("workspace_run_events_run_id_idx").using(
+    index("project_run_events_run_id_idx").using(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("workspace_run_events_user_id_idx").using(
+    index("project_run_events_user_id_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
-      name: "workspace_run_events_run_id_fkey",
+      foreignColumns: [projectRuns.id],
+      name: "project_run_events_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.documentId],
       foreignColumns: [documents.id],
-      name: "workspace_run_events_document_id_fkey",
+      name: "project_run_events_document_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
-      name: "workspace_run_events_user_id_fkey",
+      name: "project_run_events_user_id_fkey",
     }).onDelete("cascade"),
   ],
 );
 
-export const workspaceSecrets = pgTable(
-  "workspace_secrets",
+export const projectSecrets = pgTable(
+  "project_secrets",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     name: text().notNull(),
     type: text().notNull(),
     encryptedValue: text("encrypted_value").notNull(),
@@ -579,20 +579,20 @@ export const workspaceSecrets = pgTable(
       .notNull(),
   },
   (table) => [
-    index("workspace_secrets_expires_at_idx")
+    index("project_secrets_expires_at_idx")
       .using("btree", table.expiresAt.asc().nullsLast().op("timestamptz_ops"))
       .where(sql`(expires_at IS NOT NULL)`),
-    index("workspace_secrets_workspace_id_idx").using(
+    index("project_secrets_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_secrets_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_secrets_project_id_fkey",
     }).onDelete("cascade"),
-    unique("workspace_secrets_workspace_id_name_key").on(
-      table.workspaceId,
+    unique("project_secrets_project_id_name_key").on(
+      table.projectId,
       table.name,
     ),
   ],
@@ -789,11 +789,11 @@ export const account = pgTable(
   ],
 );
 
-export const workspaceInvites = pgTable(
-  "workspace_invites",
+export const projectInvites = pgTable(
+  "project_invites",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     orgId: text("org_id").notNull(),
     email: text().notNull(),
     role: text().notNull(),
@@ -814,38 +814,38 @@ export const workspaceInvites = pgTable(
       .notNull(),
   },
   (table) => [
-    index("workspace_invites_email_idx").using(
+    index("project_invites_email_idx").using(
       "btree",
       table.email.asc().nullsLast().op("text_ops"),
       table.status.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("workspace_invites_workspace_id_idx").using(
+    index("project_invites_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("timestamptz_ops"),
+      table.projectId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_invites_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_invites_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.orgId],
       foreignColumns: [organizations.id],
-      name: "workspace_invites_org_id_fkey",
+      name: "project_invites_org_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.acceptedByUserId],
       foreignColumns: [user.id],
-      name: "workspace_invites_accepted_by_user_id_fkey",
+      name: "project_invites_accepted_by_user_id_fkey",
     }).onDelete("set null"),
     foreignKey({
       columns: [table.invitedByUserId],
       foreignColumns: [user.id],
-      name: "workspace_invites_invited_by_user_id_fkey",
+      name: "project_invites_invited_by_user_id_fkey",
     }).onDelete("cascade"),
-    unique("workspace_invites_token_key").on(table.token),
+    unique("project_invites_token_key").on(table.token),
   ],
 );
 
@@ -892,7 +892,7 @@ export const documentCorrections = pgTable(
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "document_corrections_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -937,7 +937,7 @@ export const pageStageStates = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "page_stage_states_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -948,11 +948,11 @@ export const pageStageStates = pgTable(
   ],
 );
 
-export const workspaceConnectors = pgTable(
-  "workspace_connectors",
+export const projectConnectors = pgTable(
+  "project_connectors",
   {
     id: text().default(sql`gen_random_uuid()`).primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     type: text().notNull(),
     name: text().notNull(),
     credentialsEncrypted: text("credentials_encrypted").default("").notNull(),
@@ -970,18 +970,18 @@ export const workspaceConnectors = pgTable(
       .notNull(),
   },
   (table) => [
-    index("idx_workspace_connectors_status").using(
+    index("idx_project_connectors_status").using(
       "btree",
       table.status.asc().nullsLast().op("text_ops"),
     ),
-    index("idx_workspace_connectors_workspace_id").using(
+    index("idx_project_connectors_project_id").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_connectors_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_connectors_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1061,7 +1061,7 @@ export const documentChunks = pgTable(
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "document_chunks_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -1129,12 +1129,12 @@ export const notificationPrefs = pgTable(
   {
     userId: text("user_id").primaryKey().notNull(),
     orgId: text("org_id"),
-    workspaceId: text("workspace_id"),
+    projectId: text("project_id"),
     runCompleted: boolean("run_completed").default(true).notNull(),
     runFailed: boolean("run_failed").default(true).notNull(),
     qualityWarning: boolean("quality_warning").default(true).notNull(),
     costAlert: boolean("cost_alert").default(true).notNull(),
-    workspaceInvite: boolean("workspace_invite").default(true).notNull(),
+    projectInvite: boolean("project_invite").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -1149,9 +1149,9 @@ export const notificationPrefs = pgTable(
       name: "notification_prefs_org_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "notification_prefs_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "notification_prefs_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
@@ -1201,7 +1201,7 @@ export const documentPages = pgTable(
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "document_pages_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -1218,7 +1218,7 @@ export const notificationDeliveries = pgTable(
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id"),
-    workspaceId: text("workspace_id"),
+    projectId: text("project_id"),
     eventType: text("event_type").notNull(),
     provider: text().notNull(),
     recipient: text().notNull(),
@@ -1242,9 +1242,9 @@ export const notificationDeliveries = pgTable(
       table.readAt.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("notification_deliveries_workspace_id_idx").using(
+    index("notification_deliveries_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("timestamptz_ops"),
+      table.projectId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
@@ -1253,9 +1253,9 @@ export const notificationDeliveries = pgTable(
       name: "notification_deliveries_org_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "notification_deliveries_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "notification_deliveries_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
@@ -1340,7 +1340,7 @@ export const documentSummaries = pgTable(
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "document_summaries_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -1427,7 +1427,7 @@ export const auditLog = pgTable(
     id: text().primaryKey().notNull(),
     orgId: text("org_id"),
     userId: text("user_id"),
-    workspaceId: text("workspace_id"),
+    projectId: text("project_id"),
     runId: text("run_id"),
     documentId: text("document_id"),
     apiKeyId: text("api_key_id"),
@@ -1472,9 +1472,9 @@ export const auditLog = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("audit_log_workspace_id_idx").using(
+    index("audit_log_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("timestamptz_ops"),
+      table.projectId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
@@ -1483,13 +1483,13 @@ export const auditLog = pgTable(
       name: "audit_log_org_id_fkey",
     }).onDelete("set null"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "audit_log_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "audit_log_project_id_fkey",
     }).onDelete("set null"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "audit_log_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -1537,7 +1537,7 @@ export const searchEvalFixtures = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "search_eval_fixtures_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -1589,7 +1589,7 @@ export const searchIndexStaleness = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "search_index_staleness_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -1657,7 +1657,7 @@ export const documentPropositions = pgTable(
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "document_propositions_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -1747,12 +1747,12 @@ export const chatSessions = pgTable(
   "chat_sessions",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     userId: text("user_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    /** Thread-scoped retrieval overrides set from chat; never the workspace defaults. */
+    /** Thread-scoped retrieval overrides set from chat; never the project defaults. */
     searchOverrides: jsonb("search_overrides").default({}).notNull(),
   },
   (table) => [
@@ -1761,15 +1761,15 @@ export const chatSessions = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("chat_sessions_workspace_id_idx").using(
+    index("chat_sessions_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("timestamptz_ops"),
+      table.projectId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "chat_sessions_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "chat_sessions_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
@@ -1808,7 +1808,7 @@ export const chatMessageFeedback = pgTable(
   "chat_message_feedback",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     userId: text("user_id").notNull(),
     threadId: text("thread_id"),
     messageId: text("message_id").notNull(),
@@ -1825,21 +1825,21 @@ export const chatMessageFeedback = pgTable(
       .notNull(),
   },
   (table) => [
-    uniqueIndex("chat_message_feedback_user_workspace_message_idx").using(
+    uniqueIndex("chat_message_feedback_user_project_message_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.messageId.asc().nullsLast().op("text_ops"),
     ),
-    index("chat_message_feedback_workspace_id_idx").using(
+    index("chat_message_feedback_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "chat_message_feedback_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "chat_message_feedback_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
@@ -1853,8 +1853,8 @@ export const chatMessageFeedback = pgTable(
   ],
 );
 
-export const workspaces = pgTable(
-  "workspaces",
+export const projects = pgTable(
+  "projects",
   {
     id: text().primaryKey().notNull(),
     retainDocumentVersions: integer("retain_document_versions"),
@@ -1891,26 +1891,26 @@ export const workspaces = pgTable(
       mode: "string",
     }),
     isDefault: boolean("is_default").default(false).notNull(),
-    slug: text().default(sql`generate_workspace_slug()`).notNull(),
+    slug: text().default(sql`generate_project_slug()`).notNull(),
     /** Narrows organizations.allow_china_providers; both must be true (0102). */
     allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
   },
   (table) => [
-    uniqueIndex("workspaces_slug_idx").using("btree", table.slug.asc().nullsLast().op("text_ops")),
-    uniqueIndex("workspaces_org_default_idx")
+    uniqueIndex("projects_slug_idx").using("btree", table.slug.asc().nullsLast().op("text_ops")),
+    uniqueIndex("projects_org_default_idx")
       .using("btree", table.orgId.asc().nullsLast().op("text_ops"))
       .where(sql`is_default`),
-    index("workspaces_archived_at_idx").using(
+    index("projects_archived_at_idx").using(
       "btree",
       table.archivedAt.asc().nullsLast().op("timestamptz_ops"),
       table.updatedAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("workspaces_org_id_idx").using(
+    index("projects_org_id_idx").using(
       "btree",
       table.orgId.asc().nullsLast().op("text_ops"),
       table.updatedAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("workspaces_user_id_idx").using(
+    index("projects_user_id_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.updatedAt.desc().nullsFirst().op("timestamptz_ops"),
@@ -1918,31 +1918,31 @@ export const workspaces = pgTable(
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
-      name: "workspaces_user_id_fkey",
+      name: "projects_user_id_fkey",
     }).onDelete("cascade"),
     check(
-      "workspaces_system_prompt_length_check",
+      "projects_system_prompt_length_check",
       sql`(system_prompt IS NULL) OR (char_length(system_prompt) <= 2000)`,
     ),
   ],
 );
 
-/** Every slug a workspace has used; old slugs keep resolving after renames. */
-export const workspaceSlugs = pgTable(
-  "workspace_slugs",
+/** Every slug a project has used; old slugs keep resolving after renames. */
+export const projectSlugs = pgTable(
+  "project_slugs",
   {
     slug: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
   },
   (table) => [
-    index("workspace_slugs_workspace_id_idx").using("btree", table.workspaceId.asc().nullsLast().op("text_ops")),
+    index("project_slugs_project_id_idx").using("btree", table.projectId.asc().nullsLast().op("text_ops")),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_slugs_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_slugs_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1978,7 +1978,7 @@ export const piiDetections = pgTable(
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "pii_detections_run_id_fkey",
     }).onDelete("cascade"),
   ],
@@ -1992,7 +1992,7 @@ export const chatAnswerEvidenceSpans = pgTable(
     sessionId: text("session_id").notNull(),
     searchSessionId: text("search_session_id"),
     userId: text("user_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     citationIndex: integer("citation_index").notNull(),
     answerStart: integer("answer_start").notNull(),
     answerEnd: integer("answer_end").notNull(),
@@ -2027,9 +2027,9 @@ export const chatAnswerEvidenceSpans = pgTable(
       name: "chat_answer_evidence_spans_search_session_id_fkey",
     }).onDelete("set null"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "chat_answer_evidence_spans_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "chat_answer_evidence_spans_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
@@ -2090,7 +2090,7 @@ export const parserEvalFixtures = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "parser_eval_fixtures_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
@@ -2157,7 +2157,7 @@ export const parserEvalResults = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "parser_eval_results_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -2177,7 +2177,7 @@ export const uploadSessions = pgTable(
   "upload_sessions",
   {
     apiKeyId: text("api_key_id"),
-    allowedWorkspaceIds: text("allowed_workspace_ids").array(),
+    allowedProjectIds: text("allowed_project_ids").array(),
     result: jsonb(),
     lastError: text("last_error"),
     reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
@@ -2187,8 +2187,8 @@ export const uploadSessions = pgTable(
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id"),
-    workspaceId: text("workspace_id"),
-    workspaceName: text("workspace_name"),
+    projectId: text("project_id"),
+    projectName: text("project_name"),
     templateKey: text("template_key"),
     pipeline: jsonb().default({}).notNull(),
     status: text().default("pending").notNull(),
@@ -2205,9 +2205,9 @@ export const uploadSessions = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("upload_sessions_workspace_id_idx").using(
+    index("upload_sessions_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
@@ -2221,9 +2221,9 @@ export const uploadSessions = pgTable(
       name: "upload_sessions_org_id_fkey",
     }).onDelete("set null"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "upload_sessions_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "upload_sessions_project_id_fkey",
     }).onDelete("set null"),
   ],
 );
@@ -2273,12 +2273,12 @@ export const uploadSessionFiles = pgTable(
   ],
 );
 
-export const workspaceRuns = pgTable(
-  "workspace_runs",
+export const projectRuns = pgTable(
+  "project_runs",
   {
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     kind: text().notNull(),
     status: text().notNull(),
     blockedReason: text("blocked_reason"),
@@ -2352,51 +2352,51 @@ export const workspaceRuns = pgTable(
     }),
   },
   (table) => [
-    index("workspace_runs_creation_pending_idx").on(table.creationExpiresAt)
+    index("project_runs_creation_pending_idx").on(table.creationExpiresAt)
       .where(sql`creation_ready_at IS NULL AND workflow_started_at IS NULL`),
-    index("workspace_runs_workflow_start_pending_idx")
+    index("project_runs_workflow_start_pending_idx")
       .using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops"))
       .where(sql`((status = 'queued'::text) AND (workflow_started_at IS NULL))`),
-    index("workspace_runs_dead_letter_idx").using(
+    index("project_runs_dead_letter_idx").using(
       "btree",
       table.controlState.asc().nullsLast().op("timestamptz_ops"),
       table.deadLetteredAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("workspace_runs_lease_idx").using(
+    index("project_runs_lease_idx").using(
       "btree",
       table.status.asc().nullsLast().op("timestamptz_ops"),
       table.leaseExpiresAt.asc().nullsLast().op("text_ops"),
     ),
-    index("workspace_runs_org_id_idx").using(
+    index("project_runs_org_id_idx").using(
       "btree",
       table.orgId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("workspace_runs_priority_idx").using(
+    index("project_runs_priority_idx").using(
       "btree",
       table.status.asc().nullsLast().op("text_ops"),
       table.priority.desc().nullsFirst().op("int4_ops"),
       table.createdAt.asc().nullsLast().op("timestamptz_ops"),
     ),
-    index("workspace_runs_status_idx").using(
+    index("project_runs_status_idx").using(
       "btree",
       table.status.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    index("workspace_runs_workspace_id_idx").using(
+    index("project_runs_project_id_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("timestamptz_ops"),
+      table.projectId.asc().nullsLast().op("timestamptz_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_runs_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_runs_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
-      name: "workspace_runs_user_id_fkey",
+      name: "project_runs_user_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -2407,7 +2407,7 @@ export const searchZeroResults = pgTable(
     id: text().primaryKey().notNull(),
     sessionId: text("session_id").notNull(),
     userId: text("user_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     reason: text().notNull(),
     suggestions: jsonb().default([]).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -2420,9 +2420,9 @@ export const searchZeroResults = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("search_zero_results_workspace_idx").using(
+    index("search_zero_results_project_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
@@ -2436,17 +2436,17 @@ export const searchZeroResults = pgTable(
       name: "search_zero_results_user_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "search_zero_results_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "search_zero_results_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
 
-export const workspaceSearchSettings = pgTable(
-  "workspace_search_settings",
+export const projectSearchSettings = pgTable(
+  "project_search_settings",
   {
-    workspaceId: text("workspace_id").primaryKey().notNull(),
+    projectId: text("project_id").primaryKey().notNull(),
     userId: text("user_id").notNull(),
     typoTolerance: boolean("typo_tolerance").default(true).notNull(),
     dedupeByFilename: boolean("dedupe_by_filename").default(true).notNull(),
@@ -2465,19 +2465,19 @@ export const workspaceSearchSettings = pgTable(
     compatMetadata: jsonb("compat_metadata").default({}).notNull(),
   },
   (table) => [
-    index("workspace_search_settings_updated_idx").using(
+    index("project_search_settings_updated_idx").using(
       "btree",
       table.updatedAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_search_settings_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_search_settings_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
-      name: "workspace_search_settings_user_id_fkey",
+      name: "project_search_settings_user_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -2487,7 +2487,7 @@ export const querySuggestions = pgTable(
   {
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     phrase: text().notNull(),
     weight: integer().default(1).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -2497,7 +2497,7 @@ export const querySuggestions = pgTable(
   (table) => [
     index("query_suggestions_ws_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("int4_ops"),
+      table.projectId.asc().nullsLast().op("int4_ops"),
       table.weight.desc().nullsFirst().op("int4_ops"),
       table.createdAt.desc().nullsFirst().op("int4_ops"),
     ),
@@ -2507,9 +2507,9 @@ export const querySuggestions = pgTable(
       name: "query_suggestions_user_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "query_suggestions_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "query_suggestions_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -2520,7 +2520,7 @@ export const privacyAuditLog = pgTable(
     id: text().default(sql`gen_random_uuid()`).primaryKey().notNull(),
     documentId: text("document_id"),
     runId: text("run_id"),
-    workspaceId: text("workspace_id"),
+    projectId: text("project_id"),
     modelId: text("model_id").notNull(),
     endpoint: text().notNull(),
     privacyMode: text("privacy_mode").default("standard").notNull(),
@@ -2533,9 +2533,9 @@ export const privacyAuditLog = pgTable(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),
     ),
-    index("idx_privacy_audit_log_workspace_id").using(
+    index("idx_privacy_audit_log_project_id").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
       columns: [table.documentId],
@@ -2544,13 +2544,13 @@ export const privacyAuditLog = pgTable(
     }).onDelete("set null"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "privacy_audit_log_run_id_fkey",
     }).onDelete("set null"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "privacy_audit_log_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "privacy_audit_log_project_id_fkey",
     }).onDelete("set null"),
   ],
 );
@@ -2585,7 +2585,7 @@ export const connectorSyncLog = pgTable(
     ),
     foreignKey({
       columns: [table.connectorId],
-      foreignColumns: [workspaceConnectors.id],
+      foreignColumns: [projectConnectors.id],
       name: "connector_sync_log_connector_id_fkey",
     }).onDelete("cascade"),
   ],
@@ -2742,7 +2742,7 @@ export const kgNodes = pgTable(
   "kg_nodes",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     runId: text("run_id").notNull(),
     userId: text("user_id").notNull(),
     canonicalName: text("canonical_name").notNull(),
@@ -2763,24 +2763,24 @@ export const kgNodes = pgTable(
   (table) => [
     index("kg_nodes_lookup_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.entityType.asc().nullsLast().op("text_ops"),
       table.normalizedName.asc().nullsLast().op("text_ops"),
     ),
     index("kg_nodes_rank_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.mentionCount.desc().nullsFirst().op("text_ops"),
       table.sourceDocumentCount.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "kg_nodes_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "kg_nodes_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "kg_nodes_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -2788,8 +2788,8 @@ export const kgNodes = pgTable(
       foreignColumns: [user.id],
       name: "kg_nodes_user_id_fkey",
     }).onDelete("cascade"),
-    unique("kg_nodes_workspace_id_normalized_name_entity_type_key").on(
-      table.workspaceId,
+    unique("kg_nodes_project_id_normalized_name_entity_type_key").on(
+      table.projectId,
       table.normalizedName,
       table.entityType,
     ),
@@ -2800,7 +2800,7 @@ export const kgEdges = pgTable(
   "kg_edges",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     runId: text("run_id").notNull(),
     userId: text("user_id").notNull(),
     sourceNodeId: text("source_node_id").notNull(),
@@ -2820,28 +2820,28 @@ export const kgEdges = pgTable(
   (table) => [
     index("kg_edges_predicate_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("int4_ops"),
+      table.projectId.asc().nullsLast().op("int4_ops"),
       table.normalizedPredicate.asc().nullsLast().op("text_ops"),
       table.weight.desc().nullsFirst().op("text_ops"),
     ),
     index("kg_edges_source_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.sourceNodeId.asc().nullsLast().op("text_ops"),
     ),
     index("kg_edges_target_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.targetNodeId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "kg_edges_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "kg_edges_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "kg_edges_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -2860,9 +2860,9 @@ export const kgEdges = pgTable(
       name: "kg_edges_target_node_id_fkey",
     }).onDelete("cascade"),
     unique(
-      "kg_edges_workspace_id_source_node_id_target_node_id_normali_key",
+      "kg_edges_project_id_source_node_id_target_node_id_normali_key",
     ).on(
-      table.workspaceId,
+      table.projectId,
       table.sourceNodeId,
       table.targetNodeId,
       table.normalizedPredicate,
@@ -2874,7 +2874,7 @@ export const kgCommunities = pgTable(
   "kg_communities",
   {
     id: text().primaryKey().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     runId: text("run_id").notNull(),
     userId: text("user_id").notNull(),
     level: integer().default(0).notNull(),
@@ -2892,18 +2892,18 @@ export const kgCommunities = pgTable(
   (table) => [
     index("kg_communities_rank_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("int4_ops"),
+      table.projectId.asc().nullsLast().op("int4_ops"),
       table.level.asc().nullsLast().op("int4_ops"),
       table.memberCount.desc().nullsFirst().op("int4_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "kg_communities_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "kg_communities_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "kg_communities_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -3014,7 +3014,7 @@ export const kgCommunityMembers = pgTable(
   {
     communityId: text("community_id").notNull(),
     nodeId: text("node_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -3022,7 +3022,7 @@ export const kgCommunityMembers = pgTable(
   (table) => [
     index("kg_community_members_node_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.nodeId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
@@ -3036,9 +3036,9 @@ export const kgCommunityMembers = pgTable(
       name: "kg_community_members_node_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "kg_community_members_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "kg_community_members_project_id_fkey",
     }).onDelete("cascade"),
     primaryKey({
       columns: [table.communityId, table.nodeId],
@@ -3047,10 +3047,10 @@ export const kgCommunityMembers = pgTable(
   ],
 );
 
-export const workspaceMembers = pgTable(
-  "workspace_members",
+export const projectMembers = pgTable(
+  "project_members",
   {
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     userId: text("user_id").notNull(),
     role: text().notNull(),
     invitedByUserId: text("invited_by_user_id"),
@@ -3059,35 +3059,35 @@ export const workspaceMembers = pgTable(
       .notNull(),
   },
   (table) => [
-    index("workspace_members_user_id_idx").using(
+    index("project_members_user_id_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "workspace_members_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_members_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.invitedByUserId],
       foreignColumns: [user.id],
-      name: "workspace_members_invited_by_user_id_fkey",
+      name: "project_members_invited_by_user_id_fkey",
     }).onDelete("set null"),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
-      name: "workspace_members_user_id_fkey",
+      name: "project_members_user_id_fkey",
     }).onDelete("cascade"),
     primaryKey({
-      columns: [table.workspaceId, table.userId],
-      name: "workspace_members_pkey",
+      columns: [table.projectId, table.userId],
+      name: "project_members_pkey",
     }),
   ],
 );
 
-export const workspaceRunStageStates = pgTable(
-  "workspace_run_stage_states",
+export const projectRunStageStates = pgTable(
+  "project_run_stage_states",
   {
     runId: text("run_id").notNull(),
     stageName: text("stage_name").notNull(),
@@ -3106,19 +3106,19 @@ export const workspaceRunStageStates = pgTable(
       .notNull(),
   },
   (table) => [
-    index("workspace_run_stage_states_run_id_idx").using(
+    index("project_run_stage_states_run_id_idx").using(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
       table.updatedAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
-      name: "workspace_run_stage_states_run_id_fkey",
+      foreignColumns: [projectRuns.id],
+      name: "project_run_stage_states_run_id_fkey",
     }).onDelete("cascade"),
     primaryKey({
       columns: [table.runId, table.stageName],
-      name: "workspace_run_stage_states_pkey",
+      name: "project_run_stage_states_pkey",
     }),
   ],
 );
@@ -3152,7 +3152,7 @@ export const documentRunStageStates = pgTable(
     ),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "document_run_stage_states_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -3171,7 +3171,7 @@ export const chunkEntities = pgTable(
   "chunk_entities",
   {
     chunkId: text("chunk_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     runId: text("run_id").notNull(),
     userId: text("user_id").notNull(),
     nodeId: text("node_id").notNull(),
@@ -3187,13 +3187,13 @@ export const chunkEntities = pgTable(
   (table) => [
     index("chunk_entities_lookup_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.entityName.asc().nullsLast().op("text_ops"),
       table.entityType.asc().nullsLast().op("text_ops"),
     ),
     index("chunk_entities_node_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.nodeId.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
@@ -3202,13 +3202,13 @@ export const chunkEntities = pgTable(
       name: "chunk_entities_chunk_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.workspaceId],
-      foreignColumns: [workspaces.id],
-      name: "chunk_entities_workspace_id_fkey",
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "chunk_entities_project_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
       columns: [table.runId],
-      foreignColumns: [workspaceRuns.id],
+      foreignColumns: [projectRuns.id],
       name: "chunk_entities_run_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
@@ -3343,7 +3343,7 @@ export const adminStats = pgMaterializedView("admin_stats", {
   pagesTotal: bigint("pages_total", { mode: "number" }),
   avgCostCents: numeric("avg_cost_cents"),
 }).as(
-  sql`SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total) AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM workspace_runs GROUP BY (date_trunc('hour'::text, created_at))`,
+  sql`SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total) AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM project_runs GROUP BY (date_trunc('hour'::text, created_at))`,
 );
 
 export const searchExperimentResults = pgView("search_experiment_results", {
@@ -3359,7 +3359,7 @@ export const searchExperimentResults = pgView("search_experiment_results", {
 );
 
 export const pageWorkTasks = pgTable("page_work_tasks", {
-  runId: text("run_id").notNull().references(() => workspaceRuns.id, { onDelete: "cascade" }),
+  runId: text("run_id").notNull().references(() => projectRuns.id, { onDelete: "cascade" }),
   documentId: text("document_id").notNull().references(() => documents.id, { onDelete: "cascade" }),
   pageNumber: integer("page_number").notNull(),
   status: text("status").notNull().default("queued"),
@@ -3407,7 +3407,7 @@ export const creditDebitsPending = pgTable("credit_debits_pending", {
   orgId: text("org_id").notNull(),
   userId: text("user_id"),
   runId: text("run_id"),
-  workspaceId: text("workspace_id"),
+  projectId: text("project_id"),
   reason: text("reason").default("usage").notNull(),
   credits: numeric("credits", { precision: 24, scale: 12 }).notNull(),
   metadata: jsonb("metadata").default({}).notNull(),
@@ -3566,15 +3566,15 @@ export const documentPageVectors = pgTable(
     bits: bytea().notNull(),
     int8: bytea().notNull(),
     scale: real().notNull(),
-    workspaceId: text("workspace_id").notNull(),
+    projectId: text("project_id").notNull(),
     orgId: text("org_id"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   },
   (table) => [
     primaryKey({ columns: [table.documentId, table.pageNumber, table.model], name: "document_page_vectors_pkey" }),
-    index("document_page_vectors_workspace_idx").using(
+    index("document_page_vectors_project_idx").using(
       "btree",
-      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.projectId.asc().nullsLast().op("text_ops"),
       table.model.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({

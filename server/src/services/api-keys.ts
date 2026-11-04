@@ -21,7 +21,7 @@ type ApiKeyRow = {
   rate_limit_rpm: number | null;
   rate_limit_ppd: number;
   rate_limits: unknown;
-  workspace_ids: string[] | null;
+  project_ids: string[] | null;
   materialization_policy?: unknown;
   last_used_at: string | null;
   created_at: string;
@@ -61,10 +61,10 @@ export const API_KEY_MAX_EXPIRY_DAYS = 365;
 export const API_KEY_MAX_ROTATION_OVERLAP_SECONDS = 7 * 24 * 60 * 60;
 export const API_KEY_MAX_IP_ALLOWLIST = 50;
 /**
- * Opt-in scopes; never granted by default. workspaces:manage renames workspaces and changes their settings.
+ * Opt-in scopes; never granted by default. projects:manage renames projects and changes their settings.
  * `web` is client-key only: server keys use web tools through `search`.
  */
-export const supportedApiKeyScopes = [...defaultApiKeyScopes, "web", "organizations:read", "organizations:manage", "workspaces:manage"] as const;
+export const supportedApiKeyScopes = [...defaultApiKeyScopes, "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -81,8 +81,8 @@ export interface ApiKey {
   rateLimitPpd: number;
   /** Custom request and spend limits; see packages/shared/src/rate-limits.ts. */
   rateLimits: ApiKeyRateLimitRule[];
-  /** Workspaces this key may use; empty means every workspace the owner can reach in the key's org. */
-  workspaceIds: string[];
+  /** Projects this key may use; empty means every project the owner can reach in the key's org. */
+  projectIds: string[];
   /** Per-key caps on query-time page parsing; `{}` adds no restriction. */
   materializationPolicy?: Partial<MaterializationPolicy>;
   lastUsedAt: string | null;
@@ -193,16 +193,16 @@ function normalizeAllowedDomains(allowedDomains: string[] | undefined | null, ke
   return keyType === "server" ? [] : normalized;
 }
 
-/** How to fix a browser key that has no workspace allowlist; shown on refusal and on save. */
-export const CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE = "Browser (client) API keys must be limited to specific workspaces. Edit the key on the API keys page, or PATCH /v1/api-keys/:id with workspaceIds, and choose the workspaces it may use.";
+/** How to fix a browser key that has no project allowlist; shown on refusal and on save. */
+export const CLIENT_KEY_PROJECTS_REQUIRED_MESSAGE = "Browser (client) API keys must be limited to specific projects. Edit the key on the API keys page, or PATCH /v1/api-keys/:id with projectIds, and choose the projects it may use.";
 
 /**
- * A browser key is public, so it must name the workspaces it may reach: an
- * empty allowlist would otherwise mean every workspace its owner can reach.
+ * A browser key is public, so it must name the projects it may reach: an
+ * empty allowlist would otherwise mean every project its owner can reach.
  */
-export function assertClientKeyWorkspaces(keyType: ApiKeyType, workspaceIds: string[]): void {
-  if (keyType === "client" && workspaceIds.length === 0) {
-    throw new OrganizationError(400, "client_key_workspaces_required", CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE);
+export function assertClientKeyProjects(keyType: ApiKeyType, projectIds: string[]): void {
+  if (keyType === "client" && projectIds.length === 0) {
+    throw new OrganizationError(400, "client_key_projects_required", CLIENT_KEY_PROJECTS_REQUIRED_MESSAGE);
   }
 }
 
@@ -213,15 +213,15 @@ export function assertClientKeyWorkspaces(keyType: ApiKeyType, workspaceIds: str
  */
 export class ApiKeyPolicyError extends Error {
   readonly status = 403;
-  constructor(readonly code: "client_key_workspaces_required" | "client_key_origin_not_allowed" | "api_key_ip_not_allowed", message: string) {
+  constructor(readonly code: "client_key_projects_required" | "client_key_origin_not_allowed" | "api_key_ip_not_allowed", message: string) {
     super(message);
   }
 }
 
-/** A stored browser key without a workspace allowlist (written before the rule); refused at request time. */
-export class ClientKeyWorkspacesRequiredError extends ApiKeyPolicyError {
+/** A stored browser key without a project allowlist (written before the rule); refused at request time. */
+export class ClientKeyProjectsRequiredError extends ApiKeyPolicyError {
   constructor() {
-    super("client_key_workspaces_required", CLIENT_KEY_WORKSPACES_REQUIRED_MESSAGE);
+    super("client_key_projects_required", CLIENT_KEY_PROJECTS_REQUIRED_MESSAGE);
   }
 }
 
@@ -261,11 +261,11 @@ function mapApiKey(row: ApiKeyRow): ApiKey {
     name: row.name,
     keyType: parseApiKeyType(row.key_type),
     allowedDomains: row.allowed_domains ?? [],
-    scopes: effectiveKeyScopes(parseApiKeyType(row.key_type), row.scopes ?? [], row.workspace_ids ?? []),
+    scopes: effectiveKeyScopes(parseApiKeyType(row.key_type), row.scopes ?? [], row.project_ids ?? []),
     rateLimitRpm: row.rate_limit_rpm,
     rateLimitPpd: row.rate_limit_ppd,
     rateLimits: parseApiKeyRateLimits(row.rate_limits),
-    workspaceIds: row.workspace_ids ?? [],
+    projectIds: row.project_ids ?? [],
     materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy),
     lastUsedAt: row.last_used_at,
     lastUsedIp: row.last_used_ip ?? null,
@@ -292,7 +292,7 @@ export async function createApiKey(
     orgId?: string | null;
     keyType?: ApiKeyType;
     allowedDomains?: string[];
-    workspaceIds?: string[];
+    projectIds?: string[];
     /** Ignored: browser keys never hold ingest, artifacts or web (kept so older callers still validate). */
     allowClientSensitiveScopes?: boolean;
     materializationPolicy?: Partial<MaterializationPolicy>;
@@ -322,13 +322,13 @@ export async function createApiKey(
     : [...(keyType === "client" ? defaultClientApiKeyScopes : defaultApiKeyScopes)];
   return await withOrganizationLock(orgId, userId, async (tx, actor) => {
     assertOrganizationKeyScopes(keyType, scopes, actor.role);
-    const workspaceIds = await normalizeKeyWorkspaceIds(tx, orgId, userId, limits?.workspaceIds);
-    assertClientKeyWorkspaces(keyType, workspaceIds);
+    const projectIds = await normalizeKeyProjectIds(tx, orgId, userId, limits?.projectIds);
+    assertClientKeyProjects(keyType, projectIds);
     const [row] = await tx<ApiKeyRow[]>`
-      insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy, expires_at, ip_allowlist, max_output_tokens)
+      insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, project_ids, materialization_policy, expires_at, ip_allowlist, max_output_tokens)
       values (${id}, ${userId}, ${orgId}, ${keyHash}, ${name}, ${keyType}, ${tx.array(allowedDomains)},
         ${tx.array(scopes)}, ${limits?.rpm ?? null}, ${limits?.ppd ?? 10000},
-        ${tx.json(apiKeyRateLimitRulesSchema.parse(limits?.rateLimits ?? []) as never)}, ${tx.array(workspaceIds)},
+        ${tx.json(apiKeyRateLimitRulesSchema.parse(limits?.rateLimits ?? []) as never)}, ${tx.array(projectIds)},
         ${tx.json(materializationPolicyOverridesSchema.parse(limits?.materializationPolicy ?? {}) as never)},
         ${expiresAt}, ${tx.array(ipAllowlist)}, ${maxOutputTokens})
       returning *`;
@@ -416,14 +416,14 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
   if (keyType !== "client" && scopes.includes("web")) {
     throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search");
   }
-  if (keyType === "client" && scopes.includes("workspaces:manage")) {
-    throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage workspaces");
+  if (keyType === "client" && scopes.includes("projects:manage")) {
+    throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage projects");
   }
-  // `workspaces:manage` changes workspace configuration, so a key that carries it
-  // must be minted by an organization owner/admin. The per-workspace edit check
+  // `projects:manage` changes project configuration, so a key that carries it
+  // must be minted by an organization owner/admin. The per-project edit check
   // on the route is the second layer. Security finding SEC-2026-10-01.
-  if (keyType !== "client" && scopes.includes("workspaces:manage") && !["owner", "admin"].includes(role)) {
-    throw new OrganizationError(403, "organization_forbidden", "Workspace management keys require organization admin access");
+  if (keyType !== "client" && scopes.includes("projects:manage") && !["owner", "admin"].includes(role)) {
+    throw new OrganizationError(403, "organization_forbidden", "Project management keys require organization admin access");
   }
   if (!scopes.some(scope => scope.startsWith("organizations:"))) return;
   if (keyType === "client") throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot access organizations");
@@ -436,33 +436,33 @@ type KeyTransaction = postgres.TransactionSql<Record<string, postgres.PostgresTy
 /**
  * A public client key that can upload, read raw artifacts or spend credits on web tools is a standing
  * credential in someone's page source. Allow it only when the creator opts in
- * and binds the key to specific workspaces.
+ * and binds the key to specific projects.
  */
 /** Runtime guard for rows written before the rule: a browser key keeps only search and chat. */
-export function effectiveKeyScopes(keyType: ApiKeyType, scopes: string[], _workspaceIds: string[]): string[] {
+export function effectiveKeyScopes(keyType: ApiKeyType, scopes: string[], _projectIds: string[]): string[] {
   if (keyType !== "client") return scopes;
   // Narrowing an old row can remove every scope. Defaults belong to creation:
   // adding search here would grant a permission the owner never selected.
   return scopes.filter(scope => (clientApiKeyScopes as readonly string[]).includes(scope));
 }
 
-/** Every allowlisted workspace must be in the key's org and reachable by its owner. */
-async function normalizeKeyWorkspaceIds(tx: KeyTransaction, orgId: string, userId: string, workspaceIds: string[] | undefined): Promise<string[]> {
-  const requested = [...new Set((workspaceIds ?? []).map(id => id.trim()).filter(Boolean))];
+/** Every allowlisted project must be in the key's org and reachable by its owner. */
+async function normalizeKeyProjectIds(tx: KeyTransaction, orgId: string, userId: string, projectIds: string[] | undefined): Promise<string[]> {
+  const requested = [...new Set((projectIds ?? []).map(id => id.trim()).filter(Boolean))];
   if (requested.length === 0) return [];
-  if (requested.length > 100) throw new OrganizationError(400, "invalid_key_workspaces", "An API key can be limited to at most 100 workspaces");
+  if (requested.length > 100) throw new OrganizationError(400, "invalid_key_projects", "An API key can be limited to at most 100 projects");
   const rows = await tx<{ id: string }[]>`
-    select w.id from workspaces w
+    select w.id from projects w
     where w.id = any(${tx.array(requested)}) and w.org_id = ${orgId}
       and (
         w.user_id = ${userId}
-        or exists (select 1 from workspace_members wm where wm.workspace_id = w.id and wm.user_id = ${userId})
+        or exists (select 1 from project_members wm where wm.project_id = w.id and wm.user_id = ${userId})
         or exists (select 1 from org_memberships om where om.org_id = w.org_id and om.user_id = ${userId} and (om.role in ('owner', 'admin') or w.is_default))
       )`;
   const found = new Set(rows.map(row => row.id));
   const missing = requested.filter(id => !found.has(id));
   if (missing.length > 0) {
-    throw new OrganizationError(400, "invalid_key_workspaces", `Workspace not found in this key's organization: ${missing.join(", ")}`);
+    throw new OrganizationError(400, "invalid_key_projects", `Project not found in this key's organization: ${missing.join(", ")}`);
   }
   return requested;
 }
@@ -486,7 +486,7 @@ export class ApiKeyTypeChangeError extends Error {
 
 export async function updateApiKey(id: string, userId: string, updates: {
   name?: string; scopes?: string[]; rateLimitRpm?: number | null; rateLimitPpd?: number; rateLimits?: ApiKeyRateLimitRule[]; keyType?: ApiKeyType; allowedDomains?: string[];
-  workspaceIds?: string[]; allowClientSensitiveScopes?: boolean; materializationPolicy?: Partial<MaterializationPolicy>;
+  projectIds?: string[]; allowClientSensitiveScopes?: boolean; materializationPolicy?: Partial<MaterializationPolicy>;
   /** ISO date-time, or null to remove the expiry; omitted keeps it. */
   expiresAt?: string | null;
   ipAllowlist?: string[];
@@ -500,13 +500,13 @@ export async function updateApiKey(id: string, userId: string, updates: {
       throw new ApiKeyTypeChangeError();
     }
     // A legacy browser key saved without new scopes is narrowed to what it may hold.
-    const nextScopes = updates.scopes ? [...new Set(updates.scopes)] : effectiveKeyScopes(nextKeyType, existing.scopes ?? [], existing.workspace_ids ?? []);
+    const nextScopes = updates.scopes ? [...new Set(updates.scopes)] : effectiveKeyScopes(nextKeyType, existing.scopes ?? [], existing.project_ids ?? []);
     assertOrganizationKeyScopes(nextKeyType, nextScopes, role);
-    const nextWorkspaceIds = updates.workspaceIds !== undefined
-      ? await normalizeKeyWorkspaceIds(tx, existing.org_id!, userId, updates.workspaceIds)
-      : existing.workspace_ids ?? [];
-    // Every save of a browser key must leave it bound to workspaces, including a legacy key with none.
-    assertClientKeyWorkspaces(nextKeyType, nextWorkspaceIds);
+    const nextProjectIds = updates.projectIds !== undefined
+      ? await normalizeKeyProjectIds(tx, existing.org_id!, userId, updates.projectIds)
+      : existing.project_ids ?? [];
+    // Every save of a browser key must leave it bound to projects, including a legacy key with none.
+    assertClientKeyProjects(nextKeyType, nextProjectIds);
     const nextExpiresAt = updates.expiresAt !== undefined ? normalizeExpiresAt(updates.expiresAt) : undefined;
     const nextIpAllowlist = updates.ipAllowlist !== undefined ? normalizeIpAllowlist(nextKeyType, updates.ipAllowlist) : undefined;
     const nextMaxOutput = updates.maxOutputTokens !== undefined ? normalizeMaxOutputTokens(nextKeyType, updates.maxOutputTokens) : undefined;
@@ -518,7 +518,7 @@ export async function updateApiKey(id: string, userId: string, updates: {
       expires_at = case when ${nextExpiresAt !== undefined} then ${nextExpiresAt ?? null}::timestamptz else expires_at end,
       ip_allowlist = coalesce(${nextIpAllowlist ? tx.array(nextIpAllowlist) : null}, ip_allowlist),
       max_output_tokens = case when ${nextMaxOutput !== undefined} then ${nextMaxOutput ?? null}::int else max_output_tokens end,
-      workspace_ids = ${tx.array(nextWorkspaceIds)},
+      project_ids = ${tx.array(nextProjectIds)},
       rate_limit_rpm = case when ${updates.rateLimitRpm !== undefined} then ${updates.rateLimitRpm ?? null}::int else rate_limit_rpm end, rate_limit_ppd = coalesce(${updates.rateLimitPpd ?? null}, rate_limit_ppd),
       rate_limits = coalesce(${updates.rateLimits ? tx.json(apiKeyRateLimitRulesSchema.parse(updates.rateLimits) as never) : null}::jsonb, rate_limits),
       materialization_policy = coalesce(${updates.materializationPolicy ? tx.json(materializationPolicyOverridesSchema.parse(updates.materializationPolicy) as never) : null}::jsonb, materialization_policy)
@@ -541,7 +541,7 @@ export async function rotateApiKey(id: string, userId: string, options: { overla
   }
   return await withOwnedKeyLock(id, userId, async (tx, existing, role) => {
     const keyType = parseApiKeyType(existing.key_type);
-    const scopes = effectiveKeyScopes(keyType, existing.scopes ?? [], existing.workspace_ids ?? []);
+    const scopes = effectiveKeyScopes(keyType, existing.scopes ?? [], existing.project_ids ?? []);
     assertOrganizationKeyScopes(keyType, scopes, role);
     const rawKey = generateRawKey(keyType);
     if (overlap === 0) {
@@ -551,8 +551,8 @@ export async function rotateApiKey(id: string, userId: string, options: { overla
     }
     const newId = randomUUID();
     const [created] = await tx<ApiKeyRow[]>`
-      insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy, expires_at, ip_allowlist, max_output_tokens, rotated_from_key_id)
-      select ${newId}, user_id, org_id, ${hashKey(rawKey)}, name, key_type, allowed_domains, ${tx.array(scopes)}, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy, expires_at, ip_allowlist, max_output_tokens, id
+      insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, project_ids, materialization_policy, expires_at, ip_allowlist, max_output_tokens, rotated_from_key_id)
+      select ${newId}, user_id, org_id, ${hashKey(rawKey)}, name, key_type, allowed_domains, ${tx.array(scopes)}, rate_limit_rpm, rate_limit_ppd, rate_limits, project_ids, materialization_policy, expires_at, ip_allowlist, max_output_tokens, id
       from api_keys where id = ${id} and user_id = ${userId} and revoked_at is null
       returning *`;
     if (!created) return null;
@@ -584,8 +584,8 @@ export interface ValidatedKey {
   rateLimitRpm: number | null;
   rateLimitPpd: number;
   rateLimits: ApiKeyRateLimitRule[];
-  /** Workspace allowlist; empty (server keys only) means every workspace the owner can reach in `orgId`. Browser keys always have one. */
-  workspaceIds: string[];
+  /** Project allowlist; empty (server keys only) means every project the owner can reach in `orgId`. Browser keys always have one. */
+  projectIds: string[];
   /** Per-key materialization caps; absent or `{}` adds no restriction. */
   materializationPolicy?: Partial<MaterializationPolicy>;
   /** Cap on a chat answer's model output tokens for this key (browser keys default to 1000); null means no key cap. */
@@ -638,10 +638,10 @@ export async function validateApiKey(
   ) {
     throw new ClientKeyOriginNotAllowedError();
   }
-  // A browser key written before workspace allowlists were required: refuse it
-  // with how to fix it, never widen it to every workspace its owner can reach.
-  if (keyType === "client" && (row.workspace_ids ?? []).length === 0) {
-    throw new ClientKeyWorkspacesRequiredError();
+  // A browser key written before project allowlists were required: refuse it
+  // with how to fix it, never widen it to every project its owner can reach.
+  if (keyType === "client" && (row.project_ids ?? []).length === 0) {
+    throw new ClientKeyProjectsRequiredError();
   }
 
   // A server key with an IP allowlist works only from those ranges; an unknown address is refused.
@@ -660,11 +660,11 @@ export async function validateApiKey(
     orgId: row.org_id,
     keyType,
     allowedDomains,
-    scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.workspace_ids ?? []),
+    scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.project_ids ?? []),
     rateLimitRpm: row.rate_limit_rpm,
     rateLimitPpd: row.rate_limit_ppd,
     rateLimits: parseApiKeyRateLimits(row.rate_limits),
-    workspaceIds: row.workspace_ids ?? [],
+    projectIds: row.project_ids ?? [],
     materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy),
     maxOutputTokens: effectiveMaxOutputTokens(keyType, row.max_output_tokens),
   };
@@ -675,7 +675,7 @@ export async function validateApiKey(
  * under it. Skips the type/domain checks: the token holder is not the key.
  * Null when the key is revoked, gone, or its owner left the organization.
  */
-export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKeyType; scopes: string[]; workspaceIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
+export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKeyType; scopes: string[]; projectIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
   const [row] = await sql<ApiKeyRow[]>`
     select * from api_keys
     where id = ${keyId} and revoked_at is null
@@ -686,5 +686,5 @@ export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKe
       )
   `;
   const keyType = row ? parseApiKeyType(row.key_type) : null;
-  return row && keyType ? { keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.workspace_ids ?? []), workspaceIds: row.workspace_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
+  return row && keyType ? { keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.project_ids ?? []), projectIds: row.project_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
 }

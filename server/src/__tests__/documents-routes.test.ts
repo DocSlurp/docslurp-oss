@@ -55,11 +55,11 @@ vi.mock("../lib/request-context.js", async () => {
 
 const { documentsRoutes } = await import("../routes/documents.js");
 
-function buildApp(apiKey?: { scopes: string[]; keyType?: string; orgId?: string; workspaceIds?: string[] }) {
+function buildApp(apiKey?: { scopes: string[]; keyType?: string; orgId?: string; projectIds?: string[] }) {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-1" } as never);
-    if (apiKey) c.set("apiKey", { userId: "user-1", orgId: "org-1", keyType: "server", keyId: "key-1", workspaceIds: [], ...apiKey } as never);
+    if (apiKey) c.set("apiKey", { userId: "user-1", orgId: "org-1", keyType: "server", keyId: "key-1", projectIds: [], ...apiKey } as never);
     await next();
   });
   app.route("/documents", documentsRoutes);
@@ -120,7 +120,7 @@ describe("documentsRoutes bulk actions", () => {
   it("deletes a single document through the dedicated route", async () => {
     deleteDocumentMock.mockResolvedValue({
       documentId: "doc-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       filename: "contract.pdf",
       runId: "run-1",
       sourceKey: "uploads/contract.pdf"
@@ -133,7 +133,7 @@ describe("documentsRoutes bulk actions", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       documentId: "doc-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       filename: "contract.pdf",
       runId: "run-1",
       sourceKey: "uploads/contract.pdf"
@@ -156,8 +156,8 @@ describe("documentsRoutes API key content updates", () => {
     appendAuditLogMock.mockReset();
     listDocumentOwnersMock.mockImplementation(async (ids: string[]) => ids
       .filter((id) => id !== "missing")
-      .map((id) => ({ id, workspaceId: id === "doc-other" ? "ws-2" : "ws-1", orgId: id === "doc-foreign" ? "org-2" : "org-1" })));
-    deleteDocumentMock.mockResolvedValue({ documentId: "doc-1", workspaceId: "ws-1", filename: "a.md", runId: "run-1", sourceKey: "k" });
+      .map((id) => ({ id, projectId: id === "doc-other" ? "ws-2" : "ws-1", orgId: id === "doc-foreign" ? "org-2" : "org-1" })));
+    deleteDocumentMock.mockResolvedValue({ documentId: "doc-1", projectId: "ws-1", filename: "a.md", runId: "run-1", sourceKey: "k" });
     deleteDocumentsMock.mockResolvedValue(2);
     setDocumentTagsMock.mockResolvedValue(["docs"]);
   });
@@ -189,8 +189,8 @@ describe("documentsRoutes API key content updates", () => {
     expect(bulkReprocessDocumentsMock).not.toHaveBeenCalled();
   });
 
-  it("answers 404 before any change when a document is outside the key's organization or workspaces", async () => {
-    const restricted = buildApp({ scopes: ["ingest"], workspaceIds: ["ws-1"] });
+  it("answers 404 before any change when a document is outside the key's organization or projects", async () => {
+    const restricted = buildApp({ scopes: ["ingest"], projectIds: ["ws-1"] });
     for (const ids of [["doc-1", "doc-foreign"], ["doc-1", "doc-other"], ["missing"]]) {
       expect((await restricted.request("/documents/bulk", json("POST", { action: "delete", documentIds: ids }))).status).toBe(404);
     }

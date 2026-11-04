@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sqlMock = vi.fn();
 const sqlBeginMock = vi.fn();
-const getWorkspaceAccessMock = vi.fn();
-const listAccessibleWorkspaceIdsMock = vi.fn(async () => [] as string[]);
+const getProjectAccessMock = vi.fn();
+const listAccessibleProjectIdsMock = vi.fn(async () => [] as string[]);
 const currentRequestIdMock = vi.fn(() => "req-123");
 const s3SendMock = vi.fn();
 const getAvailableCreditsMock = vi.fn(async () => ({ includedRemaining: 0, prepaid: 1_000, available: 1_000 }));
@@ -18,9 +18,9 @@ vi.mock("../db.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  canContributeToWorkspace: vi.fn(() => true),
-  getWorkspaceAccess: getWorkspaceAccessMock,
-  listAccessibleWorkspaceIds: listAccessibleWorkspaceIdsMock
+  canContributeToProject: vi.fn(() => true),
+  getProjectAccess: getProjectAccessMock,
+  listAccessibleProjectIds: listAccessibleProjectIdsMock
 }));
 
 vi.mock("../lib/request-context.js", () => ({
@@ -62,7 +62,7 @@ const { createRunCreation } = await import("../services/run-creation.js");
 // Spend admission is exercised through Run creation with no files: it fails or
 // stops at the insert, before any Document is written.
 const runCreationStart = vi.fn();
-function createRun(input: { userId: string; workspaceId: string; kind: string; totalDocuments?: number; pipeline: typeof defaultPipelineFeatures }) {
+function createRun(input: { userId: string; projectId: string; kind: string; totalDocuments?: number; pipeline: typeof defaultPipelineFeatures }) {
   const { totalDocuments: _total, ...rest } = input;
   return createRunCreation({ sql: sqlMock as never, start: runCreationStart }).create({ ...rest, sources: { kind: "files", files: [] } });
 }
@@ -88,7 +88,7 @@ describe("createRun", () => {
   beforeEach(() => {
     sqlMock.mockReset();
     sqlBeginMock.mockReset();
-    getWorkspaceAccessMock.mockReset();
+    getProjectAccessMock.mockReset();
     currentRequestIdMock.mockClear();
     s3SendMock.mockReset();
     getAvailableCreditsMock.mockClear();
@@ -104,28 +104,28 @@ describe("createRun", () => {
 
   const spendStatus = (overrides: Record<string, unknown> = {}) => ({
     org_id: "org-1", plan_id: "free", available: 1_000, reserved: 0,
-    workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true, ...overrides,
+    project_budget_paused: false, org_budget_paused: false, project_in_org: true, ...overrides,
   });
 
   function respondToAdmission(status: Record<string, unknown>, texts: string[] = []) {
     sqlMock.mockImplementation((strings: TemplateStringsArray | string) => {
       const text = Array.isArray(strings) ? strings.join("?") : String(strings);
       texts.push(text);
-      if (text.includes("as workspace_budget_cents")) return Promise.resolve([{ workspace_budget_cents: null, org_budget_cents: null }]);
+      if (text.includes("as project_budget_cents")) return Promise.resolve([{ project_budget_cents: null, org_budget_cents: null }]);
       if (text.includes("org_spend_status")) return Promise.resolve([status]);
-      if (text.includes("insert into workspace_runs")) return Promise.reject(new Error("inserted"));
+      if (text.includes("insert into project_runs")) return Promise.reject(new Error("inserted"));
       return Promise.resolve([]);
     });
     return texts;
   }
 
   it("blocks new runs with credit_exhausted when included + prepaid credits are spent", async () => {
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
+    getProjectAccessMock.mockResolvedValue({ orgId: "org-1" });
     const texts = respondToAdmission(spendStatus({ available: -3.5 }));
 
     const error = await createRun({
       userId: "user-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       kind: "bulk-upload",
       totalDocuments: 1,
       pipeline: defaultPipelineFeatures,
@@ -133,14 +133,14 @@ describe("createRun", () => {
 
     expect(error).toMatchObject({ statusCode: 402, code: "credit_exhausted" });
     expect(String((error as Error).message)).toContain("/app/billing");
-    expect(texts.some((text) => text.includes("insert into workspace_runs"))).toBe(false);
+    expect(texts.some((text) => text.includes("insert into project_runs"))).toBe(false);
   });
 
   it("admits under the org's advisory lock and counts in-flight run reservations", async () => {
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
+    getProjectAccessMock.mockResolvedValue({ orgId: "org-1" });
     // 0.5 credits above the Free chat reserve (100), one in-flight run still holds 1 reserved credit.
     const texts = respondToAdmission(spendStatus({ available: 100.5, reserved: 1 }));
-    const input = { userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
+    const input = { userId: "user-1", projectId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
 
     const error = await createRun(input).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ statusCode: 402, code: "credit_exhausted" });
@@ -157,51 +157,51 @@ describe("createRun", () => {
     await expect(createRun(input)).rejects.toThrow("inserted");
   });
 
-  it("blocks runs for a workspace paused by its budget or outside the org", async () => {
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
-    const input = { userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
+  it("blocks runs for a project paused by its budget or outside the org", async () => {
+    getProjectAccessMock.mockResolvedValue({ orgId: "org-1" });
+    const input = { userId: "user-1", projectId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
     respondToAdmission(spendStatus({ org_budget_paused: true }));
     await expect(createRun(input)).rejects.toMatchObject({ statusCode: 402, code: "org_budget_paused" });
-    respondToAdmission(spendStatus({ workspace_in_org: false }));
+    respondToAdmission(spendStatus({ project_in_org: false }));
     await expect(createRun(input)).rejects.toMatchObject({ statusCode: 402, code: "plan_not_entitled" });
   });
 
   it("sums monthly spend only for budget caps that exist", async () => {
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
+    getProjectAccessMock.mockResolvedValue({ orgId: "org-1" });
     const texts: string[] = [];
-    const respond = (limits: { workspace_budget_cents: number | null; org_budget_cents: number | null }) =>
+    const respond = (limits: { project_budget_cents: number | null; org_budget_cents: number | null }) =>
       sqlMock.mockImplementation((strings: TemplateStringsArray | string) => {
         const text = Array.isArray(strings) ? strings.join("?") : String(strings);
         texts.push(text);
-        if (text.includes("as workspace_budget_cents")) return Promise.resolve([limits]);
+        if (text.includes("as project_budget_cents")) return Promise.resolve([limits]);
         if (text.includes("as spend_cents")) return Promise.resolve([{ spend_cents: 150 }]);
         if (text.includes("budget_paused")) return Promise.resolve([]);
-        if (text.includes("insert into workspace_runs")) return Promise.reject(new Error("stop-after-budget"));
+        if (text.includes("insert into project_runs")) return Promise.reject(new Error("stop-after-budget"));
         return Promise.resolve([]);
       });
-    const input = { userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
+    const input = { userId: "user-1", projectId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
 
     // No caps: the month-of-usage sum (the costliest ingest statement) is skipped.
-    respond({ workspace_budget_cents: null, org_budget_cents: null });
+    respond({ project_budget_cents: null, org_budget_cents: null });
     await createRun(input).catch(() => undefined);
-    expect(texts.some((text) => text.includes("as workspace_budget_cents"))).toBe(true);
+    expect(texts.some((text) => text.includes("as project_budget_cents"))).toBe(true);
     expect(texts.filter((text) => text.includes("as spend_cents"))).toHaveLength(0);
 
-    // A workspace cap sums workspace spend only, and pauses once spend reaches it.
+    // A project cap sums project spend only, and pauses once spend reaches it.
     texts.length = 0;
-    respond({ workspace_budget_cents: 100, org_budget_cents: null });
+    respond({ project_budget_cents: 100, org_budget_cents: null });
     const error = await createRun(input).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ statusCode: 402, code: "workspace_budget_paused" });
+    expect(error).toMatchObject({ statusCode: 402, code: "project_budget_paused" });
     expect(texts.filter((text) => text.includes("as spend_cents"))).toHaveLength(1);
   });
 
 });
 
 describe("run preview", () => {
-  it("builds a recommended preview profile from file metadata and workspace history", () => {
+  it("builds a recommended preview profile from file metadata and project history", () => {
     const preview = buildRunProcessingPreview({
       request: {
-        workspace: "ws-1",
+        project: "ws-1",
         pipeline: defaultPipelineFeatures,
         files: [
           {
@@ -245,7 +245,7 @@ describe("run preview", () => {
 
   it("prices PRICE_CARD units per quality, whichever vision model runs", () => {
     const request = {
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       pipeline: defaultPipelineFeatures,
       files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000 }],
       urls: [],
@@ -326,13 +326,13 @@ describe("stale processing run reconciliation", () => {
 
 describe("global activity inventory", () => {
   it("includes old live work instead of truncating at the latest 50 records", async () => {
-    listAccessibleWorkspaceIdsMock.mockResolvedValueOnce(["ws-1"]);
+    listAccessibleProjectIdsMock.mockResolvedValueOnce(["ws-1"]);
     sqlMock.mockResolvedValueOnce([]);
     await listRuns("user-1", true);
     const query = sqlMock.mock.calls.at(-1)![0].join(" ");
     expect(query).toContain("status in ('queued', 'processing')");
     expect(query).not.toContain("limit 50");
-    expect(query).toContain("workspace_id = any");
+    expect(query).toContain("project_id = any");
   });
 });
 

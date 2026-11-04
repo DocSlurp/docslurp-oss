@@ -12,7 +12,7 @@ import { getLiveApiKeyById, type ValidatedKey } from "./api-keys.js";
 
 /**
  * Query-time page parsing is capped by a policy resolved most-restrictive-wins
- * across: the key-type default, the workspace pipeline, the presenting API
+ * across: the key-type default, the project pipeline, the presenting API
  * key, the capability's issuing key and the sealed capability itself. No layer
  * can widen another, so a browser holding a capability can only narrow what
  * its issuer was already allowed.
@@ -49,11 +49,11 @@ function normalizeOrigin(value: string): string {
 }
 
 export async function resolveMaterializationPolicy(args: {
-  workspacePipeline: PipelineFeatures;
+  projectPipeline: PipelineFeatures;
   apiKey?: ValidatedKey | null;
   capabilityHeader?: string | null;
   origin?: string | null;
-  workspaceId: string;
+  projectId: string;
   nowMs?: number;
 }): Promise<ResolvedMaterializationPolicy> {
   const nowMs = args.nowMs ?? Date.now();
@@ -63,10 +63,10 @@ export async function resolveMaterializationPolicy(args: {
   sources.push(apiKey?.keyType === "client" ? "default:client-key" : "default:server");
   const layers: Array<Partial<MaterializationPolicy>> = [];
 
-  const workspaceLayer = args.workspacePipeline.materialization;
-  if (workspaceLayer && Object.keys(workspaceLayer).length > 0) {
-    layers.push(workspaceLayer);
-    sources.push("workspace");
+  const projectLayer = args.projectPipeline.materialization;
+  if (projectLayer && Object.keys(projectLayer).length > 0) {
+    layers.push(projectLayer);
+    sources.push("project");
   }
   if (apiKey?.materializationPolicy && Object.keys(apiKey.materializationPolicy).length > 0) {
     layers.push(apiKey.materializationPolicy);
@@ -80,7 +80,7 @@ export async function resolveMaterializationPolicy(args: {
     if (claims.exp * 1000 <= nowMs) return { error: "capability_expired" };
     const tokenPolicy = materializationPolicyOverridesSchema.safeParse(claims.policy);
     if (!tokenPolicy.success) return { error: "capability_invalid" };
-    if (!claims.workspaceIds.includes(args.workspaceId)) return { error: "capability_scope" };
+    if (!claims.projectIds.includes(args.projectId)) return { error: "capability_scope" };
     if (apiKey?.orgId && apiKey.orgId !== claims.orgId) return { error: "capability_scope" };
     if (claims.allowedOrigins?.length) {
       const origin = args.origin ? normalizeOrigin(args.origin) : null;
@@ -95,7 +95,7 @@ export async function resolveMaterializationPolicy(args: {
       const issuer = await issuerKey(claims.issuedByKeyId, nowMs);
       // The issuer's authority is re-checked now, not just at mint time.
       if (!issuer || issuer.keyType !== "server" || !issuer.scopes.includes("search")) return { error: "capability_invalid" };
-      if (issuer.workspaceIds.length > 0 && !issuer.workspaceIds.includes(args.workspaceId)) return { error: "capability_scope" };
+      if (issuer.projectIds.length > 0 && !issuer.projectIds.includes(args.projectId)) return { error: "capability_scope" };
       if (Object.keys(issuer.materializationPolicy).length > 0) {
         layers.push(issuer.materializationPolicy);
         sources.push("capability-issuer");

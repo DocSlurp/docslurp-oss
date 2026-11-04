@@ -1,7 +1,7 @@
 import type { MediaAccounting } from "./accounting.js";
 /** Provider transport and billable capacity are deliberately separate contracts. */
 export interface MediaScope {
-  orgId: string; workspaceId: string; runId: string; documentId: string;
+  orgId: string; projectId: string; runId: string; documentId: string;
 }
 export interface AudioInput {
   bytes: Uint8Array; durationSeconds: number;

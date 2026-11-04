@@ -36,7 +36,7 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 10000);
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -60,7 +60,7 @@ beforeEach(async () => {
   await sql`delete from document_pages`;
   await sql`delete from document_run_stage_states`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 /** A completed source run whose document went through every enabled stage. */
@@ -73,12 +73,12 @@ async function seedSourceRun(pipeline: PipelineFeatures) {
     "other:markdown": "s3://b/u1/run-src/markdown/other.md",
   };
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
     values ('run-src', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)},
       ${sql.json(artifacts)}, 1, 2)
   `;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values ('src', 'o1', 'u1', 'w', 'run-src', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'completed', 2)
   `;
   for (const stage of compilePipelinePlan(pipeline).stageOrder) {
@@ -100,12 +100,12 @@ async function seedSourceRun(pipeline: PipelineFeatures) {
 
 async function seedPartialRun(pipeline: PipelineFeatures, reusedFrom: string | null = "src") {
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
     values ('run-re', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as unknown as postgres.JSONValue)}, 1, 2)
   `;
-  await sql`update workspace_runs set execution_generation = 'test-generation' where id = 'run-re'`;
+  await sql`update project_runs set execution_generation = 'test-generation' where id = 'run-re'`;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count,
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count,
       previous_version_id, reused_from_document_id)
     values ('re', 'o1', 'u1', 'w', 'run-re', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', 2, 'src', ${reusedFrom})
   `;
@@ -195,12 +195,12 @@ describe("partial reprocess", () => {
     expect(usage.map((row) => row.metric)).not.toContain("vision-tokens");
     expect(usage.filter((row) => row.metric === "embedding-tokens")).toHaveLength(1);
 
-    const [run] = await sql<{ status: string }[]>`select status from workspace_runs where id = 'run-re'`;
+    const [run] = await sql<{ status: string }[]>`select status from project_runs where id = 'run-re'`;
     expect(run?.status).toBe("completed");
     // The run start pinned the legacy vision routing version in the persisted run artifacts.
     expect(artifacts["run:vision-routing-version"]).toBe("v1");
     const [pinned] = await sql<{ version: string | null }[]>`
-      select artifacts->>'run:vision-routing-version' as version from workspace_runs where id = 'run-re'`;
+      select artifacts->>'run:vision-routing-version' as version from project_runs where id = 'run-re'`;
     expect(pinned?.version).toBe("v1");
   }, 60_000);
 
@@ -223,8 +223,8 @@ describe("partial reprocess", () => {
 
     // A delayed init may not mutate a terminal run, even with its original token.
     const plan = compilePipelinePlan(pipeline);
-    const [ownership] = await sql`select execution_generation from workspace_runs where id = 'run-re'`;
-    await expect(store.seedReusedStageOutputs("run-re", plan.reusedStages, { runId: "run-re", orgId: "o1", workspaceId: "w", executionGeneration: ownership!.execution_generation ?? undefined })).rejects.toThrow("ownership");
+    const [ownership] = await sql`select execution_generation from project_runs where id = 'run-re'`;
+    await expect(store.seedReusedStageOutputs("run-re", plan.reusedStages, { runId: "run-re", orgId: "o1", projectId: "w", executionGeneration: ownership!.execution_generation ?? undefined })).rejects.toThrow("ownership");
     expect(await sql`select id from document_chunks where document_id = 're'`).toHaveLength(1);
   }, 60_000);
 
@@ -232,9 +232,9 @@ describe("partial reprocess", () => {
     await seedSourceRun(defaultPipelineFeatures);
     const pipeline = { ...defaultPipelineFeatures, restartFromStage: "page-index" };
     await seedPartialRun(pipeline);
-    await sql`update workspace_runs set execution_generation = 'replacement' where id = 'run-re'`;
+    await sql`update project_runs set execution_generation = 'replacement' where id = 'run-re'`;
     const snapshot = async () => ({
-      runs: await sql`select * from workspace_runs order by id`,
+      runs: await sql`select * from project_runs order by id`,
       documents: await sql`select * from documents order by id`,
       stages: await sql`select * from document_run_stage_states order by run_id, document_id, stage_name`,
       pages: await sql`select * from document_pages order by id`,
@@ -242,14 +242,14 @@ describe("partial reprocess", () => {
     });
     const before = await snapshot();
     await expect(store.seedReusedStageOutputs("run-re", compilePipelinePlan(pipeline).reusedStages,
-      { runId: "run-re", orgId: "o1", workspaceId: "w", executionGeneration: "test-generation" })).rejects.toThrow("ownership");
+      { runId: "run-re", orgId: "o1", projectId: "w", executionGeneration: "test-generation" })).rejects.toThrow("ownership");
     expect(await snapshot()).toEqual(before);
   }, 60_000);
 
   it("retention skips a source run while a partial run reuses it, and run start re-checks after a purge", async () => {
     await seedSourceRun(defaultPipelineFeatures);
-    await sql`update workspaces set artifact_retention_days = 1 where id = 'w'`;
-    await sql`update workspace_runs set created_at = now() - interval '10 days' where id = 'run-src'`;
+    await sql`update projects set artifact_retention_days = 1 where id = 'w'`;
+    await sql`update project_runs set created_at = now() - interval '10 days' where id = 'run-src'`;
     const pipeline = { ...defaultPipelineFeatures, restartFromStage: "embed" };
     await seedPartialRun(pipeline);
     const deleted: string[] = [];
@@ -261,22 +261,22 @@ describe("partial reprocess", () => {
     try {
       await purge();
       expect(deleted).toEqual([]);
-      expect(await sql`select id from workspace_runs where artifacts_purged_at is not null`).toEqual([]);
+      expect(await sql`select id from project_runs where artifacts_purged_at is not null`).toEqual([]);
 
       // Once the reusing run is terminal, retention proceeds as usual.
-      await sql`update workspace_runs set status = 'failed' where id = 'run-re'`;
+      await sql`update project_runs set status = 'failed' where id = 'run-re'`;
       await purge();
       expect(deleted).toContain("u1/run-src/markdown/src.md");
 
       // A run created before the purge finds the artifacts gone and fails clearly.
-      await sql`update workspace_runs set status = 'queued' where id = 'run-re'`;
+      await sql`update project_runs set status = 'queued' where id = 'run-re'`;
       const { stages, executed } = recordingStages();
       const execution = createStageExecution({ store, stages, config });
       await expect(execution.startRun({ runId: "run-re", executionGeneration: "test-generation", totalStages: 2 }))
         .rejects.toThrow(/purged by retention.*Reprocess every stage instead/);
       expect(executed).toEqual([]);
     } finally {
-      await sql`update workspaces set artifact_retention_days = null where id = 'w'`;
+      await sql`update projects set artifact_retention_days = null where id = 'w'`;
     }
   }, 60_000);
 

@@ -14,7 +14,7 @@ let scope:typeof import("../search/retrieval-scope.js").retrievalScope;
 let search:typeof import("../services/search.js");
 const schema={type:"object",properties:{site:{type:"object",format:"geojson"}}};
 const digest=createHash("sha256").update(canonicalGeoProjectionJson(schema)).digest("hex");
-const tenant={workspaceId:"q-w",orgId:"q-o"};
+const tenant={projectId:"q-w",orgId:"q-o"};
 const radius:GeoPredicate={field:"site",op:"radius",center:[0,0],radiusMeters:1000};
 describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integration",()=>{
  beforeAll(async()=>{
@@ -26,12 +26,12 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   await db`insert into organizations(id,name,slug,created_by_user_id) values('q-o','Org','query-geo','q-u'),('q-x','Other','query-other','q-other')`;
   await db`insert into org_memberships(org_id,user_id,role) values('q-o','q-u','owner'),('q-x','q-other','owner')`;
   for (const [w,o,u] of [['q-w','q-o','q-u'],['q-foreign','q-x','q-other']]) {
-   await db`insert into workspaces(id,org_id,user_id,name,pipeline) values(${w},${o},${u},${w},${db.json({outputSchema:schema})})`;
-   await db`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline) values(${w+'-r'},${o},${u},${w},'upload','completed','completed','{}')`;
+   await db`insert into projects(id,org_id,user_id,name,pipeline) values(${w},${o},${u},${w},${db.json({outputSchema:schema})})`;
+   await db`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values(${w+'-r'},${o},${u},${w},'upload','completed','completed','{}')`;
   }
   for (const [id,point,foreign] of [['near',[0,0],false],['far',[10,10],false],['dateline',[179.9,0],false],['foreign',[0,0],true]] as const) {
    const w=foreign?'q-foreign':'q-w',o=foreign?'q-x':'q-o',u=foreign?'q-other':'q-u';
-   await db`insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+   await db`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
      values(${id},${o},${u},${w},${w+'-r'},${id+'.txt'},'text/plain',${id},'completed')`;
    await db`insert into document_chunks(id,document_id,run_id,user_id,chunk_index,text,token_estimate)
      values(${id+'-chunk'},${id},${w+'-r'},${u},0,'budget road evidence',4)`;
@@ -51,13 +51,13 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
  it("explicit empty and conflicting document filters never widen",async()=>{
   const filters=await resolve(tenant,{geo:radius,documentIds:[]},schema);
   expect(filters.documentIds).toEqual([]);
-  const rows=await db`select d.id from documents d where ${scope({workspaceId:'q-w',filters}).vectorDocument()}`;
+  const rows=await db`select d.id from documents d where ${scope({projectId:'q-w',filters}).vectorDocument()}`;
   expect(rows).toEqual([]);
   expect((await resolve(tenant,{geo:radius,documentId:'near',documentIds:['far']},schema)).documentIds).toEqual([]);
  });
  it("actual hybrid retrieval refuses outsiders and preserves scope under expansion options",async()=>{
-  await expect(search.hybridSearch('budget','q-other',{filters:{workspaceId:'q-w',geo:radius},queryVector:[1,0]})).rejects.toThrow();
-  const result=await search.hybridSearch('budget','q-u',{filters:{workspaceId:'q-w',geo:radius},queryVector:[1,0],minScore:0,
+  await expect(search.hybridSearch('budget','q-other',{filters:{projectId:'q-w',geo:radius},queryVector:[1,0]})).rejects.toThrow();
+  const result=await search.hybridSearch('budget','q-u',{filters:{projectId:'q-w',geo:radius},queryVector:[1,0],minScore:0,
    useRerank:false,queryRewrite:false,selfQuery:false,enableGraphExpansion:true,enableCommunityExpansion:true,summarySeed:true});
   expect(result.results.length).toBeGreaterThan(0);
   expect(result.results.every(row=>row.citation.documentId==='near')).toBe(true);
@@ -84,7 +84,7 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
    process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
    if(mode==="abort") timer=setTimeout(()=>controller.abort(),200);
    const started=Date.now();
-   await expect(withSearchSignal<unknown>(controller.signal,()=>loader ? search.loadWorkspaceWholeCorpusContext({workspaceId:"q-w",userId:"q-u",filters:{geo:radius}}) : resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
+   await expect(withSearchSignal<unknown>(controller.signal,()=>loader ? search.loadProjectWholeCorpusContext({projectId:"q-w",userId:"q-u",filters:{geo:radius}}) : resolve(tenant,{geo:radius},schema))).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
    expect(Date.now()-started).toBeLessThan(3000);
   } finally {
    clearTimeout(timer); await blocker`rollback`; blocker.release();
@@ -96,16 +96,16 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   const {expandGraphTextQuery}=await import("../search/graph-expansion.js");
   const {finalizeSearchSessionExecution,searchResultsToChunks}=await import("../search/session-execution.js");
   const filters=await resolve(tenant,{geo:radius},schema);
-  const baseline=await search.hybridSearch("budget","q-u",{filters:{workspaceId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:false,queryRewrite:false,selfQuery:false});
+  const baseline=await search.hybridSearch("budget","q-u",{filters:{projectId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:false,queryRewrite:false,selfQuery:false});
   expect(baseline.results.length).toBeGreaterThan(0);
   const blocker=await db.reserve();
   const previous=process.env.SEARCH_STATEMENT_TIMEOUT_MS;
   const previousNative=process.env.SEARCH_LANCEDB_NATIVE;
-  const previousNativeWorkspaces=process.env.SEARCH_LANCEDB_NATIVE_WORKSPACES;
+  const previousNativeProjects=process.env.SEARCH_LANCEDB_NATIVE_PROJECTS;
   const controller=new AbortController();
   let timer:ReturnType<typeof setTimeout>|undefined;
   try {
-   if(target==="progressive"){process.env.SEARCH_LANCEDB_NATIVE="0";process.env.SEARCH_LANCEDB_NATIVE_WORKSPACES="";}
+   if(target==="progressive"){process.env.SEARCH_LANCEDB_NATIVE="0";process.env.SEARCH_LANCEDB_NATIVE_PROJECTS="";}
    await blocker`begin`;
    if(target==="parent" || target==="progressive")await blocker`lock table document_pages in access exclusive mode`;
    else if(target==="neighbor" || target==="lexical")await blocker`lock table document_chunks in access exclusive mode`;
@@ -114,9 +114,9 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
    process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
    if(mode==="abort")timer=setTimeout(()=>controller.abort(),200);
    const work=async()=>{
-    if(target==="graph")return expandGraphTextQuery({enabled:true,query:"budget",textQuery:"budget",workspaceId:"q-w",filters});
-    if(["parent","lexical","progressive","graph-evidence"].includes(target))return search.hybridSearch("budget","q-u",{filters:{workspaceId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:target==="parent",queryRewrite:false,selfQuery:false,enableGraphExpansion:target==="graph-evidence"});
-    return finalizeSearchSessionExecution({query:"budget",userId:"q-u",workspaceId:"q-w",filters,options:{parentRetrieval:true},chunks:searchResultsToChunks(baseline.results),availability:baseline.availability,effectiveQuery:"budget",selfQueryReasons:[],session:{sessionId:"parent-test",persist:vi.fn(),usageEvents:()=>[],diagnostics:()=>({})}} as never);
+    if(target==="graph")return expandGraphTextQuery({enabled:true,query:"budget",textQuery:"budget",projectId:"q-w",filters});
+    if(["parent","lexical","progressive","graph-evidence"].includes(target))return search.hybridSearch("budget","q-u",{filters:{projectId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:target==="parent",queryRewrite:false,selfQuery:false,enableGraphExpansion:target==="graph-evidence"});
+    return finalizeSearchSessionExecution({query:"budget",userId:"q-u",projectId:"q-w",filters,options:{parentRetrieval:true},chunks:searchResultsToChunks(baseline.results),availability:baseline.availability,effectiveQuery:"budget",selfQueryReasons:[],session:{sessionId:"parent-test",persist:vi.fn(),usageEvents:()=>[],diagnostics:()=>({})}} as never);
    };
    const started=Date.now();
    await expect(withSearchSignal(controller.signal,work)).rejects.toMatchObject({name:mode==="abort"?"AbortError":"SearchStatementTimeoutError"});
@@ -124,14 +124,14 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   }finally{
    clearTimeout(timer);await blocker`rollback`;blocker.release();
    if(previousNative===undefined)delete process.env.SEARCH_LANCEDB_NATIVE;else process.env.SEARCH_LANCEDB_NATIVE=previousNative;
-   if(previousNativeWorkspaces===undefined)delete process.env.SEARCH_LANCEDB_NATIVE_WORKSPACES;else process.env.SEARCH_LANCEDB_NATIVE_WORKSPACES=previousNativeWorkspaces;
+   if(previousNativeProjects===undefined)delete process.env.SEARCH_LANCEDB_NATIVE_PROJECTS;else process.env.SEARCH_LANCEDB_NATIVE_PROJECTS=previousNativeProjects;
    if(previous===undefined)delete process.env.SEARCH_STATEMENT_TIMEOUT_MS;else process.env.SEARCH_STATEMENT_TIMEOUT_MS=previous;
   }
  });
  it("a revision mutation cannot reuse prior readiness or a resolved scope",async()=>{
   const filters:SearchFilters=await resolve(tenant,{geo:radius},schema);
   await db`update documents set projection_revision=projection_revision+1 where id='near'`;
-  expect(await db`select d.id from documents d where ${scope({workspaceId:'q-w',filters}).vectorDocument()}`).toEqual([]);
+  expect(await db`select d.id from documents d where ${scope({projectId:'q-w',filters}).vectorDocument()}`).toEqual([]);
   await expect(resolve(tenant,{geo:radius},schema)).rejects.toThrow('missing or stale');
  });
 });

@@ -23,18 +23,18 @@ const id = "11111111-1111-4111-8111-111111111111";
 let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
 const app = new Hono().use("*", apiKeyAuth).route("/uploads", createUploadsRoutes());
 let rawKey: string;
-async function seedKey(overrides: { keyType?: string; scopes?: string[]; orgId?: string | null; workspaceIds?: string[]; userId?: string } = {}) {
+async function seedKey(overrides: { keyType?: string; scopes?: string[]; orgId?: string | null; projectIds?: string[]; userId?: string } = {}) {
   const keyType = overrides.keyType ?? "server";
   rawKey = `dslp_${keyType === "client" ? "pub" : "priv"}_${randomBytes(32).toString("hex")}`;
   await db.query(`insert into api_keys
-    (id, user_id, org_id, key_hash, name, key_type, scopes, allowed_domains, workspace_ids)
+    (id, user_id, org_id, key_hash, name, key_type, scopes, allowed_domains, project_ids)
     values ('key', $1, $2, $3, 'Upload test', $4, $5, $6, $7)
     on conflict (id) do update set user_id=excluded.user_id, org_id=excluded.org_id,
     key_hash=excluded.key_hash, key_type=excluded.key_type, scopes=excluded.scopes,
-    allowed_domains=excluded.allowed_domains, workspace_ids=excluded.workspace_ids, revoked_at=null`,
+    allowed_domains=excluded.allowed_domains, project_ids=excluded.project_ids, revoked_at=null`,
     [overrides.userId ?? "u", overrides.orgId === undefined ? "o" : overrides.orgId,
       createHash("sha256").update(rawKey).digest("hex"), keyType, overrides.scopes ?? ["ingest"],
-      keyType === "client" ? ["docs.example.com"] : [], overrides.workspaceIds ?? ["w"]]);
+      keyType === "client" ? ["docs.example.com"] : [], overrides.projectIds ?? ["w"]]);
 }
 const ownershipQueries = () => mocks.query.mock.calls.filter(([sql]) => /from upload_sessions/i.test(sql));
 beforeAll(async () => {
@@ -44,8 +44,8 @@ beforeAll(async () => {
     insert into "user" (id,name,email) values ('u','Test','upload@example.test'), ('other','Other','other@example.test');
     insert into organizations (id,name,slug,created_by_user_id) values ('o','Org','upload-test','u'), ('foreign','Foreign','upload-foreign','u');
     insert into org_memberships (org_id,user_id,role) values ('o','u','owner'), ('foreign','u','owner'), ('o','other','member');
-    insert into workspaces (id,org_id,user_id,name) values ('w','o','u','Workspace'), ('excluded','o','u','Excluded');
-    insert into upload_sessions (id,user_id,org_id,workspace_id,status) values ('${id}','u','o','w','uploading');
+    insert into projects (id,org_id,user_id,name) values ('w','o','u','Project'), ('excluded','o','u','Excluded');
+    insert into upload_sessions (id,user_id,org_id,project_id,status) values ('${id}','u','o','w','uploading');
   `);
   mocks.query.mockImplementation((text, values) => db.query(text, values));
 }, 120000);
@@ -60,7 +60,7 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
   const request = (sessionId = id) => app.request(`/uploads/direct/sessions/${sessionId}?statusOnly=${statusOnly}`, {
     headers: { authorization: `Bearer ${rawKey}`, origin: "https://docs.example.com" },
   });
-  it("permits a server ingest key bound to the owning workspace", async () => {
+  it("permits a server ingest key bound to the owning project", async () => {
     expect((await request()).status).toBe(200);
     expect(mocks.query.mock.calls.some(([sql]) => /from api_keys/i.test(sql))).toBe(true);
     expect(mocks.query).toHaveBeenCalled();
@@ -68,10 +68,10 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
   });
   it.each([
     ["browser", { keyType: "client", scopes: ["search"] }, 403],
-    ["legacy elevated browser", { keyType: "client", scopes: ["ingest", "artifacts", "workspaces:manage"] }, 403],
+    ["legacy elevated browser", { keyType: "client", scopes: ["ingest", "artifacts", "projects:manage"] }, 403],
     ["wrong scope", { scopes: ["search"] }, 403],
     ["other tenant", { orgId: "foreign" }, 404],
-    ["other workspace", { workspaceIds: ["excluded"] }, 404],
+    ["other project", { projectIds: ["excluded"] }, 404],
     ["other owner", { userId: "other" }, 404],
     ["missing organization", { orgId: null }, 403],
   ])("rejects %s before serialization or signing", async (_label, overrides, status) => {
@@ -83,13 +83,13 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
     expect((await request("22222222-2222-4222-8222-222222222222")).status).toBe(404);
     expect(mocks.describe).not.toHaveBeenCalled();
   });
-  it("rejects an unassigned session for a workspace-bound key", async () => {
-    await db.query("update upload_sessions set workspace_id = null where id = $1", [id]);
+  it("rejects an unassigned session for a project-bound key", async () => {
+    await db.query("update upload_sessions set project_id = null where id = $1", [id]);
     try {
       expect((await request()).status).toBe(404);
       expect(mocks.describe).not.toHaveBeenCalled();
     } finally {
-      await db.query("update upload_sessions set workspace_id = 'w' where id = $1", [id]);
+      await db.query("update upload_sessions set project_id = 'w' where id = $1", [id]);
     }
   });
   it("rejects revoked credentials before ownership lookup", async () => {

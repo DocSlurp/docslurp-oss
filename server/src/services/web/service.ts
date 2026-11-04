@@ -6,8 +6,8 @@ import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observa
 import { env } from "../../config.js";
 import { recordCostEvent, recordUnitCharge } from "../../lib/ai-usage.js";
 import { assertSafeExternalUrl } from "../../lib/network-security.js";
-import { allowHostedCallForWorkspace } from "../../lib/privacy.js";
-import { loadWorkspacePipeline } from "../../search/session-setup.js";
+import { allowHostedCallForProject } from "../../lib/privacy.js";
+import { loadProjectPipeline } from "../../search/session-setup.js";
 import { assertCanSpend } from "../billing/spend-guard.js";
 import { reviewUntrustedEvidenceText } from "../prompt-injection.js";
 import { createExaAdapter } from "./providers/exa.js";
@@ -25,7 +25,7 @@ export type WebSurface = "api" | "mcp" | "chat" | "ingest";
 export interface WebCallContext {
   userId: string;
   orgId: string | null;
-  workspaceId: string;
+  projectId: string;
   surface: WebSurface;
   signal?: AbortSignal;
   parent?: TelemetrySpan;
@@ -41,9 +41,9 @@ export interface WebServiceDeps {
   router: WebRouter;
   now: () => number;
   assertSafeUrl: (url: string) => Promise<string>;
-  /** The workspace's own opt-out (`pipeline.webTools`) first, then its privacy mode. */
-  workspaceAccess: (workspaceId: string, capability: WebCapability) => Promise<"allowed" | "disabled" | "privacy">;
-  assertCanSpend: (orgId: string | null, workspaceId: string) => Promise<void>;
+  /** The project's own opt-out (`pipeline.webTools`) first, then its privacy mode. */
+  projectAccess: (projectId: string, capability: WebCapability) => Promise<"allowed" | "disabled" | "privacy">;
+  assertCanSpend: (orgId: string | null, projectId: string) => Promise<void>;
   recordCost: typeof recordCostEvent;
   recordCharge: typeof recordUnitCharge;
 }
@@ -90,17 +90,17 @@ function deps(): WebServiceDeps {
     router: createWebRouter(env.web),
     now: Date.now,
     assertSafeUrl: assertSafeExternalUrl,
-    workspaceAccess: async (workspaceId, capability) => {
-      const pipeline = await loadWorkspacePipeline(workspaceId);
+    projectAccess: async (projectId, capability) => {
+      const pipeline = await loadProjectPipeline(projectId);
       if (pipeline.webTools === false) return "disabled";
-      return await allowHostedCallForWorkspace({
+      return await allowHostedCallForProject({
         privacyMode: pipeline.privacyMode,
-        workspaceId,
+        projectId,
         // Generic descriptor: privacy audit rows never name the provider.
         call: { provider: "web", model: capability, operation: `api.web.${capability}`, target: "hosted" },
       }) ? "allowed" : "privacy";
     },
-    assertCanSpend: (orgId, workspaceId) => assertCanSpend(orgId, workspaceId, { kind: "interactive" }),
+    assertCanSpend: (orgId, projectId) => assertCanSpend(orgId, projectId, { kind: "interactive" }),
     recordCost: recordCostEvent,
     recordCharge: recordUnitCharge,
   };
@@ -138,7 +138,7 @@ function cacheDelete(key: string): void {
 }
 
 function cacheKey(capability: WebCapability, input: unknown, ctx: WebCallContext): string {
-  return createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.workspaceId, ctx.userId, capability, input])).digest("hex");
+  return createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.projectId, ctx.userId, capability, input])).digest("hex");
 }
 
 function cacheGet<T>(key: string, now: number): T | undefined {
@@ -188,7 +188,7 @@ async function recordProviderCosts(d: WebServiceDeps, ctx: WebCallContext, capab
   paid: PaidAttempt[], attempts: WebAttempt[], served: WebProviderId | undefined): Promise<void> {
   await Promise.all(paid.map((spent, index) => d.recordCost({
     userId: ctx.userId,
-    scope: { orgId: ctx.orgId, workspaceId: ctx.workspaceId },
+    scope: { orgId: ctx.orgId, projectId: ctx.projectId },
     event: {
       id: `web-cost:${callId}:${index}`, provider: spent.provider, model: `web-${capability}`, metric: `web-${capability}`,
       amount: spent.units?.amount ?? 1, unit: spent.units?.unit ?? "request", costCents: 0,
@@ -274,7 +274,7 @@ function withUrls<C extends WebCapability>(capability: C, input: WebInput<C>, ur
 
 /**
  * Run one Web Capability call with every guardrail: feature flag, URL safety,
- * workspace privacy mode, per-org rate limit, spend check, cache, provider
+ * project privacy mode, per-org rate limit, spend check, cache, provider
  * failover, provider-cost recording (internal) and the customer unit charge.
  * Traced as one `web <capability>` span with a child span per provider attempt.
  */
@@ -289,7 +289,7 @@ export async function runWebCapability<C extends WebCapability>(
   const callId = randomUUID();
   const span = startTelemetrySpan("docslurp.web", `web ${capability}`, {
     "docslurp.web.capability": capability, "docslurp.web.surface": ctx.surface, "docslurp.web.call_id": callId,
-    "docslurp.workspaceId": ctx.workspaceId, ...(ctx.orgId ? { "docslurp.orgId": ctx.orgId } : {}),
+    "docslurp.projectId": ctx.projectId, ...(ctx.orgId ? { "docslurp.orgId": ctx.orgId } : {}),
     "docslurp.web.strategy": d.config.strategy,
   }, { parent: ctx.parent });
   let outcome = "error";
@@ -316,14 +316,14 @@ export async function runWebCapability<C extends WebCapability>(
       input = withUrls(capability, rawInput, safe);
     }
 
-    const access = await d.workspaceAccess(ctx.workspaceId, capability);
-    if (access === "disabled") throw new WebToolError(403, "web_disabled", "Web tools are turned off for this workspace.");
-    if (access === "privacy") throw new WebToolError(403, "privacy_mode_blocked", "This workspace's privacy mode does not allow web tools.");
+    const access = await d.projectAccess(ctx.projectId, capability);
+    if (access === "disabled") throw new WebToolError(403, "web_disabled", "Web tools are turned off for this project.");
+    if (access === "privacy") throw new WebToolError(403, "privacy_mode_blocked", "This project's privacy mode does not allow web tools.");
     const retryAfter = admitOrgCall(ctx.orgId ?? `user:${ctx.userId}`, started, d.config.orgPerMinute);
     if (retryAfter !== null) {
       throw new WebToolError(429, "rate_limited", "Too many web tool calls. Try again shortly.", retryAfter);
     }
-    await d.assertCanSpend(ctx.orgId, ctx.workspaceId);
+    await d.assertCanSpend(ctx.orgId, ctx.projectId);
 
     // Deep fetches ask for a fresh render, so they bypass the cache.
     const cacheable = !(capability === "fetch" && (input as WebInput<"fetch">).depth === "deep");
@@ -369,7 +369,7 @@ export async function runWebCapability<C extends WebCapability>(
       try {
         await d.recordCharge({
           userId: ctx.userId,
-          scope: { orgId: ctx.orgId, workspaceId: ctx.workspaceId },
+          scope: { orgId: ctx.orgId, projectId: ctx.projectId },
           charge: { id: `web:${callId}`, metric: charge.metric as never, amount: charge.amount, unit: charge.unit, credits,
             metadata: { capability, surface: ctx.surface, cached, callId } },
         });
@@ -390,6 +390,6 @@ export async function runWebCapability<C extends WebCapability>(
     span.set({ ...fields, "docslurp.web.outcome": outcome, "docslurp.web.runtime_ms": runtimeMs });
     span.end(outcome === "ok" ? undefined : outcome);
     // Internal log line (SigNoz): provider named here only.
-    console.log(`[web] call capability=${capability} surface=${ctx.surface} outcome=${outcome} provider=${fields["docslurp.web.provider"] ?? "-"} option=${fields["docslurp.web.option"] ?? "-"} paid=${fields["docslurp.web.options_paid"] ?? "-"} blocked=${fields["docslurp.web.price_blocked"] ?? "-"} cache=${fields["docslurp.web.cache_hit"] ?? false} results=${fields["docslurp.web.result_count"] ?? 0} cost_cents=${fields["docslurp.web.cost_cents"] ?? 0} credits=${fields["docslurp.web.credits"] ?? 0} attempts=${fields["docslurp.web.attempts"] ?? 0} ms=${runtimeMs} call=${callId} org=${ctx.orgId ?? "-"} workspace=${ctx.workspaceId}`);
+    console.log(`[web] call capability=${capability} surface=${ctx.surface} outcome=${outcome} provider=${fields["docslurp.web.provider"] ?? "-"} option=${fields["docslurp.web.option"] ?? "-"} paid=${fields["docslurp.web.options_paid"] ?? "-"} blocked=${fields["docslurp.web.price_blocked"] ?? "-"} cache=${fields["docslurp.web.cache_hit"] ?? false} results=${fields["docslurp.web.result_count"] ?? 0} cost_cents=${fields["docslurp.web.cost_cents"] ?? 0} credits=${fields["docslurp.web.credits"] ?? 0} attempts=${fields["docslurp.web.attempts"] ?? 0} ms=${runtimeMs} call=${callId} org=${ctx.orgId ?? "-"} project=${ctx.projectId}`);
   }
 }

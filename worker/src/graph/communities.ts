@@ -11,7 +11,7 @@ import {
 import { operationErrorAttributes, operationErrorSummary } from "@docslurp/shared/observability";
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
-import { lockWorkspaceGraph } from "./graph-store.js";
+import { lockProjectGraph } from "./graph-store.js";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -169,32 +169,32 @@ export interface CommunityRefreshResult {
 }
 
 /**
- * Re-clusters the whole workspace graph. Communities whose members did not
+ * Re-clusters the whole project graph. Communities whose members did not
  * change keep their summary; new ones are summarized (LLM up to the cap,
  * heuristic beyond it). Search matches summaries by full text. The swap
  * happens in one locked transaction.
  */
-export async function refreshWorkspaceCommunities(args: {
+export async function refreshProjectCommunities(args: {
   sql: Client;
-  workspaceId: string;
+  projectId: string;
   userId: string;
   runId: string | null;
   context: CommunitySummaryContext;
 }): Promise<CommunityRefreshResult> {
-  const { sql, workspaceId } = args;
+  const { sql, projectId } = args;
   const nodes = await sql<{ id: string; name: string; type: string; mentions: number }[]>`
     select id, canonical_name as name, entity_type as type, mention_count as mentions
-    from kg_nodes where workspace_id = ${workspaceId}
+    from kg_nodes where project_id = ${projectId}
   `;
   const edges = await sql<{ source: string; target: string; predicate: string; weight: number }[]>`
     select source_node_id as source, target_node_id as target, normalized_predicate as predicate, weight
-    from kg_edges where workspace_id = ${workspaceId}
+    from kg_edges where project_id = ${projectId}
   `;
   const detected = detectCommunities([...nodes], [...edges]);
   const existing = await sql<{ member_hash: string; label: string; summary: string; summary_source: string | null }[]>`
     select member_hash, label, summary, metadata->>'summarySource' as summary_source
     from kg_communities
-    where workspace_id = ${workspaceId} and member_hash is not null
+    where project_id = ${projectId} and member_hash is not null
   `;
   const previous = new Map(existing.map((row) => [row.member_hash, row]));
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
@@ -274,7 +274,7 @@ export async function refreshWorkspaceCommunities(args: {
           system: [
             "Write a concise retrieval-oriented summary for this graph community.",
             "Highlight the shared theme, the most central entities, and the key relationships operators should follow first.",
-            `Frame the summary for this workspace domain and scope:\n${args.context.scope}`,
+            `Frame the summary for this project domain and scope:\n${args.context.scope}`,
           ].join("\n"),
           prompt,
           model: args.context.model,
@@ -308,18 +308,18 @@ export async function refreshWorkspaceCommunities(args: {
     }
   });
   if (llmFailures > 0) {
-    console.warn(`[graph-communities] workspace=${workspaceId} model=${args.context.model} llm_fallback communities=${llmFailures}/${pending.length} first=${operationErrorSummary(firstFailure ?? {})}`);
+    console.warn(`[graph-communities] project=${projectId} model=${args.context.model} llm_fallback communities=${llmFailures}/${pending.length} first=${operationErrorSummary(firstFailure ?? {})}`);
   }
 
   const idByHash = new Map(records.map((record) => [record.memberHash, record.id]));
   await sql.begin(async (tx) => {
     const client = tx as unknown as Client;
-    await lockWorkspaceGraph(client, workspaceId);
-    await client`delete from kg_communities where workspace_id = ${workspaceId}`;
+    await lockProjectGraph(client, projectId);
+    await client`delete from kg_communities where project_id = ${projectId}`;
     if (!records.length) return;
     await client`
-      insert into kg_communities (id, workspace_id, run_id, user_id, level, label, summary, member_count, member_hash, metadata)
-      select id, ${workspaceId}, ${args.runId}, ${args.userId}, level, label, summary, member_count, member_hash, metadata::jsonb
+      insert into kg_communities (id, project_id, run_id, user_id, level, label, summary, member_count, member_hash, metadata)
+      select id, ${projectId}, ${args.runId}, ${args.userId}, level, label, summary, member_count, member_hash, metadata::jsonb
       from unnest(
         ${client.array(records.map((record) => record.id))}::text[],
         ${client.array(records.map((record) => record.level))}::int[],
@@ -338,8 +338,8 @@ export async function refreshWorkspaceCommunities(args: {
       const batch = members.slice(index, index + 5000);
       // Nodes deleted since the graph was read are skipped, not FK failures.
       await client`
-        insert into kg_community_members (community_id, node_id, workspace_id)
-        select member.community_id, member.node_id, ${workspaceId}
+        insert into kg_community_members (community_id, node_id, project_id)
+        select member.community_id, member.node_id, ${projectId}
         from unnest(
           ${client.array(batch.map((member) => member.community))}::text[],
           ${client.array(batch.map((member) => member.node))}::text[]

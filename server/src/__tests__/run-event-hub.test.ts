@@ -1,10 +1,10 @@
-import type { WorkspaceRunEvent } from "@docslurp/shared";
+import type { ProjectRunEvent } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseRunEventHint, RunEventHub, type RunEventHubDeps, type RunEventHubRow } from "../services/run-event-hub.js";
 
 /**
- * In-memory stand-in for workspace_run_events with the same cursor semantics
+ * In-memory stand-in for project_run_events with the same cursor semantics
  * as the SQL in services/runs.ts: rows with created_at >= after, ordered by
  * created_at, id. `commit` makes rows visible; NOTIFY is a separate, optional
  * hint, exactly as workers send it (one per flush, not per event).
@@ -42,7 +42,7 @@ class EventTable {
       const createdAt = new Date(this.base + offsetMs).toISOString();
       this.rows.push({
         cursor: createdAt,
-        event: { id, runId, userId: "u1", type: type ?? "run.progress", createdAt } as unknown as WorkspaceRunEvent,
+        event: { id, runId, userId: "u1", type: type ?? "run.progress", createdAt } as unknown as ProjectRunEvent,
       });
     }
   }

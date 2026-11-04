@@ -17,10 +17,10 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 6);
   `);
   const served = await serveOnRandomPort(db);

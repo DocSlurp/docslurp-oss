@@ -9,7 +9,7 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 import { documentExtractorRegistry } from "../extractors/registry.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
@@ -253,9 +253,9 @@ function makeDocument(overrides: Partial<Document> = {}): Document {
   };
 }
 
-function makeRun(): WorkspaceRun {
+function makeRun(): ProjectRun {
   return {
-    id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload", status: "processing",
+    id: "run-1", orgId: "org-1", userId: "user-1", projectId: "ws-1", kind: "bulk-upload", status: "processing",
     stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures }, error: null, stats: {}, artifacts: {}, claimId: null,
     createdAt: new Date(), updatedAt: new Date(),
@@ -354,7 +354,7 @@ describe("H2: the worker parses only the bytes the server hashed", () => {
       },
       async record(entry) {
         records.push(entry);
-        return { sourceSha256: entry.stagedSha256 ?? "none", orgId: "org-1", workspaceId: "ws-1" };
+        return { sourceSha256: entry.stagedSha256 ?? "none", orgId: "org-1", projectId: "ws-1" };
       },
       async noteRefusal() {},
       async recordOrgFailure() {
@@ -377,7 +377,7 @@ describe("H2: the worker parses only the bytes the server hashed", () => {
 
 const inDocument = <T>(fn: () => Promise<T>, documentId = "doc-1") =>
   runWithPerfContext(
-    { runId: "run-1", documentId, orgId: "org-1", workspaceId: "ws-1", scope: "document", stageName: "extract-markdown", pushPerformance: () => {} },
+    { runId: "run-1", documentId, orgId: "org-1", projectId: "ws-1", scope: "document", stageName: "extract-markdown", pushPerformance: () => {} },
     fn,
   );
 

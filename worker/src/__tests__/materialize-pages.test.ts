@@ -39,11 +39,11 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1),
              ('run-2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 6);
   `);
   const served = await serveOnRandomPort(db);
@@ -67,7 +67,7 @@ interface Harness {
   embedCalls: string[][];
   lanceWrites: Array<{ id: string; text: string }[]>;
   lanceDeletes: string[];
-  run: { id: string; orgId: string; userId: string; workspaceId: string };
+  run: { id: string; orgId: string; userId: string; projectId: string };
 }
 
 function harness(pageTexts: Record<number, string>, overrides: Partial<PageMaterializerOps> = {}): Harness {
@@ -80,7 +80,7 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
     lanceWrites: [] as Array<{ id: string; text: string }[]>,
     lanceDeletes: [] as string[],
     usage,
-    run: { id: "run-1", orgId: "o1", userId: "u1", workspaceId: "w" },
+    run: { id: "run-1", orgId: "o1", userId: "u1", projectId: "w" },
   } as unknown as Harness;
   const ops: PageMaterializerOps = {
     async extractText(_doc, range) {
@@ -136,7 +136,7 @@ beforeEach(async () => {
 describe("materializePageRange", () => {
   it.each([false, true])("bills materialized pages from the immutable run boost snapshot (%s), once", async speedBoost => {
     const runId = `materialized-boost-${speedBoost}`;
-    await sql`insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    await sql`insert into project_runs(id, org_id, user_id, project_id, kind, status, stage, pipeline)
       values (${runId}, 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', ${sql.json({ speedBoost })})`;
     const h = harness({ 1: LONG, 2: "" });
     h.run.id = runId;
@@ -426,7 +426,7 @@ describe("materializePageRange", () => {
     expect(await orphanQueue()).toEqual([before]);
     const [row] = (await db.query<{ org_id: string; payload: Record<string, unknown>; due: boolean }>(
       `select org_id, payload, not_before > now() as due from storage_cleanup_queue where kind = 'vector_rows'`)).rows;
-    expect(row).toMatchObject({ org_id: "o1", due: true, payload: { workspaceId: "w", documentId: "d1", dimension: 3 } });
+    expect(row).toMatchObject({ org_id: "o1", due: true, payload: { projectId: "w", documentId: "d1", dimension: 3 } });
   });
 
   it("reports total spend including failed pages and completed batches", async () => {

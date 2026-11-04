@@ -14,8 +14,8 @@ import { sql as defaultSql, type SqlClient } from "../db.js";
 import { reciprocalRankFusionScored } from "./rrf.js";
 
 /**
- * Index-config serving (spec 6.2). `workspaces.index_configs` maps `index_config_hash` to the IndexConfig of
- * every index a live document in the workspace is built with (the current one included). While a re-index
+ * Index-config serving (spec 6.2). `projects.index_configs` maps `index_config_hash` to the IndexConfig of
+ * every index a live document in the project is built with (the current one included). While a re-index
  * runs (or after a change that was not re-indexed) search serves each document from the table of the config
  * it was indexed under: one vector search per config, restricted to that config's documents, the query
  * embedded once per distinct vector space, the ranked lists fused with RRF. Their raw scores live in
@@ -72,11 +72,11 @@ const LIVE_VECTORIZED = (sql: SqlClient) => sql`
   and exists (select 1 from vector_indexes v where v.document_id = d.id)`;
 
 /** Live vectorized documents per index config hash. */
-export async function documentCountsByIndexConfig(workspaceId: string, sql: SqlClient = defaultSql): Promise<Map<string, number>> {
+export async function documentCountsByIndexConfig(projectId: string, sql: SqlClient = defaultSql): Promise<Map<string, number>> {
   const rows = await sql<{ hash: string | null; n: number }[]>`
     select d.index_config_hash as hash, count(*)::int as n
     from documents d
-    where d.workspace_id = ${workspaceId} and ${LIVE_VECTORIZED(sql)}
+    where d.project_id = ${projectId} and ${LIVE_VECTORIZED(sql)}
     group by d.index_config_hash
   `;
   return new Map(rows.filter((row) => row.hash).map((row) => [row.hash!, row.n]));
@@ -90,34 +90,34 @@ export async function documentCountsByIndexConfig(workspaceId: string, sql: SqlC
  * pipeline changed underneath (the next sweep retries). Cheap and idempotent: called by the sweeper and lazily
  * from search.
  */
-export async function pruneIndexConfigs(workspaceId: string, sql: SqlClient = defaultSql): Promise<IndexConfigMap | null> {
+export async function pruneIndexConfigs(projectId: string, sql: SqlClient = defaultSql): Promise<IndexConfigMap | null> {
   const [ws] = await sql<{ pipeline: PipelineFeatures | null }[]>`
-    select pipeline from workspaces where id = ${workspaceId} and index_configs is not null
+    select pipeline from projects where id = ${projectId} and index_configs is not null
   `;
   if (!ws) return {};
-  const current = indexConfigOf(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `workspace ${workspaceId}`));
+  const current = indexConfigOf(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `project ${projectId}`));
   const currentHash = indexConfigHash(current);
   const unchanged = ws.pipeline === null
     ? sql`ws.pipeline is null`
     : sql`ws.pipeline = ${sql.json(JSON.parse(JSON.stringify(ws.pipeline)))}::jsonb`;
   const [row] = await sql<{ index_configs: unknown }[]>`
-    update workspaces as ws
+    update projects as ws
     set index_configs = (
       select coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
       from jsonb_each(ws.index_configs) as e
       where e.key <> ${currentHash}
-        and exists (select 1 from documents d where d.workspace_id = ws.id and d.index_config_hash = e.key and ${LIVE_VECTORIZED(sql)})
+        and exists (select 1 from documents d where d.project_id = ws.id and d.index_config_hash = e.key and ${LIVE_VECTORIZED(sql)})
     ) || jsonb_build_object(${currentHash}::text, ${sql.json(JSON.parse(JSON.stringify(current)))}::jsonb)
-    where ws.id = ${workspaceId} and ws.index_configs is not null and ${unchanged}
+    where ws.id = ${projectId} and ws.index_configs is not null and ${unchanged}
     returning ws.index_configs
   `;
   return row ? parseIndexConfigs(row.index_configs) : null;
 }
 
-/** Sweeper: prunes drained configs in every workspace that still records more than one. */
+/** Sweeper: prunes drained configs in every project that still records more than one. */
 export async function pruneDrainedIndexConfigs(sql: SqlClient = defaultSql, limit = 50): Promise<number> {
   const rows = await sql<{ id: string }[]>`
-    select ws.id from workspaces as ws
+    select ws.id from projects as ws
     where ws.index_configs is not null and (select count(*) from jsonb_object_keys(ws.index_configs)) > 1
     limit ${limit}
   `;
@@ -137,11 +137,11 @@ function spaceKey(embedding: EmbeddingConfig): string {
 
 /**
  * Vector search over every index config a live document is built with. With one config (the common case)
- * it is exactly `deps.search(vector, null)` and runs no query: `indexConfigs` arrives with the workspace
+ * it is exactly `deps.search(vector, null)` and runs no query: `indexConfigs` arrives with the project
  * pipeline.
  */
 export async function servedVectorSearch<T extends ChunkLike>(args: {
-  workspaceId: string;
+  projectId: string;
   pipeline: PipelineFeatures;
   indexConfigs: IndexConfigMap;
   queryVector: number[];
@@ -154,9 +154,9 @@ export async function servedVectorSearch<T extends ChunkLike>(args: {
   const hashes = Object.keys(args.indexConfigs).filter((hash) => hash !== currentHash);
   if (hashes.length === 0) return await args.deps.search(args.queryVector, null);
 
-  const counts = await documentCountsByIndexConfig(args.workspaceId, args.sql);
+  const counts = await documentCountsByIndexConfig(args.projectId, args.sql);
   const drained = hashes.filter((hash) => !counts.get(hash));
-  if (drained.length > 0) void pruneIndexConfigs(args.workspaceId, args.sql).catch(() => undefined);
+  if (drained.length > 0) void pruneIndexConfigs(args.projectId, args.sql).catch(() => undefined);
   const others = hashes.filter((hash) => counts.get(hash));
   if (others.length === 0) return await args.deps.search(args.queryVector, null);
 

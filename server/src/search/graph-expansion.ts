@@ -8,7 +8,7 @@ export async function expandGraphTextQuery(args: {
   enabled: boolean | undefined;
   query: string;
   textQuery: string;
-  workspaceId: string;
+  projectId: string;
   filters?: SearchFilters;
   runId?: string;
 }): Promise<string> {
@@ -25,7 +25,7 @@ export async function expandGraphTextQuery(args: {
       from chunk_entities ce
       join document_chunks c on c.id = ce.chunk_id
       join documents d on d.id = c.document_id
-      where d.workspace_id = ${args.workspaceId}
+      where d.project_id = ${args.projectId}
         and ${lexicalSearchableDocument("d")}
         and ${retrievalScope(args).chunk()}
         and (

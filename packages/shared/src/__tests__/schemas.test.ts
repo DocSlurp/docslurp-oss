@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyWorkspaceTemplateLocks,
+  applyProjectTemplateLocks,
   canonicalDocumentSchema,
-  createWorkspaceSchema,
-  isUntitledWorkspaceName,
-  UNTITLED_WORKSPACE_NAME,
+  createProjectSchema,
+  isUntitledProjectName,
+  UNTITLED_PROJECT_NAME,
   defaultDocumentExtractionConfig,
   defaultEmbeddingConfig,
   defaultPipelineFeatures,
@@ -19,7 +19,7 @@ import {
   parseLlmModelUri,
   resolveEmbeddingRoute,
   documentExtractionConfigSchema,
-  workspaceChatResponseSchema,
+  projectChatResponseSchema,
   searchCitationSchema,
   supportedEmbeddingModels,
   pipelineFeaturesSchema,
@@ -27,19 +27,19 @@ import {
   pipelineStagePlan,
   runStageOrder,
   uploadRequestSchema,
-  workspaceTemplateSchema,
-  workspaceRunSchema,
-  workspaceBoardSummarySchema,
-  getWorkspaceTemplate,
+  projectTemplateSchema,
+  projectRunSchema,
+  projectBoardSummarySchema,
+  getProjectTemplate,
 } from "../index.js";
 import {
   defaultDocumentExtractionConfig as moduleDefaultDocumentExtractionConfig,
   documentExtractionConfigSchema as moduleDocumentExtractionConfigSchema,
 } from "../extraction.js";
 
-it("preserves fractional recorded costs in workspace board summaries", () => {
+it("preserves fractional recorded costs in project board summaries", () => {
   const costs = { recordedCostCents: 0.003, computeCostCents: 0.001, totalLlmCostCents: 0.003, ingestCostCents: 0.002, searchCostCents: 0.001 };
-  expect(workspaceBoardSummarySchema.parse(costs)).toMatchObject(costs);
+  expect(projectBoardSummarySchema.parse(costs)).toMatchObject(costs);
 });
 
 // ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ describe("embeddingConfigSchema", () => {
     }
   });
 
-  it("defaults new workspaces to hosted Perplexity while preserving explicit model URIs", () => {
+  it("defaults new projects to hosted Perplexity while preserving explicit model URIs", () => {
     const defaults = normalizePipelineFeatures();
     expect(defaults.embedding.profile).toBe("cheapest-hosted");
     expect(resolveEmbeddingRoute(defaults.embedding)).toMatchObject({ provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", dimensions: 1024 });
@@ -454,7 +454,7 @@ describe("embeddingConfigSchema", () => {
     }
   });
 
-  it("rejects dimensions and worker batch sizing in workspace config", () => {
+  it("rejects dimensions and worker batch sizing in project config", () => {
     const result = embeddingConfigSchema.safeParse({
       profile: "good-fast-local",
       dimensions: 42,
@@ -464,9 +464,9 @@ describe("embeddingConfigSchema", () => {
   });
 });
 
-describe("workspace templates", () => {
+describe("project templates", () => {
   it("defaults lockedSettings to an empty array when omitted", () => {
-    const template = workspaceTemplateSchema.parse({
+    const template = projectTemplateSchema.parse({
       key: "meeting-notes",
       name: "Meeting Notes",
       description: "Fast preset",
@@ -477,10 +477,10 @@ describe("workspace templates", () => {
   });
 
   it("reapplies locked template settings without clobbering unlocked edits", () => {
-    const template = getWorkspaceTemplate("engineering-docs");
+    const template = getProjectTemplate("engineering-docs");
     expect(template).not.toBeNull();
 
-    const result = applyWorkspaceTemplateLocks(
+    const result = applyProjectTemplateLocks(
       {
         ...defaultPipelineFeatures,
         quality: "fast",
@@ -607,8 +607,8 @@ describe("canonicalDocumentSchema", () => {
     expect(citation.regionCoordinateSpace).toBe("page-top-left-points");
   });
 
-  it("parses workspace chat responses with evidence spans", () => {
-    const result = workspaceChatResponseSchema.safeParse({
+  it("parses project chat responses with evidence spans", () => {
+    const result = projectChatResponseSchema.safeParse({
       id: "resp-1",
       sessionId: "session-1",
       searchSessionId: "search-1",
@@ -684,52 +684,52 @@ describe("canonicalDocumentSchema", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createWorkspaceSchema
+// createProjectSchema
 // ---------------------------------------------------------------------------
 
-describe("createWorkspaceSchema", () => {
+describe("createProjectSchema", () => {
   it("enables summaries by default and accepts an explicit opt-out", () => {
-    expect(createWorkspaceSchema.parse({ name: "Default" }).summaries).toBe(true);
-    expect(createWorkspaceSchema.parse({ name: "Off", summaries: false }).summaries).toBe(false);
-    expect(createWorkspaceSchema.safeParse({ name: "Invalid", summaries: "false" }).success).toBe(false);
+    expect(createProjectSchema.parse({ name: "Default" }).summaries).toBe(true);
+    expect(createProjectSchema.parse({ name: "Off", summaries: false }).summaries).toBe(false);
+    expect(createProjectSchema.safeParse({ name: "Invalid", summaries: "false" }).success).toBe(false);
   });
 
-  it("parses a valid workspace creation input", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "My Workspace" });
+  it("parses a valid project creation input", () => {
+    const result = createProjectSchema.safeParse({ name: "My Project" });
     expect(result.success).toBe(true);
   });
 
   it("trims whitespace from the name", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "  My Workspace  " });
+    const result = createProjectSchema.safeParse({ name: "  My Project  " });
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.name).toBe("My Workspace");
+      expect(result.data.name).toBe("My Project");
     }
   });
 
   it("accepts an omitted, empty or whitespace-only name as untitled", () => {
     for (const input of [{}, { name: "" }, { name: "   " }]) {
-      const result = createWorkspaceSchema.safeParse(input);
+      const result = createProjectSchema.safeParse(input);
       expect(result.success).toBe(true);
-      if (result.success) expect(isUntitledWorkspaceName(result.data.name)).toBe(true);
+      if (result.success) expect(isUntitledProjectName(result.data.name)).toBe(true);
     }
-    expect(isUntitledWorkspaceName(UNTITLED_WORKSPACE_NAME)).toBe(true);
-    expect(isUntitledWorkspaceName("Untitled workspaces")).toBe(false);
-    expect(isUntitledWorkspaceName("Contracts")).toBe(false);
+    expect(isUntitledProjectName(UNTITLED_PROJECT_NAME)).toBe(true);
+    expect(isUntitledProjectName("Untitled projects")).toBe(false);
+    expect(isUntitledProjectName("Contracts")).toBe(false);
   });
 
   it("rejects a name exceeding 120 characters", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "A".repeat(121) });
+    const result = createProjectSchema.safeParse({ name: "A".repeat(121) });
     expect(result.success).toBe(false);
   });
 
   it("accepts a name of exactly 120 characters", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "A".repeat(120) });
+    const result = createProjectSchema.safeParse({ name: "A".repeat(120) });
     expect(result.success).toBe(true);
   });
 
   it("applies default userId", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "Test" });
+    const result = createProjectSchema.safeParse({ name: "Test" });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.userId).toBe("demo-user");
@@ -871,16 +871,16 @@ describe("pipelineStagePlan", () => {
 });
 
 // ---------------------------------------------------------------------------
-// workspaceRunSchema
+// projectRunSchema
 // ---------------------------------------------------------------------------
 
-describe("workspaceRunSchema", () => {
+describe("projectRunSchema", () => {
   const validRun = {
     id: "run-1",
     userId: "user-1",
     orgId: "org-1",
-    workspaceId: "ws-1",
-    workspaceName: "Test Workspace",
+    projectId: "ws-1",
+    projectName: "Test Project",
     kind: "bulk-upload",
     status: "queued",
     priority: 0,
@@ -899,18 +899,18 @@ describe("workspaceRunSchema", () => {
     updatedAt: new Date().toISOString(),
   };
 
-  it("parses a valid workspace run", () => {
-    const result = workspaceRunSchema.safeParse(validRun);
+  it("parses a valid project run", () => {
+    const result = projectRunSchema.safeParse(validRun);
     expect(result.success).toBe(true);
   });
 
   it("rejects an invalid status value", () => {
-    const result = workspaceRunSchema.safeParse({ ...validRun, status: "pending" });
+    const result = projectRunSchema.safeParse({ ...validRun, status: "pending" });
     expect(result.success).toBe(false);
   });
 
   it("rejects an invalid stage value", () => {
-    const result = workspaceRunSchema.safeParse({ ...validRun, stage: "unknown-stage" });
+    const result = projectRunSchema.safeParse({ ...validRun, stage: "unknown-stage" });
     expect(result.success).toBe(false);
   });
 });

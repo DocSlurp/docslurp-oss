@@ -9,14 +9,14 @@ import { uploadUiResource, type UploadUiOptions } from "./mcp-ui-resources.js";
 
 const manifest = { capabilities: [{
   id: "suggestQueries", title: "Suggestions", description: "No AI suggestions", category: "tool",
-  inputSchema: { type: "object", properties: { workspaceId: { type: "string" } }, required: ["workspaceId"] },
+  inputSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] },
   annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
 }] };
 const dispatch: McpDispatch = async (path, init) => {
   expect(new Headers(init?.headers).has("Authorization")).toBe(false);
   expect(new Headers(init?.headers).has("Cookie")).toBe(false);
   if (path === "/tools/suggestQueries") return Response.json({ suggestions: ["support hours"] });
-  if (path === "/prompts/workspace-grounded-answer") return Response.json({ prompt: "Use citations." });
+  if (path === "/prompts/project-grounded-answer") return Response.json({ prompt: "Use citations." });
   return Response.json(manifest);
 };
 
@@ -50,7 +50,7 @@ describe("hosted MCP transport", () => {
     }
   });
 
-  it("does not advertise stateful workspace chat as read-only or idempotent", async () => {
+  it("does not advertise stateful project chat as read-only or idempotent", async () => {
     const chatManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "chat",
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false } }] };
     const response = await handleMcpHttp(new Request("http://localhost/v1/mcp", {
@@ -71,7 +71,7 @@ describe("hosted MCP transport", () => {
       const [tool] = (await client.listTools()).tools;
       expect(tool).toMatchObject({ title: "Suggestions", annotations: { title: "Suggestions", readOnlyHint: true, destructiveHint: false } });
       expect(client.getServerVersion()).toMatchObject({ name: "docslurp", title: "DocSlurp", websiteUrl: "https://docslurp.io/docs/mcp" });
-      expect((await client.listPrompts()).prompts[0]?.title).toBe("Workspace grounded answer");
+      expect((await client.listPrompts()).prompts[0]?.title).toBe("Project grounded answer");
     } finally {
       await client.close();
     }
@@ -82,12 +82,12 @@ describe("hosted MCP transport", () => {
     const http = transport();
     await client.connect(http);
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["suggestQueries"]);
-    const result = await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "example" } });
+    const result = await client.callTool({ name: "suggestQueries", arguments: { projectId: "example" } });
     expect(result).toMatchObject({ structuredContent: { suggestions: ["support hours"] }, isError: false });
     expect((await client.listResources()).resources[0]?.uri).toBe("docslurp://capabilities");
     expect((await client.readResource({ uri: "docslurp://capabilities" })).contents).toHaveLength(1);
     expect((await client.listResourceTemplates()).resourceTemplates).toEqual([]);
-    expect((await client.getPrompt({ name: "workspace-grounded-answer" })).messages[0]?.content).toEqual({ type: "text", text: "Use citations." });
+    expect((await client.getPrompt({ name: "project-grounded-answer" })).messages[0]?.content).toEqual({ type: "text", text: "Use citations." });
     await expect(client.callTool({ name: "unknown", arguments: {} })).rejects.toThrow("Unknown tool");
     await expect(client.readResource({ uri: "https://private.example/secret" })).rejects.toThrow("Unknown resource");
     await client.close();
@@ -177,9 +177,9 @@ describe("hosted MCP transport", () => {
       const info = vi.spyOn(console, "info").mockImplementation(() => {});
       const client = await connect(uploaderManifest, ui);
       try {
-        await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "SECRET-WS" }, _meta: { "docslurp/origin": "mcp-app-upload", "docslurp/widgetVersion": "3" } });
-        await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "x" }, _meta: { "docslurp/origin": "evil\nforged=1", "docslurp/widgetVersion": "3" } });
-        await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "x" } });
+        await client.callTool({ name: "suggestQueries", arguments: { projectId: "SECRET-WS" }, _meta: { "docslurp/origin": "mcp-app-upload", "docslurp/widgetVersion": "3" } });
+        await client.callTool({ name: "suggestQueries", arguments: { projectId: "x" }, _meta: { "docslurp/origin": "evil\nforged=1", "docslurp/widgetVersion": "3" } });
+        await client.callTool({ name: "suggestQueries", arguments: { projectId: "x" } });
         const lines = info.mock.calls.map(call => String(call[0])).filter(line => line.startsWith("[mcp] widget"));
         expect(lines).toEqual(["[mcp] widget tool call tool=suggestQueries origin=mcp-app-upload widget_version=3"]);
         expect(lines.join()).not.toContain("SECRET-WS");

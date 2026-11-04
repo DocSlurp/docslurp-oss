@@ -30,12 +30,12 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map"}', 2),
              ('m1', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
              ('m2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
       values ('full', 'o1', 'u1', 'w', 'up', 'a.pdf', 'application/pdf', 'k1', 'processing', 3, 'full'),
              ('mapped', 'o1', 'u1', 'w', 'up', 'b.pdf', 'application/pdf', 'k2', 'processing', 5, 'map'),
              ('d1', 'o1', 'u1', 'w', 'up', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'map');
@@ -95,7 +95,7 @@ describe("page charges", () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`
       delete from usage_events where run_id = 'up';
-      insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, amount, unit, cost_cents, metadata)
+      insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
         values ('rich:up:full:1', 'u1', 'up', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0.25, '{"documentId":"full","pageNumber":1}');
       insert into document_page_facts (document_id, page_number, text_bytes, image_count) values ('mapped', 1, 0, 1), ('mapped', 2, 0, 2);
     `);
@@ -115,14 +115,14 @@ describe("page charges", () => {
     expect(await recordMaterializedPageFee(sql, "m1", "d1", [3, 4, 5])).toBeCloseTo(fast(3), 9);
     expect(await recordMaterializedPageFee(sql, "m1", "d1", [4, 5, 6])).toBeCloseTo(fast(1), 9);
     // Pages with a Rich read recorded for the run are stamped without a Fast charge.
-    await db.exec(`insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, amount, unit, cost_cents, metadata)
+    await db.exec(`insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
       values ('rich:m1:d1:10', 'u1', 'm1', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0, '{"documentId":"d1","pageNumber":10}'),
              ('rich:m1:d1:11', 'u1', 'm1', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0, '{"documentId":"d1","pageNumber":11}')`);
     expect(await recordMaterializedPageFee(sql, "m1", "d1", [10, 11])).toBe(0);
     await db.exec(`delete from usage_events where id in ('rich:m1:d1:10', 'rich:m1:d1:11')`);
     const rows = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' order by id`);
     expect(rows.rows.map((r) => r.id)).toEqual(["m1:d1:3", "m1:d1:4", "m1:d1:5", "m1:d1:6"]);
-    const [run] = (await db.query<{ spent_cents: string }>(`select spent_cents from workspace_runs where id = 'm1'`)).rows;
+    const [run] = (await db.query<{ spent_cents: string }>(`select spent_cents from project_runs where id = 'm1'`)).rows;
     expect(Number(run!.spent_cents)).toBeCloseTo(fast(4), 9);
   });
 
@@ -159,7 +159,7 @@ describe("worker run load (round 4 M2)", () => {
     const original = console.error;
     console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
     try {
-      await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('stale-x', 'o1', 'u1', 'w', 'upload', 'processing', 'extract',
           '{"quality":"fast","documentExtraction":{"options":{"dolphin":{"mode":"page","repoPath":"/tmp/attacker"},"liteparse":{}},"ocr":{"language":"en"}}}', 1)`);
       const run = await store.loadRun("stale-x");
@@ -170,7 +170,7 @@ describe("worker run load (round 4 M2)", () => {
       expect(errors.join("\n")).toMatch(/run stale-x.*documentExtraction\.options\.dolphin\.repoPath/);
     } finally {
       console.error = original;
-      await db.exec(`delete from workspace_runs where id = 'stale-x'`);
+      await db.exec(`delete from project_runs where id = 'stale-x'`);
     }
   });
 });
@@ -186,7 +186,7 @@ describe("flag coercion", () => {
 describe("worker run start", () => {
   it("coerces a stored map pipeline to full when the flag is off", async () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
-    await db.exec(`update workspace_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
     let seen: string | undefined;
     const fake = {
       loadRun: (id: string) => store.loadRun(id),
@@ -199,7 +199,7 @@ describe("worker run start", () => {
     const exec = createStageExecution({ store: fake as never, stages: [], config: { workerDocConcurrency: 1 } as never });
     await exec.startRun({ runId: "up", totalStages: 1 } as never);
     expect(seen).toBe("full");
-    await db.exec(`update workspace_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
   });
 });
 
@@ -257,13 +257,13 @@ describe("runMaterializeRange activity", () => {
 
   it("renews the run's lease while pages materialize so only a dead worker leaves it stale", async () => {
     await ensurePageRows(sql, "d1", 12);
-    await db.exec(`update workspace_runs set status = 'processing', lease_expires_at = now() - interval '1 hour' where id = 'm1'`);
+    await db.exec(`update project_runs set status = 'processing', lease_expires_at = now() - interval '1 hour' where id = 'm1'`);
     let leaseLiveMidRun: boolean | null = null;
     const probing: Partial<PageMaterializerOps> = {
       ...ops,
       async extractText(d, range) {
         await new Promise((resolve) => setTimeout(resolve, 100)); // let the fire-and-forget renewal land
-        leaseLiveMidRun = (await db.query<{ live: boolean }>(`select lease_expires_at > now() as live from workspace_runs where id = 'm1'`)).rows[0]!.live;
+        leaseLiveMidRun = (await db.query<{ live: boolean }>(`select lease_expires_at > now() as live from project_runs where id = 'm1'`)).rows[0]!.live;
         return ops.extractText!(d, range);
       },
     };
@@ -271,40 +271,40 @@ describe("runMaterializeRange activity", () => {
     await runMaterializeRange({ ...base, materializer: { ...base.materializer, ops: probing } } as never, input("m1", [1, 2]));
     expect(leaseLiveMidRun).toBe(true);
     await completeMaterializeRun(sql, "m1", { indexed: [1, 2], blocked: [], failed: [], costCredits: 0 });
-    const [done] = (await db.query<{ lease_expires_at: string | null }>(`select lease_expires_at from workspace_runs where id = 'm1'`)).rows;
+    const [done] = (await db.query<{ lease_expires_at: string | null }>(`select lease_expires_at from project_runs where id = 'm1'`)).rows;
     expect(done!.lease_expires_at).toBeNull();
-    await db.exec(`update workspace_runs set status = 'processing', stage = 'materialize' where id = 'm1'`);
+    await db.exec(`update project_runs set status = 'processing', stage = 'materialize' where id = 'm1'`);
   });
 
   it("never shortens a longer lease when renewing", async () => {
     await ensurePageRows(sql, "d1", 12);
-    await db.exec(`update workspace_runs set status = 'processing', lease_expires_at = now() + interval '2 hours' where id = 'm1'`);
+    await db.exec(`update project_runs set status = 'processing', lease_expires_at = now() + interval '2 hours' where id = 'm1'`);
     await runMaterializeRange(deps({ heartbeat: () => {} }) as never, input("m1", [1]));
-    const [run] = (await db.query<{ long: boolean }>(`select lease_expires_at > now() + interval '90 minutes' as long from workspace_runs where id = 'm1'`)).rows;
+    const [run] = (await db.query<{ long: boolean }>(`select lease_expires_at > now() + interval '90 minutes' as long from project_runs where id = 'm1'`)).rows;
     expect(run!.long).toBe(true);
-    await db.exec(`update workspace_runs set status = 'processing', stage = 'materialize', lease_expires_at = null where id = 'm1'`);
+    await db.exec(`update project_runs set status = 'processing', stage = 'materialize', lease_expires_at = null where id = 'm1'`);
   });
 
   describe("document deleted while pages materialize", () => {
     const seedDoomed = async (id: string) => {
-      await db.exec(`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+      await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
         values ('${id}', 'o1', 'u1', 'w', 'up', '${id}.pdf', 'application/pdf', 'k-${id}', 'completed', 6, 'map')`);
     };
     const usageRows = async () => (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'm2' and metric = 'ingest-page-fast'`)).rows[0]!.n;
 
     it("stops cleanly, without throwing or billing, when the document is already gone", async () => {
-      await db.exec(`update workspace_runs set status = 'processing' where id = 'm2'`);
+      await db.exec(`update project_runs set status = 'processing' where id = 'm2'`);
       const result = await runMaterializeRange(deps() as never, { ...input("m2", [1, 2, 3]), documentId: "never-existed" });
       expect(result.indexed).toEqual([]);
       expect(result.failed).toEqual([1, 2, 3].map((page) => ({ page, reason: "document-deleted" })));
       expect(await usageRows()).toBe(0);
       await completeMaterializeRun(sql, "m2", result);
-      expect((await db.query<{ status: string }>(`select status from workspace_runs where id = 'm2'`)).rows[0]!.status).toBe("completed");
+      expect((await db.query<{ status: string }>(`select status from project_runs where id = 'm2'`)).rows[0]!.status).toBe("completed");
     });
 
     it("stops cleanly and bills nothing for unwritten pages when the document is deleted mid-run", async () => {
       await seedDoomed("doomed");
-      await db.exec(`update workspace_runs set status = 'processing' where id = 'm2'`);
+      await db.exec(`update project_runs set status = 'processing' where id = 'm2'`);
       const deleting: Partial<PageMaterializerOps> = {
         ...ops,
         async extractText(d, range) {
@@ -318,7 +318,7 @@ describe("runMaterializeRange activity", () => {
       expect(result.failed).toEqual([1, 2].map((page) => ({ page, reason: "document-deleted" })));
       expect(await usageRows()).toBe(0);
       await completeMaterializeRun(sql, "m2", result);
-      expect((await db.query<{ status: string }>(`select status from workspace_runs where id = 'm2'`)).rows[0]!.status).toBe("completed");
+      expect((await db.query<{ status: string }>(`select status from project_runs where id = 'm2'`)).rows[0]!.status).toBe("completed");
       expect((await db.query(`select 1 from document_page_states where document_id = 'doomed'`)).rows).toHaveLength(0);
     });
   });
@@ -340,7 +340,7 @@ describe("runMaterializeRange activity", () => {
     const fees = await db.query<{ id: string }>(`select id from usage_events where run_id = 'm1' and metric = 'ingest-page-fast' order by id`);
     expect(fees.rows.map((r) => r.id)).toEqual(["m1:d1:3", "m1:d1:4", "m1:d1:5"]);
     await completeMaterializeRun(sql, "m1", result);
-    const [run] = (await db.query<{ status: string; pages_processed: number }>(`select status, pages_processed from workspace_runs where id = 'm1'`)).rows;
+    const [run] = (await db.query<{ status: string; pages_processed: number }>(`select status, pages_processed from project_runs where id = 'm1'`)).rows;
     expect(run).toEqual({ status: "completed", pages_processed: 3 });
   });
 
@@ -380,19 +380,19 @@ describe("runMaterializeRange activity", () => {
   });
 
   it("labels pages of a full-index run", async () => {
-    await db.exec(`update workspace_runs set kind = 'full-index' where id = 'm2'`);
+    await db.exec(`update project_runs set kind = 'full-index' where id = 'm2'`);
     await runMaterializeRange(deps() as never, input("m2", [9]));
     const [row] = (await db.query<{ materialized_by: string }>(`select materialized_by from document_page_states where document_id = 'd1' and page_number = 9`)).rows;
     expect(row!.materialized_by).toBe("full-index");
-    await db.exec(`update workspace_runs set kind = 'materialize' where id = 'm2'; delete from usage_events where run_id = 'm2'`);
+    await db.exec(`update project_runs set kind = 'materialize' where id = 'm2'; delete from usage_events where run_id = 'm2'`);
   });
 
   it("applies the source document's ingest pipeline when the materialize run row carries none (C1)", async () => {
     // An app-style insert with the empty default pipeline, as the unfixed client wrote it.
     await db.exec(`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('m-empty', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
-      update workspace_runs set pipeline = '{"indexingMode":"map","privacyMode":"local-only","embedding":{"profile":"cheapest-local"},
+      update project_runs set pipeline = '{"indexingMode":"map","privacyMode":"local-only","embedding":{"profile":"cheapest-local"},
         "piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing"}}'::jsonb where id = 'up';`);
     const seen: Array<{ privacyMode: string; profile: string }> = [];
     const piiOps: Partial<PageMaterializerOps> = {
@@ -405,7 +405,7 @@ describe("runMaterializeRange activity", () => {
     const d = deps();
     d.materializer.ops = piiOps;
     const result = await runMaterializeRange(d as never, input("m-empty", [1, 2]));
-    await db.exec(`update workspace_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
     expect(result.blocked).toEqual([2]);
     expect(result.indexed).toEqual([1]);
     expect(seen[0]?.privacyMode).toBe("local-only");
@@ -414,10 +414,10 @@ describe("runMaterializeRange activity", () => {
 
   it("refuses to run on defaults when neither the run nor its source carries a pipeline", async () => {
     await db.exec(`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('m-bare', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
                ('up-bare', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
         values ('bare', 'o1', 'u1', 'w', 'up-bare', 'z.pdf', 'application/pdf', 'kz', 'processing', 2, 'map');`);
     await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
   });
@@ -425,10 +425,10 @@ describe("runMaterializeRange activity", () => {
   it("charges a page's base fee once across query materialization and a later full index (I6)", async () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`
-      delete from usage_events where run_id in ('fi'); delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      delete from usage_events where run_id in ('fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
         values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
     await ensurePageRows(sql, "d1", 12);
     await runMaterializeRange(deps() as never, input("m1", [3, 4, 5]));
@@ -436,7 +436,7 @@ describe("runMaterializeRange activity", () => {
     const total = await db.query<{ amount: string }>(`select amount from usage_events where metric = 'ingest-page-fast' and run_id in ('m1', 'fi')`);
     expect(total.rows.map((r) => Number(r.amount)).reduce((a, b) => a + b, 0)).toBe(12);
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
-    await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+    await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';`);
   });
 
   describe("pages a model read (M1: one charge per page, Rich or Fast)", () => {
@@ -457,7 +457,7 @@ describe("runMaterializeRange activity", () => {
       order by page, run_id, metric`)).rows;
     const reset = async () => {
       await db.exec(`update documents set materialization_generation = 0, source_materialization_blocked = false`);
-      await db.exec(`update workspace_runs set status = 'processing', stage = 'materialize', kind = 'materialize' where id in ('m1', 'm2')`);
+      await db.exec(`update project_runs set status = 'processing', stage = 'materialize', kind = 'materialize' where id in ('m1', 'm2')`);
       await ensurePageRows(sql, "d1", 12);
     };
 
@@ -565,7 +565,7 @@ describe("runMaterializeRange activity", () => {
         // stamped before charging, then lost the write; or the run was cancelled).
         await db.exec(`update document_page_states set state = 'indexed', materialized_by = 'query', fee_billed_run = 'm1', fee_billed_at = now()
           where document_id = 'd1' and page_number = 4;
-          update workspace_runs set status = 'cancelled' where id = 'm1'`);
+          update project_runs set status = 'cancelled' where id = 'm1'`);
         await runMaterializeRange(ocrDeps(), input("m2", [4]));
         await runMaterializeRange(ocrDeps(), input("m2", [4]));
         await runMaterializeRange(ocrDeps(), input("m1", [4]));
@@ -589,7 +589,7 @@ describe("runMaterializeRange activity", () => {
 
         it("an active owner with a pending Rich charge keeps its page: no Fast charge from the later run", async () => {
           await reset();
-          await db.exec(`update workspace_runs set lease_expires_at = now() + interval '10 minutes' where id = 'm1'`);
+          await db.exec(`update project_runs set lease_expires_at = now() + interval '10 minutes' where id = 'm1'`);
           await stampUncharged();
           const ledger = m1Ledger();
           await runMaterializeRange(ocrDeps(), input("m2", [4]));
@@ -602,8 +602,8 @@ describe("runMaterializeRange activity", () => {
         });
 
         it.each([
-          ["terminal", `update workspace_runs set status = 'cancelled' where id = 'm1'`],
-          ["lease-expired", `update workspace_runs set status = 'processing', lease_expires_at = now() - interval '1 second' where id = 'm1'`],
+          ["terminal", `update project_runs set status = 'cancelled' where id = 'm1'`],
+          ["lease-expired", `update project_runs set status = 'processing', lease_expires_at = now() - interval '1 second' where id = 'm1'`],
         ])("a %s owner loses its page, and its late Rich charge is dropped, not added", async (_label, ownerSql) => {
           await reset();
           await stampUncharged();
@@ -685,11 +685,11 @@ describe("runMaterializeRange activity", () => {
       };
       beforeEach(async () => {
         await reset();
-        await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm1';
-          update workspace_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
+        await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm1';
+          update project_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
       });
       afterEach(async () => {
-        await db.exec(`update workspace_runs set pipeline = '{}' where id in ('m1', 'm2')`);
+        await db.exec(`update project_runs set pipeline = '{}' where id in ('m1', 'm2')`);
       });
 
       it("Good m1 stalls in OCR, Auto m2 indexes the text layer and bills Fast: m1 publishes nothing and upgrades the charge to Rich once", async () => {
@@ -836,7 +836,7 @@ describe("runMaterializeRange activity", () => {
           let reads = 0;
           const failedAgain = await runMaterializeRange(withOps("m1", t, embedDown, async () => { reads += 1; }), input("m1", [3]));
           expect(failedAgain.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
-          await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
           expect((await runMaterializeRange(t.depsFor("m2", async () => { reads += 1; }), input("m2", [3]))).indexed).toEqual([3]);
           expect(reads).toBe(0);
           expect(await charges()).toEqual(m1Rich);
@@ -850,7 +850,7 @@ describe("runMaterializeRange activity", () => {
           }), input("m1", [3]));
           expect(empty.failed).toEqual([{ page: 3, reason: "empty-page" }]);
           expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
-          await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
           expect((await runMaterializeRange(t.depsFor("m2"), input("m2", [3]))).indexed).toEqual([3]);
           expect((await page3()).chunks.every((c) => c.text.includes(VISION))).toBe(true);
           // m2's own Rich read of the page stays provider usage.
@@ -860,7 +860,7 @@ describe("runMaterializeRange activity", () => {
 
         it("a lost read (model_read_run) plus an owner whose read then failed bill one Rich, not two", async () => {
           const t = tracked();
-          await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+          await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
           let peer = false;
           // m1 stalls in OCR; m2 takes the page, reads it and fails on embedding. m1 resumes having lost the page.
           const late = await runMaterializeRange(t.depsFor("m1", async () => {
@@ -878,20 +878,20 @@ describe("runMaterializeRange activity", () => {
           expect(await charges()).toEqual([{ run_id: "m2", metric: "ingest-page-rich", page: 3, amount: 1 }]);
           expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
           // A recovery pass on the stamped page finds nothing to take over.
-          await db.exec(`update workspace_runs set status = 'completed' where id = 'm1'`);
+          await db.exec(`update project_runs set status = 'completed' where id = 'm1'`);
           expect(await recordMaterializedPageFee(sql, "m2", "d1", [3])).toBe(0);
-          await db.exec(`update workspace_runs set status = 'processing' where id = 'm1'`);
+          await db.exec(`update project_runs set status = 'processing' where id = 'm1'`);
         });
 
         it("a PII-blocked read keeps no text, and a later full index does not charge the page again", async () => {
           process.env.DOCSLURP_DEFERRED_PROFILES = "1";
           const t = tracked();
           await db.exec(`
-            update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm1';
-            delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
-            insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+            update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm1';
+            delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
+            insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
               values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-            insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+            insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
               values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
           try {
             const blocked = await runMaterializeRange(withOps("m1", t, {
@@ -905,7 +905,7 @@ describe("runMaterializeRange activity", () => {
             expect(full).toMatchObject({ fastPages: 11, richPages: 0 });
           } finally {
             delete process.env.DOCSLURP_DEFERRED_PROFILES;
-            await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+            await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';`);
           }
         });
 
@@ -921,8 +921,8 @@ describe("runMaterializeRange activity", () => {
               const late = await runMaterializeRange(withOps("m2", t, {
                 async embed(args) {
                   if (kind === "retention") {
-                    await db.exec(`update workspaces set artifact_retention_days = 1 where id = 'w';
-                      update workspace_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
+                    await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
+                      update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
                     await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
@@ -940,8 +940,8 @@ describe("runMaterializeRange activity", () => {
               expect(await readState()).toMatchObject({ kept: false });
               expect(await charges()).toEqual(m1Rich);
             } finally {
-              await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
-                update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
+              await db.exec(`update projects set artifact_retention_days = null where id = 'w';
+                update project_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
             }
           });
 
@@ -949,13 +949,13 @@ describe("runMaterializeRange activity", () => {
             ["retention", false], ["retention", true], ["correction", false], ["correction", true],
           ])("does not publish or retain fresh OCR after %s (embedding fails: %s)", async (kind, embeddingFails) => {
             const t = tracked();
-            await db.exec(`update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+            await db.exec(`update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
             try {
               const late = await runMaterializeRange(withOps("m2", t, {
                 async embed(args) {
                   if (kind === "retention") {
-                    await db.exec(`update workspaces set artifact_retention_days = 1 where id = 'w';
-                      update workspace_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
+                    await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
+                      update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
                     await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
@@ -975,8 +975,8 @@ describe("runMaterializeRange activity", () => {
               expect(await charges()).toEqual([]);
               expect(late.failed).toEqual([{ page: 3, reason: "source-content-invalidated" }]);
             } finally {
-              await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
-                update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
+              await db.exec(`update projects set artifact_retention_days = null where id = 'w';
+                update project_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
             }
           });
 
@@ -1006,8 +1006,8 @@ describe("runMaterializeRange activity", () => {
             const t = tracked();
             await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
             expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: true });
-            await db.exec(`update workspaces set artifact_retention_days = 1 where id = 'w';
-              update workspace_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
+            await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
+              update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
             try {
               await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                 .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
@@ -1023,16 +1023,16 @@ describe("runMaterializeRange activity", () => {
               // m2 charged nothing (m1's read paid the page): it reports no credits for it.
               expect(later.costCredits).toBe(0);
             } finally {
-              await db.exec(`update workspaces set artifact_retention_days = null where id = 'w';
-                update workspace_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
+              await db.exec(`update projects set artifact_retention_days = null where id = 'w';
+                update project_runs set status = 'processing', created_at = now(), artifacts_purged_at = null where id = 'up'`);
             }
           });
 
           it("a redacted read is not kept, so a later block_indexing policy blocks the page instead of indexing it (M2)", async () => {
             const t = tracked();
             const ssn = (page: number) => ({ text: `${LONG} SSN 123-45-6789 ${VISION} page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 });
-            await db.exec(`update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"redact_artifacts","allowlistPatterns":[]}}' where id = 'm1';
-              update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
+            await db.exec(`update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"redact_artifacts","allowlistPatterns":[]}}' where id = 'm1';
+              update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
             const first = await runMaterializeRange(withOps("m1", t, { ...embedDown, async ocrPage(_d, page) { return ssn(page); } }), input("m1", [3]));
             expect(first.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
             // The read is the page's one charge, but its redacted text is not kept.
@@ -1053,7 +1053,7 @@ describe("runMaterializeRange activity", () => {
             await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
             expect(await readState()).toMatchObject({ kept: true });
             await db.exec(`update document_page_states set read_text = read_text || ' SSN 123-45-6789' where document_id = 'd1' and page_number = 3;
-              update workspace_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
+              update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm2'`);
             const blocked = await runMaterializeRange(t.depsFor("m2"), input("m2", [3]));
             expect(blocked.blocked).toEqual([3]);
             expect(await readState()).toMatchObject({ state: "blocked-pii", read_billed_run: "m1", kept: false });
@@ -1088,7 +1088,7 @@ describe("runMaterializeRange activity", () => {
             // An empty read pays the page and keeps no text, so a Good retry reads it again with the model: that read is
             // provider usage, and the retry (and the page) report no credits for it.
             await db.exec(`delete from document_chunks; delete from document_pages; delete from document_page_states;
-              delete from usage_events where run_id in ('m1', 'm2'); update workspace_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
+              delete from usage_events where run_id in ('m1', 'm2'); update project_runs set pipeline = '{"quality":"good"}' where id = 'm2'`);
             await reset();
             const empty = await runMaterializeRange(withOps("m1", t, {
               async ocrPage() { return { text: "  ", model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 1, costCents: 1 }; },
@@ -1100,7 +1100,7 @@ describe("runMaterializeRange activity", () => {
             expect(await costOf()).toBe(0);
             expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
             // A page this run decides Fast reports exactly the Fast charge, not its embedding cost.
-            await db.exec(`update workspace_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
+            await db.exec(`update project_runs set pipeline = '{"quality":"auto"}' where id = 'm2'`);
             const fast = await runMaterializeRange(t.depsFor("m2"), input("m2", [5]));
             expect(fast.costCredits).toBeCloseTo(pageCredits("fast", 1), 9);
             expect(Number((await db.query<{ c: number }>(`select cost_credits::float8 as c from document_page_states where document_id = 'd1' and page_number = 5`)).rows[0]!.c))
@@ -1122,10 +1122,10 @@ describe("runMaterializeRange activity", () => {
       process.env.DOCSLURP_DEFERRED_PROFILES = "1";
       await reset();
       await db.exec(`
-        delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+        delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
           values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
           values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
       try {
         await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));
@@ -1136,7 +1136,7 @@ describe("runMaterializeRange activity", () => {
         expect(rich.rows.map((r) => Number(r.amount))).toEqual([1]);
       } finally {
         delete process.env.DOCSLURP_DEFERRED_PROFILES;
-        await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+        await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';`);
       }
     });
   });
@@ -1144,48 +1144,48 @@ describe("runMaterializeRange activity", () => {
   it("a full index charges a page whose query stamp is stale instead of treating it as paid (round 5 I1)", async () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`
-      delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
         values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
     try {
       await ensurePageRows(sql, "d1", 12);
-      await db.exec(`update workspace_runs set status = 'processing' where id = 'm1'`);
+      await db.exec(`update project_runs set status = 'processing' where id = 'm1'`);
       await runMaterializeRange(deps() as never, input("m1", [3]));
       // Page 4: stamped by m1, which charged nothing for it and then failed.
       await db.exec(`update document_page_states set state = 'indexed', materialized_by = 'query', fee_billed_run = 'm1' where document_id = 'd1' and page_number = 4;
-        update workspace_runs set status = 'failed' where id = 'm1'`);
+        update project_runs set status = 'failed' where id = 'm1'`);
       const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
       // 12 pages - page 3 (paid by the query) = 11 Fast; the stale page 4 is not treated as paid.
       expect(charges).toMatchObject({ fastPages: 11, richPages: 0 });
     } finally {
       delete process.env.DOCSLURP_DEFERRED_PROFILES;
-      await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
-        update workspace_runs set status = 'processing' where id = 'm1'`);
+      await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
+        update project_runs set status = 'processing' where id = 'm1'`);
     }
   });
 
   it("a full index subtracts a query-paid page it read again only once (no page left unbilled)", async () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`
-      delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode)
         values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full');`);
     try {
       await ensurePageRows(sql, "d1", 12);
       await runMaterializeRange(deps() as never, input("m1", [3, 4]));
       // The full index reads page 3 again with a model (charged Rich as it is read).
-      await db.exec(`insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, amount, unit, cost_cents, metadata)
+      await db.exec(`insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
         values ('rich:fi:d1-full:3', 'u1', 'fi', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0.25, '{"documentId":"d1-full","pageNumber":3}')`);
       const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
       // 12 pages - page 4 (paid by the query, not read again) - page 3 (Rich read by this run) = 10 Fast.
       expect(charges).toMatchObject({ fastPages: 10, richPages: 0 });
     } finally {
       delete process.env.DOCSLURP_DEFERRED_PROFILES;
-      await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from workspace_runs where id = 'fi';`);
+      await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';`);
     }
   });
 

@@ -17,7 +17,7 @@ x-server-environment: &server-environment
   BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Missing auth secret}
   OAUTH_TOKEN_ENCRYPTION_KEY: ${OAUTH_TOKEN_ENCRYPTION_KEY:?Missing OAuth encryption key}
   CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Missing credential encryption key}
-  SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?Missing workspace secret encryption key}
+  SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?Missing project secret encryption key}
   METRICS_SECRET: ${METRICS_SECRET:?Missing metrics secret}
   # Bucket name must match the createbucket service below.
   STORAGE_URI: s3://docslurp-files?endpoint=http://minio:9000&region=us-east-1

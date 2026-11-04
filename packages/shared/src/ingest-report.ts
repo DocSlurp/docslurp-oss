@@ -3,7 +3,7 @@ import { z } from "zod";
 import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 
 /**
- * Ingest report: what DocSlurp observed about a workspace's files (pages,
+ * Ingest report: what DocSlurp observed about a project's files (pages,
  * bytes, text layer, images, vision, searchability, cost) plus the pipeline
  * settings that shaped it and rule-based recommendations. Built without any
  * model call (server/src/services/ingest-report.ts).
@@ -122,7 +122,7 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
   unreadable_file: { message: PUBLIC_ERROR_MESSAGES.unreadableSource, retryable: false },
   timeout: { message: "Processing timed out before this file finished.", retryable: true },
   provider_failed: { message: "An AI provider call failed or was rate-limited while processing this file.", retryable: true },
-  policy_blocked: { message: "Workspace or server policy (privacy mode, spend cap or PII rules) stopped processing this file.", retryable: false },
+  policy_blocked: { message: "Project or server policy (privacy mode, spend cap or PII rules) stopped processing this file.", retryable: false },
   cancelled: { message: "Processing of this file was cancelled.", retryable: true },
   unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
 };
@@ -198,7 +198,7 @@ export const ingestReportRecommendationSchema = z.object({
   }),
   /** The pipeline change "Turn on" applies (merged onto the current pipeline server-side). */
   patch: z.record(z.string(), z.unknown()).nullable(),
-  /** Files a reprocess would re-run with the workspace's current settings. */
+  /** Files a reprocess would re-run with the project's current settings. */
   reprocessDocumentIds: z.array(z.string()),
 });
 export type IngestReportRecommendation = z.infer<typeof ingestReportRecommendationSchema>;
@@ -221,8 +221,8 @@ export const ingestReportFileItemSchema = z.object({
 export type IngestReportFileItem = z.infer<typeof ingestReportFileItemSchema>;
 
 export const ingestReportSchema = z.object({
-  workspaceId: z.string(),
-  workspaceName: z.string(),
+  projectId: z.string(),
+  projectName: z.string(),
   generatedAt: z.string(),
   scope: z.object({
     runId: z.string().nullable(),
@@ -360,7 +360,7 @@ const SLASH_COMMAND = /^\s*\/(?:status|report|ingest(?:-report)?)\b/i;
 const NATURAL_INTENTS = [
   /\bingest(?:ion)?\s+(?:report|status|stats|summary)\b/i,
   /^\s*(?:show\s+(?:me\s+)?)?(?:the\s+)?(?:processing|indexing)\s+(?:report|status)\s*[?.!]?\s*$/i,
-  /\b(?:processing|indexing)\s+(?:report|status)\s+(?:of|for)\s+(?:my|our|these|the\s+uploaded)\s+(?:files?|documents?|docs|uploads?|pdfs?|workspace)\b/i,
+  /\b(?:processing|indexing)\s+(?:report|status)\s+(?:of|for)\s+(?:my|our|these|the\s+uploaded)\s+(?:files?|documents?|docs|uploads?|pdfs?|project)\b/i,
   /\bhow\s+(?:did|were|have|has)\s+(?:my|our|these|those|all\s+my|the\s+uploaded|my\s+uploaded)\s+(?:\w+\s+)?(?:files?|documents?|docs|uploads?|pdfs?|scans?)\s+(?:\w+\s+){0,3}?(?:process(?:ed|ing)?|ingest(?:ed)?|index(?:ed)?|go|went|do|done)\b/i,
   /\bwhy\s+(?:can'?t|cannot|couldn'?t|doesn'?t|didn'?t|won'?t|isn'?t|does\s?n'?t)\s+(?:it|you|search|docslurp|chat|the\s+search)\s+(?:\w+\s+){0,2}?(?:find|see|search|show|return|cite|answer\s+from)\b/i,
   /^\s*(?:why\s+(?:is|isn'?t)\s+)?(?:my\s+|this\s+|the\s+)?(?:page|file|document|pdf)\s*\S*\s+(?:is\s+)?(?:not|n'?t)\s+(?:searchable|indexed|showing\s+up|found)\b/i,

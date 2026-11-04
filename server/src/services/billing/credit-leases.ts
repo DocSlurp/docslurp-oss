@@ -39,10 +39,10 @@ export interface RunLeaseGrant {
   blockReason: string | null;
 }
 
-/** grant_credit_lease() for a run (holder scope checked in SQL against org/workspace). */
+/** grant_credit_lease() for a run (holder scope checked in SQL against org/project). */
 export async function grantRunCreditLease(
   client: Client,
-  run: { runId: string; orgId: string; workspaceId: string | null },
+  run: { runId: string; orgId: string; projectId: string | null },
   config: CreditLeaseConfig = creditLeaseConfig(),
   reserve: ChatCreditReserveConfig = resolveChatCreditReserveConfig(),
 ): Promise<RunLeaseGrant | null> {
@@ -55,7 +55,7 @@ export async function grantRunCreditLease(
   }[]>`
     select lease_remaining, available_credits, outstanding_credits, block_reason
     from grant_credit_lease(
-      ${run.orgId}::text, ${run.workspaceId}::text, 'run', ${run.runId}::text,
+      ${run.orgId}::text, ${run.projectId}::text, 'run', ${run.runId}::text,
       ${config.minCredits}::numeric, ${config.maxCredits}::numeric, ${config.initialCredits}::numeric,
       ${config.fraction}::numeric, ${config.horizonSeconds}::numeric, ${config.ttlSeconds}::int,
       ${isBillingExemptOrg(run.orgId)}::boolean,

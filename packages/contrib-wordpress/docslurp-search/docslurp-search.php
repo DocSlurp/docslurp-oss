@@ -22,15 +22,15 @@ add_action('admin_init', function () {
             $previous = get_option('docslurp_search_config', array());
             $key = is_array($previous) ? ($previous['api_key'] ?? '') : '';
         }
-        return array('api_url' => untrailingslashit($url), 'workspace_id' => sanitize_text_field($value['workspace_id'] ?? ''), 'api_key' => $key);
+        return array('api_url' => untrailingslashit($url), 'project_id' => sanitize_text_field($value['project_id'] ?? ''), 'api_key' => $key);
     }));
 });
 function docslurp_search_settings() {
     if (!current_user_can('manage_options')) { return; }
     $config = get_option('docslurp_search_config', array());
-    echo '<div class="wrap"><h1>DocSlurp Search</h1><p>Use a search-only server key for a workspace whose passages may be public. The shortcode makes search public, without exposing the key. Ingestion stays in DocSlurp.</p><form action="options.php" method="post">';
+    echo '<div class="wrap"><h1>DocSlurp Search</h1><p>Use a search-only server key for a project whose passages may be public. The shortcode makes search public, without exposing the key. Ingestion stays in DocSlurp.</p><form action="options.php" method="post">';
     settings_fields('docslurp_search');
-    foreach (array('api_url' => 'API origin (HTTPS)', 'workspace_id' => 'Workspace ID, slug or name (optional; blank uses the default workspace)', 'api_key' => 'Search-only server API key') as $name => $label) {
+    foreach (array('api_url' => 'API origin (HTTPS)', 'project_id' => 'Project ID, slug or name (optional; blank uses the default project)', 'api_key' => 'Search-only server API key') as $name => $label) {
         echo '<p><label>' . esc_html($label) . '<br><input class="regular-text" name="docslurp_search_config[' . esc_attr($name) . ']" type="' . ($name === 'api_key' ? 'password' : 'text') . '" value="' . esc_attr($config[$name] ?? ($name === 'api_url' ? 'https://docslurp.io' : '')) . '" autocomplete="off"></label></p>';
     }
     submit_button(); echo '</form><p>Add <code>[docslurp_search]</code> to a page or post.</p></div>';
@@ -52,7 +52,7 @@ add_action('rest_api_init', function () {
         }
         $config = get_option('docslurp_search_config', array());
         if (empty($config['api_key']) || empty($config['api_url'])) { return new WP_Error('not_configured', 'Search is not configured.', array('status' => 503)); }
-        $response = wp_safe_remote_post($config['api_url'] . '/v1/search', array('timeout' => 20, 'redirection' => 0, 'headers' => array('Authorization' => 'Bearer ' . $config['api_key'], 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('q' => $query, 'workspace' => ($config['workspace_id'] ?? '') !== '' ? $config['workspace_id'] : 'default', 'limit' => 6, 'hyde' => false, 'compression' => false, 'queryRewrite' => false, 'queryDecompose' => false, 'stepback' => false, 'selfQuery' => false))));
+        $response = wp_safe_remote_post($config['api_url'] . '/v1/search', array('timeout' => 20, 'redirection' => 0, 'headers' => array('Authorization' => 'Bearer ' . $config['api_key'], 'Content-Type' => 'application/json'), 'body' => wp_json_encode(array('q' => $query, 'project' => ($config['project_id'] ?? '') !== '' ? $config['project_id'] : 'default', 'limit' => 6, 'hyde' => false, 'compression' => false, 'queryRewrite' => false, 'queryDecompose' => false, 'stepback' => false, 'selfQuery' => false))));
         if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) { return new WP_Error('search_unavailable', 'Search is unavailable.', array('status' => 502)); }
         $body = json_decode(wp_remote_retrieve_body($response), true);
         if (!is_array($body) || !is_array($body['results'] ?? null)) { return new WP_Error('search_unavailable', 'Search is unavailable.', array('status' => 502)); }

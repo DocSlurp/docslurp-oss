@@ -1,6 +1,6 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { workspaceSettingsProposalSchema, type WorkspaceSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
-import type { WebToolActivity } from "@docslurp/shared/workspace-chat-ui";
+import { projectSettingsProposalSchema, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import type { WebToolActivity } from "@docslurp/shared/project-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 import { runInChatAgentContext } from "../lib/chat-agent-context.js";
@@ -149,7 +149,7 @@ export interface ChatToolActivity {
   name: string;
   status: "loading" | "success" | "error";
   runtimeMs?: number;
-  settingsProposal?: WorkspaceSettingsProposal;
+  settingsProposal?: ProjectSettingsProposal;
   web?: WebToolActivity;
 }
 
@@ -199,21 +199,21 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  * fullIndex is excluded for the same reason: it spends credits on the model's say-so.
  * The cost estimates, getJob and suggestQueries are left out because every tool
  * definition is resent on every step: in production (30 days to 2026-10-25) they
- * made 24 of ~9,000 chat tool calls. proposeWorkspaceSettings already reports a
+ * made 24 of ~9,000 chat tool calls. proposeProjectSettings already reports a
  * change's impact, and the app prices uploads and indexing itself.
  */
 // The agent generates the answer itself. A nested chat starts another paid answer
 // generator under a short tool deadline and can block otherwise usable retrieval.
-const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listProjects", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
- * Workspace settings tools: offered to the chat agent only for the first-party
+ * Project settings tools: offered to the chat agent only for the first-party
  * DocSlurp app (`settingsTools`). The catalog already hides
- * proposeWorkspaceSettings from every other caller; reading settings is held
- * back too, so a customer's end users cannot read workspace configuration
+ * proposeProjectSettings from every other caller; reading settings is held
+ * back too, so a customer's end users cannot read project configuration
  * through its chat.
  */
-const CHAT_SETTINGS_TOOLS = new Set(["getWorkspaceSettings", "proposeWorkspaceSettings"]);
+const CHAT_SETTINGS_TOOLS = new Set(["getProjectSettings", "proposeProjectSettings"]);
 /**
  * Withheld from browser (client) key chats, whose users are a customer's
  * anonymous visitors: upload status reports runs, costs and failed files.
@@ -228,7 +228,7 @@ const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
  * nothing by itself. Their failures, refusals and timeouts go back to the model
  * as an error result instead of blocking the turn.
  */
-const NON_BLOCKING_TOOLS = new Set(["proposeWorkspaceSettings"]);
+const NON_BLOCKING_TOOLS = new Set(["proposeProjectSettings"]);
 
 /**
  * Read-only checks suggestions mode adds to a turn. Their refusals (tool-call
@@ -236,21 +236,21 @@ const NON_BLOCKING_TOOLS = new Set(["proposeWorkspaceSettings"]);
  * question, and a skipped diagnosis must not cost them the answer. Their real
  * failures (an error response, a timeout) still block, as for any read.
  */
-const SUGGESTIONS_DIAGNOSTIC_TOOLS = new Set(["getUploadStatus", "getWorkspaceSettings"]);
+const SUGGESTIONS_DIAGNOSTIC_TOOLS = new Set(["getUploadStatus", "getProjectSettings"]);
 const REFUSAL_CODES = new Set(["tool_call_limit", "deadline"]);
 
 /** Result for a failed non-blocking tool: the answer stands; the extra is reported as unavailable. */
-export function nonBlockingToolFailure(code: string, toolId = "proposeWorkspaceSettings") {
+export function nonBlockingToolFailure(code: string, toolId = "proposeProjectSettings") {
   return {
     ok: false, code, blocked: false,
-    error: toolId === "proposeWorkspaceSettings"
+    error: toolId === "proposeProjectSettings"
       ? "The settings proposal could not be prepared. Keep your answer, say the suggested change could not be prepared, and do not claim it is ready to apply or retry it."
       : "This check did not run: the turn is out of tool calls or time. Answer from the evidence already gathered, say the check was skipped, and do not claim its result.",
   } as const;
 }
 
 /**
- * Web reads are extras to a workspace answer: their failures go back to the
+ * Web reads are extras to a project answer: their failures go back to the
  * model as an explanation it passes on, and the rest of the request is still
  * answered. The exfiltration guard (`url_not_allowed`) is not one of these.
  */
@@ -262,8 +262,8 @@ const WEB_FAILURE_CAUSES: Record<string, string> = {
   invalid_request: "The web service rejected the request; the URL or query may be malformed or unsupported.",
   url_blocked: "That address is not a public web URL, so it cannot be fetched.",
   rate_limited: "Web lookups are rate limited right now; the user can try again in a minute.",
-  web_disabled: "Web tools are turned off for this workspace.",
-  privacy_mode_blocked: "This workspace's privacy mode does not allow web tools.",
+  web_disabled: "Web tools are turned off for this project.",
+  privacy_mode_blocked: "This project's privacy mode does not allow web tools.",
   tool_timeout: "The web lookup timed out. The site or the web service may be slow or down.",
   tool_call_limit: "This turn has no tool calls left for a web lookup.",
   deadline: "This turn has no time left for a web lookup.",
@@ -283,7 +283,7 @@ export function webToolFailure(toolId: string, code: string, failed?: Array<{ ur
     ok: false, code, blocked: false,
     error: `Could not retrieve ${what}. ${webFailureCause(code)}`,
     ...(failed?.length ? { failed: failed.slice(0, 10).map(item => ({ url: item.url, reason: webFailureCause(item.reason) })) } : {}),
-    instruction: "Tell the user plainly, near the start of your answer, that this part could not be completed and why, using the reason above. Do not guess or invent what the page or search would have said. Still complete every other part of the request as well as you can, from workspace evidence and other results, and say which parts are unverified. Do not repeat the same web call.",
+    instruction: "Tell the user plainly, near the start of your answer, that this part could not be completed and why, using the reason above. Do not guess or invent what the page or search would have said. Still complete every other part of the request as well as you can, from project evidence and other results, and say which parts are unverified. Do not repeat the same web call.",
   } as const;
 }
 
@@ -319,7 +319,7 @@ export function urlsInText(text: string): string[] {
 
 /**
  * Exfiltration guard: in chat, webFetch reads only URLs the user wrote only. Document or web text cannot make the model
- * fetch an attacker URL carrying workspace data in its query string.
+ * fetch an attacker URL carrying project data in its query string.
  */
 export const WEB_FETCH_URL_REFUSED = {
   error: "webFetch can only read URLs from the user's messages. This request is blocked.",
@@ -350,16 +350,16 @@ export function withoutEvidence(value: unknown): unknown {
 export function createChatMcpTools(args: {
   manifest: McpManifest;
   dispatch: McpDispatch;
-  workspaceId: string;
-  retrievalDefaults?: WorkspaceSearchRetrievalDefaults;
+  projectId: string;
+  retrievalDefaults?: ProjectSearchRetrievalDefaults;
   signal: AbortSignal;
   onActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
   /**
-   * Privacy gate for workspaces other than the chat workspace. Tool results go
-   * to a hosted model, so a workspace whose privacyMode forbids that is refused.
+   * Privacy gate for projects other than the chat project. Tool results go
+   * to a hosted model, so a project whose privacyMode forbids that is refused.
    */
-  allowWorkspace?: (workspaceRef: string) => Promise<boolean>;
+  allowProject?: (projectRef: string) => Promise<boolean>;
   /** Tool calls allowed in this turn (default 12); later calls get TOOL_CALL_LIMIT_RESULT. */
   maxToolCalls?: number;
   /** Ceiling for a search batch's `concurrency`; also its value when the model omits it (default 6). */
@@ -380,7 +380,7 @@ export function createChatMcpTools(args: {
   userText?: string[];
   /** Suggestions mode: budget and deadline refusals of its diagnostic reads do not block the turn. */
   suggestions?: boolean;
-  /** First-party DocSlurp app only (isFirstPartyAppActor): offer the workspace settings tools. Default off. */
+  /** First-party DocSlurp app only (isFirstPartyAppActor): offer the project settings tools. Default off. */
   settingsTools?: boolean;
   /** A browser (client) key's chat: withhold tools that report account internals. */
   publicClient?: boolean;
@@ -459,7 +459,7 @@ export function createChatMcpTools(args: {
     if (tools[name]) throw new Error("Duplicate model tool name");
     tools[name] = dynamicTool({
       description: definition.id === "search"
-        ? "Retrieve cited passages from the selected workspace. Send queries as an array of objects with q and optional filters, even for one query. Each query has its own options; only concurrency may accompany queries. Use the returned evidence to write your answer; this tool does not generate an answer."
+        ? "Retrieve cited passages from the selected project. Send queries as an array of objects with q and optional filters, even for one query. Each query has its own options; only concurrency may accompany queries. Use the returned evidence to write your answer; this tool does not generate an answer."
         : definition.description,
       // One shape avoids the public MCP catalog's flat q/queries union, which
       // models can satisfy while producing a mixed request the route rejects.
@@ -471,7 +471,7 @@ export function createChatMcpTools(args: {
           "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": definition.id,
           "gen_ai.tool.call.id": toolCallId, "gen_ai.tool.type": "function",
           ...(args.chatSessionId ? { "docslurp.chat.session_id": args.chatSessionId } : {}),
-          "docslurp.workspaceId": args.workspaceId,
+          "docslurp.projectId": args.projectId,
         }, { parent: args.traceParent });
         const started = Date.now();
         const webTool = CHAT_WEB_TOOLS.has(definition.id);
@@ -535,25 +535,25 @@ export function createChatMcpTools(args: {
             ? Math.max(1, Math.min(Math.trunc(supplied.concurrency), searchConcurrency))
             : searchConcurrency
           : 1;
-        // G-04: the user-selected workspace is the only scope. The model's own
-        // workspace/workspaceId arguments are stripped, then the resolved
-        // workspace is applied, so a prompt-injected workspace key can't send a
-        // search into another workspace and the strict route schema never sees a
-        // stray field. Workspace retrieval controls (including this request's
+        // G-04: the user-selected project is the only scope. The model's own
+        // project/projectId arguments are stripped, then the resolved
+        // project is applied, so a prompt-injected project key can't send a
+        // search into another project and the strict route schema never sees a
+        // stray field. Project retrieval controls (including this request's
         // overrides) are applied after the model's arguments too.
-        const withoutWorkspace = (value: unknown): Record<string, unknown> => {
+        const withoutProject = (value: unknown): Record<string, unknown> => {
           if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-          const { workspace: _workspace, workspaceId: _workspaceId, ...rest } = value as Record<string, unknown>;
+          const { project: _project, projectId: _projectId, ...rest } = value as Record<string, unknown>;
           return rest;
         };
-        const modelSupplied = withoutWorkspace(supplied);
+        const modelSupplied = withoutProject(supplied);
         const body = definition.id === "search"
           ? Array.isArray(supplied.queries)
-            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withoutWorkspace(q), ...searchDefaults, workspace: args.workspaceId })) }
-            : { ...modelSupplied, ...searchDefaults, workspace: args.workspaceId }
-          : { ...modelSupplied, workspace: args.workspaceId };
+            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withoutProject(q), ...searchDefaults, project: args.projectId })) }
+            : { ...modelSupplied, ...searchDefaults, project: args.projectId }
+          : { ...modelSupplied, project: args.projectId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
-        let settingsProposal: WorkspaceSettingsProposal | undefined;
+        let settingsProposal: ProjectSettingsProposal | undefined;
         let web = webActivityRequest(definition.id, supplied);
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
@@ -598,8 +598,8 @@ export function createChatMcpTools(args: {
           }
           // A partial fetch failure still reports what was read and how many pages failed.
           if (response.ok && web) web = webActivityResult(web, result);
-          if (ok && definition.id === "proposeWorkspaceSettings") {
-            const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
+          if (ok && definition.id === "proposeProjectSettings") {
+            const parsed = projectSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
             if (parsed.success) settingsProposal = parsed.data;
             // No card can render, so the model must not say a proposal is ready (or see a raw token).
             else { ok = false; failureCode = "invalid_proposal"; }

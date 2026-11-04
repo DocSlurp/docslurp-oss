@@ -38,7 +38,7 @@ import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
 export interface QuarantinedSource {
   sourceSha256: string;
   orgId: string | null;
-  workspaceId: string | null;
+  projectId: string | null;
 }
 
 export interface SourceQuarantineStore {
@@ -133,11 +133,11 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
     return { orgId, count: Number(row?.count ?? 0) };
   };
   const mapRow = (row: Record<string, unknown> | undefined): QuarantinedSource | null =>
-    row ? { sourceSha256: String(row.source_sha256), orgId: (row.org_id as string | null) ?? null, workspaceId: (row.workspace_id as string | null) ?? null } : null;
+    row ? { sourceSha256: String(row.source_sha256), orgId: (row.org_id as string | null) ?? null, projectId: (row.project_id as string | null) ?? null } : null;
   return {
     async find(documentId, stagedSha256 = null) {
       const rows = await sql`
-        select q.source_sha256, q.org_id, q.workspace_id
+        select q.source_sha256, q.org_id, q.project_id
         from documents d
         join quarantined_sources q on q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256)
         where d.id = ${documentId} and q.expires_at > now()
@@ -149,10 +149,10 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
       // extends the expiry and adds its organization.
       const rows = await sql`
         insert into quarantined_sources as q (
-          source_sha256, org_id, workspace_id, run_id, document_id, stage, detail, expires_at,
+          source_sha256, org_id, project_id, run_id, document_id, stage, detail, expires_at,
           org_ids, last_org_id, last_document_id
         )
-        select coalesce(${stagedSha256}::text, d.source_sha256), d.org_id, d.workspace_id, ${runId ?? null}, d.id, ${stage ?? null},
+        select coalesce(${stagedSha256}::text, d.source_sha256), d.org_id, d.project_id, ${runId ?? null}, d.id, ${stage ?? null},
           ${detail.slice(0, 2000)}, now() + ${ttlHours}::double precision * interval '1 hour',
           case when d.org_id is null then '{}'::text[] else array[d.org_id] end, d.org_id, d.id
         from documents d
@@ -165,7 +165,7 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
           last_document_id = excluded.last_document_id,
           last_seen_at = now(),
           teardown_count = q.teardown_count + 1
-        returning source_sha256, org_id, workspace_id`;
+        returning source_sha256, org_id, project_id`;
       return mapRow(rows[0]);
     },
     async noteRefusal({ documentId, sourceSha256 }) {
@@ -256,7 +256,7 @@ async function quarantineSourceOf(store: SourceQuarantineStore, error: CommandTe
     console.error(
       listed
         ? `[worker-quarantine] status=source-quarantined metric=source_quarantined org=${listed.orgId ?? "none"} ` +
-            `workspace=${listed.workspaceId ?? "none"} run=${runId ?? "none"} document=${documentId} stage=${stage ?? "none"} ` +
+            `project=${listed.projectId ?? "none"} run=${runId ?? "none"} document=${documentId} stage=${stage ?? "none"} ` +
             `source_sha256=${listed.sourceSha256} ttl_hours=${sourceQuarantineTtlHours()}`
         : `[worker-quarantine] status=source-unhashed run=${runId ?? "none"} document=${documentId} stage=${stage ?? "none"} ` +
             "detail=document has no source hash; its source cannot be denylisted",
@@ -333,7 +333,7 @@ export async function admitCommandSource(): Promise<void> {
       if (!listed) return;
       const context = currentPerfContext();
       console.error(
-        `[worker-quarantine] status=source-refused org=${listed.orgId ?? "none"} workspace=${listed.workspaceId ?? "none"} ` +
+        `[worker-quarantine] status=source-refused org=${listed.orgId ?? "none"} project=${listed.projectId ?? "none"} ` +
           `run=${context?.runId ?? "none"} document=${documentId} source_sha256=${listed.sourceSha256}`,
       );
       // Attribution only: a failure to note it never admits the document.

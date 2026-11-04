@@ -14,7 +14,7 @@ function fixture(t) {
   mkdirSync(repo); mkdirSync(dataset);
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: 'pipe' });
   git('init', '-q'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
-  writeFileSync(join(repo, 'worker.ts'), 'export const parse = (document, workspaceSchema) => extract(document, workspaceSchema);');
+  writeFileSync(join(repo, 'worker.ts'), 'export const parse = (document, projectSchema) => extract(document, projectSchema);');
   git('add', '.'); git('commit', '-qm', 'baseline');
   const source = '%PDF-1.7\nSynthetic held-out source bytes\n%%EOF';
   const labels = JSON.stringify({ labels: [{ name: 'invoice_owner', expected: 'Distinctive Example Supplier' }, { name: 'invoice_issuer', expected: 'Unseen Example Issuer' }, { name: 'invoice_recipient', expected: 'Unseen Example Recipient' }] });
@@ -27,7 +27,7 @@ function fixture(t) {
 }
 const rules = (report) => report.findings.map((finding) => finding.rule);
 
-test('allows generic document logic and runtime workspace schemas without printing answers', (t) => {
+test('allows generic document logic and runtime project schemas without printing answers', (t) => {
   const f = fixture(t), report = f.run();
   assert.equal(report.passed, true); assert.equal(report.cases, 1); assert.equal(report.scannedProductionFiles, 1);
   assert.match(report.productionHash, /^[a-f0-9]{64}$/);

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const sqlMock = vi.fn();
 const access = vi.hoisted(() => ({ allowed: true }));
 vi.mock("../services/organizations.js", () => ({
-  getWorkspaceAccess: vi.fn(async () => access.allowed ? { role: "owner" } : null),
+  getProjectAccess: vi.fn(async () => access.allowed ? { role: "owner" } : null),
 }));
 
 vi.mock("../db.js", () => ({
@@ -13,7 +13,7 @@ vi.mock("../db.js", () => ({
 
 vi.mock("../lib/request-actor.js", () => ({
   getRequestActor: vi.fn(() => ({ type: "session", userId: "user-1" })),
-  resolveActorWorkspaceId: vi.fn(async (_actor: unknown, workspaceId?: string) => workspaceId ?? "ws-default"),
+  resolveActorProjectId: vi.fn(async (_actor: unknown, projectId?: string) => projectId ?? "ws-default"),
 }));
 
 const { suggestRoutes } = await import("../routes/suggest.js");
@@ -39,14 +39,14 @@ describe("suggestRoutes", () => {
     app = buildApp();
   });
 
-  it("refuses inaccessible workspaces before reading suggestions", async () => {
+  it("refuses inaccessible projects before reading suggestions", async () => {
     access.allowed = false;
-    const res = await app.request("/v1/suggest?workspace=foreign-workspace");
+    const res = await app.request("/v1/suggest?project=foreign-project");
     expect(res.status).toBe(404);
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to the default workspace when workspace is omitted", async () => {
+  it("falls back to the default project when project is omitted", async () => {
     const res = await app.request("/v1/suggest?q=co");
     expect(res.status).toBe(200);
     expect(JSON.stringify(sqlMock.mock.calls)).toContain("ws-default");
@@ -59,25 +59,25 @@ describe("suggestRoutes", () => {
 
   it("reports ready when only failed or superseded documents remain outside the corpus", async () => {
     mockSemanticRow({ indexed_chunk_count: 12, completed_documents: 3, in_flight_documents: 0 });
-    const res = await app.request("/v1/suggest?workspace=ws-1");
+    const res = await app.request("/v1/suggest?project=ws-1");
     const body = await res.json();
     expect(body.semantic).toEqual({ status: "ready", indexedChunkCount: 12, completedDocuments: 3, totalDocuments: 3 });
   });
 
   it("reports partial only while current documents are in flight", async () => {
     mockSemanticRow({ indexed_chunk_count: 12, completed_documents: 3, in_flight_documents: 1 });
-    const res = await app.request("/v1/suggest?workspace=ws-1");
+    const res = await app.request("/v1/suggest?project=ws-1");
     const body = await res.json();
     expect(body.semantic).toEqual({ status: "partial", indexedChunkCount: 12, completedDocuments: 3, totalDocuments: 4 });
     const semanticQuery = sqlMock.mock.calls
       .map((call) => (call[0] as TemplateStringsArray).join("?"))
       .find((query) => query.includes("in_flight_documents"));
-    expect(semanticQuery).toContain("workspace_corpus_stats");
+    expect(semanticQuery).toContain("project_corpus_stats");
     expect(semanticQuery).toContain("d.superseded_at is null");
   });
 
   it("only suggests filenames of current, searchable files (never failed or replaced ones)", async () => {
-    await app.request("/v1/suggest?workspace=ws-1&q=b");
+    await app.request("/v1/suggest?project=ws-1&q=b");
     const filenameQueries = sqlMock.mock.calls.map(call => (call[0] as TemplateStringsArray).join("?"))
       .filter(text => /d\.filename/.test(text));
     expect(filenameQueries.length).toBeGreaterThan(0);
@@ -85,7 +85,7 @@ describe("suggestRoutes", () => {
   });
 
   it("returns suggestions array", async () => {
-    const res = await app.request("/v1/suggest?workspace=ws-1&q=cont&limit=5");
+    const res = await app.request("/v1/suggest?project=ws-1&q=cont&limit=5");
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body.suggestions)).toBe(true);
@@ -101,7 +101,7 @@ describe("suggestRoutes", () => {
       if (query.includes("from documents d")) return [{ phrase: "catalog.pdf", weight: 5 }];
       return [];
     });
-    const body = await (await app.request("/v1/suggest?workspace=ws-1")).json();
+    const body = await (await app.request("/v1/suggest?project=ws-1")).json();
     expect(body.suggestions).toEqual(["catalog.pdf"]);
   });
 });

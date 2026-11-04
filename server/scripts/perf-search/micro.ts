@@ -11,7 +11,7 @@ const docs = [...new Set(rows.map((r: any) => r.documentId))] as string[];
 const filter = `"documentId" IN (${docs.map((d) => `'${d}'`).join(", ")})`;
 const N = Number(process.argv[3] ?? 150);
 const qq = qs.slice(0, N);
-// scope A: whole workspace (all docs). scope B: 8 docs incl. the labelled one (low selectivity).
+// scope A: whole project (all docs). scope B: 8 docs incl. the labelled one (low selectivity).
 const scopeB = (q: any) => { const others = docs.filter((d) => d !== q.documentId).slice(Number(q.id.slice(1)) % 300, (Number(q.id.slice(1)) % 300) + 7); return [q.documentId, ...others]; };
 const lit = (ds: string[]) => `"documentId" IN (${ds.map((d) => `'${d}'`).join(", ")})`;
 const results: any[] = [];

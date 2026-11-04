@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
-vi.mock("./usage-attribution.js", () => ({ workspaceRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
+vi.mock("./usage-attribution.js", () => ({ projectRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
 
 const {
   INGEST_RECOMMENDATION_CATALOG,
@@ -48,7 +48,7 @@ function build(args: {
     return { ...entry, chunkTotal: entry.chunkTotal || own.reduce((sum, page) => sum + page.chunkCount, 0) };
   });
   const report = buildIngestReport({
-    workspace: { id: "ws-1", name: "Contracts", pipeline: args.pipeline ?? pipeline() },
+    project: { id: "ws-1", name: "Contracts", pipeline: args.pipeline ?? pipeline() },
     scope: { runId: null, documentIds: null, matchedDocuments: docs.length },
     documents: docs,
     pageDetailDocumentIds: docs.map((entry) => entry.id),
@@ -179,7 +179,7 @@ describe("ingest report: observed content", () => {
     expect(report.recommendations[0]!.reprocessDocumentIds).toEqual(["new"]);
   });
 
-  it("defaults video workspace policy on without claiming frames were processed", () => {
+  it("defaults video project policy on without claiming frames were processed", () => {
     const report = build({ documents: [doc("video", { filename: "video.mp4", mimeType: "video/mp4" })] });
     const setting = report.config.find((item) => item.key === "mediaVideo.enabled");
     expect(setting?.value).toBe("On");
@@ -201,7 +201,7 @@ describe("ingest report: observed content", () => {
     expect(ids).toEqual(expect.arrayContaining(["turn-on-video", "media-without-transcript"]));
     expect(report.recommendations.find((rec) => rec.id === "media-without-transcript")!.patch).toBeNull();
     expect(report.config.some((item) => item.key === "mediaVideo.enabled")).toBe(true);
-    // No PDF settings for a media-only workspace.
+    // No PDF settings for a media-only project.
     expect(report.config.some((item) => item.key === "visionFallback")).toBe(false);
   });
 
@@ -268,7 +268,7 @@ describe("ingest report: observed content", () => {
     expect(report.recommendations[0]?.id).toBe("turn-on-vision");
   });
 
-  it("an empty workspace reports zero files", () => {
+  it("an empty project reports zero files", () => {
     const report = build({ documents: [] });
     expect(report.files.total).toBe(0);
     expect(summarizeIngestReport(report)).toMatch(/no files yet/);
@@ -427,13 +427,13 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
   });
 
   it("every pipeline patch passes the settings proposal schema; every other recommendation is explicitly not proposable", async () => {
-    const { workspaceSettingsProposalInputSchema } = await import("./workspace-settings-proposal-input.js");
+    const { projectSettingsProposalInputSchema } = await import("./project-settings-proposal-input.js");
     for (const rec of scenarios().flatMap((report) => report.recommendations)) {
       const entry = INGEST_RECOMMENDATION_CATALOG[rec.id as keyof typeof INGEST_RECOMMENDATION_CATALOG];
       expect(entry, `${rec.id} is missing from INGEST_RECOMMENDATION_CATALOG`).toBeDefined();
       if (entry.proposal === "pipeline-patch") {
         expect(rec.patch, rec.id).not.toBeNull();
-        const parsed = workspaceSettingsProposalInputSchema.safeParse({ changes: { pipeline: rec.patch } });
+        const parsed = projectSettingsProposalInputSchema.safeParse({ changes: { pipeline: rec.patch } });
         expect(parsed.success, `${rec.id}: ${JSON.stringify(rec.patch)}`).toBe(true);
       } else {
         expect(rec.patch, rec.id).toBeNull();
@@ -442,8 +442,8 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
   });
 
   it("accepts the quality setting, maps the retired vision.forceAllPages and rejects malformed ones", async () => {
-    const { workspaceSettingsProposalInputSchema } = await import("./workspace-settings-proposal-input.js");
-    const parse = (pipeline: unknown) => workspaceSettingsProposalInputSchema.safeParse({ changes: { pipeline } });
+    const { projectSettingsProposalInputSchema } = await import("./project-settings-proposal-input.js");
+    const parse = (pipeline: unknown) => projectSettingsProposalInputSchema.safeParse({ changes: { pipeline } });
     for (const quality of ["fast", "auto", "good"]) expect(parse({ quality }).success).toBe(true);
     expect(parse({ quality: "deep" }).success).toBe(false);
     // Older recommendations proposed vision.forceAllPages; it arrives as quality good.
@@ -510,7 +510,7 @@ describe("ingest report: pages kept as images in Fast mode", () => {
     expect(rec.patch).toEqual({ visionFallback: true, quality: "auto" });
   });
 
-  it("offers only a reprocess once the workspace has left Fast", () => {
+  it("offers only a reprocess once the project has left Fast", () => {
     for (const quality of ["auto", "good"]) {
       const rec = fastReport({ quality }).recommendations.find((entry) => entry.id === "fast-kept-as-image")!;
       expect(rec.patch, quality).toBeNull();
@@ -567,7 +567,7 @@ describe("ingest report: summary escaping", () => {
 describe("ingest report: run-scoped file items", () => {
   const base = (runId: string | null, documents: Input["documents"], extra: Partial<Input> = {}) => {
     const report = buildIngestReport({
-      workspace: { id: "ws-1", name: "Contracts", pipeline: pipeline() },
+      project: { id: "ws-1", name: "Contracts", pipeline: pipeline() },
       scope: { runId, documentIds: null, matchedDocuments: documents.length },
       documents,
       pageDetailDocumentIds: documents.map((entry) => entry.id),

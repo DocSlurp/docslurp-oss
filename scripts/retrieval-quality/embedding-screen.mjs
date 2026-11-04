@@ -40,18 +40,18 @@ try {
     const expected = frozen.corpora.find((item) => item.documentId === source.documentId);
     if (!expected || hash(bytes) !== expected.artifactSha256) throw new Error("Frozen artifact hash mismatch");
     const artifact = JSON.parse(bytes);
-    const [run] = await sql`select id,user_id,org_id,workspace_id from workspace_runs where id=${expected.runId} and user_id=${config.userId} and org_id=${config.orgId}`;
+    const [run] = await sql`select id,user_id,org_id,project_id from project_runs where id=${expected.runId} and user_id=${config.userId} and org_id=${config.orgId}`;
     if (!run || artifact.documentId !== source.documentId || artifact.embedding.lateChunking !== false) throw new Error("Artifact ownership or input contract mismatch");
     const originalFingerprint = artifact.reuse?.fingerprint ?? embeddingVectorFingerprint(artifact.embedding);
     for (const chunk of artifact.chunks) {
       if (chunk.vector.length !== 1536 || chunk.vector.some((value) => !Number.isFinite(value)) || !(Math.hypot(...chunk.vector) > 0) || !Number.isFinite(Math.hypot(...chunk.vector))) throw new Error("Invalid native baseline vector");
       if (!chunk.metadata?.embeddingInputKey || embeddingInputKey(chunk.text, originalFingerprint) !== chunk.metadata.embeddingInputKey) throw new Error("Frozen provider input parity mismatch");
     }
-    const [workspace] = await sql`select id,pipeline from workspaces where id=${run.workspace_id} and user_id=${config.userId} and org_id=${config.orgId}`;
-    if (!workspace) throw new Error("Artifact workspace ownership mismatch");
-    const privacyMode = normalizePipelineFeatures(workspace.pipeline).privacyMode;
+    const [project] = await sql`select id,pipeline from projects where id=${run.project_id} and user_id=${config.userId} and org_id=${config.orgId}`;
+    if (!project) throw new Error("Artifact project ownership mismatch");
+    const privacyMode = normalizePipelineFeatures(project.pipeline).privacyMode;
     for (const candidate of frozen.arms.filter((item) => !item.status)) assertProviderAllowed(privacyMode, { provider: candidate.provider, model: candidate.model, operation: "evaluation.embedding", target: "hosted" });
-    documents.push({ ...source, runId: run.id, workspaceId: run.workspace_id, privacyMode, chunks: artifact.chunks });
+    documents.push({ ...source, runId: run.id, projectId: run.project_id, privacyMode, chunks: artifact.chunks });
   }
   const startTotals = await orgUsageTotals(config.orgId, null);
   report.startLedgerUsd = startTotals.costCents / 100;
@@ -75,16 +75,16 @@ try {
   const armSpecs = frozen.arms.filter((arm) => !arm.status);
   const queryNorm = (v) => Math.hypot(...v);
   const validate = (v, dimensions) => { if (v.length !== dimensions || v.some((n) => !Number.isFinite(n)) || !(queryNorm(v) > 0) || !Number.isFinite(queryNorm(v))) throw new Error("Provider returned invalid vector dimensions or values"); return v; };
-  const scopeLedger = (workspaceId, sessionId) => createUsageLedger({ userId: config.userId, scope: { orgId: config.orgId, workspaceId, sessionId } });
-  const guard = async (workspaceId, nextBytes, price, arm) => {
-    const [workspace] = await sql`select id,pipeline,archived_at from workspaces where id=${workspaceId} and user_id=${config.userId} and org_id=${config.orgId}`;
-    if (!workspace || workspace.archived_at) throw new Error("Artifact workspace no longer active or authorized");
-    const privacyMode = normalizePipelineFeatures(workspace.pipeline).privacyMode;
+  const scopeLedger = (projectId, sessionId) => createUsageLedger({ userId: config.userId, scope: { orgId: config.orgId, projectId, sessionId } });
+  const guard = async (projectId, nextBytes, price, arm) => {
+    const [project] = await sql`select id,pipeline,archived_at from projects where id=${projectId} and user_id=${config.userId} and org_id=${config.orgId}`;
+    if (!project || project.archived_at) throw new Error("Artifact project no longer active or authorized");
+    const privacyMode = normalizePipelineFeatures(project.pipeline).privacyMode;
     assertProviderAllowed(privacyMode, { provider: arm.provider, model: arm.model, operation: "evaluation.embedding", target: "hosted" });
     if (report.providerActualUsd + nextBytes * price / 1_000_000 > report.providerCapUsd) throw new Error("Provider next-batch ceiling exceeds hard cap");
     const total = await orgUsageTotals(config.orgId, null);
     if (total.costCents / 100 + nextBytes * price * config.expectedLedgerFactor / 1_000_000 >= report.priorBudgetUsd) throw new Error("Original next-batch ledger allowance exhausted");
-    await assertCanSpend(config.orgId, workspaceId, { kind: "interactive" });
+    await assertCanSpend(config.orgId, projectId, { kind: "interactive" });
     return privacyMode;
   };
   for (const arm of armSpecs) {
@@ -98,12 +98,12 @@ try {
       if (arm.documentVectors === "retained") { docVectors.set(doc.documentId, doc.chunks.map((chunk) => chunk.vector)); continue; }
       const vectors = [], batchSize = arm.provider === "openai" ? 256 : 64;
       const sessionId = `embedding-screen-${report.screenId}-${arm.id}-${doc.documentId}`;
-      const ledger = scopeLedger(doc.workspaceId, sessionId);
+      const ledger = scopeLedger(doc.projectId, sessionId);
       for (let offset = 0; offset < doc.chunks.length; offset += batchSize) {
         const chunks = doc.chunks.slice(offset, offset + batchSize), values = chunks.map((chunk) => chunk.text);
         const byteBound = values.reduce((total, value) => total + Buffer.byteLength(value) + 2, 0);
-        const privacyMode = await guard(doc.workspaceId, byteBound, price, arm);
-        const attempt = { arm: arm.id, kind: "document", documentId: doc.documentId, offset, chunks: chunks.length, inputSha256: hash(JSON.stringify(values)), inputTokenUpperBound: byteBound, provider: arm.provider, model: arm.model, workspaceId: doc.workspaceId, sessionId, status: "started", startedAt: new Date().toISOString() };
+        const privacyMode = await guard(doc.projectId, byteBound, price, arm);
+        const attempt = { arm: arm.id, kind: "document", documentId: doc.documentId, offset, chunks: chunks.length, inputSha256: hash(JSON.stringify(values)), inputTokenUpperBound: byteBound, provider: arm.provider, model: arm.model, projectId: doc.projectId, sessionId, status: "started", startedAt: new Date().toISOString() };
         report.attempts.push(attempt); await save();
         const profile = { profile: "cheapest-hosted", target: "hosted", modelUri: `llm://${arm.provider}/${arm.model}`, runtime: "remote", provider: arm.provider, model: arm.model, baseUrl: arm.provider === "deepinfra" ? "https://api.deepinfra.com/v1/openai" : null, dimensions: arm.dimensions, task: "document", normalize: true, batchSize, lateChunking: false, lateChunkingWindow: 2, supportsCustomDimensions: arm.provider === "openai" };
         let usageCallbacks = 0;
@@ -133,11 +133,11 @@ try {
     for (const query of queries) {
       const targetDocs = query.documentIds?.length ? documents.filter((doc) => query.documentIds.includes(doc.documentId)) : documents;
       if (!targetDocs.length) throw new Error("Frozen query has no matching corpus");
-      const workspaceId = targetDocs[0].workspaceId, sessionId = `embedding-screen-${report.screenId}-${arm.id}-query-${query.id}`;
-      const ledger = scopeLedger(workspaceId, sessionId), byteBound = Buffer.byteLength(query.question) + 2;
+      const projectId = targetDocs[0].projectId, sessionId = `embedding-screen-${report.screenId}-${arm.id}-query-${query.id}`;
+      const ledger = scopeLedger(projectId, sessionId), byteBound = Buffer.byteLength(query.question) + 2;
       let privacyMode;
-      for (const doc of targetDocs) privacyMode = await guard(doc.workspaceId, byteBound, price, arm);
-      const qstart = performance.now(), attempt = { arm: arm.id, kind: "query", id: query.id, status: "started", startedAt: new Date().toISOString(), inputTokenUpperBound: byteBound, provider: arm.provider, model: arm.model, workspaceId, sessionId };
+      for (const doc of targetDocs) privacyMode = await guard(doc.projectId, byteBound, price, arm);
+      const qstart = performance.now(), attempt = { arm: arm.id, kind: "query", id: query.id, status: "started", startedAt: new Date().toISOString(), inputTokenUpperBound: byteBound, provider: arm.provider, model: arm.model, projectId, sessionId };
       report.attempts.push(attempt); await save();
       let recorded = false;
       const recordQuery = async ({ inputTokens }) => {
@@ -173,7 +173,7 @@ try {
     armReport.status = "success"; armReport.elapsedMs = performance.now() - started; await save();
     console.log(JSON.stringify({ arm: arm.id, status: "success", queries: armReport.queries.length, providerActualUsd: report.providerActualUsd }));
   }
-  const rows = await sql`select id,provider,model,metric,input_tokens,output_tokens,cost_cents,workspace_id,metadata from ${attributedUsage(null)} au where au.org_id=${config.orgId} and au.user_id=${config.userId} and au.metadata ->> 'screenId'=${report.screenId}`;
+  const rows = await sql`select id,provider,model,metric,input_tokens,output_tokens,cost_cents,project_id,metadata from ${attributedUsage(null)} au where au.org_id=${config.orgId} and au.user_id=${config.userId} and au.metadata ->> 'screenId'=${report.screenId}`;
   report.persistedEvents = rows.map(({ metadata, ...row }) => ({ ...row, arm: metadata.arm, sessionId: metadata.sessionId, usageSource: metadata.usageSource }));
   report.customerLedgerUsd = rows.reduce((total, row) => total + Number(row.cost_cents) / 100, 0);
   const completedAttempts = report.attempts.filter((attempt) => attempt.status === "success");
@@ -182,7 +182,7 @@ try {
   for (const attempt of completedAttempts) {
     if (attempt.usageEventIds?.length !== 1) throw new Error("Final persisted event identity missing");
     const row = byId.get(attempt.usageEventIds[0]);
-    if (!row || row.provider !== attempt.provider || row.model !== attempt.model || row.workspace_id !== attempt.workspaceId || Number(row.input_tokens) !== attempt.actualInputTokens || Number(row.output_tokens) !== 0 || row.metadata.sessionId !== attempt.sessionId || row.metadata.arm !== attempt.arm) throw new Error("Final persisted event identity or token mismatch");
+    if (!row || row.provider !== attempt.provider || row.model !== attempt.model || row.project_id !== attempt.projectId || Number(row.input_tokens) !== attempt.actualInputTokens || Number(row.output_tokens) !== 0 || row.metadata.sessionId !== attempt.sessionId || row.metadata.arm !== attempt.arm) throw new Error("Final persisted event identity or token mismatch");
     if (Math.abs(Number(row.cost_cents) / 100 - attempt.providerActualUsd * config.expectedLedgerFactor) > 1e-12) throw new Error("Final persisted event charge mismatch");
   }
   report.status = "success"; report.completedAt = new Date().toISOString(); await save();

@@ -20,7 +20,7 @@ describe("ADMIN_EMAILS admission", () => {
     expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('"emailVerified" = true'), ["user-1", ["admin@example.com"]]);
     const statement = pool.query.mock.calls[0]?.[0];
     expect(statement).toContain("role not in ('owner', 'admin')");
-    expect(statement).toContain("update workspace_members set role = 'admin'");
+    expect(statement).toContain("update project_members set role = 'admin'");
   });
   it("does not grant status when no verified allowlisted identity matches", async () => {
     vi.stubEnv("ADMIN_EMAILS", "admin@example.com");

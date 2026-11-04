@@ -3,13 +3,13 @@ import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID, createHmac } from "node:crypto";
 
-import { workspaceAllowsWebhookEvent } from "@docslurp/shared";
+import { projectAllowsWebhookEvent } from "@docslurp/shared";
 
 import { apiPool, sql } from "../db.js";
 import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
 import { findWebhookEvent } from "../lib/webhook-events.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { getWorkspaceAccess } from "./organizations.js";
+import { getProjectAccess } from "./organizations.js";
 
 type WebhookRow = {
   id: string;
@@ -435,9 +435,9 @@ export async function replayWebhookDelivery(deliveryId: string, userId: string):
 }
 
 export async function deliverWebhook(runId: string, eventType: string): Promise<void> {
-  const rows = await sql<(WebhookRow & { run_id: string; workspace_id: string })[]>`
+  const rows = await sql<(WebhookRow & { run_id: string; project_id: string })[]>`
     select
-      r.workspace_id,
+      r.project_id,
       w.id,
       w.user_id,
       w.url,
@@ -447,15 +447,15 @@ export async function deliverWebhook(runId: string, eventType: string): Promise<
       w.created_at::text,
       r.id as run_id
     from webhooks w
-    join workspace_runs r on r.user_id = w.user_id
+    join project_runs r on r.user_id = w.user_id
     where r.id = ${runId}
       and w.active = true
       and ${eventType} = any(w.events)
   `;
 
   for (const row of rows) {
-    // Only while the subscriber can still read the run's workspace (G-06).
-    if (!(await getWorkspaceAccess(row.workspace_id, row.user_id))) continue;
+    // Only while the subscriber can still read the run's project (G-06).
+    if (!(await getProjectAccess(row.project_id, row.user_id))) continue;
     await dispatchWebhook({
       webhook: row,
       eventType,
@@ -503,30 +503,30 @@ export async function drainWebhookOutbox(limit = 25): Promise<number> {
   `;
 
   for (const event of claimed) {
-    // Webhooks belong to a user, not an org. Deliver a workspace's events only
-    // while the subscriber can still read that workspace, so leaving or being
+    // Webhooks belong to a user, not an org. Deliver a project's events only
+    // while the subscriber can still read that project, so leaving or being
     // removed from an organization (G-06) stops its events.
-    const payloadWorkspaceId = typeof (event.payload as { workspaceId?: unknown } | null)?.workspaceId === "string"
-      ? (event.payload as { workspaceId: string }).workspaceId
+    const payloadProjectId = typeof (event.payload as { projectId?: unknown } | null)?.projectId === "string"
+      ? (event.payload as { projectId: string }).projectId
       : null;
-    if (payloadWorkspaceId && !(await getWorkspaceAccess(payloadWorkspaceId, event.user_id))) {
+    if (payloadProjectId && !(await getProjectAccess(payloadProjectId, event.user_id))) {
       await sql`
         update webhook_outbox
-        set dispatched_at = now(), last_error = ${"Skipped: subscriber no longer has access to this workspace"}
+        set dispatched_at = now(), last_error = ${"Skipped: subscriber no longer has access to this project"}
         where id = ${event.id}
       `;
       continue;
     }
-    // Workspaces can switch off (or narrow) the webhook events they emit.
-    const workspaceId = typeof event.payload?.workspaceId === "string" ? event.payload.workspaceId : null;
-    if (workspaceId) {
-      const [workspace] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
-        select pipeline from workspaces where id = ${workspaceId}
+    // Projects can switch off (or narrow) the webhook events they emit.
+    const projectId = typeof event.payload?.projectId === "string" ? event.payload.projectId : null;
+    if (projectId) {
+      const [project] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
+        select pipeline from projects where id = ${projectId}
       `;
-      if (workspace && !workspaceAllowsWebhookEvent(workspace.pipeline as Parameters<typeof workspaceAllowsWebhookEvent>[0], event.event_type)) {
+      if (project && !projectAllowsWebhookEvent(project.pipeline as Parameters<typeof projectAllowsWebhookEvent>[0], event.event_type)) {
         await sql`
           update webhook_outbox
-          set dispatched_at = now(), last_error = ${"Skipped: webhook notifications are off for this workspace"}
+          set dispatched_at = now(), last_error = ${"Skipped: webhook notifications are off for this project"}
           where id = ${event.id}
         `;
         continue;

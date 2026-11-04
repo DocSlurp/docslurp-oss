@@ -11,7 +11,7 @@ async function invoke(lines) {
     for await (const chunk of req) body += chunk;
     requests.push({ path: req.url, authorization: req.headers.authorization, body });
     const result = req.url === "/v1/mcp/tools" ? { tools: [{ id: "suggestQueries", title: "Suggest", inputSchema: { type: "object" } }] }
-      : req.url === "/v1/mcp/prompts/workspace-grounded-answer" ? { prompt: "Use citations" }
+      : req.url === "/v1/mcp/prompts/project-grounded-answer" ? { prompt: "Use citations" }
       : req.url === "/v1/mcp/resources/capabilities" ? { capabilities: [] }
       : { suggestions: ["renewal" ] };
     res.writeHead(req.url.endsWith("unknown") ? 404 : 200, { "Content-Type": "application/json" });
@@ -38,7 +38,7 @@ const init = request(1, "initialize", { protocolVersion: "2025-06-18", capabilit
 const ready = { jsonrpc: "2.0", method: "notifications/initialized" };
 
 test("MCP stdio lifecycle, discovery, tool content, resources and prompts use protocol shapes", async () => {
-  const { responses, requests } = await invoke([init, ready, request(2, "tools/list"), request(3, "tools/call", { name: "suggestQueries", arguments: { workspace: "ws" } }), request(4, "resources/list"), request(5, "resources/read", { uri: "docslurp://capabilities" }), request(6, "prompts/list"), request(7, "prompts/get", { name: "workspace-grounded-answer" }), request(8, "ping")]);
+  const { responses, requests } = await invoke([init, ready, request(2, "tools/list"), request(3, "tools/call", { name: "suggestQueries", arguments: { project: "ws" } }), request(4, "resources/list"), request(5, "resources/read", { uri: "docslurp://capabilities" }), request(6, "prompts/list"), request(7, "prompts/get", { name: "project-grounded-answer" }), request(8, "ping")]);
   assert.equal(responses.length, 8, "Notifications must not receive replies");
   for (const response of responses) assert.equal(response.jsonrpc, "2.0");
   assert.equal(responses[0].result.protocolVersion, "2025-06-18");

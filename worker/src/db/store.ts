@@ -22,8 +22,8 @@ import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
   Document,
-  WorkspaceRun,
-  WorkspaceRunEvent,
+  ProjectRun,
+  ProjectRunEvent,
   JsonMap,
   StageState,
 } from "../models.js";
@@ -35,15 +35,15 @@ import {
   collectOrphanedStorageKeys,
   keyFromStorageUri,
 } from "../tools/storage.js";
-import { insertWorkspaceRunEvents, RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
-import { graphFallbackScope, workspaceTemplates } from "@docslurp/shared";
+import { insertProjectRunEvents, RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
+import { graphFallbackScope, projectTemplates } from "@docslurp/shared";
 import { queryWorkerScalerSnapshot, type ScalerSql, type WorkerScalerQueryParams, type WorkerScalerSnapshot } from "@docslurp/shared";
 import {
-  refreshWorkspaceCommunities,
+  refreshProjectCommunities,
   type CommunityRefreshResult,
   type CommunitySummaryContext,
 } from "../graph/communities.js";
-import { lockWorkspaceGraph, replaceDocumentGraph, type ReplaceDocumentGraphInput } from "../graph/graph-store.js";
+import { lockProjectGraph, replaceDocumentGraph, type ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import { runGraphJobs, type GraphJobRunnerOptions } from "../graph/rebuild-job.js";
 import {
   drainDocumentCleanupQueue,
@@ -71,18 +71,18 @@ import {
   runUsageEventStatements,
 } from "./usage-event-store.js";
 
-type WorkspaceRunRow = {
+type ProjectRunRow = {
   id: string;
   org_id: string;
   /**
-   * The run's org, else its workspace's (runRowQuery): the one org admission, usage attribution and the
+   * The run's org, else its project's (runRowQuery): the one org admission, usage attribution and the
    * credit debit all use. Absent from other run queries.
    */
   canonical_org_id?: string | null;
   /** Joined from organizations by loadRun; absent from other run queries. */
   org_funded?: boolean | null;
   allow_china_providers?: boolean | null;
-  workspace_id: string;
+  project_id: string;
   user_id: string;
   kind: string;
   status: string;
@@ -92,7 +92,7 @@ type WorkspaceRunRow = {
   pages_total: number;
   pages_processed: number;
   spent_cents: number | string;
-  pipeline: Partial<WorkspaceRun["pipeline"]> | null;
+  pipeline: Partial<ProjectRun["pipeline"]> | null;
   stats: JsonMap | null;
   artifacts: Record<string, string> | null;
   error: string | null;
@@ -152,7 +152,7 @@ type BudgetAlertRow = {
   scope_id: string;
   scope_name: string;
   org_id: string | null;
-  workspace_id: string | null;
+  project_id: string | null;
   owner_user_id: string;
   owner_email: string;
   monthly_budget_cents: number;
@@ -167,8 +167,8 @@ type ArtifactRetentionRow = {
   run_id: string;
   user_id: string;
   org_id: string | null;
-  workspace_id: string;
-  workspace_name: string;
+  project_id: string;
+  project_name: string;
   source_keys: string[] | null;
   run_artifact_uris: string[] | null;
   stage_artifact_uris: string[] | null;
@@ -178,8 +178,8 @@ type RunRetentionRow = {
   run_id: string;
   user_id: string;
   org_id: string | null;
-  workspace_id: string;
-  workspace_name: string;
+  project_id: string;
+  project_name: string;
 };
 
 type StorageReferenceRow = {
@@ -187,7 +187,7 @@ type StorageReferenceRow = {
   reference_key: string | null;
   run_id: string | null;
   document_id: string | null;
-  workspace_id: string | null;
+  project_id: string | null;
   org_id: string | null;
   user_id: string | null;
   reference_source: string | null;
@@ -197,9 +197,9 @@ type StorageIntegrityRunRow = {
   run_id: string;
   user_id: string;
   org_id: string | null;
-  workspace_id: string;
+  project_id: string;
   status: string;
-  pipeline: Partial<WorkspaceRun["pipeline"]> | null;
+  pipeline: Partial<ProjectRun["pipeline"]> | null;
 };
 
 type CountByRunRow = {
@@ -212,7 +212,7 @@ type StorageReference = {
   key: string;
   runId: string | null;
   documentId: string | null;
-  workspaceId: string | null;
+  projectId: string | null;
   orgId: string | null;
   userId: string | null;
   source: string | null;
@@ -222,9 +222,9 @@ type StorageIntegrityRunCheck = {
   runId: string;
   userId: string;
   orgId: string | null;
-  workspaceId: string;
+  projectId: string;
   status: string;
-  pipeline: Partial<WorkspaceRun["pipeline"]> | null;
+  pipeline: Partial<ProjectRun["pipeline"]> | null;
   documentCount: number;
   chunkCount: number;
   vectorIndexCount: number;
@@ -249,7 +249,7 @@ export type StorageIntegrityFinding = {
   key?: string;
   runId?: string | null;
   documentId?: string | null;
-  workspaceId?: string | null;
+  projectId?: string | null;
   orgId?: string | null;
   userId?: string | null;
   referenceKind?: string | null;
@@ -384,17 +384,17 @@ type StageStateRows = (StageStateRow & { scope: "run" | "document" })[];
 function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   // The org's plan rides along (no extra round trip): it sets the AI credit
   // factor for bonus plans in the usage ledger. A run without an org takes
-  // its workspace's, as the vision attempt guard does (vision-attempt-store.ts),
+  // its project's, as the vision attempt guard does (vision-attempt-store.ts),
   // so usage rows, the credit debit and admission agree on one org.
-  return client<WorkspaceRunRow[]>`
+  return client<ProjectRunRow[]>`
     select r.*, c.org_id as canonical_org_id,
       (select o.funded_at is not null from organizations o where o.id = c.org_id) as org_funded,
-      -- China-based providers only when the org and the run's workspace both allow them; no org is restricted.
+      -- China-based providers only when the org and the run's project both allow them; no org is restricted.
       coalesce((select o.allow_china_providers from organizations o where o.id = c.org_id), false)
-        and coalesce((select w.allow_china_providers from workspaces w where w.id = r.workspace_id), false) as allow_china_providers
-    from workspace_runs r
+        and coalesce((select w.allow_china_providers from projects w where w.id = r.project_id), false) as allow_china_providers
+    from project_runs r
     cross join lateral (
-      select coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id
+      select coalesce(r.org_id, (select w.org_id from projects w where w.id = r.project_id)) as org_id
     ) c
     where r.id = ${runId}
     limit 1
@@ -403,7 +403,7 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
 
 function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
   return client<DocumentRow[]>`
-    select d.*, (select r.storage_prefix from workspace_runs r where r.id = d.run_id) as run_storage_prefix
+    select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix
     from documents d
     where d.run_id = ${runId}
       and d.superseded_at is null and d.status <> 'cancelled'
@@ -416,7 +416,7 @@ function stageStateRowsQuery(client: Sql<Record<string, unknown>>, runId: string
   return client<StageStateRows>`
     select 'run' as scope, run_id, null::text as document_id, stage_name, status, attempts, artifact_uri, stats, error,
       started_at, completed_at, updated_at
-    from workspace_run_stage_states
+    from project_run_stage_states
     where run_id = ${runId}
     union all
     select 'document' as scope, run_id, document_id, stage_name, status, attempts, artifact_uri, stats, error,
@@ -428,7 +428,7 @@ function stageStateRowsQuery(client: Sql<Record<string, unknown>>, runId: string
 }
 
 /** The three reads that open a stage activity, mapped; a stage-completion checkpoint can fetch them for the next stage. */
-export type PreloadedRunState = { run: WorkspaceRun; documents: Document[]; stageStates: StageStateRows };
+export type PreloadedRunState = { run: ProjectRun; documents: Document[]; stageStates: StageStateRows };
 
 /** What a checkpoint reports back to the stage boundary. */
 type ProgressWrite = {
@@ -482,8 +482,8 @@ export class Store {
   /** Use inside the transaction that performs init or terminal writes. */
   readonly assertExecutionOwnership = assertExecutionOwnership;
   async beginGeoAttempt(state: WorkflowState, documentId: string, schema: Record<string, unknown>) {
-    if (!state.run.workspaceId || !state.run.orgId) throw new Error("Geo extraction requires tenant scope");
-    return beginGeoAttempt(this.sql, {documentId, workspaceId:state.run.workspaceId, orgId:state.run.orgId, runId:state.run.id}, schema);
+    if (!state.run.projectId || !state.run.orgId) throw new Error("Geo extraction requires tenant scope");
+    return beginGeoAttempt(this.sql, {documentId, projectId:state.run.projectId, orgId:state.run.orgId, runId:state.run.id}, schema);
   }
   private readonly sql: Sql<Record<string, unknown>>;
   capacityLeaseStore(providerIds: string[]) { return new PostgresCapacityLeaseStore(this.sql, (id) => this.loadRun(id).catch(() => null), providerIds); }
@@ -501,7 +501,7 @@ export class Store {
   private readonly runEvents: RunEventPublisher;
   /** This process's view of run credit leases (credit-lease.ts), shared with page tasks. */
   readonly creditLeases: RunCreditLeases;
-  /** Historical stage timings per workspace/user; a 14-day aggregate does not need a fresh read per stage. */
+  /** Historical stage timings per project/user; a 14-day aggregate does not need a fresh read per stage. */
   private readonly historicalPerformanceCache = new Map<string, { loadedAt: number; value: Record<string, unknown> | null }>();
   // One in-flight load per scope: after a fleet restart every activity misses
   // the cache at once (127 concurrent percentile queries in the 2026-10-09 re-run).
@@ -556,7 +556,7 @@ export class Store {
     await this.sql.end();
   }
 
-  async loadRun(runId: string): Promise<WorkspaceRun> {
+  async loadRun(runId: string): Promise<ProjectRun> {
     const [row] = await runRowQuery(this.sql, runId);
 
     if (!row) {
@@ -567,7 +567,7 @@ export class Store {
   }
 
   async loadDocument(documentId: string): Promise<Document> {
-    const [row] = await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from workspace_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} limit 1`;
+    const [row] = await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} limit 1`;
     if (!row) throw new DocumentNotFoundError(documentId);
     return mapDocument(row);
   }
@@ -617,8 +617,8 @@ export class Store {
   }
 
   private async hydrateHistoricalStagePerformance(state: WorkflowState): Promise<void> {
-    const filterScope = state.run.workspaceId
-      ? { column: "workspace_id", value: state.run.workspaceId }
+    const filterScope = state.run.projectId
+      ? { column: "project_id", value: state.run.projectId }
       : { column: "user_id", value: state.run.userId };
     const cacheKey = `${filterScope.column}:${filterScope.value}`;
     const cached = this.historicalPerformanceCache.get(cacheKey);
@@ -655,7 +655,7 @@ export class Store {
           order by perf.value / greatest(1, coalesce(runs.pages_total, 0))
         )::numeric as p50_ms_per_page
       from performance_log perf
-      join workspace_runs runs on runs.id = perf.run_id
+      join project_runs runs on runs.id = perf.run_id
       where perf.metric = 'stage-duration'
         and perf.unit = 'ms'
         and perf.created_at >= now() - interval '14 days'
@@ -679,7 +679,7 @@ export class Store {
     }
     if (Object.keys(stages).length === 0) return null;
     return {
-      scope: filterScope.column === "workspace_id" ? "workspace" : "user",
+      scope: filterScope.column === "project_id" ? "project" : "user",
       lookbackDays: 14,
       stages,
     };
@@ -714,11 +714,11 @@ export class Store {
 
   async renewHeartbeat(runId: string): Promise<void> {
     await this.sql`
-      update workspace_runs
+      update project_runs
       set
         last_heartbeat_at = now(),
-        lease_expires_at = case when workspace_runs.kind = 'materialize'
-            then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+        lease_expires_at = case when project_runs.kind = 'materialize'
+            then greatest(coalesce(project_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
             else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
         updated_at = now()
       where id = ${runId} and status = 'processing'
@@ -730,11 +730,11 @@ export class Store {
       // Init has no paid usage to settle. Refuse the entire write when obsolete,
       // terminal, or cancelled, rather than allowing a late snapshot to revive it.
       const [row] = await this.sql<{ id: string }[]>`
-        update workspace_runs set status = 'processing',
+        update project_runs set status = 'processing',
           stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
           artifacts = ${this.toJson(state.artifacts)}::jsonb, updated_at = now()
         where id = ${state.run.id} and org_id = ${state.run.orgId ?? null}
-          and workspace_id = ${state.run.workspaceId ?? null}
+          and project_id = ${state.run.projectId ?? null}
           and execution_generation is not distinct from ${init.executionGeneration ?? null}
           and status in ('queued', 'processing')
           and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')
@@ -855,7 +855,7 @@ export class Store {
     const shardDelta = shard
       ? { artifacts: state.artifactLedger.changedSince(shard.artifacts) }
       : null;
-    // workspace_runs.spent_cents once this checkpoint commits.
+    // project_runs.spent_cents once this checkpoint commits.
     let spentCents = state.run.spentCents;
 
     // Postgres rolls a deadlock victim back whole; every assignment below is
@@ -892,13 +892,13 @@ export class Store {
         // An explicit retry resets the row to queued before checkpoints resume.
         const runAssignments = shardDelta
           ? client`
-            stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
-            processed_documents = greatest(workspace_runs.processed_documents, ${state.run.processedDocuments}),
-            pages_processed = greatest(workspace_runs.pages_processed, ${state.run.pagesProcessed}),
-            artifacts = coalesce(workspace_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
+            stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
+            processed_documents = greatest(project_runs.processed_documents, ${state.run.processedDocuments}),
+            pages_processed = greatest(project_runs.pages_processed, ${state.run.pagesProcessed}),
+            artifacts = coalesce(project_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
           : client`
-            status = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.status else ${state.run.status} end,
-            stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
+            status = case when project_runs.status in ('completed', 'failed') then project_runs.status else ${state.run.status} end,
+            stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
             processed_documents = ${state.run.processedDocuments},
             pages_total = ${state.run.pagesTotal},
             pages_processed = ${state.run.pagesProcessed},
@@ -908,32 +908,32 @@ export class Store {
         // changes only by the trigger on this checkpoint's own usage inserts.
         const runUpdate = counter
           ? client<{ spend_check_due: boolean; no_unchecked_spend: boolean; spent_cents: number | string }[]>`
-            update workspace_runs
+            update project_runs
             set
               ${counter.assignments},
               ${runAssignments},
-              last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
+              last_heartbeat_at = case when project_runs.status in ('completed', 'failed') then project_runs.last_heartbeat_at else now() end,
               lease_expires_at = case
-                when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
-                when workspace_runs.kind = 'materialize'
-                  then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+                when project_runs.status in ('completed', 'failed') then project_runs.lease_expires_at
+                when project_runs.kind = 'materialize'
+                  then greatest(coalesce(project_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
                 else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
               updated_at = now()
             from ${counter.from}
-            where workspace_runs.id = spend_prev.id
+            where project_runs.id = spend_prev.id
             returning ${counter.checkDue} as spend_check_due,
-              workspace_runs.spend_unchecked_credits = 0 as no_unchecked_spend,
-              workspace_runs.spent_cents
+              project_runs.spend_unchecked_credits = 0 as no_unchecked_spend,
+              project_runs.spent_cents
           `
           : client<{ spent_cents: number | string }[]>`
-            update workspace_runs
+            update project_runs
             set
               ${runAssignments},
-              last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
+              last_heartbeat_at = case when project_runs.status in ('completed', 'failed') then project_runs.last_heartbeat_at else now() end,
               lease_expires_at = case
-                when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
-                when workspace_runs.kind = 'materialize'
-                  then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+                when project_runs.status in ('completed', 'failed') then project_runs.lease_expires_at
+                when project_runs.kind = 'materialize'
+                  then greatest(coalesce(project_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
                 else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
               updated_at = now()
             where id = ${state.run.id}
@@ -959,7 +959,7 @@ export class Store {
         statements.push(...this.parserEvaluationStatements(client, parserEvaluations));
         if (options.readControlState) {
           controlIndex = statements.length;
-          statements.push(client<{ control_state: string | null }[]>`select control_state from workspace_runs where id = ${state.run.id}`);
+          statements.push(client<{ control_state: string | null }[]>`select control_state from project_runs where id = ${state.run.id}`);
         }
         if (options.preloadRunState) {
           preloadIndex = statements.length;
@@ -982,7 +982,7 @@ export class Store {
       }
       spentCents = (Number(runRow?.spent_cents ?? state.run.spentCents) || 0) + insertedCost(results);
       if (preloadIndex >= 0) {
-        const [runRows, documentRows, stageRows] = results.slice(preloadIndex, preloadIndex + 3) as [WorkspaceRunRow[], DocumentRow[], StageStateRows];
+        const [runRows, documentRows, stageRows] = results.slice(preloadIndex, preloadIndex + 3) as [ProjectRunRow[], DocumentRow[], StageStateRows];
         if (runRows[0]) preloaded = { run: mapRun(runRows[0]), documents: documentRows.map(mapDocument), stageStates: stageRows };
       }
       if (controlIndex >= 0) controlRequested = CONTROL_REQUEST_STATES.includes((results[controlIndex] as { control_state: string | null }[])[0]?.control_state ?? "");
@@ -1123,8 +1123,8 @@ export class Store {
     for (const statement of this.parserEvaluationStatements(client, parserEvaluations)) await statement;
   }
 
-  async completeRun(state: WorkflowState, owner: ExecutionOwner = { runId: state.run.id, orgId: state.run.orgId!, workspaceId: state.run.workspaceId! }): Promise<void> {
-    if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.workspaceId !== state.run.workspaceId) throw new StaleExecutionError();
+  async completeRun(state: WorkflowState, owner: ExecutionOwner = { runId: state.run.id, orgId: state.run.orgId!, projectId: state.run.projectId! }): Promise<void> {
+    if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.projectId !== state.run.projectId) throw new StaleExecutionError();
     // Resolve schema capabilities before reserving the terminal transaction connection.
     await this.creditLeases.active();
     if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
@@ -1150,10 +1150,10 @@ export class Store {
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
-        await client`update workspace_runs set status = 'completed', stage = 'completed',
+        await client`update project_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
           lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
-        await insertWorkspaceRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
+        await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
       });
     } catch (error) {
@@ -1172,8 +1172,8 @@ export class Store {
     if (batch.events.length) {
       await this.sql.begin(async tx => {
         const client = tx as unknown as typeof this.sql;
-        const [run] = await client`select id from workspace_runs where id = ${owner.runId}
-          and org_id = ${owner.orgId} and workspace_id = ${owner.workspaceId} for update`;
+        const [run] = await client`select id from project_runs where id = ${owner.runId}
+          and org_id = ${owner.orgId} and project_id = ${owner.projectId} for update`;
         if (!run) throw new StaleExecutionError();
         const costCents = await persistRunUsageEvents({ client, state, usageEvents: batch.events });
         await debitRunUsageCredits({ client, state, costCents });
@@ -1190,7 +1190,7 @@ export class Store {
       const logicalId = JSON.stringify(["run-terminal", owner.runId, owner.executionGeneration ?? null]);
       const [existing] = await tx`select id from run_terminal_receipts where id = ${logicalId}`;
       if (existing) return;
-      const [eligible] = await tx`select id from workspace_runs where id = ${owner.runId}
+      const [eligible] = await tx`select id from project_runs where id = ${owner.runId}
         and status in ('queued', 'processing')
         and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
       if (!eligible) throw new StaleExecutionError();
@@ -1215,7 +1215,7 @@ export class Store {
         }[]
       >`
         select user_id, stats, coalesce(failure_count, 0) as failure_count
-        from workspace_runs
+        from project_runs
         where id = ${runId}
         limit 1
       `;
@@ -1236,7 +1236,7 @@ export class Store {
       const nextStats = plan.stats as JsonMap;
 
       const [row] = await client<{ user_id: string; stats: JsonMap | null }[]>`
-        update workspace_runs
+        update project_runs
         set
           status = 'failed',
           stage = ${stage},
@@ -1260,7 +1260,7 @@ export class Store {
       await this.failProcessingDocumentStages(runId, stage, message, client);
       await this.failUnfinishedDocumentsForRun(runId, client);
 
-      await insertWorkspaceRunEvents({ sql: client, events: [{
+      await insertProjectRunEvents({ sql: client, events: [{
         id: logicalId,
         userId: row.user_id,
         runId,
@@ -1278,7 +1278,7 @@ export class Store {
 
   async releaseRunLease(runId: string): Promise<boolean> {
     const [row] = await this.sql<RunReleaseRow[]>`
-      update workspace_runs
+      update project_runs
       set status = 'queued',
           lease_expires_at = null,
           last_heartbeat_at = null,
@@ -1343,39 +1343,39 @@ export class Store {
     `;
   }
 
-  /** The run has a pending pause or cancel request (workspace_runs.control_state). */
+  /** The run has a pending pause or cancel request (project_runs.control_state). */
   async hasRunControlRequest(runId: string): Promise<boolean> {
     const [row] = await this.sql<{ control_state: string | null }[]>`
-      select control_state from workspace_runs where id = ${runId}
+      select control_state from project_runs where id = ${runId}
     `;
     return ["pause_requested", "paused", "cancel_requested", "cancelled"].includes(row?.control_state ?? "");
   }
 
-  /** Which of `stages` this run has completed (workspace_run_stage_states). */
+  /** Which of `stages` this run has completed (project_run_stage_states). */
   async completedRunStages(runId: string, stages: readonly string[]): Promise<Set<string>> {
     if (stages.length === 0) return new Set();
     const rows = await this.sql<{ stage_name: string }[]>`
-      select stage_name from workspace_run_stage_states
+      select stage_name from project_run_stage_states
       where run_id = ${runId} and status = 'completed' and stage_name = any(${this.sql.array([...stages])})
     `;
     return new Set(rows.map((row) => row.stage_name));
   }
 
-  /** The stage the run last started (workspace_runs.stage). */
+  /** The stage the run last started (project_runs.stage). */
   async currentRunStage(runId: string): Promise<string | null> {
-    const [row] = await this.sql<{ stage: string | null }[]>`select stage from workspace_runs where id = ${runId}`;
+    const [row] = await this.sql<{ stage: string | null }[]>`select stage from project_runs where id = ${runId}`;
     return row?.stage ?? null;
   }
 
   /** Shards still pending for the run's current stage (the autoscaler turns them into machines). */
   async setRunShardDemand(runId: string, shards: number): Promise<void> {
-    await this.sql`update workspace_runs set shard_demand = ${Math.max(0, Math.floor(shards))} where id = ${runId}`;
+    await this.sql`update project_runs set shard_demand = ${Math.max(0, Math.floor(shards))} where id = ${runId}`;
   }
 
   /** A shard's final checkpoint, then one shard less of fleet demand. */
   async finishShard(state: WorkflowState): Promise<void> {
     await this.writeProgress(state, (client) => [
-      client`update workspace_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${state.run.id}`,
+      client`update project_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${state.run.id}`,
     ]);
   }
 
@@ -1397,21 +1397,21 @@ export class Store {
 
     const prelude = (client: Sql<Record<string, unknown>>) => [
       client`
-        insert into workspace_run_stage_states (run_id, stage_name, status, attempts, stats, started_at, updated_at)
+        insert into project_run_stage_states (run_id, stage_name, status, attempts, stats, started_at, updated_at)
         values (${state.run.id}, ${stage}, 'processing', 1, '{}'::jsonb, now(), now())
         on conflict (run_id, stage_name) do update
         set status = 'processing',
-            attempts = workspace_run_stage_states.attempts + 1,
+            attempts = project_run_stage_states.attempts + 1,
             error = null,
             started_at = now(),
             completed_at = null,
             updated_at = now()
       `,
       // The stage's own pass starts once its shards are done.
-      client`update workspace_runs set shard_demand = 0 where id = ${state.run.id} and shard_demand <> 0`,
+      client`update project_runs set shard_demand = 0 where id = ${state.run.id} and shard_demand <> 0`,
     ];
     if (owner) {
-      if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.workspaceId !== state.run.workspaceId) throw new StaleExecutionError();
+      if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.projectId !== state.run.projectId) throw new StaleExecutionError();
       await this.creditLeases.active();
       if (state.pendingParserEvaluations.length) await this.tableExists("parser_eval_results");
       const afterCommit: Array<() => void> = [];
@@ -1469,7 +1469,7 @@ export class Store {
 
     const progress = await this.writeProgress(state, (client) => [
       client`
-        update workspace_run_stage_states
+        update project_run_stage_states
         set status = 'completed',
             artifact_uri = ${artifactUri || null},
             stats = ${this.toJson(stats)}::jsonb,
@@ -1523,14 +1523,14 @@ export class Store {
   ): Promise<number> {
     const increment = options.countFailure === false ? 0 : 1;
     const [counted] = await this.sql<{ ordinary_failures: number }[]>`
-      insert into workspace_run_stage_states (run_id, stage_name, status, attempts, error, stats, started_at, updated_at)
+      insert into project_run_stage_states (run_id, stage_name, status, attempts, error, stats, started_at, updated_at)
       values (${state.run.id}, ${stage}, 'failed', 1, ${message}, jsonb_build_object('ordinaryFailures', ${increment}::int), now(), now())
       on conflict (run_id, stage_name) do update
       set status = 'failed', error = ${message}, updated_at = now(),
           stats = jsonb_set(
-            coalesce(workspace_run_stage_states.stats, '{}'::jsonb),
+            coalesce(project_run_stage_states.stats, '{}'::jsonb),
             '{ordinaryFailures}',
-            to_jsonb(coalesce((workspace_run_stage_states.stats->>'ordinaryFailures')::int, 0) + ${increment}::int)
+            to_jsonb(coalesce((project_run_stage_states.stats->>'ordinaryFailures')::int, 0) + ${increment}::int)
           )
       returning coalesce((stats->>'ordinaryFailures')::int, 0) as ordinary_failures
     `;
@@ -1656,7 +1656,7 @@ export class Store {
     geoFinalSource?: GeoFinalSource,
   ): Promise<void> {
     if (geoFinalSource && (stage !== "structured-extract" || geoFinalSource.documentId !== documentId ||
-      geoFinalSource.runId !== state.run.id || geoFinalSource.workspaceId !== state.run.workspaceId ||
+      geoFinalSource.runId !== state.run.id || geoFinalSource.projectId !== state.run.projectId ||
       geoFinalSource.orgId !== state.run.orgId)) throw new Error("Geo checkpoint scope mismatch");
     const completesDocument = stage === "index";
     const vectors = completesDocument
@@ -1697,7 +1697,7 @@ export class Store {
     } else if (geoFinalSource) {
       const source = geoFinalSource;
       await retryTransaction(`complete-geo-stage run=${state.run.id}`, () => pipelineTransaction(this.sql, client => [
-        client`select commit_geo_final_source(${source.documentId},${source.workspaceId},${source.orgId},
+        client`select commit_geo_final_source(${source.documentId},${source.projectId},${source.orgId},
           ${source.revision}::bigint,${source.runId},${source.schemaDigest},${source.resultDigest},
           ${this.toJson(source.features)}::jsonb)`,
         stageStateUpdate(client),
@@ -1919,7 +1919,7 @@ export class Store {
    * Buffers a run event for the next coalesced write (≤ WORKER_RUN_EVENT_FLUSH_MS);
    * terminal run events are written before this resolves. See run-event-store.ts.
    */
-  async appendEvent(event: WorkspaceRunEvent): Promise<void> {
+  async appendEvent(event: ProjectRunEvent): Promise<void> {
     await this.runEvents.append(event);
   }
 
@@ -1935,7 +1935,7 @@ export class Store {
   /** Emits document.replaced once a newer canonical version has taken over in search. */
   private async announceReplacements(state: WorkflowState, replacements: CanonicalReplacement[], client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
     for (const replacement of replacements) {
-      await insertWorkspaceRunEvents({ sql: client, events: [{
+      await insertProjectRunEvents({ sql: client, events: [{
         id: logicalId ? `${logicalId}:replacement:${replacement.documentId}` : randomUUID(),
         userId: state.run.userId,
         runId: state.run.id,
@@ -1986,7 +1986,7 @@ export class Store {
       on conflict (document_id, backend, embedding_model, dimension)
       do update set bucket = excluded.bucket, path = excluded.path
     `);
-    // Search serves each document from the index config it was built with (workspaces.index_configs).
+    // Search serves each document from the index config it was built with (projects.index_configs).
     const hashes = new Map(vectors.filter((vector) => vector.indexConfigHash).map((vector) => [vector.documentId, vector.indexConfigHash!]));
     if (hashes.size > 0) {
       statements.push(client`
@@ -2014,7 +2014,7 @@ export class Store {
       select r.user_id, jsonb_build_object(
         'event', ${event}::text,
         'runId', r.id,
-        'workspaceId', r.workspace_id,
+        'projectId', r.project_id,
         'status', r.status,
         'stage', r.stage,
         'processedDocuments', r.processed_documents,
@@ -2022,7 +2022,7 @@ export class Store {
         'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
         'error', r.error
       ) as payload
-      from workspace_runs r
+      from project_runs r
       where r.id = ${runId}
     `, client, logicalId);
   }
@@ -2037,7 +2037,7 @@ export class Store {
       const payload = {
         event: "document.replaced",
         runId: state.run.id,
-        workspaceId: state.run.workspaceId,
+        projectId: state.run.projectId,
         ...replacement,
       };
       await this.enqueueWebhookEvent("document.replaced", client`
@@ -2077,8 +2077,8 @@ export class Store {
       Array<{
         user_id: string;
         org_id: string | null;
-        workspace_id: string;
-        workspace_name: string;
+        project_id: string;
+        project_name: string;
         stage: string;
         error: string | null;
         email: string;
@@ -2090,15 +2090,15 @@ export class Store {
       select
         r.user_id,
         r.org_id,
-        r.workspace_id,
-        w.name as workspace_name,
+        r.project_id,
+        w.name as project_name,
         r.stage,
         r.error,
         u.email,
         np.run_completed,
         np.run_failed
-      from workspace_runs r
-      join workspaces w on w.id = r.workspace_id
+      from project_runs r
+      join projects w on w.id = r.project_id
       join "user" u on u.id = r.user_id
       left join notification_prefs np on np.user_id = r.user_id
       -- Extract runs send their own completion email with the download (server services/extracts.ts).
@@ -2123,10 +2123,10 @@ export class Store {
 
     const subject =
       event === "run.completed"
-        ? `Run completed: ${row.workspace_name}`
-        : `Run failed: ${row.workspace_name}`;
+        ? `Run completed: ${row.project_name}`
+        : `Run failed: ${row.project_name}`;
     const lines = [
-      `Workspace: ${row.workspace_name}`,
+      `Project: ${row.project_name}`,
       `Run ID: ${runId}`,
       `Status: ${event === "run.completed" ? "completed" : "failed"}`,
       `Stage: ${row.stage}`,
@@ -2139,7 +2139,7 @@ export class Store {
       deliveryId: randomUUID(),
       userId: row.user_id,
       orgId: row.org_id,
-      workspaceId: row.workspace_id,
+      projectId: row.project_id,
       runId,
       event,
       recipient: row.email,
@@ -2164,8 +2164,8 @@ export class Store {
       Array<{
         user_id: string;
         org_id: string | null;
-        workspace_id: string;
-        workspace_name: string;
+        project_id: string;
+        project_name: string;
         filename: string;
         email: string;
         quality_warning: boolean | null;
@@ -2175,13 +2175,13 @@ export class Store {
       select
         r.user_id,
         r.org_id,
-        r.workspace_id,
-        w.name as workspace_name,
+        r.project_id,
+        w.name as project_name,
         d.filename,
         u.email,
         np.quality_warning
-      from workspace_runs r
-      join workspaces w on w.id = r.workspace_id
+      from project_runs r
+      join projects w on w.id = r.project_id
       join documents d on d.id = $2 and d.run_id = r.id
       join "user" u on u.id = r.user_id
       left join notification_prefs np on np.user_id = r.user_id
@@ -2198,7 +2198,7 @@ export class Store {
 
     const subject = `Extraction plausibility warning: ${row.filename}`;
     const lines = [
-      `Workspace: ${row.workspace_name}`,
+      `Project: ${row.project_name}`,
       `Run ID: ${runId}`,
       `Document: ${row.filename}`,
       `Stage: ${stage}`,
@@ -2210,7 +2210,7 @@ export class Store {
       deliveryId: randomUUID(),
       userId: row.user_id,
       orgId: row.org_id,
-      workspaceId: row.workspace_id,
+      projectId: row.project_id,
       runId,
       documentId,
       event: "plausibility.warning",
@@ -2230,18 +2230,18 @@ export class Store {
   }
 
   async processBudgetAlerts(): Promise<void> {
-    await this.processWorkspaceBudgetAlerts();
+    await this.processProjectBudgetAlerts();
     await this.processOrganizationBudgetAlerts();
   }
 
   async processSecretExpiryAlerts(daysBefore = 7): Promise<void> {
     type ExpiringSecretRow = {
       id: string;
-      workspace_id: string;
+      project_id: string;
       name: string;
       type: string;
       expires_at: string;
-      workspace_name: string;
+      project_name: string;
       owner_user_id: string;
       owner_email: string;
     };
@@ -2249,15 +2249,15 @@ export class Store {
     const rows = await this.sql<ExpiringSecretRow[]>`
       select
         ws.id,
-        ws.workspace_id,
+        ws.project_id,
         ws.name,
         ws.type,
         ws.expires_at::text,
-        w.name as workspace_name,
+        w.name as project_name,
         w.user_id as owner_user_id,
         u.email as owner_email
-      from workspace_secrets ws
-      join workspaces w on w.id = ws.workspace_id
+      from project_secrets ws
+      join projects w on w.id = ws.project_id
       join "user" u on u.id = w.user_id
       where ws.expires_at is not null
         and ws.expires_at <= now() + (${daysBefore} * interval '1 day')
@@ -2270,13 +2270,13 @@ export class Store {
         (new Date(row.expires_at).getTime() - Date.now()) /
           (1000 * 60 * 60 * 24),
       );
-      const subject = `Secret expiring soon: ${row.name} (${row.workspace_name})`;
+      const subject = `Secret expiring soon: ${row.name} (${row.project_name})`;
       const text = [
-        `Workspace: ${row.workspace_name}`,
+        `Project: ${row.project_name}`,
         `Secret name: ${row.name}`,
         `Type: ${row.type}`,
         `Expires: ${row.expires_at} (in ${daysLeft} day${daysLeft === 1 ? "" : "s"})`,
-        `Rotate this secret in workspace settings before it expires.`,
+        `Rotate this secret in project settings before it expires.`,
       ].join("\n");
       const html = `<p>${text.replaceAll("\n", "<br/>")}</p>`;
 
@@ -2284,7 +2284,7 @@ export class Store {
         deliveryId: randomUUID(),
         userId: row.owner_user_id,
         orgId: null,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         event: "cost.alert",
         recipient: row.owner_email,
         subject,
@@ -2299,7 +2299,7 @@ export class Store {
       });
 
       console.log(
-        `[secrets] expiry-warning secretId=${row.id} name=${row.name} workspace=${row.workspace_name} daysLeft=${daysLeft}`,
+        `[secrets] expiry-warning secretId=${row.id} name=${row.name} project=${row.project_name} daysLeft=${daysLeft}`,
       );
     }
   }
@@ -2891,7 +2891,7 @@ export class Store {
       if (owner.runId !== runId) throw new StaleExecutionError();
       await assertExecutionOwnership(tx, owner);
       const [eligible] = await tx<{ id: string }[]>`
-        select id from workspace_runs where id = ${runId}
+        select id from project_runs where id = ${runId}
           and status in ('queued', 'processing')
           and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
       if (!eligible) throw new StaleExecutionError();
@@ -2909,7 +2909,7 @@ export class Store {
           source_run.artifacts_purged_at is not null as source_artifacts_purged
         from documents d
         left join documents source on source.id = d.reused_from_document_id
-        left join workspace_runs source_run on source_run.id = source.run_id
+        left join project_runs source_run on source_run.id = source.run_id
         where d.run_id = ${runId}
         order by d.created_at, d.id
       `;
@@ -2934,10 +2934,10 @@ export class Store {
         // Existing keys win: a retried start must not overwrite artifacts a
         // stage of this run already wrote.
         await client`
-          update workspace_runs target
+          update project_runs target
           set artifacts = coalesce((
                 select jsonb_object_agg(${`${doc.id}:`}::text || substr(artifact.key, ${prefix.length + 1}), artifact.value)
-                from workspace_runs source
+                from project_runs source
                 cross join lateral jsonb_each(coalesce(source.artifacts, '{}'::jsonb)) as artifact(key, value)
                 where source.id = ${doc.source_run_id} and left(artifact.key, ${prefix.length}) = ${prefix}
               ), '{}'::jsonb) || coalesce(target.artifacts, '{}'::jsonb),
@@ -3019,17 +3019,17 @@ export class Store {
     });
   }
 
-  /** Records blocked hosted AI attempts for strict-privacy workspaces. */
+  /** Records blocked hosted AI attempts for strict-privacy projects. */
   async recordPrivacyAudit(entries: readonly PrivacyAuditEntry[]): Promise<void> {
     await insertPrivacyAuditRows(this.sql, entries);
   }
 
   /** Read graph evidence from current document rows, never reused artifact identities. */
-  async loadDocumentGraphChunks(workspaceId: string, documentId: string) {
+  async loadDocumentGraphChunks(projectId: string, documentId: string) {
     const rows = await this.sql<{ id: string; text: string; page_number: number | null }[]>`
       select c.id, c.text, c.page_number
       from document_chunks c join documents d on d.id = c.document_id
-      where c.document_id = ${documentId} and d.workspace_id = ${workspaceId}
+      where c.document_id = ${documentId} and d.project_id = ${projectId}
       order by c.chunk_index
     `;
     return rows.map((row) => ({ id: row.id, text: row.text, pageNumber: row.page_number }));
@@ -3040,50 +3040,50 @@ export class Store {
   }
 
   /** Documents whose graph was already extracted with this config (a re-run skips them). */
-  async documentsWithGraph(workspaceId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>> {
+  async documentsWithGraph(projectId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>> {
     if (documentIds.length === 0) return new Set();
     const rows = await this.sql<{ document_id: string }[]>`
       select document_id from kg_document_state
-      where workspace_id = ${workspaceId} and config_hash = ${configHash}
+      where project_id = ${projectId} and config_hash = ${configHash}
         and document_id = any(${this.sql.array([...documentIds])})
     `;
     return new Set(rows.map((row) => row.document_id));
   }
 
-  async refreshWorkspaceCommunities(args: {
-    workspaceId: string;
+  async refreshProjectCommunities(args: {
+    projectId: string;
     userId: string;
     runId: string | null;
     context: CommunitySummaryContext;
   }): Promise<CommunityRefreshResult> {
-    return await refreshWorkspaceCommunities({ sql: this.sql, ...args });
+    return await refreshProjectCommunities({ sql: this.sql, ...args });
   }
 
-  async workspaceGraphScope(workspaceId: string): Promise<string> {
-    const [workspace] = await this.sql<{ name: string; template_key: string | null }[]>`
-      select name, template_key from workspaces where id = ${workspaceId}
+  async projectGraphScope(projectId: string): Promise<string> {
+    const [project] = await this.sql<{ name: string; template_key: string | null }[]>`
+      select name, template_key from projects where id = ${projectId}
     `;
-    if (!workspace) return "Workspace";
+    if (!project) return "Project";
     return graphFallbackScope({
-      name: workspace.name,
-      templateDescription: workspaceTemplates.find((template) => template.key === workspace.template_key)?.description,
+      name: project.name,
+      templateDescription: projectTemplates.find((template) => template.key === project.template_key)?.description,
     });
   }
 
-  /** Claims and runs queued workspace graph rebuilds (see graph/rebuild-job.ts). */
+  /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);
   }
 
   /**
    * Native search's cached eligible sets (server search/eligible-documents.ts,
-   * channel `search_eligibility`) drop these workspaces now instead of after
+   * channel `search_eligibility`) drop these projects now instead of after
    * their TTL: they serve LanceDB rows without re-reading Postgres.
    */
-  private async notifySearchEligibilityChanged(workspaceIds: ReadonlyArray<string | null | undefined>): Promise<void> {
-    const ids = [...new Set(workspaceIds.filter((id): id is string => Boolean(id)))];
+  private async notifySearchEligibilityChanged(projectIds: ReadonlyArray<string | null | undefined>): Promise<void> {
+    const ids = [...new Set(projectIds.filter((id): id is string => Boolean(id)))];
     if (ids.length === 0) return;
-    await this.sql`select pg_notify('search_eligibility', ${JSON.stringify({ workspaceIds: ids })})`;
+    await this.sql`select pg_notify('search_eligibility', ${JSON.stringify({ projectIds: ids })})`;
   }
 
   /**
@@ -3091,16 +3091,16 @@ export class Store {
    * evidence and extraction state) before retention drops their chunks or the
    * run itself, then re-derive the touched nodes and edges. Facts that other
    * documents still support survive with recomputed weights and counts;
-   * workspace communities are recounted rather than deleted.
+   * project communities are recounted rather than deleted.
    */
-  private async removeRunGraphContributions(workspaceId: string, runId: string): Promise<void> {
+  private async removeRunGraphContributions(projectId: string, runId: string): Promise<void> {
     if (!(await this.tableExists("kg_nodes"))) return;
     await this.sql.begin(async (tx) => {
       const client = tx as unknown as Sql<Record<string, unknown>>;
-      await lockWorkspaceGraph(client, workspaceId);
+      await lockProjectGraph(client, projectId);
       const affected = await client<{ node_id: string }[]>`
         select ce.node_id from chunk_entities ce
-        where ce.workspace_id = ${workspaceId} and ce.run_id = ${runId}
+        where ce.project_id = ${projectId} and ce.run_id = ${runId}
         union
         select ce.node_id from chunk_entities ce
         join document_chunks c on c.id = ce.chunk_id
@@ -3119,7 +3119,7 @@ export class Store {
       `;
       await client`
         delete from chunk_entities
-        where (workspace_id = ${workspaceId} and run_id = ${runId})
+        where (project_id = ${projectId} and run_id = ${runId})
           or chunk_id in (
             select c.id from document_chunks c join documents d on d.id = c.document_id where d.run_id = ${runId}
           )
@@ -3176,7 +3176,7 @@ export class Store {
         d.source_key as reference_key,
         d.run_id,
         d.id as document_id,
-        d.workspace_id,
+        d.project_id,
         d.org_id,
         d.user_id,
         d.filename as reference_source
@@ -3187,11 +3187,11 @@ export class Store {
         artifact.value as reference_key,
         r.id as run_id,
         null::text as document_id,
-        r.workspace_id,
+        r.project_id,
         r.org_id,
         r.user_id,
         artifact.key as reference_source
-      from workspace_runs r
+      from project_runs r
       join lateral jsonb_each_text(coalesce(r.artifacts, '{}'::jsonb)) as artifact(key, value) on true
       union all
       select
@@ -3199,27 +3199,27 @@ export class Store {
         states.artifact_uri as reference_key,
         states.run_id,
         states.document_id,
-        runs.workspace_id,
+        runs.project_id,
         runs.org_id,
         runs.user_id,
         states.stage_name as reference_source
       from (
         select run_id, null::text as document_id, stage_name, artifact_uri
-        from workspace_run_stage_states
+        from project_run_stage_states
         where artifact_uri is not null
         union all
         select run_id, document_id, stage_name, artifact_uri
         from document_run_stage_states
         where artifact_uri is not null
       ) states
-      join workspace_runs runs on runs.id = states.run_id
+      join project_runs runs on runs.id = states.run_id
       union all
       select
         'vector-index' as reference_kind,
         case when vi.bucket = $1 then vi.path else null end as reference_key,
         d.run_id,
         d.id as document_id,
-        d.workspace_id,
+        d.project_id,
         d.org_id,
         d.user_id,
         vi.embedding_model as reference_source
@@ -3235,7 +3235,7 @@ export class Store {
         key: keyFromStorageUri(row.reference_key ?? "", bucket),
         runId: row.run_id,
         documentId: row.document_id,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         orgId: row.org_id,
         userId: row.user_id,
         source: row.reference_source,
@@ -3251,10 +3251,10 @@ export class Store {
         id as run_id,
         user_id,
         org_id,
-        workspace_id,
+        project_id,
         status,
         pipeline
-      from workspace_runs
+      from project_runs
       where status in ('completed', 'failed')
     `;
 
@@ -3358,7 +3358,7 @@ export class Store {
       runId: run.run_id,
       userId: run.user_id,
       orgId: run.org_id,
-      workspaceId: run.workspace_id,
+      projectId: run.project_id,
       status: run.status,
       pipeline: run.pipeline,
       documentCount: documentCounts.get(run.run_id) ?? 0,
@@ -3383,8 +3383,8 @@ export class Store {
         r.id as run_id,
         r.user_id,
         r.org_id,
-        r.workspace_id,
-        w.name as workspace_name,
+        r.project_id,
+        w.name as project_name,
         array_remove(array_agg(distinct d.source_key), null) as source_keys,
         array_remove(
           array_agg(distinct artifact_value.value) filter (where artifact_value.value is not null),
@@ -3394,13 +3394,13 @@ export class Store {
           array_agg(distinct stage_uri.value) filter (where stage_uri.value is not null),
           null
         ) as stage_artifact_uris
-      from workspace_runs r
-      join workspaces w on w.id = r.workspace_id
+      from project_runs r
+      join projects w on w.id = r.project_id
       left join documents d on d.run_id = r.id
       left join lateral jsonb_each_text(coalesce(r.artifacts, '{}'::jsonb)) as artifact_value(key, value) on true
       left join lateral (
         select wrss.artifact_uri as value
-        from workspace_run_stage_states wrss
+        from project_run_stage_states wrss
         where wrss.run_id = r.id
         union all
         select drss.artifact_uri as value
@@ -3417,11 +3417,11 @@ export class Store {
           select 1
           from documents source
           join documents reusing on reusing.reused_from_document_id = source.id
-          join workspace_runs reusing_run on reusing_run.id = reusing.run_id
+          join project_runs reusing_run on reusing_run.id = reusing.run_id
           where source.run_id = r.id
             and reusing_run.status not in ('completed', 'failed')
         )
-      group by r.id, r.user_id, r.org_id, r.workspace_id, w.name
+      group by r.id, r.user_id, r.org_id, r.project_id, w.name
       order by r.created_at asc
       limit $1
       `,
@@ -3476,7 +3476,7 @@ export class Store {
           where run_id = ${row.run_id}
         `;
       }
-      await this.removeRunGraphContributions(row.workspace_id, row.run_id);
+      await this.removeRunGraphContributions(row.project_id, row.run_id);
       if (await this.tableExists("document_summaries")) {
         await this.sql`
           delete from document_summaries
@@ -3500,9 +3500,9 @@ export class Store {
         // vector targets to the cleanup sweep before the index rows vanish.
         await this.sql`
           insert into document_cleanup_queue (
-            document_id, org_id, user_id, workspace_id, run_id, source_key, delete_source, vector_targets
+            document_id, org_id, user_id, project_id, run_id, source_key, delete_source, vector_targets
           )
-          select d.id, coalesce(d.org_id, ${row.org_id ?? ""}), d.user_id, d.workspace_id, d.run_id, d.source_key, false,
+          select d.id, coalesce(d.org_id, ${row.org_id ?? ""}), d.user_id, d.project_id, d.run_id, d.source_key, false,
             jsonb_agg(distinct jsonb_build_object(
               'backend', vi.backend, 'embeddingModel', vi.embedding_model, 'dimension', vi.dimension))
           from documents d
@@ -3521,24 +3521,24 @@ export class Store {
         `;
       }
       await this.sql`
-        update workspace_runs
+        update project_runs
         set
           artifacts_purged_at = now(),
           updated_at = now()
         where id = ${row.run_id}
       `;
-      await this.notifySearchEligibilityChanged([row.workspace_id]);
+      await this.notifySearchEligibilityChanged([row.project_id]);
 
       await this.appendAuditLog({
         orgId: row.org_id,
         userId: row.user_id,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         runId: row.run_id,
         action: "retention.artifacts_purged",
-        resourceType: "workspace_run",
+        resourceType: "project_run",
         resourceId: row.run_id,
         metadata: {
-          workspaceName: row.workspace_name,
+          projectName: row.project_name,
           deletedObjectCount: keys.size,
         },
       });
@@ -3552,10 +3552,10 @@ export class Store {
         r.id as run_id,
         r.user_id,
         r.org_id,
-        r.workspace_id,
-        w.name as workspace_name
-      from workspace_runs r
-      join workspaces w on w.id = r.workspace_id
+        r.project_id,
+        w.name as project_name
+      from project_runs r
+      join projects w on w.id = r.project_id
       where w.run_retention_days is not null
         and r.status in ('completed', 'failed')
         and r.created_at < now() - make_interval(days => w.run_retention_days)
@@ -3565,7 +3565,7 @@ export class Store {
           select 1
           from documents source
           join documents reusing on reusing.reused_from_document_id = source.id
-          join workspace_runs reusing_run on reusing_run.id = reusing.run_id
+          join project_runs reusing_run on reusing_run.id = reusing.run_id
           where source.run_id = r.id
             and reusing_run.status not in ('completed', 'failed')
         )
@@ -3579,21 +3579,21 @@ export class Store {
       await this.appendAuditLog({
         orgId: row.org_id,
         userId: row.user_id,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         runId: row.run_id,
         action: "retention.run_deleted",
-        resourceType: "workspace_run",
+        resourceType: "project_run",
         resourceId: row.run_id,
         metadata: {
-          workspaceName: row.workspace_name,
+          projectName: row.project_name,
         },
       });
 
       // A deleted run takes its documents and artifacts with it, whether or
       // not artifact retention already purged them. The documents and
-      // workspace_runs BEFORE DELETE triggers enqueue LanceDB, raw-source and
+      // project_runs BEFORE DELETE triggers enqueue LanceDB, raw-source and
       // run-prefix cleanup for the worker sweep (docs/data-deletion.md).
-      await this.removeRunGraphContributions(row.workspace_id, row.run_id);
+      await this.removeRunGraphContributions(row.project_id, row.run_id);
       await this.sql.begin(async (tx) => {
         const client = tx as unknown as Sql<Record<string, unknown>>;
         // Newer versions in other runs keep a valid (null) predecessor link.
@@ -3603,20 +3603,20 @@ export class Store {
             and run_id is distinct from ${row.run_id}
         `;
         await client`delete from documents where run_id = ${row.run_id}`;
-        await client`delete from workspace_runs where id = ${row.run_id}`;
+        await client`delete from project_runs where id = ${row.run_id}`;
       });
-      await this.notifySearchEligibilityChanged([row.workspace_id]);
+      await this.notifySearchEligibilityChanged([row.project_id]);
     }
   }
 
-  private async processWorkspaceBudgetAlerts(): Promise<void> {
+  private async processProjectBudgetAlerts(): Promise<void> {
     const rows = await this.sql.unsafe<BudgetAlertRow[]>(
       `
       select
         w.id as scope_id,
         w.name as scope_name,
         w.org_id,
-        w.id as workspace_id,
+        w.id as project_id,
         w.user_id as owner_user_id,
         u.email as owner_email,
         w.monthly_budget_cents,
@@ -3626,19 +3626,19 @@ export class Store {
         -- floor, not the cast's rounding: 99.5 cents must not trip a 100-cent cap (the live check compares exactly).
         floor(coalesce(spend.cost_cents, 0))::integer as spend_cents,
         np.cost_alert
-      from workspaces w
+      from projects w
       join "user" u on u.id = w.user_id
       left join notification_prefs np on np.user_id = w.user_id
       -- The shared attribution rule (usage_attribution view, migration 0042).
       left join (
-        select au.workspace_id, sum(au.cost_cents)::double precision as cost_cents
+        select au.project_id, sum(au.cost_cents)::double precision as cost_cents
         from usage_attribution au
         where au.created_at >= date_trunc('month', now())
-          and au.workspace_id in (
-            select id from workspaces where monthly_budget_cents is not null and monthly_budget_cents > 0
+          and au.project_id in (
+            select id from projects where monthly_budget_cents is not null and monthly_budget_cents > 0
           )
-        group by au.workspace_id
-      ) spend on spend.workspace_id = w.id
+        group by au.project_id
+      ) spend on spend.project_id = w.id
       where w.monthly_budget_cents is not null
         and w.monthly_budget_cents > 0
       group by
@@ -3668,7 +3668,7 @@ export class Store {
       }
 
       await this.sql`
-        update workspaces
+        update projects
         set
           budget_alert_level = ${nextLevel},
           budget_paused = ${nextLevel >= 100},
@@ -3679,11 +3679,11 @@ export class Store {
 
       if (nextLevel > row.budget_alert_level && row.cost_alert !== false) {
         await this.sendBudgetAlertEmail({
-          scope: "workspace",
+          scope: "project",
           scopeId: row.scope_id,
           scopeName: row.scope_name,
           orgId: row.org_id,
-          workspaceId: row.workspace_id,
+          projectId: row.project_id,
           userId: row.owner_user_id,
           recipient: row.owner_email,
           spendCents: row.spend_cents,
@@ -3702,7 +3702,7 @@ export class Store {
         o.id as scope_id,
         o.name as scope_name,
         o.id as org_id,
-        null::text as workspace_id,
+        null::text as project_id,
         o.created_by_user_id as owner_user_id,
         u.email as owner_email,
         o.monthly_budget_cents,
@@ -3765,7 +3765,7 @@ export class Store {
           scopeId: row.scope_id,
           scopeName: row.scope_name,
           orgId: row.org_id,
-          workspaceId: null,
+          projectId: null,
           userId: row.owner_user_id,
           recipient: row.owner_email,
           spendCents: row.spend_cents,
@@ -3778,11 +3778,11 @@ export class Store {
   }
 
   private async sendBudgetAlertEmail(args: {
-    scope: "workspace" | "organization";
+    scope: "project" | "organization";
     scopeId: string;
     scopeName: string;
     orgId: string | null;
-    workspaceId: string | null;
+    projectId: string | null;
     userId: string;
     recipient: string;
     spendCents: number;
@@ -3796,7 +3796,7 @@ export class Store {
       : `Budget alert: ${args.scopeName}`;
     const remainingCents = Math.max(args.budgetCents - args.spendCents, 0);
     const lines = [
-      `${args.scope === "workspace" ? "Workspace" : "Organization"}: ${args.scopeName}`,
+      `${args.scope === "project" ? "Project" : "Organization"}: ${args.scopeName}`,
       `Scope ID: ${args.scopeId}`,
       `Spend this month: ${formatCurrency(args.spendCents)}`,
       `Budget this month: ${formatCurrency(args.budgetCents)}`,
@@ -3810,7 +3810,7 @@ export class Store {
       deliveryId: randomUUID(),
       userId: args.userId,
       orgId: args.orgId,
-      workspaceId: args.workspaceId,
+      projectId: args.projectId,
       event: "cost.alert",
       recipient: args.recipient,
       subject,
@@ -3831,7 +3831,7 @@ export class Store {
     deliveryId: string;
     userId: string;
     orgId?: string | null;
-    workspaceId?: string | null;
+    projectId?: string | null;
     runId?: string | null;
     documentId?: string | null;
     event:
@@ -3839,7 +3839,7 @@ export class Store {
       | "run.failed"
       | "plausibility.warning"
       | "cost.alert"
-      | "workspace.invite";
+      | "project.invite";
     recipient: string;
     subject: string;
     text: string;
@@ -3888,7 +3888,7 @@ export class Store {
         id,
         user_id,
         org_id,
-        workspace_id,
+        project_id,
         event_type,
         provider,
         recipient,
@@ -3901,7 +3901,7 @@ export class Store {
         ${args.deliveryId},
         ${args.userId},
         ${args.orgId ?? null},
-        ${args.workspaceId ?? null},
+        ${args.projectId ?? null},
         ${args.event},
         ${provider},
         ${args.recipient},
@@ -3920,7 +3920,7 @@ export class Store {
     await this.appendAuditLog({
       orgId: args.orgId ?? null,
       userId: args.userId,
-      workspaceId: args.workspaceId ?? null,
+      projectId: args.projectId ?? null,
       runId: args.runId ?? null,
       documentId: args.documentId ?? null,
       action: delivered ? "notification.sent" : "notification.failed",
@@ -3946,7 +3946,7 @@ export class Store {
   private async appendAuditLog(args: {
     orgId?: string | null;
     userId?: string | null;
-    workspaceId?: string | null;
+    projectId?: string | null;
     runId?: string | null;
     documentId?: string | null;
     action: string;
@@ -3959,7 +3959,7 @@ export class Store {
         id,
         org_id,
         user_id,
-        workspace_id,
+        project_id,
         run_id,
         document_id,
         action,
@@ -3972,7 +3972,7 @@ export class Store {
         gen_random_uuid()::text,
         ${args.orgId ?? null},
         ${args.userId ?? null},
-        ${args.workspaceId ?? null},
+        ${args.projectId ?? null},
         ${args.runId ?? null},
         ${args.documentId ?? null},
         ${args.action},
@@ -3985,14 +3985,14 @@ export class Store {
   }
 }
 
-function mapRun(row: WorkspaceRunRow): WorkspaceRun {
+function mapRun(row: ProjectRunRow): ProjectRun {
   return {
     id: row.id,
     orgId: row.canonical_org_id ?? row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
     allowChinaProviders: row.allow_china_providers === true,
     userId: row.user_id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     kind: row.kind,
     status: row.status,
     stage: row.stage,
@@ -4052,7 +4052,7 @@ export function buildStorageIntegrityReport(args: {
       key,
       runId: reference?.runId ?? null,
       documentId: reference?.documentId ?? null,
-      workspaceId: reference?.workspaceId ?? null,
+      projectId: reference?.projectId ?? null,
       orgId: reference?.orgId ?? null,
       userId: reference?.userId ?? null,
       referenceKind: reference?.kind ?? null,
@@ -4092,7 +4092,7 @@ export function buildStorageIntegrityReport(args: {
         kind: "missing-index-rows",
         severity: "error",
         runId: run.runId,
-        workspaceId: run.workspaceId,
+        projectId: run.projectId,
         orgId: run.orgId,
         userId: run.userId,
         message:
@@ -4111,7 +4111,7 @@ export function buildStorageIntegrityReport(args: {
         kind: "missing-vector-index-metadata",
         severity: "warning",
         runId: run.runId,
-        workspaceId: run.workspaceId,
+        projectId: run.projectId,
         orgId: run.orgId,
         userId: run.userId,
         message:
@@ -4129,7 +4129,7 @@ export function buildStorageIntegrityReport(args: {
         kind: "missing-summary-rows",
         severity: "warning",
         runId: run.runId,
-        workspaceId: run.workspaceId,
+        projectId: run.projectId,
         orgId: run.orgId,
         userId: run.userId,
         message:
@@ -4146,7 +4146,7 @@ export function buildStorageIntegrityReport(args: {
         kind: "missing-proposition-rows",
         severity: "warning",
         runId: run.runId,
-        workspaceId: run.workspaceId,
+        projectId: run.projectId,
         orgId: run.orgId,
         userId: run.userId,
         message:
@@ -4171,7 +4171,7 @@ export function buildStorageIntegrityReport(args: {
         kind: "missing-graph-rows",
         severity: "warning",
         runId: run.runId,
-        workspaceId: run.workspaceId,
+        projectId: run.projectId,
         orgId: run.orgId,
         userId: run.userId,
         message:

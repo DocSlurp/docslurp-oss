@@ -7,7 +7,7 @@ import { createUsageLedger, recordUnitCharge, recordUsageEvent } from "../lib/ai
 import {
   attributedUsage,
   orgUsageTotals,
-  workspaceUsageTotals,
+  projectUsageTotals,
 } from "../services/usage-attribution.js";
 import type { SqlClient } from "../db.js";
 
@@ -56,37 +56,37 @@ async function withSeed(run: (tx: SqlClient, ids: Ids) => Promise<void>): Promis
           (${ids.org2}, 'Usage Org 2', ${ids.org2}, ${ids.user})
       `;
       await tx`
-        insert into workspaces (id, org_id, user_id, name) values
+        insert into projects (id, org_id, user_id, name) values
           (${ids.wsA}, ${ids.org1}, ${ids.user}, 'A'),
           (${ids.wsB}, ${ids.org1}, ${ids.user}, 'B'),
           (${ids.wsC}, ${ids.org2}, ${ids.user}, 'C')
       `;
       await tx`
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage)
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage)
         values (${ids.run}, ${ids.org1}, ${ids.user}, ${ids.wsA}, 'bulk-upload', 'completed', 'completed')
       `;
       // Legacy double-encoded session metadata (a JSON string holding JSON).
       await tx`
         insert into search_sessions (id, user_id, query, metadata)
-        values (${ids.session}, ${ids.user}, 'q', to_jsonb(${JSON.stringify({ workspaceId: ids.wsB })}::text))
+        values (${ids.session}, ${ids.user}, 'q', to_jsonb(${JSON.stringify({ projectId: ids.wsB })}::text))
       `;
       // Rows as the writers stamp them (migration 0042 tenant columns).
       const rows: Array<[string, string | null, number, number, number, Record<string, unknown>, string, string | null]> = [
         [ev("ingest"), ids.run, 100, 0, 10, { runId: ids.run }, ids.org1, ids.wsA],
-        [ev("search-ws"), null, 40, 10, 4, { workspaceId: ids.wsA }, ids.org1, ids.wsA],
+        [ev("search-ws"), null, 40, 10, 4, { projectId: ids.wsA }, ids.org1, ids.wsA],
         [ev("search-session"), null, 20, 0, 2, { sessionId: ids.session }, ids.org1, ids.wsB],
-        [ev("aggregate"), null, 60, 0, 6, { workspaceIds: [ids.wsA, ids.wsB, ids.wsC] }, ids.org1, null],
+        [ev("aggregate"), null, 60, 0, 6, { projectIds: [ids.wsA, ids.wsB, ids.wsC] }, ids.org1, null],
         [ev("org-only"), null, 5, 0, 1, { orgId: ids.org2 }, ids.org2, null],
       ];
-      for (const [id, runId, input, output, cost, metadata, orgId, workspaceId] of rows) {
+      for (const [id, runId, input, output, cost, metadata, orgId, projectId] of rows) {
         await tx`
-          insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, input_tokens, output_tokens, cost_cents, metadata, org_id, workspace_id)
+          insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, input_tokens, output_tokens, cost_cents, metadata, org_id, project_id)
           values (${id}, ${ids.user}, ${runId}, 'openrouter', 'm', 'llm', ${input + output}, 'token', ${input}, ${output}, ${cost},
-            ${JSON.stringify(metadata)}::text::jsonb, ${orgId}, ${workspaceId})
+            ${JSON.stringify(metadata)}::text::jsonb, ${orgId}, ${projectId})
         `;
       }
       await tx`
-        insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, created_at, org_id, workspace_id)
+        insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, created_at, org_id, project_id)
         values (${ev("last-year")}, ${ids.user}, ${ids.run}, 'openrouter', 'm', 'llm', 0, 'token', 1000,
           ${JSON.stringify({ runId: ids.run })}::text::jsonb, now() - interval '400 days', ${ids.org1}, ${ids.wsA})
       `;
@@ -101,18 +101,18 @@ async function withSeed(run: (tx: SqlClient, ids: Ids) => Promise<void>): Promis
 }
 
 describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
-  it("attributes chat and search usage written through the ledger to its org and workspace", async () => {
+  it("attributes chat and search usage written through the ledger to its org and project", async () => {
     await withSeed(async (tx, ids) => {
       const before = await orgUsageTotals(ids.org2, "month", tx);
       // Chat answer: one AI event written straight through the ledger.
       await recordUsageEvent({
         client: tx,
         userId: ids.user,
-        scope: { workspaceId: ids.wsC, orgId: ids.org2 },
+        scope: { projectId: ids.wsC, orgId: ids.org2 },
         usage: {
           provider: "openrouter",
           model: "chat-model",
-          metric: "workspace-chat",
+          metric: "project-chat",
           inputTokens: 30,
           outputTokens: 10,
           costCents: 3,
@@ -130,7 +130,7 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
       });
       const batch = await session.flushWithin(tx, {
         userId: ids.user,
-        scope: { sessionId: `ua-sess-c-${ids.user}`, workspaceId: ids.wsC, orgId: ids.org2 },
+        scope: { sessionId: `ua-sess-c-${ids.user}`, projectId: ids.wsC, orgId: ids.org2 },
       });
       batch.commit();
 
@@ -141,15 +141,15 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
       expect(after.costCents - before.costCents).toBeCloseTo(0);
       expect(after.tokens - before.tokens).toBe(50);
       expect(after.eventCount - before.eventCount).toBe(2);
-      const aiRows = await tx<{ workspace_id: string | null; org_id: string | null; cost_cents: number; metadata: Record<string, unknown> }[]>`
-        select au.workspace_id, au.org_id, au.cost_cents::double precision as cost_cents, au.metadata
+      const aiRows = await tx<{ project_id: string | null; org_id: string | null; cost_cents: number; metadata: Record<string, unknown> }[]>`
+        select au.project_id, au.org_id, au.cost_cents::double precision as cost_cents, au.metadata
         from ${attributedUsage("month", tx)} au
-        where au.org_id = ${ids.org2} and au.metric in ('workspace-chat', 'query-rewrite')
+        where au.org_id = ${ids.org2} and au.metric in ('project-chat', 'query-rewrite')
         order by au.metric
       `;
       expect(aiRows).toHaveLength(2);
       for (const row of aiRows) {
-        expect(row).toMatchObject({ workspace_id: ids.wsC, org_id: ids.org2, cost_cents: 0 });
+        expect(row).toMatchObject({ project_id: ids.wsC, org_id: ids.org2, cost_cents: 0 });
         expect(row.metadata).toMatchObject({ billable: false, costRole: "provider" });
       }
       // Provider cost is preserved for internal cost reports.
@@ -159,12 +159,12 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
       await recordUnitCharge({
         client: tx,
         userId: ids.user,
-        scope: { workspaceId: ids.wsC, orgId: ids.org2 },
+        scope: { projectId: ids.wsC, orgId: ids.org2 },
         charge: { id: `ua-chat-answer-${ids.user}`, metric: BILLABLE_UNIT_METRICS.chatAnswer, amount: 1, unit: "answer", credits: 4 },
       });
       // ws-c had 2 (a third of the aggregate) before.
-      expect((await workspaceUsageTotals(ids.wsC, "month", tx)).costCents).toBeCloseTo(2 + 4);
-      // Org-only spend (no workspace) still reaches the org via its stamped orgId.
+      expect((await projectUsageTotals(ids.wsC, "month", tx)).costCents).toBeCloseTo(2 + 4);
+      // Org-only spend (no project) still reaches the org via its stamped orgId.
       await recordUnitCharge({
         client: tx,
         userId: ids.user,
@@ -172,7 +172,7 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
         charge: { id: `ua-storage-${ids.user}`, metric: BILLABLE_UNIT_METRICS.storage, amount: 1, unit: "gb-day", credits: 2 },
       });
       expect((await orgUsageTotals(ids.org2, "month", tx)).costCents).toBeCloseTo(after.costCents + 4 + 2);
-      expect((await workspaceUsageTotals(ids.wsC, "month", tx)).costCents).toBeCloseTo(2 + 4);
+      expect((await projectUsageTotals(ids.wsC, "month", tx)).costCents).toBeCloseTo(2 + 4);
       // Both charges are queued as debits against org-2 only; AI events debit nothing.
       const debits = await tx<{ org_id: string; credits: string }[]>`
         select org_id, credits::text from credit_debits_pending
@@ -184,13 +184,13 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
     });
   });
 
-  it("counts run-linked, search, session, and split aggregate spend per workspace", async () => {
+  it("counts run-linked, search, session, and split aggregate spend per project", async () => {
     await withSeed(async (tx, ids) => {
       // ingest 10 + search 4 + aggregate 6/3
-      expect((await workspaceUsageTotals(ids.wsA, "month", tx)).costCents).toBeCloseTo(16);
+      expect((await projectUsageTotals(ids.wsA, "month", tx)).costCents).toBeCloseTo(16);
       // session-attributed 2 + aggregate 6/3
-      expect((await workspaceUsageTotals(ids.wsB, "month", tx)).costCents).toBeCloseTo(4);
-      expect((await workspaceUsageTotals(ids.wsC, "month", tx)).costCents).toBeCloseTo(2);
+      expect((await projectUsageTotals(ids.wsB, "month", tx)).costCents).toBeCloseTo(4);
+      expect((await projectUsageTotals(ids.wsC, "month", tx)).costCents).toBeCloseTo(2);
     });
   });
 
@@ -209,7 +209,7 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
 
   it("keeps the run spend counter equal to its attributed spend", async () => {
     await withSeed(async (tx, ids) => {
-      const [run] = await tx<{ spent_cents: string }[]>`select spent_cents::text from workspace_runs where id = ${ids.run}`;
+      const [run] = await tx<{ spent_cents: string }[]>`select spent_cents::text from project_runs where id = ${ids.run}`;
       // ingest 10 + last-year 1000, maintained by the usage_events trigger (0056).
       expect(Number(run?.spent_cents)).toBeCloseTo(1010);
     });

@@ -199,7 +199,7 @@ export class ExtractMarkdownStage implements Stage {
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
           parserPlaybookForQuality(state.run.pipeline.quality);
-        // Fast runs only text-layer extractors with OCR off, whatever the request or workspace asked for.
+        // Fast runs only text-layer extractors with OCR off, whatever the request or project asked for.
         const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
           { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
           state.run.pipeline.quality,
@@ -1303,7 +1303,7 @@ export class ExtractMarkdownStage implements Stage {
   /**
    * An image has no text layer, so when OCR cannot read it (no Tesseract data on this worker, or
    * Kreuzberg's bundled OCR crashing) vision is the only reader left. Returns a stand-in extractor whose empty
-   * Markdown lets page triage and the vision stage read the pixels. When the workspace cannot use vision
+   * Markdown lets page triage and the vision stage read the pixels. When the project cannot use vision
    * (turned off, or privacy mode forbids the route) the image is unreadable: fail naming that cause. The raw
    * diagnostic stays in the stored error and logs; `publicDocumentError` never shows it to users.
    */
@@ -1679,7 +1679,7 @@ export class ExtractMarkdownStage implements Stage {
       return null;
     }
     // Self-critique is optional; skip it when the vision route is hosted and
-    // the workspace privacy mode forbids hosted calls.
+    // the project privacy mode forbids hosted calls.
     if (!(await allowHostedCall(args.state, visionCall(resolveVisionRoute(args.state.run.pipeline.vision)), [args.document.id]))) {
       return null;
     }

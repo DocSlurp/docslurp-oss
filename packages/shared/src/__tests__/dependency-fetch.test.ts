@@ -13,7 +13,7 @@ it("keeps streaming lazy and spans open until consumed, with request-chain corre
   const http = vi.fn(async () => new Response(new ReadableStream({
     pull(controller) { reads++; controller.enqueue(new TextEncoder().encode("answer")); controller.close(); },
   }, { highWaterMark: 0 }), { headers: { "x-request-id": "provider-id" } }));
-  await withObservation({ name: "stream-root", metadata: { runId: "run-stream", workspaceId: "workspace-stream" } }, async () => {
+  await withObservation({ name: "stream-root", metadata: { runId: "run-stream", projectId: "project-stream" } }, async () => {
     const response = await instrumentFetch("deepinfra", "embedding", http)("https://api.example.test/v1/inference?key=secret");
     expect(reads).toBe(0);
     expect(exporter.getFinishedSpans().some(span => span.name === "deepinfra.embedding")).toBe(false);
@@ -25,7 +25,7 @@ it("keeps streaming lazy and spans open until consumed, with request-chain corre
   const root = spans.find(span => span.name === "stream-root")!;
   expect(child.parentSpanContext?.spanId).toBe(root.spanContext().spanId);
   expect(child.attributes).toMatchObject({ "server.address": "api.example.test", "http.response.body.size": 6,
-    "docslurp.runId": "run-stream", "docslurp.workspaceId": "workspace-stream" });
+    "docslurp.runId": "run-stream", "docslurp.projectId": "project-stream" });
   expect(JSON.stringify(child.attributes)).not.toContain("secret");
 });
 

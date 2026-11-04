@@ -1,15 +1,15 @@
 /**
- * Move existing org-level LanceDB tables into per-workspace databases, without
+ * Move existing org-level LanceDB tables into per-project databases, without
  * re-embedding. See src/stages/lancedb-relocate.ts for the routing rules and
  * safety notes.
  *
  *   DATABASE_URL=… LANCEDB_URI=… node worker/dist/stages/lancedb-relocate-cli.js \
  *     (--org <id> | --all) [--batch-rows 2000] [--dry-run] [--skip-maintenance] [--maintain-all] [--drop-legacy]
  *
- * --maintain-all also maintains workspace databases whose rows were already
+ * --maintain-all also maintains project databases whose rows were already
  * relocated (e.g. to build vector indexes after lowering vectorIndexMinRows).
  *
- * Run once after deploying per-workspace databases: first with --dry-run, then
+ * Run once after deploying per-project databases: first with --dry-run, then
  * without, verify search, then again with --drop-legacy (append-only, so the
  * rerun converges and then drops). Exits 1 when any org reported an error.
  */

@@ -25,7 +25,7 @@ beforeAll(async () => {
   await reconcileRoleGrants(owner, { log: () => {} });
   await owner.query(`insert into "user"(id,name,email) values('publication','Test','publication@example.test');
     insert into organizations(id,name,slug,created_by_user_id) values('publication','Test','publication','publication');
-    insert into workspaces(id,org_id,user_id,name) values
+    insert into projects(id,org_id,user_id,name) values
       ('publication-holder','publication','publication','Test'),('publication-writer','publication','publication','Test')`);
 });
 afterAll(async () => { await stop?.(); await Promise.all(clients.map(c => c.end())); });
@@ -49,7 +49,7 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
     await reconcileRoleGrants(migration, { log: () => {} });
     await migration.query(`insert into "user"(id,name,email) values('upgrade','Test','upgrade@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('upgrade','Test','upgrade','upgrade');
-      insert into workspaces(id,org_id,user_id,name) values('upgrade','upgrade','upgrade','Test')`);
+      insert into projects(id,org_id,user_id,name) values('upgrade','upgrade','upgrade','Test')`);
     await app.connect(); await worker.connect();
     await app.query("set session authorization docslurp_app");
     await worker.query("set session authorization docslurp_worker");
@@ -58,7 +58,7 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
     await migration.query("commit");
     // Deliberately no post-migration reconcileRoleGrants call.
     const before = BigInt((await app.query("select revision from realtime_revisions where org_id='upgrade'")).rows[0].revision);
-    await worker.query("update workspaces set name='after-upgrade' where id='upgrade'");
+    await worker.query("update projects set name='after-upgrade' where id='upgrade'");
     expect(BigInt((await app.query("select revision from realtime_revisions where org_id='upgrade'")).rows[0].revision)).toBe(before + 1n);
     await expect(worker.query("select realtime_record_change('foreign-org')")).rejects.toMatchObject({ code: "42501" });
     await expect(app.query("delete from realtime_revision_counters")).rejects.toMatchObject({ code: "42501" });
@@ -80,7 +80,7 @@ it.skipIf(!url)("denies direct and arbitrary-tenant mutation under the actual in
     "select * from public.realtime_compact_revisions('')",
     "set role docslurp_realtime_publisher",
   ]) await expect(worker.query(statement)).rejects.toMatchObject({ code: "42501" });
-  await worker.query("update workspaces set name='published' where id='publication-writer'");
+  await worker.query("update projects set name='published' where id='publication-writer'");
 });
 
 it.skipIf(!url)("drains a long-transaction burst without further writes and bounds reader work", async () => {
@@ -88,8 +88,8 @@ it.skipIf(!url)("drains a long-transaction burst without further writes and boun
   const read = async () => (await owner.query("select revision from realtime_revisions where org_id='publication'")).rows[0].revision;
   const before = BigInt(await read());
   await holder.query("begin");
-  await holder.query("update workspaces set name='holding' where id='publication-holder'");
-  for (let i = 0; i < 300; i++) await writer.query("update workspaces set name='burst' where id='publication-writer'");
+  await holder.query("update projects set name='holding' where id='publication-holder'");
+  for (let i = 0; i < 300; i++) await writer.query("update projects set name='burst' where id='publication-writer'");
   const rows = async () => Number((await owner.query("select count(*) from realtime_revision_counters where org_id='publication'")).rows[0].count);
   expect(await rows()).toBeGreaterThanOrEqual(300);
   const planRows = async () => {

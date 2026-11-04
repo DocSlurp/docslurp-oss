@@ -1,9 +1,9 @@
-# Workspace knowledge graph (GraphRAG)
+# Project knowledge graph (GraphRAG)
 
-Each workspace owns exactly one knowledge graph: entities (`kg_nodes`),
+Each project owns exactly one knowledge graph: entities (`kg_nodes`),
 relationships (`kg_edges` + per-document `kg_edge_evidence`), chunk mentions
 (`chunk_entities`) and communities (`kg_communities`). Every query, write and
-estimate is scoped by `workspace_id`; nothing is shared across workspaces.
+estimate is scoped by `project_id`; nothing is shared across projects.
 Search uses the graph for neighbor expansion (`graphHops`) and
 community-summary retrieval.
 
@@ -14,7 +14,7 @@ three levers are optional and live under `pipeline.graph`:
 
 | Lever | Default | Effect |
 | --- | --- | --- |
-| `domain` | `null` | What the workspace is about (≤ 2,000 chars). Extraction and community summaries use it as trusted context, keeping what matters for that scope and skipping incidental mentions. When empty, the scope falls back to the workspace's own definition: its name and template description. |
+| `domain` | `null` | What the project is about (≤ 2,000 chars). Extraction and community summaries use it as trusted context, keeping what matters for that scope and skipping incidental mentions. When empty, the scope falls back to the project's own definition: its name and template description. |
 | `entityTypes` | `[]` (generic set: person, organization, concept, date, location, product) | Node vocabulary (≤ 16 `snake_case` types). Off-vocabulary entities become `concept`. Templates provide starting vocabularies (Legal: party, agreement, clause, obligation…). |
 | `depth` | `standard` | `lean` makes 1 pass per document (16k chars, confidence ≥ 0.6). `standard` makes up to 4 passes of 12k chars (≥ 0.5). `deep` makes up to 12 passes (≥ 0.35). Passes are spread evenly across long documents. |
 
@@ -22,15 +22,15 @@ Update them with a **partial** PATCH. Fields you leave out keep their value,
 and the rest of the pipeline is never resent:
 
 ```http
-PATCH /v1/workspaces/:ref/graph
+PATCH /v1/projects/:ref/graph
 { "enabled": true, "domain": "Supplier contracts for a mid-size manufacturer…", "depth": "deep" }
 ```
 
-`GET /v1/workspaces/:ref/graph` returns the settings, entity/relationship/
+`GET /v1/projects/:ref/graph` returns the settings, entity/relationship/
 community counts, the entity-type distribution, document coverage, rebuild
 estimates and the active/last job. Coverage counts each current document as
 `current` (extracted with these settings), `stale` (extracted with other
-settings) or `missing` (never extracted). The dashboard's workspace settings
+settings) or `missing` (never extracted). The dashboard's project settings
 shows the same view. The scope box shows the fallback scope, entity types are
 editable chips with template presets, each depth card shows what a full
 rebuild at that depth would cost and take, and the on/off switch saves
@@ -38,15 +38,15 @@ immediately.
 
 ## Progressive extraction
 
-New uploads always extract with the workspace's current settings. The
+New uploads always extract with the project's current settings. The
 `graph-enrich` stage extracts **one document at a time and merges it into the
-workspace graph immediately**, so the graph (and graph search) grows during
-long runs. Communities are re-clustered across the whole workspace once the
+project graph immediately**, so the graph (and graph search) grows during
+long runs. Communities are re-clustered across the whole project once the
 run's documents are in.
 
 Per-document writes (`worker/src/graph/graph-store.ts`) are idempotent. In one
-transaction under a per-workspace advisory lock, a document's chunk mentions
-and edge evidence are replaced, nodes and edges upsert on their workspace keys
+transaction under a per-project advisory lock, a document's chunk mentions
+and edge evidence are replaced, nodes and edges upsert on their project keys
 (`normalized_name, entity_type`, and `endpoints, predicate`), and every touched
 node and edge is re-derived:
 
@@ -66,7 +66,7 @@ counts as stale: a stage retry, a later run or a `stale` rebuild extracts it
 again with the model. The stage logs `[graph-enrich] ... llm_fallback
 documents=N/M` and records the `graph-llm-fallback-documents` run metric.
 
-Model calls start at the model's lowest reasoning setting (unless the workspace
+Model calls start at the model's lowest reasoning setting (unless the project
 sets a reasoning effort), so the output budget goes to the answer. A window
 whose answer is cut off (`finishReason=length`) is retried with double the
 output budget, up to 6,400 tokens; a cut-off community summary is retried once
@@ -76,7 +76,7 @@ run's provider policy (China-based providers, Speed boost), like every other
 stage.
 
 Within a run, the `graph-enrich` stage extracts `WORKER_GRAPH_JOB_CONCURRENCY`
-documents at a time (default 4); graph writes still serialize per workspace.
+documents at a time (default 4); graph writes still serialize per project.
 
 ## Rebuilds with estimates and live progress
 
@@ -84,7 +84,7 @@ Changing settings marks earlier extractions stale. They keep serving search
 until they are rebuilt:
 
 ```http
-POST /v1/workspaces/:ref/graph/rebuild
+POST /v1/projects/:ref/graph/rebuild
 { "mode": "stale", "maxCostCents": 500 }      # or "full"
 ```
 
@@ -93,7 +93,7 @@ POST /v1/workspaces/:ref/graph/rebuild
   extraction calls, input/output tokens, community summaries, cost and time
   (point value plus low–high range). Rates come from `COST_PER_1K_*_TOKENS`,
   the same rates the worker bills. Once documents have been extracted with the
-  same settings in this workspace (or org), per-call tokens and seconds are
+  same settings in this project (or org), per-call tokens and seconds are
   calibrated from them (`basis: "observed"`, ±25–35%). Otherwise typical rates
   apply (`basis: "default"`, −50%/+100%). Time accounts for
   `WORKER_GRAPH_JOB_CONCURRENCY`.
@@ -103,7 +103,7 @@ POST /v1/workspaces/:ref/graph/rebuild
   `WORKER_GRAPH_JOB_CONCURRENCY` documents at a time and merges each one, then
   re-clusters communities. After each batch it records documents, extraction
   calls, tokens, cost and a cursor, so a crashed worker's job resumes
-  elsewhere once its lease expires. There is one active job per workspace.
+  elsewhere once its lease expires. There is one active job per project.
 - **Watch.** `GET .../graph/jobs/:id/events` streams `progress` events (the
   job JSON, including `etaSeconds` at the observed pace), then `done`. When
   SSE is unavailable or drops, `GET .../graph/jobs/:id` is the polling
@@ -113,12 +113,12 @@ POST /v1/workspaces/:ref/graph/rebuild
   once actual spend reaches it. Documents already merged stay.
 
 Rebuild spend is written to `usage_events` without a run, with
-`metadata.workspaceId` (attributed to the workspace) and `graphJobId`.
+`metadata.projectId` (attributed to the project) and `graphJobId`.
 Settings changes and rebuild start/cancel are audit-logged.
 
 ## Communities
 
-Communities are computed over the entire workspace graph with weighted label
+Communities are computed over the entire project graph with weighted label
 propagation (co-mention edges count half), which splits large connected
 components into topical clusters. Level 1 groups level-0 communities by the
 edges between them. Each community has a member fingerprint (`member_hash`).
@@ -133,6 +133,6 @@ by full-text search; Postgres keeps no vectors (see migration 0008).
 
 Document tags work with every graph configuration: they do not change the graph's domain, entity types, extraction depth, or rebuild settings. Tag filters restrict document evidence, including graph-neighbor passages. Entity query expansion draws terms from matching tagged documents. Vector candidate selection also respects tags before retrieval, so unrelated documents cannot crowd tagged candidates out.
 
-Community summaries remain available as broader workspace context. In a tagged search, each returned summary explicitly says that it is **not restricted to the selected tags**, may include documents outside the selection, and does not establish what a tagged document says. This qualification is preserved after contextual compression. Tags organize retrieval; they are not document access controls.
+Community summaries remain available as broader project context. In a tagged search, each returned summary explicitly says that it is **not restricted to the selected tags**, may include documents outside the selection, and does not establish what a tagged document says. This qualification is preserved after contextual compression. Tags organize retrieval; they are not document access controls.
 
-With self-query planning enabled, explicit `tag:finance` or `tag:"finance team"` query syntax derives tag filters. Explicit API tag filters take precedence, so planning cannot broaden a caller's tag selection. List available labels with `GET /v1/workspaces/{workspaceId}/tags` or `client.listWorkspaceTags()`.
+With self-query planning enabled, explicit `tag:finance` or `tag:"finance team"` query syntax derives tag filters. Explicit API tag filters take precedence, so planning cannot broaden a caller's tag selection. List available labels with `GET /v1/projects/{projectId}/tags` or `client.listProjectTags()`.

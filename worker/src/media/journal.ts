@@ -18,7 +18,7 @@ export class PostgresMediaJournal implements MediaJournal {
       await tx`select pg_advisory_xact_lock(hashtextextended('docslurp:remote-media-admission', 0))`;
       const [existing] = await tx<Row[]>`select id, status, result_key, cost_cents from remote_media_jobs
         where request_key = ${args.key} and run_id = ${scope.runId} and document_id = ${scope.documentId}
-        and org_id = ${scope.orgId} and workspace_id = ${scope.workspaceId}`;
+        and org_id = ${scope.orgId} and project_id = ${scope.projectId}`;
       if (existing) return { receipt: receipt(existing), acquired: false };
       const [pricingHold] = await tx`select id from remote_media_jobs where provider = ${args.provider} and org_id = ${scope.orgId}
         and model = ${args.model} and pricing_uncertain = true limit 1`;
@@ -35,8 +35,8 @@ export class PostgresMediaJournal implements MediaJournal {
       if (!totals || totals.inflight >= args.maxConcurrent) throw new Error("Media concurrency exhausted; uncertain requests need reconciliation");
       if (Number(totals.daily) + args.reserveCents > args.dailyBudgetCents) throw new Error("Media daily budget exhausted");
       const [run] = await tx<{ spent_cents: number }[]>`
-        select spent_cents from workspace_runs
-        where id = ${scope.runId} and org_id = ${scope.orgId} and workspace_id = ${scope.workspaceId}
+        select spent_cents from project_runs
+        where id = ${scope.runId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
           and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
       if (!run) throw new Error("Media run is not admitted");
       const [document] = await tx`select id from documents where id = ${scope.documentId} and run_id = ${scope.runId}`;
@@ -52,8 +52,8 @@ export class PostgresMediaJournal implements MediaJournal {
         if (Number(spent.value) + args.reserveCents > args.maxDocumentCostCents) throw new Error("Media document cost cap exhausted");
       }
       const [created] = await tx<Row[]>`insert into remote_media_jobs
-        (id, request_key, org_id, workspace_id, run_id, document_id, provider, model, status, reserve_cents)
-        values (${randomUUID()}, ${args.key}, ${scope.orgId}, ${scope.workspaceId}, ${scope.runId}, ${scope.documentId},
+        (id, request_key, org_id, project_id, run_id, document_id, provider, model, status, reserve_cents)
+        values (${randomUUID()}, ${args.key}, ${scope.orgId}, ${scope.projectId}, ${scope.runId}, ${scope.documentId},
           ${args.provider}, ${args.model}, 'submitting', ${args.reserveCents})
         returning id, status, result_key, cost_cents`;
       return { receipt: receipt(created), acquired: true };
@@ -62,8 +62,8 @@ export class PostgresMediaJournal implements MediaJournal {
   async admitVideo(scope: Parameters<NonNullable<MediaJournal["admitVideo"]>>[0], duration: number, frames: number) {
     await this.sql.begin(async tx => {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.orgId}))`;
-      const [scoped] = await tx`select 1 from workspace_runs r join documents d on d.run_id=r.id
-        where r.org_id=${scope.orgId} and r.id=${scope.runId} and r.workspace_id=${scope.workspaceId} and d.id=${scope.documentId}`;
+      const [scoped] = await tx`select 1 from project_runs r join documents d on d.run_id=r.id
+        where r.org_id=${scope.orgId} and r.id=${scope.runId} and r.project_id=${scope.projectId} and d.id=${scope.documentId}`;
       if (!scoped) throw new Error("Video admission scope mismatch");
       const policy = videoPolicy(duration);
       if (!Number.isInteger(frames) || frames < 0 || frames > policy.frames) throw new Error("Video frame budget exceeds the limit");
@@ -79,15 +79,15 @@ export class PostgresMediaJournal implements MediaJournal {
     // Credit leases other runs hold (migration 0052) are spoken for; this
     // run's own lease is what its media spend draws from.
     // The chat reserve (migration 0053) is not for jobs either.
-    const [status] = await tx<{ funded: boolean | null; available: number; leased: number; workspace_in_org: boolean; org_budget_paused: boolean; workspace_budget_paused: boolean }[]>`
+    const [status] = await tx<{ funded: boolean | null; available: number; leased: number; project_in_org: boolean; org_budget_paused: boolean; project_budget_paused: boolean }[]>`
       select s.*, org_outstanding_credit_leases(${args.scope.orgId}, 'run', ${args.scope.runId}) as leased
-      from org_spend_status(${args.scope.orgId}, ${args.scope.workspaceId}, 0) s`;
+      from org_spend_status(${args.scope.orgId}, ${args.scope.projectId}, 0) s`;
     const [pending] = await tx<{ reserved: number }[]>`select
       coalesce((select sum(case when usage_settled then greatest(reserve_cents-coalesce(charged_cost_cents,cost_cents,0),0) else greatest(reserve_cents,coalesce(charged_cost_cents,cost_cents,0)) end) from remote_media_jobs
         where org_id = ${args.scope.orgId} and (usage_settled = false or cost_state = 'disputed')), 0) +
       coalesce((select sum((case when status='deleted' then fixed_reserve_usd else reserved_usd end) * 100) from remote_capacity_leases
         where scope->>'orgId' = ${args.scope.orgId} and (status <> 'deleted' or fixed_reserve_usd > 0)), 0) as reserved`;
-    if (!status?.workspace_in_org || status.org_budget_paused || status.workspace_budget_paused ||
+    if (!status?.project_in_org || status.org_budget_paused || status.project_budget_paused ||
       (Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) < args.reserveCents + Number(pending.reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Media spend admission denied");
   }
   async complete(id: string, resultKey: string, costCents: number, pricingMismatch = false, accounting?: MediaAccounting, chargedCostCents = costCents) {

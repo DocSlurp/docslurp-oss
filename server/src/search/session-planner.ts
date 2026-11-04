@@ -20,14 +20,14 @@ import type {
   SearchOptions,
   SearchResponse,
 } from "../services/search.js";
-import { getWorkspaceAccess } from "../services/organizations.js";
+import { getProjectAccess } from "../services/organizations.js";
 import {
   fuseSearchChunkLists,
   fuseSearchResponses,
   searchResultsToChunks,
 } from "./session-execution.js";
 import type { SearchSessionJournal } from "./session.js";
-import { withWorkspaceScope } from "./workspace-retrieval-session.js";
+import { withProjectScope } from "./project-retrieval-session.js";
 import { countSearchEvent, timePhase } from "./timings.js";
 
 export type RetrievalChainStep = {
@@ -162,10 +162,10 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   userId: string;
   options: SearchOptions;
   effectiveOptions: SearchOptions;
-  workspaceId: string;
-  /** Owning organization of the workspace; scopes the query-embedding cache. */
+  projectId: string;
+  /** Owning organization of the project; scopes the query-embedding cache. */
   orgId: string;
-  workspaceSettings: { synonyms?: Record<string, string[]> };
+  projectSettings: { synonyms?: Record<string, string[]> };
   embedding: EmbeddingConfig;
   openRouterApiKey?: string;
   privacyMode: PrivacyMode;
@@ -175,9 +175,9 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     query,
     userId,
     options,
-    workspaceId,
+    projectId,
     orgId,
-    workspaceSettings,
+    projectSettings,
     embedding,
     openRouterApiKey,
     privacyMode,
@@ -197,7 +197,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     });
     effectiveOptions = {
       ...options,
-      filters: withWorkspaceScope({...derived.filters, ...(options.filters?.geo ? {geo:options.filters.geo,geoSchemaDigest:options.filters.geoSchemaDigest,documentIds:options.filters.documentIds} : {})}, workspaceId),
+      filters: withProjectScope({...derived.filters, ...(options.filters?.geo ? {geo:options.filters.geo,geoSchemaDigest:options.filters.geoSchemaDigest,documentIds:options.filters.documentIds} : {})}, projectId),
     };
     selfQueryReasons = derived.reasons;
   }
@@ -225,7 +225,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   // Started now, awaited only by the vector leg: lexical and page legs overlap the (remote) embedding call.
   const queryVector: Promise<number[] | null> = options.queryVector
     ? Promise.resolve(options.queryVector)
-    : timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId, orgId));
+    : timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, projectId, orgId));
   queryVector.catch(() => undefined);
 
   // An explicit document selection already defines the retrieval scope. Summary
@@ -235,12 +235,12 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   );
   const seedVector = effectiveOptions.summarySeed && !hasDocumentSelection ? await queryVector : null;
   if (seedVector) {
-    const access = await getWorkspaceAccess(workspaceId, userId);
+    const access = await getProjectAccess(projectId, userId);
     if (access) {
-      // Seeds come from this workspace's own database only.
+      // Seeds come from this project's own database only.
       const seedHits = await lanceDbVectorSearch({
         orgId: access.orgId,
-        workspaceId,
+        projectId,
         embeddingModel: resolveEmbeddingRoute(embedding).model,
         queryVector: seedVector,
         limit: 50,
@@ -272,7 +272,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   }
 
   const mergedGlossary = {
-    ...(workspaceSettings.synonyms ?? {}),
+    ...(projectSettings.synonyms ?? {}),
     ...(options.glossary ?? {}),
   };
   const textQuery =
@@ -419,7 +419,7 @@ export async function embedQuery(
   usage: SearchSessionJournal,
   privacyMode: PrivacyMode,
   /** Strict-privacy audit attribution for private embedding routes. */
-  auditWorkspaceId?: string | null,
+  auditProjectId?: string | null,
   orgId?: string,
 ): Promise<number[] | null> {
   const route = resolveEmbeddingRoute(embedding);
@@ -475,7 +475,7 @@ export async function embedQuery(
       baseURL: baseUrl ?? process.env.OPENAI_BASE_URL,
       privacyMode,
       modelUri: route.modelUri,
-      auditScope: { workspaceId: auditWorkspaceId ?? null },
+      auditScope: { projectId: auditProjectId ?? null },
       ...(METERED_EMBEDDING_PROVIDERS.has(provider) ? { onUsage: (actual: { inputTokens: number }) => {
         usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, metadata: { usageSource: "provider" } });
         usageRecorded = true;

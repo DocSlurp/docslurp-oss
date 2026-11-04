@@ -324,7 +324,7 @@ export class VisionExtractStage implements Stage {
             }
 
             // Active page router: the stored plan replaces page selection and the single global
-            // model. Off/shadow, workspace force-all-pages, or no plan: unchanged legacy path.
+            // model. Off/shadow, project force-all-pages, or no plan: unchanged legacy path.
             const routed = await this.loadRoutedExecution(state, document);
             const needsVision = routed
               ? this.routedSelection(routed)
@@ -923,7 +923,7 @@ export class VisionExtractStage implements Stage {
 
   /**
    * The decision-model verifier (TL3: clef-omni + clef-flash on page image + cheap output), wired into the
-   * cascade only when the workspace puts a value on quality at or above the fitted minimum (0.5 USD per
+   * cascade only when the project puts a value on quality at or above the fitted minimum (0.5 USD per
    * quality unit). Off by default: below that the free cascade checks capture the gain and no call is made.
    */
   private async routedVerification(

@@ -101,7 +101,7 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
       extract(epoch from (now() - min(created_at) filter (
         where status = 'queued' and coalesce(control_state, '') not in ('paused', 'cancelled')
       )))::double precision as oldest_queued_run_age_seconds
-    from workspace_runs
+    from project_runs
   `;
   return {
     queueDepth: Number(row?.queue_depth ?? 0),

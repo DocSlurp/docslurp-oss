@@ -12,9 +12,9 @@ vi.mock("../db.js", async () => {
   // Same numeric parsing as the production API pool (credit balances are numeric).
   return { sql: postgres(database.url ?? "postgres://unused", { max: 4, onnotice: () => {}, types: { numeric: numericType } }) };
 });
-vi.mock("../services/notifications.js", () => ({ sendWorkspaceInviteEmail: vi.fn() }));
+vi.mock("../services/notifications.js", () => ({ sendProjectInviteEmail: vi.fn() }));
 const { sql } = await import("../db.js");
-const { createOrganization, getWorkspaceAccess, updateOrganizationMemberRole, removeOrganizationMember } = await import("../services/organizations.js");
+const { createOrganization, getProjectAccess, updateOrganizationMemberRole, removeOrganizationMember } = await import("../services/organizations.js");
 // Org membership is invite-only now (G-02); seed the second owner directly.
 async function addOwner(orgId: string, userId: string) {
   await sql`insert into org_memberships (org_id, user_id, role) values (${orgId}, ${userId}, 'owner')`;
@@ -41,7 +41,7 @@ describe.skipIf(!database.url)("PostgreSQL organization ownership concurrency", 
     const orgIds = orgs.map(row => row.id);
     if (orgIds.length) {
       await sql`delete from audit_log where org_id in ${sql(orgIds)}`;
-      await sql`delete from workspaces where org_id in ${sql(orgIds)}`;
+      await sql`delete from projects where org_id in ${sql(orgIds)}`;
       await sql`delete from organizations where id in ${sql(orgIds)}`;
     }
     await sql`delete from mcp_oauth_clients where id = ${mcpClientId}`;
@@ -106,33 +106,33 @@ describe.skipIf(!database.url)("PostgreSQL organization ownership concurrency", 
     expect(row!.name).toBe("Management");
     expect(row!.key_hash).toBe(createHash("sha256").update(key.rawKey).digest("hex"));
   });
-  it("rejects a race-created organization key after removal and ends the member's workspace access (G-06)", async () => {
+  it("rejects a race-created organization key after removal and ends the member's project access (G-06)", async () => {
     const orgId = await twoOwners("Race-created key");
     const existingRawKey = `dslp_before_removal_${run}`;
     const raceRawKey = `dslp_created_after_removal_${run}`;
     const hash = (value: string) => createHash("sha256").update(value).digest("hex");
     await sql`insert into api_keys (id,org_id,user_id,key_hash,name) values (${`before-${orgId}`},${orgId},${B},${hash(existingRawKey)},'Test')`;
-    await sql`insert into workspaces (id, org_id, user_id, name) values (${`owned-${orgId}`}, ${orgId}, ${B}, 'Owned'), (${`shared-${orgId}`}, ${orgId}, ${A}, 'Shared')`;
-    await sql`insert into workspace_members (workspace_id, user_id, role) values (${`shared-${orgId}`},${B},'editor')`;
+    await sql`insert into projects (id, org_id, user_id, name) values (${`owned-${orgId}`}, ${orgId}, ${B}, 'Owned'), (${`shared-${orgId}`}, ${orgId}, ${A}, 'Shared')`;
+    await sql`insert into project_members (project_id, user_id, role) values (${`shared-${orgId}`},${B},'editor')`;
     await sql`insert into mcp_oauth_grants (id, client_id, user_id, org_id, resource, scopes, api_key_id)
       values (${`grant-${orgId}`}, ${mcpClientId}, ${B}, ${orgId}, 'https://example.test/mcp', '["search"]'::jsonb, ${`before-${orgId}`})`;
-    expect(await getWorkspaceAccess(`shared-${orgId}`, B)).not.toBeNull();
+    expect(await getProjectAccess(`shared-${orgId}`, B)).not.toBeNull();
     expect(await validateApiKey(existingRawKey)).toMatchObject({ userId: B, orgId });
     await removeOrganizationMember({ orgId, userId: A, memberUserId: B });
     // Model provisioning that authorized before removal but committed afterward.
     await sql`insert into api_keys (id,org_id,user_id,key_hash,name) values (${`race-${orgId}`},${orgId},${B},${hash(raceRawKey)},'Test')`;
     expect(await validateApiKey(existingRawKey)).toBeNull();
     expect(await validateApiKey(raceRawKey)).toBeNull();
-    const grants = await sql`select * from workspace_members where user_id = ${B}`;
+    const grants = await sql`select * from project_members where user_id = ${B}`;
     expect(grants).toHaveLength(0);
-    const [owned] = await sql`select user_id from workspaces where id = ${`owned-${orgId}`}`;
+    const [owned] = await sql`select user_id from projects where id = ${`owned-${orgId}`}`;
     expect(owned!.user_id).toBe(A);
     const [grant] = await sql`select revoked_at from mcp_oauth_grants where id = ${`grant-${orgId}`}`;
     expect(grant!.revoked_at).not.toBeNull();
     // Even a stale share row would not grant access without org membership.
-    await sql`insert into workspace_members (workspace_id, user_id, role) values (${`shared-${orgId}`},${B},'editor')`;
-    expect(await getWorkspaceAccess(`shared-${orgId}`, B)).toBeNull();
-    expect(await getWorkspaceAccess(`owned-${orgId}`, A)).not.toBeNull();
+    await sql`insert into project_members (project_id, user_id, role) values (${`shared-${orgId}`},${B},'editor')`;
+    expect(await getProjectAccess(`shared-${orgId}`, B)).toBeNull();
+    expect(await getProjectAccess(`owned-${orgId}`, A)).not.toBeNull();
     const usages = await sql`select * from api_key_usage where key_id = ${`race-${orgId}`}`;
     expect(usages).toHaveLength(0);
   });

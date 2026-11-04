@@ -29,8 +29,8 @@ import {
   toDirectUploadPartCount,
   type LoadedDirectUploadSession,
 } from "../services/direct-upload-session.js";
-import { intakeIntoWorkspace, WorkspaceIntakeError } from "../services/workspace-intake.js";
-import { createWorkspaceIntakeFakes } from "./helpers/workspace-intake-fakes.js";
+import { intakeIntoProject, ProjectIntakeError } from "../services/project-intake.js";
+import { createProjectIntakeFakes } from "./helpers/project-intake-fakes.js";
 
 function directUploadSessionFixture(
   overrides: {
@@ -43,8 +43,8 @@ function directUploadSessionFixture(
       id: "session-1",
       user_id: "user-1",
       org_id: "org-1",
-      workspace_id: null,
-      workspace_name: null,
+      project_id: null,
+      project_name: null,
       template_key: null,
       pipeline: {} as LoadedDirectUploadSession["session"]["pipeline"],
       status: "uploading",
@@ -70,9 +70,9 @@ function directUploadSessionFixture(
 
 describe("Direct Upload Session Module", () => {
   it("preserves verified object bytes through direct-upload intake into run creation", async () => {
-    const fakes = createWorkspaceIntakeFakes();
-    await intakeIntoWorkspace({
-      userId: "user-1", orgId: "org-1", kind: "direct-upload", newWorkspace: true,
+    const fakes = createProjectIntakeFakes();
+    await intakeIntoProject({
+      userId: "user-1", orgId: "org-1", kind: "direct-upload", newProject: true,
       items: directUploadIntakeItems(directUploadSessionFixture()),
     }, fakes.ports);
     expect(fakes.runs[0].files[0].fileSize).toBe(42);
@@ -261,7 +261,7 @@ describe("Direct Upload Session Module", () => {
     expect(toDirectUploadPartCount(9, 8)).toBe(2);
   });
 
-  it("turns completed session files into a Workspace Intake source", () => {
+  it("turns completed session files into a Project Intake source", () => {
     expect(
       directUploadIntakeItems(directUploadSessionFixture()),
     ).toEqual([
@@ -285,7 +285,7 @@ describe("Direct Upload Session Module", () => {
       assertDirectUploadSessionReadyForIntake(
         directUploadSessionFixture({ session: { status: "confirmed" } }),
       ),
-    ).toThrow(WorkspaceIntakeError);
+    ).toThrow(ProjectIntakeError);
 
     // An unfinished file does not block the session; intake reports it instead.
     expect(() =>
@@ -305,8 +305,8 @@ describe("Direct Upload Session Module", () => {
       }),
     );
     expect(done?.content).toEqual({ storedKey: "user-1/raw/contracts.pdf", verifiedSizeBytes: 42 });
-    expect(unfinished?.content).toEqual({ rejected: expect.any(WorkspaceIntakeError) });
-    expect((unfinished?.content as { rejected: WorkspaceIntakeError }).rejected).toMatchObject({
+    expect(unfinished?.content).toEqual({ rejected: expect.any(ProjectIntakeError) });
+    expect((unfinished?.content as { rejected: ProjectIntakeError }).rejected).toMatchObject({
       statusCode: 409,
       message: "late.pdf did not finish uploading",
     });

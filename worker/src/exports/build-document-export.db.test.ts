@@ -47,8 +47,8 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`insert into "user"(id,name,email) values('u','User','u@example.invalid');
     insert into organizations(id,name,created_by_user_id) values('o','Org','u');
-    insert into workspaces(id,org_id,user_id,name) values('w','o','u','Finance');
-    insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,total_documents,pipeline,artifacts)
+    insert into projects(id,org_id,user_id,name) values('w','o','u','Finance');
+    insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,total_documents,pipeline,artifacts)
       values('run','o','u','w','bulk-upload','completed','completed',3,'{}','{
         "doc-1:markdown":"s3://bucket/md/doc-1.md",
         "doc-1:structured":"s3://bucket/st/doc-1.json",
@@ -58,7 +58,7 @@ beforeAll(async () => {
         "doc-1:canonical-document":"s3://bucket/missing.json",
         "doc-2:markdown":"s3://bucket/md/doc-2.md"
       }');
-    insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count)
+    insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count)
       values('doc-1','o','u','w','run','Q3 plan.pdf','application/pdf','uploads/q3.pdf','completed',2),
             ('doc-2','o','u','w','run','q3 plan.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document','uploads/q3.docx','processing',1),
             ('doc-old','o','u','w','run','Old.pdf','application/pdf','uploads/old.pdf','completed',1);
@@ -92,7 +92,7 @@ beforeEach(async () => {
 
 async function queue(id: string, args: { documentId?: string; content: "markdown" | "all"; filename: string }) {
   await sql`
-    insert into document_exports (id, org_id, workspace_id, user_id, document_id, content, filename, object_key, expires_at)
+    insert into document_exports (id, org_id, project_id, user_id, document_id, content, filename, object_key, expires_at)
     values (${id}, 'o', 'w', 'u', ${args.documentId ?? null}, ${args.content}, ${args.filename}, ${`exports/o/w/${id}/`}, now() + interval '7 days')
   `;
 }
@@ -138,29 +138,29 @@ describe("buildDocumentExport", () => {
   });
 
   it("builds an extract download from its run only, under the extract prefix, never outliving the extract", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline, artifacts, extract_id, storage_prefix)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline, artifacts, extract_id, storage_prefix)
       values ('ext-run', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', 2, '{}', '{"doc-x:markdown":"s3://bucket/extracts/o/ext_1/markdown/doc-x.md"}', 'ext_1', 'extracts/o/ext_1')
       on conflict (id) do nothing`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('doc-x', 'o', 'u', 'w', 'ext-run', 'Scan.pdf', 'application/pdf', 'extracts/o/ext_1/raw/scan.pdf', 'completed', 1),
              ('doc-y', 'o', 'u', 'w', 'ext-run', 'Broken.pdf', 'application/pdf', 'extracts/o/ext_1/raw/broken.pdf', 'failed', 0)
       on conflict (id) do nothing`;
     objects.set("extracts/o/ext_1/markdown/doc-x.md", text("# Scan"));
-    await sql`insert into document_exports (id, org_id, workspace_id, user_id, run_id, content, filename, object_key, expires_at, max_expires_at)
+    await sql`insert into document_exports (id, org_id, project_id, user_id, run_id, content, filename, object_key, expires_at, max_expires_at)
       values ('exp-x', 'o', 'w', 'u', 'ext-run', 'markdown', 'Scan.zip', 'extracts/o/ext_1/exports/exp-x/', now() + interval '2 days', now() + interval '2 days')`;
 
     await buildDocumentExport({ sql, storage: storage as never }, "exp-x");
 
     const upload = uploads.get("extracts/o/ext_1/exports/exp-x/a1.zip");
     expect(upload).toBeDefined();
-    // Only the run's completed document: nothing else in the workspace, not its failed one.
+    // Only the run's completed document: nothing else in the project, not its failed one.
     expect(Object.keys(unzipSync(upload!.bytes)).some((name) => name.includes("Q3 plan") || name.includes("Broken"))).toBe(false);
     const [row] = await sql<{ document_ids: string[]; hours: number }[]>`
       select document_ids, round(extract(epoch from expires_at - now()) / 3600)::int as hours from document_exports where id = 'exp-x'`;
     expect(row).toEqual({ document_ids: ["doc-x"], hours: 48 });
   });
 
-  it("adds originals, page images and outputs for a full workspace export, and lists what it could not read", async () => {
+  it("adds originals, page images and outputs for a full project export, and lists what it could not read", async () => {
     await queue("exp-2", { content: "all", filename: "Finance.zip" });
 
     await buildDocumentExport({ sql, storage: storage as never }, "exp-2");
@@ -191,7 +191,7 @@ describe("buildDocumentExport", () => {
 
     const { files } = unzip("exp-3");
     expect(Object.keys(files).some((name) => name.includes("original/"))).toBe(false);
-    expect(strFromU8(files["Q3 plan/README.md"]!)).toContain("`original/Q3 plan.pdf`: withheld by the workspace's privacy (PII) policy");
+    expect(strFromU8(files["Q3 plan/README.md"]!)).toContain("`original/Q3 plan.pdf`: withheld by the project's privacy (PII) policy");
     // The withheld Markdown falls back to the indexed (post-policy) page text.
     expect(strFromU8(files["Q3 plan/Q3 plan.md"]!)).toBe("Page one\n\nPage two");
     await sql`update documents set metadata = '{}' where id = 'doc-1'`;
@@ -242,7 +242,7 @@ describe("buildDocumentExport", () => {
   });
 
   it("keeps the live version while a newer upload of it is pending or failed", async () => {
-    await sql`insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count,previous_version_id)
+    await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,previous_version_id)
       values('doc-1-v2','o','u','w','run','Q3 plan.pdf','application/pdf','uploads/q3-v2.pdf','processing',0,'doc-1')`;
     await queue("exp-9", { content: "markdown", filename: "Finance.zip" });
 

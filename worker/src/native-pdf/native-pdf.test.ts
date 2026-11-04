@@ -630,7 +630,7 @@ describe.skipIf(!realModule.ok)("native-pdf on the installed binding", () => {
       ["Helvetica-Bold", 16, "Installation guide"],
       ["Helvetica", 11, "Run the following commands before the first start of the service."],
       ["Courier", 10, "npm install --global docslurp"],
-      ["Courier", 10, "docslurp init --workspace demo"],
+      ["Courier", 10, "docslurp init --project demo"],
       ["Courier", 10, "docslurp ingest ./reports"],
       ["Helvetica", 11, "The ingest command prints one line for every processed document."],
     ]));

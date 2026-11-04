@@ -1,19 +1,19 @@
-import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
+import { projectSettingsProposalInputSchema } from "./project-settings-proposal-input.js";
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
 import { deferredProfilesEnabled, qualityModeSchema } from "@docslurp/shared";
 
 import { env } from "../config.js";
-import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
+import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "../lib/search-input.js";
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
 import { webMcpTools } from "./web/mcp-web-tools.js";
 import { apiKeyMayUseEstimateTool, estimateToolDefinitions, jobsGetInputSchema, jobsGetToolDefinition, type EstimateToolName } from "./mcp-estimate-catalog.js";
 
 export { jobsGetInputSchema };
 
-export const workspaceRef = z.string().min(1).max(256).optional().describe('Workspace ID, slug or name (names match by slug, so "Legal Contracts" finds legal-contracts). Omit for the organization default workspace.');
-export const listWorkspacesInput = z.object({
+export const projectRef = z.string().min(1).max(256).optional().describe('Project ID, slug or name (names match by slug, so "Legal Contracts" finds legal-contracts). Omit for the organization default project.');
+export const listProjectsInput = z.object({
   limit: z.number().int().min(1).max(100).default(50),
   offset: z.number().int().nonnegative().default(0),
 }).strict();
@@ -25,7 +25,7 @@ export const listWorkspacesInput = z.object({
 export const INLINE_UPLOAD_MAX_BYTES = 512 * 1024;
 const INLINE_UPLOAD_MAX_BASE64_CHARS = Math.ceil(INLINE_UPLOAD_MAX_BYTES / 3) * 4 + 1024;
 const uploadInputShape = {
-  workspace: z.string().min(1).max(256).optional().describe('Workspace ID, slug or name. A name that matches no workspace creates one with that name, so only pass a new name when the user asks for a new workspace. Omit for the organization default workspace.'),
+  project: z.string().min(1).max(256).optional().describe('Project ID, slug or name. A name that matches no project creates one with that name, so only pass a new name when the user asks for a new project. Omit for the organization default project.'),
   urls: z.array(z.url().refine(url => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs")).min(1).max(20).optional(),
   files: z.array(z.object({
     singlePart: z.boolean().optional().describe("Request one PUT instead of multipart parts (used by the upload widget)."),
@@ -41,7 +41,7 @@ const uploadInputShape = {
   }).strict().refine(file => Boolean(file.contentBase64) !== Boolean(file.text), "Supply either contentBase64 or text for each inline file")).min(1).max(10).optional()
     .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
-  quality: qualityModeSchema.optional().describe("Processing quality for these files; omit for the workspace setting (auto by default). fast: text layer only, scanned pages kept as images and not searchable ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50)."),
+  quality: qualityModeSchema.optional().describe("Processing quality for these files; omit for the project setting (auto by default). fast: text layer only, scanned pages kept as images and not searchable ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50)."),
 };
 const exactlyOneSource = (value: { urls?: unknown; files?: unknown; inlineFiles?: unknown }) => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1;
 export const uploadInput = z.object(uploadInputShape).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
@@ -54,7 +54,7 @@ export const extractInput = z.object({
 }).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
 
 export const openUploaderInput = z.object({
-  workspace: workspaceRef,
+  project: projectRef,
 }).strict();
 
 export const completeUploadInput = z.object({
@@ -64,21 +64,21 @@ export const completeUploadInput = z.object({
 
 export const uploadStatusInput = z.object({
   sessionId: z.string().uuid().optional().describe("Upload session returned by upload; use this to follow storage upload and automatic ingestion handoff."),
-  workspace: workspaceRef,
+  project: projectRef,
   runId: z.string().trim().min(1).max(128).optional(),
   documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
 }).strict();
 export const mediaEvidenceInput = z.object({
-  workspace: workspaceRef,
+  project: projectRef,
   documentId: z.string().min(1).max(128),
   offset: z.number().int().min(0).max(10_000_000).default(0).describe("Character offset from nextOffset; omit for the beginning."),
 }).strict();
 export const fullIndexInput = z.object({
-  workspace: workspaceRef,
-  documentIds: z.array(z.string().min(1)).max(500).optional().describe("Only these documents; omit to index every remaining page in the workspace."),
+  project: projectRef,
+  documentIds: z.array(z.string().min(1)).max(500).optional().describe("Only these documents; omit to index every remaining page in the project."),
 }).strict();
 export const suggestQueriesInput = z.object({
-  workspace: workspaceRef,
+  project: projectRef,
   q: z.string().max(10_000).optional(),
   limit: z.number().int().min(1).max(25).optional(),
 });
@@ -134,8 +134,8 @@ export interface McpTool {
   firstPartyAppOnly?: boolean;
 }
 
-/** Workspace settings tools: app-only, so a customer cannot expose them to its own end users. */
-export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getWorkspaceSettings", "proposeWorkspaceSettings"]);
+/** Project settings tools: app-only, so a customer cannot expose them to its own end users. */
+export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getProjectSettings", "proposeProjectSettings"]);
 
 /**
  * Listing order for every surface that keeps server order (tools/list, manifest, chat tools): discover → upload →
@@ -144,8 +144,8 @@ export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["get
  * verb first, and the same verb for the same kind of tool (List, Upload, Check, Search, Read, Estimate … cost).
  */
 const TOOL_ORDER = [
-  "listWorkspaces", "upload", "getUploadStatus", "search", "chat", "openUploader", "extract", "getMediaEvidence", "suggestQueries",
-  "getWorkspaceSettings", "proposeWorkspaceSettings", "fullIndex",
+  "listProjects", "upload", "getUploadStatus", "search", "chat", "openUploader", "extract", "getMediaEvidence", "suggestQueries",
+  "getProjectSettings", "proposeProjectSettings", "fullIndex",
   "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite",
   "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
   "getJob", "completeUpload",
@@ -160,43 +160,43 @@ export function mcpTools(baseUrl: string): McpTool[] {
     annotations: READ_ONLY,
   }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
-    { id: "getWorkspaceSettings", title: "Read workspace settings", scopes: ["search", "ingest"], keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
-      description: "Read current supported pipeline toggles, chat settings and retrieval defaults for the selected workspace. Use before proposing changes and to verify what is actually saved after the user applies a proposal. Does not expose secrets or change settings.",
-      inputSchema: toolInputJsonSchema(z.object({ workspace: workspaceRef }).strict()) },
-    { id: "proposeWorkspaceSettings", title: "Propose workspace settings", scopes: ["search", "ingest"],
+    { id: "getProjectSettings", title: "Read project settings", scopes: ["search", "ingest"], keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
+      description: "Read current supported pipeline toggles, chat settings and retrieval defaults for the selected project. Use before proposing changes and to verify what is actually saved after the user applies a proposal. Does not expose secrets or change settings.",
+      inputSchema: toolInputJsonSchema(z.object({ project: projectRef }).strict()) },
+    { id: "proposeProjectSettings", title: "Propose project settings", scopes: ["search", "ingest"],
       // No API key of any type may list or call it: the signed-in app only.
       keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
-      description: "Prepare an exact workspace-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires workspace editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a workspace chat session only.",
-      inputSchema: toolInputJsonSchema(workspaceSettingsProposalInputSchema) },
-    { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
-      description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Pass a returned slug (or the name) as workspace in upload, search or chat. Does not call AI.",
-      inputSchema: toolInputJsonSchema(listWorkspacesInput) },
+      description: "Prepare an exact project-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires project editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a project chat session only.",
+      inputSchema: toolInputJsonSchema(projectSettingsProposalInputSchema) },
+    { id: "listProjects", title: "List projects", scopes: ["search", "ingest"], annotations: READ_ONLY,
+      description: "List projects you can access, including their IDs, slugs, default project, document/page counts and latest processing status. Pass a returned slug (or the name) as project in upload, search or chat. Does not call AI.",
+      inputSchema: toolInputJsonSchema(listProjectsInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has workspace and run IDs for getUploadStatus. Never send local paths. Omit workspace for the default workspace; a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
+      description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has project and run IDs for getUploadStatus. Never send local paths. Omit project for the default project; a name that matches no project creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
       // Flat like every tool schema: uploadInput's refinement enforces exactly one of urls, files or inlineFiles.
       inputSchema: toolInputJsonSchema(uploadInput) },
     ...(env.mcpAppsUiEnabled && uploadBundleAvailable() ? [{ id: "openUploader", title: "Open uploader", scopes: ["ingest" as const], annotations: READ_ONLY,
-      description: "Show an upload widget so the user can drop local files you cannot read. Returns the target workspace and limits only; the widget uploads and reports progress itself. Never creates a workspace: omit workspace for the default. Hosts without MCP Apps support: use upload with urls instead.",
+      description: "Show an upload widget so the user can drop local files you cannot read. Returns the target project and limits only; the widget uploads and reports progress itself. Never creates a project: omit project for the default. Hosts without MCP Apps support: use upload with urls instead.",
       inputSchema: toolInputJsonSchema(openUploaderInput) }] : []),
     { id: "extract", title: "Extract documents (auto-deleted)", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: `Like upload (exactly one of urls, files or inlineFiles, the same workspace rules and follow-up with getUploadStatus), but the files and every output (Markdown, page images, chunks, search index) are deleted automatically when the retention window ends. Omit retentionDays for the free window (48 hours by default); a longer window is charged as storage. The response's extract has id, expiresAt and download state; the user is emailed a sign-in download link when it finishes unless notifyEmail is false. Use for one-off conversions the user does not want kept. Ingestion can incur cost.`,
+      description: `Like upload (exactly one of urls, files or inlineFiles, the same project rules and follow-up with getUploadStatus), but the files and every output (Markdown, page images, chunks, search index) are deleted automatically when the retention window ends. Omit retentionDays for the free window (48 hours by default); a longer window is charged as storage. The response's extract has id, expiresAt and download state; the user is emailed a sign-in download link when it finishes unless notifyEmail is false. Use for one-off conversions the user does not want kept. Ingestion can incur cost.`,
       inputSchema: toolInputJsonSchema(extractInput) },
     { id: "completeUpload", title: "Complete upload (legacy)", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "Legacy fallback for single-PUT sessions: verify uploaded files and start ingestion after every PUT succeeds. Normal uploads complete automatically; use getUploadStatus with sessionId instead. Pass sessionId and fileIds from upload. Do not use for multipart uploads.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
     { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
-      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a workspace; concurrency (1-8, default 4) bounds parallel retrieval. Omitted workspace uses the default. Does not generate answers.",
+      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a project; concurrency (1-8, default 4) bounds parallel retrieval. Omitted project uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
-    { id: "chat", title: "Chat with workspace", scopes: ["chat"],
+    { id: "chat", title: "Chat with project", scopes: ["chat"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },
-      description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use search for your own LLM.",
-      inputSchema: toolInputJsonSchema(workspaceChatInputSchema.omit({ agent: true })) },
+      description: "Generate a grounded answer with citations and token usage using the project's configured model. This calls AI and can incur cost; use search for your own LLM.",
+      inputSchema: toolInputJsonSchema(projectChatInputSchema.omit({ agent: true })) },
     ...webMcpTools(),
     { id: "getUploadStatus", title: "Check upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,
-      description: "Pass sessionId from upload to check file upload state and retrieve the automatic ingestion result containing workspace and run IDs. Then check ingestion progress with workspace and optional runId. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
+      description: "Pass sessionId from upload to check file upload state and retrieve the automatic ingestion result containing project and run IDs. Then check ingestion progress with project and optional runId. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
       inputSchema: toolInputJsonSchema(uploadStatusInput) },
     { id: "getMediaEvidence", title: "Read video and audio transcripts", scopes: ["search"], annotations: READ_ONLY,
       description: "Read an indexed video or audio document's extracted transcript, timestamped frame descriptions and media summary. Use a documentId from getUploadStatus or search. Returns cited text and nextOffset for bounded continuation; does not run new AI or play raw video. Use this before claiming you cannot inspect an uploaded video. One logical page can contain many sampled frames.",
@@ -204,9 +204,9 @@ export function mcpTools(baseUrl: string): McpTool[] {
     { id: "suggestQueries", title: "Suggest search queries", scopes: ["search"], annotations: READ_ONLY,
       description: "Read prior queries and suggestions without AI calls.",
       inputSchema: toolInputJsonSchema(suggestQueriesInput) },
-    ...(deferredProfilesEnabled() ? [{ id: "fullIndex", title: "Index workspace fully", scopes: ["ingest" as const],
+    ...(deferredProfilesEnabled() ? [{ id: "fullIndex", title: "Index project fully", scopes: ["ingest" as const],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
-      description: "Parse and index every remaining page of a deferred (map/visual) workspace, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
+      description: "Parse and index every remaining page of a deferred (map/visual) project, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
       inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
     ...estimates,
     { id: jobsGetToolDefinition.id, title: jobsGetToolDefinition.title, description: jobsGetToolDefinition.description,

@@ -18,7 +18,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { getWorkspaceAccess } from "./organizations.js";
+import { getProjectAccess } from "./organizations.js";
 
 type PreviewSourceDescriptor = {
   filename: string;
@@ -344,8 +344,8 @@ function estimateScenario(args: {
     mode.description,
     ...args.signals.topSignals.slice(0, 2),
     historyForQuality?.sampledDocuments
-      ? `Workspace history has ${historyForQuality.sampledDocuments} sampled docs at this quality.`
-      : "No matching workspace history yet, so this recommendation leans on file metadata.",
+      ? `Project history has ${historyForQuality.sampledDocuments} sampled docs at this quality.`
+      : "No matching project history yet, so this recommendation leans on file metadata.",
   ].filter(Boolean);
 
   return {
@@ -443,14 +443,14 @@ export function buildRunProcessingPreview(args: {
 }
 
 export async function getRunProcessingPreview(
-  request: RunProcessingPreviewRequest & { workspaceId: string },
+  request: RunProcessingPreviewRequest & { projectId: string },
   userId: string,
 ): Promise<RunProcessingPreview> {
-  // Callers resolve the workspace reference first (requireActorWorkspace).
-  const parsed = { ...runProcessingPreviewRequestSchema.parse(request), workspaceId: request.workspaceId };
-  const access = await getWorkspaceAccess(parsed.workspaceId, userId);
+  // Callers resolve the project reference first (requireActorProject).
+  const parsed = { ...runProcessingPreviewRequestSchema.parse(request), projectId: request.projectId };
+  const access = await getProjectAccess(parsed.projectId, userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
 
   const historyRows = await sql<RunPreviewHistoryRow[]>`
@@ -471,14 +471,14 @@ export async function getRunProcessingPreview(
         extract(epoch from (runs.updated_at - runs.created_at))
         / greatest(nullif(runs.pages_total, 0), greatest(d.page_count, 1))
       )::float8 as avg_seconds_per_page
-    from workspace_runs runs
+    from project_runs runs
     join documents d on d.run_id = runs.id
     left join document_run_stage_states drss
       on drss.run_id = runs.id
       and drss.document_id = d.id
       and drss.stage_name = 'extract-markdown'
       and drss.status = 'completed'
-    where runs.workspace_id = ${parsed.workspaceId}
+    where runs.project_id = ${parsed.projectId}
       and runs.status = 'completed'
       and d.status = 'completed'
       and runs.created_at > now() - interval '90 days'

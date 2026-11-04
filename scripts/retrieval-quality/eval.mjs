@@ -52,7 +52,7 @@ export function build(manifestPath, queriesPath, runDirs, output) {
         premises: [{ documentId: state.documentId, pages: q.support_pages, quotes: q.support_match_all }],
         provenance: { sourceId: source.id, url: source.url, pdfSha256: source.sha256, extraction: source.text_extraction, pages },
         original: { query: q, quality: row, qualitySha256: hash(readFileSync(join(dir, "quality.jsonl"))), rawTrace: null, limitation: "Original harness retained summary only; replay is a new observation." },
-        retrieval: { workspaceId: state.workspaceId, documentId: state.documentId, embedding: state.embedding, flags: row.flags, limit: 10 },
+        retrieval: { projectId: state.projectId, documentId: state.documentId, embedding: state.embedding, flags: row.flags, limit: 10 },
         diagnosis: row.correct ? "historical_support_retrieved" : "unresolved_extraction_chunking_or_ranking" });
     }
   }

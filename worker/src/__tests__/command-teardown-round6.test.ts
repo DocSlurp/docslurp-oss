@@ -313,7 +313,7 @@ describe("M3: only a teardown the command caused lists its source, and only for 
       },
       async record(entry) {
         records.push({ documentId: entry.documentId, ttlHours: entry.ttlHours });
-        return { sourceSha256: "sha", orgId: "org-1", workspaceId: "ws-1" };
+        return { sourceSha256: "sha", orgId: "org-1", projectId: "ws-1" };
       },
       async noteRefusal() {},
       async recordOrgFailure() {

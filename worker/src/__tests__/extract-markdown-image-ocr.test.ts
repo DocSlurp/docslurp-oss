@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES, defaultPipelineFeatures, publicDocumentError } from "@docslurp/shared";
 
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -13,13 +13,13 @@ import type { CommandRunner } from "../tools/runner.js";
 const KREUZBERG_OCR_CRASH =
   "kreuzberg=Error: node (1): Error opening data file /home/runner/work/kreuzberg-lts/target/kreuzberg-tesseract-cache/tessdata/eng.traineddata";
 
-function createRun(pipeline: Record<string, unknown> = {}): WorkspaceRun {
+function createRun(pipeline: Record<string, unknown> = {}): ProjectRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, ...pipeline },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
 }
 
 function createDocument(filename: string, mimeType: string): Document {
@@ -143,7 +143,7 @@ describe("image documents whose OCR cannot run", () => {
     } finally { await h.cleanup(); }
   });
 
-  it("fails with a specific, user-facing cause when vision is turned off for the workspace", async () => {
+  it("fails with a specific, user-facing cause when vision is turned off for the project", async () => {
     vi.stubEnv("DOCSLURP_OCR", "off");
     const h = await harness({ format: "image", pipeline: { visionFallback: false } });
     try {

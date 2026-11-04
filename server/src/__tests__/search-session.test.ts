@@ -109,13 +109,13 @@ describe("SearchSessionJournal", () => {
       metadata: {
         originalQuery: rawQuery,
         effectiveQuery: "expanded search query",
-        filters: { workspaceId: "ws-1" },
+        filters: { projectId: "ws-1" },
         options: {
-          filters: { workspaceId: "ws-1" },
+          filters: { projectId: "ws-1" },
           useHyDE: true,
           queryRewrite: true,
         },
-        workspaceId: "ws-1",
+        projectId: "ws-1",
       },
     });
 
@@ -167,7 +167,7 @@ describe("SearchSessionJournal", () => {
       metadata: {
         originalQuery: "find relevant evidence",
         options: {},
-        workspaceId: "ws-1",
+        projectId: "ws-1",
       },
     };
     const first = createSearchSessionJournal({ rootSessionId: "stream-1" });
@@ -230,7 +230,7 @@ describe("SearchSessionJournal", () => {
       query: "retrieve evidence",
       results: [],
       chunks: [],
-      metadata: { originalQuery: "retrieve evidence", options: {}, workspaceId: "ws-1" },
+      metadata: { originalQuery: "retrieve evidence", options: {}, projectId: "ws-1" },
     };
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
@@ -257,12 +257,12 @@ describe("SearchSessionJournal", () => {
       query: "different query",
       results: [],
       chunks: [],
-      metadata: { originalQuery: "different query", options: {}, workspaceId: "other-workspace" },
+      metadata: { originalQuery: "different query", options: {}, projectId: "other-project" },
     })).rejects.toThrow("different query or scope");
     expect(sqlMock).toHaveBeenCalledTimes(1);
     const insert = sqlMock.mock.calls[0]?.[0].join(" ");
     expect(insert).toContain("search_sessions.user_id = excluded.user_id");
-    expect(insert).toContain("search_sessions.metadata ->> 'workspaceId' = excluded.metadata ->> 'workspaceId'");
+    expect(insert).toContain("search_sessions.metadata ->> 'projectId' = excluded.metadata ->> 'projectId'");
     expect(insert).toContain("search_sessions.metadata ->> 'queryHash' = excluded.metadata ->> 'queryHash'");
   });
 });

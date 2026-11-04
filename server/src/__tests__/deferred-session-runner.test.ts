@@ -33,8 +33,8 @@ function run(deferredMs: number | null, temperature: "hot" | "cold") {
     ...(deferredMs === null ? {} : { deferredPageSearch: vi.fn(async () => { await sleep(deferredMs); return { chunks: [], stats: stats(temperature), documentIds: ["dm"] }; }) }),
   };
   const setup = {
-    session: { sessionId: "s", flushUsage: async () => undefined }, normalizedScope: { workspaceId: "ws", orgId: "o" }, workspaceSettings: {},
-    openRouterApiKey: undefined, privacyMode: "standard", workspacePipeline: { embedding: {} },
+    session: { sessionId: "s", flushUsage: async () => undefined }, normalizedScope: { projectId: "ws", orgId: "o" }, projectSettings: {},
+    openRouterApiKey: undefined, privacyMode: "standard", projectPipeline: { embedding: {} },
   };
   const started = performance.now();
   return runSearchSession({ query: "q", userId: "u", options: {}, setup: setup as never, adapters: adapters as never })

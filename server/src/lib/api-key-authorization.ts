@@ -1,13 +1,13 @@
 import type { MiddlewareHandler } from "hono";
 
-import type { WorkspaceRecord } from "@docslurp/shared";
+import type { ProjectRecord } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
   assertActorApiKeyScopes,
   assertActorServerApiKey,
-  assertActorWorkspaceOrgScope,
-  loadActorScopedWorkspace
+  assertActorProjectOrgScope,
+  loadActorScopedProject
 } from "./request-actor.js";
 import type { ValidatedKey } from "../services/api-keys.js";
 import { apiErrorResponse } from "./api-error.js";
@@ -24,15 +24,15 @@ export function assertServerApiKey(apiKey: ValidatedKey | null | undefined): voi
   assertActorServerApiKey(apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null);
 }
 
-export function assertApiKeyWorkspaceScope(apiKey: ValidatedKey | null | undefined, workspace: { id?: string; workspaceId?: string; orgId: string }): void {
-  assertActorWorkspaceOrgScope(apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null, workspace);
+export function assertApiKeyProjectScope(apiKey: ValidatedKey | null | undefined, project: { id?: string; projectId?: string; orgId: string }): void {
+  assertActorProjectOrgScope(apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null, project);
 }
 
-export async function loadApiKeyScopedWorkspace(
-  workspaceId: string,
+export async function loadApiKeyScopedProject(
+  projectId: string,
   apiKey: ValidatedKey,
-): Promise<WorkspaceRecord | null> {
-  return await loadActorScopedWorkspace(workspaceId, { type: "apiKey", userId: apiKey.userId, apiKey });
+): Promise<ProjectRecord | null> {
+  return await loadActorScopedProject(projectId, { type: "apiKey", userId: apiKey.userId, apiKey });
 }
 
 export function apiKeyScopeMiddleware(scopes: string[]): MiddlewareHandler {

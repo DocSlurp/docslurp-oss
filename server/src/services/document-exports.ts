@@ -18,7 +18,7 @@ import { sql } from "../db.js";
 import { deleteUploadedObject, signDownloadGet } from "../lib/storage.js";
 import { startDocumentExportWorkflow } from "../lib/temporal.js";
 import { sendExportReadyEmail } from "./notifications.js";
-import { listAccessibleWorkspaceIds } from "./organizations.js";
+import { listAccessibleProjectIds } from "./organizations.js";
 
 /**
  * Zip exports. The server checks access, estimates the size, records the export
@@ -50,7 +50,7 @@ export class DocumentExportError extends Error {
 interface ExportRecordRow {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   user_id: string;
   document_id: string | null;
   content: DocumentExportContent;
@@ -69,7 +69,7 @@ interface ExportRecordRow {
 }
 
 const recordColumns = sql`
-  id, org_id, workspace_id, user_id, document_id, content, status, filename, object_key, document_count,
+  id, org_id, project_id, user_id, document_id, content, status, filename, object_key, document_count,
   estimated_bytes, size_bytes, skipped_count, notify_email, error,
   created_at::text, completed_at::text, expires_at::text
 `;
@@ -82,7 +82,7 @@ function toExport(row: ExportRecordRow): DocumentExport {
   const live = row.status === "ready" && new Date(row.expires_at).getTime() > Date.now();
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     documentId: row.document_id,
     content: row.content,
     status: row.status === "ready" && !live ? "expired" : row.status,
@@ -111,13 +111,13 @@ export function formatExportBytes(bytes: number): string {
  * Size estimate from stored counters: extracted text (whole-document and
  * per-page Markdown), plus originals and rendered page images for "all".
  */
-async function estimateExport(args: { workspaceId: string; documentId: string | null; content: DocumentExportContent }) {
+async function estimateExport(args: { projectId: string; documentId: string | null; content: DocumentExportContent }) {
   // The same documents, in the same order and up to the same cap, as the worker exports.
   const [row] = await sql<{ documents: number; text_bytes: string; file_bytes: string; page_images: string }[]>`
     with target as (
       select d.id, d.run_id, d.stored_page_text_bytes, d.file_size
       from documents d
-      where d.workspace_id = ${args.workspaceId}
+      where d.project_id = ${args.projectId}
         and d.purged_at is null
         and ${args.documentId
           ? sql`d.id = ${args.documentId}`
@@ -130,7 +130,7 @@ async function estimateExport(args: { workspaceId: string; documentId: string | 
     images as (
       select count(*)::bigint as n
       from (select distinct run_id from target where run_id is not null) runs
-      join workspace_runs r on r.id = runs.run_id
+      join project_runs r on r.id = runs.run_id
       cross join lateral jsonb_object_keys(coalesce(r.artifacts, '{}'::jsonb)) as slot
       where slot ~ '^[^:]+:page-[0-9]+$' and split_part(slot, ':', 1) in (select id from target)
     )
@@ -149,37 +149,37 @@ async function estimateExport(args: { workspaceId: string; documentId: string | 
 
 /** A live document the user can read, with what an export needs to name and scope it. */
 export async function findExportableDocument(documentId: string, userId: string): Promise<ExportableDocument | null> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return null;
-  const [row] = await sql<{ id: string; filename: string; workspace_id: string; org_id: string; status: string }[]>`
-    select id, filename, workspace_id, org_id, status from documents
-    where id = ${documentId} and workspace_id = any(${sql.array(workspaceIds)}) and purged_at is null
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return null;
+  const [row] = await sql<{ id: string; filename: string; project_id: string; org_id: string; status: string }[]>`
+    select id, filename, project_id, org_id, status from documents
+    where id = ${documentId} and project_id = any(${sql.array(projectIds)}) and purged_at is null
   `;
-  return row ? { id: row.id, filename: row.filename, workspaceId: row.workspace_id, orgId: row.org_id, status: row.status } : null;
+  return row ? { id: row.id, filename: row.filename, projectId: row.project_id, orgId: row.org_id, status: row.status } : null;
 }
 
-export type ExportableDocument = { id: string; filename: string; workspaceId: string; orgId: string; status?: string };
+export type ExportableDocument = { id: string; filename: string; projectId: string; orgId: string; status?: string };
 
 export async function requestDocumentExport(args: {
   userId: string;
   content: DocumentExportContent;
-  /** Exactly one of document or workspace, already authorized by the caller. */
+  /** Exactly one of document or project, already authorized by the caller. */
   document?: ExportableDocument | null;
-  workspace?: { id: string; name: string; orgId: string } | null;
+  project?: { id: string; name: string; orgId: string } | null;
 }): Promise<DocumentExport> {
   const target = args.document
-    ? { workspaceId: args.document.workspaceId, orgId: args.document.orgId, documentId: args.document.id, name: documentExportFolderNames([args.document.filename])[0]! }
-    : args.workspace
-      ? { workspaceId: args.workspace.id, orgId: args.workspace.orgId, documentId: null, name: safeExportName(args.workspace.name, "workspace") }
+    ? { projectId: args.document.projectId, orgId: args.document.orgId, documentId: args.document.id, name: documentExportFolderNames([args.document.filename])[0]! }
+    : args.project
+      ? { projectId: args.project.id, orgId: args.project.orgId, documentId: null, name: safeExportName(args.project.name, "project") }
       : null;
-  if (!target) throw new DocumentExportError(404, "not_found", "Document or workspace not found");
+  if (!target) throw new DocumentExportError(404, "not_found", "Document or project not found");
   if (args.document?.status && args.document.status !== "completed") {
     throw new DocumentExportError(409, "conflict", args.document.status === "failed"
       ? "This document failed to process, so there is nothing to export. Reprocess it first."
       : "This document is still processing. Export it once it finishes.");
   }
 
-  const { documents, estimatedBytes } = await estimateExport({ workspaceId: target.workspaceId, documentId: target.documentId, content: args.content });
+  const { documents, estimatedBytes } = await estimateExport({ projectId: target.projectId, documentId: target.documentId, content: args.content });
   if (documents === 0) throw new DocumentExportError(404, "not_found", "There are no documents to export yet.");
   if (estimatedBytes > DOCUMENT_EXPORT_MAX_BYTES) {
     throw new DocumentExportError(
@@ -197,7 +197,7 @@ export async function requestDocumentExport(args: {
     // The same export asked for again (double click, second tab) reuses the one in flight or just finished.
     const [reuse] = await tx<ExportRecordRow[]>`
       select ${recordColumns} from document_exports
-      where user_id = ${args.userId} and workspace_id = ${target.workspaceId}
+      where user_id = ${args.userId} and project_id = ${target.projectId}
         and document_id is not distinct from ${target.documentId} and content = ${args.content}
         and status in ('queued', 'running', 'ready') and expires_at > now()
         and created_at > now() - interval '1 hour'
@@ -220,11 +220,11 @@ export async function requestDocumentExport(args: {
     }
     const [row] = await tx<ExportRecordRow[]>`
       insert into document_exports (
-        id, org_id, workspace_id, user_id, document_id, content, filename, object_key,
+        id, org_id, project_id, user_id, document_id, content, filename, object_key,
         document_count, estimated_bytes, notify_email, next_email_at, expires_at
       ) values (
-        ${id}, ${target.orgId}, ${target.workspaceId}, ${args.userId}, ${target.documentId}, ${args.content},
-        ${`${target.name}.zip`}, ${documentExportObjectPrefix({ orgId: target.orgId, workspaceId: target.workspaceId, exportId: id })},
+        ${id}, ${target.orgId}, ${target.projectId}, ${args.userId}, ${target.documentId}, ${args.content},
+        ${`${target.name}.zip`}, ${documentExportObjectPrefix({ orgId: target.orgId, projectId: target.projectId, exportId: id })},
         ${documents}, ${estimatedBytes}, ${notifyEmail}, ${notifyEmail ? tx`now()` : null},
         -- An upper bound until the export is ready, when the 7 days start.
         now() + make_interval(days => ${DOCUMENT_EXPORT_TTL_DAYS}, hours => ${STALLED_EXPORT_HOURS})
@@ -243,45 +243,45 @@ export async function requestDocumentExport(args: {
   return toExport(created.row);
 }
 
-/** An export the user requested, while they can still read its workspace. */
+/** An export the user requested, while they can still read its project. */
 export async function getDocumentExport(id: string, userId: string): Promise<(DocumentExport & { orgId: string }) | null> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return null;
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return null;
   const [row] = await sql<ExportRecordRow[]>`
     select ${recordColumns} from document_exports
-    where id = ${id} and user_id = ${userId} and workspace_id = any(${sql.array(workspaceIds)})
+    where id = ${id} and user_id = ${userId} and project_id = any(${sql.array(projectIds)})
   `;
   return row ? { ...toExport(row), orgId: row.org_id } : null;
 }
 
 export async function listDocumentExports(
   userId: string,
-  options: { limit?: number; allowWorkspace?: (workspace: { id: string; orgId: string }) => boolean } = {},
+  options: { limit?: number; allowProject?: (project: { id: string; orgId: string }) => boolean } = {},
 ): Promise<DocumentExport[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return [];
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return [];
   const rows = await sql<ExportRecordRow[]>`
     select ${recordColumns} from document_exports
-    where user_id = ${userId} and workspace_id = any(${sql.array(workspaceIds)})
+    where user_id = ${userId} and project_id = any(${sql.array(projectIds)})
     order by created_at desc limit ${Math.max(1, Math.min(options.limit ?? 20, 100))}
   `;
   return rows
-    .filter((row) => options.allowWorkspace?.({ id: row.workspace_id, orgId: row.org_id }) ?? true)
+    .filter((row) => options.allowProject?.({ id: row.project_id, orgId: row.org_id }) ?? true)
     .map(toExport);
 }
 
 /**
  * A two-minute presigned link straight to storage for a ready, unexpired
- * export, so the zip's bytes never pass through the API. Ownership, workspace
+ * export, so the zip's bytes never pass through the API. Ownership, project
  * access and expiry are checked here, in the same request, right before signing.
  */
 export async function signDocumentExportDownload(id: string, userId: string): Promise<string | null> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return null;
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return null;
   // Withdrawn as soon as any document in it is deleted or purged, before the sweep catches up.
   const [row] = await sql<Pick<ExportRecordRow, "object_key" | "filename">[]>`
     select e.object_key, e.filename from document_exports e
-    where e.id = ${id} and e.user_id = ${userId} and e.workspace_id = any(${sql.array(workspaceIds)})
+    where e.id = ${id} and e.user_id = ${userId} and e.project_id = any(${sql.array(projectIds)})
       and e.status = 'ready' and e.expires_at > now()
       and not exists (
         select 1 from unnest(e.document_ids) as exported(document_id)
@@ -304,7 +304,7 @@ let lastOrphanScan = 0;
 
 /**
  * Maintenance sweep: email finished large exports, fail stalled ones, delete
- * expired objects, and (hourly) withdraw exports whose documents, workspace or
+ * expired objects, and (hourly) withdraw exports whose documents, project or
  * requester are gone. Each step claims rows with a conditional update, so
  * concurrent API instances never email or delete twice.
  */
@@ -331,13 +331,13 @@ export async function sweepDocumentExports(now = Date.now()): Promise<void> {
 
   if (now - lastOrphanScan >= ORPHAN_SCAN_INTERVAL_MS) {
     lastOrphanScan = now;
-    // A document in the export, its workspace or its requester is gone (deleted,
+    // A document in the export, its project or its requester is gone (deleted,
     // purged, account deleted, organization offboarded): delete the zip, then the
     // row, which names things that no longer exist.
     const orphaned = await sql<{ id: string; object_key: string }[]>`
       select e.id, e.object_key from document_exports e
       where e.status <> 'expired' and (
-        not exists (select 1 from workspaces w where w.id = e.workspace_id)
+        not exists (select 1 from projects w where w.id = e.project_id)
         or not exists (select 1 from "user" u where u.id = e.user_id and u.deleted_at is null)
         or exists (
           select 1 from unnest(case when e.document_id is null then e.document_ids else array_append(e.document_ids, e.document_id) end) as exported(document_id)
@@ -373,19 +373,19 @@ async function sendDueExportEmails(): Promise<void> {
     where u.id = e.user_id and u.deleted_at is null
       and e.notify_email and e.emailed_at is null and e.status in ('ready', 'failed')
       and e.email_attempts < ${MAX_EMAIL_ATTEMPTS} and (e.next_email_at is null or e.next_email_at <= now())
-    returning ${sql`e.id, e.org_id, e.workspace_id, e.user_id, e.document_id, e.content, e.status, e.filename, e.object_key,
+    returning ${sql`e.id, e.org_id, e.project_id, e.user_id, e.document_id, e.content, e.status, e.filename, e.object_key,
       e.document_count, e.estimated_bytes, e.size_bytes, e.skipped_count, e.notify_email, e.error,
       e.created_at::text, e.completed_at::text, e.expires_at::text, u.email, e.email_attempts`}
   `;
   for (const row of due) {
-    // Someone removed from the workspace since asking learns nothing more about it.
-    const access = await listAccessibleWorkspaceIds(row.user_id);
-    if (!row.email || !access.includes(row.workspace_id)) continue;
+    // Someone removed from the project since asking learns nothing more about it.
+    const access = await listAccessibleProjectIds(row.user_id);
+    if (!row.email || !access.includes(row.project_id)) continue;
     await sendExportReadyEmail({
       userId: row.user_id,
       recipientEmail: row.email,
       orgId: row.org_id,
-      workspaceId: row.workspace_id,
+      projectId: row.project_id,
       filename: row.filename,
       ready: row.status === "ready",
       sizeLabel: row.size_bytes === null ? null : formatExportBytes(Number(row.size_bytes)),

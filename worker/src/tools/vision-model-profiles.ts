@@ -59,7 +59,7 @@ export interface OpenRouterProviderPreferences {
 
 /**
  * First-attempt OpenRouter routing: a pinned `order`, or an `only` allowlist of measured hosts that OpenRouter
- * sorts by current price. An org or workspace without China-based providers narrows either to its allowed hosts
+ * sorts by current price. An org or project without China-based providers narrows either to its allowed hosts
  * (openrouter-routing.ts `restrictToNonChinaProviders`, applied before every send).
  */
 export type OpenRouterRoute =

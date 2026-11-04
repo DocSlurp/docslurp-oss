@@ -11,9 +11,9 @@ export async function resumeBlockedRuns(
   deps: { sql?: SqlClient; orgId?: string; limit?: number } = {},
 ): Promise<{ resumed: number; stillBlocked: number }> {
   const sql = deps.sql ?? defaultSql;
-  const rows = await sql<{ id: string; org_id: string; workspace_id: string; speed_boost: boolean }[]>`
-    select r.id, r.org_id, r.workspace_id, coalesce(r.pipeline->'speedBoost' = 'true'::jsonb, false) as speed_boost from workspace_runs r
-    join workspaces w on w.id = r.workspace_id and w.archived_at is null
+  const rows = await sql<{ id: string; org_id: string; project_id: string; speed_boost: boolean }[]>`
+    select r.id, r.org_id, r.project_id, coalesce(r.pipeline->'speedBoost' = 'true'::jsonb, false) as speed_boost from project_runs r
+    join projects w on w.id = r.project_id and w.archived_at is null
     where r.status = 'blocked' and r.control_state is null ${deps.orgId ? sql`and r.org_id = ${deps.orgId}` : sql``}
     order by r.created_at, r.id
     limit ${deps.limit ?? 100}
@@ -22,21 +22,21 @@ export async function resumeBlockedRuns(
   let stillBlocked = 0;
   for (const row of rows) {
     const admitted = await sql.begin(async (tx) => {
-      const block = await admissionBlock(tx, row.org_id, row.workspace_id, { speedBoost: row.speed_boost });
+      const block = await admissionBlock(tx, row.org_id, row.project_id, { speedBoost: row.speed_boost });
       if (block) return false;
       try {
         return await tx.savepoint(async (sp) => {
           const [updated] = await sp<{ id: string }[]>`
-            update workspace_runs
+            update project_runs
             set status = 'queued', blocked_reason = null, workflow_started_at = null, workflow_start_next_at = null,
                 updated_at = now()
-            where id = ${row.id} and org_id = ${row.org_id} and workspace_id = ${row.workspace_id}
+            where id = ${row.id} and org_id = ${row.org_id} and project_id = ${row.project_id}
               and status = 'blocked' and control_state is null
             returning id
           `;
           if (!updated) return false;
           if (creditLeasesEnabled() && !spendGuardsSkipped()) {
-            await requireRunCreditLease(sp, { runId: row.id, orgId: row.org_id, workspaceId: row.workspace_id });
+            await requireRunCreditLease(sp, { runId: row.id, orgId: row.org_id, projectId: row.project_id });
           }
           return true;
         });

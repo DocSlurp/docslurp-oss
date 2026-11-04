@@ -28,7 +28,7 @@ export type OrgStorage = { objectBytes: number; indexBytes: number; sourceBytes:
 
 /**
  * Object + index bytes the org is storing: live documents from
- * workspace_corpus_stats, plus archived superseded versions (their pages and
+ * project_corpus_stats, plus archived superseded versions (their pages and
  * source stay stored for browsing). Live and archived rows are disjoint
  * (archived rows are superseded), so nothing is double-counted. Purged rows
  * are excluded.
@@ -38,28 +38,28 @@ export async function getOrgStorage(
   db: typeof sql = sql,
   options: { excludeExtracts?: boolean } = {},
 ): Promise<OrgStorage> {
-  // Live extract documents (counted in workspace_corpus_stats as completed,
+  // Live extract documents (counted in project_corpus_stats as completed,
   // non-superseded rows) are free in their window or prepaid as extended
   // retention, so the daily meter leaves them out.
   const extracts = options.excludeExtracts
     ? db`(select coalesce(sum(d.file_size), 0) as bytes, coalesce(sum(d.page_count), 0) as pages
         from documents d
-        join workspace_runs r on r.id = d.run_id
-        -- Same org rule as workspace_corpus_stats above: the document's workspace's org.
-        join workspaces w on w.id = d.workspace_id
+        join project_runs r on r.id = d.run_id
+        -- Same org rule as project_corpus_stats above: the document's project's org.
+        join projects w on w.id = d.project_id
         where w.org_id = ${orgId} and r.extract_id is not null
           and d.status = 'completed' and d.superseded_at is null)`
     : db`(select 0 as bytes, 0 as pages)`;
   const [row] = await db<{ source_bytes: string | number; pages: string | number }[]>`
     with extract_docs as ${extracts}
     select
-      greatest(0, coalesce((select sum(s.source_bytes) from workspace_corpus_stats s
-        join workspaces w on w.id = s.workspace_id where w.org_id = ${orgId}), 0)
+      greatest(0, coalesce((select sum(s.source_bytes) from project_corpus_stats s
+        join projects w on w.id = s.project_id where w.org_id = ${orgId}), 0)
        - (select bytes from extract_docs)
        + coalesce((select sum(d.file_size) from documents d
         where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as source_bytes,
-      greatest(0, coalesce((select sum(s.page_count) from workspace_corpus_stats s
-        join workspaces w on w.id = s.workspace_id where w.org_id = ${orgId}), 0)
+      greatest(0, coalesce((select sum(s.page_count) from project_corpus_stats s
+        join projects w on w.id = s.project_id where w.org_id = ${orgId}), 0)
        - (select pages from extract_docs)
        + coalesce((select sum(d.page_count) from documents d
         where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as pages
@@ -78,9 +78,9 @@ export async function getOrgStorage(
 async function getWorkersInUse(orgId: string): Promise<number> {
   const [row] = await sql<{ in_use: number }[]>`
     select greatest(
-      (select count(*) from workspace_runs where org_id = ${orgId} and status = 'processing'),
+      (select count(*) from project_runs where org_id = ${orgId} and status = 'processing'),
       (select count(*) from page_work_tasks t
-        join workspace_runs r on r.id = t.run_id
+        join project_runs r on r.id = t.run_id
         where r.org_id = ${orgId} and t.status = 'processing')
     )::int as in_use
   `;

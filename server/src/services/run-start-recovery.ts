@@ -77,7 +77,7 @@ export function createRunStartRecovery(deps: {
     return await sql<PendingStartRow[]>`
       with due as (
         select id
-        from workspace_runs
+        from project_runs
         where status = 'queued'
           and workflow_started_at is null
           and kind <> 'materialize'
@@ -92,7 +92,7 @@ export function createRunStartRecovery(deps: {
         limit ${config.batchSize}
         for update skip locked
       )
-      update workspace_runs r
+      update project_runs r
       set workflow_start_next_at = now() + (${config.leaseMs} * interval '1 millisecond')
       from due
       where r.id = due.id
@@ -104,7 +104,7 @@ export function createRunStartRecovery(deps: {
     if (ids.length === 0) return;
     // Temporal is unreachable: retry these on the next pass or connect, not after the lease.
     await sql`
-      update workspace_runs
+      update project_runs
       set workflow_start_next_at = now()
       where id = any(${ids})
         and workflow_started_at is null

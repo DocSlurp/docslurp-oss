@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import {
   VISION_ROUTING_VERSION_SLOT,
@@ -11,8 +11,8 @@ import {
   visionRoutingV2Enabled,
 } from "./vision-routing-v2.js";
 
-function run(workspaceId?: string, artifacts: Record<string, string> = {}) {
-  return WorkflowState.create({ id: "run-1", workspaceId, artifacts, stats: {}, pipeline: {} } as unknown as WorkspaceRun, []);
+function run(projectId?: string, artifacts: Record<string, string> = {}) {
+  return WorkflowState.create({ id: "run-1", projectId, artifacts, stats: {}, pipeline: {} } as unknown as ProjectRun, []);
 }
 
 /** What `startRun` pins for a new run under `env`. */
@@ -27,12 +27,12 @@ describe("VISION_ROUTING_V2", () => {
     }
   });
 
-  it("is on for every workspace with on", () => {
+  it("is on for every project with on", () => {
     expect(startsV2(run("ws-a"), { VISION_ROUTING_V2: "on" })).toBe(true);
     expect(startsV2(run(undefined), { VISION_ROUTING_V2: " On " })).toBe(true);
   });
 
-  it("enables an allowlisted workspace and nobody else", () => {
+  it("enables an allowlisted project and nobody else", () => {
     const env = { VISION_ROUTING_V2: "3f2c1b9e-0d4a-4b8e-9c71-5a6e2f1d0b3c, ws_canary" };
     expect(startsV2(run("3f2c1b9e-0d4a-4b8e-9c71-5a6e2f1d0b3c"), env)).toBe(true);
     expect(startsV2(run("ws_canary"), env)).toBe(true);
@@ -99,6 +99,6 @@ describe("VISION_ROUTING_V2", () => {
   it("labels the routing version for stage stats", () => {
     expect(routingVersion(true)).toBe("v2");
     expect(routingVersion(false)).toBe("v1");
-    expect(visionRoutingV2Enabled({ mode: "workspaces", workspaceIds: new Set(["a1"]) }, "a1")).toBe(true);
+    expect(visionRoutingV2Enabled({ mode: "projects", projectIds: new Set(["a1"]) }, "a1")).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import { nitroBaseModel } from "./workspace-chat-models.js";
+import { nitroBaseModel } from "./project-chat-models.js";
 import { z } from "zod";
 
 import { PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
@@ -61,7 +61,7 @@ export function dollarsToCredits(dollars: number): number {
  *   prompt caching. Standard-model means above (.0037-.0095) leave 1.6-4x at
  *   1.5 credits before those cuts; recheck per-model means after deploy.
  *   mercury-3 and mimo-v2.6-flash (p90 .018/.023, above 1.5 credits; eval-only,
- *   not in WORKSPACE_CHAT_MODELS) move to advanced.
+ *   not in PROJECT_CHAT_MODELS) move to advanced.
  * - Standard answers 1.5 -> 1 credit (owner decision 2026-10-25), after the cuts.
  *   Measured on production /v1/chat (88 turns per model, 2026-10-25), p50 / p90
  *   USD per answer: glm-5.3-flash .0022/.0041, claude-haiku-5.5 .0024/.0039,
@@ -265,7 +265,7 @@ export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
   "qwen3.8-max-prime": "premium",
 };
 
-/** Tier of a chat model id (`provider/model`, bare `model`, or a `workspace:` alias resolved by the caller). */
+/** Tier of a chat model id (`provider/model`, bare `model`, or a `project:` alias resolved by the caller). */
 export function chatModelTier(model: string | null | undefined): ChatAnswerTier {
   const selected = (model ?? "").trim().toLowerCase();
   const raw = nitroBaseModel(selected) ?? selected;
@@ -716,7 +716,7 @@ export const QUALITY_MODES: Record<QualityMode, QualityModeInfo> = {
     id: "fast",
     label: "Fast",
     description: "Text layer only. Scanned pages are kept as images, not read.",
-    priceNote: "Pages bill Fast. A page bills Rich only when a model actually reads it, such as visual indexing embedding its page image; a workspace cannot combine Fast with visual mode. Pages without a text layer are stored as page images and are not searchable.",
+    priceNote: "Pages bill Fast. A page bills Rich only when a model actually reads it, such as visual indexing embedding its page image; a project cannot combine Fast with visual mode. Pages without a text layer are stored as page images and are not searchable.",
     creditsPer1kPages: { min: PRICE_CARD.fastPer1kPages, max: PRICE_CARD.fastPer1kPages },
   },
   auto: {
@@ -1181,7 +1181,7 @@ export type IngestJobCost = z.infer<typeof ingestJobCostSchema>;
 /**
  * House organizations whose spend is never blocked for lack of credits (our
  * own docs site search and indexing keys). Usage is still metered, debited and
- * reported; only the credit gate is skipped. Workspace and org budget caps
+ * reported; only the credit gate is skipped. Project and org budget caps
  * still apply. Comma-separated org ids in BILLING_EXEMPT_ORG_IDS.
  */
 export function billingExemptOrgIds(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {

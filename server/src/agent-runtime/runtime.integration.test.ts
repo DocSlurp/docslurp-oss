@@ -20,7 +20,7 @@ let routes:typeof import("../routes/chat-operations.js").chatOperationRoutes;
 const shutdown=new AbortController();
 let worker:Promise<void>;
 let actor={type:"session" as const,userId:"native-api-owner",sessionId:"native-api-session",user:{id:"native-api-owner",name:"Native",email:"native-api@example.test"}};
-const workspace="00000000-0000-4000-8000-000000000320";
+const project="00000000-0000-4000-8000-000000000320";
 beforeAll(async()=>{
   if(!enabled)return;
   if(new URL(url!).hostname!=="127.0.0.1"||new URL(redis!).hostname!=="127.0.0.1")throw new Error("isolated loopback services required");
@@ -32,12 +32,12 @@ beforeAll(async()=>{
   vi.stubEnv("CORS_ALLOWED_ORIGINS",origin);
   authPool=new Pool({connectionString:url,max:4});
   (globalThis as {__docslurpAuthPool?:Pool}).__docslurpAuthPool=authPool;
-  vi.doMock("../services/workspace-chat.js",()=>({chatWorkspace:state.chat,workspaceChatDisabledBody:async()=>null}));
+  vi.doMock("../services/project-chat.js",()=>({chatProject:state.chat,projectChatDisabledBody:async()=>null}));
   vi.stubEnv("DOCSLURP_DURABLE_CHAT","1");vi.stubEnv("MASTRA_REDIS_URL",redis!);vi.stubEnv("MASTRA_NAMESPACE",`native-api-test:${randomUUID()}`);
   await sql`delete from chat_operations where user_id='native-api-owner'`;
   await sql`delete from documents where user_id='native-api-owner'`;
-  await sql`delete from workspace_runs where user_id='native-api-owner'`;
-  await sql`delete from workspaces where user_id='native-api-owner'`;
+  await sql`delete from project_runs where user_id='native-api-owner'`;
+  await sql`delete from projects where user_id='native-api-owner'`;
   await sql`delete from organizations where id='native-api-org'`;
   await sql`delete from "user" where id='native-api-owner'`;
   await sql`insert into "user"(id,name,email) values('native-api-owner','Native','native-api@example.test')`;
@@ -45,7 +45,7 @@ beforeAll(async()=>{
     values('native-api-session','native-api-test-token','native-api-owner',now()+interval '1 day',now(),now())`;
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('native-api-org','Native','native-api-org','native-api-owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org','native-api-owner','owner') on conflict do nothing`;
-  await sql`insert into workspaces(id,org_id,user_id,name) values(${workspace},'native-api-org','native-api-owner','Native')`;
+  await sql`insert into projects(id,org_id,user_id,name) values(${project},'native-api-org','native-api-owner','Native')`;
   runtime=await import("./runtime.js");
   routes=(await import("../routes/chat-operations.js")).chatOperationRoutes;
   worker=runtime.runNativeChatWorker(shutdown.signal);
@@ -65,7 +65,7 @@ it.runIf(enabled)("runs once under native ownership, recovers a lost HTTP ACK an
   });
   const app=new Hono().use("*",async(c,next)=>{c.set("requestActor",actor);await next();}).route("/v1/chat/operations",routes);
   const post=()=>app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_lost_ack"},
-    body:JSON.stringify({q:"synthetic",workspace})});
+    body:JSON.stringify({q:"synthetic",project})});
   try {
     const accepted=await post();expect(accepted.status).toBe(202);
     const {operationId}=await accepted.json();
@@ -141,7 +141,7 @@ it.runIf(enabled)("explicit native cancellation aborts only the accepted task an
   });
   const app=new Hono().use("*",async(c,next)=>{c.set("requestActor",actor);await next();}).route("/v1/chat/operations",routes);
   const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_cancel_task"},
-    body:JSON.stringify({q:"cancel fixture",workspace})});
+    body:JSON.stringify({q:"cancel fixture",project})});
   expect(response.status).toBe(202);
   const {operationId}=await response.json();
   await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${operationId}`)).json()).operation.snapshot.text).toBe("kept partial"),{timeout:10000});
@@ -153,33 +153,33 @@ it.runIf(enabled)("explicit native cancellation aborts only the accepted task an
 },20000);
 
 it.runIf(enabled)("keeps shared materialization visible after the native parent answer completes and tree cancellation",async()=>{
-  await sql`insert into documents(id,user_id,org_id,workspace_id,filename,mime_type,source_key,status)
-    values('native-linked-document','native-api-owner','native-api-org',${workspace},'fixture.txt','text/plain','synthetic','completed')
+  await sql`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status)
+    values('native-linked-document','native-api-owner','native-api-org',${project},'fixture.txt','text/plain','synthetic','completed')
     on conflict do nothing`;
   const {defaultMaterializeDeps}=await import("../search/deferred/materialize-client.js");
   let runId="";
   state.chat.mockImplementation(async(args)=>{
     runId=await defaultMaterializeDeps.createRun({userId:actor.userId,orgId:"native-api-org",
-      workspaceId:workspace,documentId:"native-linked-document",documents:1,pages:1,pageNumbers:[1]});
+      projectId:project,documentId:"native-linked-document",documents:1,pages:1,pageNumbers:[1]});
     await args.onTextDelta("parent answer");
     return {answer:"parent answer",citations:[]};
   });
   const app=new Hono().use("*",async(c,next)=>{c.set("requestActor",actor);await next();}).route("/v1/chat/operations",routes);
   const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_link_task"},
-    body:JSON.stringify({q:"linked fixture",workspace})});
+    body:JSON.stringify({q:"linked fixture",project})});
   expect(response.status).toBe(202);const {operationId}=await response.json();
   let recovered:any;
   await vi.waitFor(async()=>{
     recovered=await (await app.request(`/v1/chat/operations/${operationId}`)).json();
     expect(recovered.operation.status).toBe("completed");
   },{timeout:10000});
-  expect(recovered.operation).toMatchObject({id:operationId,root_id:operationId,workspace_id:workspace});
+  expect(recovered.operation).toMatchObject({id:operationId,root_id:operationId,project_id:project});
   expect(recovered.treeSettled).toBe(false);
   expect(recovered.dependencies[0]).toMatchObject({run_id:runId,parent_id:operationId,status:"waiting",ownership:"shared",cancellation:"observe_only"});
   expect(recovered.dependencies[0].attempt_id).toBeTruthy();
   const cancel=()=>app.request(`/v1/chat/operations/${operationId}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:'{"scope":"tree"}'});
   expect((await cancel()).status).toBe(200);expect((await cancel()).status).toBe(200);
-  expect((await sql`select status from workspace_runs where id=${runId}`)[0]!.status).toBe("processing");
+  expect((await sql`select status from project_runs where id=${runId}`)[0]!.status).toBe("processing");
   await sql`insert into document_page_states(document_id,page_number,state) values('native-linked-document',1,'indexed') on conflict(document_id,page_number) do update set state='indexed'`;
   recovered=await (await app.request(`/v1/chat/operations/${operationId}`)).json();
   expect(recovered.treeSettled).toBe(true);expect(recovered.dependencies[0]).toMatchObject({status:"completed",result_ref:{documentId:"native-linked-document",pages:[1]}});
@@ -195,7 +195,7 @@ it.runIf(enabled).each(["valid", "expired", "cancelled"])("recovers %s pending d
   });
   const app=new Hono().use("*",async(c,next)=>{c.set("requestActor",actor);await next();}).route("/v1/chat/operations",routes);
   const post=()=>app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":`native_lost_dispatch_${condition}`},
-    body:JSON.stringify({q:"dispatch fixture",workspace})});
+    body:JSON.stringify({q:"dispatch fixture",project})});
   try {
     const first=await post();expect(first.status).toBe(202);
     const {operationId}=await first.json();

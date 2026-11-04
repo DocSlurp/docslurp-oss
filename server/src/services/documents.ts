@@ -11,7 +11,7 @@ import {
   type DocumentIndexEntry,
   type DocumentRecord,
   type PipelineFeatures,
-  type WorkspaceRun
+  type ProjectRun
 } from "@docslurp/shared";
 
 import { env } from "../config.js";
@@ -21,7 +21,7 @@ import { getArtifactText, parseArtifactUri } from "../lib/artifacts.js";
 import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
-import { getWorkspaceAccess, listAccessibleWorkspaceIds, listEditableWorkspaceIds } from "./organizations.js";
+import { getProjectAccess, listAccessibleProjectIds, listEditableProjectIds } from "./organizations.js";
 import { runCreation } from "./run-creation.js";
 import {
   documentUsageTotals,
@@ -36,7 +36,7 @@ type DocumentRow = {
   id: string;
   org_id: string;
   user_id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string | null;
   filename: string;
   mime_type: string;
@@ -47,7 +47,7 @@ type DocumentRow = {
   file_size?: number | string | null;
   source_sha256?: string | null;
   deduped_from_document_id?: string | null;
-  dedup_scope?: "workspace" | "org" | null;
+  dedup_scope?: "project" | "org" | null;
   version_number: number;
   previous_version_id: string | null;
   canonical_id?: string | null;
@@ -61,7 +61,7 @@ type DocumentRow = {
 };
 
 type DocumentIndexRow = DocumentRow & {
-  workspace_name: string;
+  project_name: string;
   org_name: string | null;
   summary: string | null;
 };
@@ -79,10 +79,10 @@ type DocumentStageRow = {
 type RunRow = {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   user_id: string;
-  status: WorkspaceRun["status"];
-  stage: WorkspaceRun["stage"];
+  status: ProjectRun["status"];
+  stage: ProjectRun["stage"];
   total_documents: number;
   pipeline: PipelineFeatures;
   artifacts: Record<string, string> | null;
@@ -456,7 +456,7 @@ export interface DocumentViewerPayload {
   };
   /** Present for audio/video: stats for the media focus view ("This recording"). */
   media?: MediaSummary | null;
-  run: Pick<WorkspaceRun, "id" | "workspaceId" | "stage" | "status" | "updatedAt"> | null;
+  run: Pick<ProjectRun, "id" | "projectId" | "stage" | "status" | "updatedAt"> | null;
   usage: {
     document: {
       inputTokens: number;
@@ -544,7 +544,7 @@ function documentStatusReason(row: Pick<DocumentRow, "status" | "metadata">): st
   if (row.status !== PII_BLOCKED_DOCUMENT_STATUS) return null;
   const pii = row.metadata?.pii;
   const reason = pii && typeof pii === "object" ? (pii as { reason?: unknown }).reason : null;
-  return typeof reason === "string" && reason ? reason : "Blocked from indexing by the workspace PII policy.";
+  return typeof reason === "string" && reason ? reason : "Blocked from indexing by the project PII policy.";
 }
 
 /**
@@ -561,7 +561,7 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     runId: row.run_id,
     filename: row.filename,
     title: documentTitle(row),
@@ -588,7 +588,7 @@ function mapDocument(row: DocumentRow): DocumentRecord {
 function mapDocumentIndexEntry(row: DocumentIndexRow): DocumentIndexEntry {
   return documentIndexEntrySchema.parse({
     ...mapDocument(row),
-    workspaceName: row.workspace_name,
+    projectName: row.project_name,
     orgName: row.org_name ?? null,
     summary: row.summary ?? null
   });
@@ -636,8 +636,8 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
     return false;
   }
 
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return false;
   }
   const candidates = Array.from(new Set([uri, `s3://${parsed.bucket}/${parsed.key}`]));
@@ -647,7 +647,7 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
       exists(
         select 1
         from documents d
-        where d.workspace_id = any(${sql.array(workspaceIds)})
+        where d.project_id = any(${sql.array(projectIds)})
           and (${orgId === undefined} or d.org_id = ${orgId ?? null})
           and d.source_key = ${parsed.key}
       )
@@ -657,14 +657,14 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
         join documents d
           on d.id = stage_states.document_id
           and d.run_id = stage_states.run_id
-        where d.workspace_id = any(${sql.array(workspaceIds)})
+        where d.project_id = any(${sql.array(projectIds)})
           and (${orgId === undefined} or d.org_id = ${orgId ?? null})
           and stage_states.artifact_uri = ${uri}
       )
       or exists(
         select 1
-        from workspace_runs runs
-        where runs.workspace_id = any(${sql.array(workspaceIds)})
+        from project_runs runs
+        where runs.project_id = any(${sql.array(projectIds)})
           and (${orgId === undefined} or runs.org_id = ${orgId ?? null})
           and exists(
             select 1
@@ -677,7 +677,7 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
     and not exists(
       select 1
       from documents d
-      where d.workspace_id = any(${sql.array(workspaceIds)})
+      where d.project_id = any(${sql.array(projectIds)})
         and ${documentWithholdsUri(candidates)}
     ) as accessible
   `;
@@ -686,8 +686,8 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
 }
 
 async function getDocumentRow(docId: string, userId: string): Promise<DocumentRow | null> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return null;
   }
 
@@ -697,7 +697,7 @@ async function getDocumentRow(docId: string, userId: string): Promise<DocumentRo
       coalesce(array_agg(distinct dt.tag) filter (where dt.tag is not null), '{}') as tags
     from documents d
     left join document_tags dt on dt.document_id = d.id
-    where d.id = ${docId} and d.workspace_id = any(${sql.array(workspaceIds)})
+    where d.id = ${docId} and d.project_id = any(${sql.array(projectIds)})
     group by d.id
     limit 1
   `;
@@ -709,15 +709,15 @@ export async function listDocumentsWithFilters(args: {
   userId: string;
   orgId?: string;
   runId?: string;
-  workspaceId?: string;
+  projectId?: string;
   tags?: string[];
 }): Promise<DocumentRecord[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(args.userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(args.userId);
+  if (projectIds.length === 0) {
     return [];
   }
 
-  const conditions: SqlFragment[] = [sql`d.workspace_id = any(${sql.array(workspaceIds)})`];
+  const conditions: SqlFragment[] = [sql`d.project_id = any(${sql.array(projectIds)})`];
 
   if (args.runId) {
     conditions.push(sql`d.run_id = ${args.runId}`);
@@ -727,8 +727,8 @@ export async function listDocumentsWithFilters(args: {
     conditions.push(sql`d.org_id = ${args.orgId}`);
   }
 
-  if (args.workspaceId) {
-    conditions.push(sql`d.workspace_id = ${args.workspaceId}`);
+  if (args.projectId) {
+    conditions.push(sql`d.project_id = ${args.projectId}`);
   }
 
   if (args.tags && args.tags.length > 0) {
@@ -758,7 +758,7 @@ export async function listDocumentsWithFilters(args: {
 export async function listDocumentIndexEntries(args: {
   userId: string;
   orgId?: string;
-  workspaceId?: string;
+  projectId?: string;
   tags?: string[];
   q?: string;
   limit?: number;
@@ -771,8 +771,8 @@ export async function listDocumentIndexEntries(args: {
   limit: number;
   truncated: boolean;
 }> {
-  const workspaceIds = await listAccessibleWorkspaceIds(args.userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(args.userId);
+  if (projectIds.length === 0) {
     return {
       documents: [],
       totalCount: 0,
@@ -782,7 +782,7 @@ export async function listDocumentIndexEntries(args: {
   }
 
   const limit = Math.max(1, Math.min(args.limit ?? 120, 250));
-  const conditions: SqlFragment[] = [sql`d.workspace_id = any(${sql.array(workspaceIds)})`];
+  const conditions: SqlFragment[] = [sql`d.project_id = any(${sql.array(projectIds)})`];
   const trimmedQuery = args.q?.trim() ?? "";
 
   if (!args.includeSuperseded) {
@@ -793,8 +793,8 @@ export async function listDocumentIndexEntries(args: {
     conditions.push(sql`d.org_id = ${args.orgId}`);
   }
 
-  if (args.workspaceId) {
-    conditions.push(sql`d.workspace_id = ${args.workspaceId}`);
+  if (args.projectId) {
+    conditions.push(sql`d.project_id = ${args.projectId}`);
   }
 
   if (args.tags && args.tags.length > 0) {
@@ -839,7 +839,7 @@ export async function listDocumentIndexEntries(args: {
 
   const joinClause = sql`
     from documents d
-    join workspaces w on w.id = d.workspace_id
+    join projects w on w.id = d.project_id
     left join organizations orgs on orgs.id = d.org_id
     left join lateral (
       select summary
@@ -861,7 +861,7 @@ export async function listDocumentIndexEntries(args: {
      select
        d.*,
        coalesce(array_agg(distinct dt.tag) filter (where dt.tag is not null), '{}') as tags,
-       w.name as workspace_name,
+       w.name as project_name,
        orgs.name as org_name,
        ds.summary
      ${joinClause}
@@ -942,17 +942,17 @@ export function buildDocumentVersionEntries(rows: DocumentVersionRow[]): Documen
 /**
  * The whole version chain of a document, newest first, in both directions from `docId`.
  * Access is checked on the requested document; the chain is a single query on the
- * `(workspace_id, canonical_id)` index, so it never leaves the document's workspace.
+ * `(project_id, canonical_id)` index, so it never leaves the document's project.
  */
 export async function getDocumentVersionsWithTags(docId: string, userId: string): Promise<DocumentVersionEntry[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return [];
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return [];
 
-  const [target] = await sql<(DocumentVersionRow & { workspace_id: string; canonical_id: string | null })[]>`
-    select id, workspace_id, canonical_id, version_number, created_at, status, page_count, filename,
+  const [target] = await sql<(DocumentVersionRow & { project_id: string; canonical_id: string | null })[]>`
+    select id, project_id, canonical_id, version_number, created_at, status, page_count, filename,
            superseded_at, archived_at, purged_at, source_path, file_size, reindex_of, superseded_by_document_id
     from documents
-    where id = ${docId} and workspace_id = any(${sql.array(workspaceIds)})
+    where id = ${docId} and project_id = any(${sql.array(projectIds)})
     limit 1
   `;
   if (!target) return [];
@@ -963,7 +963,7 @@ export async function getDocumentVersionsWithTags(docId: string, userId: string)
     select id, version_number, created_at, status, page_count, filename, superseded_at,
            archived_at, purged_at, source_path, file_size, reindex_of, superseded_by_document_id
     from documents
-    where workspace_id = ${target.workspace_id} and canonical_id = ${target.canonical_id}
+    where project_id = ${target.project_id} and canonical_id = ${target.canonical_id}
   `;
   return buildDocumentVersionEntries(rows);
 }
@@ -978,7 +978,7 @@ async function loadDocumentTextSnapshot(docId: string, userId: string): Promise<
   const [run] = row.run_id
     ? await sql<{ artifacts: Record<string, string> | null }[]>`
         select artifacts
-        from workspace_runs
+        from project_runs
         where id = ${row.run_id}
         limit 1
       `
@@ -1083,7 +1083,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
         select
           id,
           org_id,
-          workspace_id,
+          project_id,
           user_id,
           status,
           stage,
@@ -1091,7 +1091,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
           pipeline,
           artifacts,
           updated_at::text
-        from workspace_runs
+        from project_runs
         where id = ${row.run_id}
         limit 1
       `
@@ -1216,7 +1216,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
     run: run
       ? {
           id: run.id,
-          workspaceId: run.workspace_id,
+          projectId: run.project_id,
           stage: run.stage,
           status: run.status,
           updatedAt: serializeTimestamp(run.updated_at)
@@ -1232,7 +1232,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
 
 export async function setDocumentTags(docId: string, userId: string, tags: string[]): Promise<string[] | null> {
   const document = await getDocumentRow(docId, userId);
-  if (!document || !(await listEditableWorkspaceIds(userId)).includes(document.workspace_id)) {
+  if (!document || !(await listEditableProjectIds(userId)).includes(document.project_id)) {
     return null;
   }
 
@@ -1245,7 +1245,7 @@ export async function setDocumentTags(docId: string, userId: string, tags: strin
       await tx`insert into document_tags (document_id, user_id, tag) values (${docId}, ${userId}, ${tag})`;
     }
     // Native search caches each document's tags with its eligibility.
-    await notifySearchEligibilityChanged(tx as unknown as typeof sql, [document.workspace_id]);
+    await notifySearchEligibilityChanged(tx as unknown as typeof sql, [document.project_id]);
   });
 
   return normalized;
@@ -1257,16 +1257,16 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
     return 0;
   }
 
-  const accessibleWorkspaceIds = await listEditableWorkspaceIds(userId);
-  if (accessibleWorkspaceIds.length === 0) {
+  const accessibleProjectIds = await listEditableProjectIds(userId);
+  if (accessibleProjectIds.length === 0) {
     return 0;
   }
 
-  const scopedIds = await sql<{ id: string; workspace_id: string }[]>`
-    select d.id, d.workspace_id
+  const scopedIds = await sql<{ id: string; project_id: string }[]>`
+    select d.id, d.project_id
     from documents d
     where d.id = any(${sql.array(documentIds)})
-      and d.workspace_id = any(${sql.array(accessibleWorkspaceIds)})
+      and d.project_id = any(${sql.array(accessibleProjectIds)})
   `;
 
   const rows = scopedIds.flatMap((document) =>
@@ -1286,7 +1286,7 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
       insert into document_tags ${tx(rows)}
       on conflict (document_id, tag) do nothing
     `;
-    await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.workspace_id));
+    await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
   });
 
   return scopedIds.length;
@@ -1298,16 +1298,16 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
     return 0;
   }
 
-  const accessibleWorkspaceIds = await listEditableWorkspaceIds(userId);
-  if (accessibleWorkspaceIds.length === 0) {
+  const accessibleProjectIds = await listEditableProjectIds(userId);
+  if (accessibleProjectIds.length === 0) {
     return 0;
   }
 
-  const scopedIds = await sql<{ id: string; workspace_id: string }[]>`
-    select d.id, d.workspace_id
+  const scopedIds = await sql<{ id: string; project_id: string }[]>`
+    select d.id, d.project_id
     from documents d
     where d.id = any(${sql.array(documentIds)})
-      and d.workspace_id = any(${sql.array(accessibleWorkspaceIds)})
+      and d.project_id = any(${sql.array(accessibleProjectIds)})
   `;
 
   if (scopedIds.length === 0) {
@@ -1320,7 +1320,7 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
       where document_id = any(${tx.array(scopedIds.map((row) => row.id))})
         and tag = any(${tx.array(normalized)})
     `;
-    await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.workspace_id));
+    await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
   });
 
   return scopedIds.length;
@@ -1328,7 +1328,7 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
 
 export interface DeletedDocumentResult {
   documentId: string;
-  workspaceId: string;
+  projectId: string;
   filename: string;
   runId: string | null;
   sourceKey: string;
@@ -1340,19 +1340,19 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     return [];
   }
 
-  const editableWorkspaceIds = await listEditableWorkspaceIds(userId);
-  if (editableWorkspaceIds.length === 0) {
+  const editableProjectIds = await listEditableProjectIds(userId);
+  if (editableProjectIds.length === 0) {
     return [];
   }
 
   return await sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
 
-    const docs = await transaction<Pick<DocumentRow, "id" | "workspace_id" | "filename" | "run_id" | "source_key" | "previous_version_id">[]>`
-      select id, workspace_id, filename, run_id, source_key, previous_version_id
+    const docs = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id">[]>`
+      select id, project_id, filename, run_id, source_key, previous_version_id
       from documents
       where id = any(${transaction.array(normalizedIds)})
-        and workspace_id = any(${transaction.array(editableWorkspaceIds)})
+        and project_id = any(${transaction.array(editableProjectIds)})
     `;
 
     if (docs.length === 0) {
@@ -1381,23 +1381,23 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
       `;
     }
 
-    const deleted = await transaction<Pick<DocumentRow, "id" | "workspace_id" | "filename" | "run_id" | "source_key">[]>`
+    const deleted = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key">[]>`
       delete from documents
       where id = any(${transaction.array(docs.map((doc) => doc.id))})
-      returning id, workspace_id, filename, run_id, source_key
+      returning id, project_id, filename, run_id, source_key
     `;
 
     // Deleting a current version leaves its archived predecessors to the retention sweep.
-    const workspaceIds = [...new Set(deleted.map((row) => row.workspace_id))];
-    if (workspaceIds.length > 0) {
-      await transaction`update workspaces set retention_changed_at = clock_timestamp() where id = any(${transaction.array(workspaceIds)})`;
-      // Native search caches each workspace's eligible documents; deletes emit no run_events hint.
-      await notifySearchEligibilityChanged(transaction, workspaceIds);
+    const projectIds = [...new Set(deleted.map((row) => row.project_id))];
+    if (projectIds.length > 0) {
+      await transaction`update projects set retention_changed_at = clock_timestamp() where id = any(${transaction.array(projectIds)})`;
+      // Native search caches each project's eligible documents; deletes emit no run_events hint.
+      await notifySearchEligibilityChanged(transaction, projectIds);
     }
 
     return deleted.map((row) => ({
       documentId: row.id,
-      workspaceId: row.workspace_id,
+      projectId: row.project_id,
       filename: row.filename,
       runId: row.run_id,
       sourceKey: row.source_key
@@ -1405,17 +1405,17 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   });
 }
 
-/** The workspace and organization of each listed document the user can read, so API key routes can check key scope. */
-export async function listDocumentOwners(documentIds: string[], userId: string): Promise<Array<{ id: string; workspaceId: string; orgId: string }>> {
+/** The project and organization of each listed document the user can read, so API key routes can check key scope. */
+export async function listDocumentOwners(documentIds: string[], userId: string): Promise<Array<{ id: string; projectId: string; orgId: string }>> {
   if (documentIds.length === 0) return [];
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return [];
-  const rows = await sql<{ id: string; workspace_id: string; org_id: string }[]>`
-    select d.id, d.workspace_id, w.org_id
-    from documents d join workspaces w on w.id = d.workspace_id
-    where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(documentIds)})
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return [];
+  const rows = await sql<{ id: string; project_id: string; org_id: string }[]>`
+    select d.id, d.project_id, w.org_id
+    from documents d join projects w on w.id = d.project_id
+    where d.project_id = any(${sql.array(projectIds)}) and d.id = any(${sql.array(documentIds)})
   `;
-  return rows.map((row) => ({ id: row.id, workspaceId: row.workspace_id, orgId: row.org_id }));
+  return rows.map((row) => ({ id: row.id, projectId: row.project_id, orgId: row.org_id }));
 }
 
 export async function deleteDocument(docId: string, userId: string): Promise<DeletedDocumentResult | null> {
@@ -1428,24 +1428,24 @@ export async function deleteDocuments(documentIds: string[], userId: string): Pr
 }
 
 export async function exportDocumentArtifacts(documentIds: string[], userId: string): Promise<Record<string, DocumentArtifactEntry[]>> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return {};
   }
 
   const docs = await sql<DocumentRow[]>`
-    select id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, extraction_mode, page_count,
+    select id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, extraction_mode, page_count,
       version_number, previous_version_id, metadata, created_at::text, updated_at::text
     from documents
-    where workspace_id = any(${sql.array(workspaceIds)}) and id = any(${sql.array(documentIds)})
+    where project_id = any(${sql.array(projectIds)}) and id = any(${sql.array(documentIds)})
   `;
 
   const runIds = Array.from(new Set(docs.map((doc) => doc.run_id).filter((value): value is string => Boolean(value))));
   const runs: RunRow[] = runIds.length > 0
     ? await sql<RunRow[]>`
-        select id, org_id, workspace_id, user_id, status, stage, pipeline, artifacts, updated_at::text
-        from workspace_runs
-        where workspace_id = any(${sql.array(workspaceIds)}) and id = any(${sql.array(runIds)})
+        select id, org_id, project_id, user_id, status, stage, pipeline, artifacts, updated_at::text
+        from project_runs
+        where project_id = any(${sql.array(projectIds)}) and id = any(${sql.array(runIds)})
       `
     : [];
 
@@ -1472,11 +1472,11 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
 
 /**
  * Reprocesses documents into new versions. By default each document re-runs
- * with its original run's pipeline; `useWorkspacePipeline` uses the
- * workspace's current settings instead (ingest report "reprocess affected
+ * with its original run's pipeline; `useProjectPipeline` uses the
+ * project's current settings instead (ingest report "reprocess affected
  * files" after a settings change).
  *
- * Each (workspace, pipeline) group is independent: a group that cannot be
+ * Each (project, pipeline) group is independent: a group that cannot be
  * created is reported in `failed` and the rest still run. Only when every
  * group fails does this throw (the first error, so spend blocks keep their
  * status code). Run creation starts each Run; a start that cannot happen
@@ -1485,41 +1485,41 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
 export async function bulkReprocessDocuments(
   documentIds: string[],
   userId: string,
-  options: { useWorkspacePipeline?: boolean; speedBoost?: boolean } = {},
+  options: { useProjectPipeline?: boolean; speedBoost?: boolean } = {},
 ): Promise<BulkReprocessResult> {
   const result: BulkReprocessResult = { runs: [], failed: [], warnings: [] };
   if (documentIds.length === 0) {
     return result;
   }
 
-  const workspaceIds = await listEditableWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listEditableProjectIds(userId);
+  if (projectIds.length === 0) {
     return result;
   }
 
   const selected = await sql<(DocumentRow & { pipeline: PipelineFeatures | null; is_extract: boolean })[]>`
     select
       d.*,
-      exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null) as is_extract,
-      case when ${options.useWorkspacePipeline === true}
-        then (select w.pipeline from workspaces w where w.id = d.workspace_id)
+      exists (select 1 from project_runs xr where xr.id = d.run_id and xr.extract_id is not null) as is_extract,
+      case when ${options.useProjectPipeline === true}
+        then (select w.pipeline from projects w where w.id = d.project_id)
         else coalesce(
-          (select wr.pipeline from workspace_runs wr where wr.id = d.run_id),
+          (select wr.pipeline from project_runs wr where wr.id = d.run_id),
           '{}'::jsonb
         )
       end as pipeline
     from documents d
-    where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(documentIds)})
-    order by d.workspace_id, d.created_at
+    where d.project_id = any(${sql.array(projectIds)}) and d.id = any(${sql.array(documentIds)})
+    order by d.project_id, d.created_at
   `;
   // Extract documents are deleted with their extract and are never reprocessed (409 when nothing else is left).
   const rows = selected.filter((row) => !row.is_extract);
   const extractRows = selected.filter((row) => row.is_extract);
   if (extractRows.length > 0) {
     const rejected = extractNotReprocessable();
-    for (const workspaceId of new Set(extractRows.map((row) => row.workspace_id))) {
-      const ids = extractRows.filter((row) => row.workspace_id === workspaceId).map((row) => row.id);
-      result.failed.push({ workspaceId, documentIds: ids, message: rejected.message, code: rejected.code });
+    for (const projectId of new Set(extractRows.map((row) => row.project_id))) {
+      const ids = extractRows.filter((row) => row.project_id === projectId).map((row) => row.id);
+      result.failed.push({ projectId, documentIds: ids, message: rejected.message, code: rejected.code });
       result.warnings.push(`${ids.length} extract ${ids.length === 1 ? "document was" : "documents were"} not reprocessed: ${rejected.message}`);
     }
     if (rows.length === 0) throw rejected;
@@ -1528,12 +1528,12 @@ export async function bulkReprocessDocuments(
   const groups = new Map<string, Array<DocumentRow & { pipeline: PipelineFeatures | null }>>();
   for (const row of rows) {
     // Stored snapshots may hold extractor settings the strict schemas now reject; drop them before grouping.
-    row.pipeline = sanitizeStoredPipeline(row.pipeline, options.useWorkspacePipeline === true ? `workspace ${row.workspace_id}` : `run ${row.run_id}`);
+    row.pipeline = sanitizeStoredPipeline(row.pipeline, options.useProjectPipeline === true ? `project ${row.project_id}` : `run ${row.run_id}`);
     // A document's own indexing_mode wins over its run's pipeline (a backfill keeps the source's old run).
     if (row.indexing_mode && row.pipeline && row.pipeline.indexingMode !== row.indexing_mode) {
       row.pipeline = { ...row.pipeline, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) };
     }
-    const key = `${row.workspace_id}:${JSON.stringify(row.pipeline ?? {})}`;
+    const key = `${row.project_id}:${JSON.stringify(row.pipeline ?? {})}`;
     const existing = groups.get(key) ?? [];
     existing.push(row);
     groups.set(key, existing);
@@ -1550,7 +1550,7 @@ export async function bulkReprocessDocuments(
     try {
       const created = await runCreation.create({
         userId,
-        workspaceId: first.workspace_id,
+        projectId: first.project_id,
         kind: "bulk-reprocess",
         speedBoost: options.speedBoost === true,
         // A partial source run's stage selection must not carry into a full re-run.
@@ -1564,13 +1564,13 @@ export async function bulkReprocessDocuments(
       const message = error instanceof Error ? error.message : String(error);
       const code = (error as { code?: unknown } | null)?.code;
       result.failed.push({
-        workspaceId: first.workspace_id,
+        projectId: first.project_id,
         documentIds: group.map((doc) => doc.id),
         message,
         ...(typeof code === "string" ? { code } : {}),
       });
       result.warnings.push(
-        `${group.length} ${group.length === 1 ? "document" : "documents"} in ${first.workspace_id} ${group.length === 1 ? "was" : "were"} not reprocessed: ${message}`,
+        `${group.length} ${group.length === 1 ? "document" : "documents"} in ${first.project_id} ${group.length === 1 ? "was" : "were"} not reprocessed: ${message}`,
       );
     }
   }
@@ -1580,8 +1580,8 @@ export async function bulkReprocessDocuments(
 }
 
 export type BulkReprocessResult = {
-  runs: WorkspaceRun[];
-  failed: Array<{ workspaceId: string; documentIds: string[]; message: string; code?: string }>;
+  runs: ProjectRun[];
+  failed: Array<{ projectId: string; documentIds: string[]; message: string; code?: string }>;
   warnings: string[];
 };
 
@@ -1638,9 +1638,9 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
     where document_id=${documentId} and run_id=${row.run_id} order by stage_name limit 65` : [];
   if (stages.length > 64) throw new Error("snapshot_too_large");
   const [run] = row.run_id ? await sql<{
-    id: string; workspace_id: string; stage: string; status: string; updated_at: string; total_documents: number;
-  }[]>`select id,workspace_id,stage,status,updated_at::text,total_documents from workspace_runs
-    where id=${row.run_id} and workspace_id=${row.workspace_id} and org_id=${row.org_id}` : [];
+    id: string; project_id: string; stage: string; status: string; updated_at: string; total_documents: number;
+  }[]>`select id,project_id,stage,status,updated_at::text,total_documents from project_runs
+    where id=${row.run_id} and project_id=${row.project_id} and org_id=${row.org_id}` : [];
   const [pages] = await sql<{ pages: number; chunks: number }[]>`select
     (select count(*)::int from document_pages where document_id=${documentId}) as pages,
     (select count(*)::int from document_chunks where document_id=${documentId}) as chunks`;
@@ -1662,7 +1662,7 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
   } : { inputTokens: 0, outputTokens: 0, costCents: 0, basis };
   return realtimeViewerSnapshotSchema.parse({
     document: {
-      id: document.id, workspaceId: document.workspaceId, runId: document.runId,
+      id: document.id, projectId: document.projectId, runId: document.runId,
       status: document.status, title: document.title?.slice(0,1024) ?? null,
       statusReason: document.statusReason?.slice(0,2048) ?? null, pageCount: document.pageCount,
       versionNumber: document.versionNumber ?? 1, previousVersionId: document.previousVersionId ?? null,
@@ -1672,7 +1672,7 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
     tags: document.tags,
     stages: stages.map(stage => ({ ...stage, error: publicDocumentError(stage.error)?.slice(0,2048) ?? null })),
     pageStats: { pageCount: Math.max(pages?.pages ?? 0,document.pageCount), chunkCount: pages?.chunks ?? 0, pageTextCount: pages?.pages ?? 0 },
-    run: run ? { id: run.id,workspaceId: run.workspace_id,stage: run.stage,status: run.status,updatedAt: run.updated_at } : null,
+    run: run ? { id: run.id,projectId: run.project_id,stage: run.stage,status: run.status,updatedAt: run.updated_at } : null,
     usage: { document: documentUsage, run: fullRunUsage, estimatedDocument },
   });
 }

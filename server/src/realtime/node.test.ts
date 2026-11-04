@@ -130,11 +130,11 @@ describe("real Node realtime Upgrade", () => {
     expect(await rejected(f.url,{origin:ORIGIN,cookie:"session=owner"})).toBe(429);
   });
 
-  it("rejects activity captured before constituent workspace revocation", async () => {
+  it("rejects activity captured before constituent project revocation", async () => {
     const f = await fixture();
     let release!: () => void;
     const hold = new Promise<void>(resolve => {release=resolve;});
-    vi.mocked(f.backend.project).mockImplementation(async () => { await hold; return { runs: [{id:RUN,workspaceId:"private"}] }; });
+    vi.mocked(f.backend.project).mockImplementation(async () => { await hold; return { runs: [{id:RUN,projectId:"private"}] }; });
     const {ws,frames} = await connect(f.url); subscribe(ws);
     await vi.waitFor(() => expect(f.backend.project).toHaveBeenCalled());
     vi.mocked(f.backend.authorizeDelivery!).mockResolvedValue(false);

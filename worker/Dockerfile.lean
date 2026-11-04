@@ -11,7 +11,7 @@
 # /usr/bin/python3) and native addons match the runtime stage exactly.
 
 # Build stage: compile TypeScript, then produce a self-contained production
-# node_modules for the worker only (no pnpm store, no workspace-root deps).
+# node_modules for the worker only (no pnpm store, no project-root deps).
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS builder
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app

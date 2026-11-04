@@ -3,22 +3,22 @@ import type {
   PipelineFeatureOverrides,
   PipelineFeatures,
   RunStage,
-  WorkspaceRunEventType as SharedWorkspaceRunEventType,
+  ProjectRunEventType as SharedProjectRunEventType,
 } from "@docslurp/shared";
 import { normalizePipelineFeatures } from "@docslurp/shared";
 
 export type JsonMap = Record<string, unknown>;
 
-export interface WorkspaceRun {
+export interface ProjectRun {
   id: string;
   orgId: string | null;
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
   /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
   orgFunded?: boolean;
-  /** True when the org and the run's workspace both allow China-based model providers; unset is restricted. */
+  /** True when the org and the run's project both allow China-based model providers; unset is restricted. */
   allowChinaProviders?: boolean;
   userId: string;
-  workspaceId?: string;
+  projectId?: string;
   kind: string;
   status: string;
   stage: string;
@@ -27,7 +27,7 @@ export interface WorkspaceRun {
   pagesTotal: number;
   pagesProcessed: number;
   /**
-   * Committed billed spend of the run (`workspace_runs.spent_cents`): the sum
+   * Committed billed spend of the run (`project_runs.spent_cents`): the sum
    * of cost_cents of every usage event persisted for it, kept by a trigger on
    * usage_events (migration 0056) and refreshed by each progress checkpoint.
    * Add the ledger's pending billable cents for the live figure the run cost
@@ -40,7 +40,7 @@ export interface WorkspaceRun {
   stats: JsonMap;
   artifacts: Record<string, string>;
   claimId: string | null;
-  /** Extract runs (workspace_runs.extract_id) write every artifact under this prefix instead of <user>/<run>. */
+  /** Extract runs (project_runs.extract_id) write every artifact under this prefix instead of <user>/<run>. */
   storagePrefix?: string | null;
   extractId?: string | null;
   createdAt: Date;
@@ -126,15 +126,15 @@ export interface StageState {
   updatedAt: Date;
 }
 
-export type WorkspaceRunEventType = SharedWorkspaceRunEventType | string;
+export type ProjectRunEventType = SharedProjectRunEventType | string;
 
-export interface WorkspaceRunEvent {
+export interface ProjectRunEvent {
   id?: string;
   userId: string;
   runId: string;
   documentId?: string;
   stageName?: string;
-  eventType: WorkspaceRunEventType | string;
+  eventType: ProjectRunEventType | string;
   status?: string;
   message?: string;
   progress?: JsonMap;
@@ -152,7 +152,7 @@ export interface EmbeddingProfile {
   model: string;
   baseUrl: string | null;
   dimensions: number;
-  /** Explicitly configured workspace dimensions, sent to servers that support them. */
+  /** Explicitly configured project dimensions, sent to servers that support them. */
   requestedDimensions?: number;
   task: EmbeddingConfig["task"];
   normalize: boolean;

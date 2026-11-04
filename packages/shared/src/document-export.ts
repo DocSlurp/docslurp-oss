@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Zip exports of a document or a workspace. The server records and queues an
+ * Zip exports of a document or a project. The server records and queues an
  * export; the worker builds it into object storage; the download link lives
  * seven days and the maintenance sweep deletes the object after that.
  */
@@ -17,21 +17,21 @@ export const DOCUMENT_EXPORT_TTL_DAYS = 7;
 export const DOCUMENT_EXPORT_EMAIL_THRESHOLD_BYTES = 250 * 1024 * 1024;
 /** The largest export accepted. Zip without ZIP64 tops out at 4 GiB. */
 export const DOCUMENT_EXPORT_MAX_BYTES = 3 * 1024 * 1024 * 1024;
-/** Most documents in one workspace export. */
+/** Most documents in one project export. */
 export const DOCUMENT_EXPORT_MAX_DOCUMENTS = 5_000;
 
 export const documentExportContentSchema = z.enum(["markdown", "all"]);
 export type DocumentExportContent = z.infer<typeof documentExportContentSchema>;
 
 export const documentExportRequestSchema = z.object({
-  /** One document. Omit to export a workspace. */
+  /** One document. Omit to export a project. */
   documentId: z.string().min(1).optional(),
-  /** A workspace UUID, slug or `default`; omitted means the organization's default workspace. */
-  workspaceId: z.string().min(1).optional(),
+  /** A project UUID, slug or `default`; omitted means the organization's default project. */
+  projectId: z.string().min(1).optional(),
   /** "markdown": Markdown, per-page Markdown, structured data, metadata. "all": plus originals, page images and readable outputs. */
   content: documentExportContentSchema.default("markdown"),
-}).refine((value) => !(value.documentId && value.workspaceId), {
-  message: "Pass documentId or workspaceId, not both",
+}).refine((value) => !(value.documentId && value.projectId), {
+  message: "Pass documentId or projectId, not both",
 });
 export type DocumentExportRequest = z.infer<typeof documentExportRequestSchema>;
 
@@ -40,7 +40,7 @@ export type DocumentExportStatus = z.infer<typeof documentExportStatusSchema>;
 
 export const documentExportSchema = z.object({
   id: z.string(),
-  workspaceId: z.string(),
+  projectId: z.string(),
   documentId: z.string().nullable(),
   content: documentExportContentSchema,
   status: documentExportStatusSchema,
@@ -71,13 +71,13 @@ export function documentExportWorkflowId(exportId: string): string {
 }
 
 /**
- * exports/<org>/<workspace>/<export>/: everything an export writes lives under
+ * exports/<org>/<project>/<export>/: everything an export writes lives under
  * this prefix (one zip per worker attempt, `a<attempt>.zip`), so cleanup can
  * remove a prefix and a bucket lifecycle rule can target `exports/`. The
  * readable name is applied as Content-Disposition when the link is signed.
  */
-export function documentExportObjectPrefix(args: { orgId: string; workspaceId: string; exportId: string }): string {
-  return `exports/${args.orgId}/${args.workspaceId}/${args.exportId}/`;
+export function documentExportObjectPrefix(args: { orgId: string; projectId: string; exportId: string }): string {
+  return `exports/${args.orgId}/${args.projectId}/${args.exportId}/`;
 }
 
 /** Longest file or folder name an export writes, so paths stay well under Windows' 260 characters. */

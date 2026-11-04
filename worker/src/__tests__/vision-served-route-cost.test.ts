@@ -20,7 +20,7 @@ import { findVisionOutputRejected, resetStreamingSupportForTest } from "../tools
 
 /**
  * Vision usage is priced and labelled on the route that actually served (or billed) each request: a fallback's
- * model and provider, the configured OpenAI base URL, never the workspace's configured primary route.
+ * model and provider, the configured OpenAI base URL, never the project's configured primary route.
  */
 const baseCfg = {
   openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1",

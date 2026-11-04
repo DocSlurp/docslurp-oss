@@ -25,7 +25,7 @@ credentials and prevent their restart. The operator attestation is required
 because legacy binaries have no startup handshake. Do not set it globally in an
 image, deployment environment, or API startup configuration. Do not bypass the
 supported migrator with drizzle-kit or direct SQL. Fresh installations with no
-workspace_runs table and already-migrated installations skip this one-time gate.
+project_runs table and already-migrated installations skip this one-time gate.
 
 ## Required sequence
 

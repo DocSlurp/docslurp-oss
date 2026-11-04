@@ -44,7 +44,7 @@ function quantile(values: number[], q: number): number {
 }
 
 describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
-  const qrels = qrelsPath ? JSON.parse(readFileSync(qrelsPath, "utf8")) as { workspaceId: string; userId: string; queries: Query[] } : null;
+  const qrels = qrelsPath ? JSON.parse(readFileSync(qrelsPath, "utf8")) as { projectId: string; userId: string; queries: Query[] } : null;
   beforeAll(async () => {
     sql = postgres(databaseUrl!, { max: 20, prepare: false, onnotice: () => {}, debug: (_connection, query) => { statements += 1; if (!WRITE.test(query)) reads += 1; } });
     vi.doMock("../db.js", () => ({ sql }));
@@ -69,7 +69,7 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
     const before = statements;
     const readsBefore = reads;
     const started = performance.now();
-    const response = await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { workspaceId: qrels!.workspaceId } });
+    const response = await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { projectId: qrels!.projectId } });
     const ms = performance.now() - started;
     const onPath = statements - before;
     const readsOnPath = reads - readsBefore;
@@ -95,7 +95,7 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
       while (next < queries.length) {
         const query = queries[next++]!;
         const started = performance.now();
-        await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { workspaceId: qrels!.workspaceId } });
+        await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { projectId: qrels!.projectId } });
         concurrent.push(performance.now() - started);
       }
     }));

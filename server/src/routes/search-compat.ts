@@ -2,25 +2,25 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { adapterQuery, runSearchAdapter, SearchCompatibilityError, type SearchProvider } from "@docslurp/sdk/search-adapters";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
-import { apiKeyHasAnyScope, loadApiKeyScopedWorkspace } from "../lib/api-key-authorization.js";
+import { apiKeyHasAnyScope, loadApiKeyScopedProject } from "../lib/api-key-authorization.js";
 import { hybridSearch } from "../services/search.js";
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { searchOptions } from "../lib/search-input.js";
-import { resolveActorWorkspaceId } from "../lib/request-actor.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
+import { resolveActorProjectId } from "../lib/request-actor.js";
+import { ProjectAccessError } from "../services/default-project.js";
 
-async function execute(c: Context, provider: SearchProvider, requestedWorkspaceId: string, params: unknown) {
-  adapterQuery(provider, requestedWorkspaceId, params);
+async function execute(c: Context, provider: SearchProvider, requestedProjectId: string, params: unknown) {
+  adapterQuery(provider, requestedProjectId, params);
   const key = c.get("apiKey");
   if (!apiKeyHasAnyScope(key, ["search"])) return Response.json({ error: "search scope required" }, { status: 403 });
-  // Index/collection "default" maps to the key's organization default workspace.
-  const workspaceId = await resolveActorWorkspaceId({ type: "apiKey", userId: key.userId, apiKey: key }, requestedWorkspaceId).catch((error: unknown) => {
-    if (error instanceof WorkspaceAccessError) return null;
+  // Index/collection "default" maps to the key's organization default project.
+  const projectId = await resolveActorProjectId({ type: "apiKey", userId: key.userId, apiKey: key }, requestedProjectId).catch((error: unknown) => {
+    if (error instanceof ProjectAccessError) return null;
     throw error;
   });
-  const workspace = workspaceId ? await loadApiKeyScopedWorkspace(workspaceId, key) : null;
-  if (!workspace || !workspaceId) return Response.json({ error: "Workspace not found" }, { status: 404 });
-  return await runSearchAdapter(provider, workspaceId, params, async input => publicSearchResponse(await hybridSearch(input.q, key.userId, searchOptions({ ...input, workspaceId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, compression: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }))));
+  const project = projectId ? await loadApiKeyScopedProject(projectId, key) : null;
+  if (!project || !projectId) return Response.json({ error: "Project not found" }, { status: 404 });
+  return await runSearchAdapter(provider, projectId, params, async input => publicSearchResponse(await hybridSearch(input.q, key.userId, searchOptions({ ...input, projectId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, compression: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }))));
 }
 export const searchCompatRoutes = new Hono()
   .onError((error, c) => {
@@ -40,14 +40,14 @@ export const searchCompatRoutes = new Hono()
     }
   })
   .use("*", apiKeyAuth)
-  .on(["GET", "POST"], "/meilisearch/indexes/:workspaceId/search", async c => {
+  .on(["GET", "POST"], "/meilisearch/indexes/:projectId/search", async c => {
     const params = c.req.method === "GET" ? c.req.query() : await c.req.json();
-    const response = await execute(c, "meilisearch", c.req.param("workspaceId"), params);
+    const response = await execute(c, "meilisearch", c.req.param("projectId"), params);
     return response instanceof Response ? response : c.json(response);
   })
-  .on(["GET", "POST"], "/typesense/collections/:workspaceId/documents/search", async c => {
+  .on(["GET", "POST"], "/typesense/collections/:projectId/documents/search", async c => {
     const params = c.req.method === "GET" ? c.req.query() : await c.req.json();
-    const response = await execute(c, "typesense", c.req.param("workspaceId"), params);
+    const response = await execute(c, "typesense", c.req.param("projectId"), params);
     return response instanceof Response ? response : c.json(response);
   })
   .post("/typesense/multi_search", async c => {
@@ -63,7 +63,7 @@ export const searchCompatRoutes = new Hono()
     // Authorize every collection before any retrieval/AI usage is incurred.
     const key = c.get("apiKey");
     if (!apiKeyHasAnyScope(key, ["search"])) return c.json({ error: "search scope required" }, 403);
-    for (const entry of searches) if (!await loadApiKeyScopedWorkspace(entry.collection, key)) return c.json({ error: "Workspace not found" }, 404);
+    for (const entry of searches) if (!await loadApiKeyScopedProject(entry.collection, key)) return c.json({ error: "Project not found" }, 404);
     const results = [];
     for (const entry of searches) {
       const result = await execute(c, "typesense", entry.collection, entry.params);
@@ -72,7 +72,7 @@ export const searchCompatRoutes = new Hono()
     }
     return c.json({ results });
   })
-  .post("/pagefind/:workspaceId/search", async c => {
-    const response = await execute(c, "pagefind", c.req.param("workspaceId"), await c.req.json());
+  .post("/pagefind/:projectId/search", async c => {
+    const response = await execute(c, "pagefind", c.req.param("projectId"), await c.req.json());
     return response instanceof Response ? response : c.json(response);
   });

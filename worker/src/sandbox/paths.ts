@@ -62,7 +62,7 @@ function isExistingFile(candidate: string): boolean {
 }
 
 /**
- * The command's file inputs: absolute file arguments inside a DocSlurp temp workspace.
+ * The command's file inputs: absolute file arguments inside a DocSlurp temp project.
  * Remote providers upload exactly these; the parser runtime (scripts, node_modules,
  * venv, interpreters) comes from the provider's image, never from the host.
  */
@@ -91,28 +91,28 @@ export function resolveSandboxWritablePaths(args: {
   for (const configured of args.configuredPaths) {
     const resolved = path.resolve(configured);
     if (inferDocslurpTempAncestor(resolved) !== resolved || args.runtimeProjectDir === resolved || args.runtimeProjectDir.startsWith(`${resolved}${path.sep}`)) {
-      throw new Error("Parser writable paths must be private DocSlurp temporary workspaces");
+      throw new Error("Parser writable paths must be private DocSlurp temporary projects");
     }
     writable.add(resolved);
   }
   for (const arg of args.commandArgs) {
     const resolvedArg = path.resolve(arg);
     if (resolvedArg === args.runtimeProjectDir || resolvedArg.startsWith(`${args.runtimeProjectDir}${path.sep}`)) continue;
-    const tempWorkspace = inferDocslurpTempWorkspace(arg);
-    if (tempWorkspace) {
+    const tempProject = inferDocslurpTempProject(arg);
+    if (tempProject) {
       // Fail closed: a shared read-only source (registerReadOnlySource) never shares a writable directory.
       for (const source of readOnlySources) {
-        if (source.startsWith(`${tempWorkspace}${path.sep}`)) {
-          throw new Error(`refusing to make the directory of a shared source writable: ${tempWorkspace}`);
+        if (source.startsWith(`${tempProject}${path.sep}`)) {
+          throw new Error(`refusing to make the directory of a shared source writable: ${tempProject}`);
         }
       }
-      writable.add(tempWorkspace);
+      writable.add(tempProject);
     }
   }
   return Array.from(writable);
 }
 
-export function inferDocslurpTempWorkspace(arg: string): string | null {
+export function inferDocslurpTempProject(arg: string): string | null {
   if (!path.isAbsolute(arg)) {
     return null;
   }

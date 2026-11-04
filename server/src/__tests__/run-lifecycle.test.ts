@@ -22,7 +22,7 @@ function lifecycle(startWorkflow: (...args: unknown[]) => Promise<void>) {
   queries = [];
   const sql = (async (strings: TemplateStringsArray) => {
     queries.push(strings.join("?").replace(/\s+/g, " ").trim());
-    return strings.join("?").includes("select id, execution_generation from workspace_runs") ? [{ id: "run-1", execution_generation: "generation-1" }] : [];
+    return strings.join("?").includes("select id, execution_generation from project_runs") ? [{ id: "run-1", execution_generation: "generation-1" }] : [];
   }) as unknown as SqlClient;
   Object.assign(sql, { begin: async (fn: (tx: SqlClient) => Promise<unknown>) => fn(sql) });
   return createRunLifecycle({ sql, startWorkflow, failureThreshold: 3 });
@@ -47,7 +47,7 @@ describe("Run Lifecycle start", () => {
   it("still reports the outcome when the start marker cannot be written", async () => {
     vi.spyOn(console, "warn").mockImplementationOnce(() => {});
     const sql = (async (strings: TemplateStringsArray) => {
-      if (strings.join("?").includes("select id, execution_generation from workspace_runs")) return [{ id: "run-1", execution_generation: "generation-1" }];
+      if (strings.join("?").includes("select id, execution_generation from project_runs")) return [{ id: "run-1", execution_generation: "generation-1" }];
       throw new Error("db down");
     }) as unknown as SqlClient;
     Object.assign(sql, { begin: async (fn: (tx: SqlClient) => Promise<unknown>) => fn(sql) });

@@ -20,7 +20,7 @@ const validatedKey: ValidatedKey = {
   scopes: ["documents:read"],
   rateLimitRpm: 60,
   rateLimitPpd: 10_000,
-  rateLimits: [], workspaceIds: [],
+  rateLimits: [], projectIds: [],
 };
 
 function buildApp() {

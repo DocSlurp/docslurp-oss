@@ -1,7 +1,7 @@
 import { sql } from "../db.js";
 import { abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, queueAbandonedDirectUploadCleanup, withDirectUploadLock } from "./direct-upload-session.js";
-import { WorkspaceIntakeError } from "./workspace-intake.js";
-import { confirmDirectUploadWorkspaceIntake } from "./workspace-intake-actions.js";
+import { ProjectIntakeError } from "./project-intake.js";
+import { confirmDirectUploadProjectIntake } from "./project-intake-actions.js";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -36,13 +36,13 @@ export async function reconcileDirectUploads(): Promise<void> {
           }
           return ready;
         });
-        if (ready && !stopped) await confirmDirectUploadWorkspaceIntake({ sessionId: session.id, userId: session.user_id });
+        if (ready && !stopped) await confirmDirectUploadProjectIntake({ sessionId: session.id, userId: session.user_id });
       } catch (error) {
         retryCapSeconds = 300;
         // Keep retrying recoverable storage/database failures until abandonment.
         // Persist only a generic message: provider errors may contain credentials.
         console.error(`[upload-reconcile] session=${session.id} failed`, error instanceof Error ? error.name : "unknown");
-        if (error instanceof WorkspaceIntakeError && error.statusCode !== 409 && error.statusCode < 500) {
+        if (error instanceof ProjectIntakeError && error.statusCode !== 409 && error.statusCode < 500) {
           await sql`update upload_sessions set status = 'failed', last_error = 'Upload rejected: stored bytes or intake policy validation failed' where id = ${session.id} and status <> 'confirmed'`;
           await queueAbandonedDirectUploadCleanup(session.id);
         }

@@ -82,7 +82,7 @@ Production defaults now prefer `clamdscan`, refresh signatures on startup, and f
 
 ## Parser Trust Boundary
 
-The worker images now run as a dedicated non-root `docslurp` user. Untrusted extraction commands are launched through `worker/scripts/parser-sandbox.sh`, which gives each parser invocation its own ephemeral scratch workspace plus isolated `HOME`, `TMPDIR`, and XDG directories instead of sharing the main worker process context.
+The worker images now run as a dedicated non-root `docslurp` user. Untrusted extraction commands are launched through `worker/scripts/parser-sandbox.sh`, which gives each parser invocation its own ephemeral scratch project plus isolated `HOME`, `TMPDIR`, and XDG directories instead of sharing the main worker process context.
 
 Useful env overrides:
 

@@ -61,7 +61,7 @@ export function effectiveVisionBaseUrl(baseUrl: string | null, cfg: Pick<Config,
 /**
  * The route a vision call was actually served on: the primary or the fallback, at its effective destination
  * (`baseUrl` null only for the in-process runtime). Every result, billed failure and rejection carries it, and its
- * usage is priced and labelled from it, never from the workspace's configured primary route.
+ * usage is priced and labelled from it, never from the project's configured primary route.
  */
 export interface VisionServedRoute {
   runtime: string;

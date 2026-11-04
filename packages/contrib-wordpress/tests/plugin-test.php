@@ -9,7 +9,7 @@ function add_action($name, $callback) { global $hooks; $hooks[$name] = $callback
 function add_shortcode($name, $callback) { global $shortcodes; $shortcodes[$name] = $callback; }
 function add_filter(...$args) {}
 function register_rest_route($namespace, $path, $options) { global $handler; $handler = $options['callback']; }
-function get_option(...$args) { return array('api_url' => 'https://docslurp.test', 'workspace_id' => 'public-workspace', 'api_key' => 'server-key-fixture'); }
+function get_option(...$args) { return array('api_url' => 'https://docslurp.test', 'project_id' => 'public-project', 'api_key' => 'server-key-fixture'); }
 function get_transient($name) { global $transients; return $transients[$name] ?? 0; }
 function set_transient($name, $value, $ttl) { global $transients; $transients[$name] = $value; }
 function wp_safe_remote_post($url, $options) { global $calls; $calls[] = array($url, $options); return array('code' => 200, 'body' => json_encode(array('results' => array(array('text' => '<unsafe> source', 'citation' => array('filename' => 'Public guide', 'pageNumbers' => array(1), 'documentId' => 'private-id')),), 'usage' => array('internal' => 'private')))); }
@@ -26,7 +26,7 @@ function check($condition, $message) { if (!$condition) { throw new Exception($m
 require dirname(__DIR__) . '/docslurp-search/docslurp-search.php';
 $hooks['rest_api_init']();
 check(!str_contains($shortcodes['docslurp_search'](), 'server-key-fixture'), 'Server key leaked into shortcode HTML');
-foreach (array(array('q' => 'query', 'workspace' => 'other'), array('q' => 5), array('q' => str_repeat('x', 501))) as $invalid) {
+foreach (array(array('q' => 'query', 'project' => 'other'), array('q' => 5), array('q' => str_repeat('x', 501))) as $invalid) {
     $result = $handler(new Request($invalid)); check($result instanceof WP_Error && $result->data['status'] === 400, 'Invalid input accepted');
 }
 check(count($calls) === 0, 'Invalid input incurred API requests');
@@ -36,7 +36,7 @@ check(!isset($result->data['usage']), 'Internal metadata exposed');
 check(!isset($result->data['results'][0]['citation']['documentId']), 'Internal document ID exposed');
 check($result->headers['Cache-Control'] === 'no-store', 'Proxy response cached');
 $request = $calls[0][1]; $body = json_decode($request['body'], true);
-check($body['workspace'] === 'public-workspace' && $body['limit'] === 6, 'Caller controlled search scope');
+check($body['project'] === 'public-project' && $body['limit'] === 6, 'Caller controlled search scope');
 check($request['redirection'] === 0 && $request['headers']['Authorization'] === 'Bearer server-key-fixture', 'Invalid credential transport');
 check($body['hyde'] === false && $body['compression'] === false, 'Expansion enabled unexpectedly');
 $handler(new Request(array('q' => ''))); check(count($calls) === 1, 'Empty search incurred usage');

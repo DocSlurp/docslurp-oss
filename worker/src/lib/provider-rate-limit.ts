@@ -550,7 +550,7 @@ const scopeStorage = new AsyncLocalStorage<{ orgId: string | null; allowChinaPro
 
 /**
  * Attributes provider calls inside `fn` to an org for the fair-share buckets,
- * and carries the run's China-provider policy (org AND workspace) to every
+ * and carries the run's China-provider policy (org AND project) to every
  * provider request. Only an explicit `allowChinaProviders: true` allows them.
  */
 export function runWithProviderRateScope<T>(scope: { orgId: string | null | undefined; allowChinaProviders?: boolean; speedBoost?: boolean }, fn: () => Promise<T>): Promise<T> {
@@ -558,17 +558,17 @@ export function runWithProviderRateScope<T>(scope: { orgId: string | null | unde
 }
 
 /**
- * The provider scope of work done for one workspace outside a run (graph rebuilds): its org, and China-based
- * providers only when the workspace and its org both allow them. A missing workspace or org is restricted.
+ * The provider scope of work done for one project outside a run (graph rebuilds): its org, and China-based
+ * providers only when the project and its org both allow them. A missing project or org is restricted.
  */
-export async function workspaceProviderScope(
+export async function projectProviderScope(
   sql: (strings: TemplateStringsArray, ...values: unknown[]) => PromiseLike<readonly unknown[]>,
-  workspaceId: string,
+  projectId: string,
 ): Promise<{ orgId: string | null; allowChinaProviders: boolean }> {
   const [row] = await sql`
     select w.org_id, (w.allow_china_providers and coalesce(o.allow_china_providers, false)) as allow
-    from workspaces w left join organizations o on o.id = w.org_id
-    where w.id = ${workspaceId}` as readonly ({ org_id: string | null; allow: boolean | null } | undefined)[];
+    from projects w left join organizations o on o.id = w.org_id
+    where w.id = ${projectId}` as readonly ({ org_id: string | null; allow: boolean | null } | undefined)[];
   return { orgId: row?.org_id ?? null, allowChinaProviders: row?.allow === true };
 }
 

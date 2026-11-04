@@ -24,7 +24,7 @@ describe("embedding pooling routes", () => {
     expect(embeddingPoolingProblem("llm://vllm/BAAI/bge-m3?pooling=cls")).toContain("pools on its server");
   });
 
-  it("validates workspace config and keeps catalog facts for parameterized routes", () => {
+  it("validates project config and keeps catalog facts for parameterized routes", () => {
     const local = embeddingConfigSchema.parse({ profile: "good-fast-local", modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls" });
     expect(resolveEmbeddingRoute(local)).toMatchObject({ dimensions: 1024, model: "Xenova/bge-m3", modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls" });
     expect(embeddingConfigSchema.safeParse({ profile: "cheapest-hosted", modelUri: "llm://deepinfra/BAAI/bge-m3?pooling=mean" }).success).toBe(false);

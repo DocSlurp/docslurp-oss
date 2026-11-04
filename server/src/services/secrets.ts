@@ -3,14 +3,14 @@ import { randomUUID } from "node:crypto";
 import { sql } from "../db.js";
 import { openSecret, sealSecret } from "../lib/encryption.js";
 import {
-  canManageWorkspace,
-  getWorkspaceAccess,
-  type WorkspaceAccess,
+  canManageProject,
+  getProjectAccess,
+  type ProjectAccess,
 } from "./organizations.js";
 
-type WorkspaceSecretRow = {
+type ProjectSecretRow = {
   id: string;
-  workspace_id: string;
+  project_id: string;
   name: string;
   type: string;
   encrypted_value: string;
@@ -21,9 +21,9 @@ type WorkspaceSecretRow = {
   updated_at: string;
 };
 
-export interface WorkspaceSecretRecord {
+export interface ProjectSecretRecord {
   id: string;
-  workspaceId: string;
+  projectId: string;
   name: string;
   type: string;
   rotatedAt: string;
@@ -32,19 +32,19 @@ export interface WorkspaceSecretRecord {
   createdAt: string;
 }
 
-export type WorkspaceSecretAccessGrant = {
-  workspaceId: string;
+export type ProjectSecretAccessGrant = {
+  projectId: string;
   userId: string;
   orgId: string;
-  access: WorkspaceAccess;
+  access: ProjectAccess;
 };
 
-type WorkspaceSecretAccessArgs =
-  | { access: WorkspaceSecretAccessGrant; workspaceId?: never; userId?: never }
-  | { workspaceId: string; userId: string; access?: never };
+type ProjectSecretAccessArgs =
+  | { access: ProjectSecretAccessGrant; projectId?: never; userId?: never }
+  | { projectId: string; userId: string; access?: never };
 
-type WorkspaceSecretMutationAccessArgs =
-  | { access: WorkspaceSecretAccessGrant; userId?: never }
+type ProjectSecretMutationAccessArgs =
+  | { access: ProjectSecretAccessGrant; userId?: never }
   | { userId: string; access?: never };
 
 export function encryptSecret(plaintext: string): string {
@@ -55,10 +55,10 @@ export function decryptSecret(stored: string): string {
   return openSecret("SECRETS_ENCRYPTION_KEY", stored);
 }
 
-function mapSecret(row: WorkspaceSecretRow): WorkspaceSecretRecord {
+function mapSecret(row: ProjectSecretRow): ProjectSecretRecord {
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     name: row.name,
     type: row.type,
     rotatedAt: row.rotated_at,
@@ -68,25 +68,25 @@ function mapSecret(row: WorkspaceSecretRow): WorkspaceSecretRecord {
   };
 }
 
-export async function authorizeWorkspaceSecretAccess(args: {
-  workspaceId: string;
+export async function authorizeProjectSecretAccess(args: {
+  projectId: string;
   userId: string;
 }): Promise<
-  | { ok: true; grant: WorkspaceSecretAccessGrant }
-  | { ok: false; status: 403 | 404; code: "forbidden" | "workspace_not_found"; message: string }
+  | { ok: true; grant: ProjectSecretAccessGrant }
+  | { ok: false; status: 403 | 404; code: "forbidden" | "project_not_found"; message: string }
 > {
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+  const access = await getProjectAccess(args.projectId, args.userId);
   if (!access) {
-    return { ok: false, status: 404, code: "workspace_not_found", message: "Workspace not found" };
+    return { ok: false, status: 404, code: "project_not_found", message: "Project not found" };
   }
-  if (!canManageWorkspace(access, args.userId)) {
+  if (!canManageProject(access, args.userId)) {
     return { ok: false, status: 403, code: "forbidden", message: "Forbidden" };
   }
 
   return {
     ok: true,
     grant: {
-      workspaceId: args.workspaceId,
+      projectId: args.projectId,
       userId: args.userId,
       orgId: access.orgId,
       access,
@@ -94,59 +94,59 @@ export async function authorizeWorkspaceSecretAccess(args: {
   };
 }
 
-async function requireWorkspaceSecretAccess(
-  args: WorkspaceSecretAccessArgs,
-): Promise<WorkspaceSecretAccessGrant> {
+async function requireProjectSecretAccess(
+  args: ProjectSecretAccessArgs,
+): Promise<ProjectSecretAccessGrant> {
   if (args.access) {
     return args.access;
   }
   if (!args.userId) {
-    throw new Error("Workspace secret access requires an actor userId");
+    throw new Error("Project secret access requires an actor userId");
   }
 
-  const authorization = await authorizeWorkspaceSecretAccess(args);
+  const authorization = await authorizeProjectSecretAccess(args);
   if (!authorization.ok) {
     throw new Error(authorization.message);
   }
   return authorization.grant;
 }
 
-export async function listWorkspaceSecrets(
-  args: WorkspaceSecretAccessArgs,
-): Promise<WorkspaceSecretRecord[]> {
-  const grant = await requireWorkspaceSecretAccess(args);
-  const rows = await sql<WorkspaceSecretRow[]>`
-    select id, workspace_id, name, type, encrypted_value, rotated_at, expires_at, last_used_at, created_at, updated_at
-    from workspace_secrets
-    where workspace_id = ${grant.workspaceId}
+export async function listProjectSecrets(
+  args: ProjectSecretAccessArgs,
+): Promise<ProjectSecretRecord[]> {
+  const grant = await requireProjectSecretAccess(args);
+  const rows = await sql<ProjectSecretRow[]>`
+    select id, project_id, name, type, encrypted_value, rotated_at, expires_at, last_used_at, created_at, updated_at
+    from project_secrets
+    where project_id = ${grant.projectId}
     order by created_at asc
   `;
 
   return rows.map(mapSecret);
 }
 
-export async function createWorkspaceSecret(args: {
-  workspaceId: string;
+export async function createProjectSecret(args: {
+  projectId: string;
   name: string;
   type: string;
   value: string;
   expiresAt?: string | null;
-} & WorkspaceSecretMutationAccessArgs): Promise<WorkspaceSecretRecord> {
-  const grant = await requireWorkspaceSecretAccess(
+} & ProjectSecretMutationAccessArgs): Promise<ProjectSecretRecord> {
+  const grant = await requireProjectSecretAccess(
     args.access
       ? { access: args.access }
-      : { workspaceId: args.workspaceId, userId: args.userId },
+      : { projectId: args.projectId, userId: args.userId },
   );
   const id = randomUUID();
   const encryptedValue = encryptSecret(args.value);
 
-  const [row] = await sql<WorkspaceSecretRow[]>`
-    insert into workspace_secrets (
-      id, workspace_id, name, type, encrypted_value, rotated_at, expires_at, created_at, updated_at
+  const [row] = await sql<ProjectSecretRow[]>`
+    insert into project_secrets (
+      id, project_id, name, type, encrypted_value, rotated_at, expires_at, created_at, updated_at
     )
     values (
       ${id},
-      ${grant.workspaceId},
+      ${grant.projectId},
       ${args.name},
       ${args.type},
       ${encryptedValue},
@@ -155,99 +155,99 @@ export async function createWorkspaceSecret(args: {
       now(),
       now()
     )
-    returning id, workspace_id, name, type, encrypted_value, rotated_at::text, expires_at::text, last_used_at::text, created_at::text, updated_at::text
+    returning id, project_id, name, type, encrypted_value, rotated_at::text, expires_at::text, last_used_at::text, created_at::text, updated_at::text
   `;
 
   return mapSecret(row);
 }
 
-export async function rotateWorkspaceSecret(args: {
-  workspaceId: string;
+export async function rotateProjectSecret(args: {
+  projectId: string;
   secretId: string;
   newValue: string;
-} & WorkspaceSecretMutationAccessArgs): Promise<WorkspaceSecretRecord | null> {
-  const grant = await requireWorkspaceSecretAccess(
+} & ProjectSecretMutationAccessArgs): Promise<ProjectSecretRecord | null> {
+  const grant = await requireProjectSecretAccess(
     args.access
       ? { access: args.access }
-      : { workspaceId: args.workspaceId, userId: args.userId },
+      : { projectId: args.projectId, userId: args.userId },
   );
   const encryptedValue = encryptSecret(args.newValue);
 
-  const [row] = await sql<WorkspaceSecretRow[]>`
-    update workspace_secrets
+  const [row] = await sql<ProjectSecretRow[]>`
+    update project_secrets
     set
       encrypted_value = ${encryptedValue},
       rotated_at = now(),
       updated_at = now()
     where id = ${args.secretId}
-      and workspace_id = ${grant.workspaceId}
-    returning id, workspace_id, name, type, encrypted_value, rotated_at::text, expires_at::text, last_used_at::text, created_at::text, updated_at::text
+      and project_id = ${grant.projectId}
+    returning id, project_id, name, type, encrypted_value, rotated_at::text, expires_at::text, last_used_at::text, created_at::text, updated_at::text
   `;
 
   return row ? mapSecret(row) : null;
 }
 
-export async function deleteWorkspaceSecret(args: {
-  workspaceId: string;
+export async function deleteProjectSecret(args: {
+  projectId: string;
   secretId: string;
-} & WorkspaceSecretMutationAccessArgs): Promise<boolean> {
-  const grant = await requireWorkspaceSecretAccess(
+} & ProjectSecretMutationAccessArgs): Promise<boolean> {
+  const grant = await requireProjectSecretAccess(
     args.access
       ? { access: args.access }
-      : { workspaceId: args.workspaceId, userId: args.userId },
+      : { projectId: args.projectId, userId: args.userId },
   );
   const [row] = await sql<{ id: string }[]>`
-    delete from workspace_secrets
+    delete from project_secrets
     where id = ${args.secretId}
-      and workspace_id = ${grant.workspaceId}
+      and project_id = ${grant.projectId}
     returning id
   `;
 
   return !!row;
 }
 
-export async function getWorkspaceSecretValue(args: {
-  workspaceId: string;
+export async function getProjectSecretValue(args: {
+  projectId: string;
   secretId: string;
-} & WorkspaceSecretMutationAccessArgs): Promise<string | null> {
-  const grant = await requireWorkspaceSecretAccess(
+} & ProjectSecretMutationAccessArgs): Promise<string | null> {
+  const grant = await requireProjectSecretAccess(
     args.access
       ? { access: args.access }
-      : { workspaceId: args.workspaceId, userId: args.userId },
+      : { projectId: args.projectId, userId: args.userId },
   );
   const [row] = await sql<{ encrypted_value: string }[]>`
-    select encrypted_value from workspace_secrets
+    select encrypted_value from project_secrets
     where id = ${args.secretId}
-      and workspace_id = ${grant.workspaceId}
+      and project_id = ${grant.projectId}
   `;
 
   if (!row) return null;
 
   // Update last_used_at on access
   await sql`
-    update workspace_secrets
+    update project_secrets
     set last_used_at = now()
     where id = ${args.secretId}
-      and workspace_id = ${grant.workspaceId}
+      and project_id = ${grant.projectId}
   `;
 
   return decryptSecret(row.encrypted_value);
 }
 
 export async function getExpiringSecrets(daysBefore = 7): Promise<
-  Array<WorkspaceSecretRecord & { workspaceName: string; ownerEmail: string }>
+  Array<ProjectSecretRecord & { projectName: string; ownerEmail: string }>
 > {
   const rows = await sql<
     Array<
-      WorkspaceSecretRow & {
-        workspace_name: string;
+      ProjectSecretRow & {
+        project_name: string;
         owner_email: string;
       }
     >
   >`
     select
       ws.id,
-      ws.workspace_id,
+      ws.project_id,
       ws.name,
       ws.type,
       ws.encrypted_value,
@@ -256,10 +256,10 @@ export async function getExpiringSecrets(daysBefore = 7): Promise<
       ws.last_used_at::text,
       ws.created_at::text,
       ws.updated_at::text,
-      w.name as workspace_name,
+      w.name as project_name,
       u.email as owner_email
-    from workspace_secrets ws
-    join workspaces w on w.id = ws.workspace_id
+    from project_secrets ws
+    join projects w on w.id = ws.project_id
     join "user" u on u.id = w.user_id
     where ws.expires_at is not null
       and ws.expires_at <= now() + (${daysBefore} * interval '1 day')
@@ -269,7 +269,7 @@ export async function getExpiringSecrets(daysBefore = 7): Promise<
 
   return rows.map((row) => ({
     ...mapSecret(row),
-    workspaceName: row.workspace_name,
+    projectName: row.project_name,
     ownerEmail: row.owner_email,
   }));
 }

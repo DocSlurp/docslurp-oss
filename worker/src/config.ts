@@ -82,7 +82,7 @@ export interface Config {
   lancedbReindexPages: number;
   /** Run optimize/index maintenance after LanceDB writes. LANCEDB_URI ?maintenance=false disables. */
   lancedbMaintenanceEnabled: boolean;
-  /** Minimum table rows before maintenance builds the first ANN vector index. LANCEDB_URI ?vectorIndexMinRows= (default 1000: with one database per workspace most tables are small, and an HNSW index over 1,000 rows keeps about 98% top-10 recall of a flat scan while reading a fraction of the vectors). */
+  /** Minimum table rows before maintenance builds the first ANN vector index. LANCEDB_URI ?vectorIndexMinRows= (default 1000: with one database per project most tables are small, and an HNSW index over 1,000 rows keeps about 98% top-10 recall of a flat scan while reading a fraction of the vectors). */
   lancedbVectorIndexMinRows: number;
   workerLeaseTtlMs: number;
   workerMaxRuntimeMs: number;
@@ -94,7 +94,7 @@ export interface Config {
   /** VISION_STREAMING=on|off (default on): stream hosted vision responses so degenerate output can be aborted early. */
   visionStreaming?: boolean;
   /**
-   * PAGE_ROUTER_MODE=off|shadow|active (default off). Ceiling over each workspace's
+   * PAGE_ROUTER_MODE=off|shadow|active (default off). Ceiling over each project's
    * `pageRouter.mode`: nothing routes unless both opt in. Optional so partial
    * Config literals (tests) read as off.
    */
@@ -115,7 +115,7 @@ export interface Config {
   costPer1kOutputTokens: number;
   openRouterApiKey: string;
   perplexityApiKey?: string;
-  /** Deployment fallback; workspaces and tasks can override it. */
+  /** Deployment fallback; projects and tasks can override it. */
   textGenerationModel?: string;
   textGenerationProfile?: TextGenerationProfile;
   plausibilityWarningThreshold: number;
@@ -123,7 +123,7 @@ export interface Config {
   /** How often the maintenance leader applies pending credit debits; 0 disables. */
   creditDebitFlushIntervalMs?: number;
   retentionSweepIntervalMs: number;
-  /** How often idle workers look for queued workspace graph rebuilds; 0 disables. */
+  /** How often idle workers look for queued project graph rebuilds; 0 disables. */
   graphJobPollIntervalMs?: number;
   /** Documents a graph rebuild extracts at once. */
   graphJobConcurrency?: number;

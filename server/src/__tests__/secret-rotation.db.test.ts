@@ -16,7 +16,7 @@ beforeAll(async () => {
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} }) as unknown as SqlClient;
   await sql`insert into "user" (id,name,email) values ('rotate-user','Rotate','rotate@example.com')`;
   await sql`insert into organizations (id,name,slug,created_by_user_id) values ('rotate-org','Rotate','rotate','rotate-user')`;
-  await sql`insert into workspaces (id,org_id,user_id,name) values ('rotate-ws','rotate-org','rotate-user','Rotate')`;
+  await sql`insert into projects (id,org_id,user_id,name) values ('rotate-ws','rotate-org','rotate-user','Rotate')`;
 }, 120_000);
 afterEach(() => vi.unstubAllEnvs());
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -29,9 +29,9 @@ it("dry-runs and re-encrypts every real store in bounded resumable passes", asyn
   }
   const secret = sealSecret(keys[0]!, "stored secret");
   const credential = sealSecret(keys[1]!, '{"token":"credential"}');
-  await sql`insert into workspace_secrets (id,workspace_id,name,type,encrypted_value) values
+  await sql`insert into project_secrets (id,project_id,name,type,encrypted_value) values
     ('s1','rotate-ws','one','token',${secret}), ('s2','rotate-ws','two','token',${secret})`;
-  await sql`insert into workspace_connectors (id,workspace_id,type,name,credentials_encrypted) values
+  await sql`insert into project_connectors (id,project_id,type,name,credentials_encrypted) values
     ('c1','rotate-ws','test','Connector',${credential})`;
   await sql`insert into mcp_service_connections (id,user_id,name,url,transport,auth_type,credentials_encrypted)
     values ('m1','rotate-user','MCP','https://example.com','streamable-http','header-token',${credential})`;
@@ -46,7 +46,7 @@ it("dry-runs and re-encrypts every real store in bounded resumable passes", asyn
   const dry = await rotateStoredSecrets(sql, { apply: false, limit: 1 });
   expect(dry.map((r) => r.candidates)).toEqual([1, 1, 1, 1, 1]);
   expect(dry.every((r) => r.updated === 0)).toBe(true);
-  expect((await sql`select encrypted_value from workspace_secrets where id='s1'`)[0]!.encrypted_value).toBe(secret);
+  expect((await sql`select encrypted_value from project_secrets where id='s1'`)[0]!.encrypted_value).toBe(secret);
   const applied = await rotateStoredSecrets(sql, { apply: true, limit: 1 });
   expect(applied.map((r) => r.updated)).toEqual([1, 1, 1, 1, 1]);
   expect((await rotateStoredSecrets(sql, { apply: true, limit: 1 }))[0]!.updated).toBe(1);
@@ -69,7 +69,7 @@ it("preserves a concurrent credential edit instead of overwriting it", async () 
     vi.stubEnv(`${key}_PREVIOUS_KEYS`, "{}");
   }
   const old = sealSecret(keys[0]!, "before concurrent edit");
-  await sql`insert into workspace_secrets (id,workspace_id,name,type,encrypted_value)
+  await sql`insert into project_secrets (id,project_id,name,type,encrypted_value)
     values ('race','rotate-ws','race','token',${old})`;
   for (const key of keys) {
     vi.stubEnv(key, newKey);
@@ -83,7 +83,7 @@ it("preserves a concurrent credential edit instead of overwriting it", async () 
       const template = args[0];
       if (!intercepted && Array.isArray(template) && String(template[0]).startsWith("update ")) {
         intercepted = true;
-        return sql`update workspace_secrets set encrypted_value=${concurrent} where id='race'`
+        return sql`update project_secrets set encrypted_value=${concurrent} where id='race'`
           .then(() => Reflect.apply(target, thisArg, args));
       }
       return Reflect.apply(target, thisArg, args);
@@ -92,5 +92,5 @@ it("preserves a concurrent credential edit instead of overwriting it", async () 
   const result = await rotateStoredSecrets(racingSql, { apply: true, limit: 1 });
   expect(result[0]!.conflicts).toBe(1);
   expect(result[0]!.updated).toBe(0);
-  expect((await sql`select encrypted_value from workspace_secrets where id='race'`)[0]!.encrypted_value).toBe(concurrent);
+  expect((await sql`select encrypted_value from project_secrets where id='race'`)[0]!.encrypted_value).toBe(concurrent);
 });

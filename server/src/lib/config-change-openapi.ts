@@ -1,4 +1,4 @@
-import { workspaceRefParameter } from "./state-management-openapi.js";
+import { projectRefParameter } from "./state-management-openapi.js";
 
 const security = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const jobIdParameter = { in: "path", name: "jobId", required: true, schema: { type: "string", minLength: 1 } };
@@ -34,35 +34,35 @@ export const configChangePaths = {
       responses: { "200": { description: "text/event-stream" }, "404": { description: "Job not found" } },
     },
   },
-  // POST /v1/workspaces/{workspaceId}/settings-proposals/apply is a DocSlurp-app (session) endpoint, not public API.
-  "/v1/workspaces/{workspaceId}/estimate": {
+  // POST /v1/projects/{projectId}/settings-proposals/apply is a DocSlurp-app (session) endpoint, not public API.
+  "/v1/projects/{projectId}/estimate": {
     post: {
-      tags: ["workspaces"],
-      summary: "Estimate a workspace update",
-      description: "Same body as PATCH /v1/workspaces/{workspaceId}. Returns `{ impact, estimate, billing }`: whether the change needs a re-index (none, search-only, new-uploads, reindex-recommended, reindex-required) and what it would cost.",
+      tags: ["projects"],
+      summary: "Estimate a project update",
+      description: "Same body as PATCH /v1/projects/{projectId}. Returns `{ impact, estimate, billing }`: whether the change needs a re-index (none, search-only, new-uploads, reindex-recommended, reindex-required) and what it would cost.",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
   },
-  "/v1/workspaces/{workspaceId}/search-settings/estimate": {
+  "/v1/projects/{projectId}/search-settings/estimate": {
     post: {
-      tags: ["workspaces"],
+      tags: ["projects"],
       summary: "Estimate a search settings update",
-      description: "Same body and access as PATCH /v1/workspaces/{workspaceId}/search-settings (session, or a server key with workspaces:manage). Returns `{ impact, estimate, billing }` and changes nothing.",
+      description: "Same body and access as PATCH /v1/projects/{projectId}/search-settings (session, or a server key with projects:manage). Returns `{ impact, estimate, billing }` and changes nothing.",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
   },
-  "/v1/workspaces/{workspaceId}/full-index/estimate": {
+  "/v1/projects/{projectId}/full-index/estimate": {
     post: {
-      tags: ["workspaces"],
-      summary: "Estimate a workspace full index",
+      tags: ["projects"],
+      summary: "Estimate a project full index",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
@@ -76,13 +76,13 @@ export const configChangePaths = {
       responses: estimateResponses,
     },
   },
-  "/v1/workspaces/{workspaceId}/graph/jobs/estimate": {
+  "/v1/projects/{projectId}/graph/jobs/estimate": {
     post: {
-      tags: ["workspaces"],
+      tags: ["projects"],
       summary: "Estimate a knowledge graph rebuild",
       description: "Same body as POST …/graph/rebuild.",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
@@ -91,7 +91,7 @@ export const configChangePaths = {
     post: {
       tags: ["ingest"],
       summary: "Estimate an upload",
-      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace). Pages default to about one per 75 KB. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price.",
+      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds? }], project? }` (project ID, slug or name; omitted: the default project). Pages default to about one per 75 KB. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price.",
       security,
       requestBody: body,
       responses: estimateResponses,

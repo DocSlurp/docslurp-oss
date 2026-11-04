@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { normalizePipelineFeatures, defaultWorkspaceSearchSettings } from "@docslurp/shared";
+import { normalizePipelineFeatures, defaultProjectSearchSettings } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 let sql: postgres.Sql;
@@ -30,37 +30,37 @@ beforeAll(async () => {
   await sql`insert into organizations (id,name,slug,created_by_user_id,credit_balance_cents) values ('hosted-org','Ranking','hosted-ranking','hosted-user',10000)`;
   await sql`insert into org_memberships (org_id,user_id,role) values ('hosted-org','hosted-user','owner')`;
   const pipeline = JSON.parse(JSON.stringify(normalizePipelineFeatures({ privacyMode: "standard" })));
-  await sql`insert into workspaces (id,org_id,user_id,name,pipeline) values ('hosted-ws','hosted-org','hosted-user','Ranking',${sql.json(pipeline)})`;
+  await sql`insert into projects (id,org_id,user_id,name,pipeline) values ('hosted-ws','hosted-org','hosted-user','Ranking',${sql.json(pipeline)})`;
   await sql`insert into credit_grants (org_id,source,external_id,credits) values ('hosted-org','starter','hosted-test-grant',10000)`;
-  await sql`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline) values ('hosted-run','hosted-org','hosted-user','hosted-ws','bulk-upload','completed','completed','{}')`;
-  await sql`insert into documents (id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count)
+  await sql`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline) values ('hosted-run','hosted-org','hosted-user','hosted-ws','bulk-upload','completed','completed','{}')`;
+  await sql`insert into documents (id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count)
     values ('hosted-doc','hosted-org','hosted-user','hosted-ws','hosted-run','manual.txt','text/plain','local/manual','completed',2)`;
   await sql`insert into document_chunks (id,document_id,run_id,user_id,chunk_index,text,heading_path,token_estimate,page_number,metadata) values
     ('hosted-a','hosted-doc','hosted-run','hosted-user',0,'Pump maintenance schedule.','{}',5,1,'{}'),
     ('hosted-b','hosted-doc','hosted-run','hosted-user',1,'Pump maintenance valve inspection.','{}',5,2,'{}')`;
-  const { upsertWorkspaceSearchSettings } = await import("../services/search-controls.js");
-  await upsertWorkspaceSearchSettings({ ...defaultWorkspaceSearchSettings, workspaceId: "hosted-ws", userId: "hosted-user",
-    retrievalDefaults: { ...defaultWorkspaceSearchSettings.retrievalDefaults, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B", candidateDepth: 50, resultOrder: "relevance", minScore: 0, parentRetrieval: false } });
+  const { upsertProjectSearchSettings } = await import("../services/search-controls.js");
+  await upsertProjectSearchSettings({ ...defaultProjectSearchSettings, projectId: "hosted-ws", userId: "hosted-user",
+    retrievalDefaults: { ...defaultProjectSearchSettings.retrievalDefaults, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B", candidateDepth: 50, resultOrder: "relevance", minScore: 0, parentRetrieval: false } });
   ({ hybridSearch } = await import("../services/search.js"));
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("real hybrid search with hosted reranking and actual SQL usage", () => {
-  const options = { filters: { workspaceId: "hosted-ws" }, queryVector: [1,0,0], limit: 2, minScore: 0,
+  const options = { filters: { projectId: "hosted-ws" }, queryVector: [1,0,0], limit: 2, minScore: 0,
     parentRetrieval: false, queryRewrite: false, selfQuery: false, useContextualCompression: false,
     useHyDE: false, stepback: false, iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false };
-  it("reads workspace opt-in, preserves citations and persists scoped actual tokens", async () => {
+  it("reads project opt-in, preserves citations and persists scoped actual tokens", async () => {
     const result = await hybridSearch("pump maintenance", "hosted-user", options);
     expect(http).toHaveBeenCalledTimes(1);
     expect(result.results[0].citation).toMatchObject({ documentId: "hosted-doc", pageNumber: 2 });
     expect(result.results[0].text).toBe("Pump maintenance valve inspection.");
     expect(result.usageEvents).toMatchObject([{ model: "Qwen/Qwen3-Reranker-0.6B", inputTokens: 174 }]);
     const { attributedUsage } = await import("../services/usage-attribution.js");
-    const events = await sql`select org_id,workspace_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
+    const events = await sql`select org_id,project_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
     // The rerank call's provider tokens (billing 0) and the billable search unit.
     expect(events.map(e => ({ ...e, input_tokens: Number(e.input_tokens), cost_cents: Number(e.cost_cents) }))).toMatchObject([
-      { org_id: "hosted-org", workspace_id: "hosted-ws", input_tokens: 174, run_id: null, cost_cents: 0 },
-      { org_id: "hosted-org", workspace_id: "hosted-ws", metric: "search-query", cost_cents: 0.01 },
+      { org_id: "hosted-org", project_id: "hosted-ws", input_tokens: 174, run_id: null, cost_cents: 0 },
+      { org_id: "hosted-org", project_id: "hosted-ws", metric: "search-query", cost_cents: 0.01 },
     ]);
     const [session] = await sql`select metadata from search_sessions where id=${result.sessionId}`;
     expect(session.metadata.diagnostics.hostedRerank).toMatchObject({ status: "success", inputTokens: 174 });
@@ -96,9 +96,9 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
   });
   it("privacy and actual exhausted budget block provider calls", async () => {
     const before = http.mock.calls.length;
-    await sql`update workspaces set pipeline=jsonb_set(pipeline,'{privacyMode}','"local-only"') where id='hosted-ws'`;
+    await sql`update projects set pipeline=jsonb_set(pipeline,'{privacyMode}','"local-only"') where id='hosted-ws'`;
     await hybridSearch("pump maintenance", "hosted-user", options);
-    await sql`update workspaces set pipeline=jsonb_set(pipeline,'{privacyMode}','"standard"') where id='hosted-ws'`;
+    await sql`update projects set pipeline=jsonb_set(pipeline,'{privacyMode}','"standard"') where id='hosted-ws'`;
     await sql`update organizations set credit_balance_cents=-100000 where id='hosted-org'`;
     await hybridSearch("pump maintenance", "hosted-user", options);
     expect(http).toHaveBeenCalledTimes(before);

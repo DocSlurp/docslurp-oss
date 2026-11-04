@@ -1977,7 +1977,7 @@ function commandAttribution(): Record<string, string | undefined> {
   const context = currentPerfContext();
   return {
     org_id: context?.orgId ?? undefined,
-    workspace_id: context?.workspaceId,
+    project_id: context?.projectId,
     run_id: context?.runId,
     document_id: context?.documentId,
     stage: context?.stageName,

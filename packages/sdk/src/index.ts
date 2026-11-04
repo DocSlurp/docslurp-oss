@@ -2,7 +2,7 @@ import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
 import { readSse } from "./sse.js";
 import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "./keys.js";
 export { apiKeyKind, assertBrowserSafeApiKey, assertSecureApiOrigin, PRIVATE_API_KEY_PREFIX, PUBLIC_API_KEY_PREFIX, UnsafeApiKeyError, type ApiKeyKind } from "./keys.js";
-import type { RunProgressSnapshot, WorkspaceState, OrganizationRecord, OrganizationDetails, OrganizationAccess, OrganizationMembership, OrganizationMember, OrganizationRole, OrganizationApiKey, CreateOrganizationInput, UpdateOrganizationInput, OrganizationInvite, CreateOrganizationInviteInput } from "./state.js";
+import type { RunProgressSnapshot, ProjectState, OrganizationRecord, OrganizationDetails, OrganizationAccess, OrganizationMembership, OrganizationMember, OrganizationRole, OrganizationApiKey, CreateOrganizationInput, UpdateOrganizationInput, OrganizationInvite, CreateOrganizationInviteInput } from "./state.js";
 export type * from "./state.js";
 import type { IngestReport } from "./ingest-report.js";
 export type * from "./ingest-report.js";
@@ -11,8 +11,8 @@ export type * from "./document.js";
 
 export type DocSlurpFetch = typeof fetch;
 
-/** Mirrors workspaceTemplateKeySchema on the server. */
-export type WorkspaceTemplateKey =
+/** Mirrors projectTemplateKeySchema on the server. */
+export type ProjectTemplateKey =
   | "legal-contracts"
   | "medical-records"
   | "financial-reports"
@@ -30,7 +30,7 @@ export type IndexingMode = "full" | "map" | "visual";
  */
 export type QualityMode = "fast" | "auto" | "good";
 
-export type WorkspaceRecord = JsonObject & {
+export type ProjectRecord = JsonObject & {
   id: string;
   name: string;
   /** Mode new uploads use; always "full" while deferred indexing is unavailable. */
@@ -43,7 +43,7 @@ export type WorkspaceRecord = JsonObject & {
 
 export type RetrievalStage = "chunk" | "page-text" | "map-node" | "page-image";
 
-/** Per-search stats for deferred workspaces: pages parsed on demand for this query. */
+/** Per-search stats for deferred projects: pages parsed on demand for this query. */
 export type DeferredSearchStats = {
   temperature: "cold" | "warm" | "hot";
   candidatePages: number;
@@ -68,7 +68,7 @@ export type MaterializationPolicy = {
 };
 
 export type CreateCapabilityInput = {
-  workspaceIds?: string[];
+  projectIds?: string[];
   policy?: Partial<MaterializationPolicy>;
   ttlSeconds?: number;
   boundClientKeyId?: string;
@@ -120,7 +120,7 @@ export type UploadMediaEstimate = {
   videoMinutes: number;
   /** True when a duration was not supplied and was guessed from the file size. */
   durationsAssumed: boolean;
-  /** Whether the workspace reads sampled video frames, which triples a video minute's price. */
+  /** Whether the project reads sampled video frames, which triples a video minute's price. */
   videoFrames: boolean;
   /** `low` reads video from its audio track only; `high` also reads frames. */
   credits: { low: number; high: number };
@@ -131,23 +131,23 @@ export type UploadMediaEstimate = {
 /** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
 export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean };
 
-/** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
-export type UpdateWorkspaceInput = JsonObject & {
+/** Settings accepted by project PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
+export type UpdateProjectInput = JsonObject & {
   /** "reindex" queues a re-index of existing documents; "new-uploads" only changes future ingestion. */
   apply?: "new-uploads" | "reindex";
   autoConfirmReindex?: boolean;
   retainDocumentVersions?: number | null;
-  /** False keeps China-based model providers out of this workspace's requests; true cannot widen an organization opt-out. */
+  /** False keeps China-based model providers out of this project's requests; true cannot widen an organization opt-out. */
   allowChinaProviders?: boolean;
 };
-export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
-/** The stored search and chat settings `PATCH /v1/workspaces/:id/search-settings` returns. */
-export type WorkspaceSearchSettingsResponse = { workspaceId: string; retrievalDefaults: JsonObject; chat: JsonObject } & JsonObject;
+export type ProjectUpdateResponse = { project: ProjectRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
+/** The stored search and chat settings `PATCH /v1/projects/:id/search-settings` returns. */
+export type ProjectSearchSettingsResponse = { projectId: string; retrievalDefaults: JsonObject; chat: JsonObject } & JsonObject;
 
-/** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
+/** `project`: ID, slug or name (see {@link DocSlurpClientOptions.project}); omitted: the client project. */
 export type UploadEstimateInput = {
   /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
-  speedBoost?: boolean; files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
+  speedBoost?: boolean; files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; project?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -159,7 +159,7 @@ export type JobEvent = { event: "status" | "progress" | "done"; job: JobStatus &
 export type StreamJobOptions = RequestOptions & { pollIntervalMs?: number };
 
 
-export type WorkspaceRun = JsonObject & {
+export type ProjectRun = JsonObject & {
   id: string;
   status: "queued" | "processing" | "completed" | "failed";
   controlState?: string | null;
@@ -205,7 +205,7 @@ export type SearchAvailability = {
   isPartial: boolean;
   /** Some searchable documents have keyword results only (vectors not indexed yet). */
   keywordOnly?: boolean;
-  scope?: { workspaceId: string; runId: string | null };
+  scope?: { projectId: string; runId: string | null };
   coverage?: SearchAvailabilityCoverage;
   resultBreakdown?: { indexedResultCount: number; pageResultCount: number };
   message: string | null;
@@ -248,12 +248,12 @@ export type SearchResult = JsonObject & {
   text: string;
   citation: SearchCitation;
   parentText?: string;
-  /** How this result was retrieved (deferred workspaces). */
+  /** How this result was retrieved (deferred projects). */
   retrieval?: { stage: RetrievalStage; pageNumbers?: number[]; materialized?: boolean };
 };
 
-/** Reserved workspace ID for the organization's default workspace. */
-export const DEFAULT_WORKSPACE = "default";
+/** Reserved project ID for the organization's default project. */
+export const DEFAULT_PROJECT = "default";
 
 /**
  * Supplies a bearer access token per request, for credentials that expire and
@@ -278,13 +278,13 @@ export type DocSlurpClientOptions = {
   /** Service origin. Defaults to DOCSLURP_URL, then https://docslurp.io. */
   apiUrl?: string;
   /**
-   * Workspace for ingestion, search and chat: an ID, slug or name. Names match
-   * by slug, so "Legal Contracts" and "legal-contracts" are the same workspace;
-   * an upload into a name that matches nothing creates that workspace. Defaults
-   * to DOCSLURP_WORKSPACE on the server, then "default": the organization's
-   * default workspace.
+   * Project for ingestion, search and chat: an ID, slug or name. Names match
+   * by slug, so "Legal Contracts" and "legal-contracts" are the same project;
+   * an upload into a name that matches nothing creates that project. Defaults
+   * to DOCSLURP_PROJECT on the server, then "default": the organization's
+   * default project.
    */
-  workspace?: string;
+  project?: string;
   fetch?: DocSlurpFetch;
   /** Total time allowed for one request, including retries. Default: 30 seconds. */
   timeoutMs?: number;
@@ -296,7 +296,7 @@ export type UploadFileInput = {
   /**
    * Logical identity of this source, e.g. a URL or site path like "/products".
    * When a newer upload with the same canonicalId finishes processing in the
-   * workspace, older versions drop out of search. Must not start with
+   * project, older versions drop out of search. Must not start with
    * `docslurp:` (reserved; refused with a RangeError and by the API).
    */
   canonicalId?: string;
@@ -352,7 +352,7 @@ export type UploadOptions = RequestOptions & {
   /** Folder path for a single-file or streamed upload. Use UploadFileInput.path for several files. */
   path?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the workspace's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
   quality?: QualityMode;
   /**
    * "auto" (default) uses presigned storage PUTs: single PUT for small files,
@@ -363,13 +363,13 @@ export type UploadOptions = RequestOptions & {
   directUpload?: "auto" | boolean;
   filename?: string;
   idempotencyKey?: string;
-  /** Without `workspace`: create a fresh self-titled workspace instead of using the client workspace. */
-  newWorkspace?: boolean;
+  /** Without `project`: create a fresh self-titled project instead of using the client project. */
+  newProject?: boolean;
   orgId?: string;
-  /** Template for a workspace this upload creates; without `workspace`, creates a new self-titled one from it. */
-  templateKey?: WorkspaceTemplateKey;
-  /** Workspace ID, slug or name. A name that matches no workspace creates one with that name. */
-  workspace?: string;
+  /** Template for a project this upload creates; without `project`, creates a new self-titled one from it. */
+  templateKey?: ProjectTemplateKey;
+  /** Project ID, slug or name. A name that matches no project creates one with that name. */
+  project?: string;
 };
 
 export type UploadInput = {
@@ -379,15 +379,15 @@ export type UploadInput = {
   tags?: string[];
   files: Array<Blob | File | UploadFileInput>;
   idempotencyKey?: string;
-  /** Stamp these documents with an indexing mode instead of the workspace's. */
+  /** Stamp these documents with an indexing mode instead of the project's. */
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the workspace's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
   quality?: QualityMode;
-  newWorkspace?: boolean;
+  newProject?: boolean;
   orgId?: string;
-  templateKey?: WorkspaceTemplateKey;
-  /** Workspace ID, slug or name. A name that matches no workspace creates one with that name. */
-  workspace?: string;
+  templateKey?: ProjectTemplateKey;
+  /** Project ID, slug or name. A name that matches no project creates one with that name. */
+  project?: string;
 };
 
 export type RejectedUpload = {
@@ -402,9 +402,9 @@ export type UploadResponse = {
   documents: DocumentRecord[];
   /** Files an upload left out while accepting the rest (one bad file never fails the request). Absent when every file was taken. */
   rejected?: RejectedUpload[];
-  run: WorkspaceRun;
+  run: ProjectRun;
   warnings?: string[];
-  workspace: WorkspaceRecord;
+  project: ProjectRecord;
   /** Set when the upload queued background work (for example a config-change re-index). */
   job?: JobStatus;
 };
@@ -425,7 +425,7 @@ export type ExtractStatus = "pending" | "processing" | "completed" | "failed" | 
 export type ExtractRecord = {
   id: string;
   status: ExtractStatus;
-  workspaceId: string;
+  projectId: string;
   runId: string | null;
   retentionHours: number;
   paidRetention: boolean;
@@ -449,15 +449,15 @@ export type UploadUrlsInput = {
   tags?: string[];
   idempotencyKey?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the workspace's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
   quality?: QualityMode;
-  newWorkspace?: boolean;
+  newProject?: boolean;
   orgId?: string;
-  templateKey?: WorkspaceTemplateKey;
+  templateKey?: ProjectTemplateKey;
   /** Each URL's canonical ID defaults to the URL; pass an object to map it elsewhere (e.g. "/products"). */
   urls: Array<string | { url: string; canonicalId?: string }>;
-  /** Workspace ID, slug or name. A name that matches no workspace creates one with that name. */
-  workspace?: string;
+  /** Project ID, slug or name. A name that matches no project creates one with that name. */
+  project?: string;
 };
 
 /** @deprecated Use UploadUrlsInput. */
@@ -478,12 +478,12 @@ export type SearchInput = {
   documentId?: string;
   filenameContains?: string;
   limit?: number;
-  /** Relevance floor, 0..1: drop results with a lower raw match strength. 0 disables it; omitted uses the workspace/server default. */
+  /** Relevance floor, 0..1: drop results with a lower raw match strength. 0 disables it; omitted uses the project/server default. */
   minScore?: number;
   q: string;
   tags?: string;
-  /** Workspace ID, slug or name; omitted: the client workspace. */
-  workspace?: string;
+  /** Project ID, slug or name; omitted: the client project. */
+  project?: string;
 };
 
 /** Await the response metadata or iterate its hits; both share one request. */
@@ -503,13 +503,13 @@ export type SearchUsage = {
 export type SearchResponse = {
   usage: SearchUsage;
   availability: SearchAvailability | null;
-  /** True when the workspace is searchable but search returned nothing: either nothing cleared the relevance floor or nothing was retrieved at all (e.g. a filter that matches nothing); `results` is then empty. */
+  /** True when the project is searchable but search returned nothing: either nothing cleared the relevance floor or nothing was retrieved at all (e.g. a filter that matches nothing); `results` is then empty. */
   noMatch?: boolean;
   /** The floor applied and how many retrieved candidates it removed. */
   relevanceFloor?: { minScore: number; dropped: number };
   results: SearchResult[];
   sessionId: string;
-  /** Present for deferred (map/visual) workspaces. */
+  /** Present for deferred (map/visual) projects. */
   deferred?: DeferredSearchStats;
 };
 
@@ -545,8 +545,8 @@ export type ChatInput = {
   sessionId?: string;
   /** Browser (publishable) keys: the `sessionToken` from the previous answer, required to continue `sessionId`. */
   sessionToken?: string;
-  /** Workspace ID, slug or name; omitted: the client workspace. */
-  workspace?: string;
+  /** Project ID, slug or name; omitted: the client project. */
+  project?: string;
   /**
    * Chat model for this request, as an `llm://` model URI such as
    * `llm://openrouter/anthropic/claude-haiku-5.5` (the bare OpenRouter id also
@@ -564,12 +564,12 @@ export type ChatInput = {
     searchConcurrency?: number;
     /** false: a direct answer from one retrieval and one model call, without the agent's tools. */
     tools?: boolean;
-    /** false: no web tools this turn. Omitted or true: offered only when the deployment, workspace and key allow them. */
+    /** false: no web tools this turn. Omitted or true: offered only when the deployment, project and key allow them. */
     web?: boolean;
     /** @deprecated Ignored: settings suggestions are a DocSlurp app feature and never run for API keys. */
     suggestions?: boolean;
   };
-  /** Retrieval overrides for this request only; workspace defaults stay as they are. */
+  /** Retrieval overrides for this request only; project defaults stay as they are. */
   retrieval?: {
     /** Passages retrieved for the answer, 1-12. */
     resultCount?: number;
@@ -609,8 +609,8 @@ export type ChatStreamEvent =
   | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
 export type ListDocumentsInput = {
-  /** Workspace ID, slug or name; omitted: the client workspace. */
-  workspace?: string;
+  /** Project ID, slug or name; omitted: the client project. */
+  project?: string;
   runId?: string;
   /** Comma-separated tags. */
   tags?: string;
@@ -620,7 +620,7 @@ export type ListDocumentsInput = {
 export type DeletedDocument = JsonObject & {
   documentId: string;
   filename: string;
-  workspaceId?: string | null;
+  projectId?: string | null;
   runId?: string | null;
   sourceKey?: string;
 };
@@ -628,7 +628,7 @@ export type DeletedDocument = JsonObject & {
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
 export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
-export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
+export type ReprocessRunResult = { run: ProjectRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
   /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
   speedBoost?: boolean;
@@ -652,7 +652,7 @@ export type RunStreamEvent = {
   /** snapshot or a run/stage/document event type. */
   event: string;
   id?: string;
-  data: JsonObject & { run?: WorkspaceRun };
+  data: JsonObject & { run?: ProjectRun };
 };
 
 /** Account-wide run events. `document.replaced` fires when a re-indexed source takes over search. */
@@ -661,7 +661,7 @@ export type ActivityEvent = {
   type: string;
   id?: string;
   runId: string;
-  workspaceId: string | null;
+  projectId: string | null;
   documentId: string | null;
   /** For document.replaced: { canonicalId, replacedDocumentIds }. */
   progress: JsonObject;
@@ -672,8 +672,8 @@ export type ActivityEvent = {
 export type StreamActivityOptions = RequestOptions & {
   /** Only yield these event types. */
   types?: string[];
-  /** Only yield events from this workspace. */
-  workspaceId?: string;
+  /** Only yield events from this project. */
+  projectId?: string;
 };
 
 export type StreamProgressOptions = RequestOptions & {
@@ -686,7 +686,7 @@ export type StreamProgressOptions = RequestOptions & {
   /** Longest gap between yields: re-yield the latest snapshot when nothing changed for this long. Default: off. */
   heartbeatMs?: number;
 };
-export type WorkspaceStateOptions = RequestOptions & { recentWindowHours?: number };
+export type ProjectStateOptions = RequestOptions & { recentWindowHours?: number };
 /** Narrow the ingest report to one run or up to 100 documents. */
 export type IngestReportOptions = RequestOptions & { runId?: string; documentIds?: string[] };
 
@@ -696,14 +696,14 @@ export type WaitForRunOptions = RequestOptions & {
 };
 
 export class DocSlurpRunError extends Error {
-  constructor(message: string, readonly run: WorkspaceRun) {
+  constructor(message: string, readonly run: ProjectRun) {
     super(message);
     this.name = "DocSlurpRunError";
   }
 }
 
 export class DocSlurpTimeoutError extends Error {
-  constructor(message: string, readonly run?: WorkspaceRun) {
+  constructor(message: string, readonly run?: ProjectRun) {
     super(message);
     this.name = "DocSlurpTimeoutError";
   }
@@ -970,7 +970,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return await forcedRefresh;
   }
   assertSecureApiOrigin(apiUrl);
-  const clientWorkspace = options.workspace?.trim() || env?.DOCSLURP_WORKSPACE?.trim() || DEFAULT_WORKSPACE;
+  const clientProject = options.project?.trim() || env?.DOCSLURP_PROJECT?.trim() || DEFAULT_PROJECT;
   const fetchImpl = options.fetch ?? fetch;
 
   const defaultTimeoutMs = positiveDuration(options.timeoutMs ?? 30_000, "timeoutMs");
@@ -1045,8 +1045,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function getRun(runId: string, requestOptions?: RequestOptions): Promise<WorkspaceRun> {
-    const snapshot = await request<{ run: WorkspaceRun }>(
+  async function getRun(runId: string, requestOptions?: RequestOptions): Promise<ProjectRun> {
+    const snapshot = await request<{ run: ProjectRun }>(
       `/v1/runs/${encodeURIComponent(runId)}/progress`, {}, requestOptions, true,
     );
     return snapshot.run;
@@ -1062,25 +1062,25 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    * cannot hold a stream open, poll getRunProgress or subscribe to webhooks.
    */
   async function* streamActivity(options: StreamActivityOptions = {}): AsyncGenerator<ActivityEvent> {
-    const workspaceByRun = new Map<string, string | null>();
+    const projectByRun = new Map<string, string | null>();
     const types = options.types ? new Set(options.types) : null;
     for await (const frame of streamEventsAt("/v1/runs/activity/stream", { ...options, timeoutMs: options.timeoutMs ?? 3_600_000 })) {
       if (frame.event === "activity-run") {
-        const run = frame.data as JsonObject & { id?: string; workspaceId?: string };
-        if (typeof run.id === "string") workspaceByRun.set(run.id, typeof run.workspaceId === "string" ? run.workspaceId : null);
+        const run = frame.data as JsonObject & { id?: string; projectId?: string };
+        if (typeof run.id === "string") projectByRun.set(run.id, typeof run.projectId === "string" ? run.projectId : null);
         continue;
       }
       if (frame.event !== "activity-event") continue;
       const event = frame.data as JsonObject & { type?: string; runId?: string; documentId?: string | null; progress?: JsonObject; createdAt?: string };
       if (typeof event.type !== "string" || typeof event.runId !== "string") continue;
       if (types && !types.has(event.type)) continue;
-      const workspaceId = workspaceByRun.get(event.runId) ?? null;
-      if (options.workspaceId && workspaceId !== options.workspaceId) continue;
+      const projectId = projectByRun.get(event.runId) ?? null;
+      if (options.projectId && projectId !== options.projectId) continue;
       yield {
         type: event.type,
         ...(frame.id === undefined ? {} : { id: frame.id }),
         runId: event.runId,
-        workspaceId,
+        projectId,
         documentId: typeof event.documentId === "string" ? event.documentId : null,
         progress: event.progress ?? {},
         ...(typeof event.createdAt === "string" ? { createdAt: event.createdAt } : {}),
@@ -1205,11 +1205,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function estimateAt(path: string, body: unknown, requestOptions?: RequestOptions): Promise<EstimateResponse> {
     return request<EstimateResponse>(path, jsonRequest("POST", body ?? {}), requestOptions);
   }
-  const wsPath = (ref: string | undefined) => `/v1/workspaces/${encodeURIComponent(ref?.trim() || clientWorkspace)}`;
+  const wsPath = (ref: string | undefined) => `/v1/projects/${encodeURIComponent(ref?.trim() || clientProject)}`;
 
-  /** What switching a workspace to `mode` would cost. */
-  function estimateIndexingMode(mode: IndexingMode, input: { workspace?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
-    return request(`${wsPath(input.workspace)}/indexing-mode/estimate`, jsonRequest("POST", { mode, speedBoost: input.speedBoost }), requestOptions);
+  /** What switching a project to `mode` would cost. */
+  function estimateIndexingMode(mode: IndexingMode, input: { project?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+    return request(`${wsPath(input.project)}/indexing-mode/estimate`, jsonRequest("POST", { mode, speedBoost: input.speedBoost }), requestOptions);
   }
 
   async function getRunProgress(runId: string, options?: RequestOptions): Promise<RunProgressSnapshot> {
@@ -1309,12 +1309,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function waitForRun(runId: string, waitOptions: WaitForRunOptions = {}): Promise<WorkspaceRun> {
+  async function waitForRun(runId: string, waitOptions: WaitForRunOptions = {}): Promise<ProjectRun> {
     const timeoutMs = positiveDuration(waitOptions.timeoutMs ?? 300_000, "timeoutMs");
     const pollIntervalMs = positiveDuration(waitOptions.pollIntervalMs ?? 1_000, "pollIntervalMs");
     const bound = deadline(timeoutMs, waitOptions.signal);
     const expiresAt = Date.now() + timeoutMs;
-    let run: WorkspaceRun | undefined;
+    let run: ProjectRun | undefined;
     try {
       while (true) {
         run = await getRun(runId, { signal: bound.signal, timeoutMs: Math.max(1, expiresAt - Date.now()) });
@@ -1339,21 +1339,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   /**
-   * Where an upload or URL ingest lands. An explicit per-call workspace wins
+   * Where an upload or URL ingest lands. An explicit per-call project wins
    * (the server finds it by ID, slug or name, or creates it from the name).
-   * Otherwise newWorkspace or a templateKey asks the server for a new
-   * self-titled workspace, and anything else goes to the client workspace.
+   * Otherwise newProject or a templateKey asks the server for a new
+   * self-titled project, and anything else goes to the client project.
    */
-  function intakeTarget(input: { newWorkspace?: boolean; templateKey?: string; workspace?: string }): { newWorkspace: boolean; workspace?: string } {
-    const explicit = input.workspace?.trim();
-    if (explicit) return { newWorkspace: false, workspace: explicit };
-    if (input.newWorkspace || input.templateKey) return { newWorkspace: true };
-    return { newWorkspace: false, workspace: clientWorkspace };
+  function intakeTarget(input: { newProject?: boolean; templateKey?: string; project?: string }): { newProject: boolean; project?: string } {
+    const explicit = input.project?.trim();
+    if (explicit) return { newProject: false, project: explicit };
+    if (input.newProject || input.templateKey) return { newProject: true };
+    return { newProject: false, project: clientProject };
   }
 
-  /** Per-call workspace, else the client workspace ("default" unless configured). */
-  function inWorkspace<T extends { workspace?: string }>(input: T): T {
-    return { ...input, workspace: input.workspace?.trim() || clientWorkspace };
+  /** Per-call project, else the client project ("default" unless configured). */
+  function inProject<T extends { project?: string }>(input: T): T {
+    return { ...input, project: input.project?.trim() || clientProject };
   }
 
   /** "/v1/extracts" for extract() calls (marked with EXTRACT_MODE on the options), else "/v1/uploads". */
@@ -1395,9 +1395,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
       const concurrency = input.concurrency ?? 4;
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
-      return request<SearchBatchResponse>("/v1/search", jsonRequest("POST", { queries: input.queries.map(inWorkspace), concurrency }), options);
+      return request<SearchBatchResponse>("/v1/search", jsonRequest("POST", { queries: input.queries.map(inProject), concurrency }), options);
     }
-    const response = request<SearchResponse>("/v1/search", jsonRequest("POST", inWorkspace(input)), options);
+    const response = request<SearchResponse>("/v1/search", jsonRequest("POST", inProject(input)), options);
     return Object.assign(response, { async *[Symbol.asyncIterator]() { yield* (await response).results; } });
   }
 
@@ -1425,8 +1425,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (metadata.orgId) fields.orgId = metadata.orgId;
     if (metadata.tags) fields.tags = JSON.stringify(metadata.tags);
     const target = intakeTarget(metadata);
-    if (target.workspace) fields.workspace = target.workspace;
-    if (target.newWorkspace) fields.newWorkspace = "true";
+    if (target.project) fields.project = target.project;
+    if (target.newProject) fields.newProject = "true";
     if (options.canonicalId) fields.canonicalId = options.canonicalId;
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
@@ -1474,7 +1474,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
   /**
    * Extract: exactly like upload (files, streams, URLs, direct storage
-   * transfer; the same workspace rules and partial success), except the files
+   * transfer; the same project rules and partial success), except the files
    * and every output are deleted when the retention window ends. The response
    * adds `extract` (id, expiresAt, download state).
    */
@@ -1623,7 +1623,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     canonicalIds: Array<string | null>;
     paths: string[];
     metadata: UploadOptions | (UploadInput & UploadOptions);
-    target: { newWorkspace: boolean; workspace?: string };
+    target: { newProject: boolean; project?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
     const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
@@ -1632,8 +1632,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       ...(metadata.tags ? { tags: metadata.tags } : {}),
       ...(metadata.indexingMode ? { indexingMode: metadata.indexingMode } : {}),
       ...pipelineFields(metadata),
-      ...(args.target.workspace ? { workspace: args.target.workspace } : {}),
-      ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
+      ...(args.target.project ? { project: args.target.project } : {}),
+      ...(args.target.newProject ? { newProject: true } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),
       files: args.blobs.map((blob, index) => ({
         filename: args.names[index],
@@ -1676,29 +1676,29 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     waitForRun,
 
     /** The caller's recent runs, newest first. */
-    async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
-      return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+    async listRuns(options?: RequestOptions): Promise<ProjectRun[]> {
+      return (await request<{ runs: ProjectRun[] }>("/v1/runs", {}, options, true)).runs;
 
     },
 
     getJob,
     streamJob,
 
-    /** Applies workspace settings. Re-index-queuing changes return the queued `job`. */
-    updateWorkspace(id: string | undefined, input: UpdateWorkspaceInput, requestOptions?: RequestOptions): Promise<WorkspaceUpdateResponse> {
-      return request<WorkspaceUpdateResponse>(wsPath(id), jsonRequest("PATCH", input), requestOptions);
+    /** Applies project settings. Re-index-queuing changes return the queued `job`. */
+    updateProject(id: string | undefined, input: UpdateProjectInput, requestOptions?: RequestOptions): Promise<ProjectUpdateResponse> {
+      return request<ProjectUpdateResponse>(wsPath(id), jsonRequest("PATCH", input), requestOptions);
     },
-    /** Impact and cost of an {@link UpdateWorkspaceInput}, without applying it. */
-    updateWorkspaceEstimate(id: string | undefined, input: UpdateWorkspaceInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+    /** Impact and cost of an {@link UpdateProjectInput}, without applying it. */
+    updateProjectEstimate(id: string | undefined, input: UpdateProjectInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/estimate`, input, requestOptions);
     },
     /**
-     * Changes a workspace's retrieval defaults, ranking controls and chat settings (omitted fields keep their
-     * values) and returns the stored settings. API keys must be server keys with `workspaces:manage`, and the key
-     * owner must be able to edit the workspace.
+     * Changes a project's retrieval defaults, ranking controls and chat settings (omitted fields keep their
+     * values) and returns the stored settings. API keys must be server keys with `projects:manage`, and the key
+     * owner must be able to edit the project.
      */
-    updateSearchSettings(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<WorkspaceSearchSettingsResponse> {
-      return request<WorkspaceSearchSettingsResponse>(`${wsPath(id)}/search-settings`, jsonRequest("PATCH", input), requestOptions);
+    updateSearchSettings(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<ProjectSearchSettingsResponse> {
+      return request<ProjectSearchSettingsResponse>(`${wsPath(id)}/search-settings`, jsonRequest("PATCH", input), requestOptions);
     },
     /** Impact of an `updateSearchSettings` body, without applying it. Same access as the mutation. */
     updateSearchSettingsEstimate(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<EstimateResponse> {
@@ -1710,64 +1710,64 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * the earlier extraction). Spends credits; price it with {@link reprocessEstimate}.
      */
     async reprocessRun(runId: string, input: ReprocessRunInput = {}, requestOptions?: RequestOptions): Promise<ReprocessRunResult> {
-      const body = await request<WorkspaceRun & { run?: WorkspaceRun; job?: JobStatus; warnings?: string[] }>(
+      const body = await request<ProjectRun & { run?: ProjectRun; job?: JobStatus; warnings?: string[] }>(
         `/v1/runs/${encodeURIComponent(runId)}/reprocess`, jsonRequest("POST", input), requestOptions,
       );
       // A deferred start answers { run, warnings, job }; a started one answers the run itself plus job.
       if (body.run) return { run: body.run, job: body.job, warnings: body.warnings ?? [] };
       const { job, warnings: _warnings, ...run } = body;
-      return { run: run as WorkspaceRun, job, warnings: [] };
+      return { run: run as ProjectRun, job, warnings: [] };
     },
     /** What {@link reprocessRun} would cost, without starting it. Server keys need `ingest`. */
     reprocessEstimate(runId: string, input: JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
-    /** Cost of fully indexing one document (`{ documentId }`) or a workspace (`{ workspace?, documentIds? }`). */
-    fullIndexEstimate(input: { documentId: string; speedBoost?: boolean } | { workspace?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+    /** Cost of fully indexing one document (`{ documentId }`) or a project (`{ project?, documentIds? }`). */
+    fullIndexEstimate(input: { documentId: string; speedBoost?: boolean } | { project?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, { speedBoost: input.speedBoost }, requestOptions);
-      return estimateAt(`${wsPath(input.workspace)}/full-index/estimate`, { documentIds: input.documentIds, speedBoost: input.speedBoost }, requestOptions);
+      return estimateAt(`${wsPath(input.project)}/full-index/estimate`, { documentIds: input.documentIds, speedBoost: input.speedBoost }, requestOptions);
     },
-    rebuildGraphEstimate(input: { workspace?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
-      const { workspace, ...body } = input;
-      return estimateAt(`${wsPath(typeof workspace === "string" ? workspace : undefined)}/graph/jobs/estimate`, body, requestOptions);
+    rebuildGraphEstimate(input: { project?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      const { project, ...body } = input;
+      return estimateAt(`${wsPath(typeof project === "string" ? project : undefined)}/graph/jobs/estimate`, body, requestOptions);
     },
     /** Cost of an upload before sending any bytes. */
     uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
-      return estimateAt("/v1/uploads/estimate", inWorkspace(input), requestOptions);
+      return estimateAt("/v1/uploads/estimate", inProject(input), requestOptions);
     },
     /**
      * Sets how many versions of each document are kept (1–100; null clears the override).
-     * Pass `workspace` for a workspace override, `orgId` for the organization default.
+     * Pass `project` for a project override, `orgId` for the organization default.
      */
-    setRetention(target: { orgId: string } | { workspace?: string }, retainDocumentVersions: number | null, requestOptions?: RequestOptions): Promise<JsonObject> {
+    setRetention(target: { orgId: string } | { project?: string }, retainDocumentVersions: number | null, requestOptions?: RequestOptions): Promise<JsonObject> {
       if (retainDocumentVersions !== null && (!Number.isInteger(retainDocumentVersions) || retainDocumentVersions < 1 || retainDocumentVersions > 100)) {
         throw new RangeError("retainDocumentVersions must be an integer from 1 to 100 (or null to clear).");
       }
-      const path = "orgId" in target ? `/v1/organizations/${encodeURIComponent(target.orgId)}` : wsPath(target.workspace);
+      const path = "orgId" in target ? `/v1/organizations/${encodeURIComponent(target.orgId)}` : wsPath(target.project);
       return request<JsonObject>(path, jsonRequest("PATCH", { retainDocumentVersions }), requestOptions);
     },
 
-    getWorkspaceState(id: string | undefined = clientWorkspace, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
-      if (!id?.trim()) throw new Error("Set DOCSLURP_WORKSPACE or pass a workspace for workspace state.");
+    getProjectState(id: string | undefined = clientProject, options: ProjectStateOptions = {}): Promise<ProjectState> {
+      if (!id?.trim()) throw new Error("Set DOCSLURP_PROJECT or pass a project for project state.");
       const hours = options.recentWindowHours ?? 24;
       if (!Number.isInteger(hours) || hours < 1 || hours > 720) throw new RangeError("recentWindowHours must be an integer from 1 to 720");
-      return request<WorkspaceState>(`/v1/workspaces/${encodeURIComponent(id)}/state?recentWindowHours=${hours}`, {}, options, true);
+      return request<ProjectState>(`/v1/projects/${encodeURIComponent(id)}/state?recentWindowHours=${hours}`, {}, options, true);
     },
 
     /**
      * Ingest report: pages, bytes, text layer, images, vision, searchability and
-     * cost for the workspace (default workspace when none is configured), plus
+     * cost for the project (default project when none is configured), plus
      * the settings that shaped it and recommendations. No model call.
      */
-    /** Re-runs a recommendation's affected files (up to 100) with the workspace's current settings. Server keys need `ingest`. */
+    /** Re-runs a recommendation's affected files (up to 100) with the project's current settings. Server keys need `ingest`. */
     reprocessIngestRecommendation(id: string | undefined, input: IngestRecommendationInput, options?: RequestOptions): Promise<IngestRecommendationReprocessResult> {
-      return request(`/v1/workspaces/${encodeURIComponent(id?.trim() || clientWorkspace)}/ingest-report/reprocess`, jsonRequest("POST", input), options);
+      return request(`/v1/projects/${encodeURIComponent(id?.trim() || clientProject)}/ingest-report/reprocess`, jsonRequest("POST", input), options);
     },
-    /** Applies a recommendation's own settings patch to the workspace. Server keys need `workspaces:manage`. */
+    /** Applies a recommendation's own settings patch to the project. Server keys need `projects:manage`. */
     applyIngestRecommendation(id: string | undefined, input: IngestRecommendationInput, options?: RequestOptions): Promise<IngestRecommendationApplyResult> {
-      return request(`/v1/workspaces/${encodeURIComponent(id?.trim() || clientWorkspace)}/ingest-report/apply`, jsonRequest("POST", input), options);
+      return request(`/v1/projects/${encodeURIComponent(id?.trim() || clientProject)}/ingest-report/apply`, jsonRequest("POST", input), options);
     },
-    getIngestReport(id: string | undefined = clientWorkspace, options: IngestReportOptions = {}): Promise<IngestReport> {
+    getIngestReport(id: string | undefined = clientProject, options: IngestReportOptions = {}): Promise<IngestReport> {
       const params = new URLSearchParams();
       if (options.runId) params.set("runId", options.runId);
       if (options.documentIds?.length) {
@@ -1775,7 +1775,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         params.set("documentIds", options.documentIds.join(","));
       }
       const query = params.toString();
-      return request<IngestReport>(`/v1/workspaces/${encodeURIComponent(id?.trim() || "default")}/ingest-report${query ? `?${query}` : ""}`, {}, options, true);
+      return request<IngestReport>(`/v1/projects/${encodeURIComponent(id?.trim() || "default")}/ingest-report${query ? `?${query}` : ""}`, {}, options, true);
     },
 
     async listOrganizations(options?: RequestOptions): Promise<OrganizationRecord[]> {
@@ -1827,7 +1827,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     chat(input: ChatInput, requestOptions?: RequestOptions): Promise<ChatResponse> {
       return request<ChatResponse>("/v1/chat", {
-        body: JSON.stringify(inWorkspace(input)),
+        body: JSON.stringify(inProject(input)),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       }, requestOptions);
@@ -1841,8 +1841,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * token streaming use POST /v1/chat/completions with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
-      const target = inWorkspace(input);
-      const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
+      const target = inProject(input);
+      const params = new URLSearchParams({ q: target.q, project: target.project ?? clientProject });
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
@@ -1867,9 +1867,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
     },
 
-    /** Documents in a workspace (the client default unless one is passed), newest first. */
+    /** Documents in a project (the client default unless one is passed), newest first. */
     async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
-      const params = new URLSearchParams({ workspace: input.workspace?.trim() || clientWorkspace });
+      const params = new URLSearchParams({ project: input.project?.trim() || clientProject });
       if (input.runId) params.set("runId", input.runId);
       if (input.tags) params.set("tags", input.tags);
       return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
@@ -1895,7 +1895,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
     /**
      * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
-     * `export-artifacts`), and every document must be in a workspace the key can use (404 before any change otherwise).
+     * `export-artifacts`), and every document must be in a project the key can use (404 before any change otherwise).
      */
     bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
       return request(`/v1/documents/bulk`, jsonRequest("POST", input), requestOptions);
@@ -1904,14 +1904,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     uploadUrls,
     /** @deprecated Use upload({ urls }) or uploadUrls(). */
     ingestUrls: uploadUrls,
-    async listWorkspaceTags(id: string = clientWorkspace, options?: RequestOptions): Promise<Array<{ tag: string; documentCount: number }>> {
-      return (await request<{ tags: Array<{ tag: string; documentCount: number }> }>(`/v1/workspaces/${encodeURIComponent(id)}/tags`, {}, options, true)).tags;
+    async listProjectTags(id: string = clientProject, options?: RequestOptions): Promise<Array<{ tag: string; documentCount: number }>> {
+      return (await request<{ tags: Array<{ tag: string; documentCount: number }> }>(`/v1/projects/${encodeURIComponent(id)}/tags`, {}, options, true)).tags;
     },
-    async listWorkspaces(options?: RequestOptions): Promise<WorkspaceRecord[]> {
-      return (await request<{ workspaces: WorkspaceRecord[] }>("/v1/workspaces", {}, options, true)).workspaces;
+    async listProjects(options?: RequestOptions): Promise<ProjectRecord[]> {
+      return (await request<{ projects: ProjectRecord[] }>("/v1/projects", {}, options, true)).projects;
     },
-    getWorkspace(id: string, options?: RequestOptions): Promise<WorkspaceRecord> {
-      return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
+    getProject(id: string, options?: RequestOptions): Promise<ProjectRecord> {
+      return request(`/v1/projects/${encodeURIComponent(id)}`, {}, options, true);
     },
     createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
       assertClientCanonicalIds(canonicalIdsOf(input, undefined));
@@ -1975,9 +1975,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request("/v1/capabilities", jsonRequest("POST", input), requestOptions);
     },
 
-    /** Indexes every unindexed page of a workspace (or the given documents) in the background. */
-    fullIndex(input: { workspace?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
-      return request<FullIndexResponse>(`${wsPath(input.workspace)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds, speedBoost: input.speedBoost }), requestOptions);
+    /** Indexes every unindexed page of a project (or the given documents) in the background. */
+    fullIndex(input: { project?: string; documentIds?: string[]; speedBoost?: boolean } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`${wsPath(input.project)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds, speedBoost: input.speedBoost }), requestOptions);
     },
 
     /** Indexes one document in full. */
@@ -1987,7 +1987,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     estimateIndexingMode,
     /** Alias of {@link estimateIndexingMode}. */
-    setIndexingModeEstimate(mode: IndexingMode, input: { workspace?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions) {
+    setIndexingModeEstimate(mode: IndexingMode, input: { project?: string; speedBoost?: boolean } = {}, requestOptions?: RequestOptions) {
       return estimateIndexingMode(mode, input, requestOptions);
     },
   };
@@ -2030,7 +2030,7 @@ export type { DocumentPreviewPage, ImageManifestRecord } from "./document-pages.
 /** HTTP bodies may come from a proxy; never display their diagnostic text. */
 function publicHttpError(status: number): string {
   if (status === 401) return "Please sign in again or check your API key.";
-  if (status === 403) return "You don’t have access to this action. Ask your workspace administrator for help.";
+  if (status === 403) return "You don’t have access to this action. Ask your project administrator for help.";
   if (status === 402 || status === 503) return "This feature is temporarily unavailable. Please try again later.";
   if (status === 404) return "We couldn’t find what you’re looking for. It may have been moved or removed.";
   if (status === 413) return "This file is too large. Please choose a smaller file and try again.";

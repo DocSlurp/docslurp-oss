@@ -17,8 +17,8 @@ export async function admitConfiguredAdminUser(pool: Pick<Pool, "query">, userId
     ), promoted_orgs as (
       update org_memberships set role = 'admin'
       where user_id in (select id from eligible) and role not in ('owner', 'admin')
-    ), promoted_workspaces as (
-      update workspace_members set role = 'admin'
+    ), promoted_projects as (
+      update project_members set role = 'admin'
       where user_id in (select id from eligible) and role <> 'admin'
     )
     select exists(select 1 from eligible) as is_admin

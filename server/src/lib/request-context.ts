@@ -31,10 +31,10 @@ type RequestContextState = {
   requestId: string;
   /** The error a framework handler turned into a response, for the request span. */
   error?: unknown;
-  /** The workspace a slug or `default` route reference resolved to. */
-  workspaceId?: string | null;
-  /** Every workspace whose content this request sent (or may send) to a hosted AI call; their provider settings all apply. */
-  providerPolicyWorkspaceIds?: Set<string>;
+  /** The project a slug or `default` route reference resolved to. */
+  projectId?: string | null;
+  /** Every project whose content this request sent (or may send) to a hosted AI call; their provider settings all apply. */
+  providerPolicyProjectIds?: Set<string>;
   requestStartedAt: number;
   userId: string | null;
   apiKeyId?: string | null;
@@ -43,10 +43,10 @@ type RequestContextState = {
   origin?: string | null;
   /** The Better Auth session behind a cookie-authenticated request; file URLs bind to it. */
   sessionId?: string | null;
-  /** Organization the request acts in: the API key's, or the workspace it resolved. */
+  /** Organization the request acts in: the API key's, or the project it resolved. */
   orgId?: string | null;
-  /** The API key actor's workspace allowlist; null when unrestricted or not a key. */
-  apiKeyWorkspaceIds?: readonly string[] | null;
+  /** The API key actor's project allowlist; null when unrestricted or not a key. */
+  apiKeyProjectIds?: readonly string[] | null;
   /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
   signal?: AbortSignal;
   performanceEvents: Array<{
@@ -180,7 +180,7 @@ export function currentRequestSessionId(): string | null {
   return requestContextStorage.getStore()?.sessionId ?? null;
 }
 
-/** Records the organization the request acts in (an API key's org, or a resolved workspace's). */
+/** Records the organization the request acts in (an API key's org, or a resolved project's). */
 export function setCurrentRequestOrgId(orgId: string | null | undefined): void {
   const store = requestContextStorage.getStore();
   if (store && orgId) store.orgId = orgId;
@@ -196,25 +196,25 @@ export function setCurrentRequestError(error: unknown): void {
   if (store) store.error = error;
 }
 
-/** Records the workspace a slug or `default` reference resolved to, for telemetry and the provider policy. */
-export function setCurrentRequestWorkspaceId(workspaceId: string): void {
+/** Records the project a slug or `default` reference resolved to, for telemetry and the provider policy. */
+export function setCurrentRequestProjectId(projectId: string): void {
   const store = requestContextStorage.getStore();
-  if (store) store.workspaceId = workspaceId;
-  noteProviderPolicyWorkspace(workspaceId);
+  if (store) store.projectId = projectId;
+  noteProviderPolicyProject(projectId);
 }
 
 /**
- * Adds a workspace whose content a hosted AI call in this request carries. The China-provider policy is the
- * AND of the organization's and every noted workspace's setting, so a workspace opt-out is never widened.
+ * Adds a project whose content a hosted AI call in this request carries. The China-provider policy is the
+ * AND of the organization's and every noted project's setting, so a project opt-out is never widened.
  */
-export function noteProviderPolicyWorkspace(workspaceId: string | null | undefined): void {
+export function noteProviderPolicyProject(projectId: string | null | undefined): void {
   const store = requestContextStorage.getStore();
-  if (!store || !workspaceId) return;
-  (store.providerPolicyWorkspaceIds ??= new Set()).add(workspaceId);
+  if (!store || !projectId) return;
+  (store.providerPolicyProjectIds ??= new Set()).add(projectId);
 }
 
-export function currentProviderPolicyWorkspaceIds(): readonly string[] {
-  return [...(requestContextStorage.getStore()?.providerPolicyWorkspaceIds ?? [])].sort();
+export function currentProviderPolicyProjectIds(): readonly string[] {
+  return [...(requestContextStorage.getStore()?.providerPolicyProjectIds ?? [])].sort();
 }
 
 export function currentRequestUserId(): string | null {
@@ -222,17 +222,17 @@ export function currentRequestUserId(): string | null {
 }
 
 /**
- * Records the request's API key workspace allowlist (empty = unrestricted).
- * Workspace access queries (organizations.ts) intersect with it, so services
- * that only take a userId still honor a key bound to specific workspaces.
+ * Records the request's API key project allowlist (empty = unrestricted).
+ * Project access queries (organizations.ts) intersect with it, so services
+ * that only take a userId still honor a key bound to specific projects.
  */
-export function setCurrentRequestApiKeyWorkspaceIds(workspaceIds: readonly string[] | null | undefined): void {
+export function setCurrentRequestApiKeyProjectIds(projectIds: readonly string[] | null | undefined): void {
   const store = requestContextStorage.getStore();
-  if (store) store.apiKeyWorkspaceIds = workspaceIds?.length ? [...workspaceIds] : null;
+  if (store) store.apiKeyProjectIds = projectIds?.length ? [...projectIds] : null;
 }
 
-export function currentRequestApiKeyWorkspaceIds(): readonly string[] | null {
-  return requestContextStorage.getStore()?.apiKeyWorkspaceIds ?? null;
+export function currentRequestApiKeyProjectIds(): readonly string[] | null {
+  return requestContextStorage.getStore()?.apiKeyProjectIds ?? null;
 }
 
 export function pushRequestPerformanceEvent(event: {
@@ -423,14 +423,14 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
 /**
  * What a request span needs for servicing a user: who made the request (user,
  * org, API key), the request id they can quote, the path, and every route
- * parameter (`docslurp.workspaceId`, `docslurp.runId`, `docslurp.docId`, ...).
+ * parameter (`docslurp.projectId`, `docslurp.runId`, `docslurp.docId`, ...).
  * File-proxy tokens are already redacted from `pathname`.
  */
 export function requestSpanAttributes(args: {
   requestId: string;
   route: string;
   pathname: string;
-  identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId" | "workspaceId"> | undefined;
+  identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId" | "projectId"> | undefined;
   userAgent?: string | null;
 }): Record<string, string> {
   const attributes: Record<string, string> = { "docslurp.requestId": args.requestId, "url.path": args.pathname.slice(0, 500) };
@@ -450,10 +450,10 @@ export function requestSpanAttributes(args: {
       attributes[`docslurp.${name}`] = actual[index]!.slice(0, 200);
     }
   });
-  // A slug or `default` in the path resolved to this workspace id (workspace-ref-path.ts).
-  if (args.identity?.workspaceId) {
-    if (attributes["docslurp.workspaceId"] && attributes["docslurp.workspaceId"] !== args.identity.workspaceId) attributes["docslurp.workspaceRef"] = attributes["docslurp.workspaceId"];
-    attributes["docslurp.workspaceId"] = args.identity.workspaceId;
+  // A slug or `default` in the path resolved to this project id (project-ref-path.ts).
+  if (args.identity?.projectId) {
+    if (attributes["docslurp.projectId"] && attributes["docslurp.projectId"] !== args.identity.projectId) attributes["docslurp.projectRef"] = attributes["docslurp.projectId"];
+    attributes["docslurp.projectId"] = args.identity.projectId;
   }
   return attributes;
 }

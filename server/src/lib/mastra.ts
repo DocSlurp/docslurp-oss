@@ -1,13 +1,13 @@
 import type { chatRouteOptions } from "@mastra/ai-sdk";
 import type { PipelineFeatures } from "@docslurp/shared";
 
-export const WORKSPACE_CHAT_AGENT_ID = "workspace-agent";
-export const workspaceChatRouteConfig = {
+export const PROJECT_CHAT_AGENT_ID = "project-agent";
+export const projectChatRouteConfig = {
   path: "/chat/:agentId",
 } satisfies Pick<chatRouteOptions, "path">;
 
-export function isWorkspaceChatAgent(agentId: string): boolean {
-  return agentId === WORKSPACE_CHAT_AGENT_ID;
+export function isProjectChatAgent(agentId: string): boolean {
+  return agentId === PROJECT_CHAT_AGENT_ID;
 }
 
 export interface ExtractionPlan {

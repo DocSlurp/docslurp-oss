@@ -25,8 +25,8 @@ export interface PageState {
 
 export interface MaterializeDeps {
   loadPageStates(pairs: Array<{ documentId: string; page: number }>): Promise<Map<string, PageState>>;
-  canSpend(orgId: string, workspaceId: string): Promise<boolean>;
-  createRun(args: { orgId: string; userId: string; workspaceId: string; documentId: string; documents: number; pages: number; pageNumbers?: number[] }): Promise<string>;
+  canSpend(orgId: string, projectId: string): Promise<boolean>;
+  createRun(args: { orgId: string; userId: string; projectId: string; documentId: string; documents: number; pages: number; pageNumbers?: number[] }): Promise<string>;
   /** Marks a run whose workflow start was deduplicated; the winning workflow owns the real work. */
   closeDedupedRun(runId: string): Promise<void>;
   /** Marks a run whose workflow could not be started. */
@@ -61,20 +61,20 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     for (const row of rows) result.set(pageKey(row.document_id, row.page_number), { state: row.state, costCredits: Number(row.cost) || 0 });
     return result;
   },
-  async canSpend(orgId, workspaceId) {
+  async canSpend(orgId, projectId) {
     // Materialize runs skip run creation, so check the live monthly caps here like every other run
     // insert: canSpend reads the cached budget_paused flags, which lag until the next sweep.
     try {
-      await enforceLiveBudgetCaps(workspaceId, orgId);
+      await enforceLiveBudgetCaps(projectId, orgId);
     } catch (error) {
       if (isSpendBlockedError(error)) return false;
       throw error;
     }
-    return canSpend(orgId, workspaceId);
+    return canSpend(orgId, projectId);
   },
   async createRun(args) {
     const id = `mat_${randomUUID()}`;
-    // The run carries the source document's pipeline (its ingest run, else the workspace's), so the
+    // The run carries the source document's pipeline (its ingest run, else the project's), so the
     // worker applies the same PII policy, privacy mode and embedding model as the original ingest.
     // It is inserted `processing` with a confirmed workflow start: run-start recovery and the stale
     // sweepers (which only chase `queued` rows with no confirmed start) must never run it as an upload.
@@ -85,15 +85,15 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
       select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline
       from (select 1) one
-      left join documents d on d.id = ${args.documentId} and d.workspace_id = ${args.workspaceId}
-      left join workspace_runs r on r.id = d.run_id and r.workspace_id = ${args.workspaceId}
-      left join workspaces w on w.id = ${args.workspaceId}
+      left join documents d on d.id = ${args.documentId} and d.project_id = ${args.projectId}
+      left join project_runs r on r.id = d.run_id and r.project_id = ${args.projectId}
+      left join projects w on w.id = ${args.projectId}
     `;
     const pipeline = sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`);
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
     await tx`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)
-      values (${id}, ${args.orgId}, ${args.userId}, ${args.workspaceId}, 'materialize', 'processing', 'materialize',
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)
+      values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
              ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
              now() + interval '15 minutes', now(), null)
     `;
@@ -102,13 +102,13 @@ export const defaultMaterializeDeps: MaterializeDeps = {
   },
   async closeDedupedRun(runId) {
     await sql`
-      update workspace_runs set status = 'completed', stage = 'completed', stats = stats || '{"deduplicated":true}'::jsonb, updated_at = now()
+      update project_runs set status = 'completed', stage = 'completed', stats = stats || '{"deduplicated":true}'::jsonb, updated_at = now()
       where id = ${runId} and kind = 'materialize' and status in ('queued', 'processing')
     `;
   },
   async failRun(runId, reason) {
     await sql`
-      update workspace_runs set status = 'failed', stage = 'failed', error = ${reason.slice(0, 500)}, updated_at = now()
+      update project_runs set status = 'failed', stage = 'failed', error = ${reason.slice(0, 500)}, updated_at = now()
       where id = ${runId} and kind = 'materialize' and status in ('queued', 'processing')
     `;
   },
@@ -130,7 +130,7 @@ export async function materializeForQuery(
   args: {
     orgId: string;
     userId: string;
-    workspaceId: string;
+    projectId: string;
     sessionId: string;
     candidates: Array<{ documentId: string; page: number }>;
     policy: MaterializationPolicy;
@@ -194,7 +194,7 @@ export async function materializeForQuery(
   }
   const notAttempted = candidates.length - indexed - pending.length;
 
-  if (pending.length > 0 && !(await deps.canSpend(args.orgId, args.workspaceId))) {
+  if (pending.length > 0 && !(await deps.canSpend(args.orgId, args.projectId))) {
     stats.pendingPages = pending.length + notAttempted;
     stats.stoppedBy = "credits";
     return finish();
@@ -216,7 +216,7 @@ export async function materializeForQuery(
     try {
       args.signal?.throwIfAborted();
       runId = await deps.createRun({
-        orgId: args.orgId, userId: args.userId, workspaceId: args.workspaceId, documentId, documents: 1, pages: pages.length, pageNumbers: pages,
+        orgId: args.orgId, userId: args.userId, projectId: args.projectId, documentId, documents: 1, pages: pages.length, pageNumbers: pages,
       });
       args.signal?.throwIfAborted();
       const outcome = await deps.startWorkflow(

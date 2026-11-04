@@ -463,7 +463,7 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
     parsed.provider === "ollama" ? "http://127.0.0.1:11434/v1" :
       parsed.provider === "vllm" ? "http://127.0.0.1:8000/v1" :
         parsed.provider === "lmstudio" ? "http://127.0.0.1:1234/v1" : null;
-  // Explicit workspace dimensions; only these are sent as a request parameter to
+  // Explicit project dimensions; only these are sent as a request parameter to
   // OpenAI-compatible servers that support Matryoshka truncation (e.g. vLLM).
   const requestedDimensions = config.dimensions;
   if (known) {
@@ -893,7 +893,7 @@ export function visionModelUriProblem(uri: string): string | null {
   return null;
 }
 
-/** The profile a workspace gets when it picks no vision model or profile. */
+/** The profile a project gets when it picks no vision model or profile. */
 export const DEFAULT_VISION_PROFILE = "good-fast-hosted" satisfies VisionProfileKey;
 
 export const visionProfileKeySchema = z.enum([
@@ -1383,7 +1383,7 @@ export function resetVisionModelUriOverrideReports(): void {
  * Applies `DOCSLURP_VISION_MODEL_URI` to a pipeline whose vision config is still the built-in default (default
  * profile, its own model URI). A non-default profile or any other model URI is an explicit choice and wins, and
  * non-standard privacy modes are left untouched. Call where a run or preview consumes a stored pipeline; never
- * before persisting one, or the override would be saved as if the workspace had chosen it.
+ * before persisting one, or the override would be saved as if the project had chosen it.
  */
 export function applyDefaultVisionOverride<T extends { vision: VisionConfig; privacyMode?: string }>(
   pipeline: T,

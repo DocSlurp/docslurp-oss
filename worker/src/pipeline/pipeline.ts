@@ -1,7 +1,7 @@
 import type { GeoAttempt, GeoFinalSource } from "../db/geo-final-source.js";
 import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
-import type { StageState, WorkspaceRunEvent } from "../models.js";
-import type { Document, ParserEvaluation, PerformanceEvent, WorkspaceRun } from "../models.js";
+import type { StageState, ProjectRunEvent } from "../models.js";
+import type { Document, ParserEvaluation, PerformanceEvent, ProjectRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
 import { DocumentArtifactLedger } from "./artifact-ledger.js";
 import { PipelineUsageEventLedger } from "./usage-ledger.js";
@@ -42,7 +42,7 @@ export interface CheckpointStore {
     artifactUri?: string,
     stats?: Record<string, unknown>
   ): Promise<void>;
-  appendEvent(event: WorkspaceRunEvent): Promise<void>;
+  appendEvent(event: ProjectRunEvent): Promise<void>;
   /**
    * Credit leases: true when the run's usage not yet checkpointed would use up
    * the lease this process last saw, so the caller should checkpoint now.
@@ -88,7 +88,7 @@ export interface VectorIndex {
 }
 
 export class WorkflowState {
-  run: WorkspaceRun;
+  run: ProjectRun;
   documents: Document[];
   stage: string;
   artifacts: Record<string, string>;
@@ -128,7 +128,7 @@ export class WorkflowState {
    */
   shard: { artifacts: Record<string, string> } | null = null;
 
-  constructor(run: WorkspaceRun, documents: Document[]) {
+  constructor(run: ProjectRun, documents: Document[]) {
     this.usageLedger = new PipelineUsageEventLedger(run.pipeline.speedBoost === true);
     this.run = {
       ...run,
@@ -151,7 +151,7 @@ export class WorkflowState {
     this.usageLedger.runId = run.id;
   }
 
-  static create(run: WorkspaceRun, documents: Document[]): WorkflowState {
+  static create(run: ProjectRun, documents: Document[]): WorkflowState {
     return new WorkflowState(run, documents);
   }
 

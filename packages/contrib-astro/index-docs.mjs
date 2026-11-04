@@ -60,11 +60,11 @@ export async function crawlDocs({ site, routes }, fetchImpl = fetch) {
 export const DEFAULT_DOCS_PIPELINE = Object.freeze({ visionFallback: false, preserveImages: false, summarize: true });
 
 /**
- * Uploads the rendered corpus into `workspace` (ID, slug or name): the server
- * finds it, or creates a workspace with that name on the first build, so
+ * Uploads the rendered corpus into `project` (ID, slug or name): the server
+ * finds it, or creates a project with that name on the first build, so
  * repeated builds keep landing in the same one.
  */
-export async function indexDocs(corpus, { apiUrl, workspace = 'DocSlurp documentation', pipeline = DEFAULT_DOCS_PIPELINE }, apiKey, fetchImpl = fetch) {
+export async function indexDocs(corpus, { apiUrl, project = 'DocSlurp documentation', pipeline = DEFAULT_DOCS_PIPELINE }, apiKey, fetchImpl = fetch) {
   const base = apiUrl.replace(/\/$/, '');
   const request = async (path, init = {}) => {
     const response = await fetchImpl(`${base}${path}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(60_000) });
@@ -79,13 +79,13 @@ export async function indexDocs(corpus, { apiUrl, workspace = 'DocSlurp document
   }
   form.set('canonicalIds', JSON.stringify(canonicalIds));
   if (pipeline) form.set('pipeline', JSON.stringify(pipeline));
-  form.set('workspace', workspace);
-  const hash = createHash('sha256').update(JSON.stringify({ target: workspace, corpus, pipeline: pipeline ?? null })).digest('hex');
+  form.set('project', project);
+  const hash = createHash('sha256').update(JSON.stringify({ target: project, corpus, pipeline: pipeline ?? null })).digest('hex');
   const result = await request('/v1/uploads/bulk', { method: 'POST', headers: { 'Idempotency-Key': `docs-${hash}` }, body: form });
   const deadline = Date.now() + 10 * 60_000;
   while (Date.now() < deadline) {
     const { run } = await request(`/v1/runs/${encodeURIComponent(result.run.id)}/progress`);
-    if (run.status === 'completed') return { workspaceId: result.workspace.id, runId: run.id };
+    if (run.status === 'completed') return { projectId: result.project.id, runId: run.id };
     if (['failed', 'cancelled'].includes(run.status)) throw new Error(`Docs ingestion ${run.status}`);
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
@@ -95,7 +95,7 @@ export async function indexDocs(corpus, { apiUrl, workspace = 'DocSlurp document
 async function main() {
   const args = process.argv.slice(2);
   const value = name => args[args.indexOf(name) + 1];
-  const options = { apiUrl: process.env.DOCSLURP_URL ?? 'https://docslurp.io', workspace: process.env.DOCSLURP_DOCS_WORKSPACE_ID || process.env.PUBLIC_DOCSLURP_DOCS_WORKSPACE_ID || 'DocSlurp documentation', ...(process.env.DOCSLURP_DOCS_PIPELINE ? { pipeline: JSON.parse(process.env.DOCSLURP_DOCS_PIPELINE) } : {}), ...JSON.parse(process.env.DOCSLURP_DOCS_INDEX_OPTIONS ?? '{}') };
+  const options = { apiUrl: process.env.DOCSLURP_URL ?? 'https://docslurp.io', project: process.env.DOCSLURP_DOCS_PROJECT_ID || process.env.PUBLIC_DOCSLURP_DOCS_PROJECT_ID || 'DocSlurp documentation', ...(process.env.DOCSLURP_DOCS_PIPELINE ? { pipeline: JSON.parse(process.env.DOCSLURP_DOCS_PIPELINE) } : {}), ...JSON.parse(process.env.DOCSLURP_DOCS_INDEX_OPTIONS ?? '{}') };
   const output = value('--output');
   let corpus;
   if (args.includes('--entry')) {
@@ -133,11 +133,11 @@ async function main() {
   if (key) {
     const indexed = await indexDocs(corpus, options, key);
     console.log('[docs-index]', indexed);
-    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ workspace: indexed.workspaceId }));
+    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ project: indexed.projectId }));
   }
   else {
     console.log('[docs-index] No API key; remote indexing skipped');
-    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ workspace: options.workspace ?? null }));
+    if (args.includes('--public-config')) await writeFile(value('--public-config'), JSON.stringify({ project: options.project ?? null }));
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

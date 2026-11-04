@@ -360,7 +360,7 @@ export async function embedTextChunks(args: {
   chunks: string[];
   profile: EmbeddingProfile;
   config: Config;
-  /** Workspace privacy mode; hosted embedding routes are refused outside `standard`. */
+  /** Project privacy mode; hosted embedding routes are refused outside `standard`. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   runner?: CommandRunner;
@@ -1263,7 +1263,7 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
 
 /**
  * OpenAI accepts `dimensions` for its custom-dimension models; vLLM accepts it
- * for Matryoshka models, but only when the workspace set it explicitly (an
+ * for Matryoshka models, but only when the project set it explicitly (an
  * unknown model's 1536 fallback must never be requested).
  */
 export function remoteEmbeddingProviderOptions(profile: EmbeddingProfile) {

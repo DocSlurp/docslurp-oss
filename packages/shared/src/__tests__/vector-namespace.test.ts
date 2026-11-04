@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { VectorNamespaceManager } from "../vector-namespace.js";
 
 describe("VectorNamespaceManager", () => {
-  it("gives each workspace its own database per embedding model and dimensions", () => {
+  it("gives each project its own database per embedding model and dimensions", () => {
     expect(VectorNamespaceManager.getEmbeddingLocation("s3://bucket/index/", "org-a", "ws-1", "Xenova/all-MiniLM-L6-v2", 384)).toEqual({
       uri: "s3://bucket/index/org-a/ws-1/vectors-Xenova%2Fall-MiniLM-L6-v2-384",
       table: "chunks",
@@ -15,8 +15,8 @@ describe("VectorNamespaceManager", () => {
     expect(VectorNamespaceManager.getEmbeddingLocation("/data", "org-a", "ws-1", "small-2", 384).uri).not.toBe(a);
   });
 
-  it("keeps every database of a workspace under its workspace root", () => {
-    const root = VectorNamespaceManager.getWorkspaceRoot("/data/", "org-a", "ws-1");
+  it("keeps every database of a project under its project root", () => {
+    const root = VectorNamespaceManager.getProjectRoot("/data/", "org-a", "ws-1");
     expect(root).toBe("/data/org-a/ws-1");
     expect(VectorNamespaceManager.getEmbeddingLocation("/data", "org-a", "ws-1", "m", 8).uri.startsWith(`${root}/`)).toBe(true);
   });
@@ -28,7 +28,7 @@ describe("VectorNamespaceManager", () => {
       .not.toBe(VectorNamespaceManager.getEmbeddingLocation("/data", "org-a", "ws-1", "a_b", 4).uri);
   });
 
-  it("rejects unsafe or blank org and workspace ids instead of sharing a namespace", () => {
+  it("rejects unsafe or blank org and project ids instead of sharing a namespace", () => {
     expect(() => VectorNamespaceManager.getEmbeddingLocation("/data", "../other-org", "ws-1", "m", 4)).toThrow();
     expect(() => VectorNamespaceManager.getEmbeddingLocation("/data", "org-a", "../ws", "m", 4)).toThrow();
     expect(() => VectorNamespaceManager.getEmbeddingLocation("/data", "", "ws-1", "m", 4)).toThrow();

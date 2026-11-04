@@ -1,9 +1,9 @@
 INSERT INTO "user"(id,name,email) VALUES('geo-u','Geo','geo@example.com');
 INSERT INTO organizations(id,name,slug,created_by_user_id) VALUES('geo-o','Geo','geo-life','geo-u');
-INSERT INTO workspaces(id,org_id,user_id,name) VALUES('geo-w','geo-o','geo-u','Geo');
-INSERT INTO workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+INSERT INTO projects(id,org_id,user_id,name) VALUES('geo-w','geo-o','geo-u','Geo');
+INSERT INTO project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
 VALUES('geo-r','geo-o','geo-u','geo-w','upload','processing','structured-extract','{}');
-INSERT INTO documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+INSERT INTO documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
 VALUES('geo-doc','geo-o','geo-u','geo-w','geo-r','point.txt','text/plain','geo-source','processing'),
 ('geo-correction','geo-o','geo-u','geo-w','geo-r','correct.txt','text/plain','geo-other','processing');
 INSERT INTO document_run_stage_states(run_id,document_id,stage_name,status,attempts,stats)
@@ -21,8 +21,8 @@ DO $$ BEGIN
  IF (SELECT count(*) FROM geo_projection_features WHERE document_id='geo-doc' AND ST_X(geom)=0 AND ST_Y(geom)=0) <> 1 THEN RAISE EXCEPTION 'zero point lost'; END IF;
  BEGIN
   PERFORM commit_geo_final_source('geo-doc','other','geo-o',1,'geo-r',repeat('a',64),repeat('b',64),'[]');
-  RAISE EXCEPTION 'wrong workspace accepted';
- EXCEPTION WHEN raise_exception THEN IF SQLERRM='wrong workspace accepted' THEN RAISE; END IF; END;
+  RAISE EXCEPTION 'wrong project accepted';
+ EXCEPTION WHEN raise_exception THEN IF SQLERRM='wrong project accepted' THEN RAISE; END IF; END;
 END $$;
 INSERT INTO document_corrections(id,document_id,run_id,user_id,notes)
 VALUES('geo-note','geo-doc','geo-r','geo-u','Only a note');

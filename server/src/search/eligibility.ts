@@ -86,7 +86,7 @@ function liveRun(runId: SqlFragment): SqlFragment {
   return sql`coalesce((
     select live_run.status in ('queued', 'processing')
       and coalesce(live_run.control_state, '') not in ('cancelled', 'cancel_requested', 'dead-letter')
-    from workspace_runs live_run
+    from project_runs live_run
     where live_run.id = ${runId}
   ), false)`;
 }
@@ -104,7 +104,7 @@ export function servableInProgressVersion(alias: DocumentAlias = "d"): SqlFragme
     and not exists (
       select 1 from documents sibling
       where ${column(alias, "canonical_id")} is not null
-        and sibling.workspace_id = ${column(alias, "workspace_id")}
+        and sibling.project_id = ${column(alias, "project_id")}
         and sibling.canonical_id = ${column(alias, "canonical_id")}
         and sibling.id <> ${column(alias, "id")}
         and sibling.superseded_at is null

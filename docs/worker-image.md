@@ -38,9 +38,9 @@ as follows. Kreuzberg's bundled Tesseract otherwise looks for that data at the p
 `TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
 Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still
 fails, an image continues with empty text so page triage and the vision stage read it (manifest and stage stats
-record `textlessFallback`). If the workspace has vision fallback off, or its privacy mode forbids the vision
+record `textlessFallback`). If the project has vision fallback off, or its privacy mode forbids the vision
 route, the document fails with the public message "This image can only be read with OCR or vision, and neither is
-available for this workspace." and the raw cause stays in the stored error and logs. PDFs are unaffected: Kreuzberg
+available for this project." and the raw cause stays in the stored error and logs. PDFs are unaffected: Kreuzberg
 reads their text layer and does not OCR them by default; scanned pages reach vision through page triage.
 
 ### Measured sizes (local builds, 2026-10-14, linux/amd64)
@@ -65,7 +65,7 @@ amount when those are included.
 
 ### Where the fat was
 
-1. **The pnpm content store shipped in the image**, plus the workspace root's
+1. **The pnpm content store shipped in the image**, plus the project root's
    dependencies. `pnpm install --filter @docslurp/worker... --prod` in the
    runtime stage left `/root/.local/share/pnpm/store` (1.86 GB on the production
    machine) and installed `better-auth` with its prisma/effect/typescript tree

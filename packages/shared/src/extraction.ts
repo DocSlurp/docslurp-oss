@@ -120,8 +120,8 @@ export const ocrLanguageSchema = z.string().trim()
   .max(64);
 
 /**
- * Dolphin options a workspace may set. The repository and model paths, and the Python binary, come only from the
- * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a workspace would
+ * Dolphin options a project may set. The repository and model paths, and the Python binary, come only from the
+ * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a project would
  * let it choose which script the worker runs.
  */
 export const dolphinExtractorOptionsSchema = z.object({
@@ -131,9 +131,9 @@ export const dolphinExtractorOptionsSchema = z.object({
 export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSchema>;
 
 /**
- * Kreuzberg options a workspace may set. The worker spreads them into Kreuzberg's extractFile config, so only these
+ * Kreuzberg options a project may set. The worker spreads them into Kreuzberg's extractFile config, so only these
  * keys are accepted: anything else (structured extraction, a VLM OCR config with its own base URL, cache
- * namespaces) would let a workspace make the parser call out or share caches. Unknown keys are rejected.
+ * namespaces) would let a project make the parser call out or share caches. Unknown keys are rejected.
  *
  * `disableOcr` is a marker for the worker, not a Kreuzberg switch: @kreuzberg/node 4.10.2 drops it (and
  * `ocr.enabled`) in normalizeExtractionConfig and OCRs every image regardless, so the extractor registry refuses
@@ -208,11 +208,11 @@ function dropInvalid(schema: z.ZodTypeAny, value: Record<string, unknown>, prefi
 }
 
 /**
- * Reads the `documentExtraction` of a stored pipeline (a workspace row, a run row) that predates the strict extractor
+ * Reads the `documentExtraction` of a stored pipeline (a project row, a run row) that predates the strict extractor
  * option schemas: drops options for extractor ids without a schema, keys a schema does not allow, invalid option
  * values and an invalid `ocr.language`, and lists every dropped path. Nothing dropped is kept, so a stored
  * `dolphin.repoPath` never reaches a script. Requests stay strict (`documentExtractionConfigSchema` rejects all of
- * these); only reads of stored settings use this, so one stale row cannot fail an org's workspace list or a run load.
+ * these); only reads of stored settings use this, so one stale row cannot fail an org's project list or a run load.
  */
 export function sanitizeStoredDocumentExtraction(value: unknown): { value: unknown; dropped: string[] } {
   if (!isPlainObject(value)) return { value, dropped: [] };
@@ -242,7 +242,7 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
   return { value: next, dropped };
 }
 
-/** A workspace policy. The document router can emit the same ordered IDs per document. */
+/** A project policy. The document router can emit the same ordered IDs per document. */
 export const documentExtractionConfigSchema = z.object({
   target: z.string().min(1).default("document/markdown"),
   enrich: z.array(z.string().min(1)).default([]),

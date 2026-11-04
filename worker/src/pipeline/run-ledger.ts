@@ -4,8 +4,8 @@ import type {
   Document,
   JsonMap,
   StageState,
-  WorkspaceRun,
-  WorkspaceRunEvent,
+  ProjectRun,
+  ProjectRunEvent,
 } from "../models.js";
 
 export interface PageProgress {
@@ -56,7 +56,7 @@ export interface RunProgressLedger {
 
 export interface RunProgressState {
   run: Pick<
-    WorkspaceRun,
+    ProjectRun,
     | "id"
     | "userId"
     | "status"
@@ -150,7 +150,7 @@ export function recordPageProgress(
 export function buildRunProgressEvent(
   state: RunProgressState,
   intent: RunProgressEventIntent,
-): WorkspaceRunEvent {
+): ProjectRunEvent {
   switch (intent.kind) {
     case "document-stage":
       return {
@@ -225,7 +225,7 @@ export function buildRunProgressEvent(
 export function buildRunStartedEvent(
   state: RunProgressState,
   message: string,
-): WorkspaceRunEvent {
+): ProjectRunEvent {
   return {
     userId: state.run.userId,
     runId: state.run.id,
@@ -242,7 +242,7 @@ export function buildRunStartedEvent(
 export function buildRunCompletedEvent(
   state: RunProgressState,
   message: string,
-): WorkspaceRunEvent {
+): ProjectRunEvent {
   return {
     userId: state.run.userId,
     runId: state.run.id,

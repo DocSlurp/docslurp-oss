@@ -116,7 +116,7 @@ export const QUALITY_RANK: Record<QualityMode, number> = { fast: 0, auto: 1, goo
  * Quality implied by the retired `parserPlaybook` and `vision.forceAllPages` keys, or null when neither says
  * anything. Only `forceAllPages: true` (vision on every page) means good; `fast` means fast; every other playbook,
  * including `review-grade` and `agentic`, means auto. Those playbooks never read every page, so mapping them to
- * good would multiply a workspace's spend. `forceAllPages: false` alone implies nothing (it was the default).
+ * good would multiply a project's spend. `forceAllPages: false` alone implies nothing (it was the default).
  */
 export function legacyQualityMode(source: unknown): QualityMode | null {
   if (!isRecord(source)) return null;

@@ -39,12 +39,12 @@ beforeAll(async () => {
   db = await createMigratedDatabase({ stopBefore: "page_render_dpi" });
   await db.exec(`insert into "user"(id,name,email) values('u','User','u@example.invalid');
     insert into organizations(id,name,created_by_user_id) values('o','Org','u');
-    insert into workspaces(id,org_id,user_id,name) values('w','o','u','Workspace');
-    insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,total_documents,pipeline)
+    insert into projects(id,org_id,user_id,name) values('w','o','u','Project');
+    insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,total_documents,pipeline)
       values('run','o','u','w','bulk-upload','completed','completed',1,'{}');
-    insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count)
+    insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count)
       values('doc','o','u','w','run','a.pdf','application/pdf','source','completed',1);
-    insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,expires_at)
+    insert into document_page_renders(document_id,run_id,page_number,org_id,project_id,quality,expires_at)
       values('doc','run',1,'o','w','reader',now()+interval '10 minutes'),('doc','run',1,'o','w','export',now()+interval '10 minutes');`);
   await applyRemainingMigrations(db, "page_render_dpi");
   const served = await serveOnRandomPort(db);
@@ -79,7 +79,7 @@ it("migrates existing reader/export demand without deletion and gives it conserv
 });
 it("keeps 250-DPI demand while an admitted 120-DPI export finishes", async () => {
   await sql`delete from document_page_renders`;
-  await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',120,now()+interval '10 minutes')`;
+  await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,project_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',120,now()+interval '10 minutes')`;
   let releaseLow!: () => void, releaseHigh!: () => void;
   const lowBarrier = new Promise<void>((resolve) => {
       releaseLow = resolve;
@@ -99,7 +99,7 @@ it("keeps 250-DPI demand while an admitted 120-DPI export finishes", async () =>
     dpi: 120,
   });
   await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledTimes(1));
-  await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',250,now()+interval '10 minutes')`;
+  await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,project_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',250,now()+interval '10 minutes')`;
   const high = renderDocumentPage(deps(), {
     documentId: "doc",
     runId: "run",
@@ -116,7 +116,7 @@ it("keeps 250-DPI demand while an admitted 120-DPI export finishes", async () =>
   releaseHigh();
   await high;
   expect(await sql`select dpi from document_page_renders`).toEqual([]);
-  const [run] = await sql`select artifacts from workspace_runs where id='run'`;
+  const [run] = await sql`select artifacts from project_runs where id='run'`;
   expect(run!.artifacts).toEqual({
     "doc:raster-v3-export-120dpi-page-1": "s3://page-120",
     "doc:raster-v3-export-250dpi-page-1": "s3://page-250",
@@ -124,9 +124,9 @@ it("keeps 250-DPI demand while an admitted 120-DPI export finishes", async () =>
 });
 it("clears a repeatedly renewed same-DPI demand when matching cached pixels already exist", async () => {
   await sql`delete from document_page_renders`;
-  await sql`update workspace_runs set artifacts=${sql.json({ "doc:raster-v3-export-250dpi-page-1": "s3://page-250" })}::jsonb where id='run'`;
+  await sql`update project_runs set artifacts=${sql.json({ "doc:raster-v3-export-250dpi-page-1": "s3://page-250" })}::jsonb where id='run'`;
   for (let attempt = 0; attempt < 3; attempt++) {
-    await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,workspace_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',250,now()+interval '10 minutes') on conflict(document_id,run_id,page_number,quality,dpi) do update set expires_at=excluded.expires_at`;
+    await sql`insert into document_page_renders(document_id,run_id,page_number,org_id,project_id,quality,dpi,expires_at) values('doc','run',1,'o','w','export',250,now()+interval '10 minutes') on conflict(document_id,run_id,page_number,quality,dpi) do update set expires_at=excluded.expires_at`;
   }
   await renderDocumentPage(deps(), {
     documentId: "doc",

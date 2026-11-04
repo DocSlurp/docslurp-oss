@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyWorkspacePipelineOverrides,
+  applyProjectPipelineOverrides,
   defaultPipelineFeatures,
-  getWorkspaceTemplate,
+  getProjectTemplate,
   mergePipelineFeatures,
   normalizePipelineFeatures,
   pipelineFeatureOverridesSchema,
-  workspaceAllowsWebhookEvent,
+  projectAllowsWebhookEvent,
 } from "../index.js";
 
 describe("pipeline overrides", () => {
@@ -36,17 +36,17 @@ describe("pipeline overrides", () => {
   });
 
   it("re-applies template locks after overrides", () => {
-    const template = getWorkspaceTemplate("meeting-notes")!;
-    const pipeline = applyWorkspacePipelineOverrides(template.pipeline, { summarize: false, pageIndex: true }, template);
+    const template = getProjectTemplate("meeting-notes")!;
+    const pipeline = applyProjectPipelineOverrides(template.pipeline, { summarize: false, pageIndex: true }, template);
     expect(pipeline.summarize).toBe(true);
     expect(pipeline.pageIndex).toBe(true);
   });
 
-  it("gates webhook events per workspace", () => {
-    expect(workspaceAllowsWebhookEvent(defaultPipelineFeatures, "run.completed")).toBe(true);
-    expect(workspaceAllowsWebhookEvent({ webhooks: { enabled: false } }, "run.completed")).toBe(false);
-    expect(workspaceAllowsWebhookEvent({ webhooks: { enabled: true, events: ["run.failed"] } }, "run.completed")).toBe(false);
-    expect(workspaceAllowsWebhookEvent({ webhooks: { enabled: true, events: ["run.failed"] } }, "run.failed")).toBe(true);
-    expect(workspaceAllowsWebhookEvent(null, "run.failed")).toBe(true);
+  it("gates webhook events per project", () => {
+    expect(projectAllowsWebhookEvent(defaultPipelineFeatures, "run.completed")).toBe(true);
+    expect(projectAllowsWebhookEvent({ webhooks: { enabled: false } }, "run.completed")).toBe(false);
+    expect(projectAllowsWebhookEvent({ webhooks: { enabled: true, events: ["run.failed"] } }, "run.completed")).toBe(false);
+    expect(projectAllowsWebhookEvent({ webhooks: { enabled: true, events: ["run.failed"] } }, "run.failed")).toBe(true);
+    expect(projectAllowsWebhookEvent(null, "run.failed")).toBe(true);
   });
 });

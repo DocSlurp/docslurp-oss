@@ -5,33 +5,33 @@ import { updateOrganizationMfaPolicySchema, updateOrganizationSchema, type Updat
 import {
   createOrganizationInviteSchema,
   createOrganizationSchema,
-  createWorkspaceInviteSchema,
+  createProjectInviteSchema,
   organizationInviteSchema,
   organizationMembershipSchema,
   organizationSchema,
-  workspaceInviteSchema,
-  workspaceMemberSchema,
-  updateWorkspaceMemberSchema,
+  projectInviteSchema,
+  projectMemberSchema,
+  updateProjectMemberSchema,
   type CreateOrganizationInput,
   type CreateOrganizationInviteInput,
-  type CreateWorkspaceInviteInput,
+  type CreateProjectInviteInput,
   type OrganizationInviteRecord,
   type OrganizationMembership,
   type OrganizationRecord,
-  type WorkspaceInviteRecord,
-  type WorkspaceMemberRecord
+  type ProjectInviteRecord,
+  type ProjectMemberRecord
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { insertDefaultWorkspace } from "./default-workspace.js";
-import { sendOrganizationInviteEmail, sendWorkspaceInviteEmail } from "./notifications.js";
-import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
+import { insertDefaultProject } from "./default-project.js";
+import { sendOrganizationInviteEmail, sendProjectInviteEmail } from "./notifications.js";
+import { currentRequestApiKeyProjectIds } from "../lib/request-context.js";
 import { forgetProviderPolicy } from "../lib/provider-policy.js";
 
-/** Narrows workspace IDs to the current API key request's allowlist, if any. */
-function withinRequestKeyAllowlist(workspaceIds: string[]): string[] {
-  const allowlist = currentRequestApiKeyWorkspaceIds();
-  return allowlist ? workspaceIds.filter((id) => allowlist.includes(id)) : workspaceIds;
+/** Narrows project IDs to the current API key request's allowlist, if any. */
+function withinRequestKeyAllowlist(projectIds: string[]): string[] {
+  const allowlist = currentRequestApiKeyProjectIds();
+  return allowlist ? projectIds.filter((id) => allowlist.includes(id)) : projectIds;
 }
 
 type OrganizationRow = {
@@ -57,24 +57,24 @@ type MembershipRow = {
   created_at: string;
 };
 
-type WorkspaceMemberRow = {
-  workspace_id: string;
+type ProjectMemberRow = {
+  project_id: string;
   user_id: string;
   email: string | null;
   name: string | null;
-  role: WorkspaceMemberRecord["role"];
+  role: ProjectMemberRecord["role"];
   invited_by_user_id: string | null;
   created_at: string;
 };
 
-type WorkspaceInviteRow = {
+type ProjectInviteRow = {
   id: string;
-  workspace_id: string;
+  project_id: string;
   org_id: string;
   email: string;
-  role: WorkspaceInviteRecord["role"];
+  role: ProjectInviteRecord["role"];
   token: string;
-  status: WorkspaceInviteRecord["status"];
+  status: ProjectInviteRecord["status"];
   invited_by_user_id: string;
   accepted_by_user_id: string | null;
   expires_at: string;
@@ -82,20 +82,20 @@ type WorkspaceInviteRow = {
   created_at: string;
 };
 
-export interface WorkspaceAccess {
-  workspaceId: string;
+export interface ProjectAccess {
+  projectId: string;
   orgId: string;
-  workspaceOwnerUserId: string;
+  projectOwnerUserId: string;
   /**
-   * Every org member may read the org's default workspace and add content to it
-   * (`canContributeToWorkspace`); changing its settings still needs edit rights.
+   * Every org member may read the org's default project and add content to it
+   * (`canContributeToProject`); changing its settings still needs edit rights.
    */
-  isDefaultWorkspace?: boolean;
+  isDefaultProject?: boolean;
   orgRole: OrganizationRecord["memberRole"] | null;
-  workspaceRole: WorkspaceMemberRecord["role"] | null;
+  projectRole: ProjectMemberRecord["role"] | null;
 }
 
-const elevatedWorkspaceOrgRoles = new Set<OrganizationRecord["memberRole"]>(["owner", "admin"]);
+const elevatedProjectOrgRoles = new Set<OrganizationRecord["memberRole"]>(["owner", "admin"]);
 
 function mapOrganization(row: OrganizationRow): OrganizationRecord {
   return organizationSchema.parse({
@@ -124,9 +124,9 @@ function mapMembership(row: MembershipRow): OrganizationMembership {
   });
 }
 
-function mapWorkspaceMember(row: WorkspaceMemberRow): WorkspaceMemberRecord {
-  return workspaceMemberSchema.parse({
-    workspaceId: row.workspace_id,
+function mapProjectMember(row: ProjectMemberRow): ProjectMemberRecord {
+  return projectMemberSchema.parse({
+    projectId: row.project_id,
     userId: row.user_id,
     email: row.email,
     name: row.name,
@@ -136,10 +136,10 @@ function mapWorkspaceMember(row: WorkspaceMemberRow): WorkspaceMemberRecord {
   });
 }
 
-function mapWorkspaceInvite(row: WorkspaceInviteRow): WorkspaceInviteRecord {
-  return workspaceInviteSchema.parse({
+function mapProjectInvite(row: ProjectInviteRow): ProjectInviteRecord {
+  return projectInviteSchema.parse({
     id: row.id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     orgId: row.org_id,
     email: row.email,
     role: row.role,
@@ -172,7 +172,7 @@ async function getVerifiedUser(userId: string): Promise<{ id: string; email: str
 }
 
 function personalOrgName(name: string): string {
-  return `${name.split(" ")[0] ?? "Personal"} Workspace`;
+  return `${name.split(" ")[0] ?? "Personal"} Project`;
 }
 
 export async function ensurePersonalOrganization(userId: string): Promise<OrganizationRecord> {
@@ -231,9 +231,9 @@ export async function ensurePersonalOrganization(userId: string): Promise<Organi
     insert into org_memberships (org_id, user_id, role)
     values (${organizationId}, ${user.id}, 'owner')
   `;
-  // Every organization starts with a default workspace, so dashboard-only
-  // users and requests that omit workspaceId have somewhere to land.
-  await insertDefaultWorkspace(sql, { orgId: organizationId, userId: user.id });
+  // Every organization starts with a default project, so dashboard-only
+  // users and requests that omit projectId have somewhere to land.
+  await insertDefaultProject(sql, { orgId: organizationId, userId: user.id });
 
   return await ensurePersonalOrganization(userId);
 }
@@ -311,7 +311,7 @@ export async function createOrganization(input: CreateOrganizationInput): Promis
       await tx`insert into organizations (id, name, slug, is_personal, created_by_user_id, credit_balance_cents)
         values (${orgId}, ${parsed.name}, ${parsed.slug ?? null}, false, ${parsed.userId}, 0)`;
       await tx`insert into org_memberships (org_id, user_id, role) values (${orgId}, ${parsed.userId}, 'owner')`;
-      await insertDefaultWorkspace(tx, { orgId, userId: parsed.userId });
+      await insertDefaultProject(tx, { orgId, userId: parsed.userId });
       await auditOrganization(tx, orgId, parsed.userId, "organization.created");
     });
     return (await getOrganization(orgId, parsed.userId))!;
@@ -336,13 +336,13 @@ export async function getOrganizationDetails(orgId: string, userId: string): Pro
   const organization = await getOrganization(orgId, userId);
   if (!organization) throw new OrganizationError(404, "organization_not_found", "Organization not found");
   const elevated = organization.memberRole === "owner" || organization.memberRole === "admin";
-  const [counts] = await sql<{ members: number; workspaces: number; owners: number }[]>`
+  const [counts] = await sql<{ members: number; projects: number; owners: number }[]>`
     select (select count(*)::int from org_memberships where org_id = ${orgId}) as members,
       (select count(*)::int from org_memberships where org_id = ${orgId} and role = 'owner') as owners,
-      (select count(*)::int from workspaces w where w.org_id = ${orgId} and
+      (select count(*)::int from projects w where w.org_id = ${orgId} and
         (${elevated} or w.user_id = ${userId} or exists
-          (select 1 from workspace_members wm where wm.workspace_id = w.id and wm.user_id = ${userId}))) as workspaces`;
-  return { organization, access: { orgId, userId, role: organization.memberRole, capabilities: organizationCapabilities(organization.memberRole, organization.isPersonal, counts!.owners) }, counts: { members: counts!.members, workspaces: counts!.workspaces } };
+          (select 1 from project_members wm where wm.project_id = w.id and wm.user_id = ${userId}))) as projects`;
+  return { organization, access: { orgId, userId, role: organization.memberRole, capabilities: organizationCapabilities(organization.memberRole, organization.isPersonal, counts!.owners) }, counts: { members: counts!.members, projects: counts!.projects } };
 }
 
 export async function withOrganizationLock<T>(orgId: string, userId: string, operation: (tx: OrgTransaction, actor: OrganizationMembership, personal: boolean) => Promise<T>): Promise<T> {
@@ -404,14 +404,14 @@ async function mutateMembership(orgId: string, userId: string, memberUserId: str
         // Organization-bound keys and MCP OAuth grants stop working.
         await tx`update api_keys set revoked_at = now() where org_id = ${orgId} and user_id = ${memberUserId} and revoked_at is null`;
         await tx`update mcp_oauth_grants set revoked_at = now() where org_id = ${orgId} and user_id = ${memberUserId} and revoked_at is null`;
-        // Their workspaces pass to the longest-standing owner (the last owner
+        // Their projects pass to the longest-standing owner (the last owner
         // can't be removed, so one remains), and their direct shares go.
-        await tx`update workspaces set user_id = (
+        await tx`update projects set user_id = (
             select om.user_id from org_memberships om where om.org_id = ${orgId} and om.role = 'owner' order by om.created_at, om.user_id limit 1
           ), updated_at = now()
           where org_id = ${orgId} and user_id = ${memberUserId}`;
-        await tx`delete from workspace_members where user_id = ${memberUserId} and workspace_id in (select id from workspaces where org_id = ${orgId})`;
-        // Webhooks are per user, not per org: deliveries re-check workspace
+        await tx`delete from project_members where user_id = ${memberUserId} and project_id in (select id from projects where org_id = ${orgId})`;
+        // Webhooks are per user, not per org: deliveries re-check project
         // access (services/webhooks.ts), so this org's events stop reaching them.
         result = true;
       } else {
@@ -569,19 +569,19 @@ export async function acceptOrganizationInvite(token: string, userId: string): P
 export type { InvitePreview };
 
 /** What an invite link offers, for the accept page. The token is the credential. */
-export async function getInvitePreview(token: string, kind: "organization" | "workspace"): Promise<InvitePreview | null> {
+export async function getInvitePreview(token: string, kind: "organization" | "project"): Promise<InvitePreview | null> {
   if (!token || token.length > 200) return null;
   if (kind === "organization") {
     const invite = await pendingOrgInvite(token);
     if (!invite) return null;
     const expired = invite.status === "pending" && new Date(invite.expires_at).getTime() <= Date.now();
     return { kind, status: expired ? "expired" : invite.status, email: invite.email, role: invite.role, organizationName: invite.org_name,
-      workspaceName: null, inviterName: invite.inviter_name, expiresAt: invite.expires_at };
+      projectName: null, inviterName: invite.inviter_name, expiresAt: invite.expires_at };
   }
-  const [row] = await sql<{ status: InvitePreview["status"]; email: string; role: string; expires_at: string; workspace_name: string; org_name: string; inviter_name: string | null }[]>`
-    select i.status, i.email, i.role, i.expires_at::text, w.name as workspace_name, o.name as org_name, u.name as inviter_name
-    from workspace_invites i
-    join workspaces w on w.id = i.workspace_id
+  const [row] = await sql<{ status: InvitePreview["status"]; email: string; role: string; expires_at: string; project_name: string; org_name: string; inviter_name: string | null }[]>`
+    select i.status, i.email, i.role, i.expires_at::text, w.name as project_name, o.name as org_name, u.name as inviter_name
+    from project_invites i
+    join projects w on w.id = i.project_id
     join organizations o on o.id = i.org_id
     left join "user" u on u.id = i.invited_by_user_id
     where i.token = ${token}
@@ -589,7 +589,7 @@ export async function getInvitePreview(token: string, kind: "organization" | "wo
   if (!row) return null;
   const expired = row.status === "pending" && new Date(row.expires_at).getTime() <= Date.now();
   return { kind, status: expired ? "expired" : row.status, email: row.email, role: row.role, organizationName: row.org_name,
-    workspaceName: row.workspace_name, inviterName: row.inviter_name, expiresAt: row.expires_at };
+    projectName: row.project_name, inviterName: row.inviter_name, expiresAt: row.expires_at };
 }
 export async function updateOrganizationMemberRole(args: { orgId: string; userId: string; memberUserId: string; role: OrganizationMembership["role"] }): Promise<OrganizationMembership> {
   return await mutateMembership(args.orgId, args.userId, args.memberUserId, "update", args.role) as OrganizationMembership;
@@ -598,97 +598,97 @@ export async function removeOrganizationMember(args: { orgId: string; userId: st
   return await mutateMembership(args.orgId, args.userId, args.memberUserId, "remove", null) as boolean;
 }
 
-export async function listAccessibleWorkspaceIds(userId: string): Promise<string[]> {
-  const rows = await sql<{ workspace_id: string }[]>`
+export async function listAccessibleProjectIds(userId: string): Promise<string[]> {
+  const rows = await sql<{ project_id: string }[]>`
     with accessible as (
       -- G-06: every team-org branch requires an org membership, so a removed
-      -- member keeps neither owned workspaces nor direct shares.
-      select w.id as workspace_id
-      from workspaces w
+      -- member keeps neither owned projects nor direct shares.
+      select w.id as project_id
+      from projects w
       join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-      left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
+      left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
       where om.role in ('owner', 'admin') or w.is_default or w.user_id = ${userId} or wm.user_id is not null
       union
       -- Direct shares out of a personal org (its one member can't be removed).
-      select wm.workspace_id
-      from workspace_members wm
-      join workspaces w on w.id = wm.workspace_id
+      select wm.project_id
+      from project_members wm
+      join projects w on w.id = wm.project_id
       join organizations o on o.id = w.org_id and o.is_personal
       where wm.user_id = ${userId}
     )
-    select workspace_id
+    select project_id
     from accessible
   `;
 
-  return withinRequestKeyAllowlist(rows.map((row) => row.workspace_id));
+  return withinRequestKeyAllowlist(rows.map((row) => row.project_id));
 }
 
-export async function listEditableWorkspaceIds(userId: string): Promise<string[]> {
-  const rows = await sql<{ workspace_id: string }[]>`
+export async function listEditableProjectIds(userId: string): Promise<string[]> {
+  const rows = await sql<{ project_id: string }[]>`
     with editable as (
-      select w.id as workspace_id
-      from workspaces w
+      select w.id as project_id
+      from projects w
       join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-      left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
+      left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
       where om.role in ('owner', 'admin') or w.is_default or w.user_id = ${userId} or wm.role in ('admin', 'editor')
       union
-      select wm.workspace_id
-      from workspace_members wm
-      join workspaces w on w.id = wm.workspace_id
+      select wm.project_id
+      from project_members wm
+      join projects w on w.id = wm.project_id
       join organizations o on o.id = w.org_id and o.is_personal
       where wm.user_id = ${userId}
         and wm.role in ('admin', 'editor')
     )
-    select workspace_id
+    select project_id
     from editable
   `;
 
-  return withinRequestKeyAllowlist(rows.map((row) => row.workspace_id));
+  return withinRequestKeyAllowlist(rows.map((row) => row.project_id));
 }
 
-export async function getWorkspaceAccess(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<WorkspaceAccess | null> {
-  const access = await workspaceAccessRow(workspaceId, userId, client, false);
+export async function getProjectAccess(projectId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<ProjectAccess | null> {
+  const access = await projectAccessRow(projectId, userId, client, false);
   if (!access) return null;
   const { pipeline: _pipeline, ...rest } = access;
   return rest;
 }
 
 /**
- * getWorkspaceAccess plus the stored pipeline, in the same single query, for
+ * getProjectAccess plus the stored pipeline, in the same single query, for
  * callers that decide on access and privacy mode together (the search response cache).
  */
-export async function getWorkspaceAccessWithPipeline(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<(WorkspaceAccess & { pipeline: unknown }) | null> {
-  return await workspaceAccessRow(workspaceId, userId, client, true);
+export async function getProjectAccessWithPipeline(projectId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<(ProjectAccess & { pipeline: unknown }) | null> {
+  return await projectAccessRow(projectId, userId, client, true);
 }
 
-async function workspaceAccessRow(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql, includePipeline: boolean): Promise<(WorkspaceAccess & { pipeline: unknown }) | null> {
+async function projectAccessRow(projectId: string, userId: string, client: postgres.Sql | postgres.TransactionSql, includePipeline: boolean): Promise<(ProjectAccess & { pipeline: unknown }) | null> {
   const [row] = await client<{
-    workspace_id: string;
+    project_id: string;
     org_id: string;
-    workspace_owner_user_id: string;
+    project_owner_user_id: string;
     is_default: boolean;
     org_role: OrganizationRecord["memberRole"] | null;
-    workspace_role: WorkspaceMemberRecord["role"] | null;
+    project_role: ProjectMemberRecord["role"] | null;
     pipeline: unknown;
   }[]>`
     select
-      w.id as workspace_id,
+      w.id as project_id,
       w.org_id,
-      w.user_id as workspace_owner_user_id,
+      w.user_id as project_owner_user_id,
       w.is_default,
       om.role as org_role,
-      wm.role as workspace_role,
+      wm.role as project_role,
       o.is_personal,
       case when ${includePipeline}::boolean then w.pipeline end as pipeline
-    from workspaces w
+    from projects w
     join organizations o on o.id = w.org_id
     left join org_memberships om
       on om.org_id = w.org_id
       and om.user_id = ${userId}
-    left join workspace_members wm
-      on wm.workspace_id = w.id
+    left join project_members wm
+      on wm.project_id = w.id
       and wm.user_id = ${userId}
-    where w.id = ${workspaceId}
+    where w.id = ${projectId}
       and (
         (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
         or (wm.user_id is not null and o.is_personal)
@@ -696,113 +696,113 @@ async function workspaceAccessRow(workspaceId: string, userId: string, client: p
     limit 1
   `;
 
-  if (!row || withinRequestKeyAllowlist([row.workspace_id]).length === 0) {
+  if (!row || withinRequestKeyAllowlist([row.project_id]).length === 0) {
     return null;
   }
 
   return {
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     orgId: row.org_id,
-    workspaceOwnerUserId: row.workspace_owner_user_id,
-    isDefaultWorkspace: row.is_default,
+    projectOwnerUserId: row.project_owner_user_id,
+    isDefaultProject: row.is_default,
     orgRole: row.org_role,
-    workspaceRole: row.workspace_role,
+    projectRole: row.project_role,
     pipeline: row.pipeline,
   };
 }
 
-/** May change the workspace's settings, search and chat configuration, and spend-heavy builds. */
-export function canEditWorkspace(access: WorkspaceAccess, userId: string): boolean {
-  return access.workspaceOwnerUserId === userId
-    || (access.orgRole !== null && elevatedWorkspaceOrgRoles.has(access.orgRole))
-    || access.workspaceRole === "admin"
-    || access.workspaceRole === "editor";
+/** May change the project's settings, search and chat configuration, and spend-heavy builds. */
+export function canEditProject(access: ProjectAccess, userId: string): boolean {
+  return access.projectOwnerUserId === userId
+    || (access.orgRole !== null && elevatedProjectOrgRoles.has(access.orgRole))
+    || access.projectRole === "admin"
+    || access.projectRole === "editor";
 }
 
 /**
- * May upload into the workspace and manage those runs. Every org member may add
- * to the org's default workspace, including one listed as a viewer of it; that
+ * May upload into the project and manage those runs. Every org member may add
+ * to the org's default project, including one listed as a viewer of it; that
  * membership alone never grants settings changes (SEC-2026-10-PROD-14).
  */
-export function canContributeToWorkspace(access: WorkspaceAccess, userId: string): boolean {
-  return canEditWorkspace(access, userId)
-    || (access.isDefaultWorkspace === true && access.orgRole !== null);
+export function canContributeToProject(access: ProjectAccess, userId: string): boolean {
+  return canEditProject(access, userId)
+    || (access.isDefaultProject === true && access.orgRole !== null);
 }
 
-export function canManageWorkspace(access: WorkspaceAccess, userId: string): boolean {
-  return access.workspaceOwnerUserId === userId
-    || (access.orgRole !== null && elevatedWorkspaceOrgRoles.has(access.orgRole))
-    || access.workspaceRole === "admin";
+export function canManageProject(access: ProjectAccess, userId: string): boolean {
+  return access.projectOwnerUserId === userId
+    || (access.orgRole !== null && elevatedProjectOrgRoles.has(access.orgRole))
+    || access.projectRole === "admin";
 }
 
-export async function listWorkspaceMembers(workspaceId: string, userId: string): Promise<WorkspaceMemberRecord[]> {
-  const access = await getWorkspaceAccess(workspaceId, userId);
+export async function listProjectMembers(projectId: string, userId: string): Promise<ProjectMemberRecord[]> {
+  const access = await getProjectAccess(projectId, userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
 
-  const rows = await sql<WorkspaceMemberRow[]>`
+  const rows = await sql<ProjectMemberRow[]>`
     select *
     from (
       select
-        w.id as workspace_id,
+        w.id as project_id,
         owner.id as user_id,
         owner.email,
         owner.name,
         'admin'::text as role,
         null::text as invited_by_user_id,
         w.created_at::text as created_at
-      from workspaces w
+      from projects w
       join "user" owner on owner.id = w.user_id
-      where w.id = ${workspaceId}
+      where w.id = ${projectId}
       union all
       select
-        wm.workspace_id,
+        wm.project_id,
         wm.user_id,
         auth_user.email,
         auth_user.name,
         wm.role::text,
         wm.invited_by_user_id,
         wm.created_at::text
-      from workspace_members wm
+      from project_members wm
       join "user" auth_user on auth_user.id = wm.user_id
-      join workspaces w on w.id = wm.workspace_id
-      where wm.workspace_id = ${workspaceId}
+      join projects w on w.id = wm.project_id
+      where wm.project_id = ${projectId}
         and wm.user_id <> w.user_id
     ) members
     order by created_at asc
   `;
 
-  return rows.map(mapWorkspaceMember);
+  return rows.map(mapProjectMember);
 }
 
-export async function updateWorkspaceMemberRole(args: {
-  workspaceId: string;
+export async function updateProjectMemberRole(args: {
+  projectId: string;
   userId: string;
   memberUserId: string;
-  role: WorkspaceMemberRecord["role"];
-}): Promise<WorkspaceMemberRecord> {
-  const parsed = updateWorkspaceMemberSchema.parse({ role: args.role });
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+  role: ProjectMemberRecord["role"];
+}): Promise<ProjectMemberRecord> {
+  const parsed = updateProjectMemberSchema.parse({ role: args.role });
+  const access = await getProjectAccess(args.projectId, args.userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
-  if (!canManageWorkspace(access, args.userId)) {
-    throw new Error("Only workspace admins can manage sharing");
+  if (!canManageProject(access, args.userId)) {
+    throw new Error("Only project admins can manage sharing");
   }
-  if (args.memberUserId === access.workspaceOwnerUserId) {
-    throw new Error("Workspace ownership must be changed separately");
+  if (args.memberUserId === access.projectOwnerUserId) {
+    throw new Error("Project ownership must be changed separately");
   }
 
-  const [row] = await sql<WorkspaceMemberRow[]>`
-    update workspace_members wm
+  const [row] = await sql<ProjectMemberRow[]>`
+    update project_members wm
     set role = ${parsed.role}
     from "user" auth_user
-    where wm.workspace_id = ${args.workspaceId}
+    where wm.project_id = ${args.projectId}
       and wm.user_id = ${args.memberUserId}
       and auth_user.id = wm.user_id
     returning
-      wm.workspace_id,
+      wm.project_id,
       wm.user_id,
       auth_user.email,
       auth_user.name,
@@ -812,34 +812,34 @@ export async function updateWorkspaceMemberRole(args: {
   `;
 
   if (!row) {
-    throw new Error("Workspace membership not found");
+    throw new Error("Project membership not found");
   }
 
-  return mapWorkspaceMember(row);
+  return mapProjectMember(row);
 }
 
-export async function removeWorkspaceMember(args: {
-  workspaceId: string;
+export async function removeProjectMember(args: {
+  projectId: string;
   userId: string;
   memberUserId: string;
 }): Promise<boolean> {
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+  const access = await getProjectAccess(args.projectId, args.userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
-  if (!canManageWorkspace(access, args.userId)) {
-    throw new Error("Only workspace admins can manage sharing");
+  if (!canManageProject(access, args.userId)) {
+    throw new Error("Only project admins can manage sharing");
   }
-  if (args.memberUserId === access.workspaceOwnerUserId) {
-    throw new Error("Workspace owner cannot be removed from this surface");
+  if (args.memberUserId === access.projectOwnerUserId) {
+    throw new Error("Project owner cannot be removed from this surface");
   }
-  if (args.memberUserId === args.userId && access.orgRole !== "owner" && access.orgRole !== "admin" && access.workspaceRole !== "admin") {
-    throw new Error("Only workspace admins can manage sharing");
+  if (args.memberUserId === args.userId && access.orgRole !== "owner" && access.orgRole !== "admin" && access.projectRole !== "admin") {
+    throw new Error("Only project admins can manage sharing");
   }
 
   const [row] = await sql<{ user_id: string }[]>`
-    delete from workspace_members
-    where workspace_id = ${args.workspaceId}
+    delete from project_members
+    where project_id = ${args.projectId}
       and user_id = ${args.memberUserId}
     returning user_id
   `;
@@ -847,19 +847,19 @@ export async function removeWorkspaceMember(args: {
   return !!row;
 }
 
-export async function listWorkspaceInvites(workspaceId: string, userId: string): Promise<WorkspaceInviteRecord[]> {
-  const access = await getWorkspaceAccess(workspaceId, userId);
+export async function listProjectInvites(projectId: string, userId: string): Promise<ProjectInviteRecord[]> {
+  const access = await getProjectAccess(projectId, userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
-  if (!canManageWorkspace(access, userId)) {
-    throw new Error("Only workspace admins can view invites");
+  if (!canManageProject(access, userId)) {
+    throw new Error("Only project admins can view invites");
   }
 
-  const rows = await sql<WorkspaceInviteRow[]>`
+  const rows = await sql<ProjectInviteRow[]>`
     select
       id,
-      workspace_id,
+      project_id,
       org_id,
       email,
       role,
@@ -870,30 +870,30 @@ export async function listWorkspaceInvites(workspaceId: string, userId: string):
       expires_at::text,
       accepted_at::text,
       created_at::text
-    from workspace_invites
-    where workspace_id = ${workspaceId}
+    from project_invites
+    where project_id = ${projectId}
     order by created_at desc
   `;
 
-  return rows.map(mapWorkspaceInvite);
+  return rows.map(mapProjectInvite);
 }
 
-export async function inviteWorkspaceMember(workspaceId: string, input: CreateWorkspaceInviteInput): Promise<WorkspaceInviteRecord> {
-  const parsed = createWorkspaceInviteSchema.parse(input);
-  const access = await getWorkspaceAccess(workspaceId, parsed.userId);
+export async function inviteProjectMember(projectId: string, input: CreateProjectInviteInput): Promise<ProjectInviteRecord> {
+  const parsed = createProjectInviteSchema.parse(input);
+  const access = await getProjectAccess(projectId, parsed.userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
-  if (!canManageWorkspace(access, parsed.userId)) {
-    throw new Error("Only workspace admins can invite members");
+  if (!canManageProject(access, parsed.userId)) {
+    throw new Error("Only project admins can invite members");
   }
-  await assertWorkspaceInviteeAllowed(access, parsed.email);
+  await assertProjectInviteeAllowed(access, parsed.email);
 
   const expiresAt = new Date(Date.now() + parsed.expiresInDays * 24 * 60 * 60 * 1000).toISOString();
-  const [row] = await sql<WorkspaceInviteRow[]>`
-    insert into workspace_invites (
+  const [row] = await sql<ProjectInviteRow[]>`
+    insert into project_invites (
       id,
-      workspace_id,
+      project_id,
       org_id,
       email,
       role,
@@ -904,7 +904,7 @@ export async function inviteWorkspaceMember(workspaceId: string, input: CreateWo
     )
     values (
       ${randomUUID()},
-      ${workspaceId},
+      ${projectId},
       ${access.orgId},
       ${parsed.email},
       ${parsed.role},
@@ -915,7 +915,7 @@ export async function inviteWorkspaceMember(workspaceId: string, input: CreateWo
     )
     returning
       id,
-      workspace_id,
+      project_id,
       org_id,
       email,
       role,
@@ -928,22 +928,22 @@ export async function inviteWorkspaceMember(workspaceId: string, input: CreateWo
       created_at::text
   `;
 
-  const invite = mapWorkspaceInvite(row);
-  const [workspaceRow] = await sql<{ name: string }[]>`
-    select name from workspaces where id = ${workspaceId} limit 1
+  const invite = mapProjectInvite(row);
+  const [projectRow] = await sql<{ name: string }[]>`
+    select name from projects where id = ${projectId} limit 1
   `;
   const inviter = await getUser(parsed.userId);
-  if (workspaceRow?.name && inviter) {
-    await sendWorkspaceInviteEmail({
+  if (projectRow?.name && inviter) {
+    await sendProjectInviteEmail({
       actorUserId: parsed.userId,
       recipientEmail: parsed.email,
       orgId: access.orgId,
-      workspaceId,
-      workspaceName: workspaceRow.name,
+      projectId,
+      projectName: projectRow.name,
       inviterName: inviter.name,
       inviteToken: invite.token
     }).catch((error) => {
-      console.error("workspace invite email failed:", error instanceof Error ? error.message : String(error));
+      console.error("project invite email failed:", error instanceof Error ? error.message : String(error));
     });
   }
 
@@ -951,12 +951,12 @@ export async function inviteWorkspaceMember(workspaceId: string, input: CreateWo
 }
 
 /**
- * Workspace access in a team organization requires org membership (G-06), and
- * accepting a workspace invite makes an outsider an org member. Only org
- * owners and admins may bring new people into the org that way; workspace
+ * Project access in a team organization requires org membership (G-06), and
+ * accepting a project invite makes an outsider an org member. Only org
+ * owners and admins may bring new people into the org that way; project
  * admins can share with existing members.
  */
-async function assertWorkspaceInviteeAllowed(access: WorkspaceAccess, email: string): Promise<void> {
+async function assertProjectInviteeAllowed(access: ProjectAccess, email: string): Promise<void> {
   const [org] = await sql<{ is_personal: boolean }[]>`select is_personal from organizations where id = ${access.orgId}`;
   if (!org || org.is_personal) return;
   if (access.orgRole === "owner" || access.orgRole === "admin") return;
@@ -966,28 +966,28 @@ async function assertWorkspaceInviteeAllowed(access: WorkspaceAccess, email: str
   if (!member) throw new Error("Only organization owners and admins can invite people outside the organization");
 }
 
-export async function revokeWorkspaceInvite(args: {
-  workspaceId: string;
+export async function revokeProjectInvite(args: {
+  projectId: string;
   userId: string;
   inviteId: string;
-}): Promise<WorkspaceInviteRecord> {
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+}): Promise<ProjectInviteRecord> {
+  const access = await getProjectAccess(args.projectId, args.userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
-  if (!canManageWorkspace(access, args.userId)) {
-    throw new Error("Only workspace admins can invite members");
+  if (!canManageProject(access, args.userId)) {
+    throw new Error("Only project admins can invite members");
   }
 
-  const [row] = await sql<WorkspaceInviteRow[]>`
-    update workspace_invites
+  const [row] = await sql<ProjectInviteRow[]>`
+    update project_invites
     set status = 'revoked'
     where id = ${args.inviteId}
-      and workspace_id = ${args.workspaceId}
+      and project_id = ${args.projectId}
       and status = 'pending'
     returning
       id,
-      workspace_id,
+      project_id,
       org_id,
       email,
       role,
@@ -1001,10 +1001,10 @@ export async function revokeWorkspaceInvite(args: {
   `;
 
   if (!row) {
-    const [existing] = await sql<WorkspaceInviteRow[]>`
+    const [existing] = await sql<ProjectInviteRow[]>`
       select
         id,
-        workspace_id,
+        project_id,
         org_id,
         email,
         role,
@@ -1015,27 +1015,27 @@ export async function revokeWorkspaceInvite(args: {
         expires_at::text,
         accepted_at::text,
         created_at::text
-      from workspace_invites
+      from project_invites
       where id = ${args.inviteId}
-        and workspace_id = ${args.workspaceId}
+        and project_id = ${args.projectId}
       limit 1
     `;
 
     if (!existing) {
-      throw new Error("Workspace invite not found");
+      throw new Error("Project invite not found");
     }
 
-    throw new Error(`Workspace invite is already ${existing.status}`);
+    throw new Error(`Project invite is already ${existing.status}`);
   }
 
-  return mapWorkspaceInvite(row);
+  return mapProjectInvite(row);
 }
 
-export async function acceptWorkspaceInvite(token: string, userId: string): Promise<WorkspaceMemberRecord> {
-  const inviteRows = await sql<WorkspaceInviteRow[]>`
+export async function acceptProjectInvite(token: string, userId: string): Promise<ProjectMemberRecord> {
+  const inviteRows = await sql<ProjectInviteRow[]>`
     select
       id,
-      workspace_id,
+      project_id,
       org_id,
       email,
       role,
@@ -1046,7 +1046,7 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
       expires_at::text,
       accepted_at::text,
       created_at::text
-    from workspace_invites
+    from project_invites
     where token = ${token}
     limit 1
   `;
@@ -1060,7 +1060,7 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
   }
   if (new Date(invite.expires_at).getTime() <= Date.now()) {
     await sql`
-      update workspace_invites
+      update project_invites
       set status = 'expired'
       where id = ${invite.id}
     `;
@@ -1078,7 +1078,7 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
   await sql.begin(async (tx) => {
     const [org] = await tx<{ is_personal: boolean }[]>`select is_personal from organizations where id = ${invite.org_id}`;
     if (org && !org.is_personal) {
-      // Team-org workspace access requires org membership. An outsider joins
+      // Team-org project access requires org membership. An outsider joins
       // as a member only if the inviter can still add people to the org.
       const [membership] = await tx`select 1 from org_memberships where org_id = ${invite.org_id} and user_id = ${userId}`;
       if (!membership) {
@@ -1088,18 +1088,18 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
           throw new Error("This invite can no longer add you to the organization; ask an organization admin to invite you");
         }
         await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict do nothing`;
-        await auditOrganization(tx, invite.org_id, userId, "organization.member.joined_via_workspace_invite", { inviteId: invite.id, workspaceId: invite.workspace_id });
+        await auditOrganization(tx, invite.org_id, userId, "organization.member.joined_via_project_invite", { inviteId: invite.id, projectId: invite.project_id });
       }
     }
     await tx`
-      insert into workspace_members (workspace_id, user_id, role, invited_by_user_id)
-      values (${invite.workspace_id}, ${userId}, ${invite.role}, ${invite.invited_by_user_id})
-      on conflict (workspace_id, user_id) do update
+      insert into project_members (project_id, user_id, role, invited_by_user_id)
+      values (${invite.project_id}, ${userId}, ${invite.role}, ${invite.invited_by_user_id})
+      on conflict (project_id, user_id) do update
         set role = excluded.role,
             invited_by_user_id = excluded.invited_by_user_id
     `;
     await tx`
-      update workspace_invites
+      update project_invites
       set
         status = 'accepted',
         accepted_by_user_id = ${userId},
@@ -1108,22 +1108,22 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
     `;
   });
 
-  const [row] = await sql<WorkspaceMemberRow[]>`
+  const [row] = await sql<ProjectMemberRow[]>`
     select
-      wm.workspace_id,
+      wm.project_id,
       wm.user_id,
       auth_user.email,
       auth_user.name,
       wm.role,
       wm.invited_by_user_id,
       wm.created_at::text
-    from workspace_members wm
+    from project_members wm
     join "user" auth_user on auth_user.id = wm.user_id
-    where wm.workspace_id = ${invite.workspace_id} and wm.user_id = ${userId}
+    where wm.project_id = ${invite.project_id} and wm.user_id = ${userId}
     limit 1
   `;
 
-  return mapWorkspaceMember(row);
+  return mapProjectMember(row);
 }
 
 export interface OrganizationMfaPolicy {

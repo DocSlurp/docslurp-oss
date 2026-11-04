@@ -86,14 +86,14 @@ test("browser use needs no process global and ignores browser process shims", as
     .replace(/^import .*$/gm, "").replace(/^export \{[^}]*\} from .*$/gm, "").replace(/^export /gm, "");
   for (const globals of [
     {},
-    { window: {}, process: { env: { DOCSLURP_URL: "https://private.test", DOCSLURP_API_KEY: "private-key", DOCSLURP_WORKSPACE: "private-workspace" } } },
+    { window: {}, process: { env: { DOCSLURP_URL: "https://private.test", DOCSLURP_API_KEY: "private-key", DOCSLURP_PROJECT: "private-project" } } },
   ]) {
     const factory = runInNewContext(`${compiled}\ncreateDocSlurpClient`, {
       ...globals, URL, Headers, FormData, AbortController, setTimeout, clearTimeout,
       fetch: async (url, init) => {
         assert.equal(url, init.method === "POST" ? "https://docslurp.io/v1/uploads/bulk" : "https://docslurp.io/v1/runs/run/progress");
-        // Browser shims never leak DOCSLURP_WORKSPACE; the default workspace is used.
-        if (init.method === "POST") assert.equal(init.body.get("workspace"), "default");
+        // Browser shims never leak DOCSLURP_PROJECT; the default project is used.
+        if (init.method === "POST") assert.equal(init.body.get("project"), "default");
         assert.equal(init.headers.has("authorization"), false);
         assert.equal(init.credentials, "include");
         return json({ run: { id: "run", status: "completed" } });
@@ -105,21 +105,21 @@ test("browser use needs no process global and ignores browser process shims", as
   }
 });
 
-test("ingestion workspace precedence is per-call, client, environment, then the default workspace", async () => {
-  for (const environmentWorkspace of [undefined, "env-workspace"]) {
-    await withEnvironment({ DOCSLURP_WORKSPACE: environmentWorkspace }, async () => {
-      for (const configuredWorkspace of [undefined, "client-workspace", ""]) {
-        for (const perCallWorkspace of [undefined, "call-workspace", ""]) {
-          const expected = perCallWorkspace || configuredWorkspace || environmentWorkspace || "default";
+test("ingestion project precedence is per-call, client, environment, then the default project", async () => {
+  for (const environmentProject of [undefined, "env-project"]) {
+    await withEnvironment({ DOCSLURP_PROJECT: environmentProject }, async () => {
+      for (const configuredProject of [undefined, "client-project", ""]) {
+        for (const perCallProject of [undefined, "call-project", ""]) {
+          const expected = perCallProject || configuredProject || environmentProject || "default";
           const sdk = client(async (url, init) => {
-            if (url.endsWith("/bulk")) assert.equal(init.body.get("workspace"), expected ?? null);
-            else assert.equal(JSON.parse(init.body).workspace, expected);
-            return json({ workspace: { id: "returned-workspace" }, run: { id: "run", status: "queued" } });
-          }, { workspace: configuredWorkspace });
-          // Repeat calls to prove returned workspaces do not become implicit defaults.
+            if (url.endsWith("/bulk")) assert.equal(init.body.get("project"), expected ?? null);
+            else assert.equal(JSON.parse(init.body).project, expected);
+            return json({ project: { id: "returned-project" }, run: { id: "run", status: "queued" } });
+          }, { project: configuredProject });
+          // Repeat calls to prove returned projects do not become implicit defaults.
           for (let attempt = 0; attempt < 2; attempt++) {
-            await sdk.upload({ files: [new File(["text"], "note.txt")], workspace: perCallWorkspace }, { directUpload: false });
-            await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], workspace: perCallWorkspace });
+            await sdk.upload({ files: [new File(["text"], "note.txt")], project: perCallProject }, { directUpload: false });
+            await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], project: perCallProject });
           }
         }
       }
@@ -127,31 +127,31 @@ test("ingestion workspace precedence is per-call, client, environment, then the 
   }
 });
 
-test("a named workspace is sent as workspace; templateKey or newWorkspace without one asks for a new workspace", async () => {
+test("a named project is sent as project; templateKey or newProject without one asks for a new project", async () => {
   const cases = [
-    // The server finds a workspace by ID, slug or name, or creates one from the name.
-    [{ workspace: "Legal contracts" }, { newWorkspace: false, workspace: "Legal contracts" }],
-    [{ templateKey: "legal-contracts" }, { newWorkspace: true, workspace: undefined }],
-    [{ newWorkspace: true }, { newWorkspace: true, workspace: undefined }],
-    // An explicit workspace wins over newWorkspace and templateKey.
-    [{ newWorkspace: true, workspace: "ws-1" }, { newWorkspace: false, workspace: "ws-1" }],
-    [{ templateKey: "legal-contracts", workspace: "Legal contracts" }, { newWorkspace: false, workspace: "Legal contracts" }],
-    [{ workspace: "   " }, { newWorkspace: false, workspace: "client-workspace" }],
-    [{}, { newWorkspace: false, workspace: "client-workspace" }],
+    // The server finds a project by ID, slug or name, or creates one from the name.
+    [{ project: "Legal contracts" }, { newProject: false, project: "Legal contracts" }],
+    [{ templateKey: "legal-contracts" }, { newProject: true, project: undefined }],
+    [{ newProject: true }, { newProject: true, project: undefined }],
+    // An explicit project wins over newProject and templateKey.
+    [{ newProject: true, project: "ws-1" }, { newProject: false, project: "ws-1" }],
+    [{ templateKey: "legal-contracts", project: "Legal contracts" }, { newProject: false, project: "Legal contracts" }],
+    [{ project: "   " }, { newProject: false, project: "client-project" }],
+    [{}, { newProject: false, project: "client-project" }],
   ];
   for (const [options, expected] of cases) {
     const seen = [];
     const sdk = client(async (url, init) => {
       if (url.endsWith("/bulk")) {
-        assert.equal(init.body.has("workspaceName"), false);
-        seen.push({ newWorkspace: init.body.get("newWorkspace") === "true", workspace: init.body.get("workspace") ?? undefined });
+        assert.equal(init.body.has("projectName"), false);
+        seen.push({ newProject: init.body.get("newProject") === "true", project: init.body.get("project") ?? undefined });
       } else {
         const body = JSON.parse(init.body);
-        assert.equal("workspaceName" in body, false);
-        seen.push({ newWorkspace: Boolean(body.newWorkspace), workspace: body.workspace });
+        assert.equal("projectName" in body, false);
+        seen.push({ newProject: Boolean(body.newProject), project: body.project });
       }
-      return json({ workspace: { id: "returned-workspace" }, run: { id: "run", status: "queued" } });
-    }, { workspace: "client-workspace" });
+      return json({ project: { id: "returned-project" }, run: { id: "run", status: "queued" } });
+    }, { project: "client-project" });
     await sdk.upload({ files: [new File(["text"], "note.txt")], ...options }, { directUpload: false });
     await sdk.upload(new Blob(["text"]), { ...options, directUpload: false });
     await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], ...options });
@@ -159,18 +159,18 @@ test("a named workspace is sent as workspace; templateKey or newWorkspace withou
   }
 });
 
-test("upload sends named file, bearer key and workspace without pipeline options", async () => {
+test("upload sends named file, bearer key and project without pipeline options", async () => {
   const sdk = client(async (url, init) => {
     assert.equal(url, "https://example.test/v1/uploads/bulk");
     assert.equal(init.headers.get("authorization"), "Bearer key");
     assert.equal(init.credentials, "omit");
     assert.equal(init.body.get("files").name, "policy.pdf");
     assert.equal(await init.body.get("files").text(), "PDF bytes");
-    assert.equal(init.body.get("workspace"), "workspace");
+    assert.equal(init.body.get("project"), "project");
     assert.equal(init.body.has("pipeline"), false);
-    return json({ run: { id: "run", status: "queued" }, workspace: { id: "workspace" } });
+    return json({ run: { id: "run", status: "queued" }, project: { id: "project" } });
   });
-  const result = await sdk.upload({ files: [{ filename: "policy.pdf", data: new Blob(["PDF bytes"]) }], workspace: "workspace" }, { directUpload: false });
+  const result = await sdk.upload({ files: [{ filename: "policy.pdf", data: new Blob(["PDF bytes"]) }], project: "project" }, { directUpload: false });
   assert.equal(result.run.id, "run");
 });
 
@@ -264,7 +264,7 @@ test("permanent errors and exhausted retries preserve status and body", async ()
 test("DocSlurpApiError exposes the native envelope code and request id", async () => {
   const envelope = { error: { code: "chat_disabled", message: "Chat is turned off.", requestId: "req-1" } };
   const sdk = client(async () => json(envelope, 403));
-  await assert.rejects(sdk.chat({ workspace: "workspace", q: "question" }), (error) => {
+  await assert.rejects(sdk.chat({ project: "project", q: "question" }), (error) => {
     assert.ok(error instanceof DocSlurpApiError);
     assert.equal(error.status, 403);
     assert.equal(error.code, "chat_disabled");
@@ -278,7 +278,7 @@ test("DocSlurpApiError exposes buy-credits, auto top-up and billing links from 4
   const links = { billing: "https://docslurp.io/app/billing", buyCredits: "https://docslurp.io/app/billing#bl-topup", autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup", upgrade: "https://docslurp.io/pricing", docs: "javascript:alert(1)" };
   const envelope = { error: { code: "credit_exhausted", message: "Out of credits.", details: { links }, requestId: "req-2" } };
   const sdk = client(async () => json(envelope, 402));
-  await assert.rejects(sdk.chat({ workspace: "workspace", q: "question" }), (error) => {
+  await assert.rejects(sdk.chat({ project: "project", q: "question" }), (error) => {
     assert.ok(error instanceof DocSlurpApiError);
     assert.equal(error.code, "credit_exhausted");
     assert.deepEqual(error.links, { billing: links.billing, buyCredits: links.buyCredits, autoTopUp: links.autoTopUp });
@@ -302,7 +302,7 @@ test("AI calls and unkeyed uploads never retry; keyed upload can retry", async (
   for (const method of ["chat", "search", "upload", "ingestUrls"]) {
     let calls = 0;
     const sdk = client(async () => { calls++; return json({ error: "Busy" }, 503, { "retry-after": "0" }); });
-    const input = method === "upload" ? { files: [new Blob(["data"])] } : { workspace: "workspace", q: "question", urls: ["https://example.test/doc"] };
+    const input = method === "upload" ? { files: [new Blob(["data"])] } : { project: "project", q: "question", urls: ["https://example.test/doc"] };
     await assert.rejects(sdk[method](input), DocSlurpApiError);
     assert.equal(calls, 1, method);
   }
@@ -319,10 +319,10 @@ test("cookie sessions and JSON chat transport remain usable", async () => {
   const sdk = createDocSlurpClient({ apiUrl: "https://example.test", apiKey: "", fetch: async (_url, init) => {
     assert.equal(init.credentials, "include");
     assert.equal(init.headers.get("content-type"), "application/json");
-    assert.deepEqual(JSON.parse(init.body), { workspace: "workspace", q: "question" });
+    assert.deepEqual(JSON.parse(init.body), { project: "project", q: "question" });
     return json({ answer: "answer", citations: [] });
   } });
-  assert.equal((await sdk.chat({ workspace: "workspace", q: "question" })).answer, "answer");
+  assert.equal((await sdk.chat({ project: "project", q: "question" })).answer, "answer");
 });
 
 test("invalid durations fail immediately", async () => {
@@ -346,7 +346,7 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
     requests.push({ url: request.url, method: request.method, authorization: request.headers.authorization, body: Buffer.concat(chunks).toString() });
     let body;
     if (request.url === "/v1/uploads/bulk" && request.method === "POST") {
-      body = { workspace: { id: "workspace", name: "Handbook" }, run: { id: "run", status: "queued" }, documents: [] };
+      body = { project: { id: "project", name: "Handbook" }, run: { id: "run", status: "queued" }, documents: [] };
     } else if (request.url === "/v1/runs/run/progress") {
       body = { run: { id: "run", status: ++polls === 1 ? "processing" : "completed" } };
     } else if (request.url === "/v1/search" && request.method === "POST") {
@@ -360,7 +360,7 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
-    await withEnvironment({ DOCSLURP_URL: undefined, DOCSLURP_API_KEY: "test-key", DOCSLURP_WORKSPACE: undefined }, async () => {
+    await withEnvironment({ DOCSLURP_URL: undefined, DOCSLURP_API_KEY: "test-key", DOCSLURP_PROJECT: undefined }, async () => {
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
       await new AsyncFunction("createDocSlurpClient", "createReadStream", "console", source)(
         (options) => createDocSlurpClient({
@@ -380,9 +380,9 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
       assert.ok(requests.every((request) => request.authorization === "Bearer test-key"));
       assert.match(requests[0].body, /filename="handbook.pdf"/);
       assert.match(requests[0].body, /Source document bytes/);
-      assert.match(requests[0].body, /name="workspace"\r\n\r\ndefault\r\n/);
-      // Upload and search both target the default workspace with no configuration.
-      assert.equal(JSON.parse(requests.at(-1).body).workspace, "default");
+      assert.match(requests[0].body, /name="project"\r\n\r\ndefault\r\n/);
+      // Upload and search both target the default project with no configuration.
+      assert.equal(JSON.parse(requests.at(-1).body).project, "default");
     });
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
@@ -410,9 +410,9 @@ test("server runtimes label requests with the X-DocSlurp-Client analytics tag", 
   let seen;
   const sdk = client(async (_url, init) => {
     seen = new Headers(init.headers);
-    return new Response(JSON.stringify({ workspaces: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ projects: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
   });
-  await sdk.listWorkspaces().catch(() => {});
+  await sdk.listProjects().catch(() => {});
   assert.equal(seen.get("x-docslurp-client"), "sdk");
   assert.equal(seen.get("authorization"), "Bearer key");
 });
@@ -422,12 +422,12 @@ test("upload and uploadUrls send the processing quality as pipeline.quality", as
   const sdk = client(async (url, init) => {
     if (String(url).endsWith("/url")) sent.push(JSON.parse(init.body).pipeline);
     else if (init.body instanceof FormData) sent.push(JSON.parse(init.body.get("pipeline")));
-    return json({ run: { id: "run", status: "queued" }, documents: [], workspace: { id: "w", name: "W" } });
+    return json({ run: { id: "run", status: "queued" }, documents: [], project: { id: "w", name: "W" } });
   });
   await sdk.upload({ files: [new File(["text"], "note.txt")], quality: "fast" }, { directUpload: false });
   await sdk.uploadUrls({ urls: ["https://example.test/a.pdf"], quality: "good" });
   assert.deepEqual(sent, [{ quality: "fast" }, { quality: "good" }]);
-  // Without quality the workspace setting applies: no pipeline field is sent.
+  // Without quality the project setting applies: no pipeline field is sent.
   await sdk.uploadUrls({ urls: ["https://example.test/b.pdf"] });
   assert.equal(sent[2], undefined);
 });

@@ -23,15 +23,15 @@ interface Candidate {
 
 export interface DeferredSearchDeps {
   /** One query: scoped deferred documents with their page count and indexed-page coverage. */
-  listDeferredDocuments(workspaceId: string, documentIds?: string[]): Promise<DeferredDocument[]>;
+  listDeferredDocuments(projectId: string, documentIds?: string[]): Promise<DeferredDocument[]>;
   now(): number;
   locateMap: typeof locateMapCandidates;
   listModels: typeof listPageVectorModels;
   embed: typeof embedPageQuery;
   locateImages: typeof locatePageImageCandidates;
   materialize: typeof materializeForQuery;
-  canSpend(orgId: string, workspaceId: string): Promise<boolean>;
-  invalidateVectors(workspaceId: string): void;
+  canSpend(orgId: string, projectId: string): Promise<boolean>;
+  invalidateVectors(projectId: string): void;
 }
 
 export interface DeferredDocument {
@@ -42,7 +42,7 @@ export interface DeferredDocument {
 }
 
 export const defaultDeferredSearchDeps: DeferredSearchDeps = {
-  async listDeferredDocuments(workspaceId, documentIds) {
+  async listDeferredDocuments(projectId, documentIds) {
     if (documentIds?.length === 0) return [];
     type Row = { id: string; indexing_mode: string; page_count: number; indexed: number };
     const rows = documentIds && documentIds.length > 0
@@ -51,14 +51,14 @@ export const defaultDeferredSearchDeps: DeferredSearchDeps = {
                  (select count(*)::int from document_page_states s
                    where s.document_id = d.id and s.state in ('indexed', 'blocked-pii')) as indexed
           from documents d
-          where d.workspace_id = ${workspaceId} and d.indexing_mode <> 'full' and ${deferredCandidateDocument("d")}
+          where d.project_id = ${projectId} and d.indexing_mode <> 'full' and ${deferredCandidateDocument("d")}
             and d.id = any(${sql.array(documentIds, 25)})`
       : await sql<Row[]>`
           select d.id, d.indexing_mode, d.page_count,
                  (select count(*)::int from document_page_states s
                    where s.document_id = d.id and s.state in ('indexed', 'blocked-pii')) as indexed
           from documents d
-          where d.workspace_id = ${workspaceId} and d.indexing_mode <> 'full' and ${deferredCandidateDocument("d")}`;
+          where d.project_id = ${projectId} and d.indexing_mode <> 'full' and ${deferredCandidateDocument("d")}`;
     return rows.map((row) => ({ id: row.id, mode: row.indexing_mode, pageCount: Number(row.page_count) || 0, indexedPages: Number(row.indexed) || 0 }));
   },
   now: () => Date.now(),
@@ -67,7 +67,7 @@ export const defaultDeferredSearchDeps: DeferredSearchDeps = {
   embed: embedPageQuery,
   locateImages: locatePageImageCandidates,
   materialize: materializeForQuery,
-  canSpend: (orgId, workspaceId) => canSpend(orgId, workspaceId),
+  canSpend: (orgId, projectId) => canSpend(orgId, projectId),
   invalidateVectors: clearPageVectorCache,
 };
 
@@ -77,11 +77,11 @@ export interface DeferredSearchArgs {
   queryVector: number[] | null;
   userId: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   options: SearchOptions;
   /**
    * The policy, or a lazy resolver: it is only invoked once the scope is known to hold deferred documents
-   * that are not fully indexed, so full-mode workspaces never pay for key lookups.
+   * that are not fully indexed, so full-mode projects never pay for key lookups.
    */
   policy: MaterializationPolicy | (() => Promise<MaterializationPolicy>);
   privacyMode: PrivacyMode;
@@ -92,7 +92,7 @@ export interface DeferredSearchArgs {
   /** Restricted retrieval over the candidate documents once their pages are searchable. */
   search: {
     textSearch(args: { query: string; userId: string; options: SearchOptions }): Promise<SearchChunk[]>;
-    vectorSearch(args: { queryVector: number[]; userId: string; workspaceId: string; options: SearchOptions }): Promise<SearchChunk[]>;
+    vectorSearch(args: { queryVector: number[]; userId: string; projectId: string; options: SearchOptions }): Promise<SearchChunk[]>;
   };
 }
 
@@ -147,7 +147,7 @@ export async function runDeferredPageSearch(
   args: DeferredSearchArgs,
   deps: DeferredSearchDeps = defaultDeferredSearchDeps,
 ): Promise<DeferredSearchResult | null> {
-  const { journal, workspaceId } = args;
+  const { journal, projectId } = args;
   try {
     args.signal?.throwIfAborted();
     const startedAt = deps.now();
@@ -159,7 +159,7 @@ export async function runDeferredPageSearch(
       journal.recordDiagnostic("deferredSkipped", { reason: "spatial-scope" });
       return null;
     }
-    const docs = (await deps.listDeferredDocuments(workspaceId, selected))
+    const docs = (await deps.listDeferredDocuments(projectId, selected))
       .filter(doc => selected === undefined || selected.includes(doc.id));
     if (docs.length === 0) return null;
     const documentIdsInScope = docs.map((d) => d.id);
@@ -184,7 +184,7 @@ export async function runDeferredPageSearch(
 
     // One memoized spend check gates every model call of this phase.
     let spendOk: Promise<boolean> | null = null;
-    const spend = () => (spendOk ??= deps.canSpend(args.orgId, workspaceId));
+    const spend = () => (spendOk ??= deps.canSpend(args.orgId, projectId));
     let routerCall: MapRouterCall | undefined;
     if (args.openRouterApiKey && policy.mapRouter !== "off") {
       const llm = createMapRouterCall({ apiKey: args.openRouterApiKey, privacyMode: args.privacyMode, journal, signal: args.signal });
@@ -201,14 +201,14 @@ export async function runDeferredPageSearch(
 
     const locateImages = async (documentIds: string[]): Promise<{ list: Candidate[]; degraded: boolean }> => {
       if (documentIds.length === 0) return { list: [], degraded: false };
-      const models = await deps.listModels(workspaceId, documentIds);
+      const models = await deps.listModels(projectId, documentIds);
       const model = models[0];
       if (!model) return { list: [], degraded: false };
       if (!(await spend())) return { list: [], degraded: true };
       args.signal?.throwIfAborted();
       const vector = await deps.embed({ model, query: args.query, journal: journal as UsageRecorder, privacyMode: args.privacyMode, signal: args.signal });
       if (!vector) return { list: [], degraded: true };
-      const hits = await deps.locateImages({ workspaceId, documentIds, model, queryVector: vector, k: cap });
+      const hits = await deps.locateImages({ projectId, documentIds, model, queryVector: vector, k: cap });
       return { list: hits.map((h) => ({ documentId: h.documentId, page: h.page, locator: "page-image" as const })), degraded: false };
     };
 
@@ -236,7 +236,7 @@ export async function runDeferredPageSearch(
 
     const candidates = interleave(lists.map(list => list.filter(candidate => documentIdsInScope.includes(candidate.documentId))), cap);
     const stats = await deps.materialize({
-      orgId: args.orgId, userId: args.userId, workspaceId, sessionId: journal.sessionId,
+      orgId: args.orgId, userId: args.userId, projectId, sessionId: journal.sessionId,
       candidates, policy, onEvent: args.onEvent, signal: args.signal, startedAt,
       recordDiagnostic: (key, value) => journal.recordDiagnostic(key, value),
     });
@@ -244,7 +244,7 @@ export async function runDeferredPageSearch(
     stats.fallbackUsed = fallbackUsed;
     journal.recordDiagnostic("deferred", stats);
     journal.recordDiagnostic("deferredCandidates", candidates.slice(0, 200));
-    if (stats.materializedPages > 0) deps.invalidateVectors(workspaceId);
+    if (stats.materializedPages > 0) deps.invalidateVectors(projectId);
     if (stats.temperature === "hot" || candidates.length === 0) return { chunks: [], stats, documentIds: documentIdsInScope };
 
     args.signal?.throwIfAborted();
@@ -256,7 +256,7 @@ export async function runDeferredPageSearch(
     const [text, vector] = await Promise.all([
       args.search.textSearch({ query: args.textQuery, userId: args.userId, options: restricted }),
       args.queryVector
-        ? args.search.vectorSearch({ queryVector: args.queryVector, userId: args.userId, workspaceId, options: restricted })
+        ? args.search.vectorSearch({ queryVector: args.queryVector, userId: args.userId, projectId, options: restricted })
         : Promise.resolve([] as SearchChunk[]),
     ]);
     const locatorByPage = new Map(candidates.map((c) => [`${c.documentId}:${c.page}`, c.locator]));

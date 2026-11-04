@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { workspaceSearchRetrievalDefaultsSchema, updateWorkspaceSearchRetrievalDefaultsSchema } from "@docslurp/shared";
+import { projectSearchRetrievalDefaultsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 const spend = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: spend }));
 vi.mock("../db.js", () => ({ sql: Object.assign(vi.fn(), { begin: vi.fn(), array: vi.fn() }) }));
@@ -8,17 +8,17 @@ import { rerankBM25 } from "../search/rerank.js";
 import { createSearchSessionJournal } from "../search/session.js";
 import { applySearchPostRetrievalProcessing, searchResultsToChunks } from "../search/session-execution.js";
 const chunks = [{ id: "a", text: "Pump maintenance schedule.", score: 1 }, { id: "b", text: "Inspect the pressure gauge monthly.", score: 0.5 }];
-const session = () => createSearchSessionJournal({ rootSessionId: "synthetic-ranking", scope: { orgId: "o", workspaceId: "w" } });
-const args = () => ({ query: "pump maintenance", chunks, model: HOSTED_RERANK_MODEL, apiKey: "synthetic", privacyMode: "standard" as const, scope: { orgId: "o", workspaceId: "w" }, session: session() });
+const session = () => createSearchSessionJournal({ rootSessionId: "synthetic-ranking", scope: { orgId: "o", projectId: "w" } });
+const args = () => ({ query: "pump maintenance", chunks, model: HOSTED_RERANK_MODEL, apiKey: "synthetic", privacyMode: "standard" as const, scope: { orgId: "o", projectId: "w" }, session: session() });
 const http = vi.fn();
 beforeEach(() => { spend.mockReset().mockResolvedValue(); http.mockReset(); vi.stubGlobal("fetch", http); vi.stubEnv("SEARCH_RERANK_CONCURRENCY", "4"); vi.stubEnv("SEARCH_RERANK_TIMEOUT_MS", "15000"); });
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.useRealTimers(); });
 describe("optional hosted reranking", () => {
   it("keeps BM25 default and validates explicit provider/model settings", () => {
-    expect(workspaceSearchRetrievalDefaultsSchema.parse({}).rerankProvider).toBeUndefined();
-    expect(updateWorkspaceSearchRetrievalDefaultsSchema.parse({ rerankProvider: "deepinfra", rerankModel: HOSTED_RERANK_MODEL }).rerankProvider).toBe("deepinfra");
-    expect(() => updateWorkspaceSearchRetrievalDefaultsSchema.parse({ rerankProvider: "unknown" })).toThrow();
-    expect(() => updateWorkspaceSearchRetrievalDefaultsSchema.parse({ rerankModel: "other" })).toThrow();
+    expect(projectSearchRetrievalDefaultsSchema.parse({}).rerankProvider).toBeUndefined();
+    expect(updateProjectSearchRetrievalDefaultsSchema.parse({ rerankProvider: "deepinfra", rerankModel: HOSTED_RERANK_MODEL }).rerankProvider).toBe("deepinfra");
+    expect(() => updateProjectSearchRetrievalDefaultsSchema.parse({ rerankProvider: "unknown" })).toThrow();
+    expect(() => updateProjectSearchRetrievalDefaultsSchema.parse({ rerankModel: "other" })).toThrow();
   });
   it("maps native scores to original candidates and records actual priced usage", async () => {
     http.mockResolvedValue(Response.json({ input_tokens: 174, scores: [0.1, 0.9] }));
@@ -69,7 +69,7 @@ describe("optional hosted reranking", () => {
   it("actual post-retrieval seam opts in, preserves citations/body and honors rerank off", async () => {
     const candidates=searchResultsToChunks(chunks.map((c,i)=>({text:c.text,score:c.score,citation:{source:"document" as const,documentId:"doc",filename:"manual.txt",pageNumber:i+1,pageNumbers:[i+1],headingPath:[],chunkIndex:i,blockIds:[],blockTypes:[],evidenceType:null,canonicalDocumentUri:null,tableGranularity:null,tableRowIndex:null,tableRowCount:null,tableColumnNames:[],tableColumnTypes:[],tableCells:[],tableCell:null,regionBoxes:[],regions:[],regionCoordinateSpace:null}})));
     http.mockResolvedValue(Response.json({ input_tokens: 20, scores: [0.1, 0.9] }));
-    const input={query:"pump maintenance",chunks:candidates,limit:2,options:{useRerank:true,rerankProvider:"deepinfra" as const,resultOrder:"relevance" as const},privacyMode:"standard" as const,session:session(),rerankApiKey:"synthetic",rerankScope:{orgId:"o",workspaceId:"w"}};
+    const input={query:"pump maintenance",chunks:candidates,limit:2,options:{useRerank:true,rerankProvider:"deepinfra" as const,resultOrder:"relevance" as const},privacyMode:"standard" as const,session:session(),rerankApiKey:"synthetic",rerankScope:{orgId:"o",projectId:"w"}};
     const ranked=await applySearchPostRetrievalProcessing(input); expect(ranked[0].pageNumber).toBe(2); expect(ranked[0].text).toBe(candidates[1].text); expect(ranked[0].documentId).toBe("doc");
     await applySearchPostRetrievalProcessing({...input,options:{...input.options,useRerank:false}}); expect(http).toHaveBeenCalledTimes(1);
   });

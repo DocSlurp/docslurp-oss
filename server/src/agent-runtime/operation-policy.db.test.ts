@@ -17,13 +17,13 @@ beforeAll(async()=>{
     values('native-session','native-test-token','native-owner',now()+interval '1 day',now(),now())`;
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('native-org','Native','native-policy','native-owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('native-org','native-owner','owner') on conflict do nothing`;
-  await sql`insert into workspaces(id,org_id,user_id,name) values('00000000-0000-4000-8000-000000000319','native-org','native-owner','Native')`;
-  operationId=(await ops.launchChatOperation({userId:"native-owner",orgId:"native-org",workspaceId:"00000000-0000-4000-8000-000000000319",key:"native_binding",input:{q:"fixture"}})).id;
+  await sql`insert into projects(id,org_id,user_id,name) values('00000000-0000-4000-8000-000000000319','native-org','native-owner','Native')`;
+  operationId=(await ops.launchChatOperation({userId:"native-owner",orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"native_binding",input:{q:"fixture"}})).id;
 },120000);
 afterAll(async()=>{await sql?.end();await stop?.();});
-it("authorizes session and workspace before exposing a persisted native binding",async()=>{
+it("authorizes session and project before exposing a persisted native binding",async()=>{
   const policy=createPolicy(async()=>actor);
-  expect(await policy.authorize(operationId)).toMatchObject({id:operationId,userId:actor.userId,workspaceId:"00000000-0000-4000-8000-000000000319"});
+  expect(await policy.authorize(operationId)).toMatchObject({id:operationId,userId:actor.userId,projectId:"00000000-0000-4000-8000-000000000319"});
   await expect(createPolicy(async()=>({...actor,userId:"native-foreign"})).authorize(operationId)).rejects.toThrow("operation_forbidden");
   await expect(createPolicy(async()=>null).authorize(operationId)).rejects.toThrow("operation_forbidden");
   await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;

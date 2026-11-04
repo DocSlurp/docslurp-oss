@@ -13,7 +13,7 @@ import {
   indexConfigOf,
   isBillingEnforced,
   pipelineStageOrder,
-  updateWorkspaceSchema,
+  updateProjectSchema,
   withoutStageSelection,
   type ConfigChangeImpact,
   type CostEstimate,
@@ -21,18 +21,18 @@ import {
   type JobStatus,
   type PipelineFeatures,
   type PipelineRunStage,
-  type UpdateWorkspaceInput,
-  type WorkspaceRecord,
+  type UpdateProjectInput,
+  type ProjectRecord,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
-import { validateModeSwitch } from "./workspace-indexing-mode.js";
+import { validateModeSwitch } from "./project-indexing-mode.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
 import { admissionBlock, requireRunCreditLease, isSpendBlockedError, spendBlockJobReason, spendGuardsSkipped } from "./billing/spend-guard.js";
 import { creditLeasesEnabled } from "./billing/credit-leases.js";
-import { getWorkspaceAccess, canEditWorkspace } from "./organizations.js";
+import { getProjectAccess, canEditProject } from "./organizations.js";
 import {
   INLINE_ESTIMATE_BUDGET_MS,
   jobStatusForMutation,
@@ -41,10 +41,10 @@ import {
 } from "./jobs.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
-import { getWorkspace, resolveUpdatedPipeline, updateWorkspace, type WorkspaceUpdateOptions } from "./workspaces.js";
+import { getProject, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
 
 /**
- * Config-change jobs (spec 6.2). A workspace PATCH is classified by `analyzePipelineChange`; changes that
+ * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
  * make the existing index inconsistent ("reindex-required") save and automatically queue a minimal re-index,
  * "reindex-recommended" changes re-index on request. The change is never rejected: if spend admission blocks
  * the job, the config is still saved and the runs wait as `blocked` until the org can spend again.
@@ -59,7 +59,7 @@ export type ReindexTarget = {
   id: string;
   org_id: string;
   user_id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string;
   filename: string;
   mime_type: string;
@@ -75,9 +75,9 @@ export type ReindexTarget = {
 
 export type ReindexMode = "required" | "recommended";
 
-export type WorkspaceChangePlan = {
-  workspace: WorkspaceRecord;
-  input: UpdateWorkspaceInput;
+export type ProjectChangePlan = {
+  project: ProjectRecord;
+  input: UpdateProjectInput;
   nextPipeline: PipelineFeatures;
   impact: ConfigChangeImpact;
   /** What re-indexing means for this change; null when existing documents are unaffected. */
@@ -94,7 +94,7 @@ export type WorkspaceChangePlan = {
   /** Estimate of the re-index work; null when the change creates none. */
   estimate: CostEstimate | null;
   estimateWithinBudget: boolean;
-  /** The workspace row's `updated_at` when planned; apply re-plans if another change landed since. */
+  /** The project row's `updated_at` when planned; apply re-plans if another change landed since. */
   rowVersion: string | null;
 };
 
@@ -109,24 +109,24 @@ const LIVE_DOCUMENT = sql`d.status = 'completed' and d.superseded_at is null and
  */
 async function loadTargets(
   client: typeof sql | Tx,
-  workspaceId: string,
+  projectId: string,
   options: { hashNot: string | null; ignoreReindexRuns?: boolean },
 ): Promise<ReindexTarget[]> {
   const db = client as typeof sql;
   const busyKinds = options.ignoreReindexRuns ? ["full-index"] : ["reindex", "full-index"];
   return await db<ReindexTarget[]>`
-    select d.id, d.org_id, d.user_id, d.workspace_id, d.run_id, d.filename, d.mime_type, d.source_key,
+    select d.id, d.org_id, d.user_id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key,
       d.extraction_mode, d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.source_path, d.index_config_hash
     from documents d
-    where d.workspace_id = ${workspaceId}
+    where d.project_id = ${projectId}
       and ${LIVE_DOCUMENT}
       and (d.indexing_mode is null or d.indexing_mode = 'full')
       -- Extract documents are never re-indexed: the new version would outlive the extract.
-      and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
+      and not exists (select 1 from project_runs xr where xr.id = d.run_id and xr.extract_id is not null)
       ${options.hashNot ? db`and d.index_config_hash is distinct from ${options.hashNot}` : db``}
       and not exists (
         select 1 from documents child
-        join workspace_runs r on r.id = child.run_id
+        join project_runs r on r.id = child.run_id
         where child.previous_version_id = d.id and child.status not in ('completed', 'failed', 'cancelled')
           and r.kind = any(${busyKinds}) and r.status in ('queued', 'blocked', 'processing')
       )
@@ -135,12 +135,12 @@ async function loadTargets(
 }
 
 /** Whether any live vectorized document exists (so an index-config change must be recorded). */
-async function hasVectorizedDocuments(client: typeof sql | Tx, workspaceId: string): Promise<boolean> {
+async function hasVectorizedDocuments(client: typeof sql | Tx, projectId: string): Promise<boolean> {
   const db = client as typeof sql;
   const [row] = await db<{ present: boolean }[]>`
     select exists (
       select 1 from documents d
-      where d.workspace_id = ${workspaceId} and ${LIVE_DOCUMENT}
+      where d.project_id = ${projectId} and ${LIVE_DOCUMENT}
         and (d.indexing_mode is null or d.indexing_mode = 'full')
         and exists (select 1 from vector_indexes v where v.document_id = d.id)
     ) as present
@@ -204,39 +204,39 @@ export function sumEstimates(parts: CostEstimate[]): CostEstimate | null {
   };
 }
 
-/** Whether this request re-indexes recommended changes: explicit `apply`, else the workspace/request auto-confirm default. */
-export function resolveApply(input: UpdateWorkspaceInput, workspace: Pick<WorkspaceRecord, "autoConfirmReindex">): "reindex" | "new-uploads" {
+/** Whether this request re-indexes recommended changes: explicit `apply`, else the project/request auto-confirm default. */
+export function resolveApply(input: UpdateProjectInput, project: Pick<ProjectRecord, "autoConfirmReindex">): "reindex" | "new-uploads" {
   if (input.apply) return input.apply;
-  return (input.autoConfirmReindex ?? workspace.autoConfirmReindex ?? false) ? "reindex" : "new-uploads";
+  return (input.autoConfirmReindex ?? project.autoConfirmReindex ?? false) ? "reindex" : "new-uploads";
 }
 
 /**
- * Classifies a workspace PATCH without changing anything. The estimate route returns exactly this plan's
+ * Classifies a project PATCH without changing anything. The estimate route returns exactly this plan's
  * `impact` and `estimate`; the mutation acts on the same plan.
  */
-export async function planWorkspaceChange(args: {
-  workspaceId: string;
+export async function planProjectChange(args: {
+  projectId: string;
   userId: string;
-  input: UpdateWorkspaceInput;
+  input: UpdateProjectInput;
   indexingMode?: PipelineFeatures["indexingMode"];
   env?: EstimateEnv;
   /** Inline-estimate budget in ms (default 150). */
   budgetMs?: number;
-  /** Merge a narrow trusted proposal against the same workspace snapshot this plan versions. */
+  /** Merge a narrow trusted proposal against the same project snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
-}): Promise<WorkspaceChangePlan | null> {
-  const input = updateWorkspaceSchema.parse(args.input);
-  // Read before the workspace: a change landing in between only makes apply re-plan, never apply stale data.
-  const rowVersion = await workspaceRowVersion(sql, args.workspaceId);
-  const workspace = await getWorkspace(args.workspaceId, args.userId);
-  if (!workspace) return null;
-  if (args.pipelineOverrides) input.pipeline = mergePipelineFeatures(workspace.pipeline, args.pipelineOverrides);
-  const nextPipeline = await resolveUpdatedPipeline(workspace.id, workspace, input, { indexingMode: args.indexingMode });
-  const base = analyzePipelineChange(workspace.pipeline, nextPipeline, { documents: 0, pages: 0 });
+}): Promise<ProjectChangePlan | null> {
+  const input = updateProjectSchema.parse(args.input);
+  // Read before the project: a change landing in between only makes apply re-plan, never apply stale data.
+  const rowVersion = await projectRowVersion(sql, args.projectId);
+  const project = await getProject(args.projectId, args.userId);
+  if (!project) return null;
+  if (args.pipelineOverrides) input.pipeline = mergePipelineFeatures(project.pipeline, args.pipelineOverrides);
+  const nextPipeline = await resolveUpdatedPipeline(project.id, project, input, { indexingMode: args.indexingMode });
+  const base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0 });
   const reindex: ReindexMode | null =
     base.kind === "reindex-required" ? "required" : base.kind === "reindex-recommended" ? "recommended" : null;
 
-  const beforeConfig = indexConfigOf(workspace.pipeline);
+  const beforeConfig = indexConfigOf(project.pipeline);
   const afterConfig = indexConfigOf(nextPipeline);
   const hashChanged = indexConfigHash(beforeConfig) !== indexConfigHash(afterConfig);
   // The whole estimate (target loading included) counts against the inline budget.
@@ -245,22 +245,22 @@ export async function planWorkspaceChange(args: {
   if (reindex) {
     // Only an index-config change makes documents' stored hash meaningful; other changes (PII policy,
     // summaries, ...) re-run the affected stages over every live document.
-    targets = await loadTargets(sql, workspace.id, {
+    targets = await loadTargets(sql, project.id, {
       hashNot: reindex === "required" && hashChanged ? indexConfigHash(afterConfig) : null,
       ignoreReindexRuns: reindex === "required" && hashChanged,
     });
   }
-  const recordsIndexChange = hashChanged && (targets.length > 0 || (await hasVectorizedDocuments(sql, workspace.id)));
+  const recordsIndexChange = hashChanged && (targets.length > 0 || (await hasVectorizedDocuments(sql, project.id)));
   const pages = targets.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
   const impact: ConfigChangeImpact = reindex
     ? { ...base, stages: compiledStages(nextPipeline, base.stages), documents: targets.length, pages }
     : base;
-  const willReindex = reindex === "required" || (reindex === "recommended" && resolveApply(input, workspace) === "reindex");
+  const willReindex = reindex === "required" || (reindex === "recommended" && resolveApply(input, project) === "reindex");
 
   let estimate: CostEstimate | null = null;
   if (reindex && targets.length > 0 && impact.stages.length > 0) {
     // Price what will be queued: documents whose in-flight re-index runs get cancelled owe those runs' stages too.
-    const carry: StageCarry = reindex === "required" && hashChanged ? await loadStageCarry(sql, workspace.id) : new Map();
+    const carry: StageCarry = reindex === "required" && hashChanged ? await loadStageCarry(sql, project.id) : new Map();
     const groups = new Map<string, { stages: PipelineRunStage[]; documents: number; pages: number }>();
     const everything = compilePipelinePlan(nextPipeline).stageOrder;
     for (const doc of targets) {
@@ -274,32 +274,32 @@ export async function planWorkspaceChange(args: {
     const parts: CostEstimate[] = [];
     for (const group of groups.values()) {
       parts.push(await estimateWork({
-        features: { ...nextPipeline, speedBoost: input.speedBoost === true }, stages: group.stages, documents: group.documents, pages: group.pages, orgId: workspace.orgId, env: args.env,
+        features: { ...nextPipeline, speedBoost: input.speedBoost === true }, stages: group.stages, documents: group.documents, pages: group.pages, orgId: project.orgId, env: args.env,
       }));
     }
     estimate = parts.length === 1 ? parts[0]! : sumEstimates(parts);
   }
   const estimateWithinBudget = performance.now() - started <= (args.budgetMs ?? INLINE_ESTIMATE_BUDGET_MS);
   return {
-    workspace, input, nextPipeline, impact, reindex,
+    project, input, nextPipeline, impact, reindex,
     willReindex: willReindex && targets.length > 0 && impact.stages.length > 0,
     hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, estimateWithinBudget, rowVersion,
   };
 }
 
-async function workspaceRowVersion(client: typeof sql | Tx, workspaceId: string): Promise<string | null> {
-  const [row] = await (client as typeof sql)<{ version: string }[]>`select updated_at::text as version from workspaces where id = ${workspaceId}`;
+async function projectRowVersion(client: typeof sql | Tx, projectId: string): Promise<string | null> {
+  const [row] = await (client as typeof sql)<{ version: string }[]>`select updated_at::text as version from projects where id = ${projectId}`;
   return row?.version ?? null;
 }
 
 /** Another change was saved after this plan was computed, so its pipeline and current values are stale. */
 const STALE_PLAN = Symbol("stale-plan");
 
-/** The workspace kept changing while a change was saved; the client can retry. */
+/** The project kept changing while a change was saved; the client can retry. */
 export class ConfigConflictError extends Error {
   readonly status = 409 as const;
   readonly code = "config_conflict" as const;
-  constructor() { super("The workspace changed repeatedly while saving; retry the request."); }
+  constructor() { super("The project changed repeatedly while saving; retry the request."); }
 }
 const MAX_REPLANS = 5;
 
@@ -312,7 +312,7 @@ export type ReindexRunResult = { runIds: string[]; queuedRunIds: string[]; block
  */
 export async function createReindexRuns(args: {
   tx: Tx;
-  workspace: WorkspaceRecord;
+  project: ProjectRecord;
   pipeline: PipelineFeatures;
   userId: string;
   meta: Omit<JobMeta, "id">;
@@ -321,7 +321,7 @@ export async function createReindexRuns(args: {
   reusable: ReusableSplit;
 }): Promise<ReindexRunResult> {
   assertPipelineSpeedBoost(args.pipeline);
-  const { tx, workspace } = args;
+  const { tx, project } = args;
   const runIds: string[] = [];
   const queuedRunIds: string[] = [];
   let blockedReason = args.blockedReason;
@@ -341,10 +341,10 @@ export async function createReindexRuns(args: {
   for (const [index, batch] of batches.entries()) {
     // Recheck under the org admission lock for every batch. Earlier batches in
     // this transaction already hold their own reservation/lease; a single
-    // check for the whole job would over-admit large workspaces.
+    // check for the whole job would over-admit large projects.
     let batchBlockedReason = args.blockedReason;
     if (!batchBlockedReason) {
-      const block = await admissionBlock(tx, workspace.orgId, workspace.id, { speedBoost: batch.pipeline.speedBoost });
+      const block = await admissionBlock(tx, project.orgId, project.id, { speedBoost: batch.pipeline.speedBoost });
       if (block) batchBlockedReason = spendBlockJobReason(block.code);
     }
     const status = batchBlockedReason ? "blocked" : "queued";
@@ -352,24 +352,24 @@ export async function createReindexRuns(args: {
     const pages = batch.docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
     const stats = { job: { id: jobId, ...args.meta } };
     await tx`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, blocked_reason, job_id, priority, stage,
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, blocked_reason, job_id, priority, stage,
         total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats,
         creation_ready_at, creation_expires_at)
       -- The documents are inserted in this transaction, so the manifest is complete when it commits; without
       -- creation_ready_at neither runLifecycle.start nor run-start recovery would ever start the run.
-      values (${runId}, ${workspace.orgId}, ${args.userId}, ${workspace.id}, 'reindex', ${status}, ${batchBlockedReason}, ${jobId}, 0, 'queued',
+      values (${runId}, ${project.orgId}, ${args.userId}, ${project.id}, 'reindex', ${status}, ${batchBlockedReason}, ${jobId}, 0, 'queued',
         ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
         now(), null)
     `;
     for (const doc of batch.docs) {
       const canonicalId = doc.canonical_id ?? `docslurp:document:${doc.id}`;
       if (!doc.canonical_id) await tx`update documents set canonical_id = ${canonicalId} where id = ${doc.id} and canonical_id is null`;
-      const versionNumber = await nextVersionNumber(tx as unknown as typeof sql, workspace.id, canonicalId);
+      const versionNumber = await nextVersionNumber(tx as unknown as typeof sql, project.id, canonicalId);
       await tx`
-        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
           extraction_mode, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id,
           source_sha256, source_path, indexing_mode, reindex_of)
-        values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.workspace_id}, ${runId}, ${doc.filename},
+        values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.project_id}, ${runId}, ${doc.filename},
           ${doc.mime_type}, ${doc.source_key}, 'queued', ${doc.extraction_mode}, ${doc.page_count},
           ${canonicalId}, ${versionNumber}, ${doc.id},
           ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${doc.source_path ?? ""},
@@ -380,14 +380,14 @@ export async function createReindexRuns(args: {
     if (!batchBlockedReason && creditLeasesEnabled() && !spendGuardsSkipped()) {
       try {
         await tx.savepoint(async (sp) => {
-          await requireRunCreditLease(sp, { runId, orgId: workspace.orgId, workspaceId: workspace.id });
+          await requireRunCreditLease(sp, { runId, orgId: project.orgId, projectId: project.id });
         });
       } catch (error) {
         // Save the requested configuration and document manifests, but never
         // publish queued work whose mandatory lease was refused or uncertain.
         batchBlockedReason = "credits";
-        await tx`update workspace_runs set status = 'blocked', blocked_reason = 'credits'
-          where id = ${runId} and org_id = ${workspace.orgId} and workspace_id = ${workspace.id}`;
+        await tx`update project_runs set status = 'blocked', blocked_reason = 'credits'
+          where id = ${runId} and org_id = ${project.orgId} and project_id = ${project.id}`;
         console.warn(`[credit-leases] run=${runId} admission blocked: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -406,14 +406,14 @@ export type ReusableSplit = {
 /** Stages a cancelled re-index still owed each source document: its stage subset, or null when it re-ran everything. */
 export type StageCarry = Map<string, PipelineRunStage[] | null>;
 
-/** Unfinished documents of the workspace's in-flight re-index runs, with the stages those runs were building. */
-async function loadStageCarry(client: typeof sql | Tx, workspaceId: string): Promise<StageCarry> {
+/** Unfinished documents of the project's in-flight re-index runs, with the stages those runs were building. */
+async function loadStageCarry(client: typeof sql | Tx, projectId: string): Promise<StageCarry> {
   const db = client as typeof sql;
   const rows = await db<{ source: string; subset: PipelineRunStage[] | null }[]>`
     select d.previous_version_id as source, r.pipeline -> 'stageSubset' as subset
-    from workspace_runs r
+    from project_runs r
     join documents d on d.run_id = r.id
-    where r.workspace_id = ${workspaceId} and r.kind = 'reindex' and r.status in ('queued', 'blocked', 'processing')
+    where r.project_id = ${projectId} and r.kind = 'reindex' and r.status in ('queued', 'blocked', 'processing')
       and coalesce(r.control_state, '') <> 'cancelled'
       and d.status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
       and d.previous_version_id is not null
@@ -480,9 +480,9 @@ async function splitReusable(
   return { partial, full };
 }
 
-export type AppliedWorkspaceChange = {
-  workspace: WorkspaceRecord;
-  plan: WorkspaceChangePlan;
+export type AppliedProjectChange = {
+  project: ProjectRecord;
+  plan: ProjectChangePlan;
   job: JobStatus | null;
   /** Runs that were inserted `queued` and need their workflow started. */
   queuedRunIds: string[];
@@ -491,20 +491,20 @@ export type AppliedWorkspaceChange = {
 };
 
 /**
- * Cancels the workspace's in-flight re-index runs (they build an index config that is no longer wanted):
+ * Cancels the project's in-flight re-index runs (they build an index config that is no longer wanted):
  * queued and blocked runs fail at once, processing runs are asked to cancel (signalled after commit). Their
  * unfinished documents are cancelled so the source versions are free to be re-queued. Returns the processing
  * run ids that still need the cancel signal.
  */
-async function cancelInFlightReindexRuns(tx: Tx, workspaceId: string): Promise<{ all: string[]; processing: string[] }> {
+async function cancelInFlightReindexRuns(tx: Tx, projectId: string): Promise<{ all: string[]; processing: string[] }> {
   const rows = await tx<{ id: string; was: string }[]>`
     with before as (
-      select id, status as was from workspace_runs
-      where workspace_id = ${workspaceId} and kind = 'reindex' and status in ('queued', 'blocked', 'processing')
+      select id, status as was from project_runs
+      where project_id = ${projectId} and kind = 'reindex' and status in ('queued', 'blocked', 'processing')
         and coalesce(control_state, '') <> 'cancelled'
       for update
     )
-    update workspace_runs r
+    update project_runs r
     set status = case when before.was = 'processing' then r.status else 'failed' end,
         control_state = case when before.was = 'processing' then 'cancel_requested' else 'cancelled' end,
         control_requested_at = now(),
@@ -528,14 +528,14 @@ async function cancelInFlightReindexRuns(tx: Tx, workspaceId: string): Promise<{
 
 /**
  * Saves the config and, when the plan re-indexes or changes the index config of existing documents, records
- * `index_configs` and inserts the re-index runs, all in one transaction under a per-workspace lock. A newer
+ * `index_configs` and inserts the re-index runs, all in one transaction under a per-project lock. A newer
  * required change first cancels the older in-flight re-index runs and queues every document not yet on the new
  * index. Admission failure never rolls the config back: the runs are inserted `blocked` with the reason.
  */
-export async function applyWorkspaceChange(args: {
-  plan: WorkspaceChangePlan;
+export async function applyProjectChange(args: {
+  plan: ProjectChangePlan;
   userId: string;
-  updateOptions?: Omit<WorkspaceUpdateOptions, "client">;
+  updateOptions?: Omit<ProjectUpdateOptions, "client">;
   env?: EstimateEnv;
   /** Plan-and-apply attempts before giving up with a retryable conflict (default 5). */
   maxAttempts?: number;
@@ -543,15 +543,15 @@ export async function applyWorkspaceChange(args: {
   authorize?: (client: typeof sql) => Promise<void>;
   afterSave?: (client: typeof sql) => Promise<void>;
   expectedTargetSignature?: string;
-}): Promise<AppliedWorkspaceChange | null> {
+}): Promise<AppliedProjectChange | null> {
   let plan = args.plan;
   for (let attempt = 0; attempt < (args.maxAttempts ?? MAX_REPLANS); attempt += 1) {
     const applied = await applyPlannedChange({ ...args, plan });
     if (applied !== STALE_PLAN) return applied;
     if (attempt + 1 >= (args.maxAttempts ?? MAX_REPLANS)) break;
     // A concurrent change was saved after planning: plan again from what is stored now, so neither change is lost.
-    const replanned = await planWorkspaceChange({
-      workspaceId: plan.workspace.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env,
+    const replanned = await planProjectChange({
+      projectId: plan.project.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env,
     });
     if (!replanned) return null;
     plan = replanned;
@@ -560,40 +560,40 @@ export async function applyWorkspaceChange(args: {
 }
 
 async function applyPlannedChange(args: {
-  plan: WorkspaceChangePlan;
+  plan: ProjectChangePlan;
   userId: string;
-  updateOptions?: Omit<WorkspaceUpdateOptions, "client">;
+  updateOptions?: Omit<ProjectUpdateOptions, "client">;
   env?: EstimateEnv;
   authorize?: (client: typeof sql) => Promise<void>;
   afterSave?: (client: typeof sql) => Promise<void>;
   expectedTargetSignature?: string;
-}): Promise<AppliedWorkspaceChange | null | typeof STALE_PLAN> {
+}): Promise<AppliedProjectChange | null | typeof STALE_PLAN> {
   const { plan, userId } = args;
-  const { workspace } = plan;
+  const { project } = plan;
   // Mode-switch validation reads on other connections, so it runs before any transaction opens.
-  if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== workspace.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && plan.nextPipeline.quality === "fast"))) {
-    await validateModeSwitch({ current: workspace, nextPipeline: plan.nextPipeline });
+  if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== project.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && plan.nextPipeline.quality === "fast"))) {
+    await validateModeSwitch({ current: project, nextPipeline: plan.nextPipeline });
   }
-  const lock = (tx: Tx) => tx`select pg_advisory_xact_lock(hashtextextended(${`config-change:${workspace.id}`}, 0))`;
+  const lock = (tx: Tx) => tx`select pg_advisory_xact_lock(hashtextextended(${`config-change:${project.id}`}, 0))`;
   if (!plan.willReindex && !plan.recordsIndexChange) {
-    const editAccess = await getWorkspaceAccess(workspace.id, userId);
-    if (!editAccess || !canEditWorkspace(editAccess, userId)) return null;
+    const editAccess = await getProjectAccess(project.id, userId);
+    if (!editAccess || !canEditProject(editAccess, userId)) return null;
     const saved = await sql.begin(async (tx) => {
       await lock(tx);
-      if (await workspaceRowVersion(tx, workspace.id) !== plan.rowVersion) return STALE_PLAN;
+      if (await projectRowVersion(tx, project.id) !== plan.rowVersion) return STALE_PLAN;
       await args.authorize?.(tx as unknown as typeof sql);
-      const updated = await updateWorkspace(workspace.id, userId, plan.input, {
+      const updated = await updateProject(project.id, userId, plan.input, {
         ...args.updateOptions,
         client: tx as unknown as typeof sql,
-        precomputed: { current: workspace, pipeline: plan.nextPipeline },
+        precomputed: { current: project, pipeline: plan.nextPipeline },
       });
       if (updated) await args.afterSave?.(tx as unknown as typeof sql);
       return updated;
     });
     if (saved === STALE_PLAN) return STALE_PLAN;
     if (!saved) return null;
-    const updated = await getWorkspace(workspace.id, userId);
-    return updated ? { workspace: updated, plan, job: null, queuedRunIds: [], cancelledRunIds: [] } : null;
+    const updated = await getProject(project.id, userId);
+    return updated ? { project: updated, plan, job: null, queuedRunIds: [], cancelledRunIds: [] } : null;
   }
 
   // Budget caps are checked before the transaction (they read the month's spend); a block saves the change
@@ -601,7 +601,7 @@ async function applyPlannedChange(args: {
   let blockedReason: "credits" | "budget" | "policy" | null = null;
   if (plan.willReindex) {
     try {
-      await enforceLiveBudgetCaps(workspace.id, workspace.orgId);
+      await enforceLiveBudgetCaps(project.id, project.orgId);
     } catch (error) {
       if (!isSpendBlockedError(error)) throw error;
       blockedReason = spendBlockJobReason(error.code);
@@ -611,15 +611,15 @@ async function applyPlannedChange(args: {
   const jobMeta: Omit<JobMeta, "id"> = {
     kind: "reindex",
     estimate: plan.estimateWithinBudget ? plan.estimate : null,
-    ...(plan.estimateWithinBudget ? {} : { estimateUrl: `/v1/workspaces/${workspace.id}/estimate` }),
+    ...(plan.estimateWithinBudget ? {} : { estimateUrl: `/v1/projects/${project.id}/estimate` }),
   };
 
   // Everything that reads on other connections happens before the transaction opens.
-  const access = await getWorkspaceAccess(workspace.id, userId);
-  if (!access || !canEditWorkspace(access, userId)) return null;
+  const access = await getProjectAccess(project.id, userId);
+  if (!access || !canEditProject(access, userId)) return null;
   const supersedesInFlight = plan.willReindex && plan.reindex === "required" && plan.hashChanged;
   // A newer index change cancels older re-index runs: their documents owe those runs' stages as well.
-  const plannedCarry: StageCarry = supersedesInFlight ? await loadStageCarry(sql, workspace.id) : new Map();
+  const plannedCarry: StageCarry = supersedesInFlight ? await loadStageCarry(sql, project.id) : new Map();
   const reusable: ReusableSplit = plan.willReindex
     ? await splitReusable(plan.targets, plan.nextPipeline, plan.impact.stages, plannedCarry)
     : { partial: [], full: [] };
@@ -629,20 +629,20 @@ async function applyPlannedChange(args: {
 
   const result = await sql.begin(async (tx) => {
     await lock(tx);
-    if (await workspaceRowVersion(tx, workspace.id) !== plan.rowVersion) return STALE_PLAN;
+    if (await projectRowVersion(tx, project.id) !== plan.rowVersion) return STALE_PLAN;
     await args.authorize?.(tx as unknown as typeof sql);
     if (args.expectedTargetSignature !== undefined) {
-      const approvedTargets = await loadTargets(tx, workspace.id, {
+      const approvedTargets = await loadTargets(tx, project.id, {
         hashNot: plan.reindex === "required" && plan.hashChanged ? afterHash : null, ignoreReindexRuns: supersedesInFlight,
       });
       if (reindexTargetSignature(approvedTargets) !== args.expectedTargetSignature) throw new ConfigConflictError();
     }
-    const carry: StageCarry = supersedesInFlight ? await loadStageCarry(tx, workspace.id) : new Map();
-    const cancelled = supersedesInFlight ? await cancelInFlightReindexRuns(tx, workspace.id) : { all: [], processing: [] };
-    const saved = await updateWorkspace(workspace.id, userId, plan.input, {
+    const carry: StageCarry = supersedesInFlight ? await loadStageCarry(tx, project.id) : new Map();
+    const cancelled = supersedesInFlight ? await cancelInFlightReindexRuns(tx, project.id) : { all: [], processing: [] };
+    const saved = await updateProject(project.id, userId, plan.input, {
       ...args.updateOptions,
       client: tx as unknown as typeof sql,
-      precomputed: { current: workspace, pipeline: plan.nextPipeline },
+      precomputed: { current: project, pipeline: plan.nextPipeline },
     });
     if (!saved) return null;
     await args.afterSave?.(tx as unknown as typeof sql);
@@ -650,23 +650,23 @@ async function applyPlannedChange(args: {
       // Documents indexed before hashes were recorded belong to the config that was current until now.
       await tx`
         update documents d set index_config_hash = ${beforeHash}
-        where d.workspace_id = ${workspace.id} and d.index_config_hash is null and ${LIVE_DOCUMENT}
+        where d.project_id = ${project.id} and d.index_config_hash is null and ${LIVE_DOCUMENT}
           and (d.indexing_mode is null or d.indexing_mode = 'full')
           and exists (select 1 from vector_indexes v where v.document_id = d.id)
       `;
       // Native search caches each document's owner index config hash.
-      await notifySearchEligibilityChanged(tx as unknown as typeof sql, [workspace.id]);
+      await notifySearchEligibilityChanged(tx as unknown as typeof sql, [project.id]);
       await tx`
-        update workspaces
+        update projects
         set index_configs = jsonb_build_object(${beforeHash}::text, ${tx.json(JSON.parse(JSON.stringify(plan.beforeConfig)))}::jsonb)
           || coalesce(index_configs, '{}'::jsonb)
           || jsonb_build_object(${afterHash}::text, ${tx.json(JSON.parse(JSON.stringify(plan.afterConfig)))}::jsonb)
-        where id = ${workspace.id}
+        where id = ${project.id}
       `;
     }
     if (!plan.willReindex) return { runs: null as ReindexRunResult | null, cancelled };
     // Re-read the targets under the lock: another PATCH or upload may have changed them since planning.
-    const targets = await loadTargets(tx, workspace.id, {
+    const targets = await loadTargets(tx, project.id, {
       hashNot: plan.reindex === "required" && plan.hashChanged ? afterHash : null,
       ignoreReindexRuns: supersedesInFlight,
     });
@@ -684,7 +684,7 @@ async function applyPlannedChange(args: {
     }
     split.partial = [...planned.values()];
     const runs = await createReindexRuns({
-      tx, workspace, pipeline: { ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, userId,
+      tx, project, pipeline: { ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, userId,
       meta: jobMeta, blockedReason, reusable: split,
     });
     return { runs, cancelled };
@@ -696,19 +696,19 @@ async function applyPlannedChange(args: {
       console.warn(`[config-change] run=${runId} cancel signal failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
-  const updated = await getWorkspace(workspace.id, userId);
+  const updated = await getProject(project.id, userId);
   if (!updated) return null;
-  if (!result.runs) return { workspace: updated, plan, job: null, queuedRunIds: [], cancelledRunIds: result.cancelled.all };
+  if (!result.runs) return { project: updated, plan, job: null, queuedRunIds: [], cancelledRunIds: result.cancelled.all };
   const job = await jobStatusForMutation(
     { id: result.runs.runIds[0]!, kind: "reindex", estimate: jobMeta.estimate ?? null, ...(jobMeta.estimateUrl ? { estimateUrl: jobMeta.estimateUrl } : {}) },
     result.runs.runIds,
     userId,
   );
-  return { workspace: updated, plan, job, queuedRunIds: result.runs.queuedRunIds, cancelledRunIds: result.cancelled.all };
+  return { project: updated, plan, job, queuedRunIds: result.runs.queuedRunIds, cancelledRunIds: result.cancelled.all };
 }
 
-/** What `POST /v1/workspaces/:id/estimate` returns. */
-export type WorkspaceEstimateResponse = {
+/** What `POST /v1/projects/:id/estimate` returns. */
+export type ProjectEstimateResponse = {
   impact: ConfigChangeImpact;
   estimate: CostEstimate | null;
   billing: "enforced" | "disabled";
@@ -718,21 +718,21 @@ export function billingState(env: EstimateEnv = process.env): "enforced" | "disa
   return isBillingEnforced(env) ? "enforced" : "disabled";
 }
 
-export async function estimateWorkspaceChange(args: {
-  workspaceId: string;
+export async function estimateProjectChange(args: {
+  projectId: string;
   userId: string;
-  input: UpdateWorkspaceInput;
+  input: UpdateProjectInput;
   env?: EstimateEnv;
-}): Promise<WorkspaceEstimateResponse | null> {
-  const plan = await planWorkspaceChange(args);
+}): Promise<ProjectEstimateResponse | null> {
+  const plan = await planProjectChange(args);
   if (!plan) return null;
   return { impact: plan.impact, estimate: plan.estimate, billing: billingState(args.env) };
 }
 
-/** Whether the caller may change the workspace at all (used before planning writes). */
-export async function canChangeWorkspace(workspaceId: string, userId: string): Promise<boolean> {
-  const access = await getWorkspaceAccess(workspaceId, userId);
-  return Boolean(access && canEditWorkspace(access, userId));
+/** Whether the caller may change the project at all (used before planning writes). */
+export async function canChangeProject(projectId: string, userId: string): Promise<boolean> {
+  const access = await getProjectAccess(projectId, userId);
+  return Boolean(access && canEditProject(access, userId));
 }
 
 export { INLINE_ESTIMATE_BUDGET_MS, recordJobMeta };

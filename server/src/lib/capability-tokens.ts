@@ -117,7 +117,7 @@ export function peekCapabilityToken(token: string): CapabilityClaims | null {
     if (
       c.v !== VERSION
       || typeof c.orgId !== "string" || !c.orgId
-      || !isStringArray(c.workspaceIds)
+      || !isStringArray(c.projectIds)
       || typeof c.policy !== "object" || c.policy === null || Array.isArray(c.policy)
       || typeof c.issuedByKeyId !== "string" || !c.issuedByKeyId
       || (c.boundClientKeyId !== undefined && typeof c.boundClientKeyId !== "string")
@@ -130,7 +130,7 @@ export function peekCapabilityToken(token: string): CapabilityClaims | null {
     return {
       v: 1,
       orgId: c.orgId,
-      workspaceIds: c.workspaceIds,
+      projectIds: c.projectIds,
       policy: c.policy,
       issuedByKeyId: c.issuedByKeyId,
       ...(c.boundClientKeyId !== undefined ? { boundClientKeyId: c.boundClientKeyId } : {}),

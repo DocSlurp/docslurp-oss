@@ -84,7 +84,7 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
     let total = 0;
     await (transaction ? pipelineInTransaction : pipelineTransaction)(sql, (client) => [
       // FOR NO KEY UPDATE: serializes charge recording without blocking FK checks on child rows.
-      client<{ spent_cents: number | string }[]>`select spent_cents from workspace_runs where id = ${state.run.id} for no key update`,
+      client<{ spent_cents: number | string }[]>`select spent_cents from project_runs where id = ${state.run.id} for no key update`,
       // A full-index run re-indexes documents whose pages may already have paid through query
       // materialization (stamped on the source version's ledger). Those pages are not charged twice.
       // A stamped page this run read again is already left out through rich_read, so it is not subtracted
@@ -136,7 +136,7 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       const richCredits = pageCredits("rich", richPages) * multiplier;
       charges = { fastPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
         credits: (fastCredits + richCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
-      const base = { workspaceId: state.run.workspaceId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
+      const base = { projectId: state.run.projectId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
       // The insert and its pending debit (for exactly the rows it inserted) are one statement.
       const usage = runUsageEventStatements({ client, state, usageEvents: [
         // A fixed id per run also records a zero-page decision, so a retry cannot change it.
@@ -270,18 +270,18 @@ export async function billLockedMaterializedPages(
 ): Promise<{ inserted: number; credits: number; richBatch?: PipelineUsageBatch }> {
   const { runId, documentId, requested, moved } = args;
   const rateCents = pageCredits("fast", 1);
-  await client`select id from workspace_runs where id = ${runId} for update`;
+  await client`select id from project_runs where id = ${runId} for update`;
   const candidates = moved ? requested.filter((page) => moved.has(page)) : requested;
-  const [row] = await client<{ id: string; org_id: string | null; user_id: string; workspace_id: string | null; stats: Record<string, unknown> | null; pipeline: PipelineFeatures }[]>`
-    select r.id, coalesce(r.org_id, (select w.org_id from workspaces w where w.id = r.workspace_id)) as org_id,
-      r.user_id, r.workspace_id, r.stats, r.pipeline from workspace_runs r where r.id = ${runId}
+  const [row] = await client<{ id: string; org_id: string | null; user_id: string; project_id: string | null; stats: Record<string, unknown> | null; pipeline: PipelineFeatures }[]>`
+    select r.id, coalesce(r.org_id, (select w.org_id from projects w where w.id = r.project_id)) as org_id,
+      r.user_id, r.project_id, r.stats, r.pipeline from project_runs r where r.id = ${runId}
   `;
   if (!row) throw new Error(`run not found: ${runId}`);
   // This path has no WorkflowState: take pricing from the locked run snapshot,
-  // never a caller's mutable workspace configuration or a fabricated ledger.
+  // never a caller's mutable project configuration or a fabricated ledger.
   speedBoostMultiplier(row.pipeline.speedBoost);
   const state: RunUsageState = {
-    run: { id: row.id, orgId: row.org_id, userId: row.user_id, workspaceId: row.workspace_id ?? undefined, stats: row.stats ?? {} },
+    run: { id: row.id, orgId: row.org_id, userId: row.user_id, projectId: row.project_id ?? undefined, stats: row.stats ?? {} },
     usageLedger: { speedBoost: row.pipeline.speedBoost === true },
   };
   const owned = candidates.length === 0 ? [] : (await client<{ page_number: number }[]>`
@@ -370,7 +370,7 @@ export async function billLockedMaterializedPages(
     return {
       id: `rich:${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
       amount: pagesRead, unit: "page", costCents: pageCredits("rich", pagesRead),
-      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, pageNumber: page, readBy: "model-read", readRun: read.model_read_run, materialized: true }),
+      metadata: unitChargeMetadata({ projectId: row.project_id, documentId, pageNumber: page, readBy: "model-read", readRun: read.model_read_run, materialized: true }),
     };
   });
   const fastPages = undecided.filter((page) => !readElsewhereByPage.has(page));
@@ -379,7 +379,7 @@ export async function billLockedMaterializedPages(
     ...fastPages.map(page => ({
       id: `${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
       amount: 1, unit: "page", costCents: rateCents,
-      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, page, materialized: true }),
+      metadata: unitChargeMetadata({ projectId: row.project_id, documentId, page, materialized: true }),
     })),
   ] });
   // This run read pages another run decided Fast: upgrade those decisions to Rich (the difference only, once).
@@ -409,7 +409,7 @@ export async function billLockedMaterializedPages(
       id: `rich-upgrade:${documentId}:${upgrade.page_number}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card",
       metric: BILLABLE_UNIT_METRICS.richPage, amount: pagesRead, unit: "page",
       costCents: Math.max(0, pageCredits("rich", pagesRead) - rateCents),
-      metadata: unitChargeMetadata({ workspaceId: row.workspace_id, documentId, pageNumber: upgrade.page_number, readBy: "model-read",
+      metadata: unitChargeMetadata({ projectId: row.project_id, documentId, pageNumber: upgrade.page_number, readBy: "model-read",
         upgradeOf: upgrade.fast_id, decidedBy: upgrade.fee_billed_run, materialized: true }),
     };
   }) });
@@ -459,7 +459,7 @@ export function staleStampSql(client: Sql<Record<string, unknown>>) {
       and au.metadata ->> 'documentId' = s.document_id
       and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = s.page_number::text
   ) and not exists (
-    select 1 from workspace_runs owner
+    select 1 from project_runs owner
     where owner.id = s.fee_billed_run
       and owner.status <> all(${client.array(TERMINAL_RUN_STATUSES)}::text[])
       and (owner.lease_expires_at is null or owner.lease_expires_at > now())

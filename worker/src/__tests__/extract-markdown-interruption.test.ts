@@ -3,19 +3,19 @@ import { describe, expect, it } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 
 const ORDER = ["kreuzberg", "poppler-text"];
 
-function createRun(): WorkspaceRun {
+function createRun(): ProjectRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 2, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
 }
 
 function createDocument(): Document {

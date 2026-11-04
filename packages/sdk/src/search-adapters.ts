@@ -8,8 +8,8 @@ export type SearchAdapterOptions = {
   /** Browser integrations must use a domain-restricted, search-only client key (dslp_pub_…); server keys (dslp_priv_…) throw in browsers. */
   clientKey: string;
   fetch?: typeof fetch;
-  /** Workspace ID, slug or name to search. */
-  workspace?: string;
+  /** Project ID, slug or name to search. */
+  project?: string;
   /** Map a cited document to a public site URL, especially for Pagefind migrations. */
   resolveUrl?: (result: SearchResult) => string;
 };
@@ -26,10 +26,10 @@ function integer(value: unknown, fallback: number, min: number) {
   if (typeof n !== "number" || !Number.isSafeInteger(n) || n < min || n > 100) throw new SearchCompatibilityError("Pagination values must be integers within the 100-passage retrieval window.");
   return n;
 }
-function workspace(value: unknown): asserts value is string {
-  if (typeof value !== "string" || !value.trim() || value.length > 256) throw new SearchCompatibilityError("A workspace (ID, slug or name) is required.");
+function project(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.length > 256) throw new SearchCompatibilityError("A project (ID, slug or name) is required.");
 }
-export function adapterQuery(provider: SearchProvider, workspaceRef: string, input: unknown) {
+export function adapterQuery(provider: SearchProvider, projectRef: string, input: unknown) {
   const params = record(input);
   const supported = provider === "meilisearch" ? ["q", "offset", "limit", "page", "hitsPerPage"] : provider === "typesense" ? ["q", "query_by", "page", "per_page"] : ["term", "limit", "filters", "sort"];
   for (const [key, value] of Object.entries(params)) {
@@ -40,14 +40,14 @@ export function adapterQuery(provider: SearchProvider, workspaceRef: string, inp
   if ((provider === "typesense" && params.q === undefined) || (provider === "pagefind" && params.term === undefined)) throw new SearchCompatibilityError(`${provider}: a query string is required (an empty string is allowed).`);
   const q = params[provider === "pagefind" ? "term" : "q"] ?? "";
   if (typeof q !== "string" || q.length > 16000) throw new SearchCompatibilityError("The query must be a string of at most 16,000 characters.");
-  workspace(workspaceRef);
+  project(projectRef);
   if (q.trim() === "*") throw new SearchCompatibilityError("Wildcard browsing is not supported. Send a nonempty search query, or use the document-list API.");
   const paged = provider === "typesense" || (provider === "meilisearch" && (params.page !== undefined || params.hitsPerPage !== undefined));
   const size = integer(provider === "typesense" ? params.per_page : paged ? params.hitsPerPage : params.limit, provider === "pagefind" ? 100 : 20, 1);
   const page = integer(params.page, 1, 1);
   const offset = paged ? (page - 1) * size : integer(params.offset, 0, 0);
   if (offset + size > 100) throw new SearchCompatibilityError("Only the first 100 ranked passages are available. Narrow the query instead of paging beyond this window.");
-  return { q: q.trim(), workspace: workspaceRef, offset, size, page, paged };
+  return { q: q.trim(), project: projectRef, offset, size, page, paged };
 }
 export function escapeSearchHtml(value: string) {
   return value.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
@@ -61,17 +61,17 @@ function document(hit: SearchResult, resolveUrl?: SearchAdapterOptions["resolveU
   if (resolveUrl && (typeof url !== "string" || !(/^https?:\/\//.test(url) || /^\/(?!\/)/.test(url)))) throw new SearchCompatibilityError("resolveUrl must return an HTTP(S) or site-relative public source URL for every hit.");
   return { id: `${hit.citation.documentId}:${hit.citation.chunkIndex}`, text: hit.text, title: hit.citation.filename, filename: hit.citation.filename, url, score: hit.score, citation: hit.citation };
 }
-export async function runSearchAdapter(provider: SearchProvider, workspaceRef: string, params: unknown, search: AdapterSearch, resolveUrl?: SearchAdapterOptions["resolveUrl"]) {
-  const query = adapterQuery(provider, workspaceRef, params);
+export async function runSearchAdapter(provider: SearchProvider, projectRef: string, params: unknown, search: AdapterSearch, resolveUrl?: SearchAdapterOptions["resolveUrl"]) {
+  const query = adapterQuery(provider, projectRef, params);
   const started = performance.now();
-  const response = query.q ? await search({ q: query.q, workspace: workspaceRef, limit: 100 }) : null;
+  const response = query.q ? await search({ q: query.q, project: projectRef, limit: 100 }) : null;
   const all = response?.results ?? [];
   const hits = all.slice(query.offset, query.offset + query.size).map(hit => document(hit, resolveUrl));
   // Counts describe a bounded ranked window, never the whole indexed corpus.
   const docslurp = { bounded: true, windowLimit: 100, countIsExact: false, sessionId: response?.sessionId ?? null, availability: response?.availability ?? null, usage: response?.usage ?? null };
   const elapsed = Math.round(performance.now() - started);
   if (provider === "meilisearch") return { hits, query: query.q, processingTimeMs: elapsed, ...(query.paged ? { page: query.page, hitsPerPage: query.size, totalHits: all.length, totalPages: Math.ceil(all.length / query.size) } : { offset: query.offset, limit: query.size, estimatedTotalHits: all.length }), docslurp };
-  if (provider === "typesense") return { found: all.length, page: query.page, search_time_ms: elapsed, hits: hits.map(document => ({ document })), facet_counts: [], request_params: { q: query.q, query_by: "text", per_page: query.size, collection_name: workspaceRef }, docslurp };
+  if (provider === "typesense") return { found: all.length, page: query.page, search_time_ms: elapsed, hits: hits.map(document => ({ document })), facet_counts: [], request_params: { q: query.q, query_by: "text", per_page: query.size, collection_name: projectRef }, docslurp };
   return { results: hits.map(hit => ({ id: hit.id, score: hit.score, data: { url: hit.url, excerpt: escapeSearchHtml(hit.text), plain_excerpt: hit.text, raw_content: hit.text, content: hit.text, word_count: hit.text.split(/\s+/).length, meta: { title: hit.title }, filters: {}, anchors: [], weighted_locations: [], locations: [], sub_results: [], citation: hit.citation } })), unfilteredResultCount: all.length, filters: {}, totalFilters: {}, docslurp };
 }
 function transport(options: SearchAdapterOptions) {
@@ -113,18 +113,18 @@ export type PagefindSearchResponse = Extract<AdapterResponse, { results: unknown
 export type AlgoliaSearchResponse = { hits: Array<Record<string, unknown> & { objectID: string }>; page: number; hitsPerPage: number; nbHits: number; nbPages: number; processingTimeMS: number; query: string; exhaustiveNbHits?: boolean; [key: string]: unknown };
 export function createDocSlurpMeilisearchClient(options: SearchAdapterOptions) {
   const request = transport(options);
-  return { index: (workspaceId: string) => ({ search: async (q: string, params: Record<string, unknown> = {}) => {
-    const body = { ...params, q }; adapterQuery("meilisearch", workspaceId, body);
-    return request<MeilisearchSearchResponse>(`/compat/meilisearch/indexes/${encodeURIComponent(workspaceId)}/search`, body);
+  return { index: (projectId: string) => ({ search: async (q: string, params: Record<string, unknown> = {}) => {
+    const body = { ...params, q }; adapterQuery("meilisearch", projectId, body);
+    return request<MeilisearchSearchResponse>(`/compat/meilisearch/indexes/${encodeURIComponent(projectId)}/search`, body);
   } }) };
 }
 export function createDocSlurpTypesenseClient(options: SearchAdapterOptions) {
   const request = transport(options);
-  const search = async (workspaceId: string, params: Record<string, unknown>) => {
-    adapterQuery("typesense", workspaceId, params);
-    return request<TypesenseSearchResponse>(`/compat/typesense/collections/${encodeURIComponent(workspaceId)}/documents/search`, params);
+  const search = async (projectId: string, params: Record<string, unknown>) => {
+    adapterQuery("typesense", projectId, params);
+    return request<TypesenseSearchResponse>(`/compat/typesense/collections/${encodeURIComponent(projectId)}/documents/search`, params);
   };
-  return { collections: (workspaceId: string) => ({ documents: () => withWorkspace(workspaceId, search) }), multiSearch: { perform: async (body: { searches: Array<Record<string, unknown> & { collection: string }> }, common: Record<string, unknown> = {}) => {
+  return { collections: (projectId: string) => ({ documents: () => withProject(projectId, search) }), multiSearch: { perform: async (body: { searches: Array<Record<string, unknown> & { collection: string }> }, common: Record<string, unknown> = {}) => {
     record(body); record(common);
     if (Object.keys(body).some(key => key !== "searches") || !Array.isArray(body.searches) || !body.searches.length || body.searches.length > 10) throw new SearchCompatibilityError("multiSearch accepts 1–10 queries; union searches are unsupported.");
     const searches = body.searches.map(entry => {
@@ -135,16 +135,16 @@ export function createDocSlurpTypesenseClient(options: SearchAdapterOptions) {
     return request<{ results: TypesenseSearchResponse[] }>("/compat/typesense/multi_search", { searches });
   } } };
 }
-function withWorkspace(workspaceId: string, search: (workspaceId: string, params: Record<string, unknown>) => Promise<TypesenseSearchResponse>) {
-  return { search: (params: Record<string, unknown>) => search(workspaceId, params) };
+function withProject(projectId: string, search: (projectId: string, params: Record<string, unknown>) => Promise<TypesenseSearchResponse>) {
+  return { search: (params: Record<string, unknown>) => search(projectId, params) };
 }
-export function createDocSlurpPagefind(options: SearchAdapterOptions & { workspace: string; resolveUrl: NonNullable<SearchAdapterOptions["resolveUrl"]> }) {
-  workspace(options.workspace);
+export function createDocSlurpPagefind(options: SearchAdapterOptions & { project: string; resolveUrl: NonNullable<SearchAdapterOptions["resolveUrl"]> }) {
+  project(options.project);
   if (typeof options.resolveUrl !== "function") throw new SearchCompatibilityError("Pagefind requires resolveUrl to map citations to real public source URLs.");
   const request = transport(options);
   const search: AdapterSearch = input => request<SearchResponse>("/v1/search", input);
   return { search: async (term: string, params: { filters?: Record<string, unknown>; sort?: unknown } = {}) => {
-    const response = await runSearchAdapter("pagefind", options.workspace, { ...params, term }, search, options.resolveUrl);
+    const response = await runSearchAdapter("pagefind", options.project, { ...params, term }, search, options.resolveUrl);
     const pagefind = response as Extract<typeof response, { results: unknown }>;
     return { ...pagefind, results: pagefind.results.map(result => ({ ...result, data: async () => result.data })) };
   }, filters: async () => ({}) };
@@ -158,14 +158,14 @@ function plainRecord(value: unknown): Record<string, unknown> {
 export function createDocSlurpAlgoliaClient(options: SearchAdapterOptions) {
   const request = transport(options);
   const searchSingleIndex = async ({ indexName, searchParams = {} }: { indexName: string; searchParams?: Record<string, unknown> }): Promise<AlgoliaSearchResponse> => {
-    workspace(indexName); record(searchParams);
+    project(indexName); record(searchParams);
     if (searchParams.query === "" || searchParams.query === undefined) return { hits: [], nbHits: 0, nbPages: 0, page: 0, hitsPerPage: integer(searchParams.hitsPerPage, 10, 1), query: "", processingTimeMS: 0, exhaustiveNbHits: false };
     return request<AlgoliaSearchResponse>(`/compat/algolia/1/indexes/${encodeURIComponent(indexName)}/query`, searchParams);
   };
   return { searchSingleIndex, initIndex: (indexName: string) => ({ search: (query: string, params: Record<string, unknown> = {}) => searchSingleIndex({ indexName, searchParams: { ...params, query } }) }), search: async (input: { requests: Record<string, unknown>[] } | Array<{ indexName: string; params?: Record<string, unknown> }>) => {
     const requests = Array.isArray(input) ? input.map(entry => { record(entry); const { params, ...rest } = entry; return { ...rest, ...(params === undefined ? {} : plainRecord(params)) }; }) : record(input).requests;
     if (!Array.isArray(requests) || requests.length > 10) throw new SearchCompatibilityError("Algolia search accepts at most 10 request objects.");
-    for (const entry of requests) { record(entry); workspace(entry.indexName); }
+    for (const entry of requests) { record(entry); project(entry.indexName); }
     return request<{results: AlgoliaSearchResponse[]}>("/compat/algolia/1/indexes/*/queries", { requests });
   } };
 }

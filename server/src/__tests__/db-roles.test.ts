@@ -74,7 +74,7 @@ describe("worker table classification", () => {
   it("keeps auth, credential and billing tables out of the worker's reach", () => {
     for (const table of [
       "account", "session", "verification", "api_keys", "oauth_accounts", "credit_grants",
-      "mcp_oauth_tokens", "mcp_oauth_clients", "sso_identity_links", "stripe_webhook_events", "workspace_connectors",
+      "mcp_oauth_tokens", "mcp_oauth_clients", "sso_identity_links", "stripe_webhook_events", "project_connectors",
     ]) {
       expect(WORKER_DENIED_TABLES[table], table).toBeTruthy();
     }
@@ -121,14 +121,14 @@ describe("worker role", () => {
   it("publishes ingestion revisions through validated triggers immediately after migration", async () => {
     await db.exec(`insert into "user"(id,name,email) values('role-realtime','Test','role-realtime@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('role-realtime','Test','role-realtime','role-realtime');
-      insert into workspaces(id,org_id,user_id,name) values('role-realtime','role-realtime','role-realtime','Test');
-      insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage)
+      insert into projects(id,org_id,user_id,name) values('role-realtime','role-realtime','role-realtime','Test');
+      insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
         values('role-realtime-run','role-realtime','role-realtime','role-realtime','upload','processing','extract');
-      insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+      insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
         values('role-realtime-doc','role-realtime','role-realtime','role-realtime','role-realtime-run','test.txt','text/plain','fixture','queued');`);
     const read = async () => (await db.query<{revision:string}>("select revision::text from realtime_revisions where org_id='role-realtime'")).rows[0]!.revision;
     const before = BigInt(await read());
-    await as(worker, () => db.exec("update workspace_runs set stage='index' where id='role-realtime-run'"));
+    await as(worker, () => db.exec("update project_runs set stage='index' where id='role-realtime-run'"));
     await as(worker, () => db.exec("update documents set status='processing' where id='role-realtime-doc'"));
     // Exercises the separate deferred-materialization trigger as the worker.
     await as(worker, () => db.exec(`insert into document_page_states(document_id,page_number,state)
@@ -162,14 +162,14 @@ describe("worker role", () => {
     }
   });
 
-  it("reads only the granted columns of user, webhooks and workspace_secrets", async () => {
+  it("reads only the granted columns of user, webhooks and project_secrets", async () => {
     expect(await denied(worker, `select id, email from "user"`)).toBe(false);
     expect(await denied(worker, `select name from "user"`)).toBe(true);
     expect(await denied(worker, `update "user" set email = email`)).toBe(true);
     expect(await denied(worker, "select user_id, active, events from webhooks")).toBe(false);
     expect(await denied(worker, "select secret from webhooks")).toBe(true);
-    expect(await denied(worker, "select id, workspace_id, name, type, expires_at from workspace_secrets")).toBe(false);
-    expect(await denied(worker, "select encrypted_value from workspace_secrets")).toBe(true);
+    expect(await denied(worker, "select id, project_id, name, type, expires_at from project_secrets")).toBe(false);
+    expect(await denied(worker, "select encrypted_value from project_secrets")).toBe(true);
   });
 
   it("has exactly the declared privileges on allowed tables", async () => {

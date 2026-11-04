@@ -33,11 +33,11 @@ export const OAUTH_TOKEN_PREFIX = { mcp: "dsmcp", api: "dscli" } as const;
 
 /**
  * OAuth scope -> API-key scopes for REST-audience tokens. Never maps to
- * `workspaces:manage`, `organizations:*` or `web`, so an OAuth token cannot
- * change workspace settings, manage an organization or hold client-key web
+ * `projects:manage`, `organizations:*` or `web`, so an OAuth token cannot
+ * change project settings, manage an organization or hold client-key web
  * access, whatever it was granted.
  *
- * - search -> search (passages, suggestions, read-only workspace listing)
+ * - search -> search (passages, suggestions, read-only project listing)
  * - chat   -> chat (generated answers on the owner's credits)
  * - read   -> artifacts (document text, pages, files, runs and exports)
  * - ingest -> ingest (uploads, URL ingest, reprocess, document retag/delete)
@@ -162,7 +162,7 @@ export async function validateMcpToken(raw: string, resource: string, requestCon
   const { rows } = await appDbPool.query(`
     SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name,
            k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
-           k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
+           k.rate_limits AS key_rate_limits, k.project_ids AS key_project_ids FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
     JOIN mcp_oauth_clients c ON c.id=g.client_id
     JOIN org_memberships m ON m.org_id=g.org_id AND m.user_id=g.user_id
@@ -181,7 +181,7 @@ export async function validateMcpToken(raw: string, resource: string, requestCon
     keyType: "server", allowedDomains: [], scopes: (Array.isArray(row.scopes) ? row.scopes : []).filter((scope: string) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
     rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
-    workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
+    projectIds: Array.isArray(row.key_project_ids) ? row.key_project_ids : [],
     maxOutputTokens: effectiveMaxOutputTokens("server", row.key_max_output_tokens),
     // Delegated tokens are never platform admins and never app sessions (see request-actor.ts).
     oauth: {
@@ -204,7 +204,7 @@ export async function validateOAuthApiToken(raw: string, requestContext?: { ip?:
   const { rows } = await appDbPool.query(`
     SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name, c.first_party,
            k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
-           k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids
+           k.rate_limits AS key_rate_limits, k.project_ids AS key_project_ids
     FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
     JOIN mcp_oauth_clients c ON c.id=g.client_id
@@ -226,7 +226,7 @@ export async function validateOAuthApiToken(raw: string, requestContext?: { ip?:
     keyType: "server", allowedDomains: [], scopes: oauthScopesToApiKeyScopes(grantedScopes).filter((scope) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
     rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
-    workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
+    projectIds: Array.isArray(row.key_project_ids) ? row.key_project_ids : [],
     maxOutputTokens: effectiveMaxOutputTokens("server", row.key_max_output_tokens),
     oauth: {
       grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource, audience: "api",

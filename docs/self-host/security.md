@@ -88,12 +88,12 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | `BETTER_AUTH_SECRET` | Better Auth, the sign-in layer. It is also the last fallback root for file proxy URL tokens. |
 | `OAUTH_TOKEN_ENCRYPTION_KEY` | OAuth tokens persisted in `oauth_accounts`. |
 | `CREDENTIALS_ENCRYPTION_KEY` | Connector credentials. |
-| `SECRETS_ENCRYPTION_KEY` | Workspace secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
+| `SECRETS_ENCRYPTION_KEY` | Project secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
 | `METRICS_SECRET` | Access to the metrics endpoint. |
 
 ### Rotate AES-GCM at-rest keys
 
-This procedure covers `SECRETS_ENCRYPTION_KEY` (workspace secrets, webhook signing secrets, organization SSO client secrets) and `CREDENTIALS_ENCRYPTION_KEY` (workspace connectors and user MCP service credentials). It does **not** rotate PostgreSQL PGP encryption, including `OAUTH_TOKEN_ENCRYPTION_KEY` or search history. Back up the database and keys first; protect those backups as secrets.
+This procedure covers `SECRETS_ENCRYPTION_KEY` (project secrets, webhook signing secrets, organization SSO client secrets) and `CREDENTIALS_ENCRYPTION_KEY` (project connectors and user MCP service credentials). It does **not** rotate PostgreSQL PGP encryption, including `OAUTH_TOKEN_ENCRYPTION_KEY` or search history. Back up the database and keys first; protect those backups as secrets.
 
 1. Use a maintenance window for the initial envelope upgrade: stop API and worker processes, deploy code supporting `v2:<key-id>:<iv>:<tag>:<ciphertext>` everywhere, then restart with the existing key and ID. New code immediately writes v2, so do not mix old readers with new writers. Existing `v1` and unversioned AES-GCM rows remain readable. Keep the current key and ID unchanged during this rollout.
 2. For each key being replaced, generate a random 32-byte hex key (`openssl rand -hex 32`), set `<ENV_NAME>_ID` to a new unique ID, and put the previous key in `<ENV_NAME>_PREVIOUS_KEYS`, a JSON object such as `{"default":"<previous 64 hex characters>"}`. Old deployments without an explicit ID used `default`. IDs permit letters, digits, `_` and `-`, up to 64 characters. Never reuse an ID for different key material. Keyrings accept at most 16 old keys; use real 32-byte hex/base64 values even outside production. If the old development key was a passphrase, supply its SHA-256 digest as the legacy key.

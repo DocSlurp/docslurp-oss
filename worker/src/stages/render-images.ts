@@ -163,7 +163,7 @@ export class RenderImagesStage implements Stage {
       return { pageNumbers: keptAsImage, request, routed: null, keptAsImage, unreadPages };
     }
     // Native text-only runs leave previews on demand. Classification can
-    // suggest images, but must not override the workspace feature choices.
+    // suggest images, but must not override the project feature choices.
     const wantsRasters = state.run.pipeline.preserveImages || state.run.pipeline.visionFallback;
     // Only PDFs and images have a raster form. HTML, text and other
     // split documents keep on-demand previews instead of failing here

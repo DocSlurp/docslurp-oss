@@ -3,7 +3,7 @@ import { describeVideoChunk } from "./video-processing.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extractMedia } from "./extract.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
-import type { WorkspaceRun, Document } from "../models.js";
+import type { ProjectRun, Document } from "../models.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { MediaJournal } from "./types.js";
@@ -28,8 +28,8 @@ vi.mock("../sandbox/source-integrity.js", async (importOriginal) => ({
 }));
 function fixture() {
   const document = { id: "doc", userId: "user", sourceKey: "source", pageCount: 0, status: "uploaded" } as Document;
-  const state = new WorkflowState({ id: "run", userId: "user", orgId: "org", workspaceId: "workspace", stats: {}, artifacts: {},
-    spentCents: 0, pipeline: {} } as WorkspaceRun, [document]);
+  const state = new WorkflowState({ id: "run", userId: "user", orgId: "org", projectId: "project", stats: {}, artifacts: {},
+    spentCents: 0, pipeline: {} } as ProjectRun, [document]);
   state.store = Object.fromEntries(["startDocumentStage", "completeDocumentStage", "failDocumentStage", "updateProgress", "appendEvent"]
     .map(key => [key, vi.fn(async () => {})])) as unknown as NonNullable<WorkflowState["store"]>;
   const storage = { downloadToTempFile: vi.fn(async () => "/tmp/media/source"), putBytes: vi.fn(async () => {}), putJson: vi.fn(async () => {}), uri: (key: string) => `memory://${key}` };
@@ -74,7 +74,7 @@ describe("multimedia extraction pipeline boundary", () => {
     expect(canonical.blocks[0].metadata).toMatchObject({ mode: "shown", mediaKind: "video", startSeconds: 0, endSeconds: 1, frameSeconds: [0, 1], evidenceId: "doc:visual:0" });
   });
 
-  it("defaults silent videos to frame reading when workspace configuration is missing", async () => {
+  it("defaults silent videos to frame reading when project configuration is missing", async () => {
     vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
     const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});
     vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:false,hasVideo:true});
@@ -187,12 +187,12 @@ describe("multimedia extraction pipeline boundary", () => {
   });
 });
 
-describe("video workspace defaults and explicit disable", () => {
+describe("video project defaults and explicit disable", () => {
   it.each([
     { enabled: undefined, hasAudio: false }, { enabled: undefined, hasAudio: true },
     { enabled: true, hasAudio: false }, { enabled: true, hasAudio: true },
     { enabled: false, hasAudio: false }, { enabled: false, hasAudio: true },
-  ])("enabled=$enabled, audio=$hasAudio preserves the workspace choice", async ({ enabled, hasAudio }) => {
+  ])("enabled=$enabled, audio=$hasAudio preserves the project choice", async ({ enabled, hasAudio }) => {
     vi.stubEnv("MEDIA_REMOTE_ENABLED", "true");
     vi.stubEnv("MEDIA_VIDEO_ENABLED", "true");
     vi.stubEnv("DEEPINFRA_API_KEY", "test");
@@ -211,7 +211,7 @@ describe("video workspace defaults and explicit disable", () => {
       expect(f.journal.admitVideo).toHaveBeenCalled();
     }
   });
-  it("retains platform and durable quota gates for missing workspace configuration", async () => {
+  it("retains platform and durable quota gates for missing project configuration", async () => {
     vi.stubEnv("MEDIA_REMOTE_ENABLED", "true");
     vi.stubEnv("MEDIA_VIDEO_ENABLED", "true");
     vi.stubEnv("DEEPINFRA_API_KEY", "test");

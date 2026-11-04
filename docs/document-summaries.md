@@ -1,8 +1,8 @@
-# Document and workspace summaries
+# Document and project summaries
 
-New workspaces default to `summaries: true`. This generates one reusable summary
+New projects default to `summaries: true`. This generates one reusable summary
 per document during ingestion. Summaries improve document search: the document
-index matches query text against summaries as well as filenames, and workspace
+index matches query text against summaries as well as filenames, and project
 overview answers can use the stored summaries instead of rereading whole files.
 This option does not create page-level summaries or per-page model calls.
 
@@ -13,19 +13,19 @@ This option does not create page-level summaries or per-page model calls.
 }
 ```
 
-Use this body with `POST /v1/workspaces`. To disable future generation, send
-`{"summaries": false}` to `PATCH /v1/workspaces/:id`, or use the SDK:
+Use this body with `POST /v1/projects`. To disable future generation, send
+`{"summaries": false}` to `PATCH /v1/projects/:id`, or use the SDK:
 
 ```ts
-await client.updateWorkspace("catalogs", { summaries: false });
+await client.updateProject("catalogs", { summaries: false });
 ```
 
-Workspace responses expose the effective `summaries` value. The setting uses the
+Project responses expose the effective `summaries` value. The setting uses the
 existing `pipeline.summarize` storage and run snapshot; there is no second copy of
 the setting. On creation, `summaries` defaults to true and takes precedence over
 `pipeline.summarize`. On update, an omitted `summaries` leaves the pipeline's value
 unchanged. Template locks still win, including the legal and medical templates
-that disable hosted summaries for privacy. Existing workspaces retain their saved
+that disable hosted summaries for privacy. Existing projects retain their saved
 setting. Disabling generation does not delete summaries already created.
 
 ## Cost and existing documents
@@ -34,12 +34,12 @@ Summary generation and embedding add a **one-time processing cost per document
 version**, rather than regenerating the document summary on every search. A
 completed stage checkpoint reuses its output on resume. New versions, explicit
 reprocessing, backfills or failed attempts can incur additional calls and costs.
-Workspace overview synthesis still has the normal chat-generation cost.
+Project overview synthesis still has the normal chat-generation cost.
 
-Enabling summaries for an existing workspace affects new uploads. To also process
+Enabling summaries for an existing project affects new uploads. To also process
 existing documents, use `{"summaries": true, "apply": "reindex"}`. Recommended
-backfills also follow the workspace's existing `autoConfirmReindex` setting.
-Use `POST /v1/workspaces/:id/estimate` with the same body to estimate work first.
+backfills also follow the project's existing `autoConfirmReindex` setting.
+Use `POST /v1/projects/:id/estimate` with the same body to estimate work first.
 See [config-change jobs](config-change-jobs.md).
 
 The worker uses the configured `document-summary` text model, with the shared
@@ -71,8 +71,8 @@ not establish universal optima or search-quality gains.
   bytes**. No PDF reparse fallback is permitted. Page references are explicitly
   unavailable when the extractor cannot verify boundaries.
 - One document-level generation call allows at most **256 output tokens**, even
-  when a workspace requests a larger output limit. Reasoning defaults to `none`
-  for summaries; explicit workspace/task reasoning settings still apply.
+  when a project requests a larger output limit. Reasoning defaults to `none`
+  for summaries; explicit project/task reasoning settings still apply.
   Provider-specific minimum reasoning settings remain respected.
 - Empty or token-truncated output is recorded as a skipped summary, with its
   generation usage retained; it is not embedded or indexed. Sampled summaries
@@ -91,9 +91,9 @@ Summary artifacts and stage statistics retain source size, bytes read, selected
 input bytes, page coverage and whether the evidence was sampled. Omitted pages are
 unknown; the model is not asked to invent their contents.
 
-Workspace overview context has a separate size budget and uses current,
+Project overview context has a separate size budget and uses current,
 non-superseded documents. Missing summaries and documents omitted by that budget
-are disclosed as partial coverage. A workspace overview is generated on request;
+are disclosed as partial coverage. A project overview is generated on request;
 this feature does not add a background full-corpus synthesis job.
 
 These are topic overviews, not exhaustive catalog extraction or a version diff.

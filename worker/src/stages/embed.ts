@@ -12,7 +12,7 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { deleteLanceDbRecords } from "./lancedb-writer.js";
-import { workspaceVectorLocation } from "./lancedb-location.js";
+import { projectVectorLocation } from "./lancedb-location.js";
 import { detectLanguage, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import {
   asEmbeddingReuseStore,
@@ -958,7 +958,7 @@ export class EmbedStage implements Stage {
         : undefined,
     ]).then(([inserted, ids]) => [inserted, ids ?? []] as const);
     if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
-      const location = workspaceVectorLocation(args.state.run, args.vectorSpace);
+      const location = projectVectorLocation(args.state.run, args.vectorSpace);
       await this.deleteVectors(location.uri, location.table, stale);
       args.state.staleVectorIds.set(args.document.id, stale);
     }

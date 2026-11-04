@@ -65,7 +65,7 @@ export interface ExtractorOutput {
   diagnostics: { latencyMs: number; warnings: string[]; toolVersion?: string };
 }
 
-/** Router output for one document. It has the same method IDs as workspace policy. */
+/** Router output for one document. It has the same method IDs as project policy. */
 export interface ResolvedExtractionPlan {
   target: string;
   enrich: string[];

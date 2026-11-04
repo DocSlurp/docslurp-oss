@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-intake-fakes.js";
+import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
 
 /**
  * /v1/extracts over the real intake (in-memory storage and records): sources
@@ -9,14 +9,14 @@ import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-i
  * extracts.db.test.ts.
  */
 const mocks = vi.hoisted(() => ({
-  created: [] as Array<{ orgId: string; workspaceId: string; options: Record<string, unknown>; estimatedSourceBytes?: number }>,
+  created: [] as Array<{ orgId: string; projectId: string; options: Record<string, unknown>; estimatedSourceBytes?: number }>,
   abandoned: [] as string[],
   attached: [] as Array<[string, string]>,
   creditsBlocked: false,
   extractRow: null as Record<string, unknown> | null,
   sign: vi.fn(async () => "https://storage.test/extracts/org-1/ext_x/exports/exp/a1.zip?X-Amz-Expires=120"),
   expire: vi.fn(async () => undefined),
-  workspaces: new Map<string, { id: string; orgId: string; name: string }>(),
+  projects: new Map<string, { id: string; orgId: string; name: string }>(),
   validateApiKey: vi.fn(),
   orgAdmin: false,
   hasRun: false,
@@ -27,7 +27,7 @@ vi.mock("../services/extracts.js", async (importOriginal) => {
   const { SpendBlockedError } = await import("../services/billing/spend-guard.js");
   return {
     ...actual,
-    async createExtract(args: { orgId: string; workspaceId: string; options: { retentionDays?: number }; estimatedSourceBytes?: number }) {
+    async createExtract(args: { orgId: string; projectId: string; options: { retentionDays?: number }; estimatedSourceBytes?: number }) {
       const { paid } = actual.resolveExtractRetention(args.options, { freeHours: 48, maxDays: 30 });
       if (paid && mocks.creditsBlocked) throw new SpendBlockedError("no credits", "credit_exhausted");
       mocks.created.push(args);
@@ -53,24 +53,24 @@ vi.mock("../services/extracts.js", async (importOriginal) => {
     chargeExtractRetention: vi.fn(async () => 0),
   };
 });
-vi.mock("../services/workspaces.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../services/workspaces.js")>(),
-  getWorkspace: vi.fn(async (id: string) => mocks.workspaces.get(id) ?? null),
+vi.mock("../services/projects.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/projects.js")>(),
+  getProject: vi.fn(async (id: string) => mocks.projects.get(id) ?? null),
 }));
 vi.mock("./../routes/uploads.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../routes/uploads.js")>();
   return {
     ...actual,
-    // Workspace lookup without a database: "new" asks for a new workspace, anything else must be known.
-    directUploadTarget: vi.fn(async (actor: { type: string; apiKey?: { workspaceIds?: string[] } }, input: { workspace?: string; newWorkspace?: boolean }) => {
-      if (input.newWorkspace) {
-        if (actor.type === "apiKey" && actor.apiKey?.workspaceIds?.length) {
-          const { WorkspaceIntakeError } = await import("../services/workspace-intake.js");
-          throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
+    // Project lookup without a database: "new" asks for a new project, anything else must be known.
+    directUploadTarget: vi.fn(async (actor: { type: string; apiKey?: { projectIds?: string[] } }, input: { project?: string; newProject?: boolean }) => {
+      if (input.newProject) {
+        if (actor.type === "apiKey" && actor.apiKey?.projectIds?.length) {
+          const { ProjectIntakeError } = await import("../services/project-intake.js");
+          throw new ProjectIntakeError("This API key is limited to specific projects and cannot create new ones.", 403);
         }
-        return { workspaceId: null, workspaceName: null };
+        return { projectId: null, projectName: null };
       }
-      return { workspaceId: input.workspace ?? "ws-1", workspaceName: null };
+      return { projectId: input.project ?? "ws-1", projectName: null };
     }),
   };
 });
@@ -83,17 +83,17 @@ const { createExtractsRoutes } = await import("../routes/extracts.js");
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const { apiPublicErrorMiddleware } = await import("../lib/public-errors.js");
 
-type Key = { scopes?: string[]; keyType?: string; workspaceIds?: string[]; orgId?: string };
+type Key = { scopes?: string[]; keyType?: string; projectIds?: string[]; orgId?: string };
 
 function setup(apiKey?: Key) {
-  const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-1", orgId: "org-1" })] });
+  const fakes = createProjectIntakeFakes({ projects: [fakeProject({ id: "ws-1", orgId: "org-1" })] });
   const runs: Array<{ extract?: unknown }> = [];
   const createRun = fakes.ports.records.createRun;
   fakes.ports.records.createRun = async (args) => { runs.push(args); return await createRun(args); };
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-1", email: "u@example.test", name: "U" } as never);
-    if (apiKey) c.set("apiKey", { userId: "user-1", orgId: "org-1", keyType: "server", keyId: "key-1", workspaceIds: [], scopes: ["ingest"], ...apiKey } as never);
+    if (apiKey) c.set("apiKey", { userId: "user-1", orgId: "org-1", keyType: "server", keyId: "key-1", projectIds: [], scopes: ["ingest"], ...apiKey } as never);
     await next();
   });
   // The production boundary: only reviewed copy and closed codes leave the API.
@@ -118,8 +118,8 @@ beforeEach(() => {
   mocks.attached.length = 0;
   mocks.creditsBlocked = false;
   mocks.extractRow = null;
-  mocks.workspaces.clear();
-  mocks.workspaces.set("ws-1", { id: "ws-1", orgId: "org-1", name: "Inbox" });
+  mocks.projects.clear();
+  mocks.projects.set("ws-1", { id: "ws-1", orgId: "org-1", name: "Inbox" });
   mocks.sign.mockClear();
   mocks.expire.mockClear();
   mocks.validateApiKey.mockReset();
@@ -134,7 +134,7 @@ describe("POST /v1/extracts/bulk", () => {
     expect(response.status).toBe(201);
     const body = await response.json();
     expect(body.extract).toMatchObject({ id: "ext_00000000000000000000000000000001" });
-    expect(mocks.created[0]).toMatchObject({ orgId: "org-1", workspaceId: "ws-1", options: { retentionDays: 2, notifyEmail: false, download: "all" }, estimatedSourceBytes: 5 });
+    expect(mocks.created[0]).toMatchObject({ orgId: "org-1", projectId: "ws-1", options: { retentionDays: 2, notifyEmail: false, download: "all" }, estimatedSourceBytes: 5 });
     const keys = [...fakes.objects.keys()];
     expect(keys).toHaveLength(1);
     expect(keys[0]).toMatch(/^extracts\/org-1\/ext_0{31}1\/raw\/[0-9a-f-]{36}-notes\.txt$/);
@@ -178,36 +178,36 @@ describe("POST /v1/extracts/bulk", () => {
     expect(mocks.created).toHaveLength(0);
   });
 
-  it("removes a workspace it created for an extract that then failed", async () => {
+  it("removes a project it created for an extract that then failed", async () => {
     const { app, fakes } = setup();
-    const response = await app.request("/extracts/bulk", bulk([exe()], { newWorkspace: "true" }));
+    const response = await app.request("/extracts/bulk", bulk([exe()], { newProject: "true" }));
     expect(response.status).toBe(415);
-    expect(fakes.createdWorkspaces).toHaveLength(1);
-    expect(fakes.discardedWorkspaces).toHaveLength(1);
+    expect(fakes.createdProjects).toHaveLength(1);
+    expect(fakes.discardedProjects).toHaveLength(1);
   });
 });
 
 describe("API key scope on /v1/extracts", () => {
-  it("needs ingest to create, the key's own org, and an unrestricted key to create a workspace", async () => {
+  it("needs ingest to create, the key's own org, and an unrestricted key to create a project", async () => {
     expect((await setup({ scopes: ["search"] }).app.request("/extracts/bulk", bulk([text("a.txt")]))).status).toBe(403);
     expect((await setup({ scopes: ["artifacts"] }).app.request("/extracts/url", json({ urls: ["https://example.com/a.pdf"] }))).status).toBe(403);
     expect((await setup().app.request("/extracts/url", json({ urls: ["https://example.com/a.pdf"], retentionDays: 99 }))).status).toBe(400);
     const foreign = await setup({ scopes: ["ingest"] }).app.request("/extracts/url", json({ urls: ["https://example.com/a.pdf"], orgId: "org-2" }));
     expect(foreign.status).toBe(403);
-    const restricted = await setup({ scopes: ["ingest"], workspaceIds: ["ws-1"] }).app.request("/extracts/bulk", bulk([text("a.txt")], { newWorkspace: "true" }));
+    const restricted = await setup({ scopes: ["ingest"], projectIds: ["ws-1"] }).app.request("/extracts/bulk", bulk([text("a.txt")], { newProject: "true" }));
     expect(restricted.status).toBe(403);
     expect(mocks.created).toHaveLength(0);
   });
 
-  it("refuses a workspace outside the key's allowlist as not found", async () => {
-    mocks.workspaces.set("ws-2", { id: "ws-2", orgId: "org-1", name: "Other" });
-    const response = await setup({ scopes: ["ingest"], workspaceIds: ["ws-1"] }).app.request("/extracts/bulk", bulk([text("a.txt")], { workspace: "ws-2" }));
+  it("refuses a project outside the key's allowlist as not found", async () => {
+    mocks.projects.set("ws-2", { id: "ws-2", orgId: "org-1", name: "Other" });
+    const response = await setup({ scopes: ["ingest"], projectIds: ["ws-1"] }).app.request("/extracts/bulk", bulk([text("a.txt")], { project: "ws-2" }));
     expect(response.status).toBe(404);
     expect(mocks.created).toHaveLength(0);
   });
 
   it("downloads only with a server key holding artifacts", async () => {
-    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "user-1", expired: false };
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", project_id: "ws-1", user_id: "user-1", expired: false };
     expect((await setup({ scopes: ["ingest"] }).app.request("/extracts/ext_1/download")).status).toBe(403);
     expect((await setup({ scopes: ["artifacts"], keyType: "publishable" }).app.request("/extracts/ext_1/download")).status).toBe(403);
     const allowed = await setup({ scopes: ["artifacts"] }).app.request("/extracts/ext_1/download");
@@ -215,7 +215,7 @@ describe("API key scope on /v1/extracts", () => {
   });
 
   it("rejects a revoked or unknown key before the route runs", async () => {
-    const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-1", orgId: "org-1" })] });
+    const fakes = createProjectIntakeFakes({ projects: [fakeProject({ id: "ws-1", orgId: "org-1" })] });
     const app = new Hono().use("*", apiKeyAuth).route("/v1/extracts", createExtractsRoutes(fakes.ports));
     mocks.validateApiKey.mockResolvedValue(null);
     const response = await app.request("/v1/extracts/bulk", { ...bulk([text("a.txt")]), headers: { Authorization: "Bearer dslp_revoked" } });
@@ -228,24 +228,24 @@ describe("API key scope on /v1/extracts", () => {
 describe("download authorization and failures after the run exists", () => {
   it("lets only the requester download, as with exports", async () => {
     const { app } = setup();
-    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "someone-else", expired: false };
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", project_id: "ws-1", user_id: "someone-else", expired: false };
     expect((await app.request("/extracts/ext_1/download")).status).toBe(403);
     expect(mocks.sign).not.toHaveBeenCalled();
     mocks.extractRow = { ...mocks.extractRow, user_id: "user-1" };
     expect((await app.request("/extracts/ext_1/download")).status).toBe(302);
   });
 
-  it("never expires an extract or removes its workspace once its run exists", async () => {
+  it("never expires an extract or removes its project once its run exists", async () => {
     const { app, fakes } = setup();
     mocks.hasRun = true;
     fakes.state.startError = null;
     // Fail after intake committed the run (the response payload cannot be built).
-    const actions = await import("../services/workspace-intake-actions.js");
-    const spy = vi.spyOn(actions, "createBulkWorkspaceIntake").mockRejectedValueOnce(new Error("lost connection after commit"));
-    const response = await app.request("/extracts/bulk", bulk([text("a.txt")], { newWorkspace: "true" }));
+    const actions = await import("../services/project-intake-actions.js");
+    const spy = vi.spyOn(actions, "createBulkProjectIntake").mockRejectedValueOnce(new Error("lost connection after commit"));
+    const response = await app.request("/extracts/bulk", bulk([text("a.txt")], { newProject: "true" }));
     expect(response.status).toBe(500);
     expect(mocks.abandoned).toEqual([]);
-    expect(fakes.discardedWorkspaces).toEqual([]);
+    expect(fakes.discardedProjects).toEqual([]);
     spy.mockRestore();
   });
 });
@@ -272,7 +272,7 @@ describe("reserved canonical IDs", () => {
 describe("deleting an extract", () => {
   it("lets only the requester expire it early", async () => {
     const { app } = setup();
-    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "someone-else", expired: false };
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", project_id: "ws-1", user_id: "someone-else", expired: false };
     expect((await app.request("/extracts/ext_1", { method: "DELETE" })).status).toBe(403);
     expect(mocks.expire).not.toHaveBeenCalled();
     expect((await setup({ scopes: ["artifacts"] }).app.request("/extracts/ext_1", { method: "DELETE" })).status).toBe(403);
@@ -287,7 +287,7 @@ describe("deleting an extract", () => {
 describe("reading an extract", () => {
   it("is 404 for another tenant, 410 once expired, and redirects to a short-lived signed URL with no-store", async () => {
     const { app } = setup();
-    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "user-1", expired: false };
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", project_id: "ws-1", user_id: "user-1", expired: false };
     // Another org's key sees nothing, for the record and for the download.
     const other = setup({ scopes: ["artifacts"], orgId: "org-2" }).app;
     expect((await other.request("/extracts/ext_1")).status).toBe(404);

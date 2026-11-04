@@ -27,7 +27,7 @@ Where each field accepts them:
 | Field | Accepts | Notes |
 | --- | --- | --- |
 | `model` on `POST /v1/chat`, `/v1/chat/stream`, chat operations | `llm://openrouter/...` or the bare id, from the chat model catalog | An unavailable model is a 400 `model_not_allowed`, never the default. |
-| `docslurp.model` on `POST /v1/chat/completions` | Same as `/v1/chat` | `model` on this endpoint selects a workspace (`workspace:default`); an `llm://` value there is a 400 naming `docslurp.model`. |
+| `docslurp.model` on `POST /v1/chat/completions` | Same as `/v1/chat` | `model` on this endpoint selects a project (`project:default`); an `llm://` value there is a 400 naming `docslurp.model`. |
 | `pipeline.textGeneration.model`, `.models.<task>`, `pipeline.structuredExtraction.model` | `llm://openrouter/...`, the bare id, or `llm://private/...` | Hosted URIs are stored as the bare OpenRouter id. |
 | `pipeline.vision.modelUri`, `.remoteFallbackModelUri` | An `llm://` URI from the vision catalog | Bare ids are not accepted. |
 | `pipeline.embedding.modelUri` | An `llm://` URI from the embedding catalog | Bare ids are not accepted. |
@@ -37,10 +37,10 @@ Model URIs never carry credentials: a URI with a user name or password is
 rejected. Responses report the hosted model by its bare OpenRouter id (for
 example `debug.model` on a chat answer).
 
-Workspace pipeline settings own ingestion model choices. Configure them when
-creating or updating a workspace through the API/SDK; runs snapshot those settings.
-Workspace changes affect new runs, while existing runs retain their captured
-workspace configuration. Inherited deployment defaults resolve when the worker
+Project pipeline settings own ingestion model choices. Configure them when
+creating or updating a project through the API/SDK; runs snapshot those settings.
+Project changes affect new runs, while existing runs retain their captured
+project configuration. Inherited deployment defaults resolve when the worker
 executes each task.
 
 ```json
@@ -64,14 +64,14 @@ OpenRouter id) or `llm://private/<alias>/<model>`. Supported task override keys 
 
 Resolution order is a task override, `textGeneration.model`, the worker's
 `DOCSLURP_TEXT_MODEL`, then `DEFAULT_PIPELINE_TEXT_MODEL` in shared configuration.
-Use `null` for the workspace default and omit task overrides to inherit deployment
+Use `null` for the project default and omit task overrides to inherit deployment
 settings. Blank IDs and unknown task keys are rejected. An explicit
 `structuredExtraction.model` takes precedence for structured extraction; its
 default is now `null`, so it inherits this same chain.
 
 API search and helper calls use `DOCSLURP_SEARCH_MODEL`, falling back to the
-workspace chat catalog's default. The environment override must be one of the
-allowed workspace chat models (bare id or `llm://openrouter/<id>`). Explicit
+project chat catalog's default. The environment override must be one of the
+allowed project chat models (bare id or `llm://openrouter/<id>`). Explicit
 request model selections still win.
 
 Vision uses `pipeline.vision.modelUri` and its configured fallback; embeddings
@@ -99,7 +99,7 @@ to their own list price instead of the generic `COST_PER_1K_*` rates.
 ### Tuned vision models
 
 The default and these opt-in hosted models are in the vision catalog (OpenRouter list prices checked
-2026-10-22) and can be selected per workspace with `pipeline.vision.modelUri`.
+2026-10-22) and can be selected per project with `pipeline.vision.modelUri`.
 Per-model prompt, output cap, routing and reasoning settings live in
 `worker/src/tools/vision-model-profiles.ts`; an explicit prompt other than
 `<OCR>` is kept. Costs are per page.
@@ -122,12 +122,12 @@ hosted vision model without a deploy of code. Set it on both the API/app and the
 worker so the cost preview matches what the worker calls. It applies only to
 pipelines whose vision config is still the default (profile `good-fast-hosted`
 with its own model URI), is applied when a run or preview reads the pipeline,
-and is never saved into workspace settings. So unsetting it restores the
-built-in default for every workspace.
+and is never saved into project settings. So unsetting it restores the
+built-in default for every project.
 
 - Explicit `pipeline.vision.modelUri`, `model` or a non-default `profile` win.
   A stored config that is identical to the default cannot be told apart from
-  an untouched workspace and follows the override.
+  an untouched project and follows the override.
 - Pipelines with `privacyMode` other than `standard` are never changed.
 - The value must be an `llm://` URI of a hosted model in the vision catalog, so
   spend is priced from list prices rather than the generic fallback. Anything
@@ -166,14 +166,14 @@ Haiku 5.5 also has a tested worker configuration:
 }
 ```
 
-It is available in workspace chat/search model selection. The worker profile is
+It is available in project chat/search model selection. The worker profile is
 configured separately. The seven-model calibration report
 compares required-fact recovery, complete-generation latency, actual provider
 charges and unavailable-charge bounds. Haiku's four filtered empty responses
 remain in those results; the profile does not guarantee provider reliability.
 
 Set `DOCSLURP_TEXT_PROFILE=grounded-low` to inherit the profile across a deployment.
-A workspace `profile` overrides the environment; `provider-default` preserves
+A project `profile` overrides the environment; `provider-default` preserves
 the provider's reasoning defaults and the existing prompts/limits. A missing or
 null profile inherits the deployment. Task reasoning overrides beat the common
 reasoning setting, which beats the profile. Explicit task token limits beat the
@@ -197,7 +197,7 @@ each unresolved attempt, including retries, against the same phase budget.
 Reports must retain the unresolved charges and distinguish provider charges
 from the usage ledger's customer billing markup.
 
-The profile is optional and does not select a model. Workspace model overrides
+The profile is optional and does not select a model. Project model overrides
 and `DOCSLURP_TEXT_MODEL` still resolve independently. Generation metadata records
 the effective profile, reasoning effort, and token limit for every worker text
 task. Community summaries receive actual subject/predicate/object graph links
@@ -210,7 +210,7 @@ calls. These settings do not change the provider adapter or credential type.
 Local tooling defaults can be overridden with `DOCSLURP_LOCAL_OCR_MODEL` and
 `DOCSLURP_CLIP_MODEL`. The command runner passes an explicit model to the Florence
 and CLIP scripts; embedding pool requests must also name a model instead of
-silently selecting one. Workspace vision selections take precedence over tooling
+silently selecting one. Project vision selections take precedence over tooling
 defaults for actual extraction.
 
 ## Non-free software opt-out
@@ -229,11 +229,11 @@ prices. DocSlurp adds routing preferences to each OpenRouter request:
   `deepseek/deepseek-*` sort hosts by price (`provider.sort: "price"`) and only
   use hosts that serve FP8 or better weights. Fallbacks stay on. Keeping the same
   cheap host across chat steps also keeps prompt-cache reads working.
-- **China-based providers, per organization and workspace.** These are on by
+- **China-based providers, per organization and project.** These are on by
   default. Owners and admins can turn them off for the organization with
   `PATCH /v1/organizations/:orgId { "allowChinaProviders": false }`, and a
-  workspace can turn them off for itself with
-  `PATCH /v1/workspaces/:workspace { "allowChinaProviders": false }` (it can
+  project can turn them off for itself with
+  `PATCH /v1/projects/:project { "allowChinaProviders": false }` (it can
   narrow, never widen, its organization). When off, every request carries an
   allowlist of providers with a known non-China headquarters (`provider.only`)
   plus the China-based ones on `provider.ignore`, on every path and every retry;
@@ -242,14 +242,14 @@ prices. DocSlurp adds routing preferences to each OpenRouter request:
   the measured vision route and the costs are in
   [provider regions](provider-regions.md).
 
-A request knows its organization from its API key or from the workspace it
-uses, and its workspaces from the privacy check every hosted call makes. A
+A request knows its organization from its API key or from the project it
+uses, and its projects from the privacy check every hosted call makes. A
 signed-in request without either applies the restriction when any of the
 user's organizations has it on. Changes apply within 30 seconds.
 
 ## Privacy modes
 
-`pipeline.privacyMode` controls whether workspace content may reach a hosted AI
+`pipeline.privacyMode` controls whether project content may reach a hosted AI
 provider. The rules live in `packages/shared/src/privacy.ts`.
 
 | Mode | Hosted LLM, vision, embedding and speech-to-text calls | Audit |
@@ -268,7 +268,7 @@ calls that `local-only` blocks.
 Enforcement happens in two places. Every hosted client (worker OpenRouter and
 Anthropic text, the vision runtime and its remote fallback, embeddings, the API's
 OpenRouter helpers, query embeddings, the chat MCP agent, and voice
-transcription) takes the workspace mode and throws `PrivacyModeViolationError`
+transcription) takes the project mode and throws `PrivacyModeViolationError`
 before any request leaves the process. Callers also check the mode first, so
 features handle a block in a predictable way:
 
@@ -282,8 +282,8 @@ features handle a block in a predictable way:
   hosted embedding profile, or a hosted `vision.remoteFallbackModelUri`, outside
   `standard`. Voice transcription returns HTTP 403.
 
-Answers that combine several workspaces use the strictest mode among them. Chat
-MCP tools refuse to fetch another workspace's content when that workspace forbids
+Answers that combine several projects use the strictest mode among them. Chat
+MCP tools refuse to fetch another project's content when that project forbids
 hosted models. In `privacy_audit_log`, `endpoint` is `blocked:<operation>`, for
 example `blocked:worker.text.document-summary`, and `model_id` is
 `<provider>/<model>`. The `legal-contracts` and `medical-records` templates use
@@ -292,10 +292,10 @@ summaries and propositions, because those stages need a hosted text model.
 
 ## Private model endpoints
 
-Private endpoints let `local-only` and `strict-privacy` workspaces use
+Private endpoints let `local-only` and `strict-privacy` projects use
 open-weight models that the operator runs on single-tenant hardware, such as
 vLLM on a rented GPU. Only operators can declare them, through deployment
-config. Workspaces and API callers can only name a registered alias. The
+config. Projects and API callers can only name a registered alias. The
 registry lives in `packages/shared/src/private-endpoints.ts`.
 
 Set `DOCSLURP_PRIVATE_MODEL_ENDPOINTS` on both the worker and the app. Its
@@ -354,7 +354,7 @@ The rules are:
 
 ### Routing
 
-A workspace refers to a private model as `llm://private/<alias>/<model-id>`.
+A project refers to a private model as `llm://private/<alias>/<model-id>`.
 The model id can contain `/`. Private routes take no `?baseUrl=` parameter,
 because the registry supplies the URL and credentials.
 
@@ -372,20 +372,20 @@ because the registry supplies the URL and credentials.
 The embedding and vision `target` is inferred as `private`. `textGeneration.model`
 and its per-task overrides accept either an OpenRouter id or a private route.
 Strict-privacy templates keep their local defaults. Point a template's
-workspace at private profiles by overriding these fields. Summaries and
+project at private profiles by overriding these fields. Summaries and
 propositions can then be turned back on.
 
 | Surface | Endpoint path | Notes |
 | --- | --- | --- |
-| Worker text stages (summary, propositions, structured extraction, graph, community summaries, chunk preambles) | `/chat/completions` | Structured extraction also sends `response_format: json_schema` built from the workspace schema, to private endpoints only. |
+| Worker text stages (summary, propositions, structured extraction, graph, community summaries, chunk preambles) | `/chat/completions` | Structured extraction also sends `response_format: json_schema` built from the project schema, to private endpoints only. |
 | Worker page vision and self-critique | `/chat/completions` with an image | |
 | Worker and API embeddings (including query embeddings) | `/embeddings` | Dimensions come from the registry. |
-| API grounded chat answers | `/chat/completions` (streamed) | Used when hosted chat is blocked. The workspace's `textGeneration.model` is tried first, then `DOCSLURP_PRIVATE_TEXT_MODEL`. |
+| API grounded chat answers | `/chat/completions` (streamed) | Used when hosted chat is blocked. The project's `textGeneration.model` is tried first, then `DOCSLURP_PRIVATE_TEXT_MODEL`. |
 | API voice input | `/audio/transcriptions` (multipart) | Used outside `standard` when `DOCSLURP_PRIVATE_STT_MODEL` names a registered `stt` model. |
 
 Not routed yet: the API's optional search strategies, the chat MCP agent, and
 reranking. They behave as they did before private routes existed (see TODO.md).
-Standard workspaces keep their hosted routes, but they can also name a private
+Standard projects keep their hosted routes, but they can also name a private
 route explicitly.
 
 ### Privacy and audit
@@ -401,11 +401,11 @@ the following:
 3. Under `strict-privacy`, writes one `privacy_audit_log` row *before* the
    request is sent: `model_id = private/<alias>/<model>`,
    `endpoint = private:<alias>:<operation>` (for example
-   `private:gpu1:worker.embedding`), plus the workspace, run and document. If
-   the row cannot be written, or there is no workspace scope, the call is
+   `private:gpu1:worker.embedding`), plus the project, run and document. If
+   the row cannot be written, or there is no project scope, the call is
    refused. Worker runs, page tasks and graph jobs set the scope. API calls pass
-   the workspace explicitly.
-4. Logs `[privacy] private-call operation=… alias=… model=… privacy_mode=… workspace=…`.
+   the project explicitly.
+4. Logs `[privacy] private-call operation=… alias=… model=… privacy_mode=… project=…`.
 
 `local-only` allows the same calls and writes no audit rows. Blocked hosted
 calls keep the `blocked:<operation>` rows described above.
@@ -428,11 +428,11 @@ Every older Claude id (Haiku 4.5, Sonnet 4.x/5, Opus 4.x/5, Fable 5/5.1, Claude 
 
 ### Hosted Perplexity embeddings through OpenRouter
 
-New workspaces default to `llm://openrouter/perplexity/pplx-embed-v1-0.6b`
-(native 1024 dimensions). Workspaces can also select `llm://openrouter/perplexity/pplx-embed-v1-4b`
+New projects default to `llm://openrouter/perplexity/pplx-embed-v1-0.6b`
+(native 1024 dimensions). Projects can also select `llm://openrouter/perplexity/pplx-embed-v1-4b`
 (native 2560 dimensions). Set the embedding target to `hosted`; both ingestion
 and search use `OPENROUTER_API_KEY` and the fixed official OpenRouter endpoint.
-For example, use this embedding configuration in the workspace pipeline:
+For example, use this embedding configuration in the project pipeline:
 
 ```json
 {
@@ -450,7 +450,7 @@ bound so the provider's 120,000-token aggregate request limit cannot drop conten
 They do not support dimension overrides. Reindex existing documents when changing
 embedding models so document and query vectors use the same space. Provider errors
 remain errors rather than silently switching retrieval to keywords. Existing
-explicit workspace model URIs remain selected. The `cheapest-hosted` profile
+explicit project model URIs remain selected. The `cheapest-hosted` profile
 and the default embedding configuration now select Perplexity 0.6B. Self-hosted
 operators need `OPENROUTER_API_KEY` for this default or must explicitly choose a
 local/private embedding route.
@@ -474,7 +474,7 @@ Document and query calls use the fixed `https://api.perplexity.ai/v1/embeddings`
 endpoint. The adapter decodes signed INT8 responses into normalized vectors,
 requires actual token usage, and records usage before validating paid responses.
 Native widths are 1024 and 2560 respectively; dimension overrides are rejected.
-Changing the workspace route requires reindexing, including when switching between
+Changing the project route requires reindexing, including when switching between
 native Perplexity and OpenRouter. Privacy mode still rejects remote requests.
 
 Requests are packed to at most 128 inputs and a conservative 120,000-token upper

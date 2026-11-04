@@ -8,10 +8,10 @@ let loaded = false;
 
 /**
  * The outermost ancestor holding pnpm-workspace.yaml. When this repository is
- * checked out as a submodule of a larger workspace (the private app repo pins it
+ * checked out as a submodule of a larger project (the private app repo pins it
  * at core/), the shared .env lives at that outer root, not at core/.
  */
-export function findWorkspaceRoot(startDir: string): string {
+export function findProjectRoot(startDir: string): string {
   let root = startDir;
   let found = false;
 
@@ -27,14 +27,14 @@ export function findWorkspaceRoot(startDir: string): string {
   }
 }
 
-export function loadWorkspaceEnv(fromMetaUrl: string): void {
+export function loadProjectEnv(fromMetaUrl: string): void {
   if (loaded) {
     return;
   }
 
   const startDir = dirname(fileURLToPath(fromMetaUrl));
-  const workspaceRoot = findWorkspaceRoot(startDir);
-  const envPath = resolve(workspaceRoot, ".env");
+  const projectRoot = findProjectRoot(startDir);
+  const envPath = resolve(projectRoot, ".env");
 
   if (existsSync(envPath)) {
     loadEnv({ path: envPath, quiet: true });
@@ -45,4 +45,4 @@ export function loadWorkspaceEnv(fromMetaUrl: string): void {
   loaded = true;
 }
 
-loadWorkspaceEnv(import.meta.url);
+loadProjectEnv(import.meta.url);

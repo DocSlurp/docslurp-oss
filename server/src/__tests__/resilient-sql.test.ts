@@ -35,7 +35,7 @@ const quiet = { warn: () => undefined, info: () => undefined };
 
 describe("isRetryableRead", () => {
   it.each([
-    [["select id from workspaces where id = ", ""], true],
+    [["select id from projects where id = ", ""], true],
     [["  -- note\nselect 1 from t"], true],
     [["with x as (select 1 from t) select * from x"], true],
     [["select count(*) from t for update"], false],
@@ -126,7 +126,7 @@ describe("resilientSql", () => {
     const clients = [dead, fresh];
     const create = vi.fn(() => clients[create.mock.calls.length - 1]!);
     const { sql } = resilientSql(create as any, { gapMs: 0, log: quiet });
-    expect(await (sql as any)`select id from workspaces where id = ${"w1"}`).toEqual([{ id: "w1" }]);
+    expect(await (sql as any)`select id from projects where id = ${"w1"}`).toEqual([{ id: "w1" }]);
     expect(dead.calls).toHaveLength(1);
     expect(fresh.calls).toHaveLength(1);
   });
@@ -135,7 +135,7 @@ describe("resilientSql", () => {
     const clients = [fakeClient(1, () => reset()), fakeClient(2, () => reset())];
     const create = vi.fn(() => clients[create.mock.calls.length - 1]!);
     const { sql } = resilientSql(create as any, { gapMs: 0, log: quiet });
-    await expect((sql as any)`select id from workspaces`).rejects.toMatchObject({ code: "ECONNRESET" });
+    await expect((sql as any)`select id from projects`).rejects.toMatchObject({ code: "ECONNRESET" });
     expect(clients[1]!.calls).toHaveLength(1);
   });
 

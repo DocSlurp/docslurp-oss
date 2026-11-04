@@ -5,7 +5,7 @@ import type { RequestActor } from "../lib/request-actor.js";
 import { createNativeChatHost } from "./native-host.js";
 import { NativeOperations } from "./native-operations.js";
 import { createNativeOperationPolicy } from "./operation-policy.js";
-import { createWorkspaceChatExecutor } from "./workspace-chat-executor.js";
+import { createProjectChatExecutor } from "./project-chat-executor.js";
 
 let producer: Promise<Awaited<ReturnType<typeof createRuntime>>> | undefined;
 async function createRuntime(worker: boolean) {
@@ -16,7 +16,7 @@ async function createRuntime(worker: boolean) {
   try {
     const host=await createNativeChatHost({pool,redisUrl,worker,namespace:process.env.MASTRA_NAMESPACE,
       configureBackgroundTasks: worker ? (manager,pubsub)=>manager.registerStaticExecutor(
-        "docslurpWorkspaceChat",createWorkspaceChatExecutor(manager,pubsub)) : undefined});
+        "docslurpProjectChat",createProjectChatExecutor(manager,pubsub)) : undefined});
     return {...host,async close(){await host.close();await pool.end();}};
   } catch(error){await pool.end();throw error;}
 }

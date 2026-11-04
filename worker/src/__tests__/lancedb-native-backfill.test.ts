@@ -10,13 +10,13 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "../test/migrated-postgres.js";
 import { buildVectorRecords } from "../stages/index-vectors.js";
-import { backfillAllLanceHydration, backfillOrgLanceHydration, backfillWorkspaceLanceHydration } from "../stages/lancedb-native-backfill.js";
+import { backfillAllLanceHydration, backfillOrgLanceHydration, backfillProjectLanceHydration } from "../stages/lancedb-native-backfill.js";
 import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
 
 /**
  * The native-search backfill against migrated Postgres and real local
- * per-workspace LanceDB databases that predate the hydration columns: it fills
- * only the selected workspace's database, is idempotent, leaves no rewritten
+ * per-project LanceDB databases that predate the hydration columns: it fills
+ * only the selected project's database, is idempotent, leaves no rewritten
  * row outside the vector index, and tolerates an ingest write landing while it
  * runs.
  */
@@ -30,7 +30,7 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 
 const vector = (seed: number) => Array.from({ length: DIM }, (_, k) => Math.sin(seed * 13 + k));
-const location = (workspaceId = "w") => VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", workspaceId, MODEL, DIM);
+const location = (projectId = "w") => VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", projectId, MODEL, DIM);
 
 beforeAll(async () => {
   lanceDir = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "lance-native-backfill-"));
@@ -40,30 +40,30 @@ beforeAll(async () => {
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'backfill@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org1', 'Org', 'backfill', 'u')`;
-  for (const workspace of ["w", "other"]) {
-    await sql`insert into workspaces (id, org_id, user_id, name) values (${workspace}, 'org1', 'u', ${workspace})`;
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
-      values (${`run-${workspace}`}, 'org1', 'u', ${workspace}, 'bulk-upload', 'completed', 'completed', '{}')`;
+  for (const project of ["w", "other"]) {
+    await sql`insert into projects (id, org_id, user_id, name) values (${project}, 'org1', 'u', ${project})`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (${`run-${project}`}, 'org1', 'u', ${project}, 'bulk-upload', 'completed', 'completed', '{}')`;
   }
   // Rows written by the previous release: no hydration columns at all.
   const rows: Record<string, Array<Record<string, unknown>>> = { w: [], other: [] };
   for (let d = 0; d < DOCS + 1; d += 1) {
-    const workspace = d === DOCS ? "other" : "w";
-    const documentId = `${workspace}-doc${d}`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
-      values (${documentId}, 'org1', 'u', ${workspace}, ${`run-${workspace}`}, ${`${documentId}.pdf`}, 'application/pdf', ${`k-${documentId}`}, 'completed')`;
+    const project = d === DOCS ? "other" : "w";
+    const documentId = `${project}-doc${d}`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+      values (${documentId}, 'org1', 'u', ${project}, ${`run-${project}`}, ${`${documentId}.pdf`}, 'application/pdf', ${`k-${documentId}`}, 'completed')`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${`vi-${documentId}`}, ${documentId}, 'lancedb', 'b', 'p', ${MODEL}, ${DIM})`;
     for (let c = 0; c < CHUNKS; c += 1) {
       const id = `${documentId}-${c}`;
       await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
-        values (${id}, ${documentId}, ${`run-${workspace}`}, 'u', ${c}, ${`pump seal ${c}`}, ${["Intro"]}, ${1 + (c % 5)}, 9, ${sql.json({ blockIds: [`b-${id}`] })})`;
-      rows[workspace]!.push({ id, documentId, chunkIndex: c, text: `pump seal ${c}`, vector: vector(d * CHUNKS + c), metadata: { documentId, sourceKey: "k", filename: "f" } });
+        values (${id}, ${documentId}, ${`run-${project}`}, 'u', ${c}, ${`pump seal ${c}`}, ${["Intro"]}, ${1 + (c % 5)}, 9, ${sql.json({ blockIds: [`b-${id}`] })})`;
+      rows[project]!.push({ id, documentId, chunkIndex: c, text: `pump seal ${c}`, vector: vector(d * CHUNKS + c), metadata: { documentId, sourceKey: "k", filename: "f" } });
     }
   }
-  for (const [workspace, workspaceRows] of Object.entries(rows)) {
-    const db = await connect(location(workspace).uri);
-    const table = await db.createTable(location(workspace).table, workspaceRows);
+  for (const [project, projectRows] of Object.entries(rows)) {
+    const db = await connect(location(project).uri);
+    const table = await db.createTable(location(project).table, projectRows);
     await table.createIndex("vector", { config: Index.hnswSq({ distanceType: "l2", numPartitions: 1 }) });
     table.close();
     db.close();
@@ -77,9 +77,9 @@ afterAll(async () => {
   await rm(lanceDir, { recursive: true, force: true });
 });
 
-async function readTable(workspaceId = "w") {
-  const db = await connect(location(workspaceId).uri);
-  const table = await db.openTable(location(workspaceId).table);
+async function readTable(projectId = "w") {
+  const db = await connect(location(projectId).uri);
+  const table = await db.openTable(location(projectId).table);
   try {
     // A database not backfilled yet has no hydration columns: those read as undefined.
     const present = new Set((await table.schema()).fields.map((field) => field.name));
@@ -96,24 +96,24 @@ async function readTable(workspaceId = "w") {
 }
 
 describe("lancedb native backfill", () => {
-  it("fills the workspace's database only, keeps its rows in the vector index and is idempotent", async () => {
+  it("fills the project's database only, keeps its rows in the vector index and is idempotent", async () => {
     const lines: string[] = [];
-    const results = await backfillWorkspaceLanceHydration({ sql, workspaceId: "w", batchDocs: 3, log: (line) => lines.push(line) });
+    const results = await backfillProjectLanceHydration({ sql, projectId: "w", batchDocs: 3, log: (line) => lines.push(line) });
     expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({ workspaceId: "w", uri: location().uri, chunkRows: DOCS * CHUNKS, ftsBuilt: true, optimized: true, rowsWithoutHydration: 0 });
+    expect(results[0]).toMatchObject({ projectId: "w", uri: location().uri, chunkRows: DOCS * CHUNKS, ftsBuilt: true, optimized: true, rowsWithoutHydration: 0 });
     const after = await readTable();
     expect(decodeLanceChunkHydration(after.rows.get("w-doc1-7")!.hydration)).toEqual({
       v: 1, runId: "run-w", headingPath: ["Intro"], pageNumber: 3, tokenEstimate: 9, metadata: { blockIds: ["b-w-doc1-7"] },
     });
     expect(after.rows.get("w-doc1-7")!.pageNumber).toBe(3);
     expect(after.rows.has(`other-doc${DOCS}-0`)).toBe(false);
-    // Another workspace's database is untouched.
+    // Another project's database is untouched.
     expect((await readTable("other")).rows.get(`other-doc${DOCS}-0`)!.hydration).toBeUndefined();
     // Without the optimize, every rewritten row would be flat-scanned by vector search.
     expect(after.stats).toMatchObject({ numUnindexedRows: 0 });
     expect(after.indices.some((index) => index.columns.includes("text"))).toBe(true);
 
-    const [second] = await backfillWorkspaceLanceHydration({ sql, workspaceId: "w", batchDocs: 3, log: () => {} });
+    const [second] = await backfillProjectLanceHydration({ sql, projectId: "w", batchDocs: 3, log: () => {} });
     expect(second).toMatchObject({ chunkRows: DOCS * CHUNKS, ftsBuilt: false, rowsWithoutHydration: 0 });
     const again = await readTable();
     expect(again.rows.size).toBe(after.rows.size);
@@ -124,7 +124,7 @@ describe("lancedb native backfill", () => {
   it("tolerates an ingest write while it runs", async () => {
     const artifact = { chunks: [0, 1].map((index) => ({ id: `fresh-${index}`, index, text: `fresh ${index}`, tokenEstimate: 3, vector: vector(9_000 + index), headingPath: [], pageNumber: 2, metadata: {} })) };
     await Promise.all([
-      backfillWorkspaceLanceHydration({ sql, workspaceId: "w", batchDocs: 1, log: () => {} }),
+      backfillProjectLanceHydration({ sql, projectId: "w", batchDocs: 1, log: () => {} }),
       writeLanceDbRecords(location().uri, location().table, buildVectorRecords(artifact, "w-fresh", { filename: "fresh.pdf" }, "run-w")),
     ]);
     const { rows } = await readTable();
@@ -134,17 +134,17 @@ describe("lancedb native backfill", () => {
 
   it("changes nothing on a dry run", async () => {
     const before = await readTable("other");
-    const [result] = await backfillWorkspaceLanceHydration({ sql, workspaceId: "other", dryRun: true, log: () => {} });
-    expect(result).toMatchObject({ workspaceId: "other", chunkRows: CHUNKS, optimized: false, rowsWithoutHydration: null });
+    const [result] = await backfillProjectLanceHydration({ sql, projectId: "other", dryRun: true, log: () => {} });
+    expect(result).toMatchObject({ projectId: "other", chunkRows: CHUNKS, optimized: false, rowsWithoutHydration: null });
     const after = await readTable("other");
     expect(after.rows.get(`other-doc${DOCS}-0`)!.hydration).toBeUndefined();
     expect(after.rows.size).toBe(before.rows.size);
   }, 60_000);
-  it("--org and --all cover every workspace database of the org, once each", async () => {
+  it("--org and --all cover every project database of the org, once each", async () => {
     const lines: string[] = [];
     const results = await backfillOrgLanceHydration({ sql, orgId: "org1", log: (line) => lines.push(line) });
-    expect(results.map((result) => result.workspaceId).sort()).toEqual(["other", "w"]);
-    expect(results.find((result) => result.workspaceId === "other")).toMatchObject({
+    expect(results.map((result) => result.projectId).sort()).toEqual(["other", "w"]);
+    expect(results.find((result) => result.projectId === "other")).toMatchObject({
       uri: location("other").uri, chunkRows: CHUNKS, ftsBuilt: true, optimized: true, rowsWithoutHydration: 0,
     });
     expect(lines.filter((line) => line.startsWith("[backfill] table=") && line.includes("documents="))).toHaveLength(2);
@@ -161,7 +161,7 @@ describe("lancedb native backfill", () => {
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
       values (${id}, 'w-doc0', 'run-w', 'u', 8000, 'deferred page', ${[]}, 9, 3, ${sql.json({ pageNumber: 9, materializedBy: "query", deferred: true })})`;
     await writeLanceDbRecords(location().uri, location().table, [{ id, documentId: "w-doc0", chunkIndex: 8000, text: "deferred page", vector: vector(7_777), metadata: { documentId: "w-doc0" } }]);
-    const [result] = await backfillWorkspaceLanceHydration({ sql, workspaceId: "w", batchDocs: 10, log: () => {} });
+    const [result] = await backfillProjectLanceHydration({ sql, projectId: "w", batchDocs: 10, log: () => {} });
     expect(result!.rowsWithoutHydration).toBe(1);
     const { rows } = await readTable();
     expect(rows.get(id)!.hydration ?? null).toBeNull();

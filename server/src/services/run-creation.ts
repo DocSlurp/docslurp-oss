@@ -12,7 +12,7 @@ import {
   type DocumentRecord,
   type IndexingMode,
   type PipelineFeatures,
-  type WorkspaceRun,
+  type ProjectRun,
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
@@ -25,18 +25,18 @@ import {
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
-import { canContributeToWorkspace, getWorkspaceAccess } from "./organizations.js";
+import { canContributeToProject, getProjectAccess } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
-import { mapDocument, mapWorkspaceRun, type DocumentRow, type WorkspaceRunRow } from "./run-records.js";
+import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
 import {
   AllSourcesUnreadableError,
   resolveSourceMetadata,
   UnreadableSourceError,
 } from "./source-metadata.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
-import { assertVisualModeAllowed, IndexingModeError } from "./workspace-indexing-mode.js";
+import { assertVisualModeAllowed, IndexingModeError } from "./project-indexing-mode.js";
 import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
@@ -71,13 +71,13 @@ export type RunSources =
   | { kind: "versionsOf"; documentIds: string[]; reuse?: boolean };
 
 export interface CreateRunInput {
-  /** Explicit admission opt-in; never inherit this from workspace or prior-run settings. */
+  /** Explicit admission opt-in; never inherit this from project or prior-run settings. */
   speedBoost?: boolean;
   /** Internal durable intake identity; never accepted from HTTP input. */
   runId?: string;
   /** The requester: access is checked against them and the Run belongs to them. */
   userId: string;
-  workspaceId: string;
+  projectId: string;
   kind: string;
   pipeline: PipelineFeatures;
   apiKeyId?: string | null;
@@ -99,7 +99,7 @@ export interface UnreadableSource {
 
 export interface CreatedRun {
   /** Published, with the true document and page totals. */
-  run: WorkspaceRun;
+  run: ProjectRun;
   documents: DocumentRecord[];
   unreadable: UnreadableSource[];
   /** Set when the Run exists but processing has not started yet. */
@@ -152,7 +152,7 @@ export function isRunCreationBlockedError(
 }
 
 export async function enforceLiveBudgetCaps(
-  workspaceId: string,
+  projectId: string,
   orgId: string,
 ): Promise<void> {
   const sql = defaultSql;
@@ -171,39 +171,39 @@ export async function enforceLiveBudgetCaps(
   // statement on the ingest path (67% of app-database time at 576 slots in the
   // 2026-10-09 load-test re-run), so only sum spend for a cap that exists.
   const [limits] = await sql<
-    { workspace_budget_cents: number | null; org_budget_cents: number | null }[]
+    { project_budget_cents: number | null; org_budget_cents: number | null }[]
   >`
     select
-      w.monthly_budget_cents as workspace_budget_cents,
+      w.monthly_budget_cents as project_budget_cents,
       o.monthly_budget_cents as org_budget_cents
-    from workspaces w
+    from projects w
     join organizations o on o.id = w.org_id
-    where w.id = ${workspaceId}
+    where w.id = ${projectId}
     limit 1
   `;
 
   if (!limits) {
-    throw new Error("Workspace not found");
+    throw new Error("Project not found");
   }
 
-  const monthSpendCents = async (scope: "workspace" | "org"): Promise<number> => {
+  const monthSpendCents = async (scope: "project" | "org"): Promise<number> => {
     const [row] = await sql<{ spend_cents: number }[]>`
       select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
       from ${attributedUsage("month")} au
-      where ${scope === "workspace" ? sql`au.workspace_id = ${workspaceId}` : sql`au.org_id = ${orgId}`}
+      where ${scope === "project" ? sql`au.project_id = ${projectId}` : sql`au.org_id = ${orgId}`}
     `;
     return Number(row?.spend_cents ?? 0);
   };
   const budget = {
-    workspace_budget_cents: limits.workspace_budget_cents,
-    workspace_spend_cents: limits.workspace_budget_cents == null ? 0 : await monthSpendCents("workspace"),
+    project_budget_cents: limits.project_budget_cents,
+    project_spend_cents: limits.project_budget_cents == null ? 0 : await monthSpendCents("project"),
     org_budget_cents: limits.org_budget_cents,
     org_spend_cents: limits.org_budget_cents == null ? 0 : await monthSpendCents("org"),
   };
 
-  const workspacePaused =
-    budget.workspace_budget_cents != null &&
-    budget.workspace_spend_cents >= budget.workspace_budget_cents;
+  const projectPaused =
+    budget.project_budget_cents != null &&
+    budget.project_spend_cents >= budget.project_budget_cents;
   const orgPaused =
     budget.org_budget_cents != null &&
     budget.org_spend_cents >= budget.org_budget_cents;
@@ -211,9 +211,9 @@ export async function enforceLiveBudgetCaps(
   // Write only on a change: every ingest runs this, and the org row is the
   // one every credit debit in the org locks.
   await sql`
-    update workspaces
-    set budget_paused = ${workspacePaused}, updated_at = now()
-    where id = ${workspaceId} and budget_paused is distinct from ${workspacePaused}
+    update projects
+    set budget_paused = ${projectPaused}, updated_at = now()
+    where id = ${projectId} and budget_paused is distinct from ${projectPaused}
   `;
   await sql`
     update organizations
@@ -221,12 +221,12 @@ export async function enforceLiveBudgetCaps(
     where id = ${orgId} and budget_paused is distinct from ${orgPaused}
   `;
 
-  if (workspacePaused) {
+  if (projectPaused) {
     throw new RunCreationBlockedError(
-      "This workspace has reached its monthly budget cap and new runs are paused. " +
-        "Increase the budget in workspace settings to resume processing.",
+      "This project has reached its monthly budget cap and new runs are paused. " +
+        "Increase the budget in project settings to resume processing.",
       402,
-      "workspace_budget_paused",
+      "project_budget_paused",
     );
   }
 
@@ -256,14 +256,14 @@ async function assertCreditFloor(orgId: string): Promise<void> {
   }
 }
 
-type DedupScope = "workspace" | "org";
+type DedupScope = "project" | "org";
 
 type DedupCandidateRow = {
   id: string;
   /** The document that was embedded (itself unless it is a copy); a new copy points here. */
   vector_owner_id: string;
   /**
-   * The owner's LanceDB rows live in the owner's workspace database. A copy
+   * The owner's LanceDB rows live in the owner's project database. A copy
    * elsewhere cannot share them: its index stage runs and writes its own.
    */
   shares_owner_vectors: boolean;
@@ -274,7 +274,7 @@ async function findDedupCandidate(
   client: SqlClient,
   args: {
     orgId: string;
-    workspaceId: string;
+    projectId: string;
     sourceSha256: string;
     runId: string;
   },
@@ -283,15 +283,15 @@ async function findDedupCandidate(
     select
       d.id,
       coalesce(d.deduped_from_document_id, d.id) as vector_owner_id,
-      coalesce(owner.workspace_id, d.workspace_id) = ${args.workspaceId} as shares_owner_vectors,
+      coalesce(owner.project_id, d.project_id) = ${args.projectId} as shares_owner_vectors,
       case
-        when d.workspace_id = ${args.workspaceId} then 'workspace'
+        when d.project_id = ${args.projectId} then 'project'
         else 'org'
       end as dedup_scope
     from documents d
     left join documents owner on owner.id = d.deduped_from_document_id
-    join workspace_runs runs on runs.id = d.run_id
-    join workspace_runs target_run on target_run.id = ${args.runId}
+    join project_runs runs on runs.id = d.run_id
+    join project_runs target_run on target_run.id = ${args.runId}
     where d.org_id = ${args.orgId}
       and d.source_sha256 = ${args.sourceSha256}
       and d.status = 'completed'
@@ -304,22 +304,22 @@ async function findDedupCandidate(
       and (runs.pipeline - ${client.array([...stageSelectionKeys])}::text[])
         = (target_run.pipeline - ${client.array([...stageSelectionKeys])}::text[])
       and (
-        d.workspace_id = ${args.workspaceId}
+        d.project_id = ${args.projectId}
         or d.org_id = ${args.orgId}
       )
-      -- A copy in another workspace than the vector owner is indexed from the
+      -- A copy in another project than the vector owner is indexed from the
       -- owner's embedding artifact. Pages materialized on demand (deferred
       -- indexing) have vectors outside that artifact, so such a source is
-      -- only reused inside its own workspace.
+      -- only reused inside its own project.
       and (
-        coalesce(owner.workspace_id, d.workspace_id) = ${args.workspaceId}
+        coalesce(owner.project_id, d.project_id) = ${args.projectId}
         or not exists (
           select 1 from document_chunks deferred
           where deferred.document_id = d.id and deferred.id like '%:p%:c%'
         )
       )
     order by
-      case when d.workspace_id = ${args.workspaceId} then 0 else 1 end,
+      case when d.project_id = ${args.projectId} then 0 else 1 end,
       d.updated_at desc,
       d.created_at desc
     limit 1
@@ -333,7 +333,7 @@ async function seedDeduplicatedDocument(
   args: {
     sourceDocumentId: string;
     dedupScope: DedupScope;
-    /** False: the copy is indexed into its own workspace's LanceDB database by the worker. */
+    /** False: the copy is indexed into its own project's LanceDB database by the worker. */
     sharesOwnerVectors: boolean;
     targetDocumentId: string;
     targetRunId: string;
@@ -511,7 +511,7 @@ async function seedDeduplicatedDocument(
 
 async function lockRunCreation(runId: string, sql: SqlClient): Promise<void> {
   const [run] = await sql<{ id: string }[]>`
-    select id from workspace_runs
+    select id from project_runs
     where id = ${runId} and creation_ready_at is null and status = 'queued'
       and workflow_started_at is null
     for update
@@ -526,8 +526,8 @@ async function enqueueUnmaterializedSources(runId: string, sql: SqlClient): Prom
   await sql`
     insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason)
     select 'storage_prefix', r.org_id, r.user_id || '/' || r.id || '/',
-      jsonb_build_object('workspaceId', r.workspace_id), sources.keys, 'run_creation'
-    from workspace_runs r
+      jsonb_build_object('projectId', r.project_id), sources.keys, 'run_creation'
+    from project_runs r
     cross join lateral (
       select array_agg(distinct key) as keys
       from unnest(r.creation_source_keys) as source(key)
@@ -542,7 +542,7 @@ async function enqueueUnmaterializedSources(runId: string, sql: SqlClient): Prom
 async function deleteRunCreation(runId: string, sql: SqlClient): Promise<void> {
   await sql`delete from documents where run_id = ${runId}`;
   await enqueueUnmaterializedSources(runId, sql);
-  await sql`delete from workspace_runs where id = ${runId}`;
+  await sql`delete from project_runs where id = ${runId}`;
 }
 
 /** Publish only a fully materialized manifest, with its final document/page totals. */
@@ -562,7 +562,7 @@ async function publishRunCreation(
       throw new Error(`Run ${runId} has an incomplete manifest: expected ${totalDocuments}, found ${manifest?.count ?? 0}`);
     }
     await client`
-      update workspace_runs
+      update project_runs
       set total_documents = ${totalDocuments}, pages_total = ${manifest.pages},
           creation_ready_at = now(), creation_expires_at = null, creation_source_keys = '{}', updated_at = now()
       where id = ${runId}
@@ -576,7 +576,7 @@ export async function discardUnstartedRun(runId: string, sql: SqlClient = defaul
   return await sql.begin(async (tx) => {
     const client = tx as unknown as SqlClient;
     const [locked] = await client<{ id: string }[]>`
-      select id from workspace_runs where id = ${runId}
+      select id from project_runs where id = ${runId}
         and creation_ready_at is null and workflow_started_at is null for update
     `;
     if (!locked) return false;
@@ -590,7 +590,7 @@ export async function sweepInterruptedRunCreations(sql: SqlClient = defaultSql, 
   return await sql.begin(async (tx) => {
     const client = tx as unknown as SqlClient;
     const rows = await client<{ id: string }[]>`
-      select id from workspace_runs
+      select id from project_runs
       where creation_ready_at is null and workflow_started_at is null
         and creation_expires_at <= now()
       order by creation_expires_at asc limit ${limit} for update skip locked
@@ -636,19 +636,19 @@ export function createRunCreation(deps: RunCreationDeps) {
     totalDocuments: number;
     sourceKeys: string[];
     pipeline: PipelineFeatures;
-  }): Promise<WorkspaceRunRow> {
+  }): Promise<ProjectRunRow> {
     const { input } = args;
     const requestId = currentRequestId();
-    const [row] = await admitRunSpend(args.orgId, input.workspaceId, async (tx) => {
+    const [row] = await admitRunSpend(args.orgId, input.projectId, async (tx) => {
       if (input.extract) {
         // Never a run for an extract that expired or was deleted meanwhile (a confirm racing the sweep).
         const [live] = await tx`select id from extracts where id = ${input.extract.id} and state = 'active' and expires_at > now() for update`;
         if (!live) throw new ExtractError(410, "extract_expired", EXTRACT_EXPIRED_MESSAGE);
       }
-      const rows = await tx<WorkspaceRunRow[]>`
+      const rows = await tx<ProjectRunRow[]>`
       with inserted as (
-        insert into workspace_runs (
-          id, org_id, user_id, workspace_id, kind, status, priority, control_state,
+        insert into project_runs (
+          id, org_id, user_id, project_id, kind, status, priority, control_state,
           control_requested_at, stage, total_documents, processed_documents,
           pages_total, pages_processed, stats, creation_source_keys, pipeline,
           extract_id, storage_prefix
@@ -657,7 +657,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           ${args.id},
           ${args.orgId},
           ${input.userId},
-          ${input.workspaceId},
+          ${input.projectId},
           ${input.kind},
           'queued',
           ${input.priority ?? 0},
@@ -680,9 +680,9 @@ export function createRunCreation(deps: RunCreationDeps) {
         )
         returning *
       )
-      select inserted.*, workspaces.name as workspace_name
+      select inserted.*, projects.name as project_name
       from inserted
-      join workspaces on workspaces.id = inserted.workspace_id
+      join projects on projects.id = inserted.project_id
     `;
       // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
       if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
@@ -720,22 +720,22 @@ export function createRunCreation(deps: RunCreationDeps) {
         const client = tx as unknown as SqlClient;
 
         await lockRunCreation(runId, client);
-        // Every upload has a version key: the caller's canonicalId, else workspace + folder path + filename.
-        // Versions chain per (workspace_id, canonical_id) (documents_workspace_canonical_idx).
+        // Every upload has a version key: the caller's canonicalId, else project + folder path + filename.
+        // Versions chain per (project_id, canonical_id) (documents_project_canonical_idx).
         // An extract document has its own key: it must never supersede (or be
         // superseded by) a kept document, which its expiry would then delete.
         const canonicalId = input.extract
           ? `docslurp:extract:${input.extract.id}:${documentId}`
           : documentVersionKey({
-            workspaceId: input.workspaceId,
+            projectId: input.projectId,
             path: sourcePath,
             filename,
             canonicalId: file.canonicalId,
           });
-        await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
+        await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
         const [existing] = input.extract ? [] : await client<{ id: string; version_number: number }[]>`
           select id, version_number from documents
-          where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
+          where project_id = ${input.projectId} and canonical_id = ${canonicalId}
           order by version_number desc, created_at desc
           limit 1
         `;
@@ -743,14 +743,14 @@ export function createRunCreation(deps: RunCreationDeps) {
         // Extract documents keep their own artifacts under the extract prefix, so they never reuse another document's.
         const dedupCandidate = input.extract ? null : await findDedupCandidate(client, {
           orgId,
-          workspaceId: input.workspaceId,
+          projectId: input.projectId,
           sourceSha256: metadata.sourceSha256,
           runId,
         });
 
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
-            id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
+            id, org_id, user_id, project_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, source_sha256,
             deduped_from_document_id, dedup_scope, version_number, previous_version_id,
             canonical_id, source_path, file_size, metadata, indexing_mode
@@ -759,7 +759,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${documentId},
             ${orgId},
             ${input.userId},
-            ${input.workspaceId},
+            ${input.projectId},
             ${runId},
             ${filename},
             ${file.mimeType},
@@ -823,17 +823,17 @@ export function createRunCreation(deps: RunCreationDeps) {
       const row = await sql.begin(async (tx) => {
         const client = tx as unknown as SqlClient;
         await lockRunCreation(runId, client);
-        await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
+        await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
         // The new version follows the latest in the lineage, whichever version was selected.
         const [latest] = await client<{ id: string; version_number: number }[]>`
           select id, version_number from documents
-          where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
+          where project_id = ${input.projectId} and canonical_id = ${canonicalId}
           order by version_number desc, created_at desc
           limit 1
         `;
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
-            id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
+            id, org_id, user_id, project_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, file_size, source_sha256,
             canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
@@ -841,7 +841,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${randomUUID()},
             ${source.org_id},
             ${input.userId},
-            ${source.workspace_id},
+            ${source.project_id},
             ${runId},
             ${source.filename},
             ${source.mime_type},
@@ -882,7 +882,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     const timer = setInterval(() => {
       if (heartbeat) return;
       heartbeat = sql`
-        update workspace_runs
+        update project_runs
         set creation_expires_at = now() + (${CREATION_LEASE_MS} * interval '1 millisecond')
         where id = ${runId} and creation_ready_at is null
       `.catch((error: unknown) => {
@@ -906,18 +906,18 @@ export function createRunCreation(deps: RunCreationDeps) {
   }
 
   async function create(request: CreateRunInput): Promise<CreatedRun> {
-    // Callers often pass a stored workspace or run pipeline (reprocess, bulk reprocess, full index, connectors).
+    // Callers often pass a stored project or run pipeline (reprocess, bulk reprocess, full index, connectors).
     // Extractor settings the strict schemas now reject are dropped here, before anything is written, so the
     // Run row never carries them (a Dolphin repoPath, an unknown extractor id). Request schemas stay strict.
     const requestedPipeline = { ...request.pipeline, speedBoost: request.speedBoost === true };
     assertPipelineSpeedBoost(requestedPipeline);
-    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(requestedPipeline, `run creation in workspace ${request.workspaceId}`) };
+    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(requestedPipeline, `run creation in project ${request.projectId}`) };
     assertPipelineSpeedBoost(input.pipeline);
-    const access = await getWorkspaceAccess(input.workspaceId, input.userId);
-    if (!access) throw new Error("Workspace not found");
-    if (!canContributeToWorkspace(access, input.userId)) throw new Error("Forbidden");
+    const access = await getProjectAccess(input.projectId, input.userId);
+    if (!access) throw new Error("Project not found");
+    if (!canContributeToProject(access, input.userId)) throw new Error("Forbidden");
     // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
-    // with Fast (or a refused privacy/PII policy) is refused whatever the workspace or request says
+    // with Fast (or a refused privacy/PII policy) is refused whatever the project or request says
     // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
     if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual") assertVisualModeAllowed(input.pipeline);
 
@@ -926,13 +926,13 @@ export function createRunCreation(deps: RunCreationDeps) {
     if (sources.kind === "versionsOf") {
       sourceDocuments = await sql<SourceDocumentRow[]>`
         select d.* from documents d
-        where d.workspace_id = ${input.workspaceId} and d.id = any(${sql.array(sources.documentIds)})
+        where d.project_id = ${input.projectId} and d.id = any(${sql.array(sources.documentIds)})
         order by d.created_at, d.id
       `;
       // Extract documents are never run again: a new version would outlive the
       // extract while pointing at sources and artifacts its expiry deletes.
       const [extractSource] = await sql<{ id: string }[]>`
-        select d.id from documents d join workspace_runs r on r.id = d.run_id
+        select d.id from documents d join project_runs r on r.id = d.run_id
         where d.id = any(${sql.array(sourceDocuments.map((doc) => doc.id))}) and r.extract_id is not null
         limit 1
       `;
@@ -943,13 +943,13 @@ export function createRunCreation(deps: RunCreationDeps) {
     // One admission path for every caller: credit floor, live budget caps, then
     // the reserved insert.
     await assertCreditFloor(access.orgId);
-    await enforceLiveBudgetCaps(input.workspaceId, access.orgId);
+    await enforceLiveBudgetCaps(input.projectId, access.orgId);
 
     // Validated before the insert: a pipeline the preview schema rejects must fail the request with nothing
     // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).
     const costForecastFor = (documentCount: number) => buildRunProcessingPreview({
       request: {
-        workspace: input.workspaceId,
+        project: input.projectId,
         pipeline: input.pipeline,
         files: Array.from({ length: documentCount }, (_, index) => ({
           filename: `document-${index + 1}.pdf`,
@@ -975,7 +975,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       pipeline: platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline),
     });
 
-    // Stamped on every Document so a later workspace mode switch never rewrites how it was indexed.
+    // Stamped on every Document so a later project mode switch never rewrites how it was indexed.
     const indexingMode = effectiveIndexingMode(input.pipeline.indexingMode);
     const published = await prepareAndPublish(runId, async () => {
       const materialised = sources.kind === "files"
@@ -984,7 +984,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       return materialised;
     });
 
-    const run = mapWorkspaceRun(row);
+    const run = mapProjectRun(row);
     run.totalDocuments = published.documents.length;
     run.pagesTotal = published.pagesTotal;
     run.costForecast = costForecastFor(published.documents.length);

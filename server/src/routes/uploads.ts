@@ -6,8 +6,8 @@ import {
   documentTagsSchema,
   isBillingExemptOrg,
   pipelineFeatureOverridesSchema,
-  WORKSPACE_INPUT_MAX_LENGTH,
-  workspaceTemplateKeySchema,
+  PROJECT_INPUT_MAX_LENGTH,
+  projectTemplateKeySchema,
   indexingModeSchema,
 } from "@docslurp/shared";
 
@@ -20,7 +20,7 @@ import {
   isReservedCanonicalId,
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
-import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, lookupActorWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, apiKeyCanUseProject, getRequestActor, lookupActorProject, requireActorProject, type RequestActor } from "../lib/request-actor.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import {
   abortDirectUploadSession,
@@ -32,27 +32,27 @@ import {
 } from "../services/direct-upload-session.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
+import { ProjectAccessError } from "../services/default-project.js";
 import {
-  confirmDirectUploadWorkspaceIntake,
-  createBulkWorkspaceIntake,
-  createRemoteUrlWorkspaceIntake,
-  parseFormWorkspaceIntakePipeline,
+  confirmDirectUploadProjectIntake,
+  createBulkProjectIntake,
+  createRemoteUrlProjectIntake,
+  parseFormProjectIntakePipeline,
   parseFormDocumentTags,
-  parseWorkspaceIntakePipeline,
-  parseWorkspaceIntakeTemplateKey,
-} from "../services/workspace-intake-actions.js";
+  parseProjectIntakePipeline,
+  parseProjectIntakeTemplateKey,
+} from "../services/project-intake-actions.js";
 import {
-  WorkspaceIntakeError,
-  workspaceIntakePorts,
-  type WorkspaceIntakePorts,
-} from "../services/workspace-intake.js";
+  ProjectIntakeError,
+  projectIntakePorts,
+  type ProjectIntakePorts,
+} from "../services/project-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
-import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
-import { IndexingModeError } from "../services/workspace-indexing-mode.js";
+import { findDefaultProject, getProject } from "../services/projects.js";
+import { IndexingModeError } from "../services/project-indexing-mode.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
-import { workspaceInputNotFoundError } from "../services/default-workspace.js";
+import { projectInputNotFoundError } from "../services/default-project.js";
 import { estimateUpload } from "../services/work-estimates.js";
 import { ExtractError } from "../services/extracts.js";
 import { billingState } from "../services/config-change.js";
@@ -62,12 +62,12 @@ type Uploadable = File | string | Array<File | string> | undefined;
 export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH)
   .refine((value) => !isReservedCanonicalId(value), "canonicalId must not start with docslurp: (reserved)");
 
-/** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
-export const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
+/** The public `project` field: a project UUID, slug, former slug or name; created when no project matches. */
+export const projectInputSchema = z.string().max(PROJECT_INPUT_MAX_LENGTH);
 
-/** A restricted API key's workspace allowlist (null for sessions and unrestricted keys). */
-export function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
-  return actor.type === "apiKey" && actor.apiKey.workspaceIds?.length ? actor.apiKey.workspaceIds : null;
+/** A restricted API key's project allowlist (null for sessions and unrestricted keys). */
+export function actorAllowedProjectIds(actor: RequestActor): readonly string[] | null {
+  return actor.type === "apiKey" && actor.apiKey.projectIds?.length ? actor.apiKey.projectIds : null;
 }
 
 export const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
@@ -82,9 +82,9 @@ const ingestUrlSchema = z.object({
   speedBoost: z.boolean().optional(),
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
-  workspace: workspaceInputSchema.optional(),
-  newWorkspace: z.boolean().optional(),
-  templateKey: workspaceTemplateKeySchema.optional(),
+  project: projectInputSchema.optional(),
+  newProject: z.boolean().optional(),
+  templateKey: projectTemplateKeySchema.optional(),
   indexingMode: indexingModeSchema.optional(),
   /** Plain URLs default their canonical ID to the URL; objects may override it. */
   urls: z.array(z.union([
@@ -110,9 +110,9 @@ const createDirectSessionSchema = z.object({
   indexingMode: indexingModeSchema.optional(),
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
-  workspace: workspaceInputSchema.optional(),
-  newWorkspace: z.boolean().optional(),
-  templateKey: workspaceTemplateKeySchema.optional(),
+  project: projectInputSchema.optional(),
+  newProject: z.boolean().optional(),
+  templateKey: projectTemplateKeySchema.optional(),
   pipeline: pipelineFeatureOverridesSchema.optional(),
   files: z.array(directUploadFileSchema).min(1),
 });
@@ -156,7 +156,7 @@ export function parseCanonicalIds(
       canonicalIds: body.canonicalIds,
     });
   } catch (error) {
-    if (error instanceof InvalidCanonicalIdError) throw new WorkspaceIntakeError(error.message, 400);
+    if (error instanceof InvalidCanonicalIdError) throw new ProjectIntakeError(error.message, 400);
     throw error;
   }
 }
@@ -165,7 +165,7 @@ export function parseSourcePaths(files: File[], body: Record<string, unknown>): 
   try {
     return sourcePathsForFiles(files.length, { path: body.path, paths: body.paths });
   } catch (error) {
-    if (error instanceof InvalidCanonicalIdError) throw new WorkspaceIntakeError(error.message, 400);
+    if (error instanceof InvalidCanonicalIdError) throw new ProjectIntakeError(error.message, 400);
     throw error;
   }
 }
@@ -188,13 +188,13 @@ export function runCreationErrorResponse(c: Context, error: unknown): Response |
   return apiStatusError(c, error.statusCode, error.message, { code: error.code });
 }
 
-export function workspaceIntakeErrorResponse(
+export function projectIntakeErrorResponse(
   c: Context,
   error: unknown,
 ): Response | null {
   // Fast (or a refused privacy policy) with visual indexing, from the request's overrides (run-creation.ts).
   if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
-  if (error instanceof WorkspaceAccessError) {
+  if (error instanceof ProjectAccessError) {
     return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
   // A direct extract session confirmed after its extract expired (run-creation.ts).
@@ -202,7 +202,7 @@ export function workspaceIntakeErrorResponse(
   if (error instanceof UnreadableSourceError) {
     return apiStatusError(c, error.statusCode, error.message, { code: error.code });
   }
-  if (!(error instanceof WorkspaceIntakeError)) {
+  if (!(error instanceof ProjectIntakeError)) {
     return null;
   }
 
@@ -210,17 +210,17 @@ export function workspaceIntakeErrorResponse(
 }
 
 /**
- * A workspace-scoped API key may target its allowlisted workspaces but must not
+ * A project-scoped API key may target its allowlisted projects but must not
  * create a new one (which would land outside the allowlist). Session users are
  * unrestricted. Security finding SEC-2026-10-07.
  */
-export function apiKeyMayCreateWorkspace(c: Context): boolean {
+export function apiKeyMayCreateProject(c: Context): boolean {
   const apiKey = c.get("apiKey");
-  return !apiKey || (apiKey.workspaceIds ?? []).length === 0;
+  return !apiKey || (apiKey.projectIds ?? []).length === 0;
 }
 
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
-export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntakePorts) => acceptApiKeys(new Hono()
+export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePorts) => acceptApiKeys(new Hono()
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest"]))) {
@@ -233,7 +233,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     }
     if (actor.type === "apiKey") {
       if (!actor.apiKey.orgId) return apiStatusError(c, 403, "Forbidden");
-      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedWorkspaceIds(actor))) {
+      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedProjectIds(actor))) {
         return apiStatusError(c, 404, "Upload session not found");
       }
       if (c.req.method === "POST" && /\/(bulk|url|direct\/sessions)\/?$/.test(c.req.path)) {
@@ -249,7 +249,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         if (typeof body.orgId === "string" && body.orgId.trim() && body.orgId.trim() !== actor.apiKey.orgId) {
           return apiStatusError(c, 403, "Forbidden");
         }
-        // The `workspace` value itself is resolved inside the key's org and allowlist by intake.
+        // The `project` value itself is resolved inside the key's org and allowlist by intake.
       }
     }
     await next();
@@ -263,18 +263,18 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const orgId = c.get("apiKey")?.orgId ?? input.orgId ?? null;
 
       try {
-        // Resolve the target now: an existing workspace's ID, or the name of
-        // the workspace confirm creates (none: a self-titled one).
+        // Resolve the target now: an existing project's ID, or the name of
+        // the project confirm creates (none: a self-titled one).
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
-        // Overrides only; confirm merges them onto the workspace pipeline and its template locks.
-        const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
+        // Overrides only; confirm merges them onto the project pipeline and its template locks.
+        const pipeline = parseProjectIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
         const session = await createDirectUploadSession({
           userId,
           orgId,
           apiKeyId: c.get("apiKey")?.keyId ?? null,
-          allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
-          workspaceId: target.workspaceId,
-          workspaceName: target.workspaceName,
+          allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+          projectId: target.projectId,
+          projectName: target.projectName,
           templateKey: input.templateKey ?? null,
           pipeline,
           files: input.files,
@@ -282,7 +282,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         });
         return c.json(session, 201);
       } catch (error) {
-        const response = workspaceIntakeErrorResponse(c, error);
+        const response = projectIntakeErrorResponse(c, error);
         if (response) return response;
         throw error;
       }
@@ -301,7 +301,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
     async c => {
       try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers)); }
-      catch (error) { return workspaceIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
+      catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
     })
   .post(
     "/direct/sessions/:sessionId/files/complete",
@@ -321,7 +321,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         });
       } catch (error) {
         return (
-          workspaceIntakeErrorResponse(c, error) ??
+          projectIntakeErrorResponse(c, error) ??
           apiStatusError(c, 400, reportPublicError(error))
         );
       }
@@ -344,7 +344,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     const sessionId = c.req.param("sessionId");
     let result;
     try {
-      result = await confirmDirectUploadWorkspaceIntake({
+      result = await confirmDirectUploadProjectIntake({
         sessionId,
         userId,
         audit: {
@@ -355,7 +355,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       }, ports);
     } catch (error) {
       return (
-        workspaceIntakeErrorResponse(c, error) ??
+        projectIntakeErrorResponse(c, error) ??
         runCreationErrorResponse(c, error) ??
         apiStatusError(c, 500, reportPublicError(error))
       );
@@ -376,33 +376,33 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         ? body.orgId.trim()
         : c.get("apiKey")?.orgId ?? undefined;
     const files = normalizeFiles(body.files ?? body.file);
-    const requestedWorkspace =
-      typeof body.workspace === "string" && body.workspace.trim().length > 0
-        ? body.workspace.slice(0, WORKSPACE_INPUT_MAX_LENGTH)
+    const requestedProject =
+      typeof body.project === "string" && body.project.trim().length > 0
+        ? body.project.slice(0, PROJECT_INPUT_MAX_LENGTH)
         : null;
-    const requestedNewWorkspace = body.newWorkspace === "true";
+    const requestedNewProject = body.newProject === "true";
     const requestedTemplateKey =
-      parseWorkspaceIntakeTemplateKey(body.templateKey);
+      parseProjectIntakeTemplateKey(body.templateKey);
 
-    if (!requestedWorkspace && (requestedNewWorkspace || requestedTemplateKey) && !apiKeyMayCreateWorkspace(c)) {
-      return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
+    if (!requestedProject && (requestedNewProject || requestedTemplateKey) && !apiKeyMayCreateProject(c)) {
+      return apiStatusError(c, 403, "Project-scoped API keys cannot create new projects", { code: "project_scope_forbidden" });
     }
 
     let result;
     try {
       const canonicalIds = parseCanonicalIds(files, body);
       const paths = parseSourcePaths(files, body);
-      const pipeline = parseFormWorkspaceIntakePipeline(body.pipeline);
+      const pipeline = parseFormProjectIntakePipeline(body.pipeline);
       const parsedBoost = z.enum(["true", "false"]).optional().safeParse(body.speedBoost);
-      if (!parsedBoost.success) throw new WorkspaceIntakeError("speedBoost must be true or false", 400);
+      if (!parsedBoost.success) throw new ProjectIntakeError("speedBoost must be true or false", 400);
       const speedBoost = parsedBoost.data === "true";
-      result = await createBulkWorkspaceIntake({
+      result = await createBulkProjectIntake({
         userId,
         orgId,
-        workspace: requestedWorkspace,
-        newWorkspace: requestedNewWorkspace,
+        project: requestedProject,
+        newProject: requestedNewProject,
         templateKey: requestedTemplateKey,
-        allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
+        allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         speedBoost,
@@ -419,7 +419,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       }, ports);
     } catch (error) {
       return (
-        workspaceIntakeErrorResponse(c, error) ??
+        projectIntakeErrorResponse(c, error) ??
         runCreationErrorResponse(c, error) ??
         apiStatusError(c, 500, reportPublicError(error))
       );
@@ -440,18 +440,18 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const userId = c.get("sessionUser").id;
       const body = c.req.valid("json");
       const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
-      if (!body.workspace?.trim() && (body.newWorkspace || body.templateKey) && !apiKeyMayCreateWorkspace(c)) {
-        return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
+      if (!body.project?.trim() && (body.newProject || body.templateKey) && !apiKeyMayCreateProject(c)) {
+        return apiStatusError(c, 403, "Project-scoped API keys cannot create new projects", { code: "project_scope_forbidden" });
       }
       let result;
       try {
-        result = await createRemoteUrlWorkspaceIntake({
+        result = await createRemoteUrlProjectIntake({
           userId,
           orgId: c.get("apiKey")?.orgId ?? body.orgId,
-          workspace: body.workspace?.trim() || null,
-          newWorkspace: body.newWorkspace,
+          project: body.project?.trim() || null,
+          newProject: body.newProject,
           templateKey: body.templateKey,
-          allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
+          allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           speedBoost: body.speedBoost === true,
@@ -466,7 +466,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         }, ports);
       } catch (error) {
         return (
-          workspaceIntakeErrorResponse(c, error) ??
+          projectIntakeErrorResponse(c, error) ??
           runCreationErrorResponse(c, error) ??
           apiStatusError(c, 500, reportPublicError(error))
         );
@@ -486,31 +486,31 @@ export const uploadsRoutes = createUploadsRoutes();
 
 /**
  * Where a direct upload session lands, decided at session creation: an
- * existing workspace's ID, or the name of the workspace to create at confirm
- * (neither: a self-titled one). Same rules as intakeIntoWorkspace.
+ * existing project's ID, or the name of the project to create at confirm
+ * (neither: a self-titled one). Same rules as intakeIntoProject.
  */
 export async function directUploadTarget(
   actor: RequestActor,
-  input: { workspace?: string; newWorkspace?: boolean; templateKey?: string },
+  input: { project?: string; newProject?: boolean; templateKey?: string },
   orgId: string | null,
-): Promise<{ workspaceId: string | null; workspaceName: string | null }> {
-  const lookup = await lookupActorWorkspace(actor, input.workspace, orgId);
-  const restricted = actorAllowedWorkspaceIds(actor) !== null;
-  const create = (workspaceName: string | null) => {
-    if (restricted) throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
-    return { workspaceId: null, workspaceName };
+): Promise<{ projectId: string | null; projectName: string | null }> {
+  const lookup = await lookupActorProject(actor, input.project, orgId);
+  const restricted = actorAllowedProjectIds(actor) !== null;
+  const create = (projectName: string | null) => {
+    if (restricted) throw new ProjectIntakeError("This API key is limited to specific projects and cannot create new ones.", 403);
+    return { projectId: null, projectName };
   };
   if (lookup.ref.kind === "default") {
-    const explicit = Boolean(input.workspace?.trim());
-    if (!explicit && (input.newWorkspace || input.templateKey)) return create(null);
-    return { workspaceId: (await requireActorWorkspace(actor, null, orgId)).id, workspaceName: null };
+    const explicit = Boolean(input.project?.trim());
+    if (!explicit && (input.newProject || input.templateKey)) return create(null);
+    return { projectId: (await requireActorProject(actor, null, orgId)).id, projectName: null };
   }
-  const found = "workspace" in lookup ? lookup.workspace : null;
+  const found = "project" in lookup ? lookup.project : null;
   if (lookup.ref.kind === "id") {
-    if (!found) throw workspaceInputNotFoundError({ id: lookup.ref.id });
-    return { workspaceId: found.id, workspaceName: null };
+    if (!found) throw projectInputNotFoundError({ id: lookup.ref.id });
+    return { projectId: found.id, projectName: null };
   }
-  return found ? { workspaceId: found.id, workspaceName: null } : create(lookup.ref.name);
+  return found ? { projectId: found.id, projectName: null } : create(lookup.ref.name);
 }
 
 const uploadEstimateSchema = z.object({
@@ -524,7 +524,7 @@ const uploadEstimateSchema = z.object({
     /** Length in seconds when the client can read it; otherwise estimated from the size. */
     durationSeconds: z.number().positive().max(24 * 3600).optional(),
   })).min(1).max(1000),
-  workspace: workspaceInputSchema.optional(),
+  project: projectInputSchema.optional(),
   orgId: z.string().optional(),
 });
 
@@ -536,24 +536,24 @@ export const uploadEstimateRoutes = new Hono().post(
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const actor = getRequestActor(c);
-    // Same gate as the upload itself: ingest scope, bound to the key's organization and workspaces.
+    // Same gate as the upload itself: ingest scope, bound to the key's organization and projects.
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest"]))) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
-    // Read-only: an estimate never creates a workspace, the default one included.
-    const lookup = await lookupActorWorkspace(actor, body.workspace, body.orgId);
-    if (lookup.ref.kind !== "default" && "workspace" in lookup && !lookup.workspace) {
-      throw workspaceInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
+    // Read-only: an estimate never creates a project, the default one included.
+    const lookup = await lookupActorProject(actor, body.project, body.orgId);
+    if (lookup.ref.kind !== "default" && "project" in lookup && !lookup.project) {
+      throw projectInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
     }
-    const workspace = "workspace" in lookup && lookup.workspace
-      ? await getWorkspace(lookup.workspace.id, userId)
-      : await findDefaultWorkspace({ userId, orgId: actor.type === "apiKey" ? actor.apiKey.orgId : body.orgId });
-    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
-      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    const project = "project" in lookup && lookup.project
+      ? await getProject(lookup.project.id, userId)
+      : await findDefaultProject({ userId, orgId: actor.type === "apiKey" ? actor.apiKey.orgId : body.orgId });
+    if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
+      return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const { estimate, media } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
+    const { estimate, media } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance.
-    return c.json({ estimate, media, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
+    return c.json({ estimate, media, billing: billingState(), orgId: project.orgId, billingExempt: isBillingExemptOrg(project.orgId) });
   },
 );
 acceptApiKeys(uploadEstimateRoutes);

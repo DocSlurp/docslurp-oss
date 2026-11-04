@@ -20,13 +20,13 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (execution_generation, id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (execution_generation, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values (null, 'up', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{"indexingMode":"map"}', 1),
              (null, 'bf', 'o1', 'u1', 'w', 'full-index', 'processing', 'page-embed', '{"indexingMode":"visual","stageSubset":["page-embed"]}', 1);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, indexing_mode, created_at)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, indexing_mode, created_at)
       values ('src', 'o1', 'u1', 'w', 'up', 'a.pdf', 'application/pdf', 'k1', 'completed', 4, 'c1', 1, 'map', '2026-01-01');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id, indexing_mode, created_at)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id, indexing_mode, created_at)
       values ('tmp', 'o1', 'u1', 'w', 'bf', 'a.pdf', 'application/pdf', 'k1', 'processing', 4, 'c1', 2, 'src', 'src', 'visual', '2026-01-02');
     -- The source materialized pages 1-2 on demand.
     insert into document_page_states (document_id, page_number, state, materialized_by, fee_billed_run)
@@ -36,7 +36,7 @@ beforeAll(async () => {
     -- The backfill embedded every page of the temporary version.
     insert into document_page_states (document_id, page_number, state, embedded_at, embedding_model, mapped)
       select 'tmp', n, 'unseen', now(), 'img-model', true from generate_series(1,4) n;
-    insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, workspace_id, org_id)
+    insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, project_id, org_id)
       select 'tmp', n, 'img-model', 8, decode('00','hex'), decode('00','hex'), 1, 'w', 'o1' from generate_series(1,4) n;
     insert into document_maps (document_id, run_id, nodes) values ('tmp', 'bf', '[]'::jsonb);
   `);
@@ -93,17 +93,17 @@ async function completeRun(runId: string) {
 /** A second source/temp pair with its own backfill run, so scenarios do not interfere. */
 async function seedPair(tag: string, pages = 3) {
   await db.exec(`
-    insert into workspace_runs (execution_generation, id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into project_runs (execution_generation, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values (null, 'bf-${tag}', 'o1', 'u1', 'w', 'full-index', 'processing', 'page-embed', '{"indexingMode":"visual","stageSubset":["page-embed"]}', 1);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, indexing_mode, created_at)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, indexing_mode, created_at)
       values ('src-${tag}', 'o1', 'u1', 'w', 'up', '${tag}.pdf', 'application/pdf', 'k-${tag}', 'completed', ${pages}, 'c-${tag}', 1, 'map', '2026-01-01');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id, indexing_mode, created_at)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id, indexing_mode, created_at)
       values ('tmp-${tag}', 'o1', 'u1', 'w', 'bf-${tag}', '${tag}.pdf', 'application/pdf', 'k-${tag}', 'processing', ${pages}, 'c-${tag}', 2, 'src-${tag}', 'src-${tag}', 'visual', '2026-01-02');
     insert into document_page_states (document_id, page_number, state)
       select 'src-${tag}', n, 'unseen' from generate_series(1,${pages}) n;
     insert into document_page_states (document_id, page_number, state, embedded_at, embedding_model, mapped)
       select 'tmp-${tag}', n, 'unseen', now(), 'img-model', true from generate_series(1,${pages}) n;
-    insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, workspace_id, org_id)
+    insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, project_id, org_id)
       select 'tmp-${tag}', n, 'img-model', 8, decode('00','hex'), decode('00','hex'), 1, 'w', 'o1' from generate_series(1,${pages}) n;
   `);
 }
@@ -122,7 +122,7 @@ describe("backfill completion when the source changed mid-run", () => {
     const [tmp] = await rows<{ superseded_at: string | null; canonical_id: string | null }>(`select superseded_at, canonical_id from documents where id = 'tmp-del'`);
     expect(tmp!.superseded_at).not.toBeNull();
     expect(tmp!.canonical_id).toBeNull();
-    const [run] = await rows<{ status: string }>(`select status from workspace_runs where id = 'bf-del'`);
+    const [run] = await rows<{ status: string }>(`select status from project_runs where id = 'bf-del'`);
     expect(run!.status).toBe("completed");
   });
 

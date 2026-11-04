@@ -1,16 +1,16 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const getWorkspaceMock = vi.fn();
+const getProjectMock = vi.fn();
 const hybridSearchMock = vi.fn();
-const getWorkspaceSearchSettingsMock = vi.fn();
-const upsertWorkspaceSearchSettingsMock = vi.fn();
-const userCanEditWorkspaceSettingsMock = vi.fn();
+const getProjectSearchSettingsMock = vi.fn();
+const upsertProjectSearchSettingsMock = vi.fn();
+const userCanEditProjectSettingsMock = vi.fn();
 const sqlMock = vi.fn();
 
 // Scopes carried by the mocked API key; individual tests narrow this to prove the
-// compatibility admin surface requires `workspaces:manage` (SEC-2026-10-01).
-let keyScopes: string[] = ["search", "workspaces:manage"];
+// compatibility admin surface requires `projects:manage` (SEC-2026-10-01).
+let keyScopes: string[] = ["search", "projects:manage"];
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, {
@@ -34,8 +34,8 @@ vi.mock("../middleware/api-key-auth.js", () => ({
   }) as any,
 }));
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
-  getWorkspace: getWorkspaceMock
+vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
+  getProject: getProjectMock
 }));
 
 vi.mock("../services/search.js", () => ({
@@ -43,14 +43,14 @@ vi.mock("../services/search.js", () => ({
 }));
 
 vi.mock("../services/search-controls.js", () => ({
-  getWorkspaceSearchSettings: getWorkspaceSearchSettingsMock,
-  mutateWorkspaceSearchSettingsForUser: async (args: { workspaceId: string; userId: string; mutate: (current: unknown) => unknown }) => {
-    const current = await getWorkspaceSearchSettingsMock(args.workspaceId, args.userId);
+  getProjectSearchSettings: getProjectSearchSettingsMock,
+  mutateProjectSearchSettingsForUser: async (args: { projectId: string; userId: string; mutate: (current: unknown) => unknown }) => {
+    const current = await getProjectSearchSettingsMock(args.projectId, args.userId);
     const next = args.mutate(current);
-    await upsertWorkspaceSearchSettingsMock(next);
+    await upsertProjectSearchSettingsMock(next);
     return next;
   },
-  userCanEditWorkspaceSettings: userCanEditWorkspaceSettingsMock
+  userCanEditProjectSettings: userCanEditProjectSettingsMock
 }));
 
 const { algoliaCompatRoutes } = await import("../routes/algolia-compat.js");
@@ -87,18 +87,18 @@ describe("algolia compat", () => {
 
   beforeEach(() => {
     app = buildApp();
-    keyScopes = ["search", "workspaces:manage"];
-    getWorkspaceMock.mockReset();
+    keyScopes = ["search", "projects:manage"];
+    getProjectMock.mockReset();
     hybridSearchMock.mockReset();
-    getWorkspaceSearchSettingsMock.mockReset();
-    upsertWorkspaceSearchSettingsMock.mockReset();
-    userCanEditWorkspaceSettingsMock.mockReset();
+    getProjectSearchSettingsMock.mockReset();
+    upsertProjectSearchSettingsMock.mockReset();
+    userCanEditProjectSettingsMock.mockReset();
     sqlMock.mockReset();
 
-    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Demo" });
-    userCanEditWorkspaceSettingsMock.mockResolvedValue(true);
-    getWorkspaceSearchSettingsMock.mockResolvedValue({
-      workspaceId: "ws-1",
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Demo" });
+    userCanEditProjectSettingsMock.mockResolvedValue(true);
+    getProjectSearchSettingsMock.mockResolvedValue({
+      projectId: "ws-1",
       userId: "demo-user",
       typoTolerance: true,
       dedupeByFilename: true,
@@ -171,8 +171,8 @@ describe("algolia compat", () => {
     }));
   });
 
-  it("conceals workspaces outside the API key organization across search and settings", async () => {
-    getWorkspaceMock.mockResolvedValue({ id: "foreign", orgId: "org-other", name: "Private" });
+  it("conceals projects outside the API key organization across search and settings", async () => {
+    getProjectMock.mockResolvedValue({ id: "foreign", orgId: "org-other", name: "Private" });
     const search = await app.request("/compat/algolia/1/indexes/foreign/query", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: "alpha" }),
     });
@@ -180,7 +180,7 @@ describe("algolia compat", () => {
     expect(search.status).toBe(404);
     expect(settings.status).toBe(404);
     expect(hybridSearchMock).not.toHaveBeenCalled();
-    expect(getWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
+    expect(getProjectSearchSettingsMock).not.toHaveBeenCalled();
   });
 
   it("maps a basic search request to hybridSearch and shapes Algolia-like response", async () => {
@@ -231,7 +231,7 @@ describe("algolia compat", () => {
     expect(hybridSearchMock).toHaveBeenCalledWith("alpha", "demo-user", expect.objectContaining({
       limit: 5,
       filters: expect.objectContaining({
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         tags: ["finance"],
         mimeTypes: ["application/pdf"],
         pageRange: { from: 3, to: undefined }
@@ -378,7 +378,7 @@ describe("algolia compat", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(upsertWorkspaceSearchSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(upsertProjectSearchSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
       synonyms: {
         invoice: ["bill"],
         bill: ["invoice"],
@@ -387,28 +387,28 @@ describe("algolia compat", () => {
     }));
   });
 
-  it("denies settings/synonyms/rules/import mutations to a key without the workspaces:manage scope", async () => {
+  it("denies settings/synonyms/rules/import mutations to a key without the projects:manage scope", async () => {
     keyScopes = ["search"];
     const auth = { "Content-Type": "application/json", Authorization: "Bearer test" };
     const settings = await app.request("/compat/algolia/1/indexes/ws-1/settings", { method: "PUT", headers: auth, body: JSON.stringify({ hitsPerPage: 20 }) });
     const synonyms = await app.request("/compat/algolia/1/indexes/ws-1/synonyms/batch", { method: "POST", headers: auth, body: JSON.stringify({ synonyms: [{ objectID: "s", type: "synonym", synonyms: ["a", "b"] }] }) });
     const rules = await app.request("/compat/algolia/1/indexes/ws-1/rules/batch", { method: "POST", headers: auth, body: JSON.stringify({ rules: [] }) });
-    const imported = await app.request("/compat/algolia/1/import", { method: "POST", headers: auth, body: JSON.stringify({ workspaceId: "ws-1" }) });
+    const imported = await app.request("/compat/algolia/1/import", { method: "POST", headers: auth, body: JSON.stringify({ projectId: "ws-1" }) });
     expect([settings.status, synonyms.status, rules.status, imported.status]).toEqual([403, 403, 403, 403]);
-    expect(upsertWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
+    expect(upsertProjectSearchSettingsMock).not.toHaveBeenCalled();
   });
 
-  it("denies mutations when the key owner cannot edit the workspace (viewer regression, SEC-2026-10-01)", async () => {
-    userCanEditWorkspaceSettingsMock.mockResolvedValue(false);
+  it("denies mutations when the key owner cannot edit the project (viewer regression, SEC-2026-10-01)", async () => {
+    userCanEditProjectSettingsMock.mockResolvedValue(false);
     const auth = { "Content-Type": "application/json", Authorization: "Bearer test" };
     const settings = await app.request("/compat/algolia/1/indexes/ws-1/settings", { method: "PUT", headers: auth, body: JSON.stringify({ hitsPerPage: 20 }) });
     const synonyms = await app.request("/compat/algolia/1/indexes/ws-1/synonyms/batch", { method: "POST", headers: auth, body: JSON.stringify({ synonyms: [{ objectID: "s", type: "synonym", synonyms: ["a", "b"] }] }) });
     expect([settings.status, synonyms.status]).toEqual([403, 403]);
-    expect(upsertWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
-    expect(userCanEditWorkspaceSettingsMock).toHaveBeenCalledWith("ws-1", "demo-user");
+    expect(upsertProjectSearchSettingsMock).not.toHaveBeenCalled();
+    expect(userCanEditProjectSettingsMock).toHaveBeenCalledWith("ws-1", "demo-user");
   });
 
-  it("imports migration payloads into workspace search settings", async () => {
+  it("imports migration payloads into project search settings", async () => {
     const res = await app.request("/compat/algolia/1/import", {
       method: "POST",
       headers: {
@@ -417,7 +417,7 @@ describe("algolia compat", () => {
       },
       body: JSON.stringify({
         source: "elastic",
-        workspace: "ws-1",
+        project: "ws-1",
         settings: {
           searchableAttributes: ["body", "title"]
         },
@@ -434,7 +434,7 @@ describe("algolia compat", () => {
     });
 
     expect(res.status).toBe(201);
-    expect(upsertWorkspaceSearchSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(upsertProjectSearchSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
       compatSettings: expect.objectContaining({
         searchableAttributes: ["body", "title"]
       }),
@@ -455,7 +455,7 @@ describe("algolia compat", () => {
     expect(body.imported.schemaFields).toBe(2);
   });
 
-  it("counts only search sessions that belong to the requested workspace in analytics", async () => {
+  it("counts only search sessions that belong to the requested project in analytics", async () => {
     sqlMock.mockResolvedValue([{ queries: 3, zero_results: 1, clicks: 2, conversions: 0 }]);
     const res = await app.request("/compat/algolia/1/indexes/ws-1/analytics/summary");
     expect(res.status).toBe(200);
@@ -464,16 +464,16 @@ describe("algolia compat", () => {
     expect(sqlMock).toHaveBeenCalledTimes(1);
     const [strings, ...values] = sqlMock.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
     const text = strings.join("$").replace(/\s+/g, " ");
-    // Sessions without a workspaceId must not fall through into every workspace's totals.
+    // Sessions without a projectId must not fall through into every project's totals.
     expect(text).not.toMatch(/coalesce\(\s*s\.metadata/);
-    expect(text).toContain("where s.metadata->>'workspaceId' = $");
-    expect(text).toContain("a.resource_type = 'workspace'");
+    expect(text).toContain("where s.metadata->>'projectId' = $");
+    expect(text).toContain("a.resource_type = 'project'");
     expect(values.length).toBeGreaterThan(0);
     expect(values.every((value) => value === "ws-1")).toBe(true);
   });
 
-  it("conceals analytics for workspaces outside the API key organization", async () => {
-    getWorkspaceMock.mockResolvedValue({ id: "foreign", orgId: "org-other", name: "Private" });
+  it("conceals analytics for projects outside the API key organization", async () => {
+    getProjectMock.mockResolvedValue({ id: "foreign", orgId: "org-other", name: "Private" });
     const res = await app.request("/compat/algolia/1/indexes/foreign/analytics/summary");
     expect(res.status).toBe(404);
     expect(sqlMock).not.toHaveBeenCalled();
@@ -522,7 +522,7 @@ describe("algolia compat", () => {
       const res = await search(body);
       expect(res.status).toBe(200);
       const filters = hybridSearchMock.mock.calls[0]![2].filters;
-      expect(filters).toEqual({ workspaceId: "ws-1", ...expected });
+      expect(filters).toEqual({ projectId: "ws-1", ...expected });
     });
 
     it.each([
@@ -605,7 +605,7 @@ describe("algolia compat", () => {
       expect(payload.message).toMatch(message);
       expect(payload.error).toBe(payload.message);
       expect(hybridSearchMock).not.toHaveBeenCalled();
-      expect(getWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
+      expect(getProjectSearchSettingsMock).not.toHaveBeenCalled();
     });
 
     it("rejects the whole batch when any request has an unsupported filter", async () => {
@@ -634,8 +634,8 @@ describe("algolia compat", () => {
         ] })
       });
       expect(res.status).toBe(200);
-      expect(hybridSearchMock.mock.calls[0]![2].filters).toEqual({ workspaceId: "ws-1", tags: ["finance"] });
-      expect(hybridSearchMock.mock.calls[1]![2].filters).toEqual({ workspaceId: "ws-1", pageRange: { from: undefined, to: 2 } });
+      expect(hybridSearchMock.mock.calls[0]![2].filters).toEqual({ projectId: "ws-1", tags: ["finance"] });
+      expect(hybridSearchMock.mock.calls[1]![2].filters).toEqual({ projectId: "ws-1", pageRange: { from: undefined, to: 2 } });
     });
 
     it("rejects unsupported filters on facet value search before retrieval", async () => {
@@ -716,8 +716,8 @@ describe("algolia compat", () => {
         ] })
       });
       expect(batch.status).toBe(200);
-      for (const call of hybridSearchMock.mock.calls.slice(0, 2)) expect(call[2].filters).toEqual({ workspaceId: "ws-1", tags: ["finance", "legal"] });
-      expect(hybridSearchMock.mock.calls[2]![2].filters).toEqual({ workspaceId: "ws-1" });
+      for (const call of hybridSearchMock.mock.calls.slice(0, 2)) expect(call[2].filters).toEqual({ projectId: "ws-1", tags: ["finance", "legal"] });
+      expect(hybridSearchMock.mock.calls[2]![2].filters).toEqual({ projectId: "ws-1" });
     });
 
     it.each([

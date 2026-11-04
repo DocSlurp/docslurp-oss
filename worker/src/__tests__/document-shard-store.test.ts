@@ -28,8 +28,8 @@ beforeAll(async () => {
   sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('big', 'Big', 'big', 'u1', 64, 1000), ('small', 'Small', 'small', 'u1', 2, 1000)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('wb', 'big', 'u1', 'B'), ('ws', 'small', 'u1', 'S')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts) values
+  await sql`insert into projects(id, org_id, user_id, name) values ('wb', 'big', 'u1', 'B'), ('ws', 'small', 'u1', 'S')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values
     ('run-big', 'big', 'u1', 'wb', 'bulk-upload', 'processing', 'document-summary', '{}', '{"doc-0:markdown":"s3://m0"}'),
     ('run-small', 'small', 'u1', 'ws', 'bulk-upload', 'processing', 'document-summary', '{}', '{}')`;
   // Spend from before the shards, counted by the usage_events trigger (0056).
@@ -74,7 +74,7 @@ describe("document shard checkpoints", () => {
     expect(a.run.spentCents).toBe(18);
 
     const [row] = await sql<{ artifacts: Record<string, string>; spent_cents: string; status: string; stage: string; shard_demand: number }[]>`
-      select artifacts, spent_cents, status, stage, shard_demand from workspace_runs where id = 'run-big'`;
+      select artifacts, spent_cents, status, stage, shard_demand from project_runs where id = 'run-big'`;
     expect(row!.artifacts).toEqual({
       "doc-0:markdown": "s3://m0",
       "doc-1:embeddings": "s3://e1",
@@ -88,7 +88,7 @@ describe("document shard checkpoints", () => {
   });
 
   it("count a shard's cost once when its documents checkpoint concurrently", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
       values ('run-cost', 'small', 'u1', 'ws', 'bulk-upload', 'completed', 'index', '{}', '{}')`;
     const state = await shardState("run-cost", ["doc-9"]);
     state.usageLedger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 20, unit: "page", costCents: 5,
@@ -96,7 +96,7 @@ describe("document shard checkpoints", () => {
     // Each delta is taken against the last committed checkpoint, so overlapping
     // checkpoints of one state must not both add it.
     await Promise.all([store.updateProgress(state), store.updateProgress(state), store.finishShard(state)]);
-    const [row] = await sql<{ spent_cents: string }[]>`select spent_cents from workspace_runs where id = 'run-cost'`;
+    const [row] = await sql<{ spent_cents: string }[]>`select spent_cents from project_runs where id = 'run-cost'`;
     expect(Number(row!.spent_cents)).toBe(5);
     expect(state.run.spentCents).toBe(5);
     const [usage] = await sql<{ cents: string }[]>`select coalesce(sum(cost_cents), 0) as cents from usage_events where run_id = 'run-cost'`;
@@ -113,7 +113,7 @@ describe("document shard checkpoints", () => {
     // The stage's own pass starts once its shards are done.
     const state = WorkflowState.create(await store.loadRun("run-big"), []);
     await store.startRunStage(state, "embed");
-    const [row] = await sql<{ shard_demand: number }[]>`select shard_demand from workspace_runs where id = 'run-big'`;
+    const [row] = await sql<{ shard_demand: number }[]>`select shard_demand from project_runs where id = 'run-big'`;
     expect(row!.shard_demand).toBe(0);
   });
 });
@@ -121,9 +121,9 @@ describe("document shard checkpoints", () => {
 describe("scaler demand for runs between activities", () => {
   it("count a processing run whose lease lapsed within the grace window, not one long dead", async () => {
     await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('lease', 'Lease', 'lease', 'u1', 8, 1000)`;
-    await sql`insert into workspaces(id, org_id, user_id, name) values ('wl', 'lease', 'u1', 'L')`;
+    await sql`insert into projects(id, org_id, user_id, name) values ('wl', 'lease', 'u1', 'L')`;
     // A run waiting in the task queue for its next activity has no worker renewing its lease.
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
       ('run-waiting', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '2 minutes'),
       ('run-dead', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '20 minutes')`;
     const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };

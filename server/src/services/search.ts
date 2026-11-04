@@ -15,7 +15,7 @@ import type {
   TableCell,
   TableCellValueType,
   TableChunkGranularity,
-  WorkspaceChatFallbackReason,
+  ProjectChatFallbackReason,
 } from "@docslurp/shared";
 import {
   BILLABLE_UNIT_METRICS,
@@ -56,12 +56,12 @@ import { searchChunkToResult } from "../search/session-execution.js";
 import { runSearchSession, type SearchSessionRunnerAdapters } from "../search/session-runner.js";
 import {
   resolveSearchSetup,
-  loadWorkspacePipeline,
+  loadProjectPipeline,
   type SearchAvailabilityRow,
 } from "../search/session-setup.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { runDeferredPageSearch } from "../search/deferred/deferred-search.js";
-import { getWorkspaceAccess } from "./organizations.js";
+import { getProjectAccess } from "./organizations.js";
 import { resolveSearchMaterializationPolicy } from "../search/deferred/request-policy.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import {
@@ -83,7 +83,7 @@ import {
 } from "../search/query-bounds.js";
 import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 
-export { MissingWorkspaceScopeError } from "../search/session-setup.js";
+export { MissingProjectScopeError } from "../search/session-setup.js";
 
 export interface SearchChunk {
   id: string;
@@ -172,7 +172,7 @@ export interface SearchOptions {
   rootSessionId?: string;
   /**
    * Relevance floor, 0..1: results whose raw relevance is lower are dropped.
-   * 0 disables it. Omitted: the workspace default, else SEARCH_MIN_SCORE.
+   * 0 disables it. Omitted: the project default, else SEARCH_MIN_SCORE.
    */
   minScore?: number;
 }
@@ -183,7 +183,7 @@ export interface SearchRelevanceFloor {
   minScore: number;
   /** Retrieved candidates removed for being below the floor. */
   dropped: number;
-  /** True when nothing relevant was found in a searchable workspace: `results` is empty. */
+  /** True when nothing relevant was found in a searchable project: `results` is empty. */
   noMatch: boolean;
 }
 
@@ -207,7 +207,7 @@ export interface SearchAvailability {
   /** Some searchable documents are served by keyword search only (vectors not indexed yet). */
   keywordOnly: boolean;
   scope: {
-    workspaceId: string;
+    projectId: string;
     runId: string | null;
   };
   coverage: {
@@ -260,9 +260,9 @@ export const wholeCorpusContextLimits = {
   maxChars: 60000,
 } as const;
 
-export interface WholeCorpusWorkspaceContext {
+export interface WholeCorpusProjectContext {
   eligible: boolean;
-  reason: WorkspaceChatFallbackReason | null;
+  reason: ProjectChatFallbackReason | null;
   results: SearchResult[];
   stats: {
     documentCount: number;
@@ -424,8 +424,8 @@ type WholeCorpusSummaryRow = {
   char_estimate: number;
 };
 
-export async function loadWorkspaceWholeCorpusContext(args: {
-  workspaceId: string;
+export async function loadProjectWholeCorpusContext(args: {
+  projectId: string;
   filters?: SearchFilters;
   runId?: string;
   userId: string;
@@ -433,7 +433,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
   maxChunks?: number;
   maxTokens?: number;
   maxChars?: number;
-}): Promise<WholeCorpusWorkspaceContext> {
+}): Promise<WholeCorpusProjectContext> {
   const limits = {
     maxDocuments: args.maxDocuments ?? wholeCorpusContextLimits.maxDocuments,
     maxChunks: args.maxChunks ?? wholeCorpusContextLimits.maxChunks,
@@ -441,7 +441,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
     maxChars: args.maxChars ?? wholeCorpusContextLimits.maxChars,
   };
 
-  const emptyContext: WholeCorpusWorkspaceContext = {
+  const emptyContext: WholeCorpusProjectContext = {
     eligible: false,
     reason: "load-failed",
     results: [],
@@ -456,16 +456,16 @@ export async function loadWorkspaceWholeCorpusContext(args: {
 
   const loadQuery: typeof boundedSearchQuery = args.filters?.geo ? boundedSearchQuery : async build => await build(sql);
   try {
-    const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+    const access = await getProjectAccess(args.projectId, args.userId);
     if (!access) {
       return emptyContext;
     }
 
     if (args.filters?.geo) {
-      const [workspace] = await boundedSearchQuery(client => client`select pipeline from workspaces where id=${access.workspaceId} and org_id=${access.orgId}`);
-      args = {...args,filters:await resolveGeoDocumentScope(access,args.filters,(workspace?.pipeline as {outputSchema?:unknown})?.outputSchema,args.runId)};
+      const [project] = await boundedSearchQuery(client => client`select pipeline from projects where id=${access.projectId} and org_id=${access.orgId}`);
+      args = {...args,filters:await resolveGeoDocumentScope(access,args.filters,(project?.pipeline as {outputSchema?:unknown})?.outputSchema,args.runId)};
     }
-    const scope = retrievalScope({ workspaceId: access.workspaceId, filters: args.filters, runId: args.runId });
+    const scope = retrievalScope({ projectId: access.projectId, filters: args.filters, runId: args.runId });
     const [summary] = await loadQuery(client => client<WholeCorpusSummaryRow[]>`
       select
         count(distinct c.document_id)::int as document_count,
@@ -474,7 +474,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         coalesce(sum(length(c.text)), 0)::int as char_estimate
       from document_chunks c
       join documents d on d.id = c.document_id
-      where d.workspace_id = ${access.workspaceId}
+      where d.project_id = ${access.projectId}
         and ${lexicalSearchableDocument("d")}
         and ${scope.chunk()}
     `);
@@ -497,7 +497,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
                coalesce(sum(length(p.text)), 0)::int as char_estimate
         from document_pages p
         join documents d on d.id = p.document_id
-        where d.workspace_id = ${access.workspaceId}
+        where d.project_id = ${access.projectId}
           and ${lexicalSearchableDocument("d")}
         and ${scope.page()}
       `);
@@ -509,7 +509,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
                  p.token_estimate, d.filename, 0::int as rank
           from document_pages p
           join documents d on d.id = p.document_id
-          where d.workspace_id = ${access.workspaceId}
+          where d.project_id = ${access.projectId}
             and ${lexicalSearchableDocument("d")}
         and ${scope.page()}
           order by d.filename asc, p.page_number asc
@@ -527,7 +527,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       }
       return {
         eligible: false,
-        reason: "empty-workspace",
+        reason: "empty-project",
         results: [],
         stats,
       };
@@ -584,7 +584,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         c.metadata
       from document_chunks c
       join documents d on d.id = c.document_id
-      where d.workspace_id = ${access.workspaceId}
+      where d.project_id = ${access.projectId}
         and ${lexicalSearchableDocument("d")}
         and ${scope.chunk()}
       order by d.filename asc, c.chunk_index asc
@@ -608,7 +608,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
 
 export function deriveSearchAvailability(
   row: SearchAvailabilityRow | undefined,
-  scope: { workspaceId: string; runId?: string },
+  scope: { projectId: string; runId?: string },
   resultBreakdown?: { indexedResultCount: number; pageResultCount: number },
 ): SearchAvailability {
   const coverage = {
@@ -697,7 +697,7 @@ export function deriveSearchAvailability(
     isPartial: status === "partial" || status === "pending",
     keywordOnly: coverage.keywordOnlyDocuments > 0,
     scope: {
-      workspaceId: scope.workspaceId,
+      projectId: scope.projectId,
       runId: scope.runId ?? null,
     },
     coverage,
@@ -736,7 +736,7 @@ export function partialAvailabilityMessage(
 
 function buildSearchAvailability(
   row: SearchAvailabilityRow | undefined,
-  scope: { workspaceId: string; runId?: string },
+  scope: { projectId: string; runId?: string },
   chunks: SearchChunk[],
 ): SearchAvailability {
   return deriveSearchAvailability(row, scope, {
@@ -762,29 +762,29 @@ function supportsProgressivePageSearch(filters: SearchFilters | undefined): bool
 async function vectorSearch(
   queryVector: number[],
   userId: string,
-  workspaceId: string,
+  projectId: string,
   options: SearchOptions,
   serving: IndexServing | null = null,
   privacyMode?: PrivacyMode,
 ): Promise<SearchChunk[]> {
-  const access = await getWorkspaceAccess(workspaceId, userId);
+  const access = await getProjectAccess(projectId, userId);
   if (!access) return [];
 
-  const embedding = resolveEmbeddingRoute(serving?.embedding ?? (await loadWorkspacePipeline(workspaceId)).embedding);
+  const embedding = resolveEmbeddingRoute(serving?.embedding ?? (await loadProjectPipeline(projectId)).embedding);
   // Persisted model/dimension metadata keeps vector spaces apart.
-  // Dedup copies (same content re-ingested) in the owner's workspace own no
+  // Dedup copies (same content re-ingested) in the owner's project own no
   // LanceDB rows: their vectors stay keyed by the document that was embedded.
   // Walk deduped_from to that owner so copies are searchable, then map hits to
-  // the copy's chunk with the same chunk index. A copy in another workspace
-  // has its own rows in this workspace's database and is hit directly.
+  // the copy's chunk with the same chunk index. A copy in another project
+  // has its own rows in this project's database and is hit directly.
   const query: typeof boundedSearchQuery = options.filters?.geo ? boundedSearchQuery : async build => await build(sql);
   const docRows = await query(client => client<{ id: string; owner_id: string }[]>`
     with recursive current_docs as (
       select distinct d.id from documents d
       join vector_indexes v on v.document_id = d.id
-      where d.workspace_id = ${workspaceId}
+      where d.project_id = ${projectId}
         and d.status = 'completed' and d.superseded_at is null
-        and ${retrievalScope({ workspaceId, filters: options.filters, runId: options.runId }).vectorDocument()}
+        and ${retrievalScope({ projectId, filters: options.filters, runId: options.runId }).vectorDocument()}
         and v.backend = 'lancedb'
         and v.embedding_model = ${embedding.model}
         and v.dimension = ${queryVector.length}
@@ -795,8 +795,8 @@ async function vectorSearch(
       union all
       select chain.id, d.id, d.deduped_from_document_id, chain.depth + 1
       from chain join documents d on d.id = chain.next
-      -- Stop at the workspace boundary: only this workspace's database is searched.
-      where chain.depth < 8 and d.workspace_id = ${workspaceId}
+      -- Stop at the project boundary: only this project's database is searched.
+      where chain.depth < 8 and d.project_id = ${projectId}
     )
     select distinct on (chain.id) chain.id, chain.node as owner_id
     from chain
@@ -820,10 +820,10 @@ async function vectorSearch(
 
   const limit = options.limit ?? 20;
 
-  // ANN search in this workspace's LanceDB database
+  // ANN search in this project's LanceDB database
   const hits = await lanceDbVectorSearch({
     orgId: access.orgId,
-    workspaceId,
+    projectId,
     embeddingModel: embedding.model,
     queryVector,
     documentIds: searchDocumentIds,
@@ -834,7 +834,7 @@ async function vectorSearch(
   if (hits.length === 0) return [];
 
   const currentIds = new Set(documentIds);
-  const rowsByHit = await hydrateHitsFromPostgres(hits, currentIds, copiesByOwner, workspaceId, options);
+  const rowsByHit = await hydrateHitsFromPostgres(hits, currentIds, copiesByOwner, projectId, options);
   // Preserve LanceDB ranking order
   const seen = new Set<string>();
   return hits.flatMap((hit) => (rowsByHit.get(hit.id) ?? []).flatMap((row) => {
@@ -852,7 +852,7 @@ async function hydrateHitsFromPostgres(
   hits: LanceDbSearchHit[],
   currentIds: ReadonlySet<string>,
   copiesByOwner: ReadonlyMap<string, string[]>,
-  workspaceId: string,
+  projectId: string,
   options: SearchOptions,
 ): Promise<Map<string, ChunkRow[]>> {
   const rowsByHit = new Map<string, ChunkRow[]>();
@@ -870,7 +870,7 @@ async function hydrateHitsFromPostgres(
     from document_chunks c
     join documents d on d.id = c.document_id
     where c.id in (select jsonb_array_elements_text(${sql.json(ownHitIds)}::jsonb))
-      and d.workspace_id = ${workspaceId}
+      and d.project_id = ${projectId}
       and ${whereClause}
     union all
     select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
@@ -879,7 +879,7 @@ async function hydrateHitsFromPostgres(
     from jsonb_to_recordset(${sql.json(copyPairs)}::jsonb) as pairs(hit text, document_id text, chunk_index int)
     join document_chunks c on c.document_id = pairs.document_id and c.chunk_index = pairs.chunk_index
     join documents d on d.id = c.document_id
-    where d.workspace_id = ${workspaceId}
+    where d.project_id = ${projectId}
       and ${whereClause}
   `);
   for (const row of rows) rowsByHit.set(row.hit_id, [...(rowsByHit.get(row.hit_id) ?? []), row]);
@@ -897,7 +897,7 @@ async function hydrateNativeHits(args: {
   hits: LanceDbSearchHit[];
   documents: ReadonlyMap<string, EligibleDocument>;
   copiesByOwner: ReadonlyMap<string, string[]>;
-  workspaceId: string;
+  projectId: string;
   options: SearchOptions;
   score: (hit: LanceDbSearchHit, index: number) => number;
 }): Promise<SearchChunk[]> {
@@ -926,7 +926,7 @@ async function hydrateNativeHits(args: {
   if (stale > 0) countSearchEvent("nativeHydrationStale");
   if (misses.length > 0) {
     countSearchEvent("nativeHydrationPostgres");
-    const fromPostgres = await hydrateHitsFromPostgres(misses, new Set(args.documents.keys()), args.copiesByOwner, args.workspaceId, args.options);
+    const fromPostgres = await hydrateHitsFromPostgres(misses, new Set(args.documents.keys()), args.copiesByOwner, args.projectId, args.options);
     for (const [hitId, rows] of fromPostgres) rowsByHit.set(hitId, [...(rowsByHit.get(hitId) ?? []), ...rows.filter((row) => !(rowsByHit.get(hitId) ?? []).some((own) => own.id === row.id))]);
   }
   const seen = new Set<string>();
@@ -951,7 +951,7 @@ function nativeSearchScope(documents: EligibleDocument[]): {
 }
 
 interface NativeSearchContext {
-  workspaceId: string;
+  projectId: string;
   orgId: string;
   pipeline: PipelineFeatures;
   indexConfigs: IndexConfigMap;
@@ -971,14 +971,14 @@ async function nativeVectorSearch(
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
   const embedding = resolveEmbeddingRoute(serving?.embedding ?? context.pipeline.embedding);
-  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: queryVector.length }));
+  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: queryVector.length }));
   const documents = scopeEligibleDocuments(set, options.filters, options.runId)
     .filter((document) => document.vectorReady && matchesServingHash(document, serving?.hash));
   if (documents.length === 0) return [];
   const scope = nativeSearchScope(documents);
   const hits = await timePhase("vecLance", () => lanceDbVectorSearch({
     orgId: context.orgId,
-    workspaceId: context.workspaceId,
+    projectId: context.projectId,
     embeddingModel: embedding.model,
     queryVector,
     documentIds: scope.searchDocumentIds,
@@ -987,7 +987,7 @@ async function nativeVectorSearch(
     hydrate: true,
   }));
   return await timePhase("vecHydrate", () => hydrateNativeHits({ hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
-    workspaceId: context.workspaceId, options, score: (hit) => hit.score }));
+    projectId: context.projectId, options, score: (hit) => hit.score }));
 }
 
 const NATIVE_FALLBACK_LOG_INTERVAL_MS = 10 * 60_000;
@@ -1040,7 +1040,7 @@ async function nativeTextSearch(
   if (Object.keys(context.indexConfigs).some((hash) => hash !== currentHash)) return null;
   const embedding = resolveEmbeddingRoute(context.pipeline.embedding);
   const limit = options.limit ?? 20;
-  const set = await loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions });
+  const set = await loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions });
   const inScope = scopeEligibleDocuments(set, options.filters, options.runId);
   const native = inScope.filter((document) => document.vectorReady && !document.lanceStale);
   // Postgres FTS covers documents not in LanceDB yet (early lexical) and those whose rows are stale.
@@ -1051,7 +1051,7 @@ async function nativeTextSearch(
     let result: Awaited<ReturnType<typeof lanceDbFullTextSearch>>;
     try {
       result = await lanceDbFullTextSearch({
-        orgId: context.orgId, workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
+        orgId: context.orgId, projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
         documentIds: scope.searchDocumentIds, limit,
       });
     } catch (error) {
@@ -1066,7 +1066,7 @@ async function nativeTextSearch(
     }
     // OR-semantics BM25: relevance is judged by term coverage, like the Postgres OR backoff.
     nativeChunks = (await hydrateNativeHits({ hits: result.hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
-      workspaceId: context.workspaceId, options, score: (_hit, index) => 1 / (60 + index + 1) }))
+      projectId: context.projectId, options, score: (_hit, index) => 1 / (60 + index + 1) }))
       .map((chunk) => ({ ...chunk, lexicalMatch: "partial" as const }));
   }
   if (tail.length === 0) return nativeChunks;
@@ -1153,7 +1153,7 @@ function buildProgressivePageWhere(filters: SearchFilters | undefined, runId: st
 /**
  * Matches ranked per lexical statement (SEARCH_LEXICAL_CANDIDATES, default
  * 1000). Ranking every match was the 2026-10-20 incident: a conversational
- * OR backoff matched most of a 285K-chunk workspace, and each statement read
+ * OR backoff matched most of a 285K-chunk project, and each statement read
  * and sorted every match's tsvector and text for minutes. Now the first N
  * matches (GIN bitmap order) are ranked by ts_rank_cd and only the top `limit`
  * fetch their text. Selective queries match fewer than N and rank exactly as
@@ -1374,7 +1374,7 @@ async function progressivePageSearch(
 
 async function completedPageSearch(args: {
   query: string;
-  workspaceId: string;
+  projectId: string;
   options: SearchOptions;
   shouldSearch: boolean;
 }): Promise<SearchChunk[]> {
@@ -1394,10 +1394,10 @@ async function completedPageSearch(args: {
       from document_pages p
       join documents d on d.id = p.document_id
       left join document_chunks c on c.document_id = p.document_id
-      where d.workspace_id = ${args.workspaceId}
+      where d.project_id = ${args.projectId}
         and d.status = 'completed' and d.superseded_at is null
         and c.id is null
-        and ${retrievalScope({ workspaceId: args.workspaceId, filters: args.options.filters, runId: args.options.runId }).page()}
+        and ${retrievalScope({ projectId: args.projectId, filters: args.options.filters, runId: args.options.runId }).page()}
         and to_tsvector('english', p.text) @@ websearch_to_tsquery('english', ${args.query})
       order by rank asc
       limit ${limit}
@@ -1416,7 +1416,7 @@ async function completedPageSearch(args: {
 
 async function communitySummarySearch(
   query: string,
-  workspaceId: string,
+  projectId: string,
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
   if (options.filters?.geo) return [];
@@ -1435,7 +1435,7 @@ async function communitySummarySearch(
         ) desc
       )::int as rank
     from kg_communities community
-    where community.workspace_id = ${workspaceId}
+    where community.project_id = ${projectId}
       and to_tsvector('english', community.label || ' ' || community.summary)
         @@ websearch_to_tsquery('english', ${query})
     order by rank asc
@@ -1476,7 +1476,7 @@ async function communitySummarySearch(
 
 async function graphNeighborSearch(
   query: string,
-  workspaceId: string,
+  projectId: string,
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
   const limit = options.limit ?? 20;
@@ -1487,7 +1487,7 @@ async function graphNeighborSearch(
       with recursive seed_nodes as (
         select node.id
         from kg_nodes node
-        where node.workspace_id = ${workspaceId}
+        where node.project_id = ${projectId}
           and to_tsvector('english', node.canonical_name)
             @@ websearch_to_tsquery('english', ${query})
         order by node.mention_count desc, node.source_document_count desc
@@ -1505,7 +1505,7 @@ async function graphNeighborSearch(
           walk.depth + 1 as depth
         from walk
         join kg_edges edge
-          on edge.workspace_id = ${workspaceId}
+          on edge.project_id = ${projectId}
          and (edge.source_node_id = walk.node_id or edge.target_node_id = walk.node_id)
         where walk.depth < ${hops}
       ),
@@ -1532,9 +1532,9 @@ async function graphNeighborSearch(
       from related_chunks
       join document_chunks chunk on chunk.id = related_chunks.chunk_id
       join documents document on document.id = chunk.document_id
-      where document.workspace_id = ${workspaceId}
+      where document.project_id = ${projectId}
         and ${lexicalSearchableDocument("document")}
-        and ${retrievalScope({ workspaceId, filters: options.filters, runId: options.runId }).graphChunk()}
+        and ${retrievalScope({ projectId, filters: options.filters, runId: options.runId }).graphChunk()}
       order by rank asc
       limit ${limit}
     `);
@@ -1551,13 +1551,13 @@ export function stripNulBytes(value: string): string {
   return value.replaceAll("\u0000", "");
 }
 
-/** Workspace → org, learned from completed setups, so admission can share slots fairly per org. */
-const workspaceOrgs = new Map<string, string>();
+/** Project → org, learned from completed setups, so admission can share slots fairly per org. */
+const projectOrgs = new Map<string, string>();
 
 function searchAdmission(options: SearchOptions): SearchAdmission {
-  const workspaceId = options.filters?.workspaceId?.trim();
+  const projectId = options.filters?.projectId?.trim();
   return {
-    tenant: workspaceId ? workspaceOrgs.get(workspaceId) ?? `workspace:${workspaceId}` : null,
+    tenant: projectId ? projectOrgs.get(projectId) ?? `project:${projectId}` : null,
     // One chat agent turn (or API batch) holds at most SEARCH_MAX_SLOTS_PER_TURN slots.
     group: currentChatSessionId() ?? currentSearchAdmissionGroup(),
   };
@@ -1610,13 +1610,13 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
  * non-billable by the Search Session journal.
  */
 async function chargeSearch(result: SearchResponse, userId: string, searchId: string): Promise<void> {
-  const workspaceId = result.availability?.scope?.workspaceId;
-  if (!workspaceId) return;
+  const projectId = result.availability?.scope?.projectId;
+  if (!projectId) return;
   const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
   try {
     await recordUnitCharge({
       userId,
-      scope: { workspaceId, sessionId: result.sessionId },
+      scope: { projectId, sessionId: result.sessionId },
       charge: {
         id: `search:${searchId}`,
         metric: BILLABLE_UNIT_METRICS.search,
@@ -1638,10 +1638,10 @@ async function executeHybridSearch(
   options: SearchOptions = {},
 ): Promise<SearchResponse> {
   const setup = await timePhase("setup", () => resolveSearchSetup(userId, options));
-  if (workspaceOrgs.size < 50_000) workspaceOrgs.set(setup.normalizedScope.workspaceId, `org:${setup.normalizedScope.orgId}`);
+  if (projectOrgs.size < 50_000) projectOrgs.set(setup.normalizedScope.projectId, `org:${setup.normalizedScope.orgId}`);
   const wholeCorpusFallback = async (filters = setup.resolvedOptions.filters): Promise<SearchResult[]> => {
-    const corpusCtx = await loadWorkspaceWholeCorpusContext({
-      workspaceId: setup.normalizedScope.workspaceId,
+    const corpusCtx = await loadProjectWholeCorpusContext({
+      projectId: setup.normalizedScope.projectId,
       userId,
       filters,
       runId: setup.resolvedOptions.runId,
@@ -1654,12 +1654,12 @@ async function executeHybridSearch(
   };
 
   const native: NativeSearchContext | null = setup.lanceNative
-    ? { workspaceId: setup.normalizedScope.workspaceId, orgId: setup.normalizedScope.orgId, pipeline: setup.workspacePipeline,
+    ? { projectId: setup.normalizedScope.projectId, orgId: setup.normalizedScope.orgId, pipeline: setup.projectPipeline,
         indexConfigs: setup.indexConfigs, privacyMode: setup.privacyMode }
     : null;
   const nativeVectorOrLegacy = (vector: number[], options: SearchOptions, serving: IndexServing | null) => native
-    ? nativeVectorSearch(vector, native, options, serving).then((chunks) => chunks ?? vectorSearch(vector, userId, native.workspaceId, options, serving, setup.privacyMode))
-    : vectorSearch(vector, userId, setup.normalizedScope.workspaceId, options, serving, setup.privacyMode);
+    ? nativeVectorSearch(vector, native, options, serving).then((chunks) => chunks ?? vectorSearch(vector, userId, native.projectId, options, serving, setup.privacyMode))
+    : vectorSearch(vector, userId, setup.normalizedScope.projectId, options, serving, setup.privacyMode);
   const nativeTextOrLegacy = (text: string, options: SearchOptions) => native
     ? nativeTextSearch(text, userId, native, options).then((chunks) => chunks ?? textSearch(text, userId, options))
     : textSearch(text, userId, options);
@@ -1669,7 +1669,7 @@ async function executeHybridSearch(
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
-    const set = await loadEligibleDocuments({ workspaceId: native.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions });
+    const set = await loadEligibleDocuments({ projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions });
     return set.pageOnlyCompletedDocuments > 0;
   };
 
@@ -1682,39 +1682,39 @@ async function executeHybridSearch(
       parallelRetrieval: Boolean(native),
       warmVectorIndex: native && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
         const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
-        void warmLanceDbSearch({ orgId: native.orgId, workspaceId: native.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
+        void warmLanceDbSearch({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
       } : undefined,
       buildAvailability: (chunks, effectiveOptions) =>
         buildSearchAvailability(
           setup.availabilityRow,
           {
-            workspaceId: setup.normalizedScope.workspaceId,
+            projectId: setup.normalizedScope.projectId,
             runId: effectiveOptions.runId ?? effectiveOptions.filters?.runId,
           },
           chunks,
         ),
       runSearch: hybridSearch,
-      vectorSearch: ({ queryVector, userId, workspaceId, options, query }) =>
+      vectorSearch: ({ queryVector, userId, projectId, options, query }) =>
         timePhase("vector", () => servedVectorSearch({
-          workspaceId,
-          pipeline: setup.workspacePipeline,
+          projectId,
+          pipeline: setup.projectPipeline,
           indexConfigs: setup.indexConfigs,
           queryVector,
           query,
           deps: {
-            search: (vector, serving) => native && workspaceId === native.workspaceId
+            search: (vector, serving) => native && projectId === native.projectId
               ? nativeVectorOrLegacy(vector, options, serving)
-              : vectorSearch(vector, userId, workspaceId, options, serving, setup.privacyMode),
-            embed: (text, embedding) => embedQuery(text, embedding, setup.session, setup.privacyMode, workspaceId, setup.normalizedScope.orgId),
+              : vectorSearch(vector, userId, projectId, options, serving, setup.privacyMode),
+            embed: (text, embedding) => embedQuery(text, embedding, setup.session, setup.privacyMode, projectId, setup.normalizedScope.orgId),
             diagnostic: (name, value) => setup.session.recordDiagnostic(name, value as never),
           },
         })),
       textSearch: ({ query, options }) =>
         timePhase("text", () => nativeTextOrLegacy(query, options)),
-      graphNeighborSearch: ({ query, workspaceId, options }) =>
-        timePhase("graph", () => graphNeighborSearch(query, workspaceId, options)),
-      communitySummarySearch: ({ query, workspaceId, options }) =>
-        timePhase("community", () => communitySummarySearch(query, workspaceId, options)),
+      graphNeighborSearch: ({ query, projectId, options }) =>
+        timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
+      communitySummarySearch: ({ query, projectId, options }) =>
+        timePhase("community", () => communitySummarySearch(query, projectId, options)),
       progressivePageSearch: ({ query, userId, options }) => skipProgressive
         ? Promise.resolve([])
         : timePhase("progressive", () => progressivePageSearch(query, userId, options)),
@@ -1728,13 +1728,13 @@ async function executeHybridSearch(
               // run under their own API key's policy; unresolvable keys fail closed.
               const policy = () => resolveSearchMaterializationPolicy({
                 context,
-                workspacePipeline: setup.workspacePipeline,
-                workspaceId: setup.normalizedScope.workspaceId,
+                projectPipeline: setup.projectPipeline,
+                projectId: setup.normalizedScope.projectId,
               });
               return timePhase("deferred", () => runDeferredPageSearch({
                 ...deferredArgs,
                 orgId: setup.normalizedScope.orgId,
-                workspaceId: setup.normalizedScope.workspaceId,
+                projectId: setup.normalizedScope.projectId,
                 policy,
                 privacyMode: setup.privacyMode,
                 openRouterApiKey: setup.openRouterApiKey,
@@ -1743,8 +1743,8 @@ async function executeHybridSearch(
                 signal: context?.signal,
                 search: {
                   textSearch: ({ query, userId, options }) => textSearch(query, userId, options),
-                  vectorSearch: ({ queryVector, userId, workspaceId, options }) =>
-                    vectorSearch(queryVector, userId, workspaceId, options, null, setup.privacyMode),
+                  vectorSearch: ({ queryVector, userId, projectId, options }) =>
+                    vectorSearch(queryVector, userId, projectId, options, null, setup.privacyMode),
                 },
               }));
             },

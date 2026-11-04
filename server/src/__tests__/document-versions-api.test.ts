@@ -13,9 +13,9 @@ vi.mock("../db.js", () => {
   return { sql, transaction: vi.fn() };
 });
 vi.mock("../services/organizations.js", () => ({
-  getWorkspaceAccess: vi.fn(),
-  listAccessibleWorkspaceIds: accessible,
-  listEditableWorkspaceIds: vi.fn()
+  getProjectAccess: vi.fn(),
+  listAccessibleProjectIds: accessible,
+  listEditableProjectIds: vi.fn()
 }));
 
 const { buildDocumentVersionEntries, getDocumentVersionChangelog, getDocumentVersionsWithTags } = await import("../services/documents.js");
@@ -35,7 +35,7 @@ describe("document version listing", () => {
 
   it("lists the whole chain newest first from a middle version, in one chain query", async () => {
     scripted = [
-      [{ id: "d2", workspace_id: "ws-1", canonical_id: "path:abc" }],
+      [{ id: "d2", project_id: "ws-1", canonical_id: "path:abc" }],
       [row("d1", 1, { superseded_at: "x", archived_at: "x" }), row("d3", 3), row("d2", 2, { superseded_at: "x", archived_at: "x" })]
     ];
     const versions = await getDocumentVersionsWithTags("d2", "user-1");
@@ -45,7 +45,7 @@ describe("document version listing", () => {
     expect(versions[0]).toMatchObject({ pageCount: 6, sourcePath: "legal/2026", filename: "msa.pdf", sizeBytes: 3000, status: "completed" });
     expect(queries).toHaveLength(2);
     const chain = queries[1]!;
-    expect(chain.text).toContain("workspace_id =");
+    expect(chain.text).toContain("project_id =");
     expect(chain.text).toContain("canonical_id");
     expect(chain.values).toContain("ws-1");
     expect(chain.values).toContain("path:abc");
@@ -59,7 +59,7 @@ describe("document version listing", () => {
     expect(versions.map((v) => [v.documentId, v.purged, v.isCurrent])).toEqual([["d2", false, true], ["d1", true, false]]);
   });
 
-  it("returns nothing for a document outside the user's workspaces", async () => {
+  it("returns nothing for a document outside the user's projects", async () => {
     scripted = [[]];
     expect(await getDocumentVersionsWithTags("other-org-doc", "user-1")).toEqual([]);
     expect(queries).toHaveLength(1);
@@ -68,8 +68,8 @@ describe("document version listing", () => {
     expect(await getDocumentVersionsWithTags("d1", "nobody")).toEqual([]);
   });
 
-  it("scopes the chain to the target's workspace, so a shared canonical id elsewhere never leaks in", async () => {
-    scripted = [[{ id: "d1", workspace_id: "ws-1", canonical_id: "path:same" }], [row("d1", 1)]];
+  it("scopes the chain to the target's project, so a shared canonical id elsewhere never leaks in", async () => {
+    scripted = [[{ id: "d1", project_id: "ws-1", canonical_id: "path:same" }], [row("d1", 1)]];
     await getDocumentVersionsWithTags("d1", "user-1");
     expect(queries[1]!.values).toContain("ws-1");
   });
@@ -112,12 +112,12 @@ describe("changelog baseline access", () => {
     queries.length = 0;
     accessible.mockReset().mockResolvedValue(["ws-1"]);
   });
-  const docRow = { id: "d3", user_id: "u", org_id: "o", workspace_id: "ws-1", run_id: null, filename: "msa.pdf", mime_type: "application/pdf",
+  const docRow = { id: "d3", user_id: "u", org_id: "o", project_id: "ws-1", run_id: null, filename: "msa.pdf", mime_type: "application/pdf",
     source_key: "k", status: "completed", extraction_mode: "balanced", page_count: 1, version_number: 3, previous_version_id: "d2",
     metadata: {}, tags: [], created_at: "2026-10-03T00:00:00Z", updated_at: "2026-10-03T00:00:00Z" };
-  const chain = [[{ ...row("d3", 3), workspace_id: "ws-1", canonical_id: "path:abc" }], [row("d3", 3), row("d2", 2, { superseded_at: "x" }), row("d1", 1, { purged_at: "x", superseded_at: "x" })]];
+  const chain = [[{ ...row("d3", 3), project_id: "ws-1", canonical_id: "path:abc" }], [row("d3", 3), row("d2", 2, { superseded_at: "x" }), row("d1", 1, { purged_at: "x", superseded_at: "x" })]];
 
-  it("returns null for a baseline outside the scoped chain (other workspace or org)", async () => {
+  it("returns null for a baseline outside the scoped chain (other project or org)", async () => {
     scripted = [[docRow], [], ...chain];
     expect(await getDocumentVersionChangelog("d3", "user-1", "foreign-doc")).toBeNull();
   });

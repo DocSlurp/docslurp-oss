@@ -26,28 +26,28 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'tags@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Org', 'tags', 'u')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Tags'), ('other', 'o', 'u', 'Other')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('r', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Tags'), ('other', 'o', 'u', 'Other')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('r', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
   for (const id of ["selected", "outside", "old", "foreign"]) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
       values (${id}, 'o', 'u', ${id === "foreign" ? "other" : "w"}, 'r', ${id + '.txt'}, 'text/plain', ${id}, 'completed')`;
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate)
       values (${id + '-chunk'}, ${id}, 'r', 'u', 0, ${id === "selected" ? "Selected evidence about the annual budget." : "Outside graph evidence."}, 10)`;
   }
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('r-other', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('r-other', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
   await sql`update documents set mime_type = 'application/pdf', run_id = 'r-other' where id = 'outside'`;
   await sql`update document_chunks set run_id = 'r-other', page_number = 2, created_at = '2000-01-01' where document_id = 'outside'`;
   await sql`update document_chunks set page_number = 1 where document_id = 'selected'`;
   await sql`update documents set superseded_at = now() where id = 'old'`;
   await sql`insert into document_tags (document_id, user_id, tag) values ('selected', 'u', 'finance'), ('outside', 'u', 'finance'), ('old', 'u', 'finance'), ('foreign', 'u', 'foreign-only')`;
-  await sql`insert into kg_nodes (id, workspace_id, run_id, user_id, canonical_name, normalized_name, entity_type) values ('n', 'w', 'r', 'u', 'Budget', 'budget', 'Topic')`;
+  await sql`insert into kg_nodes (id, project_id, run_id, user_id, canonical_name, normalized_name, entity_type) values ('n', 'w', 'r', 'u', 'Budget', 'budget', 'Topic')`;
   for (const id of ["selected", "outside"]) {
-    await sql`insert into chunk_entities (chunk_id, workspace_id, run_id, user_id, node_id, entity_name, entity_type) values (${id + '-chunk'}, 'w', 'r', 'u', 'n', 'Budget', 'Topic')`;
+    await sql`insert into chunk_entities (chunk_id, project_id, run_id, user_id, node_id, entity_name, entity_type) values (${id + '-chunk'}, 'w', 'r', 'u', 'n', 'Budget', 'Topic')`;
   }
-  await sql`insert into kg_communities (id, workspace_id, run_id, user_id, label, summary) values ('community', 'w', 'r', 'u', 'Budget', 'Budget summary includes the broader workspace.')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('pages', 'o', 'u', 'Pages')`;
+  await sql`insert into kg_communities (id, project_id, run_id, user_id, label, summary) values ('community', 'w', 'r', 'u', 'Budget', 'Budget summary includes the broader project.')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('pages', 'o', 'u', 'Pages')`;
   for (const id of ["page-selected", "page-outside"]) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
       values (${id}, 'o', 'u', 'pages', 'r', ${id + '.txt'}, ${id === "page-selected" ? "text/plain" : "application/pdf"}, ${id}, 'completed')`;
     await sql`insert into document_tags (document_id, user_id, tag) values (${id}, 'u', 'finance')`;
     await sql`insert into document_pages (id, document_id, run_id, user_id, page_number, text)
@@ -63,12 +63,12 @@ beforeAll(async () => {
       values (${`neighbor-${index}`}, 'selected', 'r', 'u', ${index}, ${text}, ${page}, 5,
         ${sql.json({ language })}, ${sql.array([heading])})`;
   }
-  await sql`insert into workspace_search_settings (workspace_id, user_id, pinned_results)
+  await sql`insert into project_search_settings (project_id, user_id, pinned_results)
     values ('w', 'u', '[{"queryPattern":"budget", "documentId":"outside", "rank":1}]')`;
-  // Filenames containing LIKE metacharacters, in their own workspace.
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('names', 'o', 'u', 'Names')`;
+  // Filenames containing LIKE metacharacters, in their own project.
+  await sql`insert into projects (id, org_id, user_id, name) values ('names', 'o', 'u', 'Names')`;
   for (const [id, filename] of [["wildcard", "50%_off.pdf"], ["backslash", "back\\slash.txt"], ["plain", "500 offers.pdf"]] as const) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
       values (${id}, 'o', 'u', 'names', 'r', ${filename}, 'text/plain', ${id}, 'completed')`;
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate)
       values (${id + '-chunk'}, ${id}, 'r', 'u', 0, 'Discount evidence for names.', 10)`;
@@ -79,7 +79,7 @@ afterAll(async () => { await sql?.end(); await stop?.(); });
 
 it.each([false, true])("intersects tags and document selection for evidence and preserves qualified summaries (GraphRAG %s)", async (graph) => {
   const result = await search.hybridSearch("budget", "u", {
-    filters: { workspaceId: "w", tags: ["finance"], documentId: "selected" }, queryVector: [1, 0, 0],
+    filters: { projectId: "w", tags: ["finance"], documentId: "selected" }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: graph,
@@ -91,8 +91,8 @@ it.each([false, true])("intersects tags and document selection for evidence and 
   const summaries = result.results.filter((hit) => hit.citation.source === "community_summary");
   expect(summaries.length).toBe(graph ? 1 : 0);
   if (graph) {
-    expect(summaries[0].text).toContain("Broader workspace context");
-    expect(summaries[0].text).toContain("Budget summary includes the broader workspace.");
+    expect(summaries[0].text).toContain("Broader project context");
+    expect(summaries[0].text).toContain("Budget summary includes the broader project.");
   }
 });
 
@@ -104,7 +104,7 @@ it.each([
   ["page", { pageRange: { from: 1, to: 1 } }],
 ] satisfies Array<[string, SearchFilters]>)("intersects tags and %s constraints for graph evidence", async (_name, filters) => {
   const result = await search.hybridSearch("budget", "u", {
-    filters: { workspaceId: "w", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
+    filters: { projectId: "w", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: true,
@@ -115,7 +115,7 @@ it.each([
 
 it("intersects singular and plural document selections even when both match the tag", async () => {
   const result = await search.hybridSearch("evidence", "u", {
-    filters: { workspaceId: "w", tags: ["finance"], documentId: "selected", documentIds: ["outside"] },
+    filters: { projectId: "w", tags: ["finance"], documentId: "selected", documentIds: ["outside"] },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
@@ -132,7 +132,7 @@ it.each([
   ["page", { pageRange: { from: 99 } }],
 ] satisfies Array<[string, SearchFilters]>)("keeps tags and %s constraints when whole-corpus fallback has no matching evidence", async (_name, filters) => {
   const result = await search.hybridSearch("unfindablequasar", "u", {
-    filters: { workspaceId: "w", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
+    filters: { projectId: "w", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
@@ -147,7 +147,7 @@ it.each([
   ["page", { pageRange: { from: 1, to: 1 } }],
 ] satisfies Array<[string, SearchFilters]>)("intersects tags and %s in completed page-only fallback", async (_name, filters) => {
   const result = await search.hybridSearch("budget", "u", {
-    filters: { workspaceId: "pages", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
+    filters: { projectId: "pages", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
@@ -162,7 +162,7 @@ it.each([
   ["heading", { headingPath: ["Allowed"] }, "EXCLUDED_HEADING"],
 ] satisfies Array<[string, SearchFilters, string]>)("keeps parent context inside the requested %s", async (_name, filters, excluded) => {
   const result = await search.hybridSearch("budget", "u", {
-    filters: { workspaceId: "w", documentId: "selected", tags: ["finance"], ...filters },
+    filters: { projectId: "w", documentId: "selected", tags: ["finance"], ...filters },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: true, useContextualCompression: false, useHyDE: false,
@@ -177,7 +177,7 @@ it.each([
 
 it("does not fabricate an absent pinned document outside the requested document selection", async () => {
   const result = await search.hybridSearch("budget", "u", {
-    filters: { workspaceId: "w", documentId: "selected" },
+    filters: { projectId: "w", documentId: "selected" },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
@@ -203,7 +203,7 @@ it.each([
   (await import("../search/eligible-documents.js")).resetEligibleDocumentCachesForTests();
   lanceDbVectorSearch.mockClear();
   const result = await search.hybridSearch("budget", "u", {
-    filters: { workspaceId: "w", tags: ["finance"], ...filters },
+    filters: { projectId: "w", tags: ["finance"], ...filters },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
@@ -213,27 +213,27 @@ it.each([
   expect(result.results.some((hit) => hit.text.includes("Selected evidence"))).toBe(true);
   expect(lanceDbVectorSearch).toHaveBeenCalledOnce();
   expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
-    documentIds: ["selected"], workspaceId: "w", queryVector: [1, 0, 0],
+    documentIds: ["selected"], projectId: "w", queryVector: [1, 0, 0],
   }));
 });
 
 it.each([
-  ["a literal %_ inside a name", { workspaceId: "names", filenameContains: "%_" }, ["wildcard"]],
-  ["a literal backslash inside a name", { workspaceId: "names", filenameContains: "back\\slash" }, ["backslash"]],
-  ["an exact wildcard filename", { workspaceId: "names", filenameEquals: "50%_off.pdf" }, ["wildcard"]],
-  ["an exact backslash filename", { workspaceId: "names", filenameEquals: "back\\slash.txt" }, ["backslash"]],
-  ["a literal %", { workspaceId: "names", filenameContains: "%" }, ["wildcard"]],
-  ["a literal % in a workspace without one", { filenameContains: "%" }, []],
+  ["a literal %_ inside a name", { projectId: "names", filenameContains: "%_" }, ["wildcard"]],
+  ["a literal backslash inside a name", { projectId: "names", filenameContains: "back\\slash" }, ["backslash"]],
+  ["an exact wildcard filename", { projectId: "names", filenameEquals: "50%_off.pdf" }, ["wildcard"]],
+  ["an exact backslash filename", { projectId: "names", filenameEquals: "back\\slash.txt" }, ["backslash"]],
+  ["a literal %", { projectId: "names", filenameContains: "%" }, ["wildcard"]],
+  ["a literal % in a project without one", { filenameContains: "%" }, []],
   ["a literal _", { filenameContains: "sel_cted" }, []],
-  ["a backslash", { workspaceId: "names", filenameContains: "\\" }, ["backslash"]],
-  ["a backslash that is not in the name", { workspaceId: "names", filenameContains: "back\\\\slash" }, []],
+  ["a backslash", { projectId: "names", filenameContains: "\\" }, ["backslash"]],
+  ["a backslash that is not in the name", { projectId: "names", filenameContains: "back\\\\slash" }, []],
   ["a case-insensitive substring", { filenameContains: "SELECTED" }, ["selected"]],
   ["an exact filename", { filenameEquals: "selected.txt" }, ["selected"]],
-  ["an exact filename never as a pattern", { workspaceId: "names", filenameEquals: "%" }, []],
+  ["an exact filename never as a pattern", { projectId: "names", filenameEquals: "%" }, []],
   ["an exact filename is case-sensitive", { filenameEquals: "SELECTED.TXT" }, []],
 ] satisfies Array<[string, SearchFilters, string[]]>)("matches filename filters with %s without LIKE wildcards widening scope", async (_name, filters, expected) => {
   const result = await search.hybridSearch("evidence", "u", {
-    filters: { workspaceId: "w", ...filters }, queryVector: [1, 0, 0], limit: 20, minScore: 0,
+    filters: { projectId: "w", ...filters }, queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,

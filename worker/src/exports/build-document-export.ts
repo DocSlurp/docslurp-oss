@@ -49,7 +49,7 @@ export const DOCUMENT_EXPORT_MAX_ATTEMPTS = 4;
 interface ExportRow {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   document_id: string | null;
   /** Extract downloads: only this run's documents. */
   run_id?: string | null;
@@ -61,7 +61,7 @@ interface ExportRow {
 
 export interface ExportDocumentRow {
   id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string | null;
   filename: string;
   mime_type: string;
@@ -172,7 +172,7 @@ async function referencedPageImages(source: ExportSource, canonicalKey: string |
 export async function* documentExportEntries(
   args: {
     root: string;
-    scope: "document" | "workspace";
+    scope: "document" | "project";
     content: DocumentExportContent;
     documents: ExportDocumentRow[];
     truncated: boolean;
@@ -205,7 +205,7 @@ export async function* documentExportEntries(
     if (completed && args.content === "all") {
       for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
         const target = slot.startsWith(prefix) && withheld.has(uri) ? artifactExportPath(slot.slice(prefix.length), uri) : null;
-        if (target) skipped.push({ path: `${folder}/${target.path}`, reason: "withheld by the workspace's privacy (PII) policy" });
+        if (target) skipped.push({ path: `${folder}/${target.path}`, reason: "withheld by the project's privacy (PII) policy" });
       }
     }
     const pages = completed ? await source.pages(row.id) : [];
@@ -270,7 +270,7 @@ export async function* documentExportEntries(
     if (args.content === "all") {
       const originalPath = `${folder}/original/${safeExportName(row.filename, "original", { keepExtension: true })}`;
       if (withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
-        skipped.push({ path: originalPath, reason: "withheld by the workspace's privacy (PII) policy" });
+        skipped.push({ path: originalPath, reason: "withheld by the project's privacy (PII) policy" });
       } else {
         yield {
           path: originalPath,
@@ -298,7 +298,7 @@ export async function* documentExportEntries(
         version: row.version_number ?? 1,
         extractionMode: row.extraction_mode,
         tags: row.tags,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         runId: row.run_id,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -337,7 +337,7 @@ function exportReadme(
     args.omitPageFiles
       ? "- page-by-page Markdown is left out: this export has more pages than one zip can hold as separate files. Export fewer documents to get it."
       : "- `pages/page-0001.md`: the same text page by page (documents with more than one page)",
-    "- `structured.json`: fields extracted against the workspace schema, when it has one",
+    "- `structured.json`: fields extracted against the project schema, when it has one",
     "- `metadata.json`: filename, type, status, page count, version and tags",
   ];
   if (args.content !== "all") {
@@ -371,7 +371,7 @@ function cell(value: string): string {
 }
 
 const documentColumns = (sql: Sql) => sql`
-  d.id, d.workspace_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
+  d.id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
   d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text,
   coalesce((select array_agg(dt.tag order by dt.tag) from document_tags dt where dt.document_id = d.id), '{}') as tags,
   null::jsonb as artifacts
@@ -387,7 +387,7 @@ export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow
   if (runIds.length === 0) return;
   const slots = await sql<Array<{ run_id: string; document_id: string; slot: string; uri: string }>>`
     select r.id as run_id, split_part(artifact.key, ':', 1) as document_id, artifact.key as slot, artifact.value as uri
-    from workspace_runs r
+    from project_runs r
     cross join lateral jsonb_each_text(coalesce(r.artifacts, '{}'::jsonb)) as artifact
     where r.id = any(${sql.array(runIds)})
       and split_part(artifact.key, ':', 1) = any(${sql.array(documents.map((row) => row.id))})
@@ -405,17 +405,17 @@ export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow
 }
 
 /**
- * The export's documents: the one document, or the workspace's live versions.
+ * The export's documents: the one document, or the project's live versions.
  * `superseded_at` is set only once a newer version completes, so a pending or
  * failed re-upload never hides the version that is still searchable.
  */
-export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "workspace_id" | "document_id" | "run_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
+export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "project_id" | "document_id" | "run_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
   if (row.run_id) {
-    // An extract's download: its run's completed documents, still in the export's workspace.
+    // An extract's download: its run's completed documents, still in the export's project.
     const documents = await sql<ExportDocumentRow[]>`
       select ${documentColumns(sql)}
       from documents d
-      where d.run_id = ${row.run_id} and d.workspace_id = ${row.workspace_id}
+      where d.run_id = ${row.run_id} and d.project_id = ${row.project_id}
         and d.status = 'completed' and d.purged_at is null
       order by lower(d.filename), d.created_at, d.id
       limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS + 1}
@@ -426,14 +426,14 @@ export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "worksp
     const documents = await sql<ExportDocumentRow[]>`
       select ${documentColumns(sql)}
       from documents d
-      where d.id = ${row.document_id} and d.workspace_id = ${row.workspace_id} and d.purged_at is null
+      where d.id = ${row.document_id} and d.project_id = ${row.project_id} and d.purged_at is null
     `;
     return { documents, truncated: false };
   }
   const documents = await sql<ExportDocumentRow[]>`
     select ${documentColumns(sql)}
     from documents d
-    where d.workspace_id = ${row.workspace_id}
+    where d.project_id = ${row.project_id}
       and d.superseded_at is null and d.archived_at is null and d.purged_at is null
     order by lower(d.filename), d.created_at, d.id
     limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS + 1}
@@ -467,17 +467,17 @@ export async function buildDocumentExport(
   const [row] = await sql<Array<ExportRow & { attempts: number; notify_email: boolean }>>`
     update document_exports set status = 'running', started_at = coalesce(started_at, now()), attempts = attempts + 1
     where id = ${exportId} and status in ('queued', 'running') and expires_at > now()
-    returning id, org_id, workspace_id, document_id, run_id, content, filename, object_key, expires_at, attempts, notify_email
+    returning id, org_id, project_id, document_id, run_id, content, filename, object_key, expires_at, attempts, notify_email
   `;
   if (!row) return { status: "skipped" };
   const prefix = row.object_key.endsWith("/") ? row.object_key : `${row.object_key.slice(0, row.object_key.lastIndexOf("/") + 1)}`;
   const key = `${prefix}a${options.attempt ?? row.attempts}.zip`;
   const started = Date.now();
-  console.log(`[document-export] start export=${row.id} attempt=${options.attempt ?? row.attempts} content=${row.content} scope=${row.document_id ? "document" : "workspace"} workspace=${row.workspace_id}`);
+  console.log(`[document-export] start export=${row.id} attempt=${options.attempt ?? row.attempts} content=${row.content} scope=${row.document_id ? "document" : "project"} project=${row.project_id}`);
 
   try {
     const { documents, truncated } = await loadExportDocuments(sql, row);
-    if (documents.length === 0) throw new Error("Nothing to export: the document or workspace has no documents left.");
+    if (documents.length === 0) throw new Error("Nothing to export: the document or project has no documents left.");
     await loadExportArtifacts(sql, documents);
     // Zip without ZIP64 holds 65,535 files: drop page-by-page files rather than the documents.
     const [pageCount] = await sql<Array<{ pages: number }>>`
@@ -498,7 +498,7 @@ export async function buildDocumentExport(
         select page_number, text from document_pages where document_id = ${documentId} order by page_number
       `,
     };
-    const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
+    const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "project", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
     const chunks = async function* (): AsyncGenerator<Uint8Array> {
       for await (const chunk of zipStream(entries, {
         maxBytes: options.maxBytes ?? DOCUMENT_EXPORT_MAX_BYTES,

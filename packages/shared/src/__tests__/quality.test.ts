@@ -12,7 +12,7 @@ import {
   isPageImageReferenceBlock,
   pageImageExtension,
   pageImageReferencePages,
-  workspaceTemplates,
+  projectTemplates,
   legacyQualityMode,
   mergePipelineFeatures,
   migrateLegacyQualitySettings,
@@ -107,14 +107,14 @@ describe("legacy quality input", () => {
     const forced = pipelineFeatureOverridesSchema.parse({ vision: { forceAllPages: true } });
     expect(forced).toEqual({ quality: "good", vision: {} });
 
-    const workspace = normalizePipelineFeatures({ quality: "good" });
-    expect(mergePipelineFeatures(workspace, { parserPlaybook: "fast" } as never).quality).toBe("fast");
-    expect(mergePipelineFeatures(workspace, { vision: { forceAllPages: false } } as never).quality).toBe("good");
-    expect(mergePipelineFeatures(workspace, { quality: "auto" }).quality).toBe("auto");
+    const project = normalizePipelineFeatures({ quality: "good" });
+    expect(mergePipelineFeatures(project, { parserPlaybook: "fast" } as never).quality).toBe("fast");
+    expect(mergePipelineFeatures(project, { vision: { forceAllPages: false } } as never).quality).toBe("good");
+    expect(mergePipelineFeatures(project, { quality: "auto" }).quality).toBe("auto");
   });
 
   it("keeps an in-flight review-grade run row (forceAllPages: false) on auto through normalizePipelineFeatures", () => {
-    // A workspace_runs.pipeline row written before quality existed, read back by the worker mid-run.
+    // A project_runs.pipeline row written before quality existed, read back by the worker mid-run.
     const runRow = JSON.parse(JSON.stringify({
       ...defaultPipelineFeatures,
       quality: undefined,
@@ -130,7 +130,7 @@ describe("legacy quality input", () => {
 
   it("ships the Legal Contracts and Medical Records templates on auto, locked", () => {
     for (const key of ["legal-contracts", "medical-records"]) {
-      const template = workspaceTemplates.find((entry) => entry.key === key)!;
+      const template = projectTemplates.find((entry) => entry.key === key)!;
       expect(template, key).toBeDefined();
       expect(template.pipeline.quality).toBe("auto");
       expect(template.lockedSettings).toContain("quality");
@@ -149,12 +149,12 @@ describe("quality good turns vision on", () => {
     expect(normalizePipelineFeatures({ quality: "auto", visionFallback: false }).visionFallback).toBe(false);
   });
 
-  it("enables vision when Good merges into a workspace with fallback disabled", () => {
-    const workspace = normalizePipelineFeatures({ quality: "auto", visionFallback: false });
-    const merged = mergePipelineFeatures(workspace, { quality: "good" });
+  it("enables vision when Good merges into a project with fallback disabled", () => {
+    const project = normalizePipelineFeatures({ quality: "auto", visionFallback: false });
+    const merged = mergePipelineFeatures(project, { quality: "good" });
     expect(merged.quality).toBe("good");
     expect(merged.visionFallback).toBe(true);
-    // Switching back to Auto leaves vision on (the merged workspace value); turning it off stays allowed.
+    // Switching back to Auto leaves vision on (the merged project value); turning it off stays allowed.
     expect(mergePipelineFeatures(merged, { quality: "auto", visionFallback: false }).visionFallback).toBe(false);
   });
 
@@ -203,7 +203,7 @@ describe("documentExtractionForQuality", () => {
     expect(removed).toEqual([]);
   });
 
-  it("strips a stored workspace's OCR settings too (normalized pipelines keep documentExtraction)", () => {
+  it("strips a stored project's OCR settings too (normalized pipelines keep documentExtraction)", () => {
     const pipeline = normalizePipelineFeatures({ quality: "fast", documentExtraction: { options: { kreuzberg: { forceOcr: true } } } });
     expect(documentExtractionForQuality(pipeline.documentExtraction, pipeline.quality).config.options)
       .toEqual({ kreuzberg: { disableOcr: true } });
@@ -256,7 +256,7 @@ describe("extractor options (M4: one strict schema per extractor id)", () => {
     for (const dolphin of [
       { repoPath: "/tmp/attacker" },
       { modelPath: "/tmp/attacker-model" },
-      { mode: "page", repoPath: "/workspace/uploads/evil" },
+      { mode: "page", repoPath: "/project/uploads/evil" },
       { pythonBin: "/bin/sh" },
       { dolphin: { repoPath: "/tmp/attacker" } },
       { modelFlavor: "Dolphin-v2" },
@@ -297,7 +297,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
     const original = console.error;
     console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
     try {
-      const parsed = normalizeStoredPipelineFeatures(JSON.parse(JSON.stringify(stored)) as never, "workspace ws_1");
+      const parsed = normalizeStoredPipelineFeatures(JSON.parse(JSON.stringify(stored)) as never, "project ws_1");
       expect(parsed.quality).toBe("fast");
       expect(parsed.documentExtraction.order.pdf).toEqual(["liteparse", "kreuzberg"]);
       expect(parsed.documentExtraction.options).toEqual({
@@ -308,7 +308,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
       expect(JSON.stringify(parsed)).not.toContain("/tmp/model");
       expect(parsed.documentExtraction.ocr).toEqual({ language: "eng", autoRotate: false });
       expect(errors).toHaveLength(1);
-      expect(errors[0]).toContain("workspace ws_1");
+      expect(errors[0]).toContain("project ws_1");
       for (const path of [
         "documentExtraction.ocr.language", "documentExtraction.options.liteparse", "documentExtraction.options.__proto__",
         "documentExtraction.options.kreuzberg.useCache", "documentExtraction.options.kreuzberg.ocr.vlmConfig",
@@ -338,7 +338,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
   it("stays strict for requests and for every other invalid setting, quality included", () => {
     expect(() => normalizePipelineFeatures(stored as never)).toThrow();
     expect(pipelineFeatureOverridesSchema.safeParse({ documentExtraction: { options: { dolphin: { repoPath: "/tmp/attacker" } } } }).success).toBe(false);
-    expect(() => normalizeStoredPipelineFeatures({ quality: "ultra" } as never, "workspace ws_2")).toThrow();
+    expect(() => normalizeStoredPipelineFeatures({ quality: "ultra" } as never, "project ws_2")).toThrow();
   });
 
   it("does not log or copy a clean stored pipeline", () => {
@@ -347,7 +347,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
     console.error = (...args: unknown[]) => { errors.push(args); };
     try {
       const clean = { quality: "auto", documentExtraction: { options: { dolphin: { mode: "page" } } } };
-      expect(normalizeStoredPipelineFeatures(clean as never, "workspace ws_3").documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
+      expect(normalizeStoredPipelineFeatures(clean as never, "project ws_3").documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
       expect(errors).toEqual([]);
     } finally {
       console.error = original;

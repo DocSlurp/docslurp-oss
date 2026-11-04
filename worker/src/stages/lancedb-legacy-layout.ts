@@ -1,7 +1,7 @@
 /**
- * Org-level LanceDB layouts from before every workspace had its own database.
+ * Org-level LanceDB layouts from before every project had its own database.
  * Nothing reads or writes them any more; they are known only so the one-off
- * relocation (lancedb-relocate.ts) can move their rows into workspace
+ * relocation (lancedb-relocate.ts) can move their rows into project
  * databases and drop them, and so cleanup rows queued before the change can
  * still drop a deleted org's tables.
  *

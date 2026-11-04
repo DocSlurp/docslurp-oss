@@ -675,15 +675,15 @@ describe("modal provider session lifecycle", () => {
 });
 
 describe("CommandRunner through the modal provider", () => {
-  let workspace: string;
+  let project: string;
 
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    workspace = mkdtempSync(path.join(tmpdir(), "docslurp-modal-runner-"));
+    project = mkdtempSync(path.join(tmpdir(), "docslurp-modal-runner-"));
   });
   afterEach(() => {
     vi.restoreAllMocks();
-    rmSync(workspace, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
   });
 
   it("stages only the command's input file, never the host runtime", async () => {
@@ -692,16 +692,16 @@ describe("CommandRunner through the modal provider", () => {
     const runner = new CommandRunner({
       openSession: (activityId) => provider.openSession(lifecycleConfig, { activityId }),
     });
-    const input = path.join(workspace, "source.pdf");
+    const input = path.join(project, "source.pdf");
     writeFileSync(input, "%PDF-1.7");
-    const output = path.join(workspace, "source.pdf.md");
+    const output = path.join(project, "source.pdf.md");
     const script = path.join(resolveScriptsDir(), "pdf_extract.py");
     const venvPython = path.join(resolveVenvBin(process.env.PYTHON_VENV), "python3");
 
     await runner.run({ binary: venvPython, args: [script, "--input", input, "--output", output], available: true });
 
     expect(state.remote.writes).toEqual([input]);
-    expect(state.mkdirs).toEqual(["/tmp/.docslurp-modal-control", workspace]);
+    expect(state.mkdirs).toEqual(["/tmp/.docslurp-modal-control", project]);
     const staged = [...state.remote.writes, ...state.mkdirs.slice(1)].join("\n");
     for (const host of ["node_modules", ".venv", process.execPath, resolveScriptsDir()]) expect(staged).not.toContain(host);
     expect(staged.split("\n").some((p) => p === "/usr" || p.startsWith("/usr/"))).toBe(false);

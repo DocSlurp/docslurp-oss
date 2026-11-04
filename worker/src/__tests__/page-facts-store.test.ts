@@ -16,8 +16,8 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'One', 'one', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
-    insert into documents(id, org_id, user_id, workspace_id, filename, mime_type, source_key, status, page_count)
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
+    insert into documents(id, org_id, user_id, project_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w1', 'a.pdf', 'application/pdf', 'k', 'queued', 2);
   `);
   const served = await serveOnRandomPort(db);

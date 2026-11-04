@@ -38,9 +38,9 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('rank-user', 'Ranking', 'ranking@example.invalid')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('rank-org', 'Ranking', 'ranking', 'rank-user')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('rank-org', 'rank-user', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name, pipeline) values ('rank-ws', 'rank-org', 'rank-user', 'Ranking', ${sql.json(pipeline)}), ('other-ws', 'rank-org', 'rank-user', 'Other', ${sql.json(pipeline)})`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('rank-run', 'rank-org', 'rank-user', 'rank-ws', 'bulk-upload', 'completed', 'completed', '{}'::jsonb), ('foreign-run', 'rank-org', 'rank-user', 'other-ws', 'bulk-upload', 'completed', 'completed', '{}'::jsonb)`;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+  await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('rank-ws', 'rank-org', 'rank-user', 'Ranking', ${sql.json(pipeline)}), ('other-ws', 'rank-org', 'rank-user', 'Other', ${sql.json(pipeline)})`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('rank-run', 'rank-org', 'rank-user', 'rank-ws', 'bulk-upload', 'completed', 'completed', '{}'::jsonb), ('foreign-run', 'rank-org', 'rank-user', 'other-ws', 'bulk-upload', 'completed', 'completed', '{}'::jsonb)`;
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values ('rank-doc', 'rank-org', 'rank-user', 'rank-ws', 'rank-run', 'manual.txt', 'text/plain', 'local/manual', 'completed', 240),
     ('foreign-doc', 'rank-org', 'rank-user', 'other-ws', 'foreign-run', 'other.txt', 'text/plain', 'local/other', 'completed', 1)`;
   const rows = Array.from({ length: 240 }, (_, i) => ({
@@ -60,12 +60,12 @@ beforeAll(async () => {
   ]);
   expect(await table.vectorSearch([1, 0, 0]).limit(50).toArray()).toHaveLength(50);
   table.close(); db.close();
-  const { loadWorkspacePipeline } = await import("../search/session-setup.js");
-  expect(resolveEmbeddingRoute((await loadWorkspacePipeline("rank-ws")).embedding).model).toBe(model);
+  const { loadProjectPipeline } = await import("../search/session-setup.js");
+  expect(resolveEmbeddingRoute((await loadProjectPipeline("rank-ws")).embedding).model).toBe(model);
   ({ hybridSearch } = await import("../services/search.js"));
   const lance = await import("../search/lancedb.js");
   resetLanceDbConnectionForTests = lance.resetLanceDbConnectionForTests;
-  expect(await lance.lanceDbVectorSearch({ orgId: "rank-org", workspaceId: "rank-ws", embeddingModel: model, queryVector: [1, 0, 0], documentIds: ["rank-doc"], limit: 50 })).toHaveLength(50);
+  expect(await lance.lanceDbVectorSearch({ orgId: "rank-org", projectId: "rank-ws", embeddingModel: model, queryVector: [1, 0, 0], documentIds: ["rank-doc"], limit: 50 })).toHaveLength(50);
 }, 120_000);
 
 afterAll(async () => {
@@ -79,7 +79,7 @@ describe("actual hybrid retrieval with isolated SQL and LanceDB", () => {
   it("holds acquisition depth constant across rerank modes and separates packing from relevance", async () => {
     for (const candidateDepth of [50, 100, 200]) {
       for (const useRerank of [false, true]) {
-        const options = { filters: { workspaceId: 'rank-ws' }, queryVector: [1, 0, 0], candidateDepth, useRerank,
+        const options = { filters: { projectId: 'rank-ws' }, queryVector: [1, 0, 0], candidateDepth, useRerank,
           limit: 10, minScore: 0, useMmr: false, parentRetrieval: false, summarySeed: false,
           queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false,
           useHyDE: false, useContextualCompression: false, enableGraphExpansion: false, enableCommunityExpansion: false };

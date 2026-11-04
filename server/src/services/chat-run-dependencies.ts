@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type postgres from "postgres";
 import { sql } from "../db.js";
-import { getWorkspaceAccess } from "./organizations.js";
+import { getProjectAccess } from "./organizations.js";
 import { revalidateRealtimeSession } from "../realtime/session.js";
 import type { Operation } from "./chat-operations.js";
 
@@ -18,7 +18,7 @@ export function withNativeChatRunOwner<T>(task: RunOwner & {nativeTaskId:string;
  * Its existing Temporal/page locks, deadlines and credit caps remain authoritative.
  */
 export async function acceptChatRunDependency<T>(scope: {
-  userId: string; orgId: string; workspaceId: string; documentId: string; pages: number[];
+  userId: string; orgId: string; projectId: string; documentId: string; pages: number[];
 }, allocate: (tx: postgres.Sql | postgres.TransactionSql) => Promise<{ runId: string; value: T }>): Promise<T> {
   const task = owner.getStore();
   if (!task) return (await allocate(sql)).value;
@@ -36,8 +36,8 @@ export async function acceptChatRunDependency<T>(scope: {
         for share of t` : await tx`select id from chat_operations where id=${task.id} and attempt_id=${task.attempt_id ?? null}
         and status='running' and not cancel_requested and deadline>clock_timestamp() and lease_until>clock_timestamp()
         and not exists(select 1 from chat_operations where id=${root?.id ?? ""} and tree_cancel_requested)`;
-      const [document] = await tx`select d.id from documents d join workspaces w on w.id=d.workspace_id
-        where d.id=${scope.documentId} and d.workspace_id=${scope.workspaceId} and w.org_id=${scope.orgId}`;
+      const [document] = await tx`select d.id from documents d join projects w on w.id=d.project_id
+        where d.id=${scope.documentId} and d.project_id=${scope.projectId} and w.org_id=${scope.orgId}`;
       if (!root || !active || !document) throw new Error("dependency_forbidden_or_cancelled");
       const [count] = await tx`select (select count(*) from chat_operations where root_id=${root.id}) +
         (select count(*) from chat_run_dependencies d join chat_operations c on c.id=d.operation_id where c.root_id=${root.id}) as n`;
@@ -46,7 +46,7 @@ export async function acceptChatRunDependency<T>(scope: {
     if (task) {
       task.signal.throwIfAborted();
       const session = await revalidateRealtimeSession({userId:task.user_id,sessionId:task.sessionId}, task.signal, tx);
-      const access = session && await getWorkspaceAccess(scope.workspaceId, task.user_id, tx);
+      const access = session && await getProjectAccess(scope.projectId, task.user_id, tx);
       if (!access || access.orgId !== scope.orgId) throw new Error("dependency_access_revoked");
       task.signal.throwIfAborted();
     }
@@ -57,9 +57,9 @@ export async function acceptChatRunDependency<T>(scope: {
   }) as Promise<T>;
 }
 
-/** Caller authorizes every returned workspace before delivery. No artifact bytes or URLs. */
+/** Caller authorizes every returned project before delivery. No artifact bytes or URLs. */
 export async function readChatRunDependencies(rootId: string, userId: string) {
-  return sql`select d.id, d.operation_id as parent_id, c.root_id, r.id as run_id, r.workspace_id, r.org_id,
+  return sql`select d.id, d.operation_id as parent_id, c.root_id, r.id as run_id, r.project_id, r.org_id,
     case when r.stats->>'deduplicated'='true' then null else r.execution_generation end as attempt_id, r.status as run_status, r.stage, r.control_state,
     d.document_id, d.pages, jsonb_build_object('documentId',d.document_id,'pages',d.pages) as result_ref,
     coalesce(p.attempts,0)::int as page_attempts, greatest(r.updated_at,p.updated_at) as revision, r.stats->>'deduplicated' as deduplicated,
@@ -71,7 +71,7 @@ export async function readChatRunDependencies(rootId: string, userId: string) {
       when d.created_at+interval '15 minutes'<now() then 'interrupted'
       else 'waiting' end as status
     from chat_run_dependencies d join chat_operations c on c.id=d.operation_id
-    join workspace_runs r on r.id=d.run_id
+    join project_runs r on r.id=d.run_id
     left join lateral (select count(*) filter(where state='indexed') as ready,
       count(*) filter(where state in ('failed','blocked-pii')) as failed, max(attempts) as attempts, max(updated_at) as updated_at
       from document_page_states where document_id=d.document_id and page_number=any(d.pages)) p on true

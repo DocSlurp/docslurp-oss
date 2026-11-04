@@ -19,11 +19,11 @@ beforeAll(async () => {
   await pg.db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, processed_documents, stats)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, stats)
       values ('run-c', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 3, 3, '{"failedDocuments":1,"failedDocumentStages":1,"keep":true}'),
              ('run-d', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 1, 1, '{}');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('a', 'o1', 'u1', 'w', 'run-c', 'a.pdf', 'application/pdf', 'k1', 'completed', 1),
              ('b', 'o1', 'u1', 'w', 'run-c', 'b.pdf', 'application/pdf', 'k2', 'completed', 1),
              ('x', 'o1', 'u1', 'w', 'run-c', 'x.pdf', 'application/pdf', 'k3', 'failed', 1),
@@ -32,7 +32,7 @@ beforeAll(async () => {
       ('run-c', 'a', 'extract-markdown', 'completed'), ('run-c', 'a', 'embed', 'completed'),
       ('run-c', 'b', 'extract-markdown', 'completed'), ('run-c', 'b', 'embed', 'completed'),
       ('run-c', 'x', 'extract-markdown', 'failed');
-    insert into workspace_run_stage_states (run_id, stage_name, status) values
+    insert into project_run_stage_states (run_id, stage_name, status) values
       ('run-c', 'normalize', 'completed'), ('run-c', 'extract-markdown', 'completed'), ('run-c', 'embed', 'completed');
   `);
   const url = pg.url;
@@ -50,12 +50,12 @@ describe("retrying a completed Run", () => {
     const startWorkflow = vi.fn(async () => {});
     const lifecycle = createRunLifecycle({ sql, startWorkflow, failureThreshold: 2 });
     const pipeline = { ...defaultPipelineFeatures };
-    await client`update workspace_runs set creation_ready_at = now()`;
-    const [before] = await client`select execution_generation from workspace_runs where id = 'run-c'`;
+    await client`update project_runs set creation_ready_at = now()`;
+    const [before] = await client`select execution_generation from project_runs where id = 'run-c'`;
 
     const outcome = await lifecycle.retry({ id: "run-c", status: "completed", pipeline });
     expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
-    const [run] = await client`select status, stage, processed_documents, stats, execution_generation from workspace_runs where id = 'run-c'`;
+    const [run] = await client`select status, stage, processed_documents, stats, execution_generation from project_runs where id = 'run-c'`;
     expect(run!.execution_generation).toEqual(expect.any(String));
     expect(run!.execution_generation).not.toBe(before!.execution_generation);
     expect(startWorkflow).toHaveBeenCalledWith("run-c", pipeline, { restartExisting: true, executionGeneration: run!.execution_generation });
@@ -68,7 +68,7 @@ describe("retrying a completed Run", () => {
       .toEqual([{ n: 4 }]);
     expect(await client`select count(*)::int as n from document_run_stage_states where document_id = 'x'`).toEqual([{ n: 0 }]);
     // Run-level checkpoints from the earliest failed stage onward are cleared; earlier ones stay.
-    expect(await client`select stage_name from workspace_run_stage_states where run_id = 'run-c'`).toEqual([{ stage_name: "normalize" }]);
+    expect(await client`select stage_name from project_run_stage_states where run_id = 'run-c'`).toEqual([{ stage_name: "normalize" }]);
 
     // A second retry (the Run is queued now, not completed) is not a completed-Run retry.
     expect(await lifecycle.retry({ id: "run-c", status: "completed", pipeline })).toEqual({ status: "not-retryable" });
@@ -80,6 +80,6 @@ describe("retrying a completed Run", () => {
     const lifecycle = createRunLifecycle({ sql, startWorkflow, failureThreshold: 2 });
     expect(await lifecycle.retry({ id: "run-d", status: "completed", pipeline: defaultPipelineFeatures })).toEqual({ status: "not-retryable" });
     expect(startWorkflow).not.toHaveBeenCalled();
-    expect(await client`select status from workspace_runs where id = 'run-d'`).toEqual([{ status: "completed" }]);
+    expect(await client`select status from project_runs where id = 'run-d'`).toEqual([{ status: "completed" }]);
   });
 });

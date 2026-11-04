@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { workspaceRunProgressSnapshotSchema, workspaceStateSchema } from "@docslurp/shared";
+import { projectRunProgressSnapshotSchema, projectStateSchema } from "@docslurp/shared";
 import { buildOpenApiDocument } from "./openapi.js";
-import { runProgressExample, workspaceStateExample } from "./state-management-openapi.js";
+import { runProgressExample, projectStateExample } from "./state-management-openapi.js";
 
 const document = buildOpenApiDocument("https://docslurp.io");
 
 describe("state and organization OpenAPI contracts", () => {
-  it("publishes full progress and workspace state schemas instead of reduced run records", () => {
+  it("publishes full progress and project state schemas instead of reduced run records", () => {
     const progress = document.paths["/v1/runs/{runId}/progress"].get;
     expect(progress.responses["200"].content["application/json"].schema).toEqual({ $ref: "#/components/schemas/RunProgressSnapshot" });
     expect(document.components.schemas.RunProgressSnapshot.properties).toHaveProperty("progress");
-    expect(document.components.schemas.WorkspaceState.properties).toHaveProperty("storage");
-    expect(workspaceRunProgressSnapshotSchema.parse(runProgressExample)).toEqual(runProgressExample);
-    expect(workspaceStateSchema.parse(workspaceStateExample)).toEqual(workspaceStateExample);
-    expect(document.paths["/v1/workspaces/{workspaceId}/state"].get.parameters[1]).toMatchObject({ name: "recentWindowHours", schema: { minimum: 1, maximum: 720, default: 24 } });
+    expect(document.components.schemas.ProjectState.properties).toHaveProperty("storage");
+    expect(projectRunProgressSnapshotSchema.parse(runProgressExample)).toEqual(runProgressExample);
+    expect(projectStateSchema.parse(projectStateExample)).toEqual(projectStateExample);
+    expect(document.paths["/v1/projects/{projectId}/state"].get.parameters[1]).toMatchObject({ name: "recentWindowHours", schema: { minimum: 1, maximum: 720, default: 24 } });
   });
 
   it("documents actual SSE frames and rate limiting", () => {

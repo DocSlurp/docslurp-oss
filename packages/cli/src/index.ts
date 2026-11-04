@@ -23,33 +23,33 @@ function resolveApiUrl(flags: Record<string, string | boolean>): string {
 }
 
 /**
- * --workspace, then DOCSLURP_WORKSPACE, then "default" (the organization's
- * default workspace). A workspace is an ID, slug or name; names match by slug.
+ * --project, then DOCSLURP_PROJECT, then "default" (the organization's
+ * default project). A project is an ID, slug or name; names match by slug.
  */
-function resolveWorkspace(flags: Record<string, string | boolean>): string {
-  const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
-  return explicit || process.env.DOCSLURP_WORKSPACE?.trim() || "default";
+function resolveProject(flags: Record<string, string | boolean>): string {
+  const explicit = typeof flags.project === "string" ? flags.project.trim() : "";
+  return explicit || process.env.DOCSLURP_PROJECT?.trim() || "default";
 }
 
-type IntakeTarget = { newWorkspace: boolean; templateKey?: string; workspace?: string };
+type IntakeTarget = { newProject: boolean; templateKey?: string; project?: string };
 
 /**
- * Where an upload or URL ingest lands. --workspace wins: the server finds the
- * workspace by ID, slug or name, or creates it from the name (with --template
- * applied). Otherwise --new-workspace or --template creates a self-titled
- * workspace, and anything else goes to DOCSLURP_WORKSPACE or "default".
+ * Where an upload or URL ingest lands. --project wins: the server finds the
+ * project by ID, slug or name, or creates it from the name (with --template
+ * applied). Otherwise --new-project or --template creates a self-titled
+ * project, and anything else goes to DOCSLURP_PROJECT or "default".
  */
 function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTarget {
   const templateKey = typeof flags.template === "string" && flags.template.trim() ? flags.template.trim() : undefined;
-  const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
-  if (explicit) return { newWorkspace: false, workspace: explicit, templateKey };
-  if (flags.newWorkspace === true || templateKey) return { newWorkspace: true, templateKey };
-  return { newWorkspace: false, workspace: resolveWorkspace(flags) };
+  const explicit = typeof flags.project === "string" ? flags.project.trim() : "";
+  if (explicit) return { newProject: false, project: explicit, templateKey };
+  if (flags.newProject === true || templateKey) return { newProject: true, templateKey };
+  return { newProject: false, project: resolveProject(flags) };
 }
 
 const QUALITY_MODES = ["fast", "auto", "good"] as const;
 
-/** `--quality fast|auto|good` as a pipeline override, or {} when the workspace setting applies. */
+/** `--quality fast|auto|good` as a pipeline override, or {} when the project setting applies. */
 export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: (typeof QUALITY_MODES)[number] } } {
   if (flags.quality === undefined) return {};
   const quality = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
@@ -59,30 +59,30 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
 
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
-  docslurp full-index [--workspace <id|slug|name>] [--document <id>] [--estimate] [--watch]
+  docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--api-url <url>]
-  docslurp search <query> [--workspace <id|slug|name>] [--min-score <0..1>] [--json | --context]
-  docslurp search --queries-file <queries.json> [--workspace <id|slug|name>] [--concurrency <1..4>] [--json | --context]
-  docslurp chat <question> [--workspace <id|slug|name>] [--session <id>] [--json]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--json | --context]
+  docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
+  docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
   docslurp login [--device] [--scopes "search read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
   docslurp logout [--profile <name>] [--force]
   docslurp whoami [--json]
   docslurp auth status [--json]
   docslurp auth token
-  docslurp exec [--profile <name>] [--workspace <ws>] -- <command> [args...]
+  docslurp exec [--profile <name>] [--project <ws>] -- <command> [args...]
   docslurp --license
   docslurp migrate-algolia-synonyms <export.json> [--out <glossary.json>]
-  docslurp import-search-compat <export.json> --workspace <id|slug|name> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
+  docslurp import-search-compat <export.json> --project <id|slug|name> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
 
 API commands authenticate with, in order: --api-key <key>, DOCSLURP_API_KEY,
 DOCSLURP_TOKEN (a short-lived OAuth access token), then the stored login from
@@ -91,13 +91,13 @@ add chat or ingest with --scopes. Use --device on headless or SSH machines.
 docslurp auth token prints a fresh access token (valid at most 15 minutes);
 docslurp exec passes one to a child process as DOCSLURP_TOKEN without writing it to disk.
 --profile (or DOCSLURP_PROFILE) keeps separate logins; each profile has one per API URL.
-DOCSLURP_URL overrides the hosted service. Without --workspace or DOCSLURP_WORKSPACE,
-commands use the "default" workspace: your organization's default workspace.
---workspace takes a workspace ID, slug or name: "Legal Contracts" and legal-contracts are
-the same workspace. Uploads and URL ingests into a name that matches no workspace create
-it with that name (and --template, if given); other commands answer workspace not found.
---new-workspace (or --template alone) uploads into a fresh self-titled workspace.
---quality sets processing quality for the upload (default: the workspace's, auto unless changed):
+DOCSLURP_URL overrides the hosted service. Without --project or DOCSLURP_PROJECT,
+commands use the "default" project: your organization's default project.
+--project takes a project ID, slug or name: "Legal Contracts" and legal-contracts are
+the same project. Uploads and URL ingests into a name that matches no project create
+it with that name (and --template, if given); other commands answer project not found.
+--new-project (or --template alone) uploads into a fresh self-titled project.
+--quality sets processing quality for the upload (default: the project's, auto unless changed):
 fast reads the text layer only and keeps scanned pages as images, not read ($0.05 per 1,000 pages);
 auto reads each page the cheapest faithful way ($0.05 to $2.50 per 1,000 pages, depending on the mix);
 good reads every page with a vision model ($2.50 per 1,000 pages).
@@ -147,15 +147,15 @@ async function migrateAlgoliaSynonymsCommand(inputPath: string, outPath: string)
 async function importSearchCompatCommand(inputPath: string, flags: Record<string, string | boolean>): Promise<void> {
   const raw = await readFile(inputPath, "utf8");
   const payload = JSON.parse(raw) as Record<string, unknown>;
-  const workspace = resolveWorkspace(flags);
-  if (!workspace) {
-    throw new Error("--workspace is required");
+  const project = resolveProject(flags);
+  if (!project) {
+    throw new Error("--project is required");
   }
 
   const source = String(flags.source ?? detectCompatSource(payload));
   const normalized = normalizeCompatImportPayload({
     source,
-    workspace,
+    project,
     payload
   });
 
@@ -187,7 +187,7 @@ async function importSearchCompatCommand(inputPath: string, flags: Record<string
   }
 
   const result = await response.json() as { imported: Record<string, number> };
-  console.log(`Imported ${source} compatibility payload into workspace ${workspace}.`);
+  console.log(`Imported ${source} compatibility payload into project ${project}.`);
   console.log(JSON.stringify(result.imported, null, 2));
 }
 
@@ -203,7 +203,7 @@ function detectCompatSource(payload: Record<string, unknown>): "algolia" | "elas
 
 function normalizeCompatImportPayload(args: {
   source: string;
-  workspace: string;
+  project: string;
   payload: Record<string, unknown>;
 }) {
   if (args.source === "elastic") {
@@ -218,7 +218,7 @@ function normalizeCompatImportPayload(args: {
 
     return {
       source: "elastic",
-      workspace: args.workspace,
+      project: args.project,
       settings: {
         searchableAttributes,
         attributesForFaceting: Object.keys(properties)
@@ -242,7 +242,7 @@ function normalizeCompatImportPayload(args: {
   if (args.source === "legacy-parser") {
     return {
       source: "legacy-parser",
-      workspace: args.workspace,
+      project: args.project,
       settings: args.payload.settings ?? {},
       synonyms: args.payload.synonyms ?? {},
       rules: args.payload.rules ?? [],
@@ -253,7 +253,7 @@ function normalizeCompatImportPayload(args: {
 
   return {
     source: "algolia",
-    workspace: args.workspace,
+    project: args.project,
     indexName: typeof args.payload.indexName === "string" ? args.payload.indexName : undefined,
     settings: args.payload.settings ?? {},
     synonyms: args.payload.synonyms ?? [],
@@ -280,12 +280,12 @@ function parseCliArgs(argv: string[]) {
     } else if (arg === "--no-email") {
       flags.noEmail = true;
       i++;
-    } else if (arg === "--new-workspace") {
-      flags.newWorkspace = true;
+    } else if (arg === "--new-project") {
+      flags.newProject = true;
       i++;
-    } else if (arg === "--workspace-name" || arg === "--workspace-id") {
-      throw new Error(`${arg} was removed: pass a workspace ID, slug or name with --workspace (a name that matches no workspace is created on upload).`);
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality") {
+    } else if (arg === "--project-name" || arg === "--project-id") {
+      throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
+    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -366,8 +366,8 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   // Extract sessions are created under /v1/extracts and continue on the shared upload session routes.
   const created = await apiFetch(`${intake.base}/direct/sessions`, flags, json({
     ...intake.fields,
-    ...(field("workspace") ? { workspace: field("workspace") } : {}),
-    ...(field("newWorkspace") === "true" ? { newWorkspace: true } : {}),
+    ...(field("project") ? { project: field("project") } : {}),
+    ...(field("newProject") === "true" ? { newProject: true } : {}),
     ...(field("templateKey") ? { templateKey: field("templateKey") } : {}),
     ...(field("pipeline") ? { pipeline: JSON.parse(field("pipeline")!) } : {}),
     files: files.map(({ blob, name }) => ({
@@ -424,7 +424,7 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const sized = await Promise.all(files.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
-    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspace ? { workspace: target.workspace } : {}) }, flags);
+    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.project ? { project: target.project } : {}) }, flags);
     return;
   }
 
@@ -432,8 +432,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   for (const [name, value] of Object.entries(intake.fields)) formData.append(name, String(value));
 
   const target = resolveIntakeTarget(flags);
-  if (target.workspace) formData.append("workspace", target.workspace);
-  if (target.newWorkspace) formData.append("newWorkspace", "true");
+  if (target.project) formData.append("project", target.project);
+  if (target.newProject) formData.append("newProject", "true");
   if (target.templateKey) formData.append("templateKey", target.templateKey);
   const qualityPipeline = resolveQualityPipeline(flags).pipeline;
   if (qualityPipeline) formData.append("pipeline", JSON.stringify(qualityPipeline));
@@ -444,7 +444,7 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   }
 
   if (typeof flags.path === "string" && flags.path) {
-    // Same folder path and filename re-uploaded in a workspace is a new version of one document.
+    // Same folder path and filename re-uploaded in a project is a new version of one document.
     formData.append("paths", JSON.stringify(files.map(() => flags.path)));
   }
 
@@ -516,7 +516,7 @@ function printJob(job: JobStatus): void {
 
 async function fullIndexCommand(flags: Record<string, string | boolean>): Promise<void> {
   const document = typeof flags.document === "string" && flags.document ? flags.document : undefined;
-  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/workspaces/${encodeURIComponent(resolveWorkspace(flags))}/full-index`;
+  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/projects/${encodeURIComponent(resolveProject(flags))}/full-index`;
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, {}, flags);
   await startWork(base, {}, flags);
 }
@@ -633,13 +633,13 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
 }
 
 type IntakeResult = {
-  job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[];
+  job?: JobStatus; run: { id: string }; project: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[];
   extract?: { id: string; expiresAt: string; paidRetention: boolean; notifyEmail: boolean };
 };
 
 async function printIntakeResult(response: Response, flags: Record<string, string | boolean>): Promise<void> {
   const result = await response.json() as IntakeResult;
-  console.log(`Workspace: ${result.workspace.name} (${result.workspace.slug ?? result.workspace.id})`);
+  console.log(`Project: ${result.project.name} (${result.project.slug ?? result.project.id})`);
   console.log(`Run ID:    ${result.run.id}`);
   console.log(`Documents: ${result.documents.length}`);
   if (result.extract) {
@@ -883,9 +883,9 @@ function printSearch(data: CliSearchResponse, flags: Record<string, string | boo
 }
 
 async function searchCommand(query: string, flags: Record<string, string | boolean>): Promise<void> {
-  const workspace = resolveWorkspace(flags);
+  const project = resolveProject(flags);
   if (flags.json && flags.context) throw new Error("Choose --json or --context.");
-  if (flags.run) throw new Error("Search uses --workspace <id|slug|name>; --run is no longer supported.");
+  if (flags.run) throw new Error("Search uses --project <id|slug|name>; --run is no longer supported.");
   if (flags.queriesFile) {
     if (query) throw new Error("Use a query or --queries-file, not both.");
     const inputs: unknown = JSON.parse(await readFile(String(flags.queriesFile), "utf8"));
@@ -893,8 +893,8 @@ async function searchCommand(query: string, flags: Record<string, string | boole
     const queries = inputs.map((input) => {
       const value = typeof input === "string" ? { q: input } : input;
       if (!value || typeof value !== "object" || typeof value.q !== "string" || !value.q.trim()) throw new Error("Each query must be a nonempty string or an object with q.");
-      const target = value.workspace ?? workspace;
-      return typeof target === "string" && target.trim() ? { ...value, workspace: target } : value;
+      const target = value.project ?? project;
+      return typeof target === "string" && target.trim() ? { ...value, project: target } : value;
     });
     const concurrency = Number(flags.concurrency ?? 4);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error("--concurrency must be an integer from 1 to 4.");
@@ -914,7 +914,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   const rawMinScore = flags.minScore === undefined ? undefined : String(flags.minScore).trim();
   const minScore = rawMinScore === undefined ? undefined : rawMinScore === "" ? Number.NaN : Number(rawMinScore);
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
-  const params = new URLSearchParams({ q: query, ...(workspace ? { workspace } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
+  const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;
@@ -922,12 +922,12 @@ async function searchCommand(query: string, flags: Record<string, string | boole
 }
 
 async function chatCommand(question: string, flags: Record<string, string | boolean>): Promise<void> {
-  const workspace = resolveWorkspace(flags);
+  const project = resolveProject(flags);
   if (!question.trim()) throw new Error("Chat question required.");
   if (flags.context || flags.queriesFile || flags.concurrency) throw new Error("Chat accepts one question; batch/context options are for search.");
   const response = await apiFetch("/v1/chat", flags, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: question, ...(workspace ? { workspace } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
+    body: JSON.stringify({ q: question, ...(project ? { project } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
   });
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as { answer: string; sessionId: string; citations: CliSearchResponse["results"]; usage?: unknown; availability?: { message?: string | null } };
@@ -1083,11 +1083,11 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
           break;
         }
         case "prompts/list":
-          respond({ prompts: [{ name: "workspace-grounded-answer", title: "Workspace grounded answer", description: "Answer using workspace evidence and citations" }] });
+          respond({ prompts: [{ name: "project-grounded-answer", title: "Project grounded answer", description: "Answer using project evidence and citations" }] });
           break;
         case "prompts/get": {
-          if (envelope.params?.name !== "workspace-grounded-answer") { invalid("Unknown prompt name"); break; }
-          const result = await get("/v1/mcp/prompts/workspace-grounded-answer");
+          if (envelope.params?.name !== "project-grounded-answer") { invalid("Unknown prompt name"); break; }
+          const result = await get("/v1/mcp/prompts/project-grounded-answer");
           respond({ messages: [{ role: "user", content: { type: "text", text: result.prompt } }] });
           break;
         }
@@ -1194,8 +1194,8 @@ async function main(): Promise<void> {
     }
     case "exec": {
       if (separator < 0) throw new Error("Usage: docslurp exec [--profile <name>] -- <command> [args...]");
-      const workspace = typeof flags.workspace === "string" && flags.workspace.trim() ? flags.workspace.trim() : process.env.DOCSLURP_WORKSPACE?.trim() || null;
-      await execCommand(flags, resolveApiUrl(flags), workspace, args.slice(separator + 1));
+      const project = typeof flags.project === "string" && flags.project.trim() ? flags.project.trim() : process.env.DOCSLURP_PROJECT?.trim() || null;
+      await execCommand(flags, resolveApiUrl(flags), project, args.slice(separator + 1));
       break;
     }
     case "migrate-algolia-synonyms": {

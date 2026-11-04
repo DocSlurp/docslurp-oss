@@ -22,10 +22,10 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'O', 'o', 'u')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values ('r', 'o', 'u', 'w', 'upload', 'completed', 'completed', '{}')`;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values ('d', 'o', 'u', 'w', 'r', 'a.pdf', 'application/pdf', 'k', 'completed', 2)`;
   await sql`insert into document_corrections (id, document_id, run_id, user_id, corrected_markdown)
     values ('c', 'd', 'r', 'u', 'Corrected page one.')`;
@@ -68,7 +68,7 @@ describe("human-correction reindex", () => {
     const { saveDocumentCorrection } = await import("../services/document-review.js");
     await sql`insert into "user" (id,name,email) values('outsider','Other','other@example.com')`;
     expect(await saveDocumentCorrection({docId:"d",userId:"outsider",structuredData:{site:{type:"Point",coordinates:[0,0]}}})).toBeNull();
-    await sql`update workspaces set pipeline=${sql.json({outputSchema:{type:"object",properties:{site:{type:"object",format:"geojson"}}}})}::jsonb where id='w'`;
+    await sql`update projects set pipeline=${sql.json({outputSchema:{type:"object",properties:{site:{type:"object",format:"geojson"}}}})}::jsonb where id='w'`;
     const [before] = await sql`select projection_revision from documents where id='d'`;
     await expect(saveDocumentCorrection({docId:"d",userId:"u",structuredData:{site:{type:"Point",coordinates:[0,0]}}})).rejects.toThrow("spatial migrations");
     const [after] = await sql`select projection_revision from documents where id='d'`;

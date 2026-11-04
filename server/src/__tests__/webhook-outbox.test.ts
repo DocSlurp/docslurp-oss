@@ -6,7 +6,7 @@ const state = vi.hoisted(() => ({
   outbox: [] as Array<{ id: string; user_id: string; event_type: string; payload: Record<string, unknown> }>,
   dispatched: [] as Array<{ id: string; error: string | null }>,
   requests: [] as Array<{ url: string; headers: Record<string, string>; body: string }>,
-  workspacePipeline: null as Record<string, unknown> | null,
+  projectPipeline: null as Record<string, unknown> | null,
   access: true,
 }));
 
@@ -16,8 +16,8 @@ vi.mock("../db.js", () => {
     if (text.includes("update webhook_outbox") && text.includes("claimed_at = now()")) {
       return state.outbox.splice(0);
     }
-    if (text.includes("select pipeline from workspaces")) {
-      return state.workspacePipeline ? [{ pipeline: state.workspacePipeline }] : [];
+    if (text.includes("select pipeline from projects")) {
+      return state.projectPipeline ? [{ pipeline: state.projectPipeline }] : [];
     }
     if (text.includes("from webhooks")) {
       return [{ id: "wh-1", user_id: "u1", url: "https://hooks.example/x", secret: "whsec_plain", events: ["document.replaced"], active: true, created_at: "" }];
@@ -42,7 +42,7 @@ vi.mock("../lib/network-security.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  getWorkspaceAccess: vi.fn(async (workspaceId: string) => (state.access ? { workspaceId } : null)),
+  getProjectAccess: vi.fn(async (projectId: string) => (state.access ? { projectId } : null)),
 }));
 
 const { drainWebhookOutbox } = await import("../services/webhooks.js");
@@ -52,30 +52,30 @@ describe("webhook outbox", () => {
     state.outbox = [];
     state.dispatched = [];
     state.requests = [];
-    state.workspacePipeline = null;
+    state.projectPipeline = null;
     state.access = true;
   });
 
-  it("stops delivering a workspace's events once the subscriber lost access to it (G-06)", async () => {
+  it("stops delivering a project's events once the subscriber lost access to it (G-06)", async () => {
     state.access = false;
-    state.outbox = [{ id: "ob-4", user_id: "u1", event_type: "document.replaced", payload: { workspaceId: "w" } }];
+    state.outbox = [{ id: "ob-4", user_id: "u1", event_type: "document.replaced", payload: { projectId: "w" } }];
     expect(await drainWebhookOutbox()).toBe(1);
     expect(state.requests).toHaveLength(0);
-    expect(state.dispatched).toEqual([{ id: "ob-4", error: "Skipped: subscriber no longer has access to this workspace" }]);
+    expect(state.dispatched).toEqual([{ id: "ob-4", error: "Skipped: subscriber no longer has access to this project" }]);
   });
 
-  it("skips events from a workspace that turned webhook notifications off", async () => {
-    state.workspacePipeline = { webhooks: { enabled: false, events: [] } };
-    state.outbox = [{ id: "ob-2", user_id: "u1", event_type: "document.replaced", payload: { workspaceId: "w" } }];
+  it("skips events from a project that turned webhook notifications off", async () => {
+    state.projectPipeline = { webhooks: { enabled: false, events: [] } };
+    state.outbox = [{ id: "ob-2", user_id: "u1", event_type: "document.replaced", payload: { projectId: "w" } }];
 
     expect(await drainWebhookOutbox()).toBe(1);
     expect(state.requests).toEqual([]);
-    expect(state.dispatched).toEqual([{ id: "ob-2", error: "Skipped: webhook notifications are off for this workspace" }]);
+    expect(state.dispatched).toEqual([{ id: "ob-2", error: "Skipped: webhook notifications are off for this project" }]);
   });
 
-  it("skips events the workspace did not select", async () => {
-    state.workspacePipeline = { webhooks: { enabled: true, events: ["run.failed"] } };
-    state.outbox = [{ id: "ob-3", user_id: "u1", event_type: "document.replaced", payload: { workspaceId: "w" } }];
+  it("skips events the project did not select", async () => {
+    state.projectPipeline = { webhooks: { enabled: true, events: ["run.failed"] } };
+    state.outbox = [{ id: "ob-3", user_id: "u1", event_type: "document.replaced", payload: { projectId: "w" } }];
 
     await drainWebhookOutbox();
     expect(state.requests).toEqual([]);
@@ -86,7 +86,7 @@ describe("webhook outbox", () => {
       id: "ob-1",
       user_id: "u1",
       event_type: "document.replaced",
-      payload: { workspaceId: "w", documentId: "v2", canonicalId: "/products", replacedDocumentIds: ["v1"] },
+      payload: { projectId: "w", documentId: "v2", canonicalId: "/products", replacedDocumentIds: ["v1"] },
     }];
 
     expect(await drainWebhookOutbox()).toBe(1);

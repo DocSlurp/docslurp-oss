@@ -27,10 +27,10 @@ export function normalizeSourcePath(path: string): string {
 
 /**
  * Identity of a document across re-uploads: the connector's `canonicalId` when given, else a hash of the
- * workspace, normalized folder and normalized filename. The same filename in two folders gets two keys.
+ * project, normalized folder and normalized filename. The same filename in two folders gets two keys.
  */
 export function documentVersionKey(args: {
-  workspaceId: string;
+  projectId: string;
   path: string;
   filename: string;
   canonicalId?: string | null;
@@ -38,21 +38,21 @@ export function documentVersionKey(args: {
   if (args.canonicalId) return args.canonicalId;
   const path = normalizeSourcePath(args.path);
   const name = normalizeSourcePath(args.filename);
-  return `path:${sha256Hex(`${args.workspaceId}\n${path}/${name}`).slice(0, 32)}`;
+  return `path:${sha256Hex(`${args.projectId}\n${path}/${name}`).slice(0, 32)}`;
 }
 
-/** Versions kept per document chain when neither the workspace nor the org overrides it. */
+/** Versions kept per document chain when neither the project nor the org overrides it. */
 export const DEFAULT_RETAINED_VERSIONS = 2;
 
 /**
- * Versions kept per document: workspace override, then org setting, then DEFAULT_RETAINED_VERSIONS. The same for
+ * Versions kept per document: project override, then org setting, then DEFAULT_RETAINED_VERSIONS. The same for
  * every org: storage is billed per GB, so retention is not gated by funding.
  */
 export function effectiveRetainedVersions(args: {
   orgSetting: number | null;
-  workspaceSetting: number | null;
+  projectSetting: number | null;
 }): number {
-  const raw = args.workspaceSetting ?? args.orgSetting ?? DEFAULT_RETAINED_VERSIONS;
+  const raw = args.projectSetting ?? args.orgSetting ?? DEFAULT_RETAINED_VERSIONS;
   const whole = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_RETAINED_VERSIONS;
   return Math.min(MAX_RETAINED_VERSIONS, Math.max(MIN_RETAINED_VERSIONS, whole));
 }
