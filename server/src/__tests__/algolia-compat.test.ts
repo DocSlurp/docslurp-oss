@@ -248,11 +248,11 @@ describe("algolia compat", () => {
       results: Array.from({ length: 30 }, (_, index) => makeResult(index)),
     });
     try {
-      const page = (n: number, query = "alpha") => app.request("/compat/algolia/1/indexes/ws-1/query", {
+      const page = async (n: number, query = "alpha") => (await app.request("/compat/algolia/1/indexes/ws-1/query", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
         body: JSON.stringify({ query, hitsPerPage: 10, page: n }),
-      }).then((response) => response.json());
+      })).json();
       const first = await page(0);
       const second = await page(1);
       const third = await page(2);
