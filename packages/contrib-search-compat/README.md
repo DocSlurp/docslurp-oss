@@ -11,7 +11,7 @@ Keep your existing search calls and get DocSlurp results with citations. One pac
 | `@docslurp/contrib-search-compat/typesense` | Typesense | `createDocSlurpTypesenseClient()` |
 | `@docslurp/contrib-search-compat/pagefind` | Pagefind | `createDocSlurpPagefind()` |
 
-Requires `@docslurp/sdk` 0.3.0 or newer. The Meilisearch, Typesense and Pagefind subpaths are the same adapters you can import from `@docslurp/sdk/search-adapters`. In the browser, pass a browser key as `clientKey`. Workspace references (`indexName`, `index(...)`, `collections(...)`, `workspace`) accept a workspace ID, slug or `default`; the `workspace` option also accepts a name.
+Requires `@docslurp/sdk` 0.4.0 or newer. The Meilisearch, Typesense and Pagefind subpaths are the same adapters you can import from `@docslurp/sdk/search-adapters`. In the browser, pass a browser key as `clientKey`. Workspace references (`indexName`, `index(...)`, `collections(...)`, `workspace`) accept a workspace ID, slug or `default`; the `workspace` option also accepts a name.
 
 Renamed from `@docslurp/compat-algolia`, `@docslurp/compat-meilisearch`, `@docslurp/compat-typesense` and `@docslurp/compat-pagefind`; see [`docs/releases.md`](https://github.com/DocSlurp/docslurp-oss/blob/main/docs/releases.md) for the migration.
 

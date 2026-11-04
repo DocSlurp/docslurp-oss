@@ -1,6 +1,6 @@
 {
   "name": "@docslurp/cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Command-line client for DocSlurp document ingestion and cited search.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://docslurp.io/docs/packages/cli",
