@@ -478,4 +478,128 @@ describe("algolia compat", () => {
     expect(res.status).toBe(404);
     expect(sqlMock).not.toHaveBeenCalled();
   });
+
+  describe("strict filter translation", () => {
+    const search = (body: Record<string, unknown>) => app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "alpha", ...body })
+    });
+
+    it.each([
+      [{ filters: "tags:finance" }, { tags: ["finance"] }],
+      [{ filters: "tag:finance AND mime_type:application/pdf" }, { tags: ["finance"], mimeTypes: ["application/pdf"] }],
+      [{ filters: "mimeType:text/plain" }, { mimeTypes: ["text/plain"] }],
+      [{ filters: 'filename:"Q3 AND Q4 report.pdf"' }, { filenameContains: "Q3 AND Q4 report.pdf" }],
+      [{ filters: "filenameContains:report" }, { filenameContains: "report" }],
+      [{ filters: "language:en and heading:Intro/Scope" }, { language: "en", headingPath: ["Intro", "Scope"] }],
+      [{ filters: "documentId:doc-1 AND runId:run-1" }, { documentId: "doc-1", runId: "run-1" }],
+      [{ filters: "(tags:a OR tags:b) AND language:en" }, { tags: ["a", "b"], language: "en" }],
+      [{ filters: "tags:a OR tags:b" }, { tags: ["a", "b"] }],
+      [{ filters: 'tags:"a,b"' }, { tags: ["a,b"] }],
+      [{ filters: "page > 2 AND page:1 TO 10" }, { pageRange: { from: 3, to: 10 } }],
+      [{ filters: "" }, {}],
+      [{ facetFilters: [["tags:a", "tags:b"], "language:en"] }, { tags: ["a", "b"], language: "en" }],
+      [{ facetFilters: ["tags:\\-draft"] }, { tags: ["-draft"] }],
+      [{ facetFilters: "documentId:doc-9" }, { documentId: "doc-9" }],
+      [{ facetFilters: ["tags:a"], filters: "tags:a" }, { tags: ["a"] }],
+      [{ numericFilters: ["page>=2", "page<5"] }, { pageRange: { from: 2, to: 4 } }],
+      [{ numericFilters: [["page_number=7"]] }, { pageRange: { from: 7, to: 7 } }],
+      [{ numericFilters: "pageNumber <= 3" }, { pageRange: { from: undefined, to: 3 } }],
+      [{ tagFilters: [], aroundLatLngViaIP: false, optionalFilters: ["tags:x"] }, {}]
+    ])("applies supported filters %j", async (body, expected) => {
+      const res = await search(body);
+      expect(res.status).toBe(200);
+      const filters = hybridSearchMock.mock.calls[0]![2].filters;
+      expect(filters).toEqual({ workspaceId: "ws-1", ...expected });
+    });
+
+    it.each([
+      [{ filters: "brand:acme" }, /Unsupported filter attribute "brand"/],
+      [{ facetFilters: ["owner:user-1"] }, /Unsupported filter attribute "owner"/],
+      [{ filters: "constructor:x" }, /Unsupported filter attribute "constructor"/],
+      [{ facetFilters: ["__proto__:x"] }, /Unsupported filter attribute "__proto__"/],
+      [{ facetFilters: [["tags:a", "language:en"]] }, /OR is only supported between values of one tags or mime_type/],
+      [{ filters: "language:en OR language:fr" }, /OR is only supported/],
+      [{ filters: "tags:a AND tags:b" }, /tags may appear in only one AND clause/],
+      [{ facetFilters: ["documentId:a", "documentId:b"] }, /documentId may only be filtered by one value/],
+      [{ filters: "language:en AND tags:a OR tags:b" }, /combine AND and OR with parentheses/],
+      [{ filters: "NOT tags:secret" }, /NOT/],
+      [{ filters: "tags:a AND NOT documentId:x" }, /NOT/],
+      [{ facetFilters: ["tags:-secret"] }, /negation is not supported/],
+      [{ filters: "(tags:a AND tags:b)" }, /AND inside parentheses/],
+      [{ filters: "((tags:a))" }, /expected a clause/],
+      [{ filters: "tags:a tags:b" }, /quote values that contain spaces/],
+      [{ filters: 'tags:"unterminated' }, /unterminated quote/],
+      [{ filters: "tags:" }, /empty value/],
+      [{ filters: "tags:a AND" }, /expected a clause/],
+      [{ filters: "tags:a)" }, /unexpected/],
+      [{ filters: "secret" }, /expected attribute:value/],
+      [{ numericFilters: ["price>10"] }, /Unsupported numeric filter attribute "price"/],
+      [{ filters: "price > 10" }, /Unsupported numeric filter attribute "price"/],
+      [{ numericFilters: ["page!=3"] }, /Unsupported numeric operator "!="/],
+      [{ numericFilters: [["page=1", "page=3"]] }, /cannot be combined with OR/],
+      [{ numericFilters: ["page>=x"] }, /must be integers/],
+      [{ numericFilters: ["tags:a"] }, /Only page supports numeric filters/],
+      [{ facetFilters: [123] }, /every clause must be a string/],
+      [{ facetFilters: { tags: "a" } }, /expected an array/],
+      [{ facetFilters: [[]] }, /must not be empty/],
+      [{ facetFilters: "tags:a,tags:b" }, /legacy comma syntax/],
+      [{ tagFilters: ["finance"] }, /tagFilters is not supported/],
+      [{ aroundLatLng: "40.7,-74" }, /aroundLatLng is not supported/],
+      [{ insideBoundingBox: [[1, 2, 3, 4]] }, /insideBoundingBox is not supported/],
+      [{ restrictSearchableAttributes: ["filename"] }, /restrictSearchableAttributes is not supported/],
+      [{ params: "filters=tags%3Aa" }, /params string is not supported/]
+    ])("rejects %j with 400 before retrieval", async (body, message) => {
+      const res = await search(body);
+      expect(res.status).toBe(400);
+      const payload = await res.json();
+      expect(payload).toMatchObject({ code: "UNSUPPORTED_SEARCH_OPTION", status: 400 });
+      expect(payload.message).toMatch(message);
+      expect(payload.error).toBe(payload.message);
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+      expect(getWorkspaceSearchSettingsMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects the whole batch when any request has an unsupported filter", async () => {
+      const res = await app.request("/compat/algolia/1/indexes/*/queries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ requests: [
+          { indexName: "ws-1", query: "alpha", filters: "tags:finance" },
+          { indexName: "ws-1", query: "beta", filters: "NOT tags:secret" }
+        ] })
+      });
+      expect(res.status).toBe(400);
+      const payload = await res.json();
+      expect(payload.code).toBe("UNSUPPORTED_SEARCH_OPTION");
+      expect(payload.message).toMatch(/^requests\[1\]: .*NOT/);
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+
+    it("applies each request's filters in a valid batch", async () => {
+      const res = await app.request("/compat/algolia/1/indexes/*/queries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ requests: [
+          { indexName: "ws-1", query: "alpha", filters: "tags:finance" },
+          { indexName: "ws-1", query: "beta", numericFilters: ["page<=2"] }
+        ] })
+      });
+      expect(res.status).toBe(200);
+      expect(hybridSearchMock.mock.calls[0]![2].filters).toEqual({ workspaceId: "ws-1", tags: ["finance"] });
+      expect(hybridSearchMock.mock.calls[1]![2].filters).toEqual({ workspaceId: "ws-1", pageRange: { from: undefined, to: 2 } });
+    });
+
+    it("rejects unsupported filters on facet value search before retrieval", async () => {
+      const res = await app.request("/compat/algolia/1/indexes/ws-1/facets/filename/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ facetQuery: "a", facetFilters: ["owner:user-1"], tagFilters: ["x"] })
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("UNSUPPORTED_SEARCH_OPTION");
+      expect(hybridSearchMock).not.toHaveBeenCalled();
+    });
+  });
 });

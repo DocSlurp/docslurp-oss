@@ -81,9 +81,30 @@ function transport(options: SearchAdapterOptions) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   return async <T>(path: string, body: unknown): Promise<T> => {
     const response = await fetchImpl(`${options.apiUrl.replace(/\/$/, "")}${path}`, { method: "POST", signal: AbortSignal.timeout(30_000), headers: { Authorization: `Bearer ${options.clientKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    if (!response.ok) throw new Error(`DocSlurp search failed (${response.status}): ${await response.text()}`);
+    if (!response.ok) {
+      const text = await response.text();
+      const unsupported = unsupportedSearchOptionMessage(response.status, text);
+      if (unsupported) throw new SearchCompatibilityError(unsupported);
+      throw new Error(`DocSlurp search failed (${response.status}): ${text}`);
+    }
     return response.json() as Promise<T>;
   };
+}
+/**
+ * The server rejects options it cannot apply (for example an unsupported Algolia
+ * filter clause) with HTTP 400 and code UNSUPPORTED_SEARCH_OPTION. Return that
+ * message so callers can tell an unsupported option from a transport failure.
+ */
+export function unsupportedSearchOptionMessage(status: number, body: string): string | null {
+  if (status !== 400) return null;
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown; error?: unknown; message?: unknown };
+    if (parsed?.code !== "UNSUPPORTED_SEARCH_OPTION") return null;
+    const message = typeof parsed.message === "string" ? parsed.message : parsed.error;
+    return typeof message === "string" && message ? message : "Unsupported search option.";
+  } catch {
+    return null;
+  }
 }
 export type AdapterResponse = Awaited<ReturnType<typeof runSearchAdapter>>;
 export type MeilisearchSearchResponse = Extract<AdapterResponse, { query: string }>;

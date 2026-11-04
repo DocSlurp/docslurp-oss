@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { adapterQuery, runSearchAdapter, createDocSlurpPagefind, createDocSlurpMeilisearchClient, createDocSlurpTypesenseClient, createDocSlurpAlgoliaClient } from '../dist/search-adapters.js';
+import { adapterQuery, runSearchAdapter, createDocSlurpPagefind, createDocSlurpMeilisearchClient, createDocSlurpTypesenseClient, createDocSlurpAlgoliaClient, SearchCompatibilityError } from '../dist/search-adapters.js';
 const hits = Array.from({length: 32}, (_, i) => ({ text: `<script>unsafe ${i}</script>`, score: 1, citation: { source: 'document', documentId: `doc-${i}`, filename: 'Guide', chunkIndex: i, pageNumbers: [1], headingPath: [], blockIds: [] } }));
 const response = { results: hits, sessionId: 'session', availability: null, usage: {inputTokens: 1} };
 test('Meilisearch pagination maps ranked passages and keeps bounded counts explicit', async () => {
@@ -66,4 +66,13 @@ test('HTTP errors propagate and invalid batch options never send a request', asy
     await assert.rejects(client.multiSearch.perform(body));
   }
   assert.equal(calls, 1);
+});
+test('unsupported search options rejected by the server surface as SearchCompatibilityError', async () => {
+  const rejected = {code: 'UNSUPPORTED_SEARCH_OPTION', error: 'requests[0]: Unsupported filter operator NOT in "NOT tags:secret": negation is not supported.', message: 'requests[0]: Unsupported filter operator NOT in "NOT tags:secret": negation is not supported.', status: 400};
+  const client = createDocSlurpAlgoliaClient({apiUrl: 'https://example.test', clientKey: 'key', fetch: async () => Response.json(rejected, {status: 400})});
+  for (const call of [() => client.searchSingleIndex({indexName: 'ws', searchParams: {query: 'q', filters: 'NOT tags:secret'}}), () => client.search({requests: [{indexName: 'ws', query: 'q', filters: 'NOT tags:secret'}]})]) {
+    await assert.rejects(call(), error => error instanceof SearchCompatibilityError && error.code === 'UNSUPPORTED_SEARCH_OPTION' && /NOT/.test(error.message));
+  }
+  const plain = createDocSlurpAlgoliaClient({apiUrl: 'https://example.test', clientKey: 'key', fetch: async () => new Response('bad gateway', {status: 502})});
+  await assert.rejects(plain.searchSingleIndex({indexName: 'ws', searchParams: {query: 'q'}}), error => !(error instanceof SearchCompatibilityError) && /502/.test(error.message));
 });

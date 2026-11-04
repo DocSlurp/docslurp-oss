@@ -1,3 +1,7 @@
+import { SearchCompatibilityError, unsupportedSearchOptionMessage } from "@docslurp/sdk/search-adapters";
+
+export { SearchCompatibilityError };
+
 export type AlgoliaSearchRequest = {
   query: string;
   page?: number;
@@ -121,6 +125,9 @@ export function docslurpAlgoliaClient(opts: DocSlurpAlgoliaClientOptions) {
     });
     if (!res.ok) {
       const text = await res.text();
+      // Unsupported filters and options are rejected with HTTP 400 rather than ignored.
+      const unsupported = unsupportedSearchOptionMessage(res.status, text);
+      if (unsupported) throw new SearchCompatibilityError(unsupported);
       throw new Error(`DocSlurp Algolia-compat request failed: ${res.status} ${text}`);
     }
     return await res.json() as T;
