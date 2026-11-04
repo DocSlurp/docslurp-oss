@@ -374,7 +374,7 @@ export async function listRunsPage(userId: string, args: { orgId?: string | null
   const limit = args.limit ?? 50;
   const workspaceIds = await listAccessibleWorkspaceIds(userId);
   if (workspaceIds.length === 0) return { runs: [], hasMore: false, nextCursor: null };
-  const after = args.cursor ? decodeListCursor<{ priority: number; createdAt: string; id: string }>("runs", args.cursor, { priority: "number", createdAt: "string", id: "string" }) : null;
+  const after = args.cursor ? decodeListCursor<{ priority: number; createdAt: string; id: string }>("runs", args.cursor, { priority: "int", createdAt: "timestamp", id: "string" }) : null;
   const rows = await sql<(WorkspaceRunRow & { cursor_created_at: string })[]>`
     select
       runs.*,

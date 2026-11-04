@@ -98,7 +98,14 @@ describe("documents", () => {
   it("refuses a cursor that is not a documents cursor", async () => {
     await expect(documents.listDocumentsWithFilters({ userId: "alice", cursor: encodeListCursor("runs", { priority: 0, createdAt: "x", id: "y" }) })).rejects.toBeInstanceOf(InvalidListCursorError);
     await expect(documents.listDocumentsWithFilters({ userId: "alice", cursor: "garbage" })).rejects.toBeInstanceOf(InvalidListCursorError);
-    await expect(documents.listDocumentsWithFilters({ userId: "alice", cursor: encodeListCursor("documents", { createdAt: "not a time", id: "y" }) })).rejects.toBeDefined();
+    await expect(documents.listDocumentsWithFilters({ userId: "alice", cursor: encodeListCursor("documents", { createdAt: "not a time", id: "y" }) })).rejects.toBeInstanceOf(InvalidListCursorError);
+    // Values that parse as strings and numbers but would fail the query's cast are a 400 too, not a 500.
+    for (const createdAt of ["2026-13-45 00:00:00+00", "2026-02-30T00:00:00Z", "2026-11-04'; drop table documents; --", "2026-11-04T25:00:00Z"]) {
+      await expect(documents.listDocumentsWithFilters({ userId: "alice", cursor: encodeListCursor("documents", { createdAt, id: "y" }) })).rejects.toBeInstanceOf(InvalidListCursorError);
+    }
+    for (const priority of [1.5, 1e20, -1e10]) {
+      await expect(runs.listRunsPage("alice", { cursor: encodeListCursor("runs", { priority, createdAt: "2026-11-04 00:00:00+00", id: "y" }) })).rejects.toBeInstanceOf(InvalidListCursorError);
+    }
   });
 });
 

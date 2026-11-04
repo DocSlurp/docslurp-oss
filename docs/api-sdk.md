@@ -259,7 +259,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Grounded chat over SSE | `GET /v1/chat/stream` | `chatStream` | Use SDK/HTTP |
 | OpenAI-compatible chat | `POST /v1/chat/completions`, `GET /v1/models` ([chat](https://docslurp.io/docs/chat)) | Use an OpenAI SDK | Use HTTP |
-| List documents (paged: `limit` 1-250, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/documents` | `listDocumentsPage`, `iterateDocuments`, `listDocuments` (all pages) | Use SDK/HTTP |
+| List documents (paged: `limit` 1-250, default 250, `cursor`; always returns `hasMore` and `nextCursor`, so a client that reads only `documents` sees one page and must follow `nextCursor` while `hasMore` is true; a malformed `cursor` is a 400) | `GET /v1/documents` | `listDocumentsPage`, `iterateDocuments`, `listDocuments` (all pages) | Use SDK/HTTP |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | Read structured fields | `GET /v1/documents/:id/structured` | Use HTTP | Use HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |

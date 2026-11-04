@@ -843,7 +843,7 @@ export async function listDocumentsWithFilters(args: {
   }
 
   if (args.cursor) {
-    const after = decodeListCursor<{ createdAt: string; id: string }>("documents", args.cursor, { createdAt: "string", id: "string" });
+    const after = decodeListCursor<{ createdAt: string; id: string }>("documents", args.cursor, { createdAt: "timestamp", id: "string" });
     conditions.push(sql`(d.created_at, d.id) < (${after.createdAt}::timestamptz, ${after.id})`);
   }
 
