@@ -1,5 +1,4 @@
-import { realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
-import path from "node:path";
+import { MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 
 import {
   defaultPipelineFeatures,
@@ -1590,37 +1589,7 @@ export function inferMimeType(url: string, headerValue: string | null): string {
     return headerValue.split(";")[0]!.trim();
   }
 
-  const ext = path.extname(new URL(url).pathname).toLowerCase();
-  switch (ext) {
-    case ".pdf":
-      return "application/pdf";
-    case ".md":
-      return "text/markdown";
-    case ".txt":
-      return "text/plain";
-    case ".csv":
-      return "text/csv";
-    case ".json":
-      return "application/json";
-    case ".jsonl":
-      return "application/x-ndjson";
-    case ".html":
-    case ".htm":
-      return "text/html";
-    case ".docx":
-      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    case ".xlsx":
-      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-    case ".pptx":
-      return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    default:
-      return "application/octet-stream";
-  }
+  return MIME_BY_EXTENSION[fileExtension(new URL(url).pathname)] ?? "application/octet-stream";
 }
 
 
