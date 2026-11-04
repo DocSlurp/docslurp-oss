@@ -14,6 +14,8 @@ import { getWorkspaceAccess } from "./organizations.js";
 type WebhookRow = {
   id: string;
   user_id: string;
+  org_id: string;
+  workspace_id: string | null;
   url: string;
   secret: string;
   events: string[];
@@ -38,7 +40,12 @@ type WebhookDeliveryRow = {
 
 export interface Webhook {
   id: string;
+  /** Who created it. Management stays with the creator; delivery is keyed to the organization. */
   userId: string;
+  /** The organization whose run events it receives, whoever started the run. */
+  orgId: string;
+  /** Set when it only receives one workspace's events; null for every workspace of the organization. */
+  workspaceId: string | null;
   url: string;
   events: string[];
   active: boolean;
@@ -64,6 +71,8 @@ function mapWebhook(row: WebhookRow): Webhook {
   return {
     id: row.id,
     userId: row.user_id,
+    orgId: row.org_id,
+    workspaceId: row.workspace_id,
     url: row.url,
     events: row.events,
     active: row.active,
@@ -90,7 +99,7 @@ function mapWebhookDelivery(row: WebhookDeliveryRow): WebhookDelivery {
 
 async function getWebhookRow(webhookId: string, userId: string): Promise<WebhookRow | null> {
   const [row] = await sql<WebhookRow[]>`
-    select id, user_id, url, secret, events, active, created_at::text
+    select id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text
     from webhooks
     where id = ${webhookId} and user_id = ${userId}
     limit 1
@@ -266,21 +275,41 @@ export async function dispatchWebhook(args: {
   });
 }
 
+export class WebhookScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebhookScopeError";
+  }
+}
+
 export async function createWebhook(args: {
   userId: string;
+  /** The organization it receives events for. The creator must belong to it. */
+  orgId: string;
+  /** Optionally narrow it to one workspace of that organization the creator can read. */
+  workspaceId?: string | null;
   url: string;
   secret: string;
   events?: string[];
 }): Promise<Webhook & { secret: string }> {
   const id = randomUUID();
   const events = args.events ?? ["run.completed", "run.failed"];
+  // Scope first: who may register a webhook for which tenant is decided before anything else is touched.
+  const [member] = await sql<{ one: number }[]>`
+    select 1 as one from org_memberships where org_id = ${args.orgId} and user_id = ${args.userId}
+  `;
+  if (!member) throw new WebhookScopeError("Organization not found");
+  if (args.workspaceId) {
+    const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+    if (!access || access.orgId !== args.orgId) throw new WebhookScopeError("Workspace not found");
+  }
   const safeUrl = await assertSafeExternalUrl(args.url);
   const encryptedSecret = encryptWebhookSecret(args.secret);
 
   const [row] = await sql<WebhookRow[]>`
-    insert into webhooks (id, user_id, url, secret, events)
-    values (${id}, ${args.userId}, ${safeUrl}, ${encryptedSecret}, ${sql.array(events)})
-    returning id, user_id, url, secret, events, active, created_at::text
+    insert into webhooks (id, user_id, org_id, workspace_id, url, secret, events)
+    values (${id}, ${args.userId}, ${args.orgId}, ${args.workspaceId ?? null}, ${safeUrl}, ${encryptedSecret}, ${sql.array(events)})
+    returning id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text
   `;
 
   const webhook = mapWebhook(row);
@@ -289,7 +318,7 @@ export async function createWebhook(args: {
 
 export async function listWebhooks(userId: string): Promise<Webhook[]> {
   const rows = await sql<WebhookRow[]>`
-    select id, user_id, url, secret, events, active, created_at::text
+    select id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text
     from webhooks
     where user_id = ${userId}
     order by created_at desc
@@ -352,7 +381,7 @@ export async function updateWebhook(args: {
       events = coalesce(${args.events ? sql.array(args.events) : null}, events),
       active = coalesce(${args.active ?? null}, active)
     where id = ${args.webhookId} and user_id = ${args.userId}
-    returning id, user_id, url, secret, events, active, created_at::text
+    returning id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text
   `;
 
   return row ? mapWebhook(row) : null;
@@ -365,7 +394,7 @@ export async function rotateWebhookSecret(webhookId: string, userId: string): Pr
     update webhooks
     set secret = ${encryptedSecret}
     where id = ${webhookId} and user_id = ${userId}
-    returning id, user_id, url, secret, events, active, created_at::text
+    returning id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text
   `;
 
   if (!row) {
@@ -434,12 +463,19 @@ export async function replayWebhookDelivery(deliveryId: string, userId: string):
   });
 }
 
+/**
+ * Sends a run's event to the webhooks of the organization the run belongs to (and of
+ * the run's workspace, for workspace-scoped ones), whoever started the run. A webhook
+ * only receives events from workspaces its creator can still read (G-06); other
+ * organizations' webhooks never match.
+ */
 export async function deliverWebhook(runId: string, eventType: string): Promise<void> {
-  const rows = await sql<(WebhookRow & { run_id: string; workspace_id: string })[]>`
+  const rows = await sql<(WebhookRow & { run_id: string })[]>`
     select
-      r.workspace_id,
       w.id,
       w.user_id,
+      w.org_id,
+      w.workspace_id,
       w.url,
       w.secret,
       w.events,
@@ -447,15 +483,15 @@ export async function deliverWebhook(runId: string, eventType: string): Promise<
       w.created_at::text,
       r.id as run_id
     from webhooks w
-    join workspace_runs r on r.user_id = w.user_id
+    join workspace_runs r on r.org_id = w.org_id
     where r.id = ${runId}
       and w.active = true
       and ${eventType} = any(w.events)
+      and (w.workspace_id is null or w.workspace_id = r.workspace_id)
+      and docslurp_workspace_access(r.workspace_id, w.user_id)
   `;
 
   for (const row of rows) {
-    // Only while the subscriber can still read the run's workspace (G-06).
-    if (!(await getWorkspaceAccess(row.workspace_id, row.user_id))) continue;
     await dispatchWebhook({
       webhook: row,
       eventType,
@@ -503,44 +539,52 @@ export async function drainWebhookOutbox(limit = 25): Promise<number> {
   `;
 
   for (const event of claimed) {
-    // Webhooks belong to a user, not an org. Deliver a workspace's events only
-    // while the subscriber can still read that workspace, so leaving or being
-    // removed from an organization (G-06) stops its events.
-    const payloadWorkspaceId = typeof (event.payload as { workspaceId?: unknown } | null)?.workspaceId === "string"
-      ? (event.payload as { workspaceId: string }).workspaceId
-      : null;
-    if (payloadWorkspaceId && !(await getWorkspaceAccess(payloadWorkspaceId, event.user_id))) {
+    const skip = async (reason: string) => {
       await sql`
         update webhook_outbox
-        set dispatched_at = now(), last_error = ${"Skipped: subscriber no longer has access to this workspace"}
+        set dispatched_at = now(), last_error = ${reason}
         where id = ${event.id}
       `;
+    };
+    // Webhooks belong to an organization (and optionally one of its workspaces), not to
+    // the user who started the run. The event's workspace decides the organization; an
+    // event that names no workspace has no tenant and is never delivered.
+    const workspaceId = typeof event.payload?.workspaceId === "string" ? event.payload.workspaceId : null;
+    if (!workspaceId) {
+      await skip("Skipped: event has no workspace, so no organization to deliver it to");
+      continue;
+    }
+    const [workspace] = await sql<{ org_id: string; pipeline: Record<string, unknown> | null }[]>`
+      select org_id, pipeline from workspaces where id = ${workspaceId}
+    `;
+    if (!workspace) {
+      await skip("Skipped: the event's workspace no longer exists");
       continue;
     }
     // Workspaces can switch off (or narrow) the webhook events they emit.
-    const workspaceId = typeof event.payload?.workspaceId === "string" ? event.payload.workspaceId : null;
-    if (workspaceId) {
-      const [workspace] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
-        select pipeline from workspaces where id = ${workspaceId}
-      `;
-      if (workspace && !workspaceAllowsWebhookEvent(workspace.pipeline as Parameters<typeof workspaceAllowsWebhookEvent>[0], event.event_type)) {
-        await sql`
-          update webhook_outbox
-          set dispatched_at = now(), last_error = ${"Skipped: webhook notifications are off for this workspace"}
-          where id = ${event.id}
-        `;
-        continue;
-      }
+    if (!workspaceAllowsWebhookEvent(workspace.pipeline as Parameters<typeof workspaceAllowsWebhookEvent>[0], event.event_type)) {
+      await skip("Skipped: webhook notifications are off for this workspace");
+      continue;
     }
-    const webhooks = await sql<WebhookRow[]>`
-      select id, user_id, url, secret, events, active, created_at::text
+    // Only this organization's (or this workspace's) webhooks, and only while the webhook's
+    // creator can still read the workspace, so leaving or being removed from an organization
+    // (G-06) stops its events.
+    const webhooks = await sql<(WebhookRow & { can_read: boolean })[]>`
+      select id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text,
+        docslurp_workspace_access(${workspaceId}, user_id) as can_read
       from webhooks
-      where user_id = ${event.user_id}
+      where org_id = ${workspace.org_id}
+        and (workspace_id is null or workspace_id = ${workspaceId})
         and active = true
         and ${event.event_type} = any(events)
     `;
+    const readable = webhooks.filter((webhook) => webhook.can_read);
+    if (webhooks.length > 0 && readable.length === 0) {
+      await skip("Skipped: subscriber no longer has access to this workspace");
+      continue;
+    }
     const errors: string[] = [];
-    for (const webhook of webhooks) {
+    for (const webhook of readable) {
       const delivery = await dispatchWebhook({
         webhook,
         eventType: event.event_type,

@@ -335,13 +335,10 @@ export async function getOrganizationAccess(orgId: string, userId: string): Prom
 export async function getOrganizationDetails(orgId: string, userId: string): Promise<OrganizationDetails> {
   const organization = await getOrganization(orgId, userId);
   if (!organization) throw new OrganizationError(404, "organization_not_found", "Organization not found");
-  const elevated = organization.memberRole === "owner" || organization.memberRole === "admin";
   const [counts] = await sql<{ members: number; workspaces: number; owners: number }[]>`
     select (select count(*)::int from org_memberships where org_id = ${orgId}) as members,
       (select count(*)::int from org_memberships where org_id = ${orgId} and role = 'owner') as owners,
-      (select count(*)::int from workspaces w where w.org_id = ${orgId} and
-        (${elevated} or w.user_id = ${userId} or exists
-          (select 1 from workspace_members wm where wm.workspace_id = w.id and wm.user_id = ${userId}))) as workspaces`;
+      (select count(*)::int from workspaces w where w.org_id = ${orgId} and docslurp_workspace_access(w.id, ${userId})) as workspaces`;
   return { organization, access: { orgId, userId, role: organization.memberRole, capabilities: organizationCapabilities(organization.memberRole, organization.isPersonal, counts!.owners) }, counts: { members: counts!.members, workspaces: counts!.workspaces } };
 }
 
@@ -600,24 +597,16 @@ export async function removeOrganizationMember(args: { orgId: string; userId: st
 
 export async function listAccessibleWorkspaceIds(userId: string): Promise<string[]> {
   const rows = await sql<{ workspace_id: string }[]>`
-    with accessible as (
-      -- G-06: every team-org branch requires an org membership, so a removed
-      -- member keeps neither owned workspaces nor direct shares.
-      select w.id as workspace_id
-      from workspaces w
-      join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-      left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
-      where om.role in ('owner', 'admin') or w.is_default or w.user_id = ${userId} or wm.user_id is not null
-      union
-      -- Direct shares out of a personal org (its one member can't be removed).
-      select wm.workspace_id
-      from workspace_members wm
-      join workspaces w on w.id = wm.workspace_id
-      join organizations o on o.id = w.org_id and o.is_personal
-      where wm.user_id = ${userId}
-    )
-    select workspace_id
-    from accessible
+    -- The rule itself lives in docslurp_workspace_access (migration 0129). The
+    -- candidate filter only narrows the scan to workspaces in the user's orgs or
+    -- shared with them, which is a superset of what the function can grant.
+    select w.id as workspace_id
+    from workspaces w
+    where (
+        w.org_id in (select om.org_id from org_memberships om where om.user_id = ${userId})
+        or w.id in (select wm.workspace_id from workspace_members wm where wm.user_id = ${userId})
+      )
+      and docslurp_workspace_access(w.id, ${userId})
   `;
 
   return withinRequestKeyAllowlist(rows.map((row) => row.workspace_id));
@@ -689,10 +678,7 @@ async function workspaceAccessRow(workspaceId: string, userId: string, client: p
       on wm.workspace_id = w.id
       and wm.user_id = ${userId}
     where w.id = ${workspaceId}
-      and (
-        (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-        or (wm.user_id is not null and o.is_personal)
-      )
+      and docslurp_workspace_access(w.id, ${userId})
     limit 1
   `;
 

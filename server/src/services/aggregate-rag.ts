@@ -74,7 +74,10 @@ function apiKeyCanReadWorkspace(
   apiKey: ValidatedKey | null | undefined,
   workspace: WorkspaceRecord,
 ): boolean {
-  return !apiKey?.orgId || apiKeyCanUseWorkspace(apiKey, workspace);
+  // No key means a signed-in session, which getWorkspace/listWorkspaces already scoped to the user.
+  // A key must carry an org and allow this workspace; a key without an org reads nothing.
+  if (!apiKey) return true;
+  return apiKeyCanUseWorkspace(apiKey, workspace);
 }
 
 async function resolveAggregateWorkspaces(args: {

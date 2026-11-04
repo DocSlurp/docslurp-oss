@@ -86,7 +86,10 @@ export async function indexDocs(corpus, { apiUrl, workspace = 'DocSlurp document
   while (Date.now() < deadline) {
     const { run } = await request(`/v1/runs/${encodeURIComponent(result.run.id)}/progress`);
     if (run.status === 'completed') return { workspaceId: result.workspace.id, runId: run.id };
-    if (['failed', 'cancelled'].includes(run.status)) throw new Error(`Docs ingestion ${run.status}`);
+    // A run's status is queued, processing, completed or failed. Cancelled, dead-lettered and paused runs
+    // are reported by controlState, and a run paused for spend cannot resume while this build waits.
+    const stopped = run.status === 'failed' ? 'failed' : ['cancelled', 'dead-letter'].includes(run.controlState) ? run.controlState : run.controlState === 'paused' ? (run.pauseReason ? `paused (${run.pauseReason}); it resumes when the organization can spend, but this build does not wait` : 'paused') : null;
+    if (stopped) throw new Error(`Docs ingestion ${stopped}`);
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
   throw new Error('Docs indexing timed out after 10 minutes; inspect the run before retrying');

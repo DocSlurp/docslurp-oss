@@ -992,6 +992,10 @@ export const webhooks = pgTable(
   {
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
+    /** The organization whose runs this webhook receives, whoever started them. */
+    orgId: text("org_id").notNull(),
+    /** Narrows delivery to one workspace of that organization; null means all of them. */
+    workspaceId: text("workspace_id"),
     url: text().notNull(),
     secret: text().notNull(),
     events: text().array().default(["run.completed", "run.failed"]).notNull(),
@@ -1009,6 +1013,16 @@ export const webhooks = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "webhooks_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.orgId],
+      foreignColumns: [organizations.id],
+      name: "webhooks_org_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId],
+      foreignColumns: [workspaces.id],
+      name: "webhooks_workspace_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1288,7 +1302,7 @@ export const apiKeys = pgTable(
       .defaultNow()
       .notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
-    orgId: text("org_id"),
+    orgId: text("org_id").notNull(),
     materializationPolicy: jsonb("materialization_policy").default({}).notNull(),
   },
   (table) => [

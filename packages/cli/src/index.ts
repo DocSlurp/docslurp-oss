@@ -70,7 +70,7 @@ function usage(): void {
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
-  docslurp runs [--api-url <url>]
+  docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
   docslurp search <query> [--workspace <id|slug|name>] [--min-score <0..1>] [--json | --context]
   docslurp search --queries-file <queries.json> [--workspace <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--workspace <id|slug|name>] [--session <id>] [--json]
@@ -867,6 +867,18 @@ function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}m${String(secs).padStart(2, "0")}s` : `${secs}s`;
 }
 
+/** What a spend-paused run is waiting for, so "paused" is not read as stuck. */
+function spendPausedNote(run: { controlState?: string | null; pauseReason?: string | null }): string {
+  if (run.controlState !== "paused" || !run.pauseReason) return "";
+  const why: Record<string, string> = {
+    credit_exhausted: "out of credits; resumes after a top-up",
+    workspace_budget_paused: "workspace budget reached; resumes when it is raised",
+    org_budget_paused: "organization budget reached; resumes when it is raised",
+    plan_not_entitled: "not covered by the current plan",
+  };
+  return ` (${why[run.pauseReason] ?? run.pauseReason})`;
+}
+
 async function statusCommand(runId: string, flags: Record<string, string | boolean>): Promise<void> {
   const watch = flags.watch === true;
   const timeoutSeconds = Number(flags.timeout ?? 300);
@@ -891,6 +903,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         status: string;
         stage: string;
         controlState?: string | null;
+        pauseReason?: string | null;
         error?: string | null;
         totalDocuments: number;
         processedDocuments: number;
@@ -906,7 +919,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
     const lines = [
       `Run:       ${run.id}`,
-      `Status:    ${run.controlState ?? run.status}`,
+      `Status:    ${run.controlState ?? run.status}${spendPausedNote(run)}`,
       `Stage:     ${run.stage}`,
       `Documents: [${renderBar(run.processedDocuments, run.totalDocuments)}] ${run.processedDocuments}/${run.totalDocuments} (${docPct}%)`,
       `Pages:     [${renderBar(run.pagesProcessed, run.pagesTotal)}] ${run.pagesProcessed}/${run.pagesTotal} (${pagePct}%)`,
@@ -921,7 +934,9 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     process.stdout.write(output);
     lineCount = lines.length;
 
-    const stopped = ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
+    // A spend pause (credits, a budget, a plan) lifts by itself once the org can spend: keep watching it.
+    const spendPaused = run.controlState === "paused" && Boolean(run.pauseReason);
+    const stopped = !spendPaused && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
     const done = run.status === "completed" || run.status === "failed" || stopped;
     if (done) {
       const succeeded = run.status === "completed" && !stopped;
@@ -946,7 +961,12 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 }
 
 async function runsCommand(flags: Record<string, string | boolean>): Promise<void> {
-  const response = await apiFetch("/v1/runs", flags);
+  const params = new URLSearchParams();
+  for (const name of ["limit", "cursor"]) {
+    const value = flags[name];
+    if (typeof value === "string" && value) params.set(name, value);
+  }
+  const response = await apiFetch(`/v1/runs${params.size ? `?${params}` : ""}`, flags);
   if (!response.ok) {
     console.error(`Failed to list runs (${response.status})`);
     process.exitCode = 1;
@@ -961,6 +981,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       totalDocuments: number;
       createdAt: string;
     }>;
+    hasMore?: boolean;
+    nextCursor?: string | null;
   };
 
   if (data.runs.length === 0) {
@@ -974,6 +996,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       `${run.id}  ${run.status.padEnd(10)}  ${(run.stage ?? "-").padEnd(15)}  ${String(run.totalDocuments).padStart(4)}  ${run.createdAt}`
     );
   }
+  // A page is not the whole history: say so, and how to read the rest.
+  if (data.hasMore && data.nextCursor) console.log(`\nMore runs exist. Next page: docslurp runs --cursor ${data.nextCursor}`);
 }
 
 type CliSearchResponse = {

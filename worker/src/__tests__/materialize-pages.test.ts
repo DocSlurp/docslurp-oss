@@ -183,7 +183,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: LONG, 2: `${LONG} SSN 123-45-6789 is on file for this customer.` });
     const pipeline = {
       ...defaultPipelineFeatures,
-      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn"], action: "block_indexing" as const, allowlistPatterns: [] },
+      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "block_indexing" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
     expect(result.blocked).toEqual([2]);
@@ -200,7 +200,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: `${LONG} SSN 123-45-6789 on file.` });
     const pipeline = {
       ...defaultPipelineFeatures,
-      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn"], action: "redact_artifacts" as const, allowlistPatterns: [] },
+      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "redact_artifacts" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1], pipeline));
     expect(result.indexed).toEqual([1]);

@@ -489,6 +489,29 @@ describe("searchRoutes", () => {
       expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: undefined }));
     });
 
+    it("streams from a POST whose question is in the body, with the same grant and key checks", async () => {
+      const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
+      const app = buildApp(visitor());
+      const token = sealChatSessionToken({ keyId: "pub-1", workspaceId: "ws-chat", sessionId: session });
+      const foreign = sealChatSessionToken({ keyId: "pub-2", workspaceId: "ws-chat", sessionId: session });
+      const post = (body: unknown, headers: Record<string, string> = {}) => app.request("/chat/stream", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+      expect((await post({ q: "test", workspace: "ws-chat", sessionId: session }, { "X-DocSlurp-Chat-Session-Token": foreign })).status).toBe(403);
+      expect((await post("not an object")).status).toBe(400);
+      expect((await post({ workspace: "ws-chat" })).status).toBe(400);
+      expect(chatWorkspace).not.toHaveBeenCalled();
+      sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true, has_credit_grants: true }]);
+      chatWorkspace.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
+      const stream = await post({ q: "What is the late fee?", workspace: "ws-chat", sessionId: session }, { "X-DocSlurp-Chat-Session-Token": token });
+      expect(stream.status).toBe(200);
+      expect(await stream.text()).toContain("event: done");
+      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ query: "What is the late fee?", sessionId: session, sessionToken: token }));
+      // A browser key limited to ws-chat cannot stream another workspace through the body either.
+      chatWorkspace.mockClear();
+      const other = await post({ q: "test", workspace: "ws-other" });
+      expect(other.status).toBeGreaterThanOrEqual(400);
+      expect(chatWorkspace).not.toHaveBeenCalled();
+    });
+
     it("refuses a cookie-session GET stream started cross-site (top-level navigation)", async () => {
       const app = buildApp({ type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "" } });
       const crossSite = await app.request("/chat/stream?q=test&workspace=ws-chat", { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" } });

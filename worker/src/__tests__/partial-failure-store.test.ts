@@ -30,7 +30,7 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into webhooks(id, user_id, url, secret) values ('wh', 'u1', 'https://example.test/hook', 's');
+    insert into webhooks(id, user_id, org_id, url, secret) values ('wh', 'u1', 'o1', 'https://example.test/hook', 's');
   `);
   await seedRun("run-fail");
   await seedRun("run-ok");

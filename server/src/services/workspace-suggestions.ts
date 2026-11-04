@@ -39,11 +39,9 @@ export async function readWorkspaceSuggestions(userId: string, workspaceId: stri
       select d.filename as phrase, 5 as weight
       from documents d
       join workspaces w on w.id = d.workspace_id
-      left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-      left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
       where d.workspace_id = ${workspaceId}
         and d.status = 'completed' and d.superseded_at is null
-        and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+        and docslurp_workspace_access(w.id, ${userId})
         and d.filename ilike ${like}
       limit ${limit}
     ) x
@@ -89,10 +87,8 @@ export async function readWorkspaceSuggestions(userId: string, workspaceId: stri
       ), 0) as in_flight_documents
     from workspaces w
     left join workspace_corpus_stats cs on cs.workspace_id = w.id
-    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-    left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
     where w.id = ${workspaceId}
-      and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+      and docslurp_workspace_access(w.id, ${userId})
     limit 1
   `;
 
@@ -107,14 +103,12 @@ export async function readWorkspaceSuggestions(userId: string, workspaceId: stri
             from document_chunks c
             join documents d on d.id = c.document_id
             join workspaces w on w.id = d.workspace_id
-            left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-            left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
             cross join unnest(c.heading_path) as heading
             where d.workspace_id = ${workspaceId}
               and d.status = 'completed' and d.superseded_at is null
               and trim(both from heading) <> ''
               and char_length(trim(both from heading)) >= 4
-              and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+              and docslurp_workspace_access(w.id, ${userId})
           ) headings
           group by heading
           order by hits desc, heading asc
@@ -128,11 +122,9 @@ export async function readWorkspaceSuggestions(userId: string, workspaceId: stri
           select d.filename
           from documents d
           join workspaces w on w.id = d.workspace_id
-          left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-          left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
           where d.workspace_id = ${workspaceId}
             and d.status = 'completed' and d.superseded_at is null
-            and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+            and docslurp_workspace_access(w.id, ${userId})
           order by d.updated_at desc
           limit 3
         `

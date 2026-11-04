@@ -2047,7 +2047,7 @@ export class Store {
     }
   }
 
-  /** Inserts one outbox row per source row, only for users subscribed to the event, and wakes the API. */
+  /** Inserts one outbox row per source row, only when its workspace's organization has a webhook subscribed to the event, and wakes the API. */
   private async enqueueWebhookEvent(
     event: string,
     source: postgres.PendingQuery<postgres.Row[]>,
@@ -2061,8 +2061,13 @@ export class Store {
         select coalesce(${logicalId ?? null}::text, gen_random_uuid()::text), source.user_id, ${event}, source.payload
         from source
         where exists (
+          -- Webhooks belong to the workspace's organization (or to that one workspace), not to
+          -- the user who started the run, so a teammate's run reaches the team's webhook.
           select 1 from webhooks w
-          where w.user_id = source.user_id and w.active = true and ${event} = any(w.events)
+          join workspaces ws on ws.org_id = w.org_id
+          where ws.id = source.payload->>'workspaceId'
+            and (w.workspace_id is null or w.workspace_id = ws.id)
+            and w.active = true and ${event} = any(w.events)
         )
         returning id
       )

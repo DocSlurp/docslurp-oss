@@ -247,7 +247,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
 | Raw run/stage/document events | `GET /v1/runs/:runId/events/stream` | `streamRun` | Use SDK/HTTP |
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
-| List runs | `GET /v1/runs` | `listRuns` | `runs` |
+| List runs (paged: `limit` 1-100, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/runs` | `listRunsPage`, `iterateRuns`, `listRuns` (all pages) | `runs` |
 | Account activity (SSE) | `GET /v1/runs/activity/stream` | `streamActivity` | Use SDK/HTTP |
 | Workspace state | `GET /v1/workspaces/:workspace/state` | `getWorkspaceState` | Use SDK/HTTP |
 | Ingest report | `GET /v1/workspaces/:workspace/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
@@ -259,7 +259,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Grounded chat over SSE | `GET /v1/chat/stream` | `chatStream` | Use SDK/HTTP |
 | OpenAI-compatible chat | `POST /v1/chat/completions`, `GET /v1/models` ([chat](https://docslurp.io/docs/chat)) | Use an OpenAI SDK | Use HTTP |
-| List documents | `GET /v1/documents` | `listDocuments` | Use SDK/HTTP |
+| List documents (paged: `limit` 1-250, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/documents` | `listDocumentsPage`, `iterateDocuments`, `listDocuments` (all pages) | Use SDK/HTTP |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | Read structured fields | `GET /v1/documents/:id/structured` | Use HTTP | Use HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |

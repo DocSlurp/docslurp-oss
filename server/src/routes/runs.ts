@@ -9,7 +9,7 @@ import {
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
 
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, isPlatformAdminActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -22,6 +22,7 @@ import {
   getRun,
   getRunProcessingPreview,
   getRunProgress,
+  listRunsPage,
   isReprocessRejectedError,
   isRunCreationBlockedError,
   listenForRunEvents,
@@ -32,6 +33,7 @@ import {
 } from "../services/runs.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
@@ -108,9 +110,14 @@ export const runsRoutes = new Hono()
     if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    const runs = c.req.query("activity") === "true" ? await listRuns(userId, true) : await listRuns(userId);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
-    return c.json({ runs: orgId ? runs.filter((run) => run.orgId === orgId) : runs });
+    if (c.req.query("activity") === "true") {
+      const runs = await listRuns(userId, true);
+      return c.json({ runs: orgId ? runs.filter((run) => run.orgId === orgId) : runs, hasMore: false, nextCursor: null });
+    }
+    // History is paged: `limit` (1-100, default 50) and the `cursor` from the previous page's nextCursor.
+    const page = await listRunsPage(userId, { orgId, limit: parseListLimit(c.req.query("limit"), 50, 100), cursor: c.req.query("cursor") || undefined });
+    return c.json(page);
   })
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -168,7 +175,7 @@ export const runsRoutes = new Hono()
         return apiStatusError(c, 404, "Run not found");
       }
     }
-    const snapshot = await getRunProgress(c.req.param("runId"), userId);
+    const snapshot = await getRunProgress(c.req.param("runId"), userId, { operator: await isPlatformAdminActor(actor) });
 
     if (!snapshot) {
       return apiStatusError(c, 404, "Run not found");
@@ -187,13 +194,14 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 404, "Run not found");
     }
     c.header("X-Accel-Buffering", "no");
+    const operator = await isPlatformAdminActor(actor);
     const response = streamSSE(c, async stream => {
       await streamRunProgressSnapshots({
         stream,
         subscribe: invalidate => listenForRunEvents(event => { if (event.runId === runId) invalidate(); }, { runId }),
         snapshot: async () => {
           if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", "search", "artifacts"])) return null;
-          const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0 });
+          const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0, operator });
           if (!snapshot || !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor)) return null;
           return snapshot;
         },
@@ -240,6 +248,7 @@ export const runsRoutes = new Hono()
 
     c.header("Cache-Control", "no-cache");
     c.header("X-Accel-Buffering", "no");
+    const operator = await isPlatformAdminActor(actor);
 
     return streamSSE(c, async (stream) => {
       let aborted = stream.aborted;
@@ -247,7 +256,7 @@ export const runsRoutes = new Hono()
       const abortSignal = new Promise<void>(resolve => { resolveAbort = resolve; });
       stream.onAbort(() => { aborted = true; resolveAbort(); });
       async function authorizedSnapshot() {
-        const snapshot = await getRunProgress(runId, userId);
+        const snapshot = await getRunProgress(runId, userId, { operator });
         if (!snapshot || (actor.type === "apiKey" && !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor))) return null;
         return snapshot;
       }
