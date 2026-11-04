@@ -63,6 +63,8 @@ export interface CheckpointStore {
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
   /** Persists the pages the worker measured after conversion (documents.billing_pages), which completion billing and features read. */
   setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
+  /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
+  enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
   /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
   loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }

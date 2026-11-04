@@ -184,6 +184,39 @@ export async function enforceRunSpend(
 }
 
 /**
+ * The same check with a charge the run is about to owe: the run pauses when `credits` more would take the org's available balance
+ * below what a running job needs. For a charge admission could not see (a document measured at far more pages than intake
+ * counted). Never throws.
+ */
+export async function enforceRunSpendForCharge(
+  client: Client,
+  run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string },
+  credits: number,
+  trigger: "stage-boundary" | "page-interval" | "checkpoint-interval" = "stage-boundary",
+): Promise<SpendCheckResult> {
+  if (!spendCheckConfig().enabled || !run.orgId || !(credits > 0)) return { blocked: false, paused: false };
+  try {
+    const [row] = await client<{
+      funded: boolean | null;
+      available: string | number;
+      workspace_budget_paused: boolean;
+      org_budget_paused: boolean;
+      workspace_in_org: boolean;
+    }[]>`
+      select funded, available, workspace_budget_paused, org_budget_paused, workspace_in_org
+      from org_spend_status(${run.orgId}, ${run.workspaceId ?? null}::text, 0)
+    `;
+    const available = Number(row?.available ?? 0) - credits;
+    const reason = spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row);
+    if (!reason) return { blocked: false, paused: false };
+    return await pauseRunForSpend(client, run, reason, trigger, available);
+  } catch (error) {
+    console.error(`[spend-check] run=${run.id} charge check failed: ${error instanceof Error ? error.message : String(error)}`);
+    return { blocked: false, paused: false };
+  }
+}
+
+/**
  * Pause a run its org may no longer spend for: control_state = 'paused',
  * pause_reason, a run event with the reason, and the Temporal `pause` signal.
  * Shared by the cadence check and credit leases (credit-lease.ts).

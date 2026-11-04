@@ -1,7 +1,19 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { listZipEntryNames, pagesFromSize, textPageCount, workerCountedFormat, type WorkerCountedFormat } from "@docslurp/shared";
+import {
+  DOCUMENT_FEATURES,
+  estimateProfileFor,
+  featureCredits,
+  listZipEntryNames,
+  pageCredits,
+  pagesFromSize,
+  speedBoostMultiplier,
+  textPageCount,
+  workerCountedFormat,
+  type PipelineFeatures,
+  type WorkerCountedFormat,
+} from "@docslurp/shared";
 
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -190,13 +202,35 @@ export async function measureDocumentPages(deps: PageCountDeps, document: Docume
 }
 
 /**
+ * Credits a run newly owes once a document measures at `measuredPages` where admission priced `intakePages`: the Fast page fee on the
+ * extra pages, and each enabled per-page feature on them, times the speed boost. Zero when the count did not grow. Page reads by a model
+ * are not included (they bill as they happen).
+ */
+export function extraCreditsForMeasuredPages(pipeline: PipelineFeatures, intakePages: number, measuredPages: number): number {
+  const before = Math.max(1, intakePages);
+  if (!(measuredPages > before)) return 0;
+  const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
+  let credits = pageCredits("fast", measuredPages - before);
+  for (const feature of DOCUMENT_FEATURES) {
+    if (features[feature]) credits += featureCredits(feature, measuredPages) - featureCredits(feature, before);
+  }
+  return credits * speedBoostMultiplier(pipeline.speedBoost === true);
+}
+
+/**
  * Measures the document's pages and records them as `documents.billing_pages` (and on the in-memory document) before billing reads
  * them. The page basis (`page_count`, what the text splits into) is left alone: these formats' text has no page breaks, so
  * replacing it would make the page index drop every page. Best effort: when the count cannot be measured at all the document bills
  * its intake count and the stage reports why.
  */
 export async function recordMeasuredPageCount(
-  state: { run: { id: string }; store?: { setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> } | null },
+  state: {
+    run: { id: string; orgId?: string | null; userId?: string; workspaceId?: string; pipeline?: PipelineFeatures };
+    store?: {
+      setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
+      enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+    } | null;
+  },
   deps: PageCountDeps,
   document: Document,
   format: string,
@@ -218,5 +252,14 @@ export async function recordMeasuredPageCount(
   await state.store.setDocumentBillingPages(state.run.id, document.id, measured.pages, measured.method);
   document.billingPages = measured.pages;
   document.billingPagesMethod = measured.method;
+  // Admission priced the intake count (one page for these formats). When the measured count is far above it, the credits the run
+  // now owes may not fit the balance: check again here and pause the run instead of finding out when the completion fee is charged.
+  if (state.store.enforceSpendForCharge && state.run.pipeline && state.run.userId) {
+    const extra = extraCreditsForMeasuredPages(state.run.pipeline, intakePages, measured.pages);
+    if (extra > 0) {
+      const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
+      if (outcome.paused) console.warn(`[page-count] run=${state.run.id} document=${document.id} paused: measured ${measured.pages} pages (intake ${intakePages}) owes ${extra.toFixed(2)} more credits than the balance holds`);
+    }
+  }
   return { pages: measured.pages, method: measured.method, intakePages };
 }

@@ -20,6 +20,7 @@ import { allowHostedCallForWorkspace, openRouterTextCall, runWithPrivacyAuditSco
 import { runWithProviderRateScope, workspaceProviderScope } from "../lib/provider-rate-limit.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { DOCUMENT_FEATURE_METRICS, UNIT_CHARGE_PROVIDER, featureCredits, featurePagesRead, unitChargeMetadata } from "@docslurp/shared";
+import { textReadPages } from "../pipeline/feature-charges.js";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -147,7 +148,8 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
   if (job.phase === "extracting" || job.phase === "queued") {
     for (;;) {
       const documents = await sql<{ id: string; filename: string; page_count: number | null }[]>`
-        select d.id, d.filename, d.page_count from documents d
+        -- The pages the document bills (the worker's measured count of an Office file), else its page basis.
+        select d.id, d.filename, coalesce(d.billing_pages, d.page_count) as page_count from documents d
         where d.workspace_id = ${job.workspace_id}
           and d.status = 'completed' and d.superseded_at is null
           and (${cursor}::text is null or d.id > ${cursor})
@@ -219,12 +221,18 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
           if (graph.llmFailed) console.warn(`[graph-job] llm_fallback job=${job.id} document=${document.id} model=${job.model}`);
           if (graph.source === "llm") {
             // Price card: knowledge graph per started 10 pages, once per document per rebuild job.
-            // Billed on the share of the document the model read.
-            const pages = featurePagesRead(Math.max(1, Number(document.page_count) || 0), graph.charsRead, graph.charsTotal);
+            // Billed on the text the model read: the document's pages pro rata on every window it answered, and at least the pages of
+            // text read (3,500 characters a page). A window whose answer did not parse was still read.
+            const pages = Math.max(
+              featurePagesRead(Math.max(1, Number(document.page_count) || 0), graph.charsAttempted, graph.charsTotal),
+              textReadPages(graph.charsAttempted),
+            );
+            const featureCents = featureCredits("knowledgeGraph", pages);
+            progress.costCents += featureCents; // counts against the job's cost cap like the model's own spend
             usage.push({
               id: `feature:knowledgeGraph:job:${job.id}:${document.id}`,
               provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: DOCUMENT_FEATURE_METRICS.knowledgeGraph,
-              amount: 1, unit: "document", costCents: featureCredits("knowledgeGraph", pages), inputTokens: 0, outputTokens: 0,
+              amount: 1, unit: "document", costCents: featureCents, inputTokens: 0, outputTokens: 0,
               metadata: unitChargeMetadata({ documentId: document.id, feature: "knowledgeGraph", pages }),
             });
           }

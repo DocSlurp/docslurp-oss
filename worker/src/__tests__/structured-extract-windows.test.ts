@@ -116,7 +116,7 @@ describe("structured extraction of long documents", () => {
     await new StructuredExtractStage(storage, config).run(state);
 
     expect(vi.mocked(generateOpenRouterText)).toHaveBeenCalledTimes(STRUCTURED_MAX_WINDOWS);
-    const envelope = objects.get("user/run/structured/doc.json") as { fields: Record<string, { errors: string[] }>; coverage: { truncated: boolean; pagesRead: number; pagesTotal: number }; overallPolicy: string };
+    const envelope = objects.get("user/run/structured/doc.json") as { fields: Record<string, { errors: string[] }>; coverage: { truncated: boolean; pagesRead: number; pagesTotal: number; charsRead: number }; overallPolicy: string };
     expect(envelope.coverage.truncated).toBe(true);
     expect(envelope.coverage.pagesTotal).toBe(300);
     expect(envelope.coverage.pagesRead).toBeGreaterThan(50);
