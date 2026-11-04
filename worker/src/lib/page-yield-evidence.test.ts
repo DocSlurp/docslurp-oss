@@ -20,7 +20,8 @@ describe("embedded image storage evidence", () => {
     expect(embeddedImageBytesByPage(Array.from({ length: 100_001 }, () => row(1, 10, "1K")).join("\n")).size).toBe(0);
   });
   it("counts inline occurrences separately and ignores non-data headers", () => {
-    const inline = row(1, 10, "123").replace("10 0", "[inline] -");
+    // poppler prints the object column of an inline image as one `[inline]` token.
+    const inline = row(1, 10, "123").replace("10 0", "[inline]");
     expect([...embeddedImageBytesByPage(`page num type\n${inline}\n${inline}`)]).toEqual([[1, 246]]);
   });
 });

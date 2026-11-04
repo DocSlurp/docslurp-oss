@@ -19,6 +19,17 @@ export function pageTextYield(text: string, expectedCharacters: number) {
   };
 }
 
+/**
+ * Splits one `pdfimages -list` row into its 16 columns (page num type width height color comp bpc
+ * enc interp object ID x-ppi y-ppi size ratio). poppler prints an inline image's object and ID
+ * columns as the single token `[inline]`; it becomes `[inline] -` so every column keeps its index.
+ */
+export function pdfImagesListFields(line: string): string[] {
+  const fields = line.trim().split(/\s+/);
+  if (fields[10] === "[inline]" && fields.length === 15) fields.splice(11, 0, "-");
+  return fields;
+}
+
 /** Rounded, embedded stream sizes from pdfimages -list, never exported PNG/PPM sizes.
  * Masks count as storage; repeated object references count once per page. Shared images
  * on different pages are attributed to each page, so these totals must not be summed
@@ -28,7 +39,7 @@ export function embeddedImageBytesByPage(stdout: string): Map<number, number | n
   const pages = new Map<number, { bytes: number; seen: Set<string>; unknown: boolean }>();
   let count = 0;
   for (const line of stdout.split("\n")) {
-    const f = line.trim().split(/\s+/);
+    const f = pdfImagesListFields(line);
     if (!/^\d+$/.test(f[0] ?? "")) continue;
     // Do not return apparently complete totals for a truncated hostile listing.
     if (++count > 100_000) return new Map();

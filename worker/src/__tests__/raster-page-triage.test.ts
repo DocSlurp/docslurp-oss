@@ -129,6 +129,12 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     expect(result.renderPages).toEqual([2, 4]);
   }, 90_000);
 
+  it("a scan drawn as an inline image goes to vision", async () => {
+    const result = await triage([textPage(1), { kind: "image", images: [{ image: scannedImage(), inline: true }] }, textPage(3)]);
+    expect(result.evidence?.find((page) => page.pageNumber === 2)).toMatchObject({ imageCount: 1, largestImageCoverage: 1 });
+    expect(result.visionPages).toEqual([2]);
+  }, 90_000);
+
   it("near-empty native text over a full-page image goes to vision", async () => {
     const result = await triage([textPage(1), scanPage(["Ref 0042"]), textPage(3)]);
     const stamped = result.evidence?.find((page) => page.pageNumber === 2);
@@ -264,6 +270,12 @@ describe("page image evidence parsing", () => {
     await collectPageImageEvidence({ runner, sourcePath: "/x.pdf", pageTexts, sharedImagesList: { lastPage: 1, stdout: Promise.resolve(listing) } });
     await collectPageImageEvidence({ runner, sourcePath: "/x.pdf", pageTexts, sharedImagesList: { lastPage: 2, stdout: Promise.resolve(null) } });
     expect(calls).toEqual(["pdfimages:own", "pdfinfo:", "pdfimages:own", "pdfinfo:"]);
+  });
+
+  it("reads inline images, whose object column is one `[inline]` token", () => {
+    // Verbatim poppler 26.10 output for a page drawn with BI … ID … EI.
+    const rows = parsePdfImagesList("   1     0 image      40   100  gray    1   8  image  no   [inline]       5     9 4000B 100%");
+    expect(rows).toEqual([{ pageNumber: 1, type: "image", width: 40, height: 100, xPpi: 5, yPpi: 9 }]);
   });
 
   it("caps the rows parsed from a hostile image list", () => {

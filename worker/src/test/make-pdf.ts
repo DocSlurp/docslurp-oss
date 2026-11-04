@@ -20,6 +20,8 @@ export interface ImagePlacement {
   image: GrayImage;
   /** PDF user-space rectangle in points; defaults to the whole page. */
   rect?: { x: number; y: number; width: number; height: number };
+  /** Draw the image inline in the content stream (`BI … ID … EI`) instead of as an XObject. */
+  inline?: boolean;
 }
 
 export type TestPdfPage =
@@ -113,9 +115,14 @@ export function buildTestPdf(pages: TestPdfPage[]): Buffer {
     if (page.kind === "image") {
       page.images.forEach((placement, index) => {
         const { image } = placement;
+        const rect = placement.rect ?? { x: 0, y: 0, width: PAGE_WIDTH, height: PAGE_HEIGHT };
+        if (placement.inline) {
+          const data = image.pixels.toString("latin1");
+          ops.push(`q ${rect.width} 0 0 ${rect.height} ${rect.x} ${rect.y} cm BI /W ${image.width} /H ${image.height} /CS /G /BPC 8 ID ${data}\nEI Q`);
+          return;
+        }
         const id = add(stream(`/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, image.pixels));
         xobjects.push(`/Im${index} ${id} 0 R`);
-        const rect = placement.rect ?? { x: 0, y: 0, width: PAGE_WIDTH, height: PAGE_HEIGHT };
         ops.push(`q ${rect.width} 0 0 ${rect.height} ${rect.x} ${rect.y} cm /Im${index} Do Q`);
       });
       ops.push(...textOps(page.lines ?? []));

@@ -16,7 +16,7 @@ import { open } from "node:fs/promises";
 import { PAGE_RASTER_ROUTING } from "@docslurp/shared";
 
 import type { CommandRunner } from "../tools/runner.js";
-import { embeddedImageBytesByPage } from "./page-yield-evidence.js";
+import { embeddedImageBytesByPage, pdfImagesListFields } from "./page-yield-evidence.js";
 
 /** Pages with fewer native words than this are "sparse" and get raster evidence. */
 export const SPARSE_PAGE_WORDS = PAGE_RASTER_ROUTING.sparsePageWords;
@@ -72,8 +72,7 @@ export function parsePdfImagesList(stdout: string, maxRows = MAX_IMAGE_ROWS): Pd
   const rows: PdfImageRow[] = [];
   for (const line of stdout.split("\n")) {
     if (rows.length >= maxRows) break;
-    const fields = line.trim().split(/\s+/);
-    // page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio
+    const fields = pdfImagesListFields(line);
     if (fields.length < 14 || !/^\d+$/.test(fields[0]!)) continue;
     const type = fields[2]!;
     if (type !== "image" && type !== "stencil") continue;
