@@ -15,7 +15,7 @@ function make(overrides: Record<string, unknown> = {}) {
     document: { id: "d", mimeType: "image/png", userId: "u", sourceKey: "k", pageCount: 1 } as never,
     storage: { bucket: "b", getJson, downloadToTempFile: vi.fn() } as never,
     rasters: { renderSelectedPages: vi.fn(async () => []), sourcePath: vi.fn(async () => "/tmp/x.pdf") },
-    runner: { tesseractOcr: vi.fn(), florence2: vi.fn(), run: vi.fn() } as never,
+    runner: { plan: vi.fn(), florence2: vi.fn(), run: vi.fn() } as never,
     canonicalUri: () => null,
     selection: {} as never,
     allow: async () => true,
@@ -68,17 +68,25 @@ describe("production executor deps", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
     const image = path.join(dir, "p.png");
     await writeFile(image, "x");
+    const tsv = [
+      "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+      "5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96\tscanned",
+      "5\t1\t1\t1\t1\t2\t70\t10\t50\t20\t95\twords",
+    ].join("\n");
     const run = vi.fn(async (plan: { args: string[] }) => {
-      if (plan.args.includes("--prompt")) await writeFile(plan.args[plan.args.indexOf("--output") + 1]!, JSON.stringify({ text: " a red bridge " }));
-      else await writeFile(`${plan.args[1]}.txt`, " scanned words \n");
-      return { stdout: "", stderr: "" };
+      if (plan.args.includes("--prompt")) {
+        await writeFile(plan.args[plan.args.indexOf("--output") + 1]!, JSON.stringify({ text: " a red bridge " }));
+        return { stdout: "", stderr: "" };
+      }
+      // Tesseract: script detection first (`-l osd`), then the page in the detected script's packs.
+      return { stdout: plan.args.includes("osd") ? "Script: Latin\nScript confidence: 9.5\n" : tsv, stderr: "" };
     });
     const recordLocalUsage = vi.fn();
     const { deps } = make({
       recordLocalUsage,
       runner: {
         run,
-        tesseractOcr: vi.fn(async (src: string, base: string) => ({ binary: "tesseract", args: [src, base], available: true })),
+        plan: vi.fn(async (binary: string, ...args: string[]) => ({ binary, args, available: true })),
         florence2: vi.fn(async (src: string, out: string, prompt: string, model: string) => ({ binary: "python3", args: ["--input", src, "--output", out, "--prompt", prompt, "--model", model], available: true })),
        
       },

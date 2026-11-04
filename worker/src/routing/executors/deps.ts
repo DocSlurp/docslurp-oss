@@ -21,6 +21,7 @@ import type { VisionPageOutput } from "../../stages/vision-extract.js";
 import type { CommandRunner } from "../../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } from "../../tools/storage.js";
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
+import { ocrImageText } from "../../lib/ocr-language.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
 import { logNativePdfFallback } from "../../native-pdf/types.js";
@@ -36,7 +37,9 @@ export interface ProductionExecutorDepsInput {
   document: Document;
   storage: Pick<ArtifactStore, "bucket" | "getJson" | "downloadToTempFile">;
   rasters: Pick<PdfRasterCache, "renderSelectedPages" | "sourcePath"> & Partial<Pick<PdfRasterCache, "renderClip">>;
-  runner: Pick<CommandRunner, "tesseractOcr" | "florence2" | "run">;
+  runner: Pick<CommandRunner, "plan" | "florence2" | "run">;
+  /** The workspace OCR language setting (`auto` or Tesseract codes); unset reads the environment default. */
+  ocrLanguage?: string;
   /** Ledger lookup for the document's canonical-document artifact uri. */
   canonicalUri: () => string | null;
   selection: VisionConfig;
@@ -237,16 +240,17 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
 
     async ocr(raster, { pageNumber, signal }) {
       const started = Date.now();
-      const base = `${raster.path}.ocr`;
-      const plan = await input.runner.tesseractOcr(raster.path, base);
-      if (!plan.available) throw new Error("tesseract unavailable");
-      try {
-        await input.runner.run(plan, signal);
-        const text = (await readFile(`${base}.txt`, "utf8")).trim();
-        return { text, latencyMs: Date.now() - started, model: "tesseract" };
-      } finally {
-        await rm(`${base}.txt`, { force: true });
-      }
+      // Script detection and the matching language packs, as in page OCR (lib/ocr-language.ts).
+      const ocr = await ocrImageText({
+        image: raster.path,
+        setting: input.ocrLanguage,
+        run: async (args) => {
+          const plan = await input.runner.plan("tesseract", ...args);
+          if (!plan.available) throw new Error("tesseract unavailable");
+          return (await input.runner.run(plan, signal)).stdout;
+        },
+      });
+      return { text: ocr.text.trim(), latencyMs: Date.now() - started, model: "tesseract" };
     },
 
     async label(raster, { pageNumber, signal }) {

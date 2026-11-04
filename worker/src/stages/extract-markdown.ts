@@ -372,7 +372,7 @@ export class ExtractMarkdownStage implements Stage {
                   secondaryKey: candidateBKey,
                   primarySource: isolated.primary.source,
                   secondarySource: isolated.secondary?.source ?? tempFile,
-                  graphContext: { sourceHash: contentHash, pageCount, documentId: document.id },
+                  graphContext: { sourceHash: contentHash, pageCount, documentId: document.id, ocrLanguage: state.run.pipeline.documentExtraction?.ocr?.language },
                   signal,
                 });
                 // A candidate whose command could not be torn down ends the stage: never let the
@@ -1296,13 +1296,13 @@ export class ExtractMarkdownStage implements Stage {
     textKey: string,
     sourceTempFile: string,
     signal?: AbortSignal,
-    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+    graphContext?: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string },
   ): Promise<ExtractedCandidate> {
     return extractor.execute(this.candidateExecutors(graphContext), textKey, sourceTempFile, signal);
   }
 
   private candidateExecutors(
-    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+    graphContext?: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string },
   ): CandidateExecutors {
     return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
@@ -1383,7 +1383,7 @@ export class ExtractMarkdownStage implements Stage {
     extractor: PreparedExtractor,
     textKey: string,
     sourcePath: string,
-    context?: { sourceHash: string; pageCount: number; documentId: string },
+    context?: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string },
     signal?: AbortSignal,
   ): Promise<ExtractedCandidate> {
     if (!context) throw new Error("graph-local requires source hash and page count");
@@ -1396,6 +1396,7 @@ export class ExtractMarkdownStage implements Stage {
         pageCount: context.pageCount,
         targetKinds: ["document/markdown"],
         scratchDir,
+        ocrLanguage: context.ocrLanguage,
         signal,
       });
       const markdown = graph.targets.find((artifact) => artifact.kind === "document/markdown");
@@ -1610,7 +1611,7 @@ export class ExtractMarkdownStage implements Stage {
     secondaryKey: string | null;
     primarySource: string;
     secondarySource: string;
-    graphContext: { sourceHash: string; pageCount: number; documentId: string };
+    graphContext: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string };
     signal?: AbortSignal;
   }): Promise<
     [

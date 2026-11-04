@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { deferredProfilesEnabled, splitTextIntoPages } from "@docslurp/shared";
+import { deferredProfilesEnabled, splitTextIntoPagesStrict } from "@docslurp/shared";
 import { ensurePageRows } from "../deferred/page-ledger.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
@@ -53,7 +53,10 @@ export class PageIndexStage implements Stage {
             signal,
             state.artifactLedger.readDocument(document.id, "canonical-document"),
           );
-          const pageTexts = splitByPages(extracted.text, document.pageCount);
+          // Page rows only when the text says where each page is: misaligned text is never filed under another
+          // page's number (the document's chunks still index it).
+          const alignedPages = splitTextIntoPagesStrict(extracted.text, document.pageCount);
+          const pageTexts = alignedPages ?? [];
 
           const pageRows: Array<{
             id: string;
@@ -82,7 +85,8 @@ export class PageIndexStage implements Stage {
           }
 
           if (this.sql && deferredProfilesEnabled()) {
-            await markPagesIngestedIfDeferred(this.sql(), document.id, pageRows.length, state.run.kind === "full-index" ? "full-index" : "ingest");
+            const ingestedPages = alignedPages === null ? document.pageCount : pageRows.length;
+            await markPagesIngestedIfDeferred(this.sql(), document.id, ingestedPages, state.run.kind === "full-index" ? "full-index" : "ingest");
           }
 
           const key = `${runArtifactRoot(state.run, document.userId)}/page-index/${document.id}.json`;
@@ -97,6 +101,7 @@ export class PageIndexStage implements Stage {
             artifactUri: this.storage.uri(key),
             stats: {
               pages: pageRows.length,
+              pageAlignment: alignedPages === null ? "unknown" : "form-feed",
               search
             },
           };
@@ -137,7 +142,3 @@ export async function markPagesIngested(sql: Sql<Record<string, unknown>>, docum
   `;
 }
 
-function splitByPages(text: string, pageCount: number): string[] {
-  const pages = splitTextIntoPages(text, pageCount);
-  return pages.length > 0 ? pages : [text];
-}

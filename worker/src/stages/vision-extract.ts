@@ -856,6 +856,7 @@ export class VisionExtractStage implements Stage {
           storage: this.storage,
           rasters: this.rasters,
           runner: this.runner,
+          ocrLanguage: state.run.pipeline.documentExtraction?.ocr?.language,
           canonicalUri: () => state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
           selection,
           allow,
