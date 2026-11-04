@@ -134,10 +134,11 @@ describe("runWebCapability", () => {
     expect(result.results[0]!.markdown).not.toContain("suppressed");
   });
 
-  it("suppresses instruction-like web text before a chat model reads it", async () => {
+  it("passes instruction-shaped web text verbatim as tool data", async () => {
     setup();
     const result = await runWebCapability("search", search, { ...ctx, surface: "chat" });
-    expect(result.results[0]!.title).not.toMatch(/ignore previous instructions/i);
+    expect(result.results[0]!.title).toMatch(/ignore previous instructions/i);
+    expect(result.results[0]!.title).not.toContain("suppressed");
     expect(result.results[0]!.snippet).toBe("Solar output rose.");
   });
 });
