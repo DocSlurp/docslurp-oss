@@ -21,6 +21,42 @@ describe("assessTextLayer: readable text is ok", () => {
     it(`${name} prose`, () => expect(assessTextLayer(text).verdict).toBe("ok"));
   }
 
+  it("Ukrainian, Belarusian, Serbian and Macedonian prose, capitals and tables are not mojibake", () => {
+    const uk = times("Рішення комітету щодо Рівненської області ухвалено в січні; Суми, Сімферополь і Полтава підтвердили свої плани, а Їжак і Єнот сховались.", 4);
+    const be = times("Рэспубліка Беларусь прыняла рашэнне аб развіцці сельскай гаспадаркі, а Ўладзімір і Сяргей падрыхтавалі справаздачу.", 4);
+    const sr = times("Одлука одбора о Љубомиру, Његошу и Ћирилици усвојена је у Србији; Ђорђе и Џон су потврдили своје планове за Јануар.", 4);
+    const mk = times("Одлуката на одборот за Ѓорѓи и Ќирил е донесена во Скопје, а Љубица и Његош ги потврдија своите планови за Јануари.", 4);
+    for (const text of [uk, be, sr, mk]) expect(assessTextLayer(text).verdict).toBe("ok");
+    const capitals = "РІШЕННЯ КОМІТЕТУ\nСІЧЕНЬ РІВНЕ СУМИ СІМФЕРОПОЛЬ\nРЄСТР СІЛЬСЬКОГО ГОСПОДАРСТВА\nСРІБЛО РІЧКА СІЛЬ";
+    expect(assessTextLayer(`${capitals}\n${uk}`).verdict).toBe("ok");
+    const cities = ["Рівне", "Суми", "Сімферополь", "Чернігів", "Харків", "Київ", "Львів", "Одеса", "Полтава", "Ужгород"];
+    const table = ["| Місто | Населення | Область |", "|---|---|---|", ...cities.map((city, i) => `| ${city} | ${100 + i * 17},${i}00 | Область ${i + 1} |`)].join("\n");
+    const tableAssessment = assessTextLayer(table);
+    expect(tableAssessment.verdict).not.toBe("garbled");
+    expect(tableAssessment.reasons).not.toContain("mojibake");
+  });
+
+  it("German prose with an em dash after ß or capitals is not Latin-1 mojibake", () => {
+    const assessment = assessTextLayer(times("Die Straße—eine Ödnis—und die Übung—so Ärzte—blieb leer, aber Öl und Äpfel kosten mehr als gestern in der Stadt.", 4));
+    expect(assessment.verdict).toBe("ok");
+  });
+
+  it("base64 appendices, PEM certificates, JWTs and part-number lists are data, not a glyph shift", () => {
+    let seed = 12345;
+    const bytes = (n: number) => Buffer.from(Array.from({ length: n }, () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) >> 16) & 0xff));
+    const wrap = (text: string, width: number) => text.match(new RegExp(`.{1,${width}}`, "g"))!.join("\n");
+    const base64 = wrap(bytes(900).toString("base64"), 76);
+    const pem = `-----BEGIN CERTIFICATE-----\n${wrap(bytes(900).toString("base64"), 64)}\n-----END CERTIFICATE-----`;
+    const jwts = Array.from({ length: 6 }, () => `eyJ${bytes(30).toString("base64url")}.${bytes(80).toString("base64url")}.${bytes(32).toString("base64url")}`).join("\n");
+    const parts = Array.from({ length: 40 }, (_, i) => `PN-${String(480000 + i * 37).padStart(7, "0")}-AB${String(1000 + i * 13)}-REV${"ABCDEF"[i % 6]}`).join("\n");
+    const serials = Array.from({ length: 40 }, () => bytes(12).toString("hex").toUpperCase().replace(/[A-F]/g, (c) => "QWXYZV"[c.charCodeAt(0) % 6]!) + "KJ").join("\n");
+    for (const [name, text] of Object.entries({ base64, pem, jwts, parts, serials })) {
+      const assessment = assessTextLayer(text);
+      expect(assessment.verdict, name).not.toBe("garbled");
+      expect(assessment.reasons, name).not.toContain("glyph-shift");
+    }
+  });
+
   it("a page of git hashes and a DNA sequence is data, not a broken layer", () => {
     const hashes = Array.from({ length: 30 }, (_, i) => `${(0xabcdef12 + i * 7919).toString(16).padStart(8, "0")}${"0123456789abcdef".repeat(2)}`).join("\n");
     expect(assessTextLayer(hashes).verdict).not.toBe("garbled");
@@ -59,17 +95,31 @@ describe("assessTextLayer: broken layers", () => {
   it("UTF-8 read as Latin-1 or Windows-1251 is garbled, in Latin and Cyrillic scripts", () => {
     const asLatin1 = Buffer.from(PROSE.german, "utf8").toString("latin1");
     expect(["garbled", "suspect"]).toContain(assessTextLayer(asLatin1).verdict);
-    expect(assessTextLayer(Buffer.from(PROSE.russian, "utf8").toString("latin1")).verdict).toBe("garbled");
-    expect(assessTextLayer(new TextDecoder("windows-1251").decode(Buffer.from(PROSE.russian, "utf8"))).verdict).toBe("garbled");
-    expect(assessTextLayer(new TextDecoder("windows-1252").decode(Buffer.from(PROSE.greek, "utf8"))).verdict).toBe("garbled");
+    // Mojibake alone is `suspect`: only unmapped glyphs send a page to vision unchecked; the OCR cross-check decides.
+    // (Read as Latin-1, Cyrillic also leaves C1 control characters: unmapped-glyph evidence, so it is garbled.)
+    const latin1Russian = assessTextLayer(Buffer.from(PROSE.russian, "utf8").toString("latin1"));
+    expect(latin1Russian.verdict).toBe("garbled");
+    expect(latin1Russian.reasons).toContain("unmapped-glyphs");
+    const cases = [
+      new TextDecoder("windows-1251").decode(Buffer.from(PROSE.russian, "utf8")),
+      new TextDecoder("windows-1251").decode(Buffer.from(times("Рішення комітету щодо Рівненської області ухвалено в січні, Сімферополь підтвердив.", 4), "utf8")),
+      new TextDecoder("windows-1252").decode(Buffer.from(PROSE.greek, "utf8")),
+    ];
+    for (const text of cases) {
+      const assessment = assessTextLayer(text);
+      expect(assessment.verdict).toBe("suspect");
+      expect(assessment.reasons).toContain("mojibake");
+    }
   });
 
-  it("a glyph-code shift is garbled whether or not the spaces survive", () => {
+  it("a glyph-code shift is flagged for the OCR cross-check whether or not the spaces survive", () => {
     const shift = (text: string) => [...text].map((c) => (c > " " && c < "\x7f" ? String.fromCharCode(33 + ((c.charCodeAt(0) - 33 + 29) % 94)) : c)).join("");
-    expect(assessTextLayer(shift(PROSE.english)).verdict).toBe("garbled");
-    expect(assessTextLayer(shift(PROSE.english.replace(/ /g, ""))).verdict).toBe("garbled");
+    expect(assessTextLayer(shift(PROSE.english)).verdict).not.toBe("ok");
+    expect(assessTextLayer(shift(PROSE.english.replace(/ /g, ""))).verdict).not.toBe("ok");
     const shiftedLetters = times("6FDOLQJDWWHQWLRQZLWKRXWORVLQJVLJQDOLVDKDUGSUREOHP 7KHDXWKRUVSURSRVHDQHZDUFKLWHFWXUHIRUORQJFRQWH[WV", 4);
-    expect(assessTextLayer(shiftedLetters).verdict).toBe("garbled");
+    const assessment = assessTextLayer(shiftedLetters);
+    expect(assessment.verdict).toBe("suspect");
+    expect(assessment.reasons).toContain("glyph-shift");
   });
 
   it("a consistent letter substitution is flagged for an OCR cross-check in each alphabetic script", () => {
