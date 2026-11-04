@@ -42,12 +42,12 @@ export type ShardProfileKey = keyof typeof SHARD_PROFILES | (string & {});
 
 const registeredProfiles = new Map<string, ShardCostProfile>();
 
-/** Add a plugin's prior. Built-in keys cannot be replaced, and a key keeps its first profile. */
+/** Add a plugin's prior. Built-in keys cannot be replaced, and a key keeps its first profile (re-registering the same values is a no-op). */
 export function registerShardProfile(key: string, profile: ShardCostProfile): void {
   if (!/^[a-z0-9-]+:[a-z0-9-]+$/.test(key) || Object.hasOwn(SHARD_PROFILES, key)) throw new Error(`Invalid shard profile key ${key}`);
   const existing = registeredProfiles.get(key);
-  if (existing && existing !== profile) throw new Error(`Shard profile ${key} is already registered`);
-  registeredProfiles.set(key, profile);
+  if (existing && JSON.stringify(existing) !== JSON.stringify(profile)) throw new Error(`Shard profile ${key} is already registered`);
+  if (!existing) registeredProfiles.set(key, profile);
 }
 
 /** The prior for a key; unknown keys throw rather than plan from a guess. */

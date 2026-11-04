@@ -132,7 +132,8 @@ describe("registered priors", () => {
     const { registerShardProfile, shardProfile } = await import("../temporal/page-shard-profiles.js");
     registerShardProfile("extract-markdown:test-vm", vm);
     expect(shardProfile("extract-markdown:test-vm")).toBe(vm);
-    expect(() => registerShardProfile("extract-markdown:test-vm", { ...vm })).toThrow("already registered");
+    expect(() => registerShardProfile("extract-markdown:test-vm", { ...vm })).not.toThrow();
+    expect(() => registerShardProfile("extract-markdown:test-vm", { ...vm, perPageMs: 99 })).toThrow("already registered");
     expect(() => registerShardProfile("render-images:fly-shared-slot", vm)).toThrow("Invalid shard profile key");
     expect(() => shardProfile("extract-markdown:missing")).toThrow("Unknown shard profile");
     const long = planPageShards(477, shardProfile("extract-markdown:test-vm"), { readySlots: 16, maxSlots: 16, scaleUpMs: 0 }, { maxCostOverhead: 1, maxShards: 32 });
