@@ -2,7 +2,9 @@
 //! (central directory plus stored or deflated entries; no Zip64, which documents never need).
 //!
 //! Word and PowerPoint store the count from the last save (`<Pages>`, `<Slides>`). The worker counts pages after
-//! converting the document, so for Word this is an approximation; slides map one to one.
+//! converting the document, so for Word this is an approximation: a count the body of the document contradicts is
+//! dropped (generated files keep a stale `1`), and a document that embeds images does not claim an all-text mix.
+//! Slides map one to one.
 
 use super::{u16_le, u32_le, ProbeInput, ProbeKind, ProbeResult, WHOLE_FILE_MAX_BYTES};
 use crate::card::PageMix;
@@ -11,6 +13,12 @@ use crate::card::PageMix;
 const MAX_ENTRY_BYTES: usize = 256 * 1024;
 /// Central directory entries considered; a document has dozens to a few thousand.
 const MAX_ENTRIES: usize = 50_000;
+
+/// Embedded raster images beyond this many compressed bytes may be pages scanned into the document, so the page mix stays unknown.
+const DOCX_EMBEDDED_IMAGE_BYTES: usize = 64 * 1024;
+/// Uncompressed `word/document.xml` bytes one page can hold at most (verbose Word XML runs 10-40 KB per page; this is a very dense page).
+/// A claimed count whose pages could not hold the body is a stale one.
+const DOCX_MAX_XML_BYTES_PER_PAGE: usize = 120 * 1024;
 
 const DOCX_MIME: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const PPTX_MIME: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
@@ -45,13 +53,25 @@ pub(super) fn probe(input: &ProbeInput<'_>, extension: &str) -> ProbeResult {
         return result.note("spreadsheets have no page count; priced from size");
     };
     match archive.read("docProps/app.xml").and_then(|xml| element_number(&xml, tag)) {
-        Some(count) if count > 0 => result.pages = Some(count as f64),
+        Some(count) if count > 0 => {
+            let body = if format == "docx" { archive.uncompressed("word/document.xml") } else { None };
+            if body.is_some_and(|bytes| usize::try_from(count).map_or(true, |pages| pages.saturating_mul(DOCX_MAX_XML_BYTES_PER_PAGE) < bytes)) {
+                result.notes.push(format!("<{tag}> count in docProps/app.xml is smaller than the document body allows; priced from size"));
+            } else {
+                result.pages = Some(count as f64);
+            }
+        }
         _ => result.notes.push(format!("no <{tag}> count in docProps/app.xml; priced from size")),
     }
     if format == "docx" {
-        // Word documents are text-layer pages; embedded scans are the exception.
-        result.mix = Some(PageMix::new(1.0, 0.0, 0.0));
-        result.mix_confidence = Some(0.6);
+        // Word documents are mostly text-layer pages, but pages scanned into the document are images: with embedded
+        // rasters the mix is left unknown instead of asserting all text.
+        if archive.compressed_under("word/media/") > DOCX_EMBEDDED_IMAGE_BYTES {
+            result.notes.push("document embeds images; page mix not assumed".to_string());
+        } else {
+            result.mix = Some(PageMix::new(1.0, 0.0, 0.0));
+            result.mix_confidence = Some(0.6);
+        }
     }
     result
 }
@@ -60,6 +80,7 @@ struct Entry<'a> {
     name: &'a [u8],
     method: u16,
     compressed: usize,
+    uncompressed: usize,
     local_header: usize,
 }
 
@@ -92,11 +113,22 @@ impl<'a> Archive<'a> {
                 name: bytes.get(name_start..name_start.checked_add(name_len)?)?,
                 method: u16_le(bytes, at + 10)?,
                 compressed: usize::try_from(u32_le(bytes, at + 20)?).ok()?,
+                uncompressed: usize::try_from(u32_le(bytes, at + 24)?).ok()?,
                 local_header: usize::try_from(u32_le(bytes, at + 42)?).ok()?,
             });
             at = name_start.checked_add(name_len)?.checked_add(extra_len)?.checked_add(comment_len)?;
         }
         Some(Self { bytes, entries })
+    }
+
+    /// An entry's declared uncompressed size (not trusted for allocation; it is only compared).
+    fn uncompressed(&self, name: &str) -> Option<usize> {
+        self.entries.iter().find(|entry| entry.name == name.as_bytes()).map(|entry| entry.uncompressed)
+    }
+
+    /// Compressed bytes of every entry under `prefix`.
+    fn compressed_under(&self, prefix: &str) -> usize {
+        self.entries.iter().filter(|entry| entry.name.starts_with(prefix.as_bytes())).fold(0usize, |sum, entry| sum.saturating_add(entry.compressed))
     }
 
     fn has(&self, name: &str) -> bool {
@@ -172,6 +204,39 @@ mod tests {
 
         let pptx = archive(&[("ppt/presentation.xml", "<p/>"), ("docProps/app.xml", "<ep:Properties><ep:Slides> 31 </ep:Slides></ep:Properties>")]);
         assert_eq!(probe(&ProbeInput::whole("a.pptx", None, &pptx), "pptx").pages, Some(31.0));
+    }
+
+    #[test]
+    fn drops_a_page_count_the_document_body_contradicts_and_does_not_assume_text_around_images() {
+        // A generated file keeps a stale <Pages>1</Pages> while its body would fill dozens of pages.
+        let body = "<w:p>x</w:p>".repeat(40_000); // ~480 KB of body XML
+        let stale = archive(&[("word/document.xml", &body), ("docProps/app.xml", "<Properties><Pages>1</Pages></Properties>")]);
+        let result = probe(&ProbeInput::whole("a.docx", None, &stale), "docx");
+        assert_eq!(result.pages, None);
+        assert!(result.notes.iter().any(|note| note.contains("smaller than the document body allows")));
+        // A plausible count is kept, with an all-text mix at reduced trust.
+        let honest = archive(&[("word/document.xml", "<w:document/>"), ("docProps/app.xml", "<Properties><Pages>3</Pages></Properties>")]);
+        let kept = probe(&ProbeInput::whole("a.docx", None, &honest), "docx");
+        assert_eq!((kept.pages, kept.mix_confidence), (Some(3.0), Some(0.6)));
+        // Scanned pages pasted into the document are images: the mix is not asserted.
+        let mut state = 0x9E37_79B9u32;
+        let noise: String = (0..400_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                char::from(b'a' + (state % 26) as u8)
+            })
+            .collect();
+        let scanned = archive(&[
+            ("word/document.xml", "<w:document/>"),
+            ("word/media/image1.png", &noise),
+            ("docProps/app.xml", "<Properties><Pages>4</Pages></Properties>"),
+        ]);
+        let result = probe(&ProbeInput::whole("a.docx", None, &scanned), "docx");
+        assert_eq!(result.pages, Some(4.0));
+        assert_eq!(result.mix, None);
+        assert!(result.notes.iter().any(|note| note.contains("embeds images")));
     }
 
     #[test]

@@ -56,7 +56,7 @@ const {
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
-const { defaultPipelineFeatures, pageCredits } = await import("@docslurp/shared");
+const { defaultPipelineFeatures, pageCredits, QUOTE_HIGH_RICH_PAGE_FACTOR } = await import("@docslurp/shared");
 const { createRunCreation } = await import("../services/run-creation.js");
 
 // Spend admission is exercised through Run creation with no files: it fails or
@@ -247,23 +247,46 @@ describe("run preview", () => {
     const request = {
       workspaceId: "ws-1",
       pipeline: defaultPipelineFeatures,
-      files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000 }],
+      // Counted pages price exactly; the mix of a PDF is unknown, so auto spans text to every page read by vision.
+      files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000, pages: 20 }],
       urls: [],
     };
     const preview = () => buildRunProcessingPreview({ request, historyRows: [] });
     const byQuality = Object.fromEntries(preview().options.map((option) => [option.quality, option.estimatedCost]));
     const pages = preview().estimatedPages;
-    // fast is flat Fast, good flat Rich, auto spans the two (credits are cents).
+    expect(pages).toBe(20);
+    // fast is flat Fast, good Rich with the dense-page surcharge at the top, auto spans Fast to that (credits are cents).
     expect(byQuality.fast).toEqual({ minCents: pageCredits("fast", pages), maxCents: pageCredits("fast", pages) });
-    expect(byQuality.good).toEqual({ minCents: pageCredits("rich", pages), maxCents: pageCredits("rich", pages) });
+    expect(byQuality.good).toEqual({ minCents: pageCredits("rich", pages), maxCents: pageCredits("rich", pages * QUOTE_HIGH_RICH_PAGE_FACTOR) });
     expect(byQuality.auto!.minCents).toBe(pageCredits("fast", pages));
-    expect(byQuality.auto!.maxCents).toBeLessThanOrEqual(pageCredits("rich", pages));
+    expect(byQuality.auto!.maxCents).toBe(pageCredits("rich", pages * QUOTE_HIGH_RICH_PAGE_FACTOR));
     vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/z-ai/glm-5.3-flash");
     try {
       expect(preview().options.map((option) => option.estimatedCost)).toEqual(Object.values(byQuality));
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("prices uncounted pages over a range and counted pages exactly, from the pages and not the filename", () => {
+    const quote = (files: Array<{ filename: string; mimeType: string; sizeBytes: number; pages?: number }>) =>
+      buildRunProcessingPreview({ request: { workspace: "ws-1", pipeline: defaultPipelineFeatures, files, urls: [] }, historyRows: [] });
+    const unknown = quote([{ filename: "report.pdf", mimeType: "application/pdf", sizeBytes: 12 * 1024 * 1024 }]);
+    const counted = quote([{ filename: "report.pdf", mimeType: "application/pdf", sizeBytes: 12 * 1024 * 1024, pages: 300 }]);
+    // The 180 KB-per-page constant is gone: 12 MB is the quote's 75 KB assumption, and the counted 300 pages are inside its range.
+    expect(unknown.estimatedPages).toBe(Math.ceil((12 * 1024 * 1024) / (75 * 1024)));
+    expect(counted.estimatedPages).toBe(300);
+    expect(counted.current.estimatedCost.maxCents).toBeLessThanOrEqual(unknown.current.estimatedCost.maxCents);
+    expect(counted.current.estimatedCost.minCents).toBeGreaterThanOrEqual(unknown.current.estimatedCost.minCents);
+    // Words in a filename say nothing about the file: "scan", "invoice" and "capital" no longer change signals or price.
+    const named = quote([{ filename: "scan-invoice-capital-democracy.pdf", mimeType: "application/pdf", sizeBytes: 12 * 1024 * 1024 }]);
+    expect(named.topSignals).toEqual(unknown.topSignals);
+    expect(named.current.estimatedCost).toEqual(unknown.current.estimatedCost);
+    // Formats do: a spreadsheet is table-heavy, an image scan-like.
+    expect(quote([{ filename: "data.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", sizeBytes: 90_000 }]).topSignals)
+      .toContain("table-heavy inputs favor layout-aware extraction");
+    expect(quote([{ filename: "photo.jpg", mimeType: "image/jpeg", sizeBytes: 900_000 }]).topSignals)
+      .toContain("scan-like inputs raise the quality bar for fallback vision");
   });
 });
 

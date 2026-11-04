@@ -10,7 +10,7 @@ import { buildEstimateCard, ESTIMATE_RULES } from "./estimate-card.js";
 import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golden.js";
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
 import { speedBoostMultiplier } from "./billing.js";
-import { estimateProfileFor, quoteFileSchema, quoteUpload, type QuoteFile } from "./upload-quote.js";
+import { estimateProfileFor, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, type QuoteFile } from "./upload-quote.js";
 import { isUploadImageFile, isUploadTextFile, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
 const estimateDir = join(dirname(fileURLToPath(import.meta.url)), "../../estimate");
@@ -70,9 +70,10 @@ describe("quoteUpload", () => {
     ["good + graph", { ...defaultPipelineFeatures, quality: "good", graphRag: true }],
     ["fast, no video frames", { ...defaultPipelineFeatures, quality: "fast", mediaVideo: { ...defaultPipelineFeatures.mediaVideo, enabled: false } }],
   ];
+  // Counted pages: the server's estimate is the reference for the cheap end; uncounted pages are quoted over a range (below).
   const batches: QuoteFile[][] = [
-    [{ name: "a.pdf", size: 2_000_000 }],
-    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000 }, { name: "c.xlsx", size: 4_000_000 }],
+    [{ name: "a.pdf", size: 2_000_000, pages: 27 }],
+    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000, pages: 2 }, { name: "c.xlsx", size: 4_000_000, pages: 54 }],
     [{ name: "talk.mp3", size: 30_000_000 }, { name: "deck.pptx", size: 8_000_000, pages: 42 }, { name: "clip.mp4", size: 1, durationSeconds: 125 }],
   ];
 
@@ -83,16 +84,19 @@ describe("quoteUpload", () => {
           const legacy = legacyUploadEstimate({ files: batch, pipeline, speedBoost, workerSlots: 50, env: enforced });
           const quote = quoteUpload({ files: batch, profile: estimateProfileFor(pipeline, { workerSlots: 50, env: enforced }), speedBoost });
           if (!legacy.media) {
-            expect(quote.estimate).toEqual(legacy.pagedEstimate);
+            // Same pages, documents and cheap end as the server's estimate; the expensive end is a ceiling above it.
+            expect(quote.estimate.pages).toBe(legacy.pagedEstimate.pages);
+            expect(quote.estimate.documents).toBe(legacy.pagedEstimate.documents);
+            expect(quote.estimate.credits!.low).toBe(legacy.pagedEstimate.credits!.low);
+            expect(quote.estimate.credits!.high).toBeGreaterThanOrEqual(legacy.pagedEstimate.credits!.high);
+            expect(quote.estimate.seconds!.low).toBe(legacy.pagedEstimate.seconds!.low);
             expect(quote.media).toBeNull();
             return;
           }
-          expect(quote.estimate.credits).toEqual({
-            low: legacy.pagedEstimate.credits!.low + legacy.media.credits.low * (speedBoost ? 4 : 1),
-            high: legacy.pagedEstimate.credits!.high + legacy.media.credits.high * (speedBoost ? 4 : 1),
-          });
-          expect(quote.estimate.seconds).toEqual(legacy.pagedEstimate.seconds);
-          expect(quote.estimate.basis).toBe(`${legacy.pagedEstimate.basis}; audio and video priced by duration`);
+          expect(quote.estimate.credits!.low).toBe(legacy.pagedEstimate.credits!.low + legacy.media.credits.low * (speedBoost ? 4 : 1));
+          expect(quote.estimate.credits!.high).toBeGreaterThanOrEqual(legacy.pagedEstimate.credits!.high + legacy.media.credits.high * (speedBoost ? 4 : 1));
+          expect(quote.estimate.seconds!.low).toBe(legacy.pagedEstimate.seconds!.low);
+          expect(quote.estimate.basis).toContain("; audio and video priced by duration");
         });
       }
     }
@@ -114,6 +118,12 @@ describe("quoteUpload", () => {
     const csv = quoteUpload({ files: [{ name: "rows.csv", size: 1_000_000 }], profile }).estimate;
     expect(csv.pages).toBe(Math.ceil(1_000_000 / 3_500));
     expect(csv.credits!.low).toBeLessThan(csv.credits!.high);
+    // Uncounted: the line rule (60 lines a page) can need far more pages than characters do, and the quote says so.
+    expect(csv.pagesRange).toEqual({ low: Math.ceil(1_000_000 / 7_000), high: Math.ceil(1_000_000 / 720) });
+    expect(csv.unmeasuredFiles).toBe(1);
+    // Text never bills Rich, whatever the length: the high end is more Fast pages, not vision.
+    const countedHigh = quoteUpload({ files: [{ name: "rows.csv", size: 1_000_000, pages: Math.ceil(1_000_000 / 720) }], profile }).estimate;
+    expect(csv.credits!.high).toBeCloseTo(countedHigh.credits!.high, 9);
     // Counted (probe): all text pages, an exact price.
     const counted = quoteUpload({ files: [{ name: "rows.csv", size: 1_000_000, pages: 334 }], profile }).estimate;
     expect(counted.credits!.low).toBe(counted.credits!.high);
@@ -152,8 +162,10 @@ describe("quoteUpload", () => {
     const allText = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100, mix: { text: 1, complex: 0, scanned: 0 } }], profile }).estimate;
     const scanned = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100, mix: { text: 0, complex: 0, scanned: 1 } }], profile }).estimate;
     expect(allText.credits).toEqual({ low: unknown.low, high: unknown.low });
-    expect(scanned.credits!.low).toBe(scanned.credits!.high);
-    expect(scanned.credits!.low).toBeGreaterThan(unknown.high);
+    // Vision output is unknown until read, so even a measured scan spans one to QUOTE_HIGH_RICH_PAGE_FACTOR Rich pages each.
+    expect(scanned.credits!.low).toBeGreaterThan(unknown.low);
+    expect(scanned.credits!.high).toBeCloseTo(unknown.high, 9);
+    expect(scanned.credits!.high).toBeCloseTo(scanned.credits!.low * QUOTE_HIGH_RICH_PAGE_FACTOR, 9);
     expect(allText.basis).toContain("page mix known for every file");
   });
 
@@ -169,12 +181,55 @@ describe("quoteUpload", () => {
     const unknown = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100 }], profile }).estimate.credits!;
     const untrusted = quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 100, mix: { text: 0, complex: 0, scanned: 1 }, mixConfidence: 0 }], profile }).estimate.credits!;
     expect(untrusted.low).toBeCloseTo(unknown.low, 9);
-    expect(untrusted.high).toBeGreaterThan(unknown.high);
+    expect(untrusted.high).toBeGreaterThanOrEqual(unknown.high - 1e-9);
   });
 
   it("returns no price when billing is disabled", () => {
     const profile = estimateProfileFor(defaultPipelineFeatures, { env: {} });
     expect(profile.billing).toBe("disabled");
     expect(quoteUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], profile }).estimate.credits).toBeNull();
+  });
+});
+
+describe("quoteUpload with uncounted pages", () => {
+  const enforced = { DOCSLURP_BILL_INGEST: "true" };
+  const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });
+
+  it("quotes a 12 MB scan over the pages its size allows, not as 157 pages with a ceiling", () => {
+    const quote = quoteUpload({ files: [{ name: "scan.pdf", size: 12 * 1024 * 1024 }], profile }).estimate;
+    expect(quote.pages).toBe(Math.ceil((12 * 1024 * 1024) / (75 * 1024)));
+    expect(quote.unmeasuredFiles).toBe(1);
+    // The real count (300 pages) is inside the stated range, and the high end covers all of them read by vision.
+    expect(quote.pagesRange!.low).toBeLessThan(300);
+    expect(quote.pagesRange!.high).toBeGreaterThan(300);
+    const real = quoteUpload({ files: [{ name: "scan.pdf", size: 12 * 1024 * 1024, pages: 300, mix: { text: 0, complex: 0, scanned: 1 } }], profile }).estimate.credits!;
+    expect(quote.credits!.high).toBeGreaterThanOrEqual(real.high);
+    expect(quote.credits!.low).toBeLessThanOrEqual(real.low);
+    expect(quote.basis).toContain("pages not counted for 1 of 1 files");
+  });
+
+  it("counted pages quote exactly their pages, with no range", () => {
+    const quote = quoteUpload({ files: [{ name: "a.pdf", size: 12 * 1024 * 1024, pages: 300 }], profile }).estimate;
+    expect(quote.pagesRange).toBeUndefined();
+    expect(quote.unmeasuredFiles).toBeUndefined();
+    expect(quote.pages).toBe(300);
+  });
+
+  it("puts the output-token surcharge on the high end of page-reading profiles only", () => {
+    const fast = estimateProfileFor({ ...defaultPipelineFeatures, quality: "fast" }, { env: enforced });
+    const file = { name: "a.pdf", size: 1, pages: 100, mix: { text: 0, complex: 0, scanned: 1 } };
+    const fastQuote = quoteUpload({ files: [file], profile: fast }).estimate.credits!;
+    expect(fastQuote.high).toBe(fastQuote.low);
+    const auto = quoteUpload({ files: [file], profile }).estimate.credits!;
+    expect(auto.high).toBeCloseTo(auto.low * QUOTE_HIGH_RICH_PAGE_FACTOR, 9);
+  });
+
+  it("gives a page range per file: one value when counted, a spread from the size when not", () => {
+    expect(quoteFilePageRange({ name: "a.pdf", size: 3_000_000, pages: 40 })).toEqual({ low: 40, central: 40, high: 40, measured: true });
+    expect(quoteFilePageRange({ name: "photo.jpg", size: 3_000_000 })).toEqual({ low: 1, central: 1, high: 1, measured: true });
+    const range = quoteFilePageRange({ name: "b.pdf", size: 3_000_000 });
+    expect(range.measured).toBe(false);
+    expect(range.low).toBeLessThan(range.central);
+    expect(range.central).toBeLessThan(range.high);
   });
 });

@@ -188,6 +188,8 @@ export const runProcessingPreviewFileSchema = z.object({
   filename: z.string().min(1),
   mimeType: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
+  /** Counted pages, when known (a run's documents have them). Without it pages are estimated from the size, over a range. */
+  pages: z.number().int().positive().max(10_000_000).optional(),
 });
 export type RunProcessingPreviewFile = z.infer<
   typeof runProcessingPreviewFileSchema

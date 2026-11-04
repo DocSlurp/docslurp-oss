@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { PRICE_CARD_VERSION, estimateProfileFor, defaultPipelineFeatures, quoteUpload, textPageCount } from "@docslurp/shared";
+import { PRICE_CARD_VERSION, decodeTextBytes, estimateProfileFor, defaultPipelineFeatures, quoteUpload, textPageCount } from "@docslurp/shared";
 
 import { createEstimator, EstimatorError } from "../js/index.mjs";
 import { probePath, quotePaths } from "../js/node.mjs";
@@ -118,6 +118,25 @@ describe("@docslurp/estimate (wasm)", () => {
       assert.equal(probe.kind, "text");
       assert.equal(probe.pages, textPageCount(text), JSON.stringify(text.slice(0, 20)));
     }
+  });
+
+  it("counts East Asian text, HTML markup and UTF-16 files as the API does", () => {
+    const cjk = "日本語のテキストです。".repeat(300);
+    const html = `<!doctype html><html><head><style>${"a{x:y}".repeat(3_000)}</style><SCRIPT type="x">${"var a=1;".repeat(3_000)}</SCRIPT></head><body><!-- note --><p>Hello</p>${"<div class=\"c\">word</div>\n".repeat(80)}1 < 2 and <b>bold</b></body></html>`;
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${"name,total\r\n"}${"acme,10\r\n".repeat(200)}`, "utf16le")]);
+    const cases = [
+      ["cjk.txt", Buffer.from(cjk), textPageCount(cjk)],
+      ["page.html", Buffer.from(html), textPageCount(html, { markup: true })],
+      ["rows.csv", utf16, textPageCount(decodeTextBytes(utf16))],
+    ];
+    for (const [name, bytes, expected] of cases) {
+      const probe = estimator.probe({ name, size: bytes.length }, bytes);
+      assert.equal(probe.kind, "text");
+      assert.equal(probe.pages, expected, name);
+    }
+    // Markup and scripts are not pages: the HTML above is a few lines of text, not the ~50 KB of source.
+    assert.equal(textPageCount(html, { markup: true }), 2);
+    assert.ok(textPageCount(html) > 10);
   });
 
   it("imports a memory capped at 256 MiB", async () => {

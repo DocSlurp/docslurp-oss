@@ -950,20 +950,22 @@ export function createRunCreation(deps: RunCreationDeps) {
 
     // Validated before the insert: a pipeline the preview schema rejects must fail the request with nothing
     // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).
-    const costForecastFor = (documentCount: number) => buildRunProcessingPreview({
-      request: {
-        workspace: input.workspaceId,
-        pipeline: input.pipeline,
-        files: Array.from({ length: documentCount }, (_, index) => ({
-          filename: `document-${index + 1}.pdf`,
-          mimeType: "application/pdf",
-          sizeBytes: 900_000,
-        })),
-        urls: [],
-      },
+    // The forecast prices the files and pages the run actually has (counted pages where known, sizes otherwise), not placeholders.
+    type ForecastFile = { filename: string; mimeType: string; sizeBytes: number; pages?: number };
+    const costForecastFor = (files: ForecastFile[]) => buildRunProcessingPreview({
+      request: { workspace: input.workspaceId, pipeline: input.pipeline, files, urls: [] },
     }).current.estimatedCost;
-    // The preview schema needs at least one file; the count here only validates the pipeline.
-    costForecastFor(Math.max(1, sources.kind === "files" ? sources.files.length : sourceDocuments.length));
+    const forecastFilesOfSources = (): ForecastFile[] => sources.kind === "files"
+      ? sources.files.map((file) => ({ filename: file.filename, mimeType: file.mimeType, sizeBytes: Math.max(0, Math.round(file.fileSize ?? 0)) }))
+      : sourceDocuments.map((doc) => ({
+        filename: doc.filename,
+        mimeType: doc.mime_type,
+        sizeBytes: Math.max(0, Math.round(Number(doc.file_size) || 0)),
+        ...(doc.page_count > 0 ? { pages: doc.page_count } : {}),
+      }));
+    // The preview schema needs at least one file; with none (an empty run) the call only validates the pipeline.
+    const validationFiles = forecastFilesOfSources();
+    costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
 
     const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
@@ -990,7 +992,12 @@ export function createRunCreation(deps: RunCreationDeps) {
     const run = mapWorkspaceRun(row);
     run.totalDocuments = published.documents.length;
     run.pagesTotal = published.pagesTotal;
-    run.costForecast = costForecastFor(published.documents.length);
+    run.costForecast = costForecastFor(published.documents.map((doc) => ({
+      filename: doc.filename,
+      mimeType: doc.mime_type,
+      sizeBytes: Math.max(0, Math.round(Number((doc as { file_size?: unknown }).file_size) || 0)),
+      ...(doc.page_count > 0 ? { pages: doc.page_count } : {}),
+    })));
 
     // The Run is committed from here on: failing the request now would leave a
     // Run the caller never learns about, so a start failure defers instead.

@@ -26,7 +26,7 @@ export type Range = { low: number; high: number };
 
 export type Quote = {
   card: { version: string; revision: string; source: "bundled" | "supplied" };
-  estimate: { pages: number; documents: number; billing: "enforced" | "disabled"; credits: Range | null; seconds: Range | null; basis: string };
+  estimate: { pages: number; pagesRange?: { low: number; high: number }; unmeasuredFiles?: number; documents: number; billing: "enforced" | "disabled"; credits: Range | null; seconds: Range | null; basis: string };
   media: null | {
     audioFiles: number; videoFiles: number; audioMinutes: number; videoMinutes: number;
     durationsAssumed: boolean; videoFrames: boolean; credits: Range;

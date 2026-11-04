@@ -139,12 +139,25 @@ impl QuoteFile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CostEstimate {
+    /// Pages priced: counted pages, or the middle of the range for files whose pages were not counted.
     pub pages: f64,
+    /// Present when some files' pages were not counted: the fewest and most pages their sizes allow. `pages` is not a ceiling then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages_range: Option<PagesRange>,
+    /// How many files' page counts are unknown (priced over a range).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmeasured_files: Option<u32>,
     pub documents: f64,
     pub billing: Billing,
     pub credits: Option<CreditRange>,
     pub seconds: Option<CreditRange>,
     pub basis: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PagesRange {
+    pub low: f64,
+    pub high: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +206,41 @@ pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
 const IMAGE_FILE_MIX: PageMix = PageMix::new(0.0, 0.0, 1.0);
 const TEXT_FILE_MIX: PageMix = PageMix::new(1.0, 0.0, 0.0);
 
+// The ends of the page range of a file whose pages were not counted (`upload-quote.ts`: UNMEASURED_* and QUOTE_HIGH_RICH_*).
+// The golden cases hold these in step with the TypeScript.
+const UNMEASURED_MIN_BYTES_PER_PAGE: f64 = 16.0 * 1024.0;
+const UNMEASURED_MAX_BYTES_PER_PAGE: f64 = 300.0 * 1024.0;
+const UNMEASURED_TEXT_MAX_BYTES_PER_PAGE: f64 = 7_000.0;
+const UNMEASURED_TEXT_MIN_BYTES_PER_PAGE: f64 = 720.0;
+/// `richPagesForOutputTokens(2000)`: a dense page's output bills the included 1,000 tokens plus one extra Rich page.
+const QUOTE_HIGH_RICH_PAGE_FACTOR: f64 = 2.0;
+
+/// Where a file's page count sits: the cheap end, the middle and the expensive end; `measured` when the client counted them.
+struct PageRange {
+    low: f64,
+    high: f64,
+    measured: bool,
+}
+
+/// Port of `quoteFilePageRange`.
+fn quote_file_page_range(card: &Card, file: &QuoteFile) -> PageRange {
+    let central = quote_file_pages(card, file);
+    let mime = file.mime_type.as_deref();
+    if file.pages.is_some() || is_image_file(card, &file.name, mime) {
+        return PageRange { low: central, high: central, measured: true };
+    }
+    let (low_divisor, high_divisor) = if is_text_file(card, &file.name, mime) {
+        (UNMEASURED_TEXT_MAX_BYTES_PER_PAGE, UNMEASURED_TEXT_MIN_BYTES_PER_PAGE)
+    } else {
+        (UNMEASURED_MAX_BYTES_PER_PAGE, UNMEASURED_MIN_BYTES_PER_PAGE)
+    };
+    PageRange {
+        low: 1f64.max(central.min((file.size / low_divisor).ceil())),
+        high: central.max((file.size / high_divisor).ceil()),
+        measured: false,
+    }
+}
+
 /// A file's known page mix and its trust: measured, every page scanned for an image file, or all text for a text file.
 fn known_mix(card: &Card, file: &QuoteFile) -> Option<(PageMix, f64)> {
     if let Some(mix) = file.mix.filter(|mix| mix.text + mix.complex + mix.scanned > 0.0) {
@@ -202,8 +250,8 @@ fn known_mix(card: &Card, file: &QuoteFile) -> Option<(PageMix, f64)> {
     if is_image_file(card, &file.name, mime) {
         return Some((IMAGE_FILE_MIX, 1.0));
     }
-    // Text pages are only known once counted; without a count the size-based pages may be low, so keep the range.
-    (is_text_file(card, &file.name, mime) && file.pages.is_some()).then_some((TEXT_FILE_MIX, 1.0))
+    // Text files have no scanned pages whatever their length; only their page count is uncertain (`quote_file_page_range`).
+    is_text_file(card, &file.name, mime).then_some((TEXT_FILE_MIX, 1.0))
 }
 
 /// The expensive end for a known mix: blended toward the scan-heavy bound, never below the measured scanned share.
@@ -231,27 +279,40 @@ fn blended_mix(mix: &PageMix, confidence: f64, bound: &PageMix) -> PageMix {
     )
 }
 
-fn quote_mixes(card: &Card, files: &[&QuoteFile]) -> (PageMix, PageMix, usize) {
+struct QuoteMixes {
+    low: PageMix,
+    high: PageMix,
+    known: usize,
+    unmeasured: usize,
+    range_low: f64,
+    range_high: f64,
+}
+
+/// Port of `quoteMixes`: page counts per class at each end of the range, the scanned share of the high end counted `rich_factor` times.
+fn quote_mixes(card: &Card, files: &[&QuoteFile], rich_factor: f64) -> QuoteMixes {
     let known = files.iter().filter(|file| known_mix(card, file).is_some()).count();
-    if known == 0 {
-        return (card.quote_low_mix, card.quote_high_mix, 0);
-    }
     let mut low = PageMix::default();
     let mut high = PageMix::default();
+    let (mut unmeasured, mut range_low, mut range_high) = (0usize, 0.0, 0.0);
     for file in files {
-        let pages = quote_file_pages(card, file);
+        let range = quote_file_page_range(card, file);
+        if !range.measured {
+            unmeasured += 1;
+        }
+        range_low += range.low;
+        range_high += range.high;
         let (file_low, file_high) = match known_mix(card, file) {
             Some((mix, confidence)) => (blended_mix(&mix, confidence, &card.quote_low_mix), high_mix(card, &mix, confidence)),
             None => (card.quote_low_mix, card.quote_high_mix),
         };
-        low.text += pages * file_low.text;
-        low.complex += pages * file_low.complex;
-        low.scanned += pages * file_low.scanned;
-        high.text += pages * file_high.text;
-        high.complex += pages * file_high.complex;
-        high.scanned += pages * file_high.scanned;
+        low.text += range.low * file_low.text;
+        low.complex += range.low * file_low.complex;
+        low.scanned += range.low * file_low.scanned;
+        high.text += range.high * file_high.text;
+        high.complex += range.high * file_high.complex;
+        high.scanned += range.high * file_high.scanned * rich_factor;
     }
-    (low, high, known)
+    QuoteMixes { low, high, known, unmeasured, range_low, range_high }
 }
 
 fn round_up5(value: f64) -> f64 {
@@ -273,7 +334,8 @@ pub fn quote_upload(
         files.iter().filter(|file| upload_media_kind(card, &file.name, file.mime_type.as_deref()).is_none()).collect();
     let pages = 0f64.max(js_round(paged.iter().fold(0.0, |sum, file| sum + quote_file_pages(card, file))));
     let documents = paged.len() as f64;
-    let (low_mix, high_mix, known) = quote_mixes(card, &paged);
+    // Fast never reads a page with a model, so no page can bill the extra Rich pages of a long output.
+    let mixes = quote_mixes(card, &paged, if profile.quality == "fast" { 1.0 } else { QUOTE_HIGH_RICH_PAGE_FACTOR });
     let features: std::collections::BTreeMap<String, bool> = card
         .document_features
         .iter()
@@ -282,13 +344,16 @@ pub fn quote_upload(
             (name.clone(), enabled)
         })
         .collect();
-    let run = |mix: PageMix| -> Result<IngestEstimate, Error> {
+    // `mix` holds page counts; the pages priced are their sum, so each end of the range prices its own page count.
+    let run = |mix: PageMix, bound: PageMix| -> Result<IngestEstimate, Error> {
+        let total = mix.text + mix.complex + mix.scanned;
+        let priced_mix = if total > 0.0 { mix } else { bound };
         estimate_ingest(
             card,
             &IngestInput {
-                pages,
+                pages: if total > 0.0 { 0f64.max(js_round(total)) } else { pages },
                 documents: Some(1f64.max(documents)),
-                mix: mix.into(),
+                mix: priced_mix.into(),
                 profile: Some(profile.quality.clone()),
                 features: features.clone(),
                 worker_slots: profile.worker_slots.filter(|slots| *slots != 0.0 && !slots.is_nan()),
@@ -300,19 +365,32 @@ pub fn quote_upload(
     let paged_credits = |estimate: &IngestEstimate| {
         (estimate.credits.total_credits - estimate.credits.breakdown.features) + estimate.credits.breakdown.features
     };
-    let low = run(low_mix)?;
-    let high = run(high_mix)?;
+    let low = run(mixes.low, card.quote_low_mix)?;
+    let high = run(mixes.high, card.quote_high_mix)?;
     let fixed = card.fixed_overhead_seconds;
     let seconds = |wall: f64| if pages > 0.0 { 0f64.max(wall - fixed) + fixed } else { 0.0 };
-    let range = if known == 0 {
-        "range from all-text to scan-heavy pages".to_string()
-    } else if known == paged.len() {
+    let mix_range = if mixes.known == 0 {
+        "range from all-text to every page read by vision".to_string()
+    } else if mixes.known == paged.len() {
         "page mix known for every file".to_string()
     } else {
-        format!("page mix known for {known} of {} files, others range from all-text to scan-heavy pages", paged.len())
+        format!("page mix known for {} of {} files, others range from all-text to every page read by vision", mixes.known, paged.len())
+    };
+    let range_low = 0f64.max(js_round(mixes.range_low));
+    let range_high = 0f64.max(js_round(mixes.range_high));
+    let range = if mixes.unmeasured == 0 {
+        mix_range
+    } else {
+        format!(
+            "{mix_range}; pages not counted for {} of {} files, assumed {range_low} to {range_high} from their sizes",
+            mixes.unmeasured,
+            paged.len()
+        )
     };
     let paged_estimate = CostEstimate {
         pages,
+        pages_range: (mixes.unmeasured > 0).then_some(PagesRange { low: range_low, high: range_high }),
+        unmeasured_files: (mixes.unmeasured > 0).then_some(mixes.unmeasured as u32),
         documents,
         billing: profile.billing,
         credits: match profile.billing {

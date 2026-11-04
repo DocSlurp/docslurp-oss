@@ -325,13 +325,103 @@ pub fn is_text_file(card: &Card, name: &str, mime_type: Option<&str>) -> bool {
     is_generic_type(&mime) && listed(&card.extensions.text, &extension_of(name))
 }
 
-/// Port of `textPageCount`: one page per `lines` lines or per `chars` characters, whichever is more. Characters are
-/// UTF-16 code units of the text with JavaScript's `trim` applied, as the API counts them.
-pub fn text_page_count(card: &Card, bytes: &[u8]) -> f64 {
+/// East Asian characters carry about three times the content of a Latin one: each counts as this many characters toward a page.
+const TEXT_PAGE_CJK_WEIGHT: usize = 3;
+
+fn is_cjk(c: char) -> bool {
+    matches!(u32::from(c),
+        0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff | 0xff66..=0xff9f | 0x20000..=0x2fa1f)
+}
+
+fn js_space(c: char) -> bool {
+    c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{85}')
+}
+
+/// Decodes a text file by its byte-order mark: UTF-16 either way, UTF-8 (BOM removed), else UTF-8 with replacement characters.
+fn decode_text(bytes: &[u8]) -> String {
+    let wide = |rest: &[u8], big_endian: bool| {
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|pair| if big_endian { u16::from_be_bytes([pair[0], pair[1]]) } else { u16::from_le_bytes([pair[0], pair[1]]) })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return wide(rest, false);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return wide(rest, true);
+    }
     let text = String::from_utf8_lossy(bytes);
-    let lines = text.matches('\n').count() as f64 + 1.0;
-    let js_space = |c: char| c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{85}');
-    let chars = text.trim_matches(js_space).encode_utf16().count() as f64;
+    text.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or_else(|| text.into_owned())
+}
+
+fn starts_with_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len() && haystack.iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == *b)
+}
+
+/// Index of lower-case ASCII `needle` in `bytes` at or after `from`, ignoring ASCII case.
+fn find_ascii_ci(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    (from..=bytes.len().checked_sub(needle.len())?).find(|at| starts_with_ascii_ci(&bytes[*at..], needle))
+}
+
+/// Port of `stripMarkup`: the visible text of HTML with tags, comments, scripts and styles removed.
+fn strip_markup(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(relative) = text[at..].find('<') else {
+            out.push_str(&text[at..]);
+            break;
+        };
+        let open = at + relative;
+        out.push_str(&text[at..open]);
+        if text[open..].starts_with("<!--") {
+            at = text[open + 4..].find("-->").map_or(text.len(), |close| open + 4 + close + 3);
+            continue;
+        }
+        let block = ["script", "style"].into_iter().find(|name| {
+            starts_with_ascii_ci(&bytes[open..], format!("<{name}").as_bytes())
+                && matches!(bytes.get(open + name.len() + 1), Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+        });
+        if let Some(name) = block {
+            at = match find_ascii_ci(bytes, format!("</{name}").as_bytes(), open) {
+                Some(close) => text[close..].find('>').map_or(text.len(), |end| close + end + 1),
+                None => text.len(),
+            };
+            continue;
+        }
+        let end = text[open..].find('>').map(|end| open + end);
+        let tag_start = bytes.get(open + 1).is_some_and(|first| matches!(first, b'!' | b'/' | b'?') || first.is_ascii_alphabetic());
+        match end {
+            Some(end) if tag_start => {
+                out.push('\n');
+                at = end + 1;
+            }
+            _ => {
+                out.push('<');
+                at = open + 1;
+            }
+        }
+    }
+    out
+}
+
+/// Port of `textPageCount`: one page per `lines` lines or per `chars` characters, whichever is more. Characters are
+/// UTF-16 code units of the text with JavaScript's `trim` applied, as the API counts them; East Asian characters count
+/// [`TEXT_PAGE_CJK_WEIGHT`] each. With `markup` (HTML) tags, scripts and styles are removed first and only non-blank
+/// lines count. The text is decoded by its byte-order mark (UTF-16 or UTF-8).
+pub fn text_page_count(card: &Card, bytes: &[u8], markup: bool) -> f64 {
+    let decoded = decode_text(bytes);
+    let visible = if markup { strip_markup(&decoded) } else { decoded };
+    let lines = if markup {
+        visible.split('\n').filter(|line| !line.trim_matches(js_space).is_empty()).count() as f64
+    } else {
+        visible.matches('\n').count() as f64 + 1.0
+    };
+    let trimmed = visible.trim_matches(js_space);
+    let chars = (trimmed.encode_utf16().count() + trimmed.chars().filter(|c| is_cjk(*c)).count() * (TEXT_PAGE_CJK_WEIGHT - 1)) as f64;
     1f64.max((lines / card.text_pages.lines).ceil()).max((chars / card.text_pages.chars).ceil())
 }
 

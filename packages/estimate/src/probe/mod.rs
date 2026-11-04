@@ -283,7 +283,10 @@ fn sniff(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
 fn text(card: &Card, input: &ProbeInput<'_>, format: &str) -> ProbeResult {
     let mut result = ProbeResult::new(ProbeKind::Text, format, None);
     if input.is_whole() && input.size <= TEXT_WHOLE_MAX_BYTES {
-        result.pages = Some(crate::price::text_page_count(card, input.head));
+        // HTML is counted by its visible text, as the API counts it (the stored type is text/html).
+        let markup = input.mime().starts_with("text/html")
+            || (matches!(input.mime().as_str(), "" | "application/octet-stream") && matches!(input.extension().as_str(), "html" | "htm" | "mhtml"));
+        result.pages = Some(crate::price::text_page_count(card, input.head, markup));
     } else {
         result.notes.push("text file larger than the probe limit; pages estimated from size".into());
     }
