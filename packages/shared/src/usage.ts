@@ -228,14 +228,16 @@ export function resolveAiUsagePricingWithSource(
   input: { provider?: string | null; model?: string | null; inputTokens?: number | null },
   options: AiUsagePricingOptions = {},
 ): { pricing: AiUsagePricing; pricingSource: AiUsagePricingSource } {
+  const matched = findAiUsageCatalogEntry(input, options.catalog ?? defaultAiUsagePricingCatalog);
   if (!options.catalog && normalizeAiUsageCatalogKey(input.provider) === "openrouter") {
-    const live = liveModelPrice(input.model, { promptTokens: input.inputTokens ?? undefined });
+    // A verified catalog rate (cents per 1K) bounds the live listing, in USD per token.
+    const reference = matched ? { input: matched.costPer1kInputTokens / 100_000, output: matched.costPer1kOutputTokens / 100_000 } : undefined;
+    const live = liveModelPrice(input.model, { promptTokens: input.inputTokens ?? undefined, reference });
     if (live) {
       // USD per token to cents per 1K tokens.
       return { pricing: { costPer1kInputTokens: live.input * 100_000, costPer1kOutputTokens: live.output * 100_000 }, pricingSource: "openrouter-live" };
     }
   }
-  const matched = findAiUsageCatalogEntry(input, options.catalog ?? defaultAiUsagePricingCatalog);
   return { pricing: resolveAiUsagePricing(input, options), pricingSource: matched ? "catalog" : "configured-fallback" };
 }
 

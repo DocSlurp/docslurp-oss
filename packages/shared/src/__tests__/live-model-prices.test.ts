@@ -37,6 +37,29 @@ describe("live model prices", () => {
     expect(liveModelPrice("vendor/flat:nitro")).toBeUndefined();
   });
 
+  it("drops listings at or above the prohibited-price ceiling and ignores live prices far from a verified one", () => {
+    expect(parseOpenRouterCatalog({ data: [{ id: "vendor/huge", pricing: { prompt: "1e307", completion: "0.0000001" } }] }).size).toBe(0);
+    expect(parseOpenRouterCatalog({ data: [{ id: "vendor/pricey", pricing: { prompt: "0.0000001", completion: "0.00005" } }] }).size).toBe(0);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    setLiveModelPricesForTests({ models: { "vendor/flat": { input: 0.0000001, output: 0.0000004 }, "vendor/zero": { input: 0, output: 0 } } });
+    expect(liveModelPrice("vendor/flat", { reference: { input: 0.00000015, output: 0.0000005 } })?.input).toBe(0.0000001);
+    expect(liveModelPrice("vendor/flat", { reference: { input: 0.000001, output: 0.0000004 } })).toBeUndefined();
+    // A $0 listing cannot silence the estimate for a model with a verified price.
+    expect(liveModelPrice("vendor/zero", { reference: { input: 0.0000001, output: 0.0000004 } })).toBeUndefined();
+  });
+
+  it("handles UTC windows that wrap midnight and windows with only an end", () => {
+    setLiveModelPricesForTests({ models: Object.fromEntries(parseOpenRouterCatalog({ data: [
+      { id: "vendor/night", pricing: { prompt: "0.0000001", completion: "0.0000001", overrides: [{ utc_start: 2200, utc_end: 600, prompt: "0.0000002", completion: "0.0000002" }] } },
+      { id: "vendor/morning", pricing: { prompt: "0.0000001", completion: "0.0000001", overrides: [{ utc_end: 900, prompt: "0.0000003", completion: "0.0000003" }] } },
+    ] })) });
+    expect(liveModelPrice("vendor/night", { at: new Date("2026-11-04T23:00:00Z") })?.input).toBe(0.0000002);
+    expect(liveModelPrice("vendor/night", { at: new Date("2026-11-04T05:59:00Z") })?.input).toBe(0.0000002);
+    expect(liveModelPrice("vendor/night", { at: new Date("2026-11-04T12:00:00Z") })?.input).toBe(0.0000001);
+    expect(liveModelPrice("vendor/morning", { at: new Date("2026-11-04T08:00:00Z") })?.input).toBe(0.0000003);
+    expect(liveModelPrice("vendor/morning", { at: new Date("2026-11-04T10:00:00Z") })?.input).toBe(0.0000001);
+  });
+
   it("ignores a snapshot past its maximum age", () => {
     setLiveModelPricesForTests({ fetchedAt: Date.now() - LIVE_MODEL_PRICES_MAX_AGE_MS - 1, models: { "vendor/flat": { input: 1, output: 1 } } });
     expect(liveModelPrice("vendor/flat")).toBeUndefined();

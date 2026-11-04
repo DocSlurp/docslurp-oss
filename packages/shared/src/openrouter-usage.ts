@@ -1,7 +1,7 @@
 import { nitroBaseModel } from "./workspace-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
-import { liveModelPrice, liveModelPriceStatus, liveModelPricesDisabled, refreshLiveModelPrices } from "./live-model-prices.js";
+import { liveModelPrice, refreshStaleLiveModelPrices } from "./live-model-prices.js";
 
 /** Provider charges are USD; the application ledger uses fractional USD cents. */
 export interface ProviderTextUsage {
@@ -41,15 +41,16 @@ async function resolveOpenRouterUsageInner(args: {
   providerName?: string;
   generationId?: string;
   usage: { inputTokens?: number; outputTokens?: number; raw?: unknown };
-  /** Delays before each generation-receipt lookup; tests pass [0]. */
+  /** Delays before each generation-receipt lookup (default [0], one lookup). */
   receiptRetryDelaysMs?: readonly number[];
 }): Promise<ProviderTextUsage> {
   const base = { inputTokens: args.usage.inputTokens ?? 0, outputTokens: args.usage.outputTokens ?? 0 };
   const direct = readProviderCharge(args.usage.raw);
   if (direct.costCents !== undefined) return { ...base, ...direct, metadata: { ...direct.metadata, generationId: args.generationId ?? null, ...(args.providerName ? { providerName: args.providerName } : {}) } };
   if (args.generationId) {
-    // A receipt is often not queryable for a moment after the response ends: retry once.
-    for (const delayMs of args.receiptRetryDelaysMs ?? [0, 1_500]) {
+    // A receipt is often not queryable for a moment after the response ends. Background callers
+    // pass a retry delay (e.g. [0, 1_500]); user-facing paths look once.
+    for (const delayMs of args.receiptRetryDelaysMs ?? [0]) {
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       const receipt = await fetchGenerationReceipt(args.apiKey, args.generationId, base).catch(() => null);
       if (receipt === "incomplete") break;
@@ -67,11 +68,13 @@ async function resolveOpenRouterUsageInner(args: {
       pricingSource: "nitro-endpoint-ceiling-estimate", generationId: args.generationId ?? null,
       ...(args.providerName ? { providerName: args.providerName } : {}) },
   };
-  // No receipt: estimate from the live list price (loading it once if this
-  // process has none yet), then the hardcoded verified table.
-  if (!liveModelPriceStatus().loaded && !liveModelPricesDisabled()) await refreshLiveModelPrices().catch(() => false);
-  const live = liveModelPrice(args.model, { promptTokens: base.inputTokens });
-  const verified = live ? undefined : chatModelPricePerToken(args.model);
+  // No receipt: estimate from the live list price, then the hardcoded verified
+  // table. A missing or stale snapshot is refreshed in the background, never
+  // awaited on this (often user-facing) path.
+  refreshStaleLiveModelPrices();
+  const reference = chatModelPricePerToken(args.model);
+  const live = liveModelPrice(args.model, { promptTokens: base.inputTokens, reference });
+  const verified = live ? undefined : reference;
   const pricing = live ? { input: live.input, output: live.output } : verified;
   return { ...base,
     ...(pricing ? { costCents: (base.inputTokens * pricing.input + base.outputTokens * pricing.output) * 100 } : {}),

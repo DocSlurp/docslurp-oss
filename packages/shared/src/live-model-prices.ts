@@ -16,6 +16,14 @@ export const LIVE_MODEL_PRICES_REFRESH_MS = 60 * 60_000;
 export const LIVE_MODEL_PRICES_RETRY_MS = 5 * 60_000;
 /** A snapshot older than this is ignored and the hardcoded tables apply. */
 export const LIVE_MODEL_PRICES_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+/**
+ * Listed rates at or above $50 per 1M tokens are dropped: no allowed model
+ * costs that (the prohibited-model ceiling), so such a listing is an error.
+ */
+export const LIVE_MODEL_PRICE_MAX_USD_PER_TOKEN = 50 / 1_000_000;
+/** A live rate more than this factor away from a verified hardcoded rate is ignored for that call. */
+export const LIVE_MODEL_PRICE_MAX_DRIFT = 5;
+const MAX_CATALOG_BYTES = 20 * 1024 * 1024;
 
 /** USD per token, the unit OpenRouter lists. */
 export interface LiveTokenRates {
@@ -55,6 +63,11 @@ let inFlight: Promise<boolean> | null = null;
 
 function rate(value: unknown): number | null {
   const parsed = typeof value === "string" ? Number(value) : typeof value === "number" ? value : NaN;
+  return Number.isFinite(parsed) && parsed >= 0 && parsed < LIVE_MODEL_PRICE_MAX_USD_PER_TOKEN ? parsed : null;
+}
+
+function count(value: unknown): number | null {
+  const parsed = typeof value === "string" ? Number(value) : typeof value === "number" ? value : NaN;
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
@@ -64,14 +77,14 @@ function parseOverride(raw: unknown): LivePriceOverride | null {
   const input = rate(value.prompt), output = rate(value.completion);
   if (input === null || output === null) return null;
   const override: LivePriceOverride = { input, output };
-  const min = rate(value.min_prompt_tokens);
+  const min = count(value.min_prompt_tokens);
   if (min !== null) override.minPromptTokens = min;
   if (Array.isArray(value.utc_days)) override.utcDays = value.utc_days.filter((day): day is string => typeof day === "string").map((day) => day.toLowerCase());
-  const start = rate(value.utc_start), end = rate(value.utc_end);
+  const start = count(value.utc_start), end = count(value.utc_end);
   if (start !== null) override.utcStart = start;
   if (end !== null) override.utcEnd = end;
   // An override with no condition we understand is ignored rather than applied to every call.
-  return override.minPromptTokens !== undefined || override.utcDays || override.utcStart !== undefined ? override : null;
+  return override.minPromptTokens !== undefined || override.utcDays || override.utcStart !== undefined || override.utcEnd !== undefined ? override : null;
 }
 
 /** Parse one OpenRouter catalog payload (`{ data: [{ id, pricing }] }`) into price entries. */
@@ -104,7 +117,9 @@ function overrideApplies(override: LivePriceOverride, promptTokens: number | und
     const hhmm = at.getUTCHours() * 100 + at.getUTCMinutes();
     const start = override.utcStart ?? 0;
     const end = !override.utcEnd ? 2400 : override.utcEnd;
-    if (hhmm < start || hhmm >= end) return false;
+    // A window that wraps midnight (2200 to 0600) covers both ends of the day.
+    const inside = start <= end ? hhmm >= start && hhmm < end : hhmm >= start || hhmm < end;
+    if (!inside) return false;
   }
   return true;
 }
@@ -118,7 +133,7 @@ function overrideApplies(override: LivePriceOverride, promptTokens: number | und
  */
 export function liveModelPrice(
   model: string | null | undefined,
-  options: { promptTokens?: number; at?: Date; now?: number } = {},
+  options: { promptTokens?: number; at?: Date; now?: number; reference?: LiveTokenRates } = {},
 ): LiveModelPrice | undefined {
   if (!model || !snapshot) return undefined;
   const now = options.now ?? Date.now();
@@ -127,13 +142,39 @@ export function liveModelPrice(
   if (!entry) return undefined;
   const at = options.at ?? new Date(now);
   const override = entry.overrides.find((candidate) => overrideApplies(candidate, options.promptTokens, at));
+  const input = override?.input ?? entry.input, output = override?.output ?? entry.output;
+  // Against a verified hardcoded price, a listing far off either way is a catalog error, not a price change.
+  if (options.reference && (drifted(input, options.reference.input) || drifted(output, options.reference.output))) {
+    warnDrift(model.trim(), { input, output }, options.reference);
+    return undefined;
+  }
   return {
-    input: override?.input ?? entry.input,
-    output: override?.output ?? entry.output,
+    input,
+    output,
     pricingSource: "openrouter-live",
     fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
     ...(override ? { override: override.minPromptTokens !== undefined ? "min-prompt-tokens" as const : "utc-window" as const } : {}),
   };
+}
+
+function drifted(live: number, reference: number): boolean {
+  if (!(reference > 0)) return false;
+  return live > reference * LIVE_MODEL_PRICE_MAX_DRIFT || live < reference / LIVE_MODEL_PRICE_MAX_DRIFT;
+}
+
+const driftWarned = new Set<string>();
+function warnDrift(model: string, live: LiveTokenRates, reference: LiveTokenRates): void {
+  if (driftWarned.has(model) || driftWarned.size > 256) return;
+  driftWarned.add(model);
+  console.warn(`[model-prices] live_price_ignored model=${model} live_in=${live.input} live_out=${live.output} verified_in=${reference.input} verified_out=${reference.output} max_drift=${LIVE_MODEL_PRICE_MAX_DRIFT}x`);
+}
+
+async function readCatalog(response: Response): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_CATALOG_BYTES) throw new Error(`catalog exceeds ${MAX_CATALOG_BYTES} bytes`);
+  const text = await response.text();
+  if (text.length > MAX_CATALOG_BYTES) throw new Error(`catalog exceeds ${MAX_CATALOG_BYTES} bytes`);
+  return JSON.parse(text);
 }
 
 /**
@@ -149,15 +190,17 @@ export async function refreshLiveModelPrices(options: { fetch?: typeof fetch; no
     const doFetch = options.fetch ?? fetch;
     const merged = new Map<string, LiveModelPriceEntry>();
     const errors: string[] = [];
-    for (const url of CATALOG_URLS) {
+    const results = await Promise.all(CATALOG_URLS.map(async (url) => {
       try {
         const response = await doFetch(url, { signal: AbortSignal.timeout(10_000) });
-        if (!response.ok) { errors.push(`${url} http ${response.status}`); continue; }
-        for (const [id, entry] of parseOpenRouterCatalog(await response.json())) merged.set(id, entry);
+        if (!response.ok) { errors.push(`${url} http ${response.status}`); return null; }
+        return parseOpenRouterCatalog(await readCatalog(response));
       } catch (error) {
         errors.push(`${url} ${error instanceof Error ? error.message : String(error)}`.slice(0, 200));
+        return null;
       }
-    }
+    }));
+    for (const models of results) for (const [id, entry] of models ?? []) merged.set(id, entry);
     if (merged.size === 0) {
       lastError = errors.join("; ") || "empty catalog";
       console.warn(`[model-prices] live_refresh=failed kept_snapshot=${snapshot !== null} error=${lastError}`);
@@ -169,6 +212,17 @@ export async function refreshLiveModelPrices(options: { fetch?: typeof fetch; no
     return true;
   })().finally(() => { inFlight = null; });
   return await inFlight;
+}
+
+/**
+ * Request-path hook: start a background refresh when no snapshot is loaded or
+ * it is older than the refresh interval (processes without the timer), at most
+ * once per retry interval. Never awaited, never throws.
+ */
+export function refreshStaleLiveModelPrices(now: number = Date.now()): void {
+  if (liveModelPricesDisabled()) return;
+  if (snapshot && now - snapshot.fetchedAt < LIVE_MODEL_PRICES_REFRESH_MS) return;
+  void refreshLiveModelPrices().catch(() => false);
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -210,4 +264,6 @@ export function setLiveModelPricesForTests(next: { fetchedAt?: number; models: R
   } : null;
   lastAttemptAt = 0;
   lastError = null;
+  inFlight = null;
+  driftWarned.clear();
 }

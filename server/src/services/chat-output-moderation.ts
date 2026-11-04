@@ -94,7 +94,8 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
 function moderationUsage(raw: unknown, inputTokens: number, outputTokens: number): NonNullable<ModerationVerdict["usage"]> {
   const charge = readProviderCharge(raw);
   if (charge.costCents !== undefined) return { model: LLAMA_GUARD_MODEL, inputTokens, outputTokens, costCents: charge.costCents, metadata: charge.metadata };
-  const live = liveModelPrice(LLAMA_GUARD_MODEL, { promptTokens: inputTokens });
+  const reference = { input: LLAMA_GUARD_PRICE.input / 1_000_000, output: LLAMA_GUARD_PRICE.output / 1_000_000 };
+  const live = liveModelPrice(LLAMA_GUARD_MODEL, { promptTokens: inputTokens, reference });
   const usdPerToken = live ?? { input: LLAMA_GUARD_PRICE.input / 1_000_000, output: LLAMA_GUARD_PRICE.output / 1_000_000 };
   return {
     model: LLAMA_GUARD_MODEL, inputTokens, outputTokens,

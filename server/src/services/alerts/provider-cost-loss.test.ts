@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../usage-attribution.js", () => ({ providerCostLossItems: vi.fn() }));
 const { ProviderCostLossMonitor, providerCostLossChecks, resolveProviderCostLossSettings } = await import("./provider-cost-loss.js");
-type Item = Parameters<typeof providerCostLossChecks>[0][number];
+type Item = Parameters<typeof providerCostLossChecks>[1][number];
+type Org = Parameters<typeof providerCostLossChecks>[0][number];
+const totals = (items: Item[]): Org[] => {
+  const byOrg = new Map<string, Org>();
+  for (const i of items) {
+    const org = byOrg.get(i.orgId) ?? { orgId: i.orgId, lossCents: 0, providerCostCents: 0, creditCents: 0, estimatedCostCents: 0, items: 0, refundedItems: 0 };
+    if (i.refunded) org.refundedItems += 1;
+    else { org.lossCents += i.lossCents; org.providerCostCents += i.providerCostCents; org.creditCents += i.creditCents; org.estimatedCostCents += i.estimatedCostCents; org.items += 1; }
+    byOrg.set(i.orgId, org);
+  }
+  return [...byOrg.values()];
+};
 
 const item = (overrides: Partial<Item> = {}): Item => ({
   kind: "chat-turn", key: "t1", orgId: "o1", creditCents: 1, providerCostCents: 3, estimatedCostCents: 0, lossCents: 2,
@@ -12,13 +23,14 @@ const settings = { thresholdCents: 100, intervalMs: 300_000, settleMs: 120_000, 
 describe("provider cost loss checks", () => {
   it("fires per org at the threshold, excludes refunded turns and resolves orgs that recover", () => {
     const items = [item({ lossCents: 60 }), item({ key: "t2", lossCents: 50, topModel: "vendor/other" }), item({ key: "t3", lossCents: 500, refunded: true }), item({ orgId: "o2", lossCents: 99 })];
-    const checks = providerCostLossChecks(items, 100, new Set(["o3"]));
+    const checks = providerCostLossChecks(totals(items), items, 100, new Set(["o3"]));
     expect(checks.map((check) => [check.id, check.state])).toEqual([
       ["provider-cost-loss:o1", "firing"], ["provider-cost-loss:o3", "ok"],
     ]);
     expect(checks[0]).toMatchObject({ details: { lossCents: 110, items: 2, refundedItems: 1, topModels: "vendor/model,vendor/other" } });
     // A previously firing org now under the threshold resolves.
-    expect(providerCostLossChecks([item({ orgId: "o2", lossCents: 5 })], 100, new Set(["o2"]))[0]).toMatchObject({ state: "ok" });
+    const recovered = [item({ orgId: "o2", lossCents: 5 })];
+    expect(providerCostLossChecks(totals(recovered), recovered, 100, new Set(["o2"]))[0]).toMatchObject({ state: "ok" });
   });
 
   it("reads thresholds from the environment, with 0 disabling", () => {
@@ -30,10 +42,11 @@ describe("provider cost loss checks", () => {
 describe("ProviderCostLossMonitor", () => {
   function monitor(items: Item[][], billing = true) {
     let now = 10_000_000;
-    const query = vi.fn(async () => items.shift() ?? []);
+    const state = { billing };
+    const query = vi.fn(async () => { const next = items.shift() ?? []; return { items: next, orgs: totals(next) }; });
     const emit = vi.fn();
-    const instance = new ProviderCostLossMonitor(settings, { query, now: () => now, emit, billingEnforced: () => billing });
-    return { instance, query, emit, advance: (ms: number) => { now += ms; } };
+    const instance = new ProviderCostLossMonitor(settings, { query, now: () => now, emit, billingEnforced: () => state.billing });
+    return { instance, query, emit, state, advance: (ms: number) => { now += ms; } };
   }
 
   it("emits each loss item once, throttles queries and resolves after recovery", async () => {
@@ -61,5 +74,9 @@ describe("ProviderCostLossMonitor", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     m.advance(300_000);
     expect(await m.instance.evaluate()).toEqual([{ id: "provider-cost-loss:o1", state: "unknown", reason: "loss query failed" }]);
+    // Switching billing off resolves the firing alert instead of leaving it active.
+    m.state.billing = false;
+    expect(await m.instance.evaluate()).toEqual([expect.objectContaining({ id: "provider-cost-loss:o1", state: "ok" })]);
+    expect(await m.instance.evaluate()).toEqual([]);
   });
 });
