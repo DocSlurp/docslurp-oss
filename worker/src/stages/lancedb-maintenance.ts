@@ -268,14 +268,58 @@ export function lanceDbFtsIndexEnabled(env: NodeJS.ProcessEnv = process.env): bo
   return !["0", "false", "off", "no"].includes((env.LANCEDB_FTS_INDEX ?? "").trim().toLowerCase());
 }
 
-/** The chunk-text FTS index: English stemming and stop words, no positions (no phrase queries). */
-export function chunkTextFtsIndex(): Index {
-  return Index.fts({ withPosition: false, language: "English", stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
+/**
+ * Name of the current chunk-text FTS index. An index under any other name was
+ * built with the old English-only analyzer and is replaced by maintenance.
+ */
+export const CHUNK_TEXT_FTS_INDEX_NAME = "text_fts_icu_v1";
+
+/**
+ * LANCEDB_FTS_LANGUAGE selects the analyzer of the chunk-text index. Unset (or
+ * `auto`) is the language-neutral default: ICU dictionary word segmentation
+ * (Japanese, Chinese, Thai and every other script), lower-casing and accent
+ * folding, no stemming and no stop-word list, since either one is per-language
+ * and silently damages every other language in the table (an English stemmer
+ * and stop list on German text). Naming a language (`English`, `German`, ...)
+ * restores stemming and stop words for a deployment whose documents are in
+ * that one language.
+ */
+export function chunkTextFtsLanguage(env: NodeJS.ProcessEnv = process.env): string | null {
+  const value = (env.LANCEDB_FTS_LANGUAGE ?? "").trim();
+  return !value || value.toLowerCase() === "auto" ? null : value;
 }
 
+/** The chunk-text FTS index: no positions (no phrase queries). */
+export function chunkTextFtsIndex(env: NodeJS.ProcessEnv = process.env): Index {
+  const language = chunkTextFtsLanguage(env);
+  if (language) {
+    return Index.fts({ withPosition: false, baseTokenizer: "simple", language, stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
+  }
+  return Index.fts({ withPosition: false, baseTokenizer: "icu", stem: false, removeStopWords: false, lowercase: true, asciiFolding: true });
+}
+
+type IndexInfo = { name?: string; indexType?: string; columns: string[] };
+
+const isTextFtsIndex = (index: IndexInfo) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? "");
+
 /** True when the table has an FTS index on `text`. */
-export function hasChunkTextFtsIndex(indices: Array<{ indexType?: string; columns: string[] }>): boolean {
-  return indices.some((index) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? ""));
+export function hasChunkTextFtsIndex(indices: IndexInfo[]): boolean {
+  return indices.some(isTextFtsIndex);
+}
+
+/** True when the table's FTS index on `text` is the current multilingual one. */
+export function hasCurrentChunkTextFtsIndex(indices: IndexInfo[]): boolean {
+  return indices.some((index) => isTextFtsIndex(index) && index.name === CHUNK_TEXT_FTS_INDEX_NAME);
+}
+
+/** Builds the current index, first dropping an older English-only one so two analyzers never serve one column. */
+export async function ensureChunkTextFtsIndex(table: Table, indices: IndexInfo[]): Promise<boolean> {
+  if (hasCurrentChunkTextFtsIndex(indices)) return false;
+  for (const stale of indices.filter(isTextFtsIndex)) {
+    if (stale.name) await table.dropIndex(stale.name);
+  }
+  await table.createIndex("text", { config: chunkTextFtsIndex(), name: CHUNK_TEXT_FTS_INDEX_NAME, replace: true });
+  return true;
 }
 
 /** Choose ANN parameters; L2 matches the app's default vectorSearch distance. */
@@ -334,8 +378,8 @@ export async function runLanceDbMaintenance(
       // merge-insert joins on "id"; a btree lets it look keys up instead of scanning the table.
       await table.createIndex("id", { config: Index.btree(), replace: false });
     }
-    if (lanceDbFtsIndexEnabled() && rows > 0 && !hasChunkTextFtsIndex(indices)) {
-      await table.createIndex("text", { config: chunkTextFtsIndex(), replace: false });
+    if (lanceDbFtsIndexEnabled() && rows > 0) {
+      await ensureChunkTextFtsIndex(table, indices);
     }
     if (indexCreated || consolidated) {
       indices = await table.listIndices();
