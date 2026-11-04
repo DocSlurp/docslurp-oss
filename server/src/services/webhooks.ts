@@ -1,5 +1,5 @@
 import { withBackgroundSpan } from "@docslurp/shared/observability";
-import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { friendlyErrorMessage, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID, createHmac } from "node:crypto";
 
@@ -282,6 +282,14 @@ export class WebhookScopeError extends Error {
   }
 }
 
+/** The caller belongs to the organization but its role does not allow this webhook. */
+export class WebhookForbiddenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebhookForbiddenError";
+  }
+}
+
 export async function createWebhook(args: {
   userId: string;
   /** The organization it receives events for. The creator must belong to it. */
@@ -295,10 +303,15 @@ export async function createWebhook(args: {
   const id = randomUUID();
   const events = args.events ?? ["run.completed", "run.failed"];
   // Scope first: who may register a webhook for which tenant is decided before anything else is touched.
-  const [member] = await sql<{ one: number }[]>`
-    select 1 as one from org_memberships where org_id = ${args.orgId} and user_id = ${args.userId}
+  const [member] = await sql<{ role: string }[]>`
+    select role from org_memberships where org_id = ${args.orgId} and user_id = ${args.userId}
   `;
   if (!member) throw new WebhookScopeError("Organization not found");
+  // Every workspace's events (including ones the creator cannot see today) go to a URL the creator picked: owners and admins only.
+  // A member may watch a workspace they can read.
+  if (!args.workspaceId && !["owner", "admin"].includes(member.role)) {
+    throw new WebhookForbiddenError("Organization admin access required for an organization-wide webhook; choose a workspace instead");
+  }
   if (args.workspaceId) {
     const access = await getWorkspaceAccess(args.workspaceId, args.userId);
     if (!access || access.orgId !== args.orgId) throw new WebhookScopeError("Workspace not found");
@@ -489,6 +502,10 @@ export async function deliverWebhook(runId: string, eventType: string): Promise<
       and ${eventType} = any(w.events)
       and (w.workspace_id is null or w.workspace_id = r.workspace_id)
       and docslurp_workspace_access(r.workspace_id, w.user_id)
+      -- An organization-wide webhook keeps delivering only while its creator is still an owner or admin.
+      and (w.workspace_id is not null or exists (
+        select 1 from org_memberships m where m.org_id = w.org_id and m.user_id = w.user_id and m.role in ('owner', 'admin')
+      ))
   `;
 
   for (const row of rows) {
@@ -571,7 +588,11 @@ export async function drainWebhookOutbox(limit = 25): Promise<number> {
     // (G-06) stops its events.
     const webhooks = await sql<(WebhookRow & { can_read: boolean })[]>`
       select id, user_id, org_id, workspace_id, url, secret, events, active, created_at::text,
-        docslurp_workspace_access(${workspaceId}, user_id) as can_read
+        docslurp_workspace_access(${workspaceId}, user_id)
+          -- An organization-wide webhook keeps delivering only while its creator is still an owner or admin.
+          and (workspace_id is not null or exists (
+            select 1 from org_memberships m where m.org_id = webhooks.org_id and m.user_id = webhooks.user_id and m.role in ('owner', 'admin')
+          )) as can_read
       from webhooks
       where org_id = ${workspace.org_id}
         and (workspace_id is null or workspace_id = ${workspaceId})
@@ -646,7 +667,10 @@ export async function stopWebhookOutboxListener(): Promise<void> {
   await listener?.unlisten();
 }
 
-/** Preserve document results verbatim; only operational error fields are rewritten. */
+/**
+ * Preserve document results verbatim; only operational error fields are rewritten: reviewed public copy passes, anything else
+ * (a raw worker error queued before the worker stopped sending them) becomes the generic processing message.
+ */
 function publicWebhookPayload(payload: Record<string, unknown>): Record<string, unknown> {
-  return { ...payload, ...(payload.error ? { error: PUBLIC_ERROR_MESSAGES.processing } : {}) };
+  return { ...payload, ...(payload.error ? { error: friendlyErrorMessage(payload.error, PUBLIC_ERROR_MESSAGES.processing) } : {}) };
 }

@@ -7,7 +7,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -2011,20 +2011,37 @@ export class Store {
    * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
    */
   async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
-    await this.enqueueWebhookEvent(event, client`
-      select r.user_id, jsonb_build_object(
-        'event', ${event}::text,
-        'runId', r.id,
-        'workspaceId', r.workspace_id,
-        'status', r.status,
-        'stage', r.stage,
-        'processedDocuments', r.processed_documents,
-        'pagesProcessed', r.pages_processed,
-        'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
-        'error', r.error
-      ) as payload
+    const [run] = await client<Array<{
+      user_id: string;
+      workspace_id: string;
+      status: string;
+      stage: string;
+      processed_documents: number;
+      pages_processed: number;
+      failed_documents: number;
+      error: string | null;
+    }>>`
+      select r.user_id, r.workspace_id, r.status, r.stage, r.processed_documents, r.pages_processed,
+        coalesce((r.stats->>'failedDocuments')::int, 0) as failed_documents, r.error
       from workspace_runs r
       where r.id = ${runId}
+    `;
+    if (!run) return;
+    // Subscribers include teammates and external systems: the raw worker error (stack frames, hosts, provider text) stays in the
+    // run record and telemetry, and only its public copy is queued.
+    const payload = {
+      event,
+      runId,
+      workspaceId: run.workspace_id,
+      status: run.status,
+      stage: run.stage,
+      processedDocuments: run.processed_documents,
+      pagesProcessed: run.pages_processed,
+      failedDocuments: run.failed_documents,
+      error: publicDocumentError(run.error),
+    };
+    await this.enqueueWebhookEvent(event, client`
+      select ${run.user_id}::text as user_id, ${this.toJson(payload)}::jsonb as payload
     `, client, logicalId);
   }
 
