@@ -631,7 +631,21 @@ export type ChatStreamEvent =
   | { event: "message"; data: ChatResponse }
   | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
-export type ListDocumentsInput = {
+/** One page of a list: `hasMore` says whether `nextCursor` leads to more. Pass `nextCursor` back as `cursor`. */
+export type ListPage<Key extends string, T> = { [K in Key]: T[] } & { hasMore: boolean; nextCursor: string | null };
+export type PageInput = { limit?: number; cursor?: string };
+
+/** A list that would not fit under `maxItems` was cut off; page through it with the *Page or iterate* methods. */
+export class DocSlurpTruncatedError extends Error {
+  constructor(message: string, readonly partial: unknown[]) {
+    super(message);
+    this.name = "DocSlurpTruncatedError";
+  }
+}
+
+export type ListDocumentsInput = PageInput & {
+  /** listDocuments() reads every page up to this many documents (default 10,000), then throws DocSlurpTruncatedError instead of returning a cut-off list. */
+  maxItems?: number;
   /** Workspace ID, slug or name; omitted: the client workspace. */
   workspace?: string;
   runId?: string;
@@ -730,6 +744,21 @@ export class DocSlurpTimeoutError extends Error {
     super(message);
     this.name = "DocSlurpTimeoutError";
   }
+}
+
+const DEFAULT_MAX_LIST_ITEMS = 10_000;
+
+/** Reads a paged list to the end; more than `maxItems` is an error, never a silently shortened list. */
+async function collectPages<T>(items: AsyncGenerator<T>, maxItems = DEFAULT_MAX_LIST_ITEMS): Promise<T[]> {
+  const collected: T[] = [];
+  for await (const item of items) {
+    if (collected.length >= maxItems) {
+      await items.return(undefined);
+      throw new DocSlurpTruncatedError(`The list has more than ${maxItems} items. Page through it with the *Page methods or iterate*, or raise maxItems.`, collected);
+    }
+    collected.push(item);
+  }
+  return collected;
 }
 
 /** True for a run the worker paused for spend: it resumes on its own once credits or budget allow. */
@@ -1340,6 +1369,41 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
+  async function listRunsPage(input: PageInput = {}, options?: RequestOptions): Promise<ListPage<"runs", WorkspaceRun>> {
+    const params = new URLSearchParams();
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    if (input.cursor) params.set("cursor", input.cursor);
+    const query = params.toString();
+    return await request<ListPage<"runs", WorkspaceRun>>(`/v1/runs${query ? `?${query}` : ""}`, {}, options, true);
+  }
+
+  async function* iterateRuns(input: Omit<PageInput, "cursor"> = {}, options?: RequestOptions): AsyncGenerator<WorkspaceRun> {
+    let cursor: string | undefined;
+    do {
+      const page = await listRunsPage({ ...input, cursor }, options);
+      yield* page.runs;
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  }
+
+  async function listDocumentsPage(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<ListPage<"documents", DocumentRecord>> {
+    const params = new URLSearchParams({ workspace: input.workspace?.trim() || clientWorkspace });
+    if (input.runId) params.set("runId", input.runId);
+    if (input.tags) params.set("tags", input.tags);
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    if (input.cursor) params.set("cursor", input.cursor);
+    return await request<ListPage<"documents", DocumentRecord>>(`/v1/documents?${params.toString()}`, {}, requestOptions, true);
+  }
+
+  async function* iterateDocuments(input: Omit<ListDocumentsInput, "cursor" | "maxItems"> = {}, requestOptions?: RequestOptions): AsyncGenerator<DocumentRecord> {
+    let cursor: string | undefined;
+    do {
+      const page = await listDocumentsPage({ ...input, cursor }, requestOptions);
+      yield* page.documents;
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  }
+
   async function waitForRun(runId: string, waitOptions: WaitForRunOptions = {}): Promise<WorkspaceRun> {
     const timeoutMs = positiveDuration(waitOptions.timeoutMs ?? 300_000, "timeoutMs");
     const pollIntervalMs = positiveDuration(waitOptions.pollIntervalMs ?? 1_000, "pollIntervalMs");
@@ -1714,10 +1778,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamActivity,
     waitForRun,
 
-    /** The caller's recent runs, newest first. */
-    async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
-      return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+    /** One page of run history (highest priority, then newest first). Follow `nextCursor` for the rest. */
+    listRunsPage,
 
+    /** Every run, page by page. */
+    iterateRuns,
+
+    /** All of the caller's runs, newest first; throws DocSlurpTruncatedError past `maxItems` (default 10,000) rather than returning a cut-off list. */
+    async listRuns(options?: RequestOptions & { maxItems?: number }): Promise<WorkspaceRun[]> {
+      return await collectPages(iterateRuns({}, options), options?.maxItems);
     },
 
     getJob,
@@ -1901,13 +1970,16 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
     },
 
-    /** Documents in a workspace (the client default unless one is passed), newest first. */
-    async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
-      const params = new URLSearchParams({ workspace: input.workspace?.trim() || clientWorkspace });
-      if (input.runId) params.set("runId", input.runId);
-      if (input.tags) params.set("tags", input.tags);
-      return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
+    /** One page of documents in a workspace (the client default unless one is passed), newest first. Follow `nextCursor` for the rest. */
+    listDocumentsPage,
 
+    /** Every document in a workspace, page by page. */
+    iterateDocuments,
+
+    /** All documents in a workspace, newest first; throws DocSlurpTruncatedError past `maxItems` (default 10,000) rather than returning a cut-off list. */
+    async listDocuments(input: Omit<ListDocumentsInput, "cursor"> = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
+      const { maxItems, ...rest } = input;
+      return await collectPages(iterateDocuments(rest, requestOptions), maxItems);
     },
 
     /** Every version of a document (newest first), including archived versions and purged tombstones. */

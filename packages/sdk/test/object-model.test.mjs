@@ -28,6 +28,47 @@ test("listDocuments scopes to the client workspace and forwards filters", async 
   assert.equal(url, "https://example.test/v1/documents?workspace=manuals&runId=run-9&tags=a%2Cb");
 });
 
+test("listRuns and listDocuments follow cursors to the end instead of stopping at the first page", async () => {
+  const urls = [];
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", workspace: "manuals", fetch: async requestUrl => {
+    urls.push(String(requestUrl));
+    const url = new URL(requestUrl);
+    const cursor = url.searchParams.get("cursor");
+    if (url.pathname === "/v1/runs") {
+      return cursor === null
+        ? json({ runs: [{ id: "r1" }, { id: "r2" }], hasMore: true, nextCursor: "c1" })
+        : json({ runs: [{ id: "r3" }], hasMore: false, nextCursor: null });
+    }
+    return cursor === null
+      ? json({ documents: [{ id: "d1" }], hasMore: true, nextCursor: "dc1" })
+      : json({ documents: [{ id: "d2" }], hasMore: false, nextCursor: null });
+  } });
+  assert.deepEqual((await client.listRuns()).map(run => run.id), ["r1", "r2", "r3"]);
+  assert.deepEqual((await client.listDocuments()).map(doc => doc.id), ["d1", "d2"]);
+  assert.ok(urls.includes("https://example.test/v1/runs?cursor=c1"));
+  assert.ok(urls.includes("https://example.test/v1/documents?workspace=manuals&cursor=dc1"));
+});
+
+test("page methods expose hasMore and nextCursor, and forward limit and cursor", async () => {
+  let url;
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async requestUrl => {
+    url = requestUrl;
+    return json({ runs: [{ id: "r1" }], hasMore: true, nextCursor: "next" });
+  } });
+  const page = await client.listRunsPage({ limit: 1, cursor: "abc" });
+  assert.deepEqual([page.runs.length, page.hasMore, page.nextCursor], [1, true, "next"]);
+  assert.equal(url, "https://example.test/v1/runs?limit=1&cursor=abc");
+});
+
+test("a list longer than maxItems throws instead of returning a cut-off array", async () => {
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async () => json({ runs: [{ id: "r1" }, { id: "r2" }], hasMore: true, nextCursor: "more" }) });
+  await assert.rejects(client.listRuns({ maxItems: 3 }), error => {
+    assert.equal(error.name, "DocSlurpTruncatedError");
+    assert.equal(error.partial.length, 3);
+    return true;
+  });
+});
+
 test("deleteDocument sends DELETE and returns the removed identities", async () => {
   let seen;
   const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async (url, init) => {

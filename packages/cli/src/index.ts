@@ -69,7 +69,7 @@ function usage(): void {
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
-  docslurp runs [--api-url <url>]
+  docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
   docslurp search <query> [--workspace <id|slug|name>] [--min-score <0..1>] [--json | --context]
   docslurp search --queries-file <queries.json> [--workspace <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--workspace <id|slug|name>] [--session <id>] [--json]
@@ -838,7 +838,12 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 }
 
 async function runsCommand(flags: Record<string, string | boolean>): Promise<void> {
-  const response = await apiFetch("/v1/runs", flags);
+  const params = new URLSearchParams();
+  for (const name of ["limit", "cursor"]) {
+    const value = flags[name];
+    if (typeof value === "string" && value) params.set(name, value);
+  }
+  const response = await apiFetch(`/v1/runs${params.size ? `?${params}` : ""}`, flags);
   if (!response.ok) {
     console.error(`Failed to list runs (${response.status})`);
     process.exitCode = 1;
@@ -853,6 +858,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       totalDocuments: number;
       createdAt: string;
     }>;
+    hasMore?: boolean;
+    nextCursor?: string | null;
   };
 
   if (data.runs.length === 0) {
@@ -866,6 +873,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       `${run.id}  ${run.status.padEnd(10)}  ${(run.stage ?? "-").padEnd(15)}  ${String(run.totalDocuments).padStart(4)}  ${run.createdAt}`
     );
   }
+  // A page is not the whole history: say so, and how to read the rest.
+  if (data.hasMore && data.nextCursor) console.log(`\nMore runs exist. Next page: docslurp runs --cursor ${data.nextCursor}`);
 }
 
 type CliSearchResponse = {

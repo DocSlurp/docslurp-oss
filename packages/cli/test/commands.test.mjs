@@ -172,6 +172,13 @@ test("deferred queued watch is bounded", async () => {
   assert.ok(result.requests.length >= 1);
 });
 
+test("runs prints the cursor for the next page and forwards --limit and --cursor", async () => {
+  const result = await invoke(["runs", "--limit", "1", "--cursor", "abc"], () => ({ body: { runs: [run("completed", { createdAt: "2026-10-02" })], hasMore: true, nextCursor: "next-page" } }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.requests[0].url, "/v1/runs?limit=1&cursor=abc");
+  assert.match(result.stdout, /More runs exist\. Next page: docslurp runs --cursor next-page/);
+});
+
 test("runs list authenticates and prints run summary", async () => {
   const result = await invoke(["runs", "--api-key", "flag-key"], () => ({ body: { runs: [run("completed", { createdAt: "2026-10-02" })] } }));
   assert.equal(result.code, 0, result.stderr);
