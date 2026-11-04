@@ -42,6 +42,19 @@ vi.mock("../services/search.js", () => ({
   hybridSearch: hybridSearchMock
 }));
 
+// An in-memory stand-in for the tenant-scoped response cache, off unless a test turns it on.
+const responseCache = { on: false, store: new Map<string, unknown>(), tickets: [] as Array<Record<string, unknown>> };
+vi.mock("../search/response-cache.js", () => ({
+  cacheableApiKeyId: (id: string | null | undefined) => id,
+  searchResponseCacheTtlMs: () => (responseCache.on ? 30_000 : 0),
+  responseCacheTicket: async (args: Record<string, unknown>) => {
+    responseCache.tickets.push(args);
+    return { key: JSON.stringify([args.userId, args.apiKeyId, args.workspaceIds, args.request]) };
+  },
+  readCachedResponse: (ticket: { key: string }) => responseCache.store.get(ticket.key),
+  storeResponse: async (ticket: { key: string }, data: unknown) => { responseCache.store.set(ticket.key, data); },
+}));
+
 vi.mock("../services/search-controls.js", () => ({
   getWorkspaceSearchSettings: getWorkspaceSearchSettingsMock,
   mutateWorkspaceSearchSettingsForUser: async (args: { workspaceId: string; userId: string; mutate: (current: unknown) => unknown }) => {
@@ -204,7 +217,57 @@ describe("algolia compat", () => {
     expect(body.facets.filename["a.pdf"]).toBe(1);
   });
 
-  it("uses page-aware overfetching and trims attributes on single-index search", async () => {
+  it("highlights the words the query matched, not a placeholder", async () => {
+    hybridSearchMock.mockResolvedValue({
+      sessionId: "session-1",
+      results: [{ ...makeResult(0, "Müller-Report.pdf"), text: "The Müller fee schedule: fees for Gebühren." }],
+    });
+    const res = await app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "muller fee", highlightPreTag: "<em>", highlightPostTag: "</em>" }),
+    });
+    const body = await res.json();
+    expect(body.hits[0]._highlightResult.text).toEqual({
+      value: "The <em>Müller</em> <em>fee</em> schedule: fees for Gebühren.",
+      matchLevel: "full",
+      matchedWords: ["muller", "fee"],
+      fullyHighlighted: false,
+    });
+    expect(body.hits[0]._highlightResult.filename.value).toBe("<em>Müller</em>-Report.pdf");
+  });
+
+  it("serves the next pages of a result list from one search instead of re-running it", async () => {
+    responseCache.on = true;
+    responseCache.store.clear();
+    responseCache.tickets.length = 0;
+    hybridSearchMock.mockReset();
+    hybridSearchMock.mockResolvedValue({
+      sessionId: "session-1",
+      availability: { status: "complete" },
+      results: Array.from({ length: 30 }, (_, index) => makeResult(index)),
+    });
+    try {
+      const page = (n: number, query = "alpha") => app.request("/compat/algolia/1/indexes/ws-1/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ query, hitsPerPage: 10, page: n }),
+      }).then((response) => response.json());
+      const first = await page(0);
+      const second = await page(1);
+      const third = await page(2);
+      expect(hybridSearchMock).toHaveBeenCalledTimes(1);
+      expect([first, second, third].map((body) => body.hits[0].objectID)).toEqual(["doc-0:0", "doc-10:10", "doc-20:20"]);
+      // The cache key carries the caller, the key and the workspace: a different query is a different search.
+      await page(0, "beta");
+      expect(hybridSearchMock).toHaveBeenCalledTimes(2);
+      expect(responseCache.tickets[0]).toMatchObject({ userId: "demo-user", apiKeyId: "key-1", workspaceIds: ["ws-1"] });
+    } finally {
+      responseCache.on = false;
+    }
+  });
+
+  it("fetches a stable bucket past the requested page and trims attributes on single-index search", async () => {
     hybridSearchMock.mockResolvedValue({
       sessionId: "session-1",
       results: [makeResult(0), makeResult(1), makeResult(2), makeResult(3), makeResult(4)]
@@ -229,7 +292,7 @@ describe("algolia compat", () => {
 
     expect(res.status).toBe(200);
     expect(hybridSearchMock).toHaveBeenCalledWith("alpha", "demo-user", expect.objectContaining({
-      limit: 5,
+      limit: 50,
       filters: expect.objectContaining({
         workspaceId: "ws-1",
         tags: ["finance"],

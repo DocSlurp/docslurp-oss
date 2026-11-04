@@ -32,7 +32,7 @@ vi.mock("../services/workspace-chat.js", () => ({
 
 vi.mock("../services/aggregate-rag.js", () => ({
   aggregateWorkspaceRagSearch,
-  AggregateAnswerScopeError: class AggregateAnswerScopeError extends Error {},
+  AggregateAnswerScopeError: class AggregateAnswerScopeError extends Error { constructor() { super("generateAnswer needs workspaces from one organization"); } },
 }));
 
 const getWorkspace = vi.fn();
@@ -394,7 +394,7 @@ describe("searchRoutes", () => {
 
     it("answers 400 when an answer would span organizations", async () => {
       const { AggregateAnswerScopeError } = await import("../services/aggregate-rag.js");
-      aggregateWorkspaceRagSearch.mockRejectedValueOnce(new AggregateAnswerScopeError("generateAnswer needs workspaces from one organization"));
+      aggregateWorkspaceRagSearch.mockRejectedValueOnce(new AggregateAnswerScopeError());
       const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
       expect(response.status).toBe(400);
       await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });
