@@ -40,10 +40,11 @@ test("deleteDocument sends DELETE and returns the removed identities", async () 
   assert.equal(deleted.filename, "a.pdf");
 });
 
-test("chatStream streams status, the answer, then done from GET /v1/chat/stream", async () => {
-  let url, accept;
+test("chatStream posts the question in the body to /v1/chat/stream and streams status, the answer, then done", async () => {
+  let url, accept, init_;
   const client = createDocSlurpClient({ apiUrl: "https://example.test", workspace: "manuals", fetch: async (requestUrl, init) => {
     url = requestUrl;
+    init_ = init;
     accept = new Headers(init.headers).get("Accept");
     return sse([
       'event: status\ndata: {"stage":"retrieval","message":"Retrieving workspace context"}\n\n',
@@ -56,8 +57,22 @@ test("chatStream streams status, the answer, then done from GET /v1/chat/stream"
   assert.deepEqual(events.map(event => event.event), ["status", "message", "done"]);
   assert.equal(events[1].data.answer, "Hi");
   assert.equal(events[2].data.sessionId, "s1");
-  assert.equal(url, "https://example.test/v1/chat/stream?q=hi&workspace=manuals&sessionId=s1&model=workspace%3Amanuals");
+  // The question is never in the URL.
+  assert.equal(url, "https://example.test/v1/chat/stream");
+  assert.equal(init_.method, "POST");
+  assert.deepEqual(JSON.parse(init_.body), { q: "hi", workspace: "manuals", sessionId: "s1", model: "workspace:manuals" });
+  assert.equal(new Headers(init_.headers).get("Content-Type"), "application/json");
   assert.equal(accept, "text/event-stream");
+});
+
+test("chatStream sends the session grant in a header, not the URL or body", async () => {
+  let seen;
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", apiKey: "key", fetch: async (url, init) => { seen = { url, init }; return sse(['event: done\ndata: {}\n\n']); } });
+  for await (const _event of client.chatStream({ q: "secret question", sessionId: "s1", sessionToken: "grant" })) {}
+  assert.equal(new Headers(seen.init.headers).get("X-DocSlurp-Chat-Session-Token"), "grant");
+  assert.equal(String(seen.url).includes("secret"), false);
+  assert.equal(String(seen.url).includes("grant"), false);
+  assert.equal(seen.init.body.includes("grant"), false);
 });
 
 test("chatStream throws when the stream ends before done", async () => {

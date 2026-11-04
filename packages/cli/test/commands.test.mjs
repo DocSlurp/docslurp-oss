@@ -149,6 +149,23 @@ test("watch exits on failed requests and failed or paused runs", async () => {
   }
 });
 
+test("watch keeps waiting on a run paused for credits instead of stopping at once", async () => {
+  const result = await invoke(["status", "run", "--watch", "--timeout", "0.15"], () => ({
+    body: { run: run("processing", { controlState: "paused", pauseReason: "credit_exhausted" }) },
+  }));
+  // It ran until its own deadline (an operator pause or failure would have ended after one request, with "Stopped").
+  assert.match(result.stdout, /paused \(out of credits; resumes after a top-up\)/);
+  assert.doesNotMatch(result.stdout, /Stopped/);
+  assert.match(result.stderr, /did not complete within/);
+  assert.equal(result.code, 1);
+});
+
+test("a single status of a credit-paused run is not a failure", async () => {
+  const result = await invoke(["status", "run"], () => ({ body: { run: run("processing", { controlState: "paused", pauseReason: "org_budget_paused" }) } }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /Stopped/);
+});
+
 test("deferred queued watch is bounded", async () => {
   const result = await invoke(["status", "run", "--watch", "--timeout", "0.15"], () => ({ body: { run: run("queued") } }));
   assert.equal(result.code, 1, result.stderr);

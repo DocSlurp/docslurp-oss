@@ -247,36 +247,49 @@ export const workspaceChatRoutes = new Hono()
   .route("/operations", chatOperationRoutes)
   .use("*", nativeApiErrors)
   .post("/", workspaceChatHandler)
-  .get("/stream", workspaceChatStreamHandler);
+  .get("/stream", workspaceChatStreamHandler)
+  // The question travels in the body, not the URL, where proxies, logs and history keep it.
+  .post("/stream", workspaceChatStreamHandler);
 /** Internal tool target only. Never mount this router as a public agent entrypoint. */
 export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleWorkspaceChat(c, "grounded"));
 
 /**
- * `GET /v1/chat/stream`: the cited chat answer as server-sent events from a
- * GET, with the question in the query string. The same scoping,
- * chat settings and spend checks as `POST /v1/chat` apply.
+ * `POST /v1/chat/stream` (and `GET /v1/chat/stream`, kept for browsers that
+ * can only open an EventSource): the cited chat answer as server-sent events.
+ * The POST carries the same JSON body as `POST /v1/chat`, so the question is
+ * never in a URL. The same scoping, chat settings and spend checks apply.
  */
 async function workspaceChatStreamHandler(c: Context) {
   if (process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
     return c.json({ error: "Use POST /v1/chat/operations with Idempotency-Key, then resume the operation" }, 409);
   }
-  // Paid GET turns from cookie sessions require same-origin browser evidence.
-  if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
+  const fromBody = c.req.method === "POST";
+  // Paid GET turns from cookie sessions require same-origin browser evidence; a POST is covered by the CSRF/origin checks every POST gets.
+  if (!fromBody && getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
   }
-  let filters: unknown;
-  const rawFilters = c.req.query("filters");
-  if (rawFilters !== undefined) {
-    try {
-      if (rawFilters.length > 16384) throw new Error("Filters too large");
-      filters = JSON.parse(rawFilters);
-    } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
+  let input: unknown;
+  if (fromBody) {
+    const body: unknown = await c.req.json().catch(() => null);
+    input = body && typeof body === "object" && !Array.isArray(body)
+      ? { ...body, sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || (body as { sessionToken?: unknown }).sessionToken }
+      : null;
+  } else {
+    let filters: unknown;
+    const rawFilters = c.req.query("filters");
+    if (rawFilters !== undefined) {
+      try {
+        if (rawFilters.length > 16384) throw new Error("Filters too large");
+        filters = JSON.parse(rawFilters);
+      } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
+    }
+    input = { filters, q: c.req.query("q"),
+      workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
+      sessionId: c.req.query("sessionId"),
+      sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
+      model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") };
   }
-  const parsed = workspaceChatInputSchema.safeParse({ filters, q: c.req.query("q"),
-    workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
-    sessionId: c.req.query("sessionId"),
-    sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
-    model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") });
+  const parsed = workspaceChatInputSchema.safeParse(input);
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const { q: query, sessionToken, model } = parsed.data;
 
@@ -669,4 +682,4 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
 
 acceptApiKeys(searchRoutes);
 acceptApiKeys(searchesRoutes);
-acceptApiKeys(workspaceChatRoutes, ["POST /", "GET /stream"]);
+acceptApiKeys(workspaceChatRoutes, ["POST /", "GET /stream", "POST /stream"]);

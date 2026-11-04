@@ -744,6 +744,18 @@ function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}m${String(secs).padStart(2, "0")}s` : `${secs}s`;
 }
 
+/** What a spend-paused run is waiting for, so "paused" is not read as stuck. */
+function spendPausedNote(run: { controlState?: string | null; pauseReason?: string | null }): string {
+  if (run.controlState !== "paused" || !run.pauseReason) return "";
+  const why: Record<string, string> = {
+    credit_exhausted: "out of credits; resumes after a top-up",
+    workspace_budget_paused: "workspace budget reached; resumes when it is raised",
+    org_budget_paused: "organization budget reached; resumes when it is raised",
+    plan_not_entitled: "not covered by the current plan",
+  };
+  return ` (${why[run.pauseReason] ?? run.pauseReason})`;
+}
+
 async function statusCommand(runId: string, flags: Record<string, string | boolean>): Promise<void> {
   const watch = flags.watch === true;
   const timeoutSeconds = Number(flags.timeout ?? 300);
@@ -768,6 +780,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         status: string;
         stage: string;
         controlState?: string | null;
+        pauseReason?: string | null;
         error?: string | null;
         totalDocuments: number;
         processedDocuments: number;
@@ -783,7 +796,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
     const lines = [
       `Run:       ${run.id}`,
-      `Status:    ${run.controlState ?? run.status}`,
+      `Status:    ${run.controlState ?? run.status}${spendPausedNote(run)}`,
       `Stage:     ${run.stage}`,
       `Documents: [${renderBar(run.processedDocuments, run.totalDocuments)}] ${run.processedDocuments}/${run.totalDocuments} (${docPct}%)`,
       `Pages:     [${renderBar(run.pagesProcessed, run.pagesTotal)}] ${run.pagesProcessed}/${run.pagesTotal} (${pagePct}%)`,
@@ -798,7 +811,9 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     process.stdout.write(output);
     lineCount = lines.length;
 
-    const stopped = ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
+    // A spend pause (credits, a budget, a plan) lifts by itself once the org can spend: keep watching it.
+    const spendPaused = run.controlState === "paused" && Boolean(run.pauseReason);
+    const stopped = !spendPaused && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
     const done = run.status === "completed" || run.status === "failed" || stopped;
     if (done) {
       const succeeded = run.status === "completed" && !stopped;

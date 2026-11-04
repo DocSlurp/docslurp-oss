@@ -186,6 +186,8 @@ export type WorkspaceRun = JsonObject & {
   id: string;
   status: "queued" | "processing" | "completed" | "failed";
   controlState?: string | null;
+  /** Why the worker paused the run for spend (credit_exhausted, workspace_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
+  pauseReason?: string | null;
   error?: string | null;
 };
 
@@ -730,6 +732,11 @@ export class DocSlurpTimeoutError extends Error {
   }
 }
 
+/** True for a run the worker paused for spend: it resumes on its own once credits or budget allow. */
+export function isSpendPaused(run: Pick<WorkspaceRun, "controlState" | "pauseReason">): boolean {
+  return run.controlState === "paused" && typeof run.pauseReason === "string" && run.pauseReason.length > 0;
+}
+
 function positiveDuration(value: number, name: string): number {
   if (!Number.isFinite(value) || value <= 0) throw new RangeError(`${name} must be a positive finite number`);
   return value;
@@ -1110,24 +1117,27 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}): AsyncGenerator<RunStreamEvent> {
+  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}, jsonBody?: string): AsyncGenerator<RunStreamEvent> {
     const bound = deadline(positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs"), streamOptions.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const onAbort = () => { void reader?.cancel().catch(() => {}); };
     try {
       bound.signal.throwIfAborted();
       const headers = new Headers({ ...extraHeaders, Accept: "text/event-stream" });
+      // A POST carries its input in the body (never the URL); a refused token is retried with the same body.
+      const method = jsonBody === undefined ? {} : { method: "POST", body: jsonBody };
+      if (jsonBody !== undefined) headers.set("Content-Type", "application/json");
       const credential = await bearer();
       if (credential) headers.set("Authorization", `Bearer ${credential}`);
       if (SEND_CLIENT_TAG) headers.set(CLIENT_HEADER, CLIENT_TAG);
       let response = await fetchImpl(`${apiUrl}${path}`, {
-        headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
+        ...method, headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
       });
-      // A refused token before the stream opens: refresh once and reconnect (GET, nothing to replay).
+      // A refused token before the stream opens: refresh once and reconnect (the server refused it before doing any work, so nothing replays).
       if (response.status === 401 && typeof tokenSource === "function") {
         await response.body?.cancel();
         headers.set("Authorization", `Bearer ${await bearer(true)}`);
-        response = await fetchImpl(`${apiUrl}${path}`, { headers, credentials: "omit", signal: bound.signal });
+        response = await fetchImpl(`${apiUrl}${path}`, { ...method, headers, credentials: "omit", signal: bound.signal });
       }
       if (!response.ok) {
         const body = await readErrorBody(response);
@@ -1339,7 +1349,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     try {
       while (true) {
         run = await getRun(runId, { signal: bound.signal, timeoutMs: Math.max(1, expiresAt - Date.now()) });
-        if (run.status === "failed" || ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "")) {
+        // A run the worker paused for spend (credits, a budget, a plan) resumes by itself once the org may spend,
+        // so it is waiting, not failed; the timeout carries it with its pauseReason. Any other pause, a
+        // cancellation or a dead letter will not move without someone acting, so those end the wait.
+        if (run.status === "failed" || (!isSpendPaused(run) && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? ""))) {
           throw new DocSlurpRunError("We couldn’t finish processing this run. Check its status and try again.", run);
         }
         if (run.status === "completed") return run;
@@ -1347,7 +1360,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }
     } catch (error) {
       if (bound.signal.aborted && bound.signal.reason instanceof DocSlurpTimeoutError) {
-        throw new DocSlurpTimeoutError(`Run ${runId} did not complete within ${timeoutMs}ms; it may still be queued or processing`, run);
+        throw new DocSlurpTimeoutError(
+          run && isSpendPaused(run)
+            ? `Run ${runId} is paused (${run.pauseReason}) and resumes when the organization can spend again; stopped waiting after ${timeoutMs}ms`
+            : `Run ${runId} did not complete within ${timeoutMs}ms; it may still be queued or processing`,
+          run,
+        );
       }
       // The request's remaining-budget timer can fire before the outer deadline.
       if (error instanceof DocSlurpTimeoutError && !error.run) {
@@ -1858,24 +1876,19 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
      * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
      * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. Reads GET /v1/chat/stream; for OpenAI-style
-     * token streaming use POST /v1/chat/completions with stream: true.
+     * is never mistaken for success. Posts the question in the body of
+     * POST /v1/chat/stream, so it never sits in a URL, proxy log or browser
+     * history; for OpenAI-style token streaming use POST /v1/chat/completions
+     * with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
-      const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
-      if (target.sessionId) params.set("sessionId", target.sessionId);
-      if (target.model) params.set("model", target.model);
-      if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
-      if (target.filters !== undefined) {
-        const filters = JSON.stringify(target.filters);
-        if (filters.length > 16384) throw new Error("Chat stream filters exceed 16384 characters; use chat() for larger requests");
-        params.set("filters", filters);
-      }
+      // The session grant goes in a header, never the URL or the body, as before.
+      const { sessionToken, ...body } = target;
+      const payload = JSON.stringify({ ...body, workspace: target.workspace ?? clientWorkspace });
       let completed = false;
-      // The session grant goes in a header, never the URL.
-      const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
-      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions, grant)) {
+      const grant: Record<string, string> = sessionToken ? { "X-DocSlurp-Chat-Session-Token": sessionToken } : {};
+      for await (const frame of streamEventsAt("/v1/chat/stream", requestOptions, grant, payload)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
