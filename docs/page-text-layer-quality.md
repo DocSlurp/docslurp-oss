@@ -14,12 +14,18 @@ count; nothing reads ASCII classes, keywords or file names.
 | Layer | Evidence | Verdict |
 |---|---|---|
 | 1. Unmapped glyphs | U+FFFD, private-use code points, `(cid:N)` runs, C0/C1 controls over non-space characters | `garbled` from 10 %, `suspect` from 2 % |
-| 2. Decoding mistakes | UTF-8 read as Latin-1/Windows-1252 (a lead letter then a continuation byte shown as punctuation: `Ã©`, `â€™`, `Ð¿Ñ€`) and UTF-8 Cyrillic read as Windows-1251 (`Р°РІС‚`), over non-space characters | `garbled` from 4 %, `suspect` from 0.4 % |
-| 3. Glyph-code shift | Four or more long (20+) unspaced runs of ASCII letters, digits and marks that are all upper case/digits or case-mixed, over a wide alphabet, holding a quarter of the page. Hex digests, nucleotide sequences, URLs and addresses are exempt. | `garbled` |
+| 2. Decoding mistakes | UTF-8 read as Latin-1/Windows-1252 (a lead byte of a Latin, Greek, Cyrillic, Arabic or Hebrew sequence then a continuation byte shown as punctuation: `Ã©`, `â€™`, `Ð¿Ñ€`) and UTF-8 Cyrillic read as Windows-1251 (`Р°РІС‚`: **runs of three or more** `Р`/`С` + continuation pairs, because one pair is a Ukrainian, Belarusian, Serbian or Macedonian word: `Рівне`, `СІЧЕНЬ`, `РІШЕННЯ`), over non-space characters | `suspect` from 0.4 % (never `garbled` alone) |
+| 3. Glyph-code shift | Four or more long (20+) unspaced runs of ASCII letters, digits and marks that are all upper case/digits or case-mixed, over a wide alphabet, holding a quarter of the page, **with a language's letter frequencies** (index of coincidence of the runs' characters at least 0.05; shifted English measures 0.06, base64 0.016 to 0.034) **and few digits** (at most 30 %). Hex digests, nucleotide sequences, URLs, addresses, PEM blocks and JWTs are exempt. | `suspect` (never `garbled` alone) |
 | 3b. Symbol soup | ASCII punctuation at 40 % of the page over 10 or more distinct marks with few letters (a shift that lands on punctuation) | `garbled` |
 | 4. Letter pairs | Mean log-probability per letter pair of the page's words under a pooled letter-bigram table for the page's dominant alphabetic script (Latin, Cyrillic, Greek). The script must hold half the page's letters, so a Latin unit inside Korean text is not judged as a Latin page. Acronyms and words under 3 letters are skipped. | `suspect` below -6.85, `garbled` below -8.2 with 60+ words |
 | 5. Script mixing | One word with letters of two alphabetic scripts, in a fifth of the words | `suspect` |
 | OCR cross-check | A sample of the suspect pages is rendered at 100 dpi, read by Tesseract in the layer's script and compared with the layer in reading order, **precision and recall**, both at least 0.5 (`tokenAgreement`) | decides `suspect` pages: a mismatch reads the page, a match keeps the layer, no result keeps the layer and is reported |
+
+Only unmapped glyphs (layer 1), symbol soup and letters far outside the script's pairs make a page `garbled`, which is read
+without a check. Mojibake and glyph-shift signatures are `suspect`: both can be produced by real text and data (a Ukrainian
+city table matched the old single-pair Windows-1251 rule and scored 0.417 garbled, billing a vision read and replacing good
+text; base64 appendices, PEM certificates, JWTs and part-number lists matched the old glyph-shift rule), so the sampled OCR
+cross-check decides them.
 
 `suspect` never causes a paid read on its own. A consistent glyph substitution (a font whose code points were assigned in order of
 first use, so every mark the first layers look for is absent) is the case layer 4 exists for, and it is also the one case
@@ -51,6 +57,13 @@ Data: Wikipedia plain-text extracts in 21 languages (en de fr es pl fi sv it tr 
 - **Mojibake** (UTF-8 read as Latin-1, Windows-1252, Windows-1251): `garbled` or `suspect` for every page that has non-ASCII
   characters; pages that are pure ASCII are unchanged by the mistake, as they should be.
 - `(cid:N)`, U+FFFD and private-use replacement: 364 of 364 `garbled`.
+- **False-positive re-check (2026-11-04).** 36 random Wikipedia articles of at least 400 characters (Ukrainian 6, Belarusian
+  6, Serbian 6, Macedonian 6, Bulgarian 6, Russian 7; the calibration harness is not in the repository, this was a throwaway
+  fetch, deleted afterwards): all `ok` with the new rules; the old rules flagged one Ukrainian page `suspect`
+  (`mojibake-minor`). The tests cover the failure inputs directly (Ukrainian, Belarusian, Serbian and Macedonian prose, caps
+  headings and a city table; base64, PEM, JWT, part-number and serial lists) next to the positive cases (real Windows-1251
+  and Windows-1252 mojibake: `suspect`; Latin-1 read of Cyrillic: `garbled` through its C1 control characters; shifted glyph
+  codes: `suspect`).
 - Tests also cover: git hashes and a DNA page (not `garbled`), code, a Markdown table, a 12-word page, Cyrillic and Greek
   headings, math with Greek letters and operators, and a Latin unit in CJK text.
 

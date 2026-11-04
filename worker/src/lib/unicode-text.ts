@@ -82,6 +82,15 @@ export function estimateTokens(text: string): number {
 function wordTokens(word: string): number {
   let ideographic = 0;
   let other = 0;
+  // Nothing below U+1100 is Han, Kana or Hangul, and nothing there is a surrogate: skip the per-character script test.
+  let low = true;
+  for (let i = 0; i < word.length; i++) {
+    if (word.charCodeAt(i) >= 0x1100) {
+      low = false;
+      break;
+    }
+  }
+  if (low) return Math.max(1, Math.ceil(word.length / (LATIN.test(word) ? 4 : 3)));
   for (const char of word) {
     if (IDEOGRAPHIC.test(char)) ideographic++;
     else other++;
@@ -98,19 +107,23 @@ export interface SizeLimits {
   maxTokens?: number;
 }
 
-export function fitsLimits(text: string, limits: SizeLimits, tokens = limits.maxTokens === undefined ? 0 : estimateTokens(text)): boolean {
-  return text.length <= limits.maxChars && (limits.maxTokens === undefined || tokens <= limits.maxTokens);
+/**
+ * Whether `text` fits. Characters are checked first and the token estimate is skipped when the answer is already
+ * known: a token costs at least one UTF-16 unit of text (`estimateTokens(text) <= text.length`), so text no longer
+ * than `maxTokens` always fits, and oversize text is rejected without segmenting it.
+ */
+export function fitsLimits(text: string, limits: SizeLimits, tokens?: number): boolean {
+  if (text.length > limits.maxChars) return false;
+  if (limits.maxTokens === undefined || text.length <= limits.maxTokens) return true;
+  return (tokens ?? estimateTokens(text)) <= limits.maxTokens;
 }
 
 export type SplitLevel = "sentence" | "line" | "word" | "grapheme";
 
-function unitsAt(text: string, level: SplitLevel): string[] {
-  switch (level) {
-    case "sentence": return sentences(text);
-    case "line": return text.split(/(?<=\n)/);
-    case "word": return wordParts(text).map((part) => part.text);
-    case "grapheme": return graphemes(text);
-  }
+export interface SizedPiece {
+  text: string;
+  /** `estimateTokens(text)` or, for pieces cut inside a word, a conservative count; 0 when no token limit applies. */
+  tokens: number;
 }
 
 const NEXT_LEVEL: Record<Exclude<SplitLevel, "grapheme">, SplitLevel> = { sentence: "line", line: "word", word: "grapheme" };
@@ -122,72 +135,143 @@ const NEXT_LEVEL: Record<Exclude<SplitLevel, "grapheme">, SplitLevel> = { senten
  * starts at the line level because it has no sentences.
  */
 export function atomize(text: string, limits: SizeLimits, options?: { code?: boolean }): string[] {
-  if (!text) return [];
-  return split(text, limits, options?.code ? "line" : "sentence");
+  return atomizeSized(text, limits, options).map((piece) => piece.text);
 }
 
-function split(text: string, limits: SizeLimits, level: SplitLevel): string[] {
-  if (fitsLimits(text, limits)) return [text];
-  if (level === "grapheme") return splitGraphemes(text, limits);
-  const parts = unitsAt(text, level);
-  if (parts.length <= 1) return split(text, limits, NEXT_LEVEL[level]);
-  const next = NEXT_LEVEL[level];
-  const pieces: string[] = [];
-  let current = "";
-  let currentTokens = 0;
-  const flush = () => {
-    if (current) pieces.push(current);
-    current = "";
-    currentTokens = 0;
-  };
-  for (const part of parts) {
-    const partTokens = limits.maxTokens === undefined ? 0 : estimateTokens(part);
-    if (!fitsLimits(part, limits, partTokens)) {
-      flush();
-      pieces.push(...split(part, limits, next));
-      continue;
-    }
-    if (current && !fitsLimits(current + part, limits, currentTokens + partTokens)) flush();
-    current += part;
-    currentTokens += partTokens;
-  }
-  flush();
+/**
+ * `atomize` with each piece's token count, so a caller packing pieces into chunks does not segment them again.
+ *
+ * Linear in the text: every level walks its parts once, a part is counted only when it can fit the character limit,
+ * and a text that is over the limit is never counted as a whole. Word and grapheme parts are counted as they are
+ * walked and never collected into an array.
+ */
+export function atomizeSized(text: string, limits: SizeLimits, options?: { code?: boolean }): SizedPiece[] {
+  if (!text) return [];
+  const pieces: SizedPiece[] = [];
+  split(pieces, text, limits, options?.code ? "line" : "sentence");
   return pieces;
 }
 
-function splitGraphemes(text: string, limits: SizeLimits): string[] {
-  const pieces: string[] = [];
-  let current = "";
-  let currentTokens = 0;
-  for (const cluster of graphemes(text)) {
-    const clusterTokens = limits.maxTokens === undefined ? 0 : estimateTokens(cluster);
-    if (!fitsLimits(cluster, limits, clusterTokens)) {
-      // A single cluster over the limit (hundreds of combining marks): cut by
-      // code point, which still never splits a surrogate pair.
-      if (current) pieces.push(current);
-      current = "";
-      currentTokens = 0;
+function split(out: SizedPiece[], text: string, limits: SizeLimits, level: SplitLevel, known?: number): void {
+  const counting = limits.maxTokens !== undefined;
+  if (text.length <= limits.maxChars) {
+    const tokens = counting ? known ?? estimateTokens(text) : 0;
+    if (!counting || tokens <= limits.maxTokens!) {
+      out.push({ text, tokens });
+      return;
+    }
+  }
+  if (level === "grapheme") return splitGraphemes(out, text, limits);
+  if (level === "word") return splitWords(out, text, limits);
+  const next = NEXT_LEVEL[level];
+  const packer = new Packer(out, limits);
+  const parts: Iterable<string> = level === "sentence" ? lazySentences(text) : text.split(/(?<=\n)/);
+  for (const part of parts) {
+    if (part.length > limits.maxChars) {
+      packer.flush();
+      split(out, part, limits, next);
+      continue;
+    }
+    const tokens = counting ? estimateTokens(part) : 0;
+    if (counting && tokens > limits.maxTokens!) {
+      packer.flush();
+      split(out, part, limits, next, tokens);
+      continue;
+    }
+    packer.add(part, tokens);
+  }
+  packer.flush();
+}
+
+/** Greedy packing of parts that each fit into pieces that each fit. */
+class Packer {
+  private current = "";
+  private currentTokens = 0;
+  /** `recount`: pieces cut inside words were packed by a per-cluster upper bound; report their real estimate. */
+  constructor(private readonly out: SizedPiece[], private readonly limits: SizeLimits, private readonly recount = false) {}
+
+  add(part: string, tokens: number): void {
+    if (this.current && (this.current.length + part.length > this.limits.maxChars ||
+        (this.limits.maxTokens !== undefined && this.currentTokens + tokens > this.limits.maxTokens))) {
+      this.flush();
+    }
+    this.current += part;
+    this.currentTokens += tokens;
+  }
+
+  flush(): void {
+    if (this.current) {
+      const tokens = this.recount && this.limits.maxTokens !== undefined ? estimateTokens(this.current) : this.currentTokens;
+      this.out.push({ text: this.current, tokens });
+    }
+    this.current = "";
+    this.currentTokens = 0;
+  }
+}
+
+function* lazySentences(text: string): Generator<string> {
+  for (const part of segmenter("sentence").segment(text)) yield part.segment;
+}
+
+function splitWords(out: SizedPiece[], text: string, limits: SizeLimits): void {
+  const counting = limits.maxTokens !== undefined;
+  const packer = new Packer(out, limits);
+  for (const part of segmenter("word").segment(text)) {
+    const value = part.segment;
+    const tokens = !counting ? 0 : part.isWordLike ? wordTokens(value) : symbolTokens(value);
+    if (value.length > limits.maxChars || (counting && tokens > limits.maxTokens!)) {
+      packer.flush();
+      splitGraphemes(out, value, limits);
+      continue;
+    }
+    packer.add(value, tokens);
+  }
+  packer.flush();
+}
+
+function splitGraphemes(out: SizedPiece[], text: string, limits: SizeLimits): void {
+  const counting = limits.maxTokens !== undefined;
+  const packer = new Packer(out, limits, true);
+  for (const part of segmenter("grapheme").segment(text)) {
+    const cluster = part.segment;
+    const tokens = counting ? graphemeTokens(cluster) : 0;
+    if (cluster.length > limits.maxChars || (counting && tokens > limits.maxTokens!)) {
+      // A single cluster over the limit (hundreds of combining marks): cut by code point, which still never splits a
+      // surrogate pair. Each code point counts one token, an upper bound of the estimate.
+      packer.flush();
       let piece = "";
+      let pieceTokens = 0;
       for (const point of cluster) {
-        if (piece && !fitsLimits(piece + point, limits, limits.maxTokens === undefined ? 0 : estimateTokens(piece + point))) {
-          pieces.push(piece);
+        const cost = counting && point.trim() ? 1 : 0;
+        if (piece && (piece.length + point.length > limits.maxChars || (counting && pieceTokens + cost > limits.maxTokens!))) {
+          out.push({ text: piece, tokens: pieceTokens });
           piece = "";
+          pieceTokens = 0;
         }
         piece += point;
+        pieceTokens += cost;
       }
-      if (piece) pieces.push(piece);
+      if (piece) out.push({ text: piece, tokens: pieceTokens });
       continue;
     }
-    if (current && !fitsLimits(current + cluster, limits, currentTokens + clusterTokens)) {
-      pieces.push(current);
-      current = "";
-      currentTokens = 0;
-    }
-    current += cluster;
-    currentTokens += clusterTokens;
+    packer.add(cluster, tokens);
   }
-  if (current) pieces.push(current);
-  return pieces;
+  packer.flush();
+}
+
+/** What `estimateTokens` charges for a non-word segment: one token per non-space code point. */
+function symbolTokens(value: string): number {
+  if (value.length === 1) return value.trim() ? 1 : 0;
+  let tokens = 0;
+  for (const char of value) if (char.trim()) tokens++;
+  return tokens;
+}
+
+/** A cluster of one code point costs one token unless it is whitespace; clusters with marks or joiners are counted whole. */
+function graphemeTokens(cluster: string): number {
+  const single = cluster.length === 1 || (cluster.length === 2 && cluster.codePointAt(0)! > 0xffff);
+  if (single) return cluster.trim() ? 1 : 0;
+  return estimateTokens(cluster);
 }
 
 /** The last `maxChars` or fewer UTF-16 units of `text`, starting on a word boundary. */

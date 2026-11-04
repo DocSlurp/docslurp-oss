@@ -30,7 +30,7 @@ import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { createConcurrencyLimiter, createSerialQueue, createThrottledWriter, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
 import { textModelApiKey } from "../lib/text-model-route.js";
 import {
-  buildChunks,
+  buildChunksCooperative,
   contextualizeChunksForEmbedding,
   embedTextChunks,
   estimateTokens,
@@ -257,7 +257,7 @@ export class EmbedStage implements Stage {
                   maxTokens: chunkMaxTokens,
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
-              : fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens);
+              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal);
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
@@ -989,30 +989,52 @@ export class EmbedStage implements Stage {
   }
 }
 
-function buildLateChunkedEmbeddingInputs(chunks: string[], enabled: boolean, windowSize: number, maxInputTokens: number): string[] {
+/**
+ * Each chunk embedded with its neighbours as context ("late chunking"). Neighbours join nearest first and each side
+ * stops at the first neighbour that does not fit: skipping one and taking a farther chunk would leave a gap that
+ * the joined prefix or suffix still contains, and cut the focus chunk off the end of the model window.
+ */
+export function buildLateChunkedEmbeddingInputs(chunks: string[], enabled: boolean, windowSize: number, maxInputTokens: number): string[] {
   if (!enabled || chunks.length <= 1) {
     return chunks;
   }
 
   const radius = Math.max(1, Math.min(windowSize, 6));
   const costs = chunks.map((chunk) => estimateTokens(chunk) + 2);
-  return chunks.map((chunk, index) => {
-    // Neighbours join nearest first, only while the whole input stays inside
-    // the model window, so the focus chunk is never the part that gets cut.
+  const assemble = (index: number, before: number, after: number): string => {
+    const prefix = chunks.slice(before, index).join("\n\n");
+    const suffix = chunks.slice(index + 1, after + 1).join("\n\n");
+    return [prefix ? `Context before:\n${prefix}` : "", `Focus chunk:\n${chunks[index]}`, suffix ? `Context after:\n${suffix}` : ""]
+      .filter(Boolean)
+      .join("\n\n");
+  };
+  return chunks.map((_chunk, index) => {
     let room = maxInputTokens - costs[index]! - 16; // labels
     let before = index;
     let after = index;
-    for (let distance = 1; distance <= radius; distance++) {
+    let beforeOpen = true;
+    let afterOpen = true;
+    for (let distance = 1; distance <= radius && (beforeOpen || afterOpen); distance++) {
       const previous = index - distance;
-      if (previous >= 0 && costs[previous]! <= room) { room -= costs[previous]!; before = previous; }
+      if (beforeOpen) {
+        if (previous >= 0 && costs[previous]! <= room) { room -= costs[previous]!; before = previous; }
+        else beforeOpen = false;
+      }
       const following = index + distance;
-      if (following < chunks.length && costs[following]! <= room) { room -= costs[following]!; after = following; }
+      if (afterOpen) {
+        if (following < chunks.length && costs[following]! <= room) { room -= costs[following]!; after = following; }
+        else afterOpen = false;
+      }
     }
-    const prefix = chunks.slice(before, index).join("\n\n");
-    const suffix = chunks.slice(index + 1, after + 1).join("\n\n");
-    return [prefix ? `Context before:\n${prefix}` : "", `Focus chunk:\n${chunk}`, suffix ? `Context after:\n${suffix}` : ""]
-      .filter(Boolean)
-      .join("\n\n");
+    // The estimate is the contract: drop context, farthest first, until the whole input fits; the bare chunk is
+    // always within the chunking budget.
+    let input = assemble(index, before, after);
+    while ((before < index || after > index) && estimateTokens(input) > maxInputTokens) {
+      if (index - before >= after - index) before += 1;
+      else after -= 1;
+      input = assemble(index, before, after);
+    }
+    return input;
   });
 }
 
@@ -1143,13 +1165,14 @@ function normalizedChunkPages(chunk: CanonicalChunk | undefined): number[] {
   return [...new Set(pages)].sort((a, b) => a - b);
 }
 
-function fallbackChunkDrafts(
+async function fallbackChunkDrafts(
   text: string,
   fallback: string,
   chunkOverlap: boolean,
-  maxTokens: number
-): CanonicalChunk[] {
-  const { texts, headingPaths } = buildChunks(text, fallback, { chunkOverlap, maxTokens });
+  maxTokens: number,
+  signal?: AbortSignal,
+): Promise<CanonicalChunk[]> {
+  const { texts, headingPaths } = await buildChunksCooperative(text, fallback, { chunkOverlap, maxTokens }, signal);
   return texts.map((chunkText, index) => ({
     text: chunkText,
     headingPath: headingPaths[index] ?? [],

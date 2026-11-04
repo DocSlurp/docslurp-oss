@@ -23,15 +23,16 @@ import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { Document, EmbeddingProfile } from "../models.js";
-import { chunkTextWithMeta } from "../pipeline/chunking.js";
+import { chunkTextWithMeta, type ChunkMeta } from "../pipeline/chunking.js";
 import { estimateTokens, normalizeNfc } from "../lib/unicode-text.js";
-import { ArtifactReadError } from "../lib/artifact-read-error.js";
+import { ArtifactReadError, artifactReadFailureKind } from "../lib/artifact-read-error.js";
 export { ArtifactReadError };
 import type { CommandRunner } from "../tools/runner.js";
 import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
 import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import {
   type ArtifactStore,
+  artifactStorageKey,
   cleanupTempFile,
   keyFromStorageUri,
 } from "../tools/storage.js";
@@ -288,18 +289,30 @@ async function extractTextForEmbeddingRaw(
   throw new Error(`no extractor produced text for ${document.filename}`);
 }
 
-function artifactKeyOf(artifactUri: string): string {
-  return artifactUri.replace(/^s3:\/\/[^/]+\//, "");
+/**
+ * The bucket-local key of a recorded artifact. The worker reads only its own bucket: another bucket's URI, or a key
+ * with traversal segments, is refused (`outside-bucket`) before any storage call, so a manifest or run record
+ * cannot point the worker at objects it does not own.
+ */
+function artifactKeyOf(storage: ArtifactStore, artifactUri: string): string {
+  const key = keyFromStorageUri(artifactUri, storage.bucket);
+  if (key === null) throw new ArtifactReadError(artifactUri, `it is not in this worker's bucket`, { kind: "outside-bucket" });
+  try {
+    return artifactStorageKey(key);
+  } catch (error) {
+    throw new ArtifactReadError(artifactUri, `unsafe storage key`, { kind: "outside-bucket", cause: error });
+  }
 }
 
 async function readUtf8Artifact(storage: ArtifactStore, artifactUri: string): Promise<string> {
+  const key = artifactKeyOf(storage, artifactUri);
   let data: Buffer;
   try {
-    data = await storage.getBytes(artifactKeyOf(artifactUri));
+    data = await storage.getBytes(key);
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error, kind: artifactReadFailureKind(error) });
   }
-  if (!isUtf8(data)) throw new ArtifactReadError(artifactUri, "not valid UTF-8");
+  if (!isUtf8(data)) throw new ArtifactReadError(artifactUri, "not valid UTF-8", { kind: "invalid" });
   return data.toString("utf8");
 }
 
@@ -316,10 +329,10 @@ export async function readExtractedMarkdown(
   try {
     parsed = JSON.parse(raw) as { textArtifactUri?: string };
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, "manifest is not valid JSON", { cause: error });
+    throw new ArtifactReadError(artifactUri, "manifest is not valid JSON", { cause: error, kind: "invalid" });
   }
   if (!parsed.textArtifactUri) {
-    throw new ArtifactReadError(artifactUri, "manifest has no textArtifactUri");
+    throw new ArtifactReadError(artifactUri, "manifest has no textArtifactUri", { kind: "invalid" });
   }
   return normalizeNfc(await readUtf8Artifact(storage, parsed.textArtifactUri));
 }
@@ -328,28 +341,27 @@ export async function readCanonicalDocumentArtifact(
   storage: ArtifactStore,
   artifactUri: string,
 ): Promise<CanonicalDocument> {
+  const key = artifactKeyOf(storage, artifactUri);
   let json: unknown;
   try {
-    json = await storage.getJson(artifactKeyOf(artifactUri));
+    json = await storage.getJson(key);
   } catch (error) {
-    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error });
+    throw new ArtifactReadError(artifactUri, error instanceof Error ? error.message : "storage read failed", { cause: error, kind: artifactReadFailureKind(error) });
   }
   const parsed = canonicalDocumentSchema.safeParse(json);
-  if (!parsed.success) throw new ArtifactReadError(artifactUri, "does not match the canonical document schema");
+  if (!parsed.success) throw new ArtifactReadError(artifactUri, "does not match the canonical document schema", { kind: "invalid" });
   // Indexed text is NFC, so "ü" typed as one character or as u + combining diaeresis finds the same chunks.
   for (const block of parsed.data.blocks) block.text = normalizeNfc(block.text);
   return parsed.data;
 }
 
-export function buildChunks(
-  text: string,
-  fallback: string,
-  options?: { chunkOverlap?: boolean; maxTokens?: number },
-): { texts: string[]; headingPaths: string[][] } {
-  const metas = [...chunkTextWithMeta(text, 1800, {
-    overlapFraction: options?.chunkOverlap ? 0.5 : undefined,
-    maxTokens: options?.maxTokens,
-  })];
+type ChunkBuildOptions = { chunkOverlap?: boolean; maxTokens?: number };
+
+function chunkOptions(options: ChunkBuildOptions | undefined) {
+  return { overlapFraction: options?.chunkOverlap ? 0.5 : undefined, maxTokens: options?.maxTokens };
+}
+
+function chunkResult(metas: ChunkMeta[], fallback: string): { texts: string[]; headingPaths: string[][] } {
   if (metas.length === 0) {
     return { texts: [fallback], headingPaths: [[]] };
   }
@@ -357,6 +369,40 @@ export function buildChunks(
     texts: metas.map((m) => m.text),
     headingPaths: metas.map((m) => m.headingPath),
   };
+}
+
+export function buildChunks(
+  text: string,
+  fallback: string,
+  options?: ChunkBuildOptions,
+): { texts: string[]; headingPaths: string[][] } {
+  return chunkResult([...chunkTextWithMeta(text, 1800, chunkOptions(options))], fallback);
+}
+
+/** Longest the event loop may be held by chunking before it is handed back (activity heartbeats run on it). */
+const CHUNKING_SLICE_MS = 20;
+
+/**
+ * `buildChunks` for a large document: the same chunks, but the event loop is released between chunks once a slice of
+ * work has passed, so a dense multi-thousand-page document cannot starve the activity heartbeat while it is chunked.
+ */
+export async function buildChunksCooperative(
+  text: string,
+  fallback: string,
+  options?: ChunkBuildOptions,
+  signal?: AbortSignal,
+): Promise<{ texts: string[]; headingPaths: string[][] }> {
+  const metas: ChunkMeta[] = [];
+  let sliceStart = performance.now();
+  for (const meta of chunkTextWithMeta(text, 1800, chunkOptions(options))) {
+    metas.push(meta);
+    if (performance.now() - sliceStart >= CHUNKING_SLICE_MS) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      signal?.throwIfAborted();
+      sliceStart = performance.now();
+    }
+  }
+  return chunkResult(metas, fallback);
 }
 
 export { estimateTokens };

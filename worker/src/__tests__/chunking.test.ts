@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { chunkText, chunkTextWithMeta } from "../pipeline/chunking.js";
 import { estimateTokens } from "../lib/unicode-text.js";
+import { buildChunks, buildChunksCooperative } from "../stages/embedding-runtime.js";
 
 // ---------------------------------------------------------------------------
 // chunkText
@@ -243,5 +244,81 @@ describe("chunking non-Latin text", () => {
     const chunks = [...chunkText(text, 1800, { maxTokens: 64 })];
     for (const chunk of chunks) expect(estimateTokens(chunk)).toBeLessThanOrEqual(64);
     expect(chunks.join("")).toBe(text);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scale: chunking runs on the worker's event loop, which also answers the activity heartbeat
+// ---------------------------------------------------------------------------
+
+describe("chunking large documents", () => {
+  const sentence = "The committee reviewed the quarterly report and agreed that the new schedule should begin after the winter break. ";
+  const checkAll = (text: string, maxChars: number, maxTokens: number) => {
+    const chunks = [...chunkTextWithMeta(text, maxChars, { maxTokens })];
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(maxChars);
+      expect(estimateTokens(chunk.text)).toBeLessThanOrEqual(maxTokens);
+    }
+    return chunks;
+  };
+
+  // Each case was 3 to 23 seconds (and up to 945 MB) when every level re-counted the whole text; linear it costs a
+  // few passes of the word segmenter. The bound is relative to one such pass over the same text, measured under the
+  // same load (a parallel suite slows both), so it does not flake on a busy machine; the old code was 30 to 750 times
+  // one pass.
+  const onePass = (text: string) => {
+    const started = performance.now();
+    estimateTokens(text);
+    return performance.now() - started;
+  };
+  const withinPasses = (text: string, elapsedMs: number, passes: number) => expect(elapsedMs).toBeLessThan(passes * onePass(text) + 1_000);
+
+  it.each([
+    ["one 2.8M-character English paragraph", () => sentence.repeat(25_000)],
+    ["2.8M characters of words with no sentence end", () => "the committee reviewed the quarterly report and agreed ".repeat(52_000)],
+    ["1.1M characters of Chinese", () => "委员会审议了季度报告，并同意在冬季休假之后开始执行新的时间表。".repeat(36_000)],
+    ["one 1M-character token", () => "a".repeat(1_000_000)],
+    ["3M characters of unbroken Hangul", () => "위원회는분기보고서를검토하고".repeat(210_000)],
+  ])("%s chunks in linear time", (_name, make) => {
+    const text = make();
+    const started = performance.now();
+    const chunks = checkAll(text, 1800, 256);
+    withinPasses(text, performance.now() - started, 12);
+    expect(chunks.length).toBeGreaterThan(100);
+  });
+
+  it("chunks ten thousand pages of mixed prose, lists and code in a few seconds", () => {
+    const page = (i: number) => `# Page ${i}\n\n${sentence.repeat(8)}\n\n- item one\n- item two\n\n\`\`\`\ncode line ${i}\n\`\`\`\n`;
+    const text = Array.from({ length: 10_000 }, (_, i) => page(i)).join("\f");
+    const started = performance.now();
+    const chunks = [...chunkTextWithMeta(text, 1800, { maxTokens: 256 })];
+    withinPasses(text, performance.now() - started, 12);
+    expect(chunks.length).toBeGreaterThanOrEqual(10_000);
+  });
+
+  it("returns control between chunks often enough for a heartbeat while a large document is chunked", async () => {
+    const text = Array.from({ length: 4_000 }, (_, i) => `## Section ${i}\n\n${sentence.repeat(6)}`).join("\n\n");
+    let ticks = 0;
+    const timer = setInterval(() => { ticks++; }, 1);
+    const { texts } = await buildChunksCooperative(text, "fallback", { maxTokens: 256 });
+    clearInterval(timer);
+    expect(texts).toEqual(buildChunks(text, "fallback", { maxTokens: 256 }).texts);
+    expect(ticks).toBeGreaterThan(0);
+  });
+
+  it("keeps Unicode intact at scale: no split surrogate pair, grapheme cluster or fenced block", () => {
+    const family = "👨‍👩‍👧‍👦";
+    const fence = "```ts\n" + "const value = compute(input);\n".repeat(3) + "```\n";
+    const text = [`${family}`.repeat(3_000), "é́".repeat(2_000), "你好吗？".repeat(3_000), fence + sentence.repeat(30)].join("\n\n");
+    const chunks = checkAll(text, 400, 64);
+    const all = chunks.map((chunk) => chunk.text).join("\n");
+    expect(all).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    for (const chunk of chunks) {
+      const clusters = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(chunk.text)].map((part) => part.segment);
+      expect(clusters.join("")).toBe(chunk.text);
+      expect(chunk.text.startsWith("‍")).toBe(false);
+      expect(chunk.text.startsWith("́")).toBe(false);
+    }
+    expect(chunks.some((chunk) => chunk.text.includes("```ts\nconst value = compute(input);\n") && chunk.text.trimEnd().endsWith("```"))).toBe(true);
   });
 });

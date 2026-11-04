@@ -1,6 +1,6 @@
 import { tableChunks, TableBoundary } from "./table-chunking.js";
 import { leadingFrontmatterLineCount, plainHeadingText } from "../lib/markdown-structure.js";
-import { atomize, estimateTokens, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "../lib/unicode-text.js";
+import { atomizeSized, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "../lib/unicode-text.js";
 
 export interface ChunkMeta {
   text: string;
@@ -197,18 +197,15 @@ function* emitSection(section: Section, limits: SizeLimits): Generator<string> {
   let current = "";
   let currentTokens = 0;
   for (const block of splitFences(body)) {
-    const pieces = fitsLimits(block.text, limits) && block.code
-      ? [block.text]
-      : atomize(block.text, limits, { code: block.code });
-    for (const piece of pieces) {
-      const tokens = limits.maxTokens === undefined ? 0 : estimateTokens(piece);
-      if (current && !fitsLimits(current + piece, limits, currentTokens + tokens)) {
+    // `atomizeSized` returns a fitting block as one piece, with the token count it needed to decide.
+    for (const piece of atomizeSized(block.text, limits, { code: block.code })) {
+      if (current && !fitsLimits(current + piece.text, limits, currentTokens + piece.tokens)) {
         if (current.trim()) yield current.trim();
         current = "";
         currentTokens = 0;
       }
-      current += piece;
-      currentTokens += tokens;
+      current += piece.text;
+      currentTokens += piece.tokens;
     }
   }
 

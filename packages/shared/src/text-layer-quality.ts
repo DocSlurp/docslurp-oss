@@ -5,13 +5,14 @@
  * Two kinds of evidence, kept apart:
  *
  * - `garbled`: the layer carries marks of a failed glyph-to-Unicode mapping (replacement characters, private-use
- *   glyphs, `(cid:N)` runs, control characters), of a decoding mistake (UTF-8 read as Latin-1 or Windows-1251) or
- *   of a glyph-code shift (long case-mixed alphanumeric runs). These cannot be produced by language, so the page's
- *   text is unreadable and only a read of the page image recovers it.
- * - `suspect`: letters that do not behave like words of their script (letter pairs unlike the script's words, words
- *   mixing scripts). A consistent glyph substitution (a font whose code points were
- *   assigned in order of first use) looks like this and is invisible to the marker checks. A suspect page is
- *   cross-checked against an OCR of its render (`tokenAgreement`) before anything is paid for.
+ *   glyphs, `(cid:N)` runs, control characters), or is symbol soup or letters far outside the script's pairs. These
+ *   cannot be produced by language, so the page's text is unreadable and only a read of the page image recovers it.
+ * - `suspect`: patterns that usually mean a broken layer but that real text, data and other languages can produce
+ *   too: a decoding mistake's signature (UTF-8 read as Latin-1 or Windows-1251), a glyph-code shift (long case-mixed
+ *   alphanumeric runs with a language's letter frequencies), letters that do not behave like words of their script
+ *   (letter pairs unlike the script's words, words mixing scripts). A consistent glyph substitution (a font whose
+ *   code points were assigned in order of first use) looks like this and is invisible to the marker checks. A
+ *   suspect page is cross-checked against an OCR of its render (`tokenAgreement`) before anything is paid for.
  *
  * Nothing here looks at ASCII: letters, marks and symbols are Unicode properties, so Cyrillic, Greek, Arabic, CJK,
  * math and source code are judged by the same rules as Latin prose.
@@ -36,14 +37,22 @@ export const TEXT_LAYER_QUALITY = {
   /** Unmapped glyph marks over non-space characters: suspect at, garbled at. */
   unmappedSuspect: 0.02,
   unmappedGarbled: 0.1,
-  /** Mojibake-signature characters over non-space characters. */
+  /** Mojibake-signature characters over non-space characters. Never `garbled` on its own: see the module note. */
   mojibakeSuspect: 0.004,
-  mojibakeGarbled: 0.04,
+  /** Consecutive lead+continuation pairs of Windows-1251 mojibake; Ukrainian or Serbian words reach one or two. */
+  cp1251MojibakeMinPairs: 3,
   /** Alphanumeric-only runs of this many characters are "long tokens" (words never reach it; hashes and keys do). */
   longTokenChars: 20,
   /** Share of a page's non-space characters inside long, mixed-case, wide-alphabet tokens, and the least tokens. */
   longTokenGarbled: 0.25,
   longTokenMinTokens: 4,
+  /**
+   * A glyph-code shift keeps the language's letter frequencies: the index of coincidence of the long tokens' characters
+   * is 0.06 and above for shifted English; base64, keys, hashes and serials are near-uniform (0.016 to 0.034).
+   */
+  longTokenMinCoincidence: 0.05,
+  /** Shifted prose holds few digits (they come from rare capitals); identifiers and part numbers are digit-heavy. */
+  longTokenMaxDigitShare: 0.3,
   /**
    * Mean natural-log probability per letter pair of a page's words under the script's pooled letter-bigram table
    * (text-layer-bigrams.ts). Held-out natural pages score -5.0 to -7.0; Caesar and substitution ciphers of the same
@@ -73,11 +82,17 @@ export const TEXT_LAYER_QUALITY = {
 const UNMAPPED = /[�￾￿-\u{F0000}-\u{10FFFF}\u0000-\u0008\u000B\u000E-\u001F\u007F-\u009F]/gu;
 const CID_RUN = /\(cid:\d+\)/g;
 
-// UTF-8 text decoded as Latin-1/Windows-1252 ("Ã©", "â€™", "Ð¿Ñ€"): a lead letter followed by a continuation
-// byte shown as Latin-1 or Windows-1252 punctuation.
-const LATIN1_MOJIBAKE = /[\u00C2-\u00DFâ][\u0080-¿ŒœŠšŸŽžƒˆ˜–-›€™]/gu;
-// UTF-8 Cyrillic decoded as Windows-1251 ("Р°РІС‚"): Р or С followed by a letter or mark Russian text does not put there.
-const CP1251_MOJIBAKE = /[РС][Ђ-Џђ-џҐґ -¿‘-›€№™]/gu;
+// UTF-8 text decoded as Latin-1/Windows-1252 ("Ã©", "â€™", "Ð¿Ñ€"): the lead byte of a Latin, Greek, Cyrillic, Arabic or
+// Hebrew sequence followed by a continuation byte shown as Latin-1 or Windows-1252 punctuation. German capitals
+// (Ö, Ü, ß) are not leads: "Straße—" is prose.
+const LATIN1_MOJIBAKE = /[ÂÃÄÅÎÏÐÑØÙ×â][\u0080-¿ŒœŠšŸŽžƒˆ˜–-›€™]/gu;
+// UTF-8 Cyrillic decoded as Windows-1251 ("Р°РІС‚"): every letter becomes Р or С plus a continuation byte, so the signature is
+// a run of such pairs. A single pair is a Ukrainian, Belarusian, Serbian or Macedonian word ("Рівне", "СІЧЕНЬ", "РІШЕННЯ"):
+// the continuation bytes include real letters (І, і, Ї, Є, Ј, Љ, Њ, Ћ, Џ, Ђ, ђ, ґ).
+const CP1251_MOJIBAKE_RUN = new RegExp(
+  `(?:[РС][Ђ-Џђ-џҐґ\\u00A0-¿‘-›€№™]){${TEXT_LAYER_QUALITY.cp1251MojibakeMinPairs},}`,
+  "gu",
+);
 
 function countMatches(text: string, pattern: RegExp): { count: number; chars: number } {
   let count = 0;
@@ -133,10 +148,20 @@ function wordLetterPairs(script: AlphabeticScript, tokenLetters: string[]): { su
  * is not a URL, an address or a restricted-alphabet sequence (hex digests, nucleotides).
  */
 function isLongTokenCandidate(token: string): boolean {
-  if (!/^[\x21-\x7e]+$/.test(token) || token.includes("://") || token.includes("@")) return false;
+  if (!/^[\x21-\x7e]+$/.test(token) || token.includes("://") || token.includes("@") || token.includes("-----")) return false;
+  // A JSON Web Token (`eyJ…` is `{"`) is three base64url segments, never a shifted word.
+  if (/^eyJ[\w-]+\.[\w-]+\.[\w-]*$/.test(token)) return false;
   const alphanumeric = token.match(/[A-Za-z0-9]/g)?.length ?? 0;
   if (alphanumeric < token.length * 0.7) return false;
   return !RESTRICTED_ALPHABET.test(token.replace(/[^A-Za-z0-9]/g, ""));
+}
+
+/** Probability that two characters drawn from the counts are equal: ~0.065 for a language's letters, 1/64 for base64. */
+function indexOfCoincidence(counts: Map<string, number>, total: number): number {
+  if (total < 2) return 0;
+  let same = 0;
+  for (const count of counts.values()) same += count * (count - 1);
+  return same / (total * (total - 1));
 }
 
 const RESTRICTED_ALPHABET = /^[ACGTUNacgtun]+$|^[0-9A-Fa-f]+$/;
@@ -163,16 +188,18 @@ export function assessTextLayer(text: string): TextLayerAssessment {
   ratio = Math.max(ratio, unmappedRatio);
 
   // 2. Decoding mistakes.
-  const mojibake = (countMatches(sample, LATIN1_MOJIBAKE).chars + countMatches(sample, CP1251_MOJIBAKE).chars) / nonSpace;
-  if (mojibake >= TEXT_LAYER_QUALITY.mojibakeGarbled) { garbled = true; reasons.push("mojibake"); }
-  else if (mojibake >= TEXT_LAYER_QUALITY.mojibakeSuspect) { suspect = true; reasons.push("mojibake-minor"); }
+  // A decoding mistake is `suspect`, never `garbled`: its signature can be language (a Latin-script name list, a cipher-like
+  // table) and the OCR cross-check settles it; only unmapped glyphs are unreadable without a look at the image.
+  const mojibake = (countMatches(sample, LATIN1_MOJIBAKE).chars + countMatches(sample, CP1251_MOJIBAKE_RUN).chars) / nonSpace;
+  if (mojibake >= TEXT_LAYER_QUALITY.mojibakeSuspect) { suspect = true; reasons.push("mojibake"); }
   ratio = Math.max(ratio, mojibake);
 
   // Token pass: long-token mass, letter pairs and script mixing share one walk.
   let letters = 0;
   let longChars = 0;
   let longTokens = 0;
-  const longAlphabet = new Set<string>();
+  const longAlphabet = new Map<string, number>();
+  let longDigits = 0;
   const scriptLetters: Record<AlphabeticScript, number> = { latin: 0, cyrillic: 0, greek: 0 };
   const pairs: Record<AlphabeticScript, { sum: number; count: number; words: number }> = {
     latin: { sum: 0, count: 0, words: 0 },
@@ -190,7 +217,10 @@ export function assessTextLayer(text: string): TextLayerAssessment {
       if (flips >= 3 || !/[a-z]/.test(token)) {
         longChars += token.length;
         longTokens += 1;
-        for (const char of token) longAlphabet.add(char);
+        for (const char of token) {
+          longAlphabet.set(char, (longAlphabet.get(char) ?? 0) + 1);
+          if (char >= "0" && char <= "9") longDigits += 1;
+        }
       }
     }
     const tokenLetters = token.match(/\p{L}/gu);
@@ -218,10 +248,14 @@ export function assessTextLayer(text: string): TextLayerAssessment {
     }
   }
 
-  // 3. Glyph-code shift: most of the page is long, mixed-case alphanumeric runs over a wide alphabet.
+  // 3. Glyph-code shift: most of the page is long, mixed-case alphanumeric runs over a wide alphabet whose letter
+  // frequencies are a language's (a shift renames letters, it does not flatten them). Base64, PEM, JWTs, keys and
+  // part numbers are long runs too, but uniform or digit-heavy. A shift is `suspect`: the OCR cross-check settles it.
   const longRatio = longChars / nonSpace;
-  if (longTokens >= TEXT_LAYER_QUALITY.longTokenMinTokens && longAlphabet.size >= 12 && longRatio >= TEXT_LAYER_QUALITY.longTokenGarbled) {
-    garbled = true;
+  if (longTokens >= TEXT_LAYER_QUALITY.longTokenMinTokens && longAlphabet.size >= 12 && longRatio >= TEXT_LAYER_QUALITY.longTokenGarbled &&
+      longDigits <= longChars * TEXT_LAYER_QUALITY.longTokenMaxDigitShare &&
+      indexOfCoincidence(longAlphabet, longChars) >= TEXT_LAYER_QUALITY.longTokenMinCoincidence) {
+    suspect = true;
     reasons.push("glyph-shift");
     ratio = Math.max(ratio, longRatio);
   }
