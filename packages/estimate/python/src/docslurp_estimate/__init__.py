@@ -54,9 +54,13 @@ class Estimator:
         self._card_json = None if card is None else (card if isinstance(card, str) else json.dumps(card)).encode()
         # One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into
         # it again, so hostile files cost at most this memory, never a fresh allocation per crash.
+        self._new_store()
+
+    def _new_store(self) -> None:
         self._store = wasmtime.Store(self._engine)
         limits = wasmtime.Limits(_MEMORY_INITIAL_PAGES, _MEMORY_MAXIMUM_PAGES)
         self._memory = wasmtime.Memory(self._store, wasmtime.MemoryType(limits))
+        self._resets = 0
         self._instantiate()
 
     def _instantiate(self) -> None:
@@ -65,6 +69,11 @@ class Estimator:
         self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_card", "ds_read_plan", "ds_probe", "ds_quote")}
 
     def _reset(self) -> None:
+        # A store keeps a little bookkeeping per instance; start a new one now and then so it stays bounded.
+        self._resets += 1
+        if self._resets >= 64:
+            self._new_store()
+            return
         size = self._memory.data_len(self._store)
         chunk = bytes(16 * 1024 * 1024)
         for offset in range(0, size, len(chunk)):
@@ -73,25 +82,24 @@ class Estimator:
 
     def _call(self, name: str, *inputs: Optional[bytes]) -> Any:
         store = self._store
-        args: list[int] = []
-        allocated: list[tuple[int, int]] = []
-        for data in inputs:
-            if not data:
-                args += [0, 0]
-                continue
-            pointer = self._fn["ds_alloc"](store, len(data))
-            self._memory.write(store, data, pointer)
-            allocated.append((pointer, len(data)))
-            args += [pointer, len(data)]
         try:
+            args: list[int] = []
+            for data in inputs:
+                if not data:
+                    args += [0, 0]
+                    continue
+                pointer = self._fn["ds_alloc"](store, len(data))
+                self._memory.write(store, data, pointer)
+                args += [pointer, len(data)]
             packed = self._fn[name](store, *args) & _MASK64
+            for pointer, length in zip(args[::2], args[1::2]):
+                if length:
+                    self._fn["ds_free"](store, pointer, length)
         except wasmtime.Trap as error:
-            # A trap (a panic, or a file that hit the memory cap) leaves the heap inconsistent: zero the memory and
-            # instantiate the module into it again, exactly as on first load.
+            # A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
+            # inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
             self._reset()
             raise EstimatorError("crashed", f"the estimator stopped on this input ({error})") from None
-        for pointer, length in allocated:
-            self._fn["ds_free"](store, pointer, length)
         pointer, length = packed >> 32, packed & 0xFFFFFFFF
         raw = self._memory.read(store, pointer, pointer + length)
         self._fn["ds_free"](store, pointer, length)

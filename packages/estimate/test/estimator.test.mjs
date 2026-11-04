@@ -145,6 +145,12 @@ describe("@docslurp/estimate (wasm)", () => {
     assert.equal(quote.estimate.pages, 2);
   });
 
+  it("reports an input larger than the module's memory as a crash and recovers", () => {
+    const huge = new Uint8Array(300 * 1024 * 1024);
+    assert.throws(() => estimator.probe({ name: "huge.pdf", size: huge.length }, huge), (error) => error instanceof EstimatorError && error.code === "crashed");
+    assert.equal(estimator.quote({ files: [{ name: "a.pdf", size: 10, pages: 2 }] }).estimate.pages, 2);
+  });
+
   it("reads a WAV duration from its header and prices it as audio without a name hint", () => {
     const seconds = 90;
     const rate = 8_000;

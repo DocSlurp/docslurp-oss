@@ -50,33 +50,32 @@ export async function createEstimator(options = {}) {
 
   function call(name, ...inputs) {
     const exports = instance.exports;
-    const allocated = [];
-    const args = [];
-    for (const input of inputs) {
-      if (!input || input.byteLength === 0) {
-        args.push(0, 0);
-        continue;
-      }
-      const bytes = input instanceof Uint8Array ? input : new Uint8Array(input.buffer ?? input, input.byteOffset ?? 0, input.byteLength);
-      const pointer = exports.ds_alloc(bytes.byteLength);
-      new Uint8Array(memory.buffer, pointer, bytes.byteLength).set(bytes);
-      allocated.push([pointer, bytes.byteLength]);
-      args.push(pointer, bytes.byteLength);
-    }
     let packed;
     try {
+      const args = [];
+      for (const input of inputs) {
+        if (!input || input.byteLength === 0) {
+          args.push(0, 0);
+          continue;
+        }
+        const bytes = input instanceof Uint8Array ? input : new Uint8Array(input.buffer ?? input, input.byteOffset ?? 0, input.byteLength);
+        const pointer = exports.ds_alloc(bytes.byteLength);
+        new Uint8Array(memory.buffer, pointer, bytes.byteLength).set(bytes);
+        args.push(pointer, bytes.byteLength);
+      }
       packed = BigInt.asUintN(64, BigInt(exports[name](...args)));
+      // Inputs are freed by zeroing on the next reset if a call traps; on success, free them now.
+      for (let index = 0; index < args.length; index += 2) if (args[index + 1] > 0) exports.ds_free(args[index], args[index + 1]);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
-        // A trap (a panic, or a file that hit the memory cap) leaves the heap inconsistent: zero the memory and
-        // instantiate the module into it again, exactly as on first load.
+        // A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
+        // inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
         new Uint8Array(memory.buffer).fill(0);
         instance = instantiate();
         throw new EstimatorError("crashed", `the estimator stopped on this input (${error.message})`);
       }
       throw error;
     }
-    for (const [pointer, length] of allocated) exports.ds_free(pointer, length);
     const pointer = Number(packed >> 32n);
     const length = Number(packed & 0xffffffffn);
     const json = decoder.decode(new Uint8Array(memory.buffer, pointer, length));
