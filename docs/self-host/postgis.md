@@ -1,8 +1,9 @@
 # PostGIS feasibility and extension migration boundary
 
-This is a backend feasibility foundation, **not an enabled geo search feature**.
-No application migrations, production extensions, retrieval paths or ordinary
-JSON contracts change here.
+PostGIS is optional. It backs spatial search ([Spatial search](../geo-search.md))
+and the geo projection ([Geo projection lifecycle](geo-projection-publication.md)).
+Without it, DocSlurp runs normally and spatial search requests return 503. This
+page covers the local feasibility check and the optional spatial migration journal.
 
 ## Repeatable local check
 
@@ -24,7 +25,8 @@ checks, not application retrieval, authorization, throughput or lifecycle tests.
 
 ## Installation and ordinary migration compatibility
 
-Stock PostgreSQL 17 does not imply PostGIS availability. Operators must install
+Stock PostgreSQL 17 does not imply PostGIS availability; the Compose stack's
+`postgres:17-bookworm` image has no PostGIS. Operators must install
 matching PostGIS server packages, or choose a supported PostGIS database image,
 and explicitly install the extension as the database owner. Do not change an
 existing database image/data directory without its normal backup and upgrade
@@ -47,25 +49,35 @@ An unconditional geometry column or CREATE EXTENSION in that journal would break
 ordinary installations. A conditional DO block is also wrong: Drizzle would mark
 it applied on a non-geo database and never install it when capability appears.
 
-Proposed extension strategy for the next storage implementation:
+The spatial migrations follow this strategy (`server/db/migrate-postgis.mjs`):
 
-1. Keep extension migrations under `server/db/migrations/postgis/`, with a
-   distinct ordered journal and ledger, explicitly invoked by an opt-in owner
-   command under the existing migration lock after the ordinary journal.
-2. Preflight installed PostGIS before any extension DDL. Missing capability is a
-   loud refusal for this command; it never installs the extension implicitly.
+1. Extension migrations live under `server/db/migrations/postgis/`, with their
+   own ordered `journal.json` and a checksum ledger (`postgis_migration_ledger`).
+   `migrate.mjs` applies them only when `POSTGIS_MIGRATIONS=1`, under the
+   migration lock, after the ordinary journal.
+2. They check for an installed PostGIS before any extension DDL. Without it the
+   run fails with `PostGIS migrations require an already installed postgis
+   extension`; it never installs the extension itself.
 3. Test fresh, repeat, rollback-on-failure, ordinary-to-enabled upgrade and both
    journals against real PostgreSQL. Keep the ordinary PGlite journal unchanged.
 4. Retrieval must require installed capability **and** the expected extension
    migration version **and** matching published projection generation. Missing
    capability returns an explicit unsupported/index-not-ready error before paid
    query enhancement. Never drop a geo constraint or treat missing rows as a
-   complete empty result. This gate is not wired by this feasibility PR.
+   complete empty result. Search applies this gate in
+   `server/src/search/geo-scope.ts`: 503 when the spatial tables are absent, 409
+   when selected documents lack a current generation.
 
-## Projection storage handoff (not DDL)
+## Projection storage design requirements
 
-Do not create `document_geo` until publication identity is agreed with the
-structured-result owner. Current `document_corrections` upserts structured data
+The storage this section asked for now exists: `geo_accepted_sources` (ordinary
+migration 0110) and `geo_projection_generations`, `geo_projection_features` and
+`ready_geo_projection_generations` (spatial migrations 0001 and 0002). See
+[Geo projection lifecycle](geo-projection-publication.md) for how they behave.
+The requirements below are kept as the design record.
+
+The original concern: publication identity had to be agreed with the
+structured-result owner first. Current `document_corrections` upserts structured data
 in place (`server/src/services/document-review.ts`); `schema.ts` stores pipeline
 configuration as JSON. A run ID or correction timestamp alone does not establish
 an immutable accepted-result/schema revision. Inventing these here would allow
@@ -93,10 +105,7 @@ The storage migration should establish:
   schema invalidation and result cache generation. Test correction-vs-publish,
   delete-vs-retry, supersession, dedup copies and rollback on the real backend.
 
-No projection DDL is delivered in this slice. Integration owners must resolve
-these identities and implement the gate before claiming geo support. Boundary
-implementation requires independent council reviews before merge; this harness
-is not that security review.
+The feasibility harness below is not a security review of that implementation.
 
 ## Observed local run — 2026-11-01
 

@@ -59,3 +59,6 @@ flowchart LR
 - [Database roles](database-roles.md): least-privilege Postgres roles for the server, workers, migrations and backups.
 - [Parser sandbox providers](sandbox-providers.md): bubblewrap, landlock and Modal, selection, production policy and benchmarks.
 - [Choosing isolation per platform](platform-isolation.md): what Fargate, Cloud Run, Kubernetes, Fly.io and others give you, and which mode to use.
+- [PostGIS](postgis.md): the optional spatial database, its feasibility check and the opt-in spatial migrations.
+- [PostGIS migration ownership](postgis-owner-preflight.md): running migrations as the application owner after a privileged PostGIS install.
+- [Geo projection lifecycle](geo-projection-publication.md): how accepted geo fields become a scoped spatial projection.
