@@ -166,7 +166,6 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
-| `VISION_ROUTING_V2` | `off` | off, on, workspace ids | Legacy vision routing v2 (below) for every run or a comma-separated canary list of workspace ids. Worker only, read once per run at run start. A malformed value reads as off with one warning. |
 | `VISION_PAGE_ATTEMPTS` | `2` | integer 1..4 (clamped) | Vision provider requests per page and purpose per run, retries and fallbacks included (vision run guard, below). |
 | `VISION_REGION_ATTEMPTS_PER_PAGE` | `12` | integer 0..64 (clamped) | Routed region requests per page per run. |
 | `VISION_BREAKER_MIN_FAILURES` | `20` | integer 1..10000 (clamped) | Failed or rejected requests before the rejection breaker can stop vision for the run. |
@@ -196,34 +195,18 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 
 `.env.example` lists every flag above with its default.
 
-### Legacy vision routing v2
+### Legacy vision routing: evidence routing (v2) and v1
 
-`VISION_ROUTING_V2` gates the fixes to the legacy (non-router) vision path so production can
-enable them for one workspace before everyone. The worker reads it once, when the run starts
-(`startRun`), and persists the resolved version as the run artifact `run:vision-routing-version`
-(`v1` or `v2`). Extract-markdown, classify-route, vision fan-out and page tasks read that artifact,
-so workers with different environments, retries and rehydrated runs route a run the same way
-(`worker/src/lib/vision-routing-v2.ts`). The pure routing functions take `{ routingV2 }`; none
-of them read the environment. Every comma-separated entry must be a valid workspace id: `ws-a,,`,
-`,ws-a` and `ws-a,` are malformed and read as off with one warning.
+New runs read a page with a vision/OCR model only on facts about the PDF page (native words from the text layer, significant
+non-repeated images, text-layer quality, drawn content): see [page-routing-evidence.md](page-routing-evidence.md) and
+[page-text-layer-quality.md](page-text-layer-quality.md). The worker pins the version when the run starts (`startRun`) as the
+run artifact `run:vision-routing-version` (`v2` for every new run). Extract-markdown, classify-route, vision fan-out and page
+tasks read that artifact, so workers of different builds, retries and rehydrated runs route a run the same way
+(`worker/src/lib/vision-routing-v2.ts`). The pure routing functions take `{ routingV2 }`; none of them read the environment.
+There is no environment switch (`VISION_ROUTING_V2` was removed). `v1`, the keyword and character-class routing, remains only
+for runs already in flight and for states built without a pin; delete it once those runs drain.
 
-Gated (v2 only):
-
-- Page triage counts native words from page facts' shared `pdftotext` run, so an OCR'd scan stays
-  sparse (`extract-markdown` passes `textLayerPages`; when `pdftotext` failed or its pages do not
-  line up, triage keeps the v1 count); uploaded images get full-page raster evidence
-  (`imageFilePageEvidence`).
-- Document labels use whole-word terms and need two distinct body terms, read from the first
-  256 KB of text (`hasDistinctTerms` stops at the answer, so memory does not grow with the upload).
-- Page routes: the numeric-row table cue, garbled-text detection, Unicode-math formula signals
-  (each scanning the first 64 KB of a page), and keeping structured routes (table, form, formula,
-  figure) for OCR'd pages.
-- A page without text layer or images whose OCR text has words counts as drawn content.
-- `selectLegacyVisionPages` also admits formula pages and lets the text route decide when raster
-  evidence does not authorize OCR; v1 lets any page-evidence decision decide alone.
-
-With the flag off, routing is v1 except for these always-on changes, so it does **not** reproduce
-`origin/main` exactly:
+Both versions share these changes, which are not gated:
 
 - A page whose vision output is rejected (degenerate, refusal, truncated) no longer fails the
   document (`shouldFailOpenVisionError`). It keeps its native or OCR text when that text is usable
