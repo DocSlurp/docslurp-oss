@@ -381,7 +381,8 @@ export type UploadOptions = RequestOptions & {
    * "auto" (default) uses presigned storage PUTs: single PUT for small files,
    * multipart for large files and unknown-size streams. The server starts
    * ingestion automatically. false uses the size-limited /v1/uploads/bulk
-   * compatibility transport. Direct sessions ignore idempotencyKey.
+   * compatibility transport. Direct sessions send `idempotencyKey` (or a generated one) as an Idempotency-Key header, so a
+   * create that timed out is retried safely and never makes a second session.
    */
   directUpload?: "auto" | boolean;
   filename?: string;
@@ -414,6 +415,10 @@ export type UploadInput = {
 };
 
 export type RejectedUpload = {
+  /** Position of the file in the request, when the server reports it. Match by this, never by filename. */
+  index?: number;
+  /** The id this client sent for the file (the request index as a string), echoed by the server. */
+  clientId?: string;
   filename: string;
   /** HTTP status the file would have produced on its own. */
   statusCode: 400 | 409 | 413 | 415 | 422;
@@ -850,6 +855,10 @@ function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; l
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
 export type DirectUploadDescriptor = {
+  /** Position of the file in the create request; the server sanitizes filenames, so match by this, never by name. */
+  index?: number | null;
+  /** The client id sent with the file, echoed back. */
+  clientId?: string | null;
   id: string;
   filename: string;
   mimeType: string;
@@ -864,9 +873,16 @@ export type DirectUploadDescriptor = {
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
-  files: Array<{ filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
+  files: Array<{ clientId?: string; filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
 };
-export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[]; result?: UploadResponse | null };
+export type UploadSession = {
+  sessionId: string;
+  status: string;
+  files: DirectUploadDescriptor[];
+  result?: UploadResponse | null;
+  /** Files the server left out of the session (the others were accepted), keyed by request index. */
+  rejected?: RejectedUpload[];
+};
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 
 function normalizeApiUrl(apiUrl: string): string {
@@ -1538,12 +1554,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     let failure: unknown;
     try {
       signal.throwIfAborted();
-      const session = await request<UploadSession>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+      const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
         ...intakeTarget(metadata), ...extractFields(options), orgId: metadata.orgId, tags: metadata.tags,
         templateKey: metadata.templateKey, indexingMode: metadata.indexingMode, ...pipelineFields(metadata),
-        files: [{ filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
+        files: [{ clientId: "0", filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
           canonicalId: options.canonicalId, path: options.path }],
-      }), transferOptions);
+      }, transferOptions, metadata.idempotencyKey ?? newIdempotencyKey());
       sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
       const descriptor = session.files[0];
       if (!descriptor || descriptor.mode !== "multipart") throw new Error("Stream upload requires a multipart session");
@@ -1637,6 +1653,74 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
+  /** True for failures worth another attempt: a timeout, a dropped connection, or a transient or expired-URL response. */
+  function isTransientTransferError(error: unknown): boolean {
+    if (error instanceof DocSlurpTimeoutError) return true;
+    if (error instanceof DocSlurpApiError) return [403, 408, 429, 500, 502, 503, 504].includes(error.status);
+    return error instanceof TypeError;
+  }
+
+  /**
+   * Creates a direct-upload session with an Idempotency-Key. A request that timed out or lost its connection is sent again with the
+   * same key, so the server returns the session the first attempt made instead of creating (and charging for) another.
+   */
+  async function postUploadSession<T>(path: string, body: unknown, options: UploadOptions, key: string): Promise<T> {
+    const init = jsonRequest("POST", body);
+    const headers = new Headers(init.headers);
+    headers.set("Idempotency-Key", key);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request<T>(path, { ...init, headers }, options, true);
+      } catch (error) {
+        if (attempt >= 3 || options.signal?.aborted || !isTransientTransferError(error) || (error instanceof DocSlurpApiError && error.status === 403)) throw error;
+        await sleep(250 * 2 ** attempt, options.signal ?? new AbortController().signal);
+      }
+    }
+  }
+
+  /**
+   * Sends one file's bytes. When a part or the single PUT fails after its own retries, the session is read again: storage knows which
+   * parts arrived, so the transfer resumes from the server's pendingParts (with fresh signed URLs) instead of restarting.
+   */
+  async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
+    let descriptor = first;
+    for (let round = 0; ; round++) {
+      try {
+        if (descriptor.mode === "single") {
+          await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType, options);
+          return;
+        }
+        for (const part of descriptor.pendingParts ?? []) {
+          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
+          await putToStorage(part.url, blob.slice(start, start + part.sizeBytes), undefined, options);
+        }
+        return;
+      } catch (error) {
+        if (round >= 2 || options.signal?.aborted || !isTransientTransferError(error)) throw error;
+        let refreshed: DirectUploadDescriptor | undefined;
+        try {
+          await sleep(250 * 2 ** round, options.signal ?? new AbortController().signal);
+          const session = await request<UploadSession>(sessionPath, {}, options, true);
+          refreshed = session.files.find((file) => file.id === descriptor.id);
+        } catch { throw error; }
+        if (!refreshed) throw error;
+        if ((refreshed as { status?: string }).status === "completed") return;
+        descriptor = refreshed;
+      }
+    }
+  }
+
+  /** The local file a session descriptor belongs to: by request index, then the client id, and only for older servers by name and size. */
+  function sourceForDescriptor<T extends { name: string; blob: Blob }>(descriptor: DirectUploadDescriptor, sources: T[], claimed: Set<number>): { source: T; index: number } | undefined {
+    const byIndex = typeof descriptor.index === "number" ? descriptor.index
+      : descriptor.clientId != null && /^\d+$/.test(descriptor.clientId) ? Number(descriptor.clientId) : -1;
+    const index = byIndex >= 0 ? byIndex : sources.findIndex((source, at) => !claimed.has(at) && source.name === descriptor.filename && source.blob.size === descriptor.sizeBytes);
+    const source = sources[index];
+    if (!source || claimed.has(index)) return undefined;
+    claimed.add(index);
+    return { source, index };
+  }
+
   /** Transfer known-size files; the server reconciles storage and starts ingestion. */
   async function uploadDirect(args: {
     blobs: Blob[];
@@ -1647,7 +1731,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newWorkspace: boolean; workspace?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
-    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+    const idempotencyKey = metadata.idempotencyKey ?? newIdempotencyKey();
+    const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
       ...extractFields(options),
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
@@ -1657,31 +1742,31 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),
       files: args.blobs.map((blob, index) => ({
+        // The request index doubles as the client id: the server sanitizes filenames, so the reply is matched by index.
+        clientId: String(index),
         filename: args.names[index],
         mimeType: blob.type || "application/octet-stream",
         sizeBytes: blob.size,
         ...(args.canonicalIds[index] ? { canonicalId: args.canonicalIds[index] } : {}),
         ...(args.paths[index] ? { path: args.paths[index] } : {}),
       })),
-    }), options);
+    }, options, idempotencyKey);
     const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
-    const remaining = args.blobs.map((blob, index) => ({ blob, name: args.names[index] }));
+    const sources = args.blobs.map((blob, index) => ({ blob, name: args.names[index]! }));
+    const claimed = new Set<number>();
+    // Files the server left out come back by request index; report them under the names the caller gave.
+    const leftOut = (session.rejected ?? []).map((rejection) => ({
+      ...rejection,
+      filename: typeof rejection.index === "number" ? args.names[rejection.index] ?? rejection.filename : rejection.filename,
+    }));
     try {
       for (const descriptor of session.files) {
-        const at = remaining.findIndex((source) => source.name === descriptor.filename && source.blob.size === descriptor.sizeBytes);
-        const source = at < 0 ? undefined : remaining.splice(at, 1)[0];
-        if (!source) throw new Error(`Direct upload session returned an unknown file: ${descriptor.filename}`);
-        if (descriptor.mode === "single") {
-          await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType, options);
-          continue;
-        }
-        for (const part of descriptor.pendingParts ?? []) {
-          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes), undefined, options);
-        }
-
+        const match = sourceForDescriptor(descriptor, sources, claimed);
+        if (!match) throw new Error(`Direct upload session returned a file this upload did not send: ${descriptor.filename}`);
+        await transferFile(sessionPath, descriptor, match.source.blob, options);
       }
-      return await waitUploadSession(sessionPath, options);
+      const result = await waitUploadSession(sessionPath, options);
+      return leftOut.length ? { ...result, rejected: [...leftOut, ...(result.rejected ?? [])] } : result;
     } catch (error) {
       await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
@@ -1934,9 +2019,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     getWorkspace(id: string, options?: RequestOptions): Promise<WorkspaceRecord> {
       return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
     },
-    createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+    /** Creates a direct-upload session. Sends an Idempotency-Key (yours, else a generated one) and retries a lost create with it. */
+    createUploadSession(input: UploadSessionInput, options?: RequestOptions & { idempotencyKey?: string }): Promise<UploadSession> {
       assertClientCanonicalIds(canonicalIdsOf(input, undefined));
-      return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
+      return postUploadSession<UploadSession>("/v1/uploads/direct/sessions", { ...input, ...intakeTarget(input) }, options ?? {}, options?.idempotencyKey ?? newIdempotencyKey());
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
@@ -2015,6 +2101,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 }
 
 export type DocSlurpClient = ReturnType<typeof createDocSlurpClient>;
+
+/** A fresh Idempotency-Key for one upload: the same key accompanies every attempt to create its session. */
+function newIdempotencyKey(): string {
+  const crypto = globalThis.crypto;
+  if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 function jsonRequest(method: string, body: unknown): RequestInit {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
