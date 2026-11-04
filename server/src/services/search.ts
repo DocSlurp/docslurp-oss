@@ -70,6 +70,7 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
+import { estimateTextTokens } from "../search/token-estimate.js";
 import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
 import { currentSearchAdmissionGroup, withSearchSlot, type SearchAdmission } from "../search/search-limiter.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
@@ -1495,7 +1496,7 @@ async function communitySummarySearch(
     text: qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) }),
     headingPath: [row.label],
     pageNumber: null,
-    tokenEstimate: Math.ceil(qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) }).length / 4),
+    tokenEstimate: estimateTextTokens(qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) })),
     score: 1 / (120 + row.rank),
     filename: `${row.label} community`,
     pageNumbers: [],
