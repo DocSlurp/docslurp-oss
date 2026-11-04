@@ -80,7 +80,7 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/uploads/direct/sessions/{sessionId}/confirm", "post", "ingest", "Confirm a direct upload session and start its run", "ingest", "Run started"],
   ["/v1/artifacts/preview", "get", "artifacts", "Preview an artifact's content", "artifacts", "Artifact preview"],
   ["/v1/chat/stream", "get", "chat", "Stream a cited chat answer as server-sent events from a GET (question in the query string); POST /v1/chat takes the full request body", "chat", "Server-sent event stream"],
-  ["/v1/search/aggregate", "post", "search", "Search several workspaces and merge the results", "search", "Aggregated results", jsonBody],
+  ["/v1/search/aggregate", "post", "search", "Search several workspaces and merge the results. Provider-backed steps and generateAnswer are off unless requested; generateAnswer calls a model: it needs a server key with the chat scope, answered workspaces from one organization, and counts as a chat request", "search", "Aggregated results", jsonBody],
   ["/v1/search/{sessionId}/feedback", "post", "search", "Record click or relevance feedback for a search session", "search", "Feedback recorded", jsonBody],
   ["/v1/searches/{sessionId}/materialization", "get", "search", "Poll on-demand page materialization for a deferred-index search session", "search", "Candidate pages and their ledger state"],
   ["/v1/search/diagnostics", "get", "search", "Zero-result diagnostics for a search session in a workspace you can read", "search", "Diagnostics or null", {

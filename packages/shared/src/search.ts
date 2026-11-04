@@ -150,7 +150,11 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
     limitPerWorkspace: z.number().int().positive().max(25).default(5),
     maxWorkspaces: z.number().int().positive().max(50).default(12),
     maxCitations: z.number().int().positive().max(50).default(12),
-    generateAnswer: z.boolean().default(true),
+    /**
+     * Calls a model on the caller's credits: off unless requested, and an API
+     * key also needs the `chat` scope (POST /v1/search/aggregate).
+     */
+    generateAnswer: z.boolean().default(false),
     includePartial: z.boolean().default(true),
     hyde: z.boolean().default(false),
     rerank: z.boolean().default(true),
@@ -159,11 +163,12 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
     /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
     minScore: z.number().min(0).max(1).optional(),
     compression: z.boolean().default(false),
-    queryRewrite: z.boolean().default(true),
+    /** Provider-backed steps stay off unless requested, as on POST /v1/search. */
+    queryRewrite: z.boolean().default(false),
     queryDecompose: z.boolean().default(false),
     stepback: z.boolean().default(false),
     parentRetrieval: z.boolean().default(true),
-    selfQuery: z.boolean().default(true),
+    selfQuery: z.boolean().default(false),
     iterativeMultiHop: z.boolean().default(false),
     graphExpansion: z.boolean().default(false),
     communityExpansion: z.boolean().default(false),

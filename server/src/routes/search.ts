@@ -8,6 +8,8 @@ import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
+import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
+import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 
 import { aggregateWorkspaceRagSearchRequestSchema, deferredProfilesEnabled, type ApiErrorCode } from "@docslurp/shared";
 
@@ -533,6 +535,27 @@ export const searchRoutes = new Hono()
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
+    // A generated answer is a model call billed like chat, so it needs the
+    // chat scope as well (the same scope /v1/chat checks). Refuse before any
+    // workspace lookup or retrieval runs.
+    // Browser keys never get aggregate answers: the answer path has no output
+    // moderation and fans out across workspaces, which a public key must not reach.
+    if (parsed.data.generateAnswer && actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["chat"]))) {
+      return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+    }
+
+    // An answer is a chat turn: it spends the chat-ai allowance and holds a
+    // chat slot like /v1/chat (the path alone classifies it as search).
+    let slot: { release: () => void } | null | "uncapped" = "uncapped";
+    if (parsed.data.generateAnswer) {
+      const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
+      if (limited) return limited;
+      slot = acquireChatSlot(c);
+      if (!slot) {
+        c.header("Retry-After", "5");
+        return apiErrorResponse(c, 429, "rate_limited", "Too many chat requests in progress for this key; wait for one to finish");
+      }
+    }
 
     try {
       // Each listed workspace may be a UUID, slug, former slug, name or
@@ -550,7 +573,12 @@ export const searchRoutes = new Hono()
       if (error instanceof Error && error.message.startsWith("Workspace not found")) {
         return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
+      if (error instanceof Error && error.name === "AggregateAnswerScopeError") {
+        return apiErrorResponse(c, 400, "invalid_request", error.message);
+      }
       throw error;
+    } finally {
+      if (slot && slot !== "uncapped") slot.release();
     }
   })
   .post("/:sessionId/feedback", async (c) => {

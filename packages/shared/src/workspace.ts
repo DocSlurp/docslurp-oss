@@ -708,13 +708,31 @@ export const defaultWorkspaceSearchSettings =
     userId: "",
   });
 
+/** Largest rankingRules, pinnedResults or synonyms a search-settings update may store: entries and serialized bytes. */
+export const SEARCH_SETTINGS_MAX_ENTRIES = 500;
+export const SEARCH_SETTINGS_MAX_BYTES = 64 * 1024;
+
+/** Bounds one free-form search-settings field, so an API key cannot store an unbounded blob read on every search. */
+function boundedSearchSetting<T extends z.ZodTypeAny>(schema: T) {
+  return schema.superRefine((value, ctx) => {
+    const entries = Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : 0;
+    if (entries > SEARCH_SETTINGS_MAX_ENTRIES) {
+      ctx.addIssue({ code: "custom", message: `At most ${SEARCH_SETTINGS_MAX_ENTRIES} entries` });
+      return;
+    }
+    if (new TextEncoder().encode(JSON.stringify(value) ?? "").length > SEARCH_SETTINGS_MAX_BYTES) {
+      ctx.addIssue({ code: "custom", message: `At most ${SEARCH_SETTINGS_MAX_BYTES / 1024} KB when serialized` });
+    }
+  });
+}
+
 export const updateWorkspaceSearchSettingsSchema = z.object({
   typoTolerance: z.boolean().optional(),
   dedupeByFilename: z.boolean().optional(),
-  rankingRules: z.record(z.string(), z.unknown()).optional(),
+  rankingRules: boundedSearchSetting(z.record(z.string(), z.unknown())).optional(),
   boosts: updateWorkspaceSearchBoostsSchema.optional(),
-  pinnedResults: z.array(workspaceSearchPinnedResultSchema).optional(),
-  synonyms: z.record(z.string(), z.array(z.string())).optional(),
+  pinnedResults: boundedSearchSetting(z.array(workspaceSearchPinnedResultSchema)).optional(),
+  synonyms: boundedSearchSetting(z.record(z.string(), z.array(z.string()))).optional(),
   retrievalDefaults: updateWorkspaceSearchRetrievalDefaultsSchema.optional(),
   chat: updateWorkspaceSearchChatSettingsSchema.optional(),
 });
