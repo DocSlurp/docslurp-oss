@@ -1196,6 +1196,7 @@ describe("workspacesRoutes validation", () => {
   });
 
   it("updates workspace search settings and records an audit entry", async () => {
+    getWorkspaceMock.mockResolvedValueOnce({ id: "ws-1", orgId: "org-1", name: "Legal", slug: "legal" });
     updateWorkspaceSearchSettingsForUserMock.mockResolvedValue({
       workspaceId: "ws-1",
       userId: "demo-user",
@@ -1274,7 +1275,10 @@ describe("workspacesRoutes validation", () => {
     });
     expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({
       action: "workspace.search-settings.updated",
+      orgId: "org-1",
+      workspaceId: "ws-1",
       resourceId: "ws-1",
+      apiKeyId: null,
     }));
   });
 });
@@ -1367,7 +1371,27 @@ describe("workspace search settings via API keys", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ chat: { answerStyle: "concise" } });
     expect(updateWorkspaceSearchSettingsForUserMock).toHaveBeenCalledWith({ workspaceId: "ws-1", userId: "demo-user", input: { chat: { answerStyle: "concise" } } });
-    expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({ action: "workspace.search-settings.updated", apiKeyId: "key-1" }));
+    expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({ action: "workspace.search-settings.updated", apiKeyId: "key-1", orgId: "org-1", workspaceId: "ws-1", resourceId: "ws-1" }));
+  });
+
+  it("refuses a wrong key before validating the body, so it never sees a schema error", async () => {
+    for (const method of ["PATCH", "POST"]) {
+      const path = method === "POST" ? `${settingsPath}/estimate` : settingsPath;
+      const response = await buildApp({ orgId: "org-1", scopes: ["search"] }).request(path, {
+        method, headers: { "content-type": "application/json" }, body: JSON.stringify({ synonyms: "not-an-object" }),
+      });
+      expect(response.status, path).toBe(403);
+    }
+    // A permitted key with an invalid body gets the validation envelope on both routes.
+    for (const method of ["PATCH", "POST"]) {
+      const path = method === "POST" ? `${settingsPath}/estimate` : settingsPath;
+      const response = await buildApp({ orgId: "org-1", scopes: ["workspaces:manage"] }).request(path, {
+        method, headers: { "content-type": "application/json" }, body: JSON.stringify({ synonyms: "not-an-object" }),
+      });
+      expect(response.status, path).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request" } });
+    }
+    expect(updateWorkspaceSearchSettingsForUserMock).not.toHaveBeenCalled();
   });
 
   it.each([

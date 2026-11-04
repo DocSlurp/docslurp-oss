@@ -5,7 +5,7 @@ import { applySettingsProposal, SettingsProposalError } from "../services/worksp
 import { reportPublicError } from "../lib/public-errors.js";
 import { isCancellation } from "@docslurp/shared/cancellation";
 import type { ChatToolActivity } from "../services/chat-mcp-tools.js";
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import { streamSSE } from "hono/streaming";
@@ -609,6 +609,16 @@ async function denySearchSettingsApiKey(
   }
   return null;
 }
+
+/** Runs the search-settings key gate before body validation, so a refused key gets 403/404, never a schema 400. */
+const searchSettingsKeyGate: MiddlewareHandler = async (c, next) => {
+  const actor = getRequestActor(c);
+  if (actor.type === "apiKey") {
+    const denied = await denySearchSettingsApiKey(c, actor, String(c.req.param("workspaceId")));
+    if (denied) return denied;
+  }
+  await next();
+};
 
 export const workspacesRoutes = new Hono()
   .route("/", workspaceRecommendationVisitsRoutes)
@@ -1403,17 +1413,15 @@ export const workspacesRoutes = new Hono()
   )
   .patch(
     "/:workspaceId/search-settings",
+    searchSettingsKeyGate,
     zValidator("json", updateWorkspaceSearchSettingsSchema, validationHook),
     async (c) => {
-      const workspaceId = String(c.req.param("workspaceId"));
       const userId = c.get("sessionUser").id;
       const actor = getRequestActor(c);
-      if (actor.type === "apiKey") {
-        const denied = await denySearchSettingsApiKey(c, actor, workspaceId);
-        if (denied) return denied;
-      }
+      const workspace = await getWorkspace(String(c.req.param("workspaceId")), userId);
+      if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       const settings = await updateWorkspaceSearchSettingsForUser({
-        workspaceId,
+        workspaceId: workspace.id,
         userId,
         input: c.req.valid("json"),
       });
@@ -1423,11 +1431,12 @@ export const workspacesRoutes = new Hono()
       }
 
       await appendAuditLog({
+        orgId: workspace.orgId,
         userId,
-        workspaceId,
+        workspaceId: workspace.id,
         action: "workspace.search-settings.updated",
         resourceType: "workspace-search-settings",
-        resourceId: workspaceId,
+        resourceId: workspace.id,
         apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
         ipAddress: requestIp(c),
         metadata: {
@@ -1581,16 +1590,12 @@ export const workspacesRoutes = new Hono()
   )
   .post(
     "/:workspaceId/search-settings/estimate",
-    zValidator("json", updateWorkspaceSearchSettingsSchema),
+    // Same gates as the PATCH. The MCP in-process forward bypasses sessionAuth, so they run here.
+    searchSettingsKeyGate,
+    zValidator("json", updateWorkspaceSearchSettingsSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const workspaceId = String(c.req.param("workspaceId"));
-      const actor = getRequestActor(c);
-      // Same gates as the PATCH. The MCP in-process forward bypasses sessionAuth, so they run here.
-      if (actor.type === "apiKey") {
-        const denied = await denySearchSettingsApiKey(c, actor, workspaceId);
-        if (denied) return denied;
-      }
       const before = await getWorkspaceSearchSettingsForUser(workspaceId, userId);
       const access = before ? await getWorkspaceAccess(workspaceId, userId) : null;
       if (!before || !access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");

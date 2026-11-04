@@ -7,6 +7,12 @@ const chatWorkspace = vi.fn();
 const workspaceChatDisabledBody = vi.fn(async (_workspaceId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
 const aggregateWorkspaceRagSearch = vi.fn();
 const sqlMock = vi.fn();
+const enforceActorCategoryRateLimit = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
+
+vi.mock("../middleware/rate-limit.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../middleware/rate-limit.js")>(),
+  enforceActorCategoryRateLimit,
+}));
 
 vi.mock("../db.js", () => ({
   sql: sqlMock,
@@ -331,7 +337,7 @@ describe("searchRoutes", () => {
   });
 
   describe("aggregate answers need the chat scope", () => {
-    const keyActor = (scopes: string[]) => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] } });
+    const keyActor = (scopes: string[], keyType: "server" | "client" = "server") => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] } });
     const aggregate = (actor: ReturnType<typeof keyActor>, body: Record<string, unknown>) => buildApp(actor).request("/search/aggregate", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "who is this for?", ...body }),
     });
@@ -350,12 +356,40 @@ describe("searchRoutes", () => {
       expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
     });
 
+    it("refuses generateAnswer from a browser key, even with chat", async () => {
+      const response = await aggregate(keyActor(["search", "chat"], "client"), { generateAnswer: true, workspaces: ["ws-1"] });
+      expect(response.status).toBe(403);
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
+    it("answers 400 when an answer would span organizations", async () => {
+      aggregateWorkspaceRagSearch.mockRejectedValueOnce(Object.assign(new Error("generateAnswer needs workspaces from one organization"), { name: "AggregateAnswerScopeError" }));
+      const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });
+    });
+
     it("runs a default request from a search-only key with every model-calling step off", async () => {
       aggregateWorkspaceRagSearch.mockResolvedValueOnce(empty);
       expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
       expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({
         request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, compression: false, queryDecompose: false, stepback: false }),
       }));
+    });
+
+    it("counts an answer as chat-ai and refuses when that allowance is spent", async () => {
+      aggregateWorkspaceRagSearch.mockResolvedValue(empty);
+      enforceActorCategoryRateLimit.mockClear();
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
+      expect(enforceActorCategoryRateLimit).not.toHaveBeenCalled();
+      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
+      expect(enforceActorCategoryRateLimit).toHaveBeenCalledWith(expect.anything(), "chat-ai");
+      aggregateWorkspaceRagSearch.mockClear();
+      enforceActorCategoryRateLimit.mockResolvedValueOnce(new Response(null, { status: 429 }));
+      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(429);
+      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      aggregateWorkspaceRagSearch.mockReset();
     });
 
     it("answers for a key with search and chat", async () => {
