@@ -35,4 +35,10 @@ describe("project cutover rejects stale scope instead of selecting default", () 
     expect((await raw.request("/", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ params: { arguments: { workspaceId: "other" } } }) })).status).toBe(400);
   });
 
+  it("cannot hide stale selection behind a non-JSON Content-Type", async () => {
+    for (const contentType of ["text/plain", "application/octet-stream"]) {
+      expect((await app().request("/", { method: "POST", headers: { "content-type": contentType }, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(400);
+    }
+  });
+
 });

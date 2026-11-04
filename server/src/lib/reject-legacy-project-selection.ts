@@ -17,6 +17,10 @@ export const rejectLegacyProjectSelection: MiddlewareHandler = async (c, next) =
   if (hasLegacyProjectSelection(c.req.query())) return reject();
   if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method)) {
     const contentType = c.req.header("content-type") ?? "";
+    const form = /multipart\/form-data|application\/x-www-form-urlencoded/i.test(contentType);
+    if (c.req.raw.body && !form && !/\bjson\b/i.test(contentType)) {
+      return middlewareErrorResponse(c, 400, "invalid_request", "JSON API requests require application/json; legacy selection must not bypass validation through Content-Type.");
+    }
     if (/\bjson\b/i.test(contentType)) {
       // Clone preserves raw transport consumers such as MCP. Prior limits bound bytes.
       const body: unknown = await c.req.raw.clone().json().catch(() => null);
