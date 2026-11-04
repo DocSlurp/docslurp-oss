@@ -647,6 +647,21 @@ export async function listEditableWorkspaceIds(userId: string): Promise<string[]
 }
 
 export async function getWorkspaceAccess(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<WorkspaceAccess | null> {
+  const access = await workspaceAccessRow(workspaceId, userId, client, false);
+  if (!access) return null;
+  const { pipeline: _pipeline, ...rest } = access;
+  return rest;
+}
+
+/**
+ * getWorkspaceAccess plus the stored pipeline, in the same single query, for
+ * callers that decide on access and privacy mode together (the search response cache).
+ */
+export async function getWorkspaceAccessWithPipeline(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql = sql): Promise<(WorkspaceAccess & { pipeline: unknown }) | null> {
+  return await workspaceAccessRow(workspaceId, userId, client, true);
+}
+
+async function workspaceAccessRow(workspaceId: string, userId: string, client: postgres.Sql | postgres.TransactionSql, includePipeline: boolean): Promise<(WorkspaceAccess & { pipeline: unknown }) | null> {
   const [row] = await client<{
     workspace_id: string;
     org_id: string;
@@ -654,6 +669,7 @@ export async function getWorkspaceAccess(workspaceId: string, userId: string, cl
     is_default: boolean;
     org_role: OrganizationRecord["memberRole"] | null;
     workspace_role: WorkspaceMemberRecord["role"] | null;
+    pipeline: unknown;
   }[]>`
     select
       w.id as workspace_id,
@@ -662,7 +678,8 @@ export async function getWorkspaceAccess(workspaceId: string, userId: string, cl
       w.is_default,
       om.role as org_role,
       wm.role as workspace_role,
-      o.is_personal
+      o.is_personal,
+      case when ${includePipeline}::boolean then w.pipeline end as pipeline
     from workspaces w
     join organizations o on o.id = w.org_id
     left join org_memberships om
@@ -689,7 +706,8 @@ export async function getWorkspaceAccess(workspaceId: string, userId: string, cl
     workspaceOwnerUserId: row.workspace_owner_user_id,
     isDefaultWorkspace: row.is_default,
     orgRole: row.org_role,
-    workspaceRole: row.workspace_role
+    workspaceRole: row.workspace_role,
+    pipeline: row.pipeline,
   };
 }
 

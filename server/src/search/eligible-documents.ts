@@ -108,8 +108,27 @@ function remember(workspaceId: string, key: string): void {
   keysByWorkspace.set(workspaceId, keys);
 }
 
-/** Drop every cached eligibility and availability entry of the workspace. */
+/**
+ * Other per-workspace search caches (the search response cache) that drop
+ * entries on the same hints. `active` says whether it holds anything, so an
+ * unknown run is still looked up while only those caches are populated.
+ */
+export interface SearchWorkspaceInvalidationListener {
+  invalidate(workspaceId: string): void;
+  active(): boolean;
+}
+const invalidationListeners = new Set<SearchWorkspaceInvalidationListener>();
+
+/** Registers a cache to clear on workspace invalidation hints, and starts listening for them. */
+export function onSearchWorkspaceInvalidated(listener: SearchWorkspaceInvalidationListener): void {
+  invalidationListeners.add(listener);
+}
+
+/** Drop every cached eligibility and availability entry of the workspace (and of registered caches). */
 export function invalidateSearchWorkspace(workspaceId: string): void {
+  for (const listener of invalidationListeners) {
+    try { listener.invalidate(workspaceId); } catch { /* one cache must not block the others */ }
+  }
   const keys = keysByWorkspace.get(workspaceId);
   if (!keys) return;
   keysByWorkspace.delete(workspaceId);
@@ -127,7 +146,8 @@ export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
     if (workspaceId) invalidateSearchWorkspace(workspaceId);
     else unknown.push(runId);
   }
-  if (unknown.length === 0 || keysByWorkspace.size === 0) return;
+  const listenersActive = [...invalidationListeners].some((listener) => listener.active());
+  if (unknown.length === 0 || (keysByWorkspace.size === 0 && !listenersActive)) return;
   const rows = await sql<{ id: string; workspace_id: string }[]>`
     select id, workspace_id from workspace_runs where id = any(${sql.array(unknown)})
   `;
@@ -158,7 +178,7 @@ export function handleSearchEligibilityHint(payload: string): void {
  * Subscribe once per process to run_events hints (worker/src/db/run-event-store.ts)
  * and search_eligibility hints (API-side deletes). Best effort: the TTL still bounds staleness.
  */
-function ensureInvalidationListener(): void {
+export function ensureInvalidationListener(): void {
   if (listening) return;
   // Tests replace ../db.js with partial mocks; without a pool there is nothing to listen on.
   let pool: typeof apiPool | undefined;

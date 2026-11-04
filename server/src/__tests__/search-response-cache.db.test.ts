@@ -22,6 +22,14 @@ vi.mock("../lib/request-actor.js", async (importOriginal) => ({
     return userId ? { type: "session", userId, sessionId: `sess-${userId}`, user: { id: userId, email: `${userId}@example.test`, name: userId } } : null;
   },
 }));
+const notifyHint = vi.hoisted(() => vi.fn());
+vi.mock("../search/eligibility-hint.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../search/eligibility-hint.js")>();
+  return { ...actual, notifySearchEligibilityChanged: async (...args: Parameters<typeof actual.notifySearchEligibilityChanged>) => {
+    notifyHint(args[1]);
+    return actual.notifySearchEligibilityChanged(...args);
+  } };
+});
 const hybridSearch = vi.hoisted(() => vi.fn());
 vi.mock("../services/search.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/search.js")>(),
@@ -86,6 +94,8 @@ afterAll(async () => { await sql?.end(); await stopDb?.(); });
 
 beforeEach(async () => {
   vi.stubEnv("SEARCH_RESPONSE_CACHE_TTL_MS", "60000");
+  // A loaded CI runner must not turn a slow in-process Postgres lookup into a skipped cache.
+  vi.stubEnv("SEARCH_RESPONSE_CACHE_LOOKUP_TIMEOUT_MS", "10000");
   routes.clearSearchResponseCacheForTests();
   hybridSearch.mockClear();
   await sql`update workspaces set pipeline = '{}' where id in (${WS.std}, ${defaultWorkspaceA})`;
@@ -154,6 +164,58 @@ describe("search response cache privacy", () => {
     const after = await post({ key: "a1" }, { q: "pump", workspace: WS.std });
     expect(hybridSearch).toHaveBeenCalledTimes(2);
     expect(cachedReplay(after.json)).toBe(false);
+  });
+
+  it("stores nothing when the workspace turns strict-privacy during a slow search, even after it turns back", async () => {
+    const original = hybridSearch.getMockImplementation()!;
+    hybridSearch.mockImplementationOnce(async (...args: unknown[]) => {
+      // The search is in flight while the owner switches the workspace to strict-privacy.
+      await sql`update workspaces set pipeline = ${sql.json({ privacyMode: "strict-privacy" })} where id = ${WS.std}`;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return (original as (...a: unknown[]) => unknown)(...args);
+    });
+    const during = await post({ key: "a1" }, { q: "slow", workspace: WS.std });
+    expect(during.status).toBe(200);
+    // Back to standard within the TTL: nothing was stored, so retrieval runs again.
+    await sql`update workspaces set pipeline = '{}' where id = ${WS.std}`;
+    const after = await post({ key: "a1" }, { q: "slow", workspace: WS.std });
+    expect(cachedReplay(after.json)).toBe(false);
+    expect(hybridSearch).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores nothing when the workspace is invalidated during a slow search", async () => {
+    const { invalidateSearchWorkspace } = await import("../search/eligible-documents.js");
+    const original = hybridSearch.getMockImplementation()!;
+    hybridSearch.mockImplementationOnce(async (...args: unknown[]) => {
+      // A settings or document change lands (search_eligibility hint) while the search runs.
+      invalidateSearchWorkspace(WS.std);
+      return (original as (...a: unknown[]) => unknown)(...args);
+    });
+    await post({ key: "a1" }, { q: "raced", workspace: WS.std });
+    const after = await post({ key: "a1" }, { q: "raced", workspace: WS.std });
+    expect(cachedReplay(after.json)).toBe(false);
+    expect(hybridSearch).toHaveBeenCalledTimes(2);
+  });
+
+  it("emits the invalidation hint when workspace settings or search settings change", async () => {
+    const { updateWorkspace } = await import("../services/workspaces.js");
+    const { getWorkspaceSearchSettings, upsertWorkspaceSearchSettings } = await import("../services/search-controls.js");
+    notifyHint.mockClear();
+    expect(await updateWorkspace(WS.local, "alice", { name: "Local renamed" })).not.toBeNull();
+    expect(notifyHint).toHaveBeenLastCalledWith([WS.local]);
+    notifyHint.mockClear();
+    await upsertWorkspaceSearchSettings(await getWorkspaceSearchSettings(WS.local, "alice"));
+    expect(notifyHint).toHaveBeenLastCalledWith([WS.local]);
+  });
+
+  it("drops cached answers when a search_eligibility hint names the workspace", async () => {
+    const { handleSearchEligibilityHint } = await import("../search/eligible-documents.js");
+    await post({ key: "a1" }, { q: "pump", workspace: WS.std });
+    await post({ key: "a1" }, { q: "pump", workspace: WS.local });
+    handleSearchEligibilityHint(JSON.stringify({ workspaceIds: [WS.std] }));
+    expect(cachedReplay((await post({ key: "a1" }, { q: "pump", workspace: WS.std })).json)).toBe(false);
+    expect(cachedReplay((await post({ key: "a1" }, { q: "pump", workspace: WS.local })).json)).toBe(true);
+    expect(hybridSearch).toHaveBeenCalledTimes(3);
   });
 });
 
