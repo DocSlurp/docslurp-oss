@@ -578,8 +578,10 @@ export type ChatInput = {
   /** Workspace ID, slug or name; omitted: the client workspace. */
   workspace?: string;
   /**
-   * Chat model for this request. Omitted: the default. An unavailable model is
-   * refused with HTTP 400 `model_not_allowed`, never replaced by the default.
+   * Chat model for this request, as an `llm://` model URI such as
+   * `llm://openrouter/anthropic/claude-haiku-5.5` (the bare OpenRouter id also
+   * works). Omitted: the default. An unavailable model is refused with HTTP 400
+   * `model_not_allowed`, never replaced by the default.
    */
   model?: string;
   /** Search-agent budgets and modes for this turn (`chat()` only; `chatStream` ignores them); non-admin callers can only lower the budgets. */

@@ -177,7 +177,15 @@ export function candidateLanguageSets(script: string | null, env: NodeJS.Process
  * OCR of one page image. `setting` is `auto` (detect the script, retry on low
  * confidence) or the workspace's own language codes.
  */
-export async function ocrImageText(args: { image: string; setting?: string; run: TesseractRun; env?: NodeJS.ProcessEnv; now?: () => number }): Promise<OcrOutcome> {
+export async function ocrImageText(args: {
+  image: string;
+  setting?: string;
+  run: TesseractRun;
+  env?: NodeJS.ProcessEnv;
+  now?: () => number;
+  /** Which traineddata files exist (tests); defaults to the filesystem. */
+  exists?: (path: string) => boolean;
+}): Promise<OcrOutcome> {
   const env = args.env ?? process.env;
   const now = args.now ?? Date.now;
   const started = now();
@@ -193,7 +201,7 @@ export async function ocrImageText(args: { image: string; setting?: string; run:
     } catch {
       // Too little text for orientation detection: fall back to trying the common scripts.
     }
-    candidates = candidateLanguageSets(script, env);
+    candidates = candidateLanguageSets(script, env, args.exists);
   } else {
     const parsed = ocrLanguageSchema.safeParse(setting);
     if (!parsed.success) throw new Error(`invalid OCR language: ${setting}`);

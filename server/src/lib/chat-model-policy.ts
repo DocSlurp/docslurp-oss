@@ -13,6 +13,7 @@ import {
 import {
   DEFAULT_WORKSPACE_CHAT_MODEL,
   isWorkspaceChatModelId,
+  normalizeChatModelRef,
 } from "@docslurp/shared/workspace-chat-models";
 import { isPlatformAdminActor, type RequestActor } from "./request-actor.js";
 import { getWorkspaceAccess } from "../services/organizations.js";
@@ -33,16 +34,16 @@ export type ChatEvalModelRejection = { id: string; reason: "invalid-id" | "prohi
 const OPENROUTER_MODEL_ID = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(?::free)?$/i;
 
 /**
- * DOCSLURP_CHAT_EVAL_MODELS: comma-separated OpenRouter ids that admins may
- * request on /v1/chat in addition to the catalog. Each id must be a plain
- * OpenRouter id (a `:free` suffix is allowed), must not be a Pro/Ultra model,
+ * DOCSLURP_CHAT_EVAL_MODELS: comma-separated OpenRouter ids (bare or
+ * `llm://openrouter/<id>`) that admins may request on /v1/chat in addition to
+ * the catalog. Each id must be a plain OpenRouter id (a `:free` suffix is allowed), must not be a Pro/Ultra model,
  * and needs a verified price below the output-price cap in
  * CHAT_MODEL_PRICES_USD_PER_MTOK, so missing pricing never passes as cheap.
  */
 export function parseChatEvalModels(csv: string | undefined): { models: string[]; rejected: ChatEvalModelRejection[] } {
   const models: string[] = [];
   const rejected: ChatEvalModelRejection[] = [];
-  for (const id of new Set((csv ?? "").split(",").map(item => item.trim()).filter(Boolean))) {
+  for (const id of new Set((csv ?? "").split(",").map(item => normalizeChatModelRef(item)).filter(Boolean))) {
     const price = CHAT_MODEL_PRICES_USD_PER_MTOK[id];
     if (!OPENROUTER_MODEL_ID.test(id)) rejected.push({ id, reason: "invalid-id" });
     else if (isProhibitedRoutingModelId(id)) rejected.push({ id, reason: "prohibited-model" });
@@ -94,7 +95,7 @@ export async function chatEvalAccess(actor: RequestActor | undefined, workspaceI
  * catalog requests skip the admin and workspace lookups entirely.
  */
 export function chatTurnNeedsEvalAccess(model: string | null | undefined, agent?: ChatAgentLimitsInput): boolean {
-  const requested = model?.trim();
+  const requested = model ? normalizeChatModelRef(model) : undefined;
   if (requested && !isWorkspaceChatModelId(requested)) return true;
   return (Object.keys(CHAT_AGENT_LIMIT_DEFAULTS) as ChatAgentLimitName[])
     .some(name => typeof agent?.[name] === "number" && Math.trunc(agent[name]!) > CHAT_AGENT_LIMIT_DEFAULTS[name]);
@@ -103,12 +104,13 @@ export function chatTurnNeedsEvalAccess(model: string | null | undefined, agent?
 export type ChatModelSource = "default" | "catalog" | "eval";
 
 /**
+ * `model` may be a bare OpenRouter id or its `llm://openrouter/<id>` URI; both resolve to the bare id.
  * Omitted model: the default. A catalog model: anyone. An eval allowlist model:
  * callers with eval access only (`isAdmin`: see chatEvalAccess). Anything else, including a non-admin naming an eval model, is a
  * 400 rather than a silent fallback, so a comparison never measures the wrong model.
  */
 export function resolveChatModelRequest(args: { requested: string | null | undefined; isAdmin: boolean; evalModels?: ReadonlySet<string> }): { model: string; source: ChatModelSource } {
-  const requested = args.requested?.trim();
+  const requested = args.requested ? normalizeChatModelRef(args.requested) : undefined;
   if (!requested) return { model: DEFAULT_WORKSPACE_CHAT_MODEL, source: "default" };
   if (isWorkspaceChatModelId(requested)) return { model: requested, source: "catalog" };
   const evalModels = args.evalModels ?? configuredChatEvalModels();

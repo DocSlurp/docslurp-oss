@@ -80,7 +80,7 @@ export const workspaceChatInputSchema = z.object({
   sessionId: id.optional(),
   /** Browser (client) keys: the `sessionToken` returned with the previous answer, required to continue `sessionId`. */
   sessionToken: z.string().min(1).max(4096).optional(),
-  model: id.optional(),
+  model: id.optional().describe("Chat model for this request: an llm://openrouter/<vendor>/<model> URI such as llm://openrouter/anthropic/claude-haiku-5.5, or the bare OpenRouter id. Omitted: the default. A model you may not use is refused with 400 model_not_allowed, never swapped for the default."),
   /** Retrieval overrides for this request only. */
   retrieval: chatRetrievalOverridesSchema.optional(),
   /** Documents, types, tags and indexed-date filters. */
