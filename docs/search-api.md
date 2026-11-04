@@ -381,6 +381,25 @@ Omitting both controls preserves existing behavior: rerank-enabled searches acqu
 
 MMR changes which passages are returned, not only their order. No retrieval-quality improvement from it has been measured.
 
+### Reranking is fused with the hybrid order
+
+Reranking (`rerank: true`, local BM25 by default) never replaces the hybrid order. The reranker's ordering and the
+fused vector + keyword ordering are combined by reciprocal rank fusion, and ties keep the hybrid order. A reranker
+alone can reward a stray shared word ("do" in "I do not know how to cook" for "how do I cancel my subscription")
+over the passage that answers the question without repeating the query's words ("terminate your plan"); fused with
+the hybrid rank, that passage stays on top. Results are ordered by this fused rank, not by raw scores from different
+scales (cosine, BM25, graph).
+
+### Keyword search beyond English
+
+Keyword search runs two Postgres text-search legs. The English leg stems English text. The folded leg
+(`document_chunks.ts_folded`, migration 0123) uses the `simple` configuration over lowercase, accent-stripped text
+in which every CJK, kana and Hangul character is its own token. It has no stop words, so negations such as "not"
+survive. A query with accents, a non-Latin script or CJK also uses the folded leg, and any query that finds nothing
+in the English leg falls back to it, so "Muller Gebuhren" finds "Müller Gebühren", "日本の首都" finds a passage
+about Tokyo being the capital of Japan, and Russian queries match regardless of case. The folded leg does not
+stem: Russian, German and French inflections match only their exact forms.
+
 ### Optional hosted learned reranking
 
 Workspace search settings can explicitly select DeepInfra's pointwise
@@ -405,7 +424,8 @@ Set `rerankProvider` to `"bm25"` to restore local ranking; a request with
 `rerank:false` makes no reranker call. Provider/model selection is a workspace
 setting, not an arbitrary per-request URL or credential. Search and workspace
 chat share the post-retrieval implementation. Existing output-score and citation
-contracts are retained; provider scores only choose candidate ordering.
+contracts are retained; provider scores only choose candidate ordering, fused with the
+hybrid order as above.
 
 The hosted path preserves the original query and candidate bodies/identities,
 uses batches of at most 25 pairs with up to four requests in flight. One shared
