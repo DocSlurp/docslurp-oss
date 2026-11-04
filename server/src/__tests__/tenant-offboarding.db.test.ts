@@ -202,7 +202,7 @@ describe("account deletion", () => {
     await seedOrg("team", "Team", [["leaver", "owner"], ["teammate", "member"]]);
     await seedWorkspace("mine", "personal", "leaver");
     await seedWorkspace("shared", "team", "leaver");
-    await sql`insert into webhooks (id, user_id, url, secret, events) values ('hook', 'leaver', 'https://example.test', 's', '{}')`;
+    await sql`insert into webhooks (id, user_id, org_id, url, secret, events) values ('hook', 'leaver', 'personal', 'https://example.test', 's', '{}')`;
     await sql`insert into "session" (id, "expiresAt", token, "createdAt", "updatedAt", "userId")
       values ('s1', now() + interval '1 day', 't1', now(), now(), 'leaver')`;
     await sql`insert into "account" (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
