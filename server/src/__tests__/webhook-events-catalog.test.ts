@@ -11,6 +11,6 @@ describe("webhook event catalog", () => {
     const example = findWebhookEvent(type)!.examplePayload;
     expect(Object.keys(example).sort()).toEqual(OUTBOX_RUN_FIELDS);
     expect(example).not.toHaveProperty("costCents");
-    expect(example.error === null || Object.values(PUBLIC_ERROR_MESSAGES).includes(example.error as string)).toBe(true);
+    expect(example.error === null || (Object.values(PUBLIC_ERROR_MESSAGES) as string[]).includes(example.error as string)).toBe(true);
   });
 });
