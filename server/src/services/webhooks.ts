@@ -471,48 +471,6 @@ const creatorAdministers = () => sql`exists (
   where m.org_id = webhooks.org_id and m.user_id = webhooks.user_id and m.role = any(${sql.array(ADMIN_ROLES)})
 )`;
 
-/**
- * Sends a run's event to the webhooks of the organization the run belongs to, whoever started it. Other organizations'
- * webhooks never match, and neither does one whose creator is no longer an owner or admin there.
- */
-export async function deliverWebhook(runId: string, eventType: string): Promise<void> {
-  const rows = await sql<(WebhookRow & { run_id: string })[]>`
-    select
-      webhooks.id,
-      webhooks.user_id,
-      webhooks.org_id,
-      webhooks.url,
-      webhooks.secret,
-      webhooks.events,
-      webhooks.active,
-      webhooks.created_at::text,
-      r.id as run_id
-    from webhooks
-    join workspace_runs r on r.org_id = webhooks.org_id
-    where r.id = ${runId}
-      and webhooks.active = true
-      and ${eventType} = any(webhooks.events)
-      and ${creatorAdministers()}
-  `;
-
-  for (const row of rows) {
-    await dispatchWebhook({
-      webhook: row,
-      eventType,
-      payload: buildWebhookPayload({
-        webhookId: row.id,
-        eventType,
-        runId
-      })
-    }).catch((error) => {
-      console.error(
-        `webhook delivery failed for ${row.id}:`,
-        error instanceof Error ? error.message : String(error)
-      );
-    });
-  }
-}
-
 type WebhookOutboxRow = {
   id: string;
   user_id: string;

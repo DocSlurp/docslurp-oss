@@ -4348,7 +4348,7 @@ export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<stri
  * SQL for publicDocumentError over a text column: null stays null, a known failure marker maps to its reviewed public
  * copy, anything else to the generic processing message. Built from the same tables, so the two cannot drift.
  */
-function publicErrorSql(client: Sql<Record<string, unknown>>, column: "r.error"): postgres.PendingQuery<postgres.Row[]> {
+export function publicErrorSql(client: Sql<Record<string, unknown>>, column: "r.error"): postgres.PendingQuery<postgres.Row[]> {
   const value = client.unsafe(column);
   let expression = client`case when ${value} is null or ${value} = '' then null::text`;
   for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
