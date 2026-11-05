@@ -5,6 +5,7 @@
  */
 import { DOCUMENT_FAILURE_MARKERS, IMAGE_MAX_FRAMES, pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 
+import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { RunPolicyError } from "../lib/document-failure.js";
 import { extraCreditsForMeasuredPages } from "../lib/office-page-count.js";
 import { emitDocumentPageProgress, isCostCapExceeded } from "../pipeline/checkpoints.js";
@@ -94,8 +95,39 @@ export async function authorizeImageFrames(state: WorkflowState, documentId: str
   // Fails closed: a check that cannot decide throws SpendCheckUnavailableError (retryable) out of the stage, before any charge.
   const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
   if (!outcome.paused && !outcome.blocked) return;
-  console.warn(`[ocr] image-frames-unfunded run=${state.run.id} document=${documentId} frames=${frames} intake=${intake} owes=${extra.toFixed(2)}: run paused, image refused before any charge`);
-  throw new OcrRefusedError(`${DOCUMENT_FAILURE_MARKERS.imageFramesUnfunded} (${frames} frames)`, "spend-paused");
+  throw unfundedFramesError(state, documentId, frames, outcome.paused, `owes=${extra.toFixed(2)} intake=${intake}`);
+}
+
+/**
+ * The image is refused for funds: `spend-paused` only when the run is paused (this check paused it); `spend-blocked` when the
+ * balance check found the run already paused or stopped by something else. The image fails either way, with nothing charged.
+ */
+function unfundedFramesError(state: WorkflowState, documentId: string, frames: number, paused: boolean, detail: string): OcrRefusedError {
+  const reason = paused ? "spend-paused" : "spend-blocked";
+  console.warn(`[ocr] image-frames-unfunded run=${state.run.id} document=${documentId} frames=${frames} ${detail} outcome=${reason}: image refused before any charge`);
+  return new OcrRefusedError(`${DOCUMENT_FAILURE_MARKERS.imageFramesUnfunded} (${frames} frames)`, reason);
+}
+
+/**
+ * The boundary stopped at the frames affordableImageFrames funded and the image has more: refuse it, and always leave the run
+ * paused for funds, so the reported outcome and the run's state agree whatever the balance did since the read was sized.
+ *  - The frame check (authorizeImageFrames with one frame past the budget) pauses the run when the balance still does not cover
+ *    it: refused as `spend-paused`.
+ *  - When the balance changed in between and now covers that check, the run is paused explicitly (`credit_exhausted`, which
+ *    resumes by itself once the organization may spend) and the image is refused as `spend-paused` all the same: its frames past
+ *    the budget were never read, so it cannot be completed from this read.
+ *  - When no pause can be made, the refusal is SpendCheckUnavailableError (retryable): never a `spend-paused` without a pause.
+ * Nothing is charged on any path; the VM's provider cost is already in the ledger.
+ */
+export async function refuseUnfundedImageFrames(state: WorkflowState, documentId: string, stageName: string, budget: number): Promise<never> {
+  await authorizeImageFrames(state, documentId, stageName, budget + 1);
+  const run = { id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId };
+  if (!state.store?.pauseRunForSpend || !run.userId) {
+    throw new SpendCheckUnavailableError(`image ${documentId} exceeds its funded frames (${budget}) but run ${state.run.id} cannot be paused`);
+  }
+  const outcome = await state.store.pauseRunForSpend(run as typeof run & { userId: string }, "credit_exhausted");
+  if (typeof outcome?.paused !== "boolean") throw new SpendCheckUnavailableError(`run ${state.run.id} pause for image ${documentId} returned no outcome`);
+  throw unfundedFramesError(state, documentId, budget + 1, outcome.paused, `budget=${budget} balance-changed-before-check`);
 }
 
 /** Record the frames read as the document's page count, persisted before anything downstream reads it. */

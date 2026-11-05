@@ -54,7 +54,7 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, spendCounterSql } from "./spend-check.js";
+import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRunForSpend, SpendCheckUnavailableError, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
@@ -2752,6 +2752,12 @@ export class Store {
 
   /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
   /** Fails closed: throws SpendCheckUnavailableError (retryable) when it cannot decide. */
+  async pauseRunForSpend(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }> {
+    const result = await pauseRunForSpend(this.sql, run, reason, "stage-boundary", Number.NaN);
+    if (result.pauseFailed) throw new SpendCheckUnavailableError(`could not pause run ${run.id} for ${reason}`);
+    return { paused: result.paused, blocked: result.blocked };
+  }
+
   async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked: boolean }> {
     const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
     return { paused: result.paused, blocked: result.blocked };

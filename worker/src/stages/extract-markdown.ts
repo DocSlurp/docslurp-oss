@@ -105,7 +105,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { affordableImageFrames, authorizeImageFrames, authorizeImageRead } from "../ocr/image-frames.js";
+import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
@@ -1685,6 +1685,7 @@ export class ExtractMarkdownStage implements Stage {
       beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
       // The VM reads no more frames than the run can pay for.
       frameBudget: (max) => affordableImageFrames(state, context.documentId, max),
+      refuseUnfundedFrames: (budget) => refuseUnfundedImageFrames(state, context.documentId, this.name, budget),
       // Its bounded rendition of each frame is the only pixels of this upload the worker ever decodes (page-image embedding).
       rendition: PAGE_RENDITION,
       ...(signal ? { signal } : {}),

@@ -35,10 +35,12 @@ export interface OcrDocumentInput {
   beforeCharging?: (frames: number) => Promise<void>;
   /**
    * An image's frames the run can pay for (image-frames.ts affordableImageFrames), asked before the read starts: the boundary
-   * reads no more. When the image had more frames than that, beforeCharging is called with one past the budget (it pauses the
-   * run and refuses the image) and nothing is charged.
+   * reads no more. When the image had more frames than that, refuseUnfundedFrames refuses it (the run left paused) and nothing
+   * is charged.
    */
   frameBudget?: (max: number) => Promise<number>;
+  /** Refuses an image with more frames than `frameBudget` funded (image-frames.ts refuseUnfundedImageFrames); never returns. */
+  refuseUnfundedFrames?: (budget: number) => Promise<never>;
   /** Ask the boundary for a bounded rendition of every frame (visual indexing); returned as bytes on each page. */
   rendition?: { maxLongEdge: number; maxBytes: number };
   signal?: AbortSignal;
@@ -87,9 +89,9 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
     // publish part of it under a bill that claims the whole file.
     if (input.kind === "image" && outcome.truncatedFrames) {
       if (budget !== null && budget < OCR_DEFAULT_MAX_FRAMES) {
-        // The image has more frames than the run can pay for: the frame check pauses the run and refuses it, nothing charged.
-        await input.beforeCharging?.(budget + 1);
-        throw new OcrRefusedError(`image ${input.documentId} has more frames than the run's credits cover (${budget} funded)`, "spend-paused");
+        // The image has more frames than the run can pay for: refused with the run paused, nothing charged.
+        if (input.refuseUnfundedFrames) await input.refuseUnfundedFrames(budget);
+        throw new Error(`image ${input.documentId} has more frames than the run's credits cover (${budget} funded) and no refusal path`);
       }
       throw imageTooManyFramesError(input.documentId);
     }

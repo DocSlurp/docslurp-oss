@@ -78,6 +78,8 @@ export interface CheckpointStore {
   countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
   enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
+  /** Pauses the run for funds (pause_reason `reason`) without a balance check; `blocked` without `paused`: already paused or stopped. */
+  pauseRunForSpend?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }>;
   /** This run's persisted OCR escalation reads of a page, oldest first (migration 0129). */
   ocrEscalationReads?(runId: string, documentId: string, pageNumber: number): Promise<OcrEscalationReadRow[]>;
   /** Persist one OCR escalation call as soon as it returns; a replayed attempt number is a no-op. */

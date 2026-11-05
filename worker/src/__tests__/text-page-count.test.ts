@@ -118,4 +118,14 @@ describe("text pages are measured in full by the worker, and only that count bil
       .rejects.toMatchObject({ name: "SourceIntegrityError" });
     expect(await pageRow("poor")).toEqual({ page_count: apiEstimate, page_count_source: "assumed" });
   }, 60_000);
+
+  it("Store.pauseRunForSpend pauses a processing run once; a second pause reports blocked, not paused", async () => {
+    await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      values ('run3', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract', '${pipeline}', 1)`);
+    const run = { id: "run3", orgId: "o1", workspaceId: "w1", userId: "u1" };
+    expect(await store.pauseRunForSpend(run, "credit_exhausted")).toEqual({ paused: true, blocked: true });
+    const { rows } = await db.query<{ control_state: string; pause_reason: string }>(`select control_state, pause_reason from workspace_runs where id = 'run3'`);
+    expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
+    expect(await store.pauseRunForSpend(run, "credit_exhausted")).toEqual({ paused: false, blocked: true });
+  }, 60_000);
 });

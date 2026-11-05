@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defaultPipelineFeatures, modalSandboxCostCents, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
 
-import { enforceRunSpendForCharge, setSpendCheckConfig } from "../db/spend-check.js";
+import { enforceRunSpendForCharge, SpendCheckUnavailableError, setSpendCheckConfig } from "../db/spend-check.js";
 import { pushUsageEvent } from "../lib/perf-context.js";
 
 import { documentExtractorRegistry } from "../extractors/registry.js";
@@ -230,6 +230,65 @@ describe("image documents are read by the OCR extractor", () => {
       expect(calls.pageCounts).toEqual([6]); // one past the budget: the frame check pauses the run
       expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); }
+  });
+
+  describe("the balance changes between sizing the read and the frame check", () => {
+    // Sizing funds 5 frames of a 40-frame TIFF; by the frame check the balance covers it (a top-up in between).
+    async function changedBalance(pause: ((run: unknown, reason: string) => Promise<{ paused: boolean; blocked: boolean }>) | null) {
+      vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const all = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
+      const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1,
+        frames: (job) => all.slice(0, job.maxFrames),
+        result: (job) => ocrResultFor(job, all.slice(0, job.maxFrames), { truncatedFrames: all.length > job.maxFrames }) });
+      const { store, calls } = spendStore(1_000_000);
+      (store as any).largestFundedCharge = async () => 5;
+      const pauses: string[] = [];
+      (store as any).pauseRunForSpend = pause ? async (run: unknown, reason: string) => { pauses.push(reason); return await pause(run, reason); } : undefined;
+      (h.state as any).store = store;
+      const outcomes = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("image-frames-unfunded"));
+      return { h, calls, pauses, outcomes };
+    }
+
+    it("pauses the run anyway and refuses the image as spend-paused: the reported outcome matches the run", async () => {
+      const { h, calls, pauses, outcomes } = await changedBalance(async () => ({ paused: true, blocked: true }));
+      try {
+        await h.stage.run(h.state);
+        expect(h.jobs[0]!.maxFrames).toBe(5);
+        // The frame check passed (the balance now covers one past the budget), so the refusal paused the run itself.
+        expect(calls.checks.at(-1)).toBeGreaterThan(0);
+        expect(pauses).toEqual(["credit_exhausted"]);
+        expect(h.checkpoint()?.status).toBe("failed");
+        expect(publicDocumentError(h.checkpoint()?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
+        expect(outcomes()).toHaveLength(1);
+        expect(outcomes()[0]).toContain("outcome=spend-paused");
+        expect(h.richIds()).toEqual([]);
+      } finally { await h.cleanup(); }
+    });
+
+    it("reports spend-blocked, never spend-paused, when the run was already paused or stopped by something else", async () => {
+      const { h, pauses, outcomes } = await changedBalance(async () => ({ paused: false, blocked: true }));
+      try {
+        await h.stage.run(h.state);
+        expect(pauses).toEqual(["credit_exhausted"]);
+        expect(h.checkpoint()?.status).toBe("failed");
+        expect(outcomes()[0]).toContain("outcome=spend-blocked");
+        expect(outcomes().some((line) => line.includes("spend-paused"))).toBe(false);
+        expect(h.richIds()).toEqual([]);
+      } finally { await h.cleanup(); }
+    });
+
+    it("fails closed (retryable, document not failed) when the run cannot be paused", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      // The store's pause write failed (Store.pauseRunForSpend throws SpendCheckUnavailableError on pauseFailed).
+      const { h, outcomes } = await changedBalance(async () => { throw new SpendCheckUnavailableError("could not pause run"); });
+      try {
+        await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
+        expect(h.checkpoint()?.status).not.toBe("failed");
+        expect(outcomes()).toEqual([]);
+        expect(h.richIds()).toEqual([]);
+      } finally { await h.cleanup(); }
+    });
   });
 
   it("charges and reports every counted frame when the balance covers them", async () => {
