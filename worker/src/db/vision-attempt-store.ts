@@ -118,6 +118,10 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         select count(*)::int as pages from vision_run_attempts
         where run_id = ${runId} and document_id = ${target.documentId} and purpose = ${target.purpose}
           and page_number <> ${target.pageNumber} and attempts > 0`;
+      // The per-document attempt budget (OCR escalation): every request of this document for the purpose, retries included.
+      const [documentAttempts] = target.documentAttemptLimit === undefined ? [] : await tx<{ attempts: number }[]>`
+        select coalesce(sum(attempts), 0)::int as attempts from vision_run_attempts
+        where run_id = ${runId} and document_id = ${target.documentId} and purpose = ${target.purpose}`;
       const [totals] = await tx<{ attempts: number; failures: number }[]>`
         select coalesce(sum(attempts), 0)::int as attempts, coalesce(sum(failures), 0)::int as failures
         from vision_run_attempts where run_id = ${runId}`;
@@ -156,6 +160,7 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         routeOverruns,
         routeCorrection,
         documentPages: documentPages?.pages ?? 0,
+        documentAttempts: documentAttempts?.attempts ?? 0,
       }, target, config, admittedCents);
       if (stop) return { admitted: false as const, stop };
       const ticketId = randomUUID();

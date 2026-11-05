@@ -116,6 +116,8 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 
 `hosted` mode uses the same reader, budget and guards for its reads.
 
+
+Escalation reads survive activity retries. Each hosted call is persisted as it returns (`ocr_escalation_reads`, migration 0129, deleted with its run): a retried activity reuses a page's completed read instead of calling the provider again, and re-records every earlier call's usage under its original id, so a call's provider cost is recorded exactly once even when the activity that made it failed before its checkpoint. A call that does repeat (the first one failed) is recorded again with its own cost and counts against `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`. Escalation rows bill 0 credits and keep their cost as `providerCostCents`, which the provider-cost loss alert reads.
 ## Billing and usage
 
 - An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
@@ -207,6 +209,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION` | off | `on` to enable escalation reads. |
 | `DOCSLURP_OCR_ESCALATION_MODEL` | `llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct` | Hosted reader for escalation and `hosted` mode. |
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
+| `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS` | pages + a fifth (`30`) | Hosted requests per document, every page and retry included, counted in the durable vision attempt ledger. |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for workspaces left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |

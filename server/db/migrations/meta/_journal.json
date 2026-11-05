@@ -904,6 +904,13 @@
       "when": 1793750400015,
       "tag": "0128_vision_attempts_ocr_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1793750400016,
+      "tag": "0129_ocr_escalation_reads",
+      "breakpoints": true
     }
   ]
 }

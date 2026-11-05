@@ -1,7 +1,7 @@
 import type { GeoAttempt, GeoFinalSource } from "../db/geo-final-source.js";
 import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
 import type { StageState, WorkspaceRunEvent } from "../models.js";
-import type { Document, ParserEvaluation, PerformanceEvent, WorkspaceRun } from "../models.js";
+import type { Document, ParserEvaluation, PerformanceEvent, UsageEvent, WorkspaceRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
 import { DocumentArtifactLedger } from "./artifact-ledger.js";
 import { PipelineUsageEventLedger } from "./usage-ledger.js";
@@ -11,6 +11,16 @@ import {
   type PageProgress,
   refreshRunProgressStats,
 } from "./run-ledger.js";
+
+/** One persisted OCR escalation call (ocr_escalation_reads). */
+export interface OcrEscalationReadRow {
+  attempt: number;
+  status: "completed" | "failed";
+  text: string | null;
+  model: string;
+  /** The call's usage events, under the ids they were buffered with. */
+  usageEvents: UsageEvent[];
+}
 
 export interface CheckpointStore {
   beginGeoAttempt?(state: WorkflowState, documentId: string, schema: Record<string, unknown>): Promise<GeoAttempt | undefined>;
@@ -68,6 +78,10 @@ export interface CheckpointStore {
   countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
   enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
+  /** This run's persisted OCR escalation reads of a page, oldest first (migration 0129). */
+  ocrEscalationReads?(runId: string, documentId: string, pageNumber: number): Promise<OcrEscalationReadRow[]>;
+  /** Persist one OCR escalation call as soon as it returns; a replayed attempt number is a no-op. */
+  recordOcrEscalationRead?(row: OcrEscalationReadRow & { runId: string; documentId: string; pageNumber: number }): Promise<void>;
   /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers; read-only (nothing is paused). */
   largestFundedCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number>;
   /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */

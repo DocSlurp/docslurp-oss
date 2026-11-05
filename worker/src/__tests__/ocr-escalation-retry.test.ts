@@ -1,0 +1,162 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+import type { Config } from "../config.js";
+import { Store } from "../db/store.js";
+import { persistRunUsageEvents } from "../db/usage-event-store.js";
+import type { VisionRequestGate } from "../lib/vision-attempt-guard.js";
+import type { WorkspaceRun } from "../models.js";
+import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
+import { pngHeader } from "../test/fake-ocr.js";
+import { startMigratedPostgres } from "../test/migrated-postgres.js";
+import type { CommandRunner } from "../tools/runner.js";
+import type { executeVisionRuntime, VisionExecutionResult } from "../tools/vision-runtime.js";
+
+/**
+ * OCR escalation across activity retries (migration 0129): a retried activity reuses a page's persisted read instead of
+ * calling DeepInfra again; every real call, failed ones included, is ledgered once with its provider cost and counts against
+ * the document's attempt budget; the persisted row carries providerCostCents (cost_cents 0) for the provider-cost loss alert.
+ */
+const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
+const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
+let stop: () => Promise<void>;
+let url: string;
+let scratch: string;
+let shared: Store;
+let admin: ReturnType<typeof sql>;
+
+beforeAll(async () => {
+  const database = await startMigratedPostgres();
+  stop = database.stop;
+  url = database.url;
+  // PGlite serves one connection: every "activity" shares this store; each gets a fresh state, ledger and guard.
+  shared = new Store(url, 60_000, { poolMax: 1, runEvents: { flushMs: 120_000, maxBuffered: 20_000 } });
+  admin = sql(shared);
+  await admin`insert into "user" (id, name, email) values ('esc-u', 'U', 'esc-u@example.com')`;
+  await admin`insert into organizations (id, name, slug, created_by_user_id) values ('esc-org', 'O', 'esc-org', 'esc-u')`;
+  await admin`insert into workspaces (id, org_id, user_id, name) values ('esc-ws', 'esc-org', 'esc-u', 'W')`;
+  for (const id of ["esc-run-1", "esc-run-2", "esc-run-3"]) {
+    await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+      values (${id}, 'esc-org', 'esc-u', 'esc-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
+  }
+  scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "docslurp-esc-retry-"));
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+}, 120_000);
+
+afterAll(async () => {
+  await shared?.close();
+  await stop?.();
+  if (scratch) await rm(scratch, { recursive: true, force: true });
+  vi.restoreAllMocks();
+});
+
+const success = (): VisionExecutionResult => ({
+  runtime: "openai-compatible", provider: "deepinfra", model: MODEL, prompt: "p", text: "Hosted transcription", raw: "", latencyMs: 1,
+  inputTokens: 1_500, outputTokens: 400, usageSource: "provider", costCents: 0.05, baseUrl: "https://api.deepinfra.com/v1/openai",
+  fallbackUsed: false, route: { runtime: "openai-compatible", baseUrl: "https://api.deepinfra.com/v1/openai", provider: "deepinfra", model: MODEL, billing: "deepinfra" },
+}) as unknown as VisionExecutionResult;
+
+/** A fresh activity: a new pool, store, guard and ledger, as a retried Temporal activity has. */
+function activity(runId: string, execute: typeof executeVisionRuntime, env: NodeJS.ProcessEnv = {}) {
+  const created = shared;
+  const state = WorkflowState.create({
+    id: runId, orgId: "esc-org", workspaceId: "esc-ws", userId: "esc-u", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
+    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
+  } as unknown as WorkspaceRun, []);
+  state.store = created;
+  state.visionAttempts = created.visionAttempts;
+  state.usageLedger.runId = runId;
+  const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on", ...env }, execute });
+  return { state, reader, store: created };
+}
+
+async function frame(name: string): Promise<string> {
+  const imagePath = path.join(scratch, `${name}.png`);
+  await writeFile(imagePath, pngHeader(100, 50));
+  return imagePath;
+}
+
+function sql(store: Store) { return (store as unknown as { sql: Parameters<typeof persistRunUsageEvents>[0]["client"] }).sql; }
+
+describe("OCR escalation across activity retries", () => {
+  it("reuses a persisted read on retry instead of calling the provider again, and ledgers its cost once", async () => {
+    const execute = vi.fn(async (args: Parameters<typeof executeVisionRuntime>[0]) => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      return success();
+    });
+    // Attempt 1 reads the page, then the activity dies before its checkpoint: its buffered usage is lost.
+    const first = activity("esc-run-1", execute);
+    const page = { documentId: "doc-1", pageNumber: 3, imagePath: await frame("r1"), mimeType: "image/png" };
+    expect((await first.reader.read(page, "ocr-escalation")).text).toBe("Hosted transcription");
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    // The retried activity reuses the read: no second provider call, and the first call's cost is buffered again.
+    const retry = activity("esc-run-1", execute);
+    expect((await retry.reader.read({ ...page, imagePath: await frame("r1b") }, "ocr-escalation")).text).toBe("Hosted transcription");
+    expect(execute).toHaveBeenCalledTimes(1);
+    const batch = retry.state.usageLedger.checkpoint();
+    await persistRunUsageEvents({ client: sql(retry.store), state: retry.state, usageEvents: batch.events });
+    batch.commit();
+    // And a third activity that persists again changes nothing: the call is one usage row.
+    const again = activity("esc-run-1", execute);
+    await again.reader.read({ ...page, imagePath: await frame("r1c") }, "ocr-escalation");
+    const replay = again.state.usageLedger.checkpoint();
+    await persistRunUsageEvents({ client: sql(again.store), state: again.state, usageEvents: replay.events });
+    const rows = await admin<{ id: string; cost_cents: string; provider_cost: number }[]>`
+      select id, cost_cents::text, (metadata ->> 'providerCostCents')::float8 as provider_cost
+      from usage_events where run_id = 'esc-run-1' and metric = 'ocr-escalation'`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe("ocr-escalation:esc-run-1:doc-1:3:1");
+    // The loss alert reads providerCostCents: the escalation row bills 0 credits and keeps its provider cost.
+    expect(Number(rows[0]!.cost_cents)).toBe(0);
+    expect(rows[0]!.provider_cost).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("records a failed call's cost and calls again on retry, each call counting against the attempt budget", async () => {
+    let calls = 0;
+    const execute = vi.fn(async (args: Parameters<typeof executeVisionRuntime>[0]) => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      calls += 1;
+      if (calls === 1) {
+        throw Object.assign(new Error("upstream reset after the response was billed"), {
+          visionUsage: { provider: "deepinfra", model: MODEL, inputTokens: 1_500, outputTokens: 120, costCents: 0.03, usageSource: "provider" },
+        });
+      }
+      return success();
+    });
+    const first = activity("esc-run-2", execute);
+    const page = { documentId: "doc-2", pageNumber: 1, imagePath: await frame("f1"), mimeType: "image/png" };
+    await expect(first.reader.read(page, "ocr-escalation")).rejects.toThrow();
+    const retry = activity("esc-run-2", execute);
+    expect((await retry.reader.read({ ...page, imagePath: await frame("f2") }, "ocr-escalation")).text).toBe("Hosted transcription");
+    expect(execute).toHaveBeenCalledTimes(2);
+    const reads = await admin<{ attempt: number; status: string }[]>`
+      select attempt, status from ocr_escalation_reads where run_id = 'esc-run-2' order by attempt`;
+    expect(reads.map((row) => row.status)).toEqual([...(reads.length === 2 ? ["failed"] : []), "completed"]);
+    // Both calls were admitted by the durable guard: they count against the document's attempt budget.
+    const [attempts] = await admin<{ attempts: number }[]>`
+      select coalesce(sum(attempts), 0)::int as attempts from vision_run_attempts where run_id = 'esc-run-2' and document_id = 'doc-2' and purpose = 'ocr'`;
+    expect(attempts?.attempts).toBe(2);
+  }, 60_000);
+
+  it("refuses a call past the document's total attempt budget, retries included", async () => {
+    let sent = 0;
+    const execute = vi.fn(async (args: Parameters<typeof executeVisionRuntime>[0]) => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      sent += 1;
+      throw new Error("provider error");
+    });
+    const env = { DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS: "2" };
+    const page = { documentId: "doc-3", pageNumber: 1, mimeType: "image/png" };
+    await expect(activity("esc-run-3", execute, env).reader.read({ ...page, imagePath: await frame("b1") }, "ocr-escalation")).rejects.toThrow();
+    await expect(activity("esc-run-3", execute, env).reader.read({ ...page, pageNumber: 2, imagePath: await frame("b2") }, "ocr-escalation")).rejects.toThrow();
+    // A third request of the document, on any page, is refused before reaching the provider.
+    await expect(activity("esc-run-3", execute, env).reader.read({ ...page, pageNumber: 3, imagePath: await frame("b3") }, "ocr-escalation"))
+      .rejects.toMatchObject({ name: "HostedOcrSkipped", reason: "budget" });
+    expect(sent).toBe(2); // the refused request never reached the provider
+  }, 60_000);
+});

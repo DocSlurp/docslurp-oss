@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
  * right after the prelude (0128's vision_run_attempts, which no transaction takes before a prelude table).
  */
 const dir = new URL("../../db/migrations/", import.meta.url);
-const release = readdirSync(dir).filter((name) => /^012[1-8]_.*\.sql$/.test(name)).sort();
+const release = readdirSync(dir).filter((name) => /^012[1-9]_.*\.sql$/.test(name)).sort();
 const statements = (name: string) =>
   readFileSync(new URL(name, dir), "utf8")
     .split("--> statement-breakpoint")
@@ -27,16 +27,18 @@ const PRELUDE = [
 ];
 const PRELUDE_TABLES = new Set(["documents", "upload_session_files", "organizations", "org_memberships", "api_keys", "webhooks"]);
 
-describe("0121-0128 lock prelude", () => {
-  it("covers the eight migrations of the release", () => {
-    expect(release).toHaveLength(8);
+describe("0121-0129 lock prelude", () => {
+  it("covers the nine migrations of the release", () => {
+    expect(release).toHaveLength(9);
   });
 
   it.each(release)("%s takes no strong lock before or outside the prelude", (name) => {
     const all = statements(name);
     const altered = all.flatMap((statement) => [...statement.matchAll(/\bALTER TABLE\s+(?:IF EXISTS\s+)?(?:public\.)?"?(\w+)"?/gi)].map((match) => match[1]!.toLowerCase()));
     const indexed = all.flatMap((statement) => [...statement.matchAll(/\bCREATE (?:UNIQUE )?INDEX (?!CONCURRENTLY)[^;]*?\bON\s+(?:public\.)?"?(\w+)"?/gi)].map((match) => match[1]!.toLowerCase()));
-    const strong = [...altered, ...indexed];
+    // A foreign key locks the table it references (SHARE ROW EXCLUSIVE) when the constraint is created.
+    const referenced = all.flatMap((statement) => [...statement.matchAll(/\bREFERENCES\s+(?:public\.)?"?(\w+)"?/gi)].map((match) => match[1]!.toLowerCase()));
+    const strong = [...altered, ...indexed, ...referenced];
     if (strong.length === 0) {
       // 0121 and 0124 define functions only.
       expect(all.some((statement) => /^LOCK TABLE/i.test(statement))).toBe(false);
@@ -46,7 +48,7 @@ describe("0121-0128 lock prelude", () => {
     // Tables the migration locks itself, in order, straight after the prelude.
     const extra = new Set<string>();
     for (const statement of all.slice(PRELUDE.length)) {
-      const lock = /^LOCK TABLE\s+(?:public\.)?"?(\w+)"?\s+IN ACCESS EXCLUSIVE MODE;$/i.exec(statement);
+      const lock = /^LOCK TABLE\s+(?:public\.)?"?(\w+)"?\s+IN [A-Z ]+ MODE;$/i.exec(statement);
       if (!lock) break;
       extra.add(lock[1]!.toLowerCase());
     }
@@ -57,5 +59,10 @@ describe("0121-0128 lock prelude", () => {
   it("0127 also locks the workspaces and runs its plan reads, right after the prelude", () => {
     const all = statements(release.find((name) => name.startsWith("0127_"))!);
     expect(all[PRELUDE.length]).toBe("LOCK TABLE workspaces, workspace_runs IN SHARE ROW EXCLUSIVE MODE;");
+  });
+
+  it("0129 locks workspace_runs, which its foreign key references, right after the prelude", () => {
+    const all = statements(release.find((name) => name.startsWith("0129_"))!);
+    expect(all[PRELUDE.length]).toBe("LOCK TABLE workspace_runs IN SHARE ROW EXCLUSIVE MODE;");
   });
 });

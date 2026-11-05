@@ -2756,6 +2756,25 @@ export class Store {
     return { paused: result.paused, blocked: result.blocked };
   }
 
+  async ocrEscalationReads(runId: string, documentId: string, pageNumber: number): Promise<import("../pipeline/pipeline.js").OcrEscalationReadRow[]> {
+    const rows = await this.sql<{ attempt: number; status: "completed" | "failed"; text: string | null; model: string; usage_events: unknown }[]>`
+      select attempt, status, text, model, usage_events from ocr_escalation_reads
+      where run_id = ${runId} and document_id = ${documentId} and page_number = ${pageNumber}
+      order by attempt`;
+    return rows.map((row) => ({
+      attempt: Number(row.attempt), status: row.status, text: row.text, model: row.model,
+      usageEvents: Array.isArray(row.usage_events) ? row.usage_events as import("../models.js").UsageEvent[] : [],
+    }));
+  }
+
+  async recordOcrEscalationRead(row: import("../pipeline/pipeline.js").OcrEscalationReadRow & { runId: string; documentId: string; pageNumber: number }): Promise<void> {
+    await this.sql`
+      insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
+      values (${row.runId}, ${row.documentId}, ${row.pageNumber}, ${row.attempt}, ${row.status}, ${row.text}, ${row.model},
+        ${this.sql.json(JSON.parse(JSON.stringify(row.usageEvents)))})
+      on conflict (run_id, document_id, page_number, attempt) do nothing`;
+  }
+
   /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers (spend-check.ts largestFundedCharge); read-only. */
   async largestFundedCharge(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number> {
     return await largestFundedCharge(this.sql, run, max, creditsFor);

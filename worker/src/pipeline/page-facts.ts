@@ -31,6 +31,8 @@ export interface VisionPageOutcome {
     | "overrun-unreconciled"
     /** A per-document page budget (OCR escalation); vision page reads never set one. */
     | "document-page-limit"
+    /** A per-document attempt budget (OCR escalation); vision page reads never set one. */
+    | "document-attempt-limit"
     | "blank-render"
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
     | "unverified-render";
@@ -50,6 +52,7 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
     case "route-overrun":
     case "overrun-unreconciled":
     case "document-page-limit":
+    case "document-attempt-limit":
       return "guarded";
     case "blank-render":
     case "unverified-render":

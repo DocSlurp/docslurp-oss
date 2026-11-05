@@ -10,6 +10,7 @@
  */
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
+import type { UsageEvent } from "../models.js";
 
 import type { Config } from "../config.js";
 import { isCostCapExceeded } from "../pipeline/checkpoints.js";
@@ -24,6 +25,17 @@ import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 export const DEFAULT_OCR_ESCALATION_MODEL = "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct";
 /** Escalation reads per document unless `DOCSLURP_OCR_ESCALATION_MAX_PAGES` says otherwise. */
 export const DEFAULT_OCR_ESCALATION_MAX_PAGES = 25;
+
+/**
+ * Escalation requests per document, every page and retry included (`DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`), counted in the
+ * vision guard's durable ledger. Default: the page budget plus a fifth of it for retries.
+ */
+export function ocrEscalationMaxAttempts(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS?.trim());
+  if (Number.isInteger(parsed) && parsed >= 0) return Math.min(parsed, 20_000);
+  const pages = ocrEscalationMaxPages(env);
+  return pages + Math.ceil(pages / 5);
+}
 /** Image types a hosted model takes as stored; anything else would need host decoding and is refused. */
 export const HOSTED_OCR_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 /** Largest stored image hosted mode sends as is. */
@@ -104,10 +116,35 @@ export function createHostedOcrReader(args: {
       const maxPages = ocrEscalationMaxPages(env);
       const pageRef = { documentId: page.documentId, pageNumber: page.pageNumber };
       const outputPath = `${page.imagePath}.${purpose}.json`;
+      // Escalation reads are persisted as each call returns (ocr_escalation_reads). A retried activity reuses the page's
+      // completed read instead of calling the provider again, and re-buffers every earlier call's usage under its own id, so
+      // its provider cost is recorded exactly once even when the activity that made it never reached its checkpoint.
+      const store = state.store;
+      const durable = purpose === "ocr-escalation" && store?.ocrEscalationReads && store.recordOcrEscalationRead ? store : null;
+      let attempt = 1;
+      if (durable) {
+        const prior = await durable.ocrEscalationReads!(state.run.id, page.documentId, page.pageNumber);
+        const pending = new Set(state.usageLedger.snapshot().map((event) => event.id));
+        for (const row of prior) for (const event of row.usageEvents) if (event.id && !pending.has(event.id)) state.usageLedger.enqueue(event);
+        attempt = prior.reduce((max, row) => Math.max(max, row.attempt), 0) + 1;
+        const done = prior.find((row) => row.status === "completed" && row.text !== null);
+        if (done) {
+          console.log(`[ocr] ${purpose} reused document=${page.documentId} page=${page.pageNumber} attempt=${done.attempt}: no new provider call`);
+          return { text: done.text!, model: done.model, inputTokens: 0, outputTokens: 0, costCents: 0 };
+        }
+      }
+      const callId = `${purpose}:${state.run.id}:${page.documentId}:${page.pageNumber}:${attempt}`;
+      const persist = async (status: "completed" | "failed", text: string | null, model: string, events: Array<UsageEvent | null>) => {
+        if (!durable) return;
+        await durable.recordOcrEscalationRead!({
+          runId: state.run.id, documentId: page.documentId, pageNumber: page.pageNumber, attempt, status, text, model,
+          usageEvents: events.filter((event): event is UsageEvent => event !== null),
+        });
+      };
       try {
-        // The per-document page budget is counted by the guard's durable attempt ledger (run, document, page), so an
-        // activity retry or a worker restart cannot reset it.
-        return await withVisionCall(state, { ...pageRef, purpose: "ocr", documentPageLimit: maxPages }, async (gate) => {
+        // The per-document page and attempt budgets are counted by the guard's durable attempt ledger (run, document, page),
+        // so an activity retry or a worker restart cannot reset them; a retried call counts against the attempt budget.
+        return await withVisionCall(state, { ...pageRef, purpose: "ocr", documentPageLimit: maxPages, documentAttemptLimit: ocrEscalationMaxAttempts(env) }, async (gate) => {
           let result: Awaited<ReturnType<typeof executeVisionRuntime>>;
           try {
             result = await execute({
@@ -115,13 +152,18 @@ export function createHostedOcrReader(args: {
               privacyMode: state.run.pipeline.privacyMode, outputSchema: null, signal, gate,
             });
           } catch (error) {
-            // Every billed request behind a failed read is recorded on the route that billed it.
-            for (const usage of visionFailureUsages(error, vision, args.cfg, { ...pageRef, purpose })) {
-              if (usage.kind === "rejected") state.usageLedger.record(usage.input);
-              else state.usageLedger.enqueue({ ...usage.input, amount: usage.input.amount ?? 1, unit: usage.input.unit ?? "attempt", costCents: usage.input.costCents ?? 0, inputTokens: usage.input.inputTokens ?? 0, outputTokens: usage.input.outputTokens ?? 0 }, { logAiUsage: true });
+            // Every billed request behind a failed read is recorded on the route that billed it, and persisted with the call.
+            const failed: Array<UsageEvent | null> = [];
+            for (const [index, usage] of visionFailureUsages(error, vision, args.cfg, { ...pageRef, purpose }).entries()) {
+              const event = usage.kind === "rejected"
+                ? state.usageLedger.record(usage.input)
+                : state.usageLedger.enqueue({ ...usage.input, amount: usage.input.amount ?? 1, unit: usage.input.unit ?? "attempt", costCents: usage.input.costCents ?? 0, inputTokens: usage.input.inputTokens ?? 0, outputTokens: usage.input.outputTokens ?? 0 }, { logAiUsage: true });
+              if (event) event.id = `${callId}:failed:${index}`;
+              failed.push(event);
             }
+            if (failed.some((event) => event !== null)) await persist("failed", null, ocrEscalationModel(env), failed);
             const stop = findVisionGuardStop(error);
-            if (stop?.reason === "document-page-limit") {
+            if (stop?.reason === "document-page-limit" || stop?.reason === "document-attempt-limit") {
               console.warn(`[ocr] ${purpose} budget spent document=${page.documentId} page=${page.pageNumber} max=${maxPages}`);
               throw new HostedOcrSkipped("budget", `${purpose} page budget spent for this document`);
             }
@@ -131,7 +173,7 @@ export function createHostedOcrReader(args: {
           const costCents = priceVisionResult(result, args.cfg);
           // A Rich page read, once per run and page (the recogniser's read of the same page already charged it); the
           // provider's actual tokens and cost are recorded on the served route.
-          recordVisionRead(state.usageLedger, gate, pageRef, {
+          const read = recordVisionRead(state.usageLedger, gate, pageRef, {
             provider: result.route.provider,
             model: result.model,
             metric: purpose,
@@ -152,6 +194,8 @@ export function createHostedOcrReader(args: {
               ...(result.servedModel ? { servedModel: result.servedModel } : {}),
             },
           });
+          if (read) read.id = callId;
+          await persist("completed", result.text, result.model, [read]);
           return { text: result.text, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents };
         });
       } finally {
