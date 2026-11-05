@@ -9,6 +9,7 @@ import {
 } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
+import { RunPolicyError } from "./document-failure.js";
 
 /**
  * Real page counts for formats whose page count the server cannot know at intake (it counts Office, EPUB and spreadsheet files
@@ -149,8 +150,14 @@ export function measureExtractedPages(format: string, extractor: string, markdow
   const text = markdown.length > MAX_COUNTED_TEXT_CHARS ? markdown.slice(0, MAX_COUNTED_TEXT_CHARS) : markdown;
   if (!text.trim()) return null;
   if (format === "office-pptx" && extractor === "pptx") {
-    const slides = bounded(text.replace(/\f\s*$/, "").split("\f").length);
-    return slides ? { pages: slides, method: "slides" } : null;
+    // Each slide is at least one page, and as many as its text fills by the text rule: a single slide holding a book's worth
+    // of text bills that text, not one page.
+    const slides = text.replace(/\f\s*$/, "").split("\f");
+    const pages = bounded(slides.reduce((total, slide) => {
+      const content = contentLines(slide);
+      return total + Math.max(1, content.trim() ? textPageCount(content, { markup: true }) : 0);
+    }, 0));
+    return pages ? { pages, method: "slides" } : null;
   }
   if (format === "office-excel" && extractor === "xlsx") {
     const sheets = sheetCellTexts(text);
@@ -237,7 +244,10 @@ export async function recordMeasuredPageCount(
       // The run's rows include this document once it is recorded; never count less than this document alone.
       const extra = own - ownFast + Math.max(ownFast, runFast);
       const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
-      if (outcome.paused) console.warn(`[page-count] run=${state.run.id} document=${document.id} paused: measured ${measured.pages} pages (intake ${intakePages}) owes ${extra.toFixed(2)} more credits than the balance holds`);
+      if (outcome.paused || outcome.blocked) {
+        console.warn(`[page-count] run=${state.run.id} document=${document.id} stopped (paused=${outcome.paused}): measured ${measured.pages} pages (intake ${intakePages}) owes ${extra.toFixed(2)} more credits than the balance holds`);
+        throw new RunPolicyError(`Credits do not cover the measured pages of document ${document.id}; run ${outcome.paused ? "paused" : "stopped"}`);
+      }
     }
   }
   return { pages: measured.pages, method: measured.method, intakePages };

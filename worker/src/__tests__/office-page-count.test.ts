@@ -79,6 +79,17 @@ describe("measureExtractedPages: counts from the extractor's own output", () => 
     expect(measureExtractedPages("office-pptx", "pptx", "## Title only\n")).toEqual({ pages: 1, method: "slides" });
   });
 
+  it("bills a slide's text, not one page: a single slide holding a book counts as the text rule's pages", () => {
+    // About 1,000 pages of prose on one slide (Council C M2): once one page, now the text rule's count.
+    const book = markdownOfPages(1_000);
+    const one = measureExtractedPages("office-pptx", "pptx", `## Slide 1\n${book}\n`)!;
+    expect(one.method).toBe("slides");
+    expect(one.pages).toBeGreaterThanOrEqual(1_000);
+    // Per slide: two near-empty slides and one full of text sum to 1 + 1 + its pages.
+    const mixed = measureExtractedPages("office-pptx", "pptx", `## A\n\f\n## B\n\f\n## C\n${markdownOfPages(30)}\n`)!;
+    expect(mixed.pages).toBeGreaterThanOrEqual(32);
+  });
+
   it("counts a PPTX another extractor read by the text rule: only python-pptx's form feeds mark slides", () => {
     expect(measureExtractedPages("office-pptx", "pandoc", "a\fb\fc")).toMatchObject({ method: "text-rule" });
   });

@@ -102,10 +102,13 @@ describe("a measured DOCX: page rows and billing", () => {
     // 20,000 blank pages: a few credits of base fee plus every enabled feature on them, against a 20-credit balance.
     const owed = extraCreditsForMeasuredPages(run.pipeline, 1, 20_000);
     expect(owed).toBeGreaterThan(20);
-    const measured = await recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000));
-    expect(measured.pages).toBe(20_000);
+    // The count is recorded, the run is paused and the document is stopped (a run-policy stop), not carried on.
+    await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
+    expect((await store.loadDocument("docx2"))!.billingPages).toBe(20_000);
     const { rows } = await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from workspace_runs where id = 'run2'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
+    // A run already paused (or stopped) by something else: the check reports blocked without pausing, and still stops it.
+    await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
   }, 60_000);
 
   it("adds up the run's measured documents: ten large DOCX files that each fit a 10-credit balance cannot together overdraw it", async () => {
@@ -119,8 +122,12 @@ describe("a measured DOCX: page rows and billing", () => {
     const state = async () => (await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run3'`)).rows[0]!.control_state;
     let pausedAt = 0;
     for (let n = 1; n <= 10 && !pausedAt; n += 1) {
-      await recordMeasuredPageCount({ run, store }, (await store.loadDocument(`big${n}`))!, "office-word", counted(400));
-      if (await state() === "paused") pausedAt = n;
+      const stopped = await recordMeasuredPageCount({ run, store }, (await store.loadDocument(`big${n}`))!, "office-word", counted(400))
+        .then(() => false, (error: Error) => error.name === "RunPolicyError");
+      if (await state() === "paused") {
+        expect(stopped).toBe(true);
+        pausedAt = n;
+      } else expect(stopped).toBe(false);
     }
     // Five files owe 9.98 credits and fit; the sixth takes the run to 11.97 and pauses it. Checked one file at a time, none ever would.
     expect(pausedAt).toBe(Math.floor(10 / each) + 1);
