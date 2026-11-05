@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { hostedApiKeyForWorkspaces, openRouterCall } from "../lib/privacy.js";
 import type {
   AggregateWorkspaceRagSearchRequest,
@@ -7,7 +9,11 @@ import type {
   WorkspaceRecord,
 } from "@docslurp/shared";
 import {
+  BILLABLE_UNIT_METRICS,
   aggregateWorkspaceRagSearchRequestSchema,
+  chatAnswerCredits,
+  chatAnswerUnits,
+  chatModelTier,
 } from "@docslurp/shared";
 
 import {
@@ -15,7 +21,8 @@ import {
   resolveOpenRouterApiKey,
   SEARCH_OPENROUTER_MODEL,
 } from "../lib/ai.js";
-import { recordUsageEvent } from "../lib/ai-usage.js";
+import { recordUnitCharge, recordUsageEvent } from "../lib/ai-usage.js";
+import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
@@ -177,8 +184,8 @@ async function generateAggregateAnswer(args: {
   query: string;
   citations: AggregateRagCitation[];
   workspaces: AggregateRagWorkspaceResult[];
-  /** Set only when every answered workspace belongs to the same org. */
-  orgId: string | null;
+  /** The one organization searched: every answered workspace belongs to it, and the answer bills to it. */
+  orgId: string;
   maxOutputTokens: number;
 }): Promise<{
   answer: string;
@@ -244,14 +251,18 @@ async function generateAggregateAnswer(args: {
     documents,
     maxOutputTokens: args.maxOutputTokens,
   });
+  // The answer is one item for the provider-loss alert (providerCostLossItems keys chat items on metadata.chatTurnId):
+  // its model cost and its charge carry the same id, so a loss on it is seen like a chat turn's.
+  const answerItemId = `aggregate-answer:${randomUUID()}`;
+  const scope = {
+    orgId: args.orgId,
+    workspaceIds: uniqueStrings(
+      args.workspaces.map((workspace) => workspace.workspaceId),
+    ),
+  };
   await recordUsageEvent({
     userId: args.userId,
-    scope: {
-      orgId: args.orgId,
-      workspaceIds: uniqueStrings(
-        args.workspaces.map((workspace) => workspace.workspaceId),
-      ),
-    },
+    scope,
     usage: {
       provider: "openrouter",
       model: SEARCH_OPENROUTER_MODEL,
@@ -259,6 +270,7 @@ async function generateAggregateAnswer(args: {
       ...generated.usage,
       metadata: {
         ...generated.usage.metadata,
+        chatTurnId: answerItemId,
         searchSessionIds: uniqueStrings(
           args.workspaces.flatMap((workspace) =>
             workspace.sessionId ? [workspace.sessionId] : [],
@@ -267,6 +279,24 @@ async function generateAggregateAnswer(args: {
       },
     },
   });
+  // A generated answer bills as a chat answer does (PRICE_CARD.chatAnswerTiers at the model's tier, once more per started
+  // 100k total tokens). Inside a chat turn the turn's own answer already covers it.
+  if (!currentChatTurn()) {
+    const totalTokens = generated.usage.inputTokens + generated.usage.outputTokens;
+    const tier = chatModelTier(SEARCH_OPENROUTER_MODEL);
+    await recordUnitCharge({
+      userId: args.userId,
+      scope,
+      charge: {
+        id: `${answerItemId}:charge`,
+        metric: BILLABLE_UNIT_METRICS.chatAnswer,
+        amount: 1,
+        unit: "answer",
+        credits: chatAnswerCredits({ tier, totalTokens }),
+        metadata: { model: SEARCH_OPENROUTER_MODEL, tier, totalTokens, answerUnits: chatAnswerUnits(totalTokens), feature: "aggregate-rag-answer", chatTurnId: answerItemId },
+      },
+    });
+  }
 
   const answer =
     generated.text.trim() || buildAggregateFallbackAnswer(args);
