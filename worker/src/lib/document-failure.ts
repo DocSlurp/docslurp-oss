@@ -45,6 +45,8 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   // The worker, not the Document: a command's teardown failed here, or this worker is quarantined.
   "CommandTeardownError",
   "WorkerQuarantinedError",
+  // OCR could not run (VM creation, capacity, a deadline): retried, never the Document's fault.
+  "OcrInfrastructureError",
 ]);
 
 function causeChain(error: unknown): unknown[] {

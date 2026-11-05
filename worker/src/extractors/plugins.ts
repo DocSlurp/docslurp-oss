@@ -157,6 +157,11 @@ export interface SandboxedOcrProvider {
   maxSourceBytes: number;
   /** Throw when the deployment is not ready (unpinned image, missing models or credentials). Never fall back. */
   assertConfigured(): void;
+  /**
+   * Run the job. When the CLI refused the job or its input (a usage, model or input refusal, an internal error, or the CLI
+   * killed by its own resource limits), throw an error carrying `ocrRefused: true`: the page fails without a retry. Any
+   * other throw (VM creation, capacity, a deadline, a dropped transfer) is treated as infrastructure and retried later.
+   */
   run(job: SandboxedOcrJob, signal?: AbortSignal): Promise<SandboxedOcrResult>;
   /** Upper bound on one run's wall time for this many frames: the remote command budget. */
   timeoutMs(frames: number): number;

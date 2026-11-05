@@ -159,6 +159,14 @@ export interface ClamDatabaseHealth {
   source: string | null;
 }
 
+/** A command that ran to completion and exited non-zero (local or remote). The message keeps its historical shape. */
+export class CommandExitError extends Error {
+  constructor(message: string, readonly exitCode: number | null) {
+    super(message);
+    this.name = "CommandExitError";
+  }
+}
+
 export class CommandRunner {
   private readonly scriptsDir: string;
   private readonly venvBin: string;
@@ -262,7 +270,7 @@ export class CommandRunner {
           if ("remote" in launched) {
             const result = await this.settleRemote(plan, launched);
             if (result.exitCode === 0) return { stdout: result.stdout, stderr: result.stderr };
-            throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim());
+            throw new CommandExitError(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim(), result.exitCode);
           }
           const { child, supervised } = launched;
           return await new Promise<CommandResult>((resolve, reject) => {
@@ -320,8 +328,9 @@ export class CommandRunner {
             }
 
             reject(
-              new Error(
+              new CommandExitError(
                 `${plan.binary} (${code ?? "unknown"}): ${stderr || stdout}`.trim(),
+                code ?? null,
               ),
             );
           }, (error: Error) => reject(commandFailure(error, monitor.finish())));

@@ -40,6 +40,53 @@ export class OcrBoundaryFailure extends Error {
   }
 }
 
+/**
+ * OCR could not run for a reason that is not the input's: the VM could not be created, capacity, a deadline, a dropped
+ * transfer, a provider that is not ready. Retrying later (Temporal backs off and retries the activity, possibly on another
+ * worker) can succeed, so stages rethrow it instead of failing the page.
+ */
+export class OcrInfrastructureError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "OcrInfrastructureError";
+  }
+}
+
+/**
+ * The boundary refused or rejected this input deterministically: a usage or model-pin refusal, hostile or undecodable
+ * input, an internal CLI crash on these bytes, or a result that failed validation. Reading the same bytes again gives the
+ * same answer, so the page fails without an in-process retry.
+ */
+export class OcrDeterministicFailure extends Error {
+  constructor(message: string, readonly reason: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "OcrDeterministicFailure";
+  }
+}
+
+/** Exit codes of `docslurp_ocr.py` that refuse the job or its input (usage, model, input, internal). */
+const OCR_CLI_REFUSAL_EXIT_CODES = new Set([2, 3, 4, 5]);
+
+/**
+ * Classify a failed boundary run. Aborts and command-teardown failures pass through unchanged (their callers handle
+ * them). A provider marks a deterministic refusal by throwing an error with `ocrRefused: true` (SandboxedOcrProvider);
+ * the local CLI by its refusal exit codes. Everything else is infrastructure.
+ */
+export function classifyOcrRunError(error: unknown, signal?: AbortSignal): unknown {
+  if (signal?.aborted) return error;
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "CommandTeardownError" || error.name === "WorkerQuarantinedError")) return error;
+  if (error instanceof OcrRefusedError || error instanceof OcrDeterministicFailure || error instanceof OcrInfrastructureError) return error;
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+  if ((error as { ocrRefused?: unknown } | null)?.ocrRefused === true) {
+    return new OcrDeterministicFailure(`OCR boundary refused the job: ${message}`, "boundary-refused", { cause: error });
+  }
+  const exitCode = (error as { name?: unknown; exitCode?: unknown } | null);
+  if (exitCode?.name === "CommandExitError" && typeof exitCode.exitCode === "number" && OCR_CLI_REFUSAL_EXIT_CODES.has(exitCode.exitCode)) {
+    return new OcrDeterministicFailure(`OCR CLI refused the job: ${message}`, "cli-refused", { cause: error });
+  }
+  return new OcrInfrastructureError(`OCR boundary failed to run: ${message}`, { cause: error });
+}
+
 /** Artifact-ledger key listing (JSON) the pages of a document whose OCR read failed; vision never reads them instead. */
 export const OCR_FAILED_PAGES_KEY = "ocr-failed-pages";
 

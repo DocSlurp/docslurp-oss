@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXTRACTOR_PLUGIN_API_VERSION, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedOcrProvider } from "../../extractors/plugins.js";
 import { CommandRunner } from "../../tools/runner.js";
 import { readWithOcr } from "../engine.js";
-import { assertOcrConfiguration, localOcrRefusal, OcrRefusedError, resolveOcrMode, resolveServiceProfile } from "../mode.js";
+import { assertOcrConfiguration, classifyOcrRunError, localOcrRefusal, OcrDeterministicFailure, OcrInfrastructureError, OcrRefusedError, resolveOcrMode, resolveServiceProfile } from "../mode.js";
 
 function provider(overrides: Partial<SandboxedOcrProvider> = {}): SandboxedOcrProvider {
   return {
@@ -169,5 +169,33 @@ describe("production refusal reaches no local OCR command", () => {
     const { runner } = spiedRunner();
     const job = { input: source, kind: "image" as const, output: path.join(scratch, "r.json"), imageDir: path.join(scratch, "img"), recognisers: ["multi"], maxAttempts: 1, retryBelow: 0.8, maxFrames: 1, maxLongEdge: 2000, escalation: null };
     await expect(runner.run({ binary: "forged", args: [], available: true, sandboxedOcr: job })).rejects.toThrow(/sandboxed OCR provider/);
+  });
+});
+
+describe("classifyOcrRunError", () => {
+  const exit = (code: number | null) => Object.assign(new Error(`python3 (${code}): refused`), { name: "CommandExitError", exitCode: code });
+
+  it("treats a provider's ocrRefused error and the CLI's refusal exit codes as deterministic", () => {
+    expect(classifyOcrRunError(Object.assign(new Error("input refused"), { ocrRefused: true }))).toBeInstanceOf(OcrDeterministicFailure);
+    for (const code of [2, 3, 4, 5]) expect(classifyOcrRunError(exit(code)), String(code)).toBeInstanceOf(OcrDeterministicFailure);
+  });
+
+  it("treats VM creation, capacity, deadlines and unknown exits as infrastructure", () => {
+    for (const error of [new Error("vm create failed"), Object.assign(new Error("deadline"), { name: "SandboxRunError" }), exit(null), exit(137), exit(1), "boom"]) {
+      expect(classifyOcrRunError(error)).toBeInstanceOf(OcrInfrastructureError);
+    }
+    // A provider must opt in to a deterministic refusal; anything else retries.
+    expect(classifyOcrRunError(Object.assign(new Error("x"), { ocrRefused: "yes" }))).toBeInstanceOf(OcrInfrastructureError);
+  });
+
+  it("passes aborts, teardown failures and already-classified errors through unchanged", () => {
+    const abort = Object.assign(new Error("aborted"), { name: "AbortError" });
+    const teardown = Object.assign(new Error("teardown"), { name: "CommandTeardownError" });
+    const refused = new OcrRefusedError("off", "off");
+    for (const error of [abort, teardown, refused]) expect(classifyOcrRunError(error)).toBe(error);
+    const controller = new AbortController();
+    controller.abort();
+    const any = new Error("vm create failed");
+    expect(classifyOcrRunError(any, controller.signal)).toBe(any);
   });
 });

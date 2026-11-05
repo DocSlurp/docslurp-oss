@@ -14,7 +14,7 @@ import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { ESCALATE_RECOGNISERS, planOcrLanguages, type OcrLanguagePlan } from "./languages.js";
-import { OcrRefusedError, resolveOcrMode, type OcrMode } from "./mode.js";
+import { classifyOcrRunError, OcrDeterministicFailure, OcrRefusedError, resolveOcrMode, type OcrMode } from "./mode.js";
 import { pinnedOcrModelEntries, type PinnedOcrModel } from "./models.js";
 
 /** Bound on the result JSON read back from the boundary. */
@@ -123,6 +123,15 @@ async function withOcrSlot<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>, sign
 /** Plan the job: the VM provider, or (self-hosted only) the local sandbox. */
 async function planJob(runner: OcrRunner, job: SandboxedOcrJob, mode: "vm" | "local", env: NodeJS.ProcessEnv): Promise<CommandPlan> {
   return mode === "vm" ? await runner.sandboxedOcrRead(job) : await runner.localOcrRead(job, env);
+}
+
+/** A result that fails validation is a deterministic rejection of this read (same bytes, same result). */
+async function rejectInvalid<T>(check: () => Promise<T>): Promise<T> {
+  try {
+    return await check();
+  } catch (error) {
+    throw new OcrDeterministicFailure(error instanceof Error ? error.message : String(error), "invalid-result", { cause: error });
+  }
 }
 
 /** Read the result JSON the boundary wrote, bounded, as untrusted input. */
@@ -260,12 +269,23 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
     };
     const started = Date.now();
     const result = await withOcrSlot(env, async () => {
-      const plan = await planJob(runner, job, mode, env);
+      let plan: CommandPlan;
+      try {
+        plan = await planJob(runner, job, mode, env);
+      } catch (error) {
+        // A provider that is not ready (assertConfigured) is the deployment's, not the input's.
+        throw classifyOcrRunError(error, input.signal);
+      }
       if (!plan.available) throw new OcrRefusedError(`OCR runtime unavailable for DOCSLURP_OCR_MODE=${mode}`, "unavailable");
-      await runner.run(plan, input.signal);
-      return await readResult(job.output);
+      try {
+        await runner.run(plan, input.signal);
+      } catch (error) {
+        throw classifyOcrRunError(error, input.signal);
+      }
+      return await rejectInvalid(() => readResult(job.output));
     }, input.signal);
-    const { unreadPages } = checkResultAgainstJob(result, job, pinnedOcrModelEntries());
+    const pinned = pinnedOcrModelEntries();
+    const { unreadPages } = await rejectInvalid(async () => checkResultAgainstJob(result, job, pinned));
     const pages: OcrPageRead[] = [];
     for (const frame of result.frames) {
       let escalation: OcrPageRead["escalation"] = null;
