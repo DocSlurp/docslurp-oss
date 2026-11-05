@@ -1093,6 +1093,8 @@ export class ExtractMarkdownStage implements Stage {
                       needsVision,
                       textlessFallback,
                       plausibilityScore,
+                      // Fast kept the image unread on purpose: its empty text is not a low-quality extraction to retry.
+                      ...(winningCandidate.label === "image-textless" ? { keptUnread: true } : {}),
                       manifestUri,
                       artifactGraphUri: graph?.manifestUri ?? null,
                       artifactGraphTargets: graph?.requestedTargets ?? [],

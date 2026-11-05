@@ -141,6 +141,8 @@ function recordRetryCount(
 }
 
 function plausibilityScoreFor(stats: Record<string, unknown>): number | undefined {
+  // A page kept unread on purpose (Fast keeps an image as its page image) has no text by design: nothing to escalate.
+  if (stats.keptUnread === true) return undefined;
   return typeof stats.plausibilityScore === "number"
     ? stats.plausibilityScore
     : undefined;
