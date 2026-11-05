@@ -42,6 +42,7 @@ import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
 import { assertOutputModerationConfig } from "./services/chat-output-moderation.js";
+import { warnOrgLimitAboveOneWithUniqueIndex } from "./services/org-membership-limit.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
@@ -343,6 +344,12 @@ export function ensureApiStartup(): Promise<void> {
       logRateLimitBackendAtStartup();
       // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
       assertOutputModerationConfig();
+      // DOCSLURP_MAX_ORGS_PER_USER above 1 while migration 0127's unique index still refuses a second membership.
+      void warnOrgLimitAboveOneWithUniqueIndex(async () => {
+        const { sql } = await import("./db.js");
+        const [row] = await sql<{ present: boolean }[]>`select to_regclass('public.org_memberships_one_org_per_user') is not null as present`;
+        return Boolean(row?.present);
+      });
       void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
         const { sql } = await import("./db.js");
         return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;

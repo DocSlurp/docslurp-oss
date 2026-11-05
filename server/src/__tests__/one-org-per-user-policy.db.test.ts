@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
-import { maxOrgsPerUser } from "../services/org-membership-limit.js";
+import { maxOrgsPerUser, warnOrgLimitAboveOneWithUniqueIndex } from "../services/org-membership-limit.js";
 
 /**
  * The one-organization-per-user policy (DOCSLURP_MAX_ORGS_PER_USER=1, index org_memberships_one_org_per_user): joining or
@@ -54,6 +54,16 @@ describe("one organization per user", () => {
     expect(maxOrgsPerUser({ DOCSLURP_MAX_ORGS_PER_USER: "3" })).toBe(3);
     expect(maxOrgsPerUser({ DOCSLURP_MAX_ORGS_PER_USER: "0" })).toBe(1);
     expect(maxOrgsPerUser({ DOCSLURP_MAX_ORGS_PER_USER: "lots" })).toBe(1);
+  });
+
+  it("warns at startup when a limit above one meets the one-organization index", async () => {
+    const lines: string[] = [];
+    const indexExists = async () => (await sql<{ present: boolean }[]>`select to_regclass('public.org_memberships_one_org_per_user') is not null as present`)[0]!.present;
+    expect(await warnOrgLimitAboveOneWithUniqueIndex(indexExists, { DOCSLURP_MAX_ORGS_PER_USER: "3" }, (line) => lines.push(line))).toBe(true);
+    expect(lines.join("\n")).toMatch(/DOCSLURP_MAX_ORGS_PER_USER=3 has no effect/);
+    expect(await warnOrgLimitAboveOneWithUniqueIndex(indexExists, {}, (line) => lines.push(line))).toBe(false);
+    expect(await warnOrgLimitAboveOneWithUniqueIndex(async () => false, { DOCSLURP_MAX_ORGS_PER_USER: "3" }, (line) => lines.push(line))).toBe(false);
+    expect(lines).toHaveLength(1);
   });
 
   it("refuses a second membership row outright", async () => {
@@ -116,6 +126,23 @@ describe("one organization per user", () => {
     const [{ token }] = await sql<{ token: string }[]>`select token from workspace_invites where workspace_id = ${workspace!.id}`;
     await expect(orgs.acceptWorkspaceInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
     expect(await sql`select 1 from workspace_members where workspace_id = ${workspace!.id} and user_id = ${ownerB}`).toEqual([]);
+  });
+
+  it("answers 409 when a workspace invite's join passes the check but loses the race to the one-organization index", async () => {
+    // A concurrent join that commits between the check and the insert leaves exactly this state: the check passed, the
+    // index refuses. A limit of 2 lets the check pass while the index (still present) refuses the second membership.
+    const ownerA = await user("owner-a");
+    const ownerB = await user("owner-b");
+    const orgA = await team(ownerA);
+    const orgB = await team(ownerB);
+    const [workspace] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgA} and is_default`;
+    await orgs.inviteWorkspaceMember(workspace!.id, { userId: ownerA, email: `${ownerB}@example.test`, role: "viewer", expiresInDays: 7 });
+    const [{ token }] = await sql<{ token: string }[]>`select token from workspace_invites where workspace_id = ${workspace!.id}`;
+    vi.stubEnv("DOCSLURP_MAX_ORGS_PER_USER", "2");
+    await expect(orgs.acceptWorkspaceInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
+    expect(await membershipsOf(ownerB)).toEqual([{ org_id: orgB, role: "owner" }]);
+    expect(await sql`select 1 from workspace_members where workspace_id = ${workspace!.id} and user_id = ${ownerB}`).toEqual([]);
+    expect(await sql`select status from workspace_invites where workspace_id = ${workspace!.id}`).toEqual([{ status: "pending" }]);
   });
 
   it("gives a member who leaves exactly one organization again: their personal one", async () => {
