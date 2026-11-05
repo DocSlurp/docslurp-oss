@@ -221,6 +221,16 @@ pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
     1f64.max(js_round(pages))
 }
 
+/// Port of `isFastOnlyFile`: a Word, slide or sheet file (the card's `fastOnlyFormats`) whose pages no model reads in any quality,
+/// unless the client measured a page mix for it.
+fn is_fast_only_file(card: &Card, file: &QuoteFile) -> bool {
+    if file.mix.is_some_and(|mix| mix.text + mix.complex + mix.scanned > 0.0) {
+        return false;
+    }
+    worker_counted_format(card, &file.name, file.mime_type.as_deref())
+        .is_some_and(|format| card.unmeasured_pages.fast_only_formats.iter().any(|candidate| candidate == format))
+}
+
 const IMAGE_FILE_MIX: PageMix = PageMix::new(0.0, 0.0, 1.0);
 const TEXT_FILE_MIX: PageMix = PageMix::new(1.0, 0.0, 0.0);
 
@@ -298,6 +308,8 @@ fn blended_mix(mix: &PageMix, confidence: f64, bound: &PageMix) -> PageMix {
 struct QuoteMixes {
     low: PageMix,
     high: PageMix,
+    fast_low: f64,
+    fast_high: f64,
     known: usize,
     unmeasured: usize,
     range_low: f64,
@@ -306,9 +318,11 @@ struct QuoteMixes {
 
 /// Port of `quoteMixes`: page counts per class at each end of the range, the scanned share of the high end counted `rich_factor` times.
 fn quote_mixes(card: &Card, files: &[&QuoteFile], rich_factor: f64) -> QuoteMixes {
-    let known = files.iter().filter(|file| known_mix(card, file).is_some()).count();
+    // A Word, slide or sheet file's pages are as known as a text file's: no model reads them.
+    let known = files.iter().filter(|file| is_fast_only_file(card, file) || known_mix(card, file).is_some()).count();
     let mut low = PageMix::default();
     let mut high = PageMix::default();
+    let (mut fast_low, mut fast_high) = (0.0, 0.0);
     let (mut unmeasured, mut range_low, mut range_high) = (0usize, 0.0, 0.0);
     for file in files {
         let range = quote_file_page_range(card, file);
@@ -317,6 +331,12 @@ fn quote_mixes(card: &Card, files: &[&QuoteFile], rich_factor: f64) -> QuoteMixe
         }
         range_low += range.low;
         range_high += range.high;
+        // No model reads a Word, slide or sheet page in any quality: Fast at both ends, over its page range.
+        if is_fast_only_file(card, file) {
+            fast_low += range.low;
+            fast_high += range.high;
+            continue;
+        }
         let (file_low, file_high) = match known_mix(card, file) {
             Some((mix, confidence)) => (blended_mix(&mix, confidence, &card.quote_low_mix), high_mix(card, &mix, confidence)),
             None => (card.quote_low_mix, card.quote_high_mix),
@@ -328,7 +348,7 @@ fn quote_mixes(card: &Card, files: &[&QuoteFile], rich_factor: f64) -> QuoteMixe
         high.complex += range.high * file_high.complex;
         high.scanned += range.high * file_high.scanned * rich_factor;
     }
-    QuoteMixes { low, high, known, unmeasured, range_low, range_high }
+    QuoteMixes { low, high, fast_low, fast_high, known, unmeasured, range_low, range_high }
 }
 
 /// What the high end of a quote assumes of a page a vision model reads (`richHighEnd`): typical, not a ceiling.
@@ -395,13 +415,15 @@ pub fn quote_upload(
         })
         .collect();
     // `mix` holds page counts; the pages priced are their sum, so each end of the range prices its own page count.
-    let run = |mix: PageMix, bound: PageMix| -> Result<IngestEstimate, Error> {
+    let run = |mix: PageMix, bound: PageMix, fast_only: f64| -> Result<IngestEstimate, Error> {
         let total = mix.text + mix.complex + mix.scanned;
         let priced_mix = if total > 0.0 { mix } else { bound };
+        let fast_only_pages = 0f64.max(js_round(fast_only));
         estimate_ingest(
             card,
             &IngestInput {
-                pages: if total > 0.0 { 0f64.max(js_round(total)) } else { pages },
+                pages: if total > 0.0 { 0f64.max(js_round(total)) } else if fast_only_pages > 0.0 { 0.0 } else { pages },
+                fast_only_pages: Some(fast_only_pages),
                 documents: Some(1f64.max(documents)),
                 mix: priced_mix.into(),
                 profile: Some(profile.quality.clone()),
@@ -415,8 +437,8 @@ pub fn quote_upload(
     let paged_credits = |estimate: &IngestEstimate| {
         (estimate.credits.total_credits - estimate.credits.breakdown.features) + estimate.credits.breakdown.features
     };
-    let low = run(mixes.low, card.quote_low_mix)?;
-    let high = run(mixes.high, card.quote_high_mix)?;
+    let low = run(mixes.low, card.quote_low_mix, mixes.fast_low)?;
+    let high = run(mixes.high, card.quote_high_mix, mixes.fast_high)?;
     let fixed = card.fixed_overhead_seconds;
     let seconds = |wall: f64| if pages > 0.0 { 0f64.max(wall - fixed) + fixed } else { 0.0 };
     let mix_range = if mixes.known == 0 {

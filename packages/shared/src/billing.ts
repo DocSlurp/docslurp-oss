@@ -161,7 +161,7 @@ export function featurePagesRead(pages: number, charsRead: number, charsTotal: n
 }
 
 /** Stamped on billable events so a receipt says which price card charged it. */
-export const PRICE_CARD_VERSION = "2026-11-04";
+export const PRICE_CARD_VERSION = "2026-11-04b";
 
 /** Per dedicated machine, sold by sales, not self-serve. */
 export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;
@@ -915,6 +915,11 @@ export type IngestEstimateInput = {
   videoMinutes?: number;
   /** Optional per-document features to price (DOCUMENT_FEATURES); off unless set. */
   features?: Partial<Record<DocumentFeature, boolean>>;
+  /**
+   * Pages, beyond `pages`, that no model reads in any quality (Word, slide and sheet files: their text is extracted, never
+   * rendered for vision): billed Fast and timed as the Fast profile's text page, whatever `profile` is.
+   */
+  fastOnlyPages?: number;
 };
 
 export type IngestEstimate = {
@@ -958,7 +963,9 @@ function normalizeMix(mix: Partial<PageMix>): PageMix {
 export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
   const profile = PIPELINE_PROFILES[input.profile ?? "auto"];
   const workers = Math.max(1, Math.round(nonNegative(input.workerSlots ?? FUNDED_WORKER_SLOTS)) || FUNDED_WORKER_SLOTS);
-  const pages = Math.max(0, Math.round(nonNegative(input.pages)));
+  const mixPages = Math.max(0, Math.round(nonNegative(input.pages)));
+  const fastOnlyPages = Math.max(0, Math.round(nonNegative(input.fastOnlyPages)));
+  const pages = mixPages + fastOnlyPages;
   const documents = Math.max(1, Math.round(nonNegative(input.documents ?? 1)));
   const audioMinutes = Math.ceil(nonNegative(input.audioMinutes));
   const videoMinutes = Math.ceil(nonNegative(input.videoMinutes));
@@ -967,7 +974,7 @@ export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
   const totals = { workerSeconds: 0, fastPages: 0, richPages: 0, sourceBytes: 0, artifactBytes: 0, indexBytes: 0 };
   let slowestPageSeconds = 0;
   for (const pageClass of pageClassSchema.options) {
-    const count = pages * mix[pageClass];
+    const count = mixPages * mix[pageClass];
     if (count <= 0) continue;
     const cost = profile.pages[pageClass];
     totals.workerSeconds += count * cost.workerSeconds;
@@ -976,6 +983,15 @@ export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
     totals.sourceBytes += count * cost.sourceBytes;
     totals.artifactBytes += count * cost.artifactBytes;
     totals.indexBytes += count * cost.indexBytes;
+    slowestPageSeconds = Math.max(slowestPageSeconds, cost.workerSeconds);
+  }
+  if (fastOnlyPages > 0) {
+    const cost = PIPELINE_PROFILES.fast.pages.text;
+    totals.workerSeconds += fastOnlyPages * cost.workerSeconds;
+    totals.fastPages += fastOnlyPages;
+    totals.sourceBytes += fastOnlyPages * cost.sourceBytes;
+    totals.artifactBytes += fastOnlyPages * cost.artifactBytes;
+    totals.indexBytes += fastOnlyPages * cost.indexBytes;
     slowestPageSeconds = Math.max(slowestPageSeconds, cost.workerSeconds);
   }
   const mediaPages = mediaRichPages("audio", audioMinutes * 60) + mediaRichPages("video", videoMinutes * 60);

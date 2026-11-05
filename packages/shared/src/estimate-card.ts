@@ -26,6 +26,7 @@ import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { defaultPipelineFeatures } from "./pipeline.js";
 import {
   ASSUMED_BYTES_PER_PAGE,
+  FAST_ONLY_FORMATS,
   estimateProfileFor,
   QUOTE_HIGH_MIX,
   QUOTE_HIGH_RICH_OUTPUT_TOKENS,
@@ -52,7 +53,7 @@ export const ESTIMATE_CARD_SCHEMA = 2;
  * Version of the pricing formulas (quoteUpload, estimateIngest, estimateUploadMedia, the file-type rules). Bump it
  * with any change to them, so a port built for other rules refuses the card instead of quoting with stale logic.
  */
-export const ESTIMATE_RULES = 4;
+export const ESTIMATE_RULES = 5;
 
 function cardBody() {
   return {
@@ -82,6 +83,8 @@ function cardBody() {
       text: { minBytesPerPage: UNMEASURED_TEXT_MIN_BYTES_PER_PAGE, maxBytesPerPage: UNMEASURED_TEXT_MAX_BYTES_PER_PAGE },
       workerCounted: Object.fromEntries(Object.entries(UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE).map(([format, bytes]) => [format, { ...bytes }])),
       formats: workerCountedFormatTable(),
+      /** Of those, the formats no model reads in any quality (Word, slides, sheets): priced Fast at both ends of a quote. */
+      fastOnlyFormats: [...FAST_ONLY_FORMATS],
     },
     /** The high end of a quote counts each page a vision model reads as this many Rich pages (a dense page's typical output tokens). */
     quoteHighRichPageFactor: QUOTE_HIGH_RICH_PAGE_FACTOR,

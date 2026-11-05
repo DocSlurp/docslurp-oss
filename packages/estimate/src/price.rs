@@ -88,6 +88,10 @@ pub struct IngestInput {
     /// Optional per-document features to price (`documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`).
     #[serde(default)]
     pub features: BTreeMap<String, bool>,
+    /// Pages, beyond `pages`, that no model reads in any quality (Word, slide and sheet files): billed Fast and timed as the
+    /// Fast profile's text page, whatever `profile` is (`fastOnlyPages`).
+    #[serde(default)]
+    pub fast_only_pages: Option<f64>,
 }
 
 /// `Partial<PageMix>` as `estimateIngest` takes it.
@@ -169,7 +173,9 @@ pub fn estimate_ingest(card: &Card, input: &IngestInput) -> Result<IngestEstimat
     let profile = card.profile(profile_id)?;
     let slots = js_round(non_negative(Some(input.worker_slots.unwrap_or(card.funded_worker_slots))));
     let workers = 1f64.max(if slots == 0.0 || slots.is_nan() { card.funded_worker_slots } else { slots });
-    let pages = 0f64.max(js_round(non_negative(Some(input.pages))));
+    let mix_pages = 0f64.max(js_round(non_negative(Some(input.pages))));
+    let fast_only_pages = 0f64.max(js_round(non_negative(input.fast_only_pages)));
+    let pages = mix_pages + fast_only_pages;
     let documents = 1f64.max(js_round(non_negative(Some(input.documents.unwrap_or(1.0)))));
     let audio_minutes = non_negative(input.audio_minutes).ceil();
     let video_minutes = non_negative(input.video_minutes).ceil();
@@ -185,7 +191,7 @@ pub fn estimate_ingest(card: &Card, input: &IngestInput) -> Result<IngestEstimat
     let classes: [(f64, &PageCost); 3] =
         [(mix.text, &profile.text), (mix.complex, &profile.complex), (mix.scanned, &profile.scanned)];
     for (share, cost) in classes {
-        let count = pages * share;
+        let count = mix_pages * share;
         if count <= 0.0 {
             continue;
         }
@@ -197,6 +203,15 @@ pub fn estimate_ingest(card: &Card, input: &IngestInput) -> Result<IngestEstimat
         source_bytes += count * cost.source_bytes;
         artifact_bytes += count * cost.artifact_bytes;
         index_bytes += count * cost.index_bytes;
+        slowest_page_seconds = slowest_page_seconds.max(cost.worker_seconds);
+    }
+    if fast_only_pages > 0.0 {
+        let cost = &card.profile("fast")?.text;
+        worker_seconds += fast_only_pages * cost.worker_seconds;
+        fast_pages += fast_only_pages;
+        source_bytes += fast_only_pages * cost.source_bytes;
+        artifact_bytes += fast_only_pages * cost.artifact_bytes;
+        index_bytes += fast_only_pages * cost.index_bytes;
         slowest_page_seconds = slowest_page_seconds.max(cost.worker_seconds);
     }
     let media_pages = media_rich_pages(card, MediaKind::Audio, audio_minutes * 60.0)

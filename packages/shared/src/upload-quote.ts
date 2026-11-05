@@ -74,6 +74,19 @@ export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCou
 };
 
 /**
+ * Of those, the formats no model ever reads, in any quality: Word, legacy Office, OpenDocument, RTF, slide and sheet files have their
+ * text extracted and are never rendered for a vision model, so each of their pages bills Fast. A quote prices them Fast at both ends.
+ */
+export const FAST_ONLY_FORMATS: readonly WorkerCountedFormat[] = ["office-word", "office-other", "office-excel", "office-pptx"];
+
+/** Whether a file's pages bill Fast whatever the workspace's quality (FAST_ONLY_FORMATS), unless the client measured a page mix. */
+export function isFastOnlyFile(file: { name: string; type?: string | null; mix?: PageMix }): boolean {
+  if (file.mix && file.mix.text + file.mix.complex + file.mix.scanned > 0) return false;
+  const format = workerCountedFormat(file);
+  return format !== null && FAST_ONLY_FORMATS.includes(format);
+}
+
+/**
  * The MIME types and extensions that make a file one of those formats (the card ships them for ports that cannot import the table).
  * A MIME type the API counts as text (`text/rtf`) is left out: intake counts such a file from its text.
  */
@@ -294,10 +307,15 @@ function highMix(mix: PageMix, confidence: number): PageMix {
  * counts a file's fewest pages as cheap text; the high end its most pages with the scanned share read by vision, each such page
  * counting QUOTE_HIGH_RICH_PAGE_FACTOR times (a dense page's output tokens).
  */
-function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: PageMix; high: PageMix; known: number; unmeasured: number; rangeLow: number; rangeHigh: number } {
-  const known = files.filter((file) => knownMix(file)).length;
+function quoteMixes(files: readonly QuoteFile[], richFactor: number): {
+  low: PageMix; high: PageMix; fastLow: number; fastHigh: number; known: number; unmeasured: number; rangeLow: number; rangeHigh: number;
+} {
+  // A Word, slide or sheet file's pages are as known as a text file's: no model reads them.
+  const known = files.filter((file) => isFastOnlyFile(file) || knownMix(file)).length;
   const low: PageMix = { text: 0, complex: 0, scanned: 0 };
   const high: PageMix = { text: 0, complex: 0, scanned: 0 };
+  let fastLow = 0;
+  let fastHigh = 0;
   let unmeasured = 0;
   let rangeLow = 0;
   let rangeHigh = 0;
@@ -306,6 +324,12 @@ function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: Pag
     if (!range.measured) unmeasured += 1;
     rangeLow += range.low;
     rangeHigh += range.high;
+    // No model reads a Word, slide or sheet page in any quality: Fast at both ends, over its page range.
+    if (isFastOnlyFile(file)) {
+      fastLow += range.low;
+      fastHigh += range.high;
+      continue;
+    }
     const mix = knownMix(file);
     const fileLow = mix ? blendedMix(mix.mix, mix.confidence, QUOTE_LOW_MIX) : QUOTE_LOW_MIX;
     const fileHigh = mix ? highMix(mix.mix, mix.confidence) : QUOTE_HIGH_MIX;
@@ -316,7 +340,7 @@ function quoteMixes(files: readonly QuoteFile[], richFactor: number): { low: Pag
     high.complex += range.high * fileHigh.complex;
     high.scanned += range.high * fileHigh.scanned * richFactor;
   }
-  return { low, high, known, unmeasured, rangeLow, rangeHigh };
+  return { low, high, fastLow, fastHigh, known, unmeasured, rangeLow, rangeHigh };
 }
 
 /**
@@ -359,10 +383,12 @@ export function quoteUpload(args: {
   for (const feature of DOCUMENT_FEATURES) features[feature] = profile.documentFeatures[feature];
 
   // `mix` holds page counts; the pages priced are their sum, so each end of the range prices its own page count.
-  const run = (mix: PageMix, bound: Readonly<PageMix>) => {
+  const run = (mix: PageMix, bound: Readonly<PageMix>, fastOnly: number) => {
     const total = mix.text + mix.complex + mix.scanned;
+    const fastOnlyPages = Math.max(0, Math.round(fastOnly));
     return estimateIngest({
-      pages: total > 0 ? Math.max(0, Math.round(total)) : pages,
+      pages: total > 0 ? Math.max(0, Math.round(total)) : fastOnlyPages > 0 ? 0 : pages,
+      fastOnlyPages,
       documents: Math.max(1, documents),
       mix: total > 0 ? mix : { ...bound },
       profile: profile.quality as PipelineProfileId,
@@ -373,8 +399,8 @@ export function quoteUpload(args: {
   // Same arithmetic as estimatePipelineWork with every planned stage selected, so results match it bit for bit.
   const pagedCredits = (estimate: ReturnType<typeof estimateIngest>) =>
     (estimate.credits.totalCredits - estimate.credits.breakdown.features) + estimate.credits.breakdown.features;
-  const low = run(mixes.low, QUOTE_LOW_MIX);
-  const high = run(mixes.high, QUOTE_HIGH_MIX);
+  const low = run(mixes.low, QUOTE_LOW_MIX, mixes.fastLow);
+  const high = run(mixes.high, QUOTE_HIGH_MIX, mixes.fastHigh);
   const seconds = (wall: number) => (pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) + FIXED_OVERHEAD_SECONDS : 0);
   const mixRange = mixes.known === 0
     ? "range from all-text to every page read by vision"
