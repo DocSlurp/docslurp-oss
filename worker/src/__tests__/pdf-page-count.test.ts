@@ -237,4 +237,23 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     const billing = WorkflowState.create(await store.loadRun("run-e2e"), [(await store.loadDocument("e2e-pdf"))!, (await store.loadDocument("e2e-txt"))!]);
     expect((await recordPageBaseFee(sql, billing)).fastPages).toBe(9 + 2);
   }, 60_000);
+
+  it("with no PDF mode, a PDF fails at format-detect before any parser or download runs", async () => {
+    vi.stubEnv("DOCSLURP_PDF_MODE", "");
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "");
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('run-off', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 2);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+        values ('off-pdf', 'o1', 'u1', 'w1', 'run-off', 'h.pdf', 'application/pdf', 'raw/h', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}');`);
+    const storage = { putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`, downloadSourceToTempFile: vi.fn(), getBytes: vi.fn() } as unknown as ArtifactStore;
+    const host = runner("Pages: 2\n");
+    const state = WorkflowState.create(await store.loadRun("run-off"), [(await store.loadDocument("off-pdf"))!]);
+    state.store = store;
+    await new FormatDetectStage(storage, host).run(state);
+    expect(state.documentStage("off-pdf", "format-detect")?.status).toBe("failed");
+    expect(host.pdfInfo).not.toHaveBeenCalled();
+    expect(host.run).not.toHaveBeenCalled();
+    expect((storage as unknown as { downloadSourceToTempFile: ReturnType<typeof vi.fn> }).downloadSourceToTempFile).not.toHaveBeenCalled();
+  }, 60_000);
 });
