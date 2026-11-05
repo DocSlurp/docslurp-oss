@@ -58,3 +58,18 @@ for (const method of ["upload","extract"]) test(`${method} validates original in
   assert.equal(requests,0);
   assert.equal(reads,0);
 });
+
+test("batch search validates outer selectors before constructing its envelope", async () => {
+  let requests=0;
+  const client=createDocSlurpClient({project:"default-project",fetch:()=>{requests++;throw new Error("network must not run");}});
+  await assert.rejects(async()=>client.search({queries:[{q:"question"}],workspace:"intended"}),/Legacy workspace selection/);
+  await assert.rejects(async()=>client.search(Object.assign(Object.create({workspace:"intended"}),{queries:[{q:"question"}]})),/Legacy workspace selection/);
+  assert.equal(requests,0);
+});
+test("activity streaming does not discard a legacy project filter", async () => {
+  let requests=0;
+  const client=createDocSlurpClient({fetch:()=>{requests++;throw new Error("network must not run");}});
+  await assert.rejects(()=>client.streamActivity({workspaceId:"intended"}).next(),/Legacy workspace selection/);
+  await assert.rejects(()=>client.streamActivity(Object.create({workspaceId:"intended"})).next(),/Legacy workspace selection/);
+  assert.equal(requests,0);
+});

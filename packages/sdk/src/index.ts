@@ -1070,6 +1070,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    * cannot hold a stream open, poll getRunProgress or subscribe to webhooks.
    */
   async function* streamActivity(options: StreamActivityOptions = {}): AsyncGenerator<ActivityEvent> {
+    rejectLegacyProjectOptions(options);
     const projectByRun = new Map<string, string | null>();
     const types = options.types ? new Set(options.types) : null;
     for await (const frame of streamEventsAt("/v1/runs/activity/stream", { ...options, timeoutMs: options.timeoutMs ?? 3_600_000 })) {
@@ -1402,6 +1403,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function search(input: SearchInput, options?: RequestOptions): SearchRequest;
   function search(input: SearchBatchInput, options?: RequestOptions): Promise<SearchBatchResponse>;
   function search(input: SearchInput | SearchBatchInput, options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
+    rejectLegacyProjectOptions(input);
     if ("queries" in input) {
       if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
       const concurrency = input.concurrency ?? 4;
