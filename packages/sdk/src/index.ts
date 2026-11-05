@@ -937,7 +937,7 @@ function isStreamBody(body: unknown): boolean {
 }
 
 function rejectLegacyProjectOptions(input: object): void {
-  if (["workspace", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace"].some(key => Object.hasOwn(input, key))) {
+  if (["workspace", "workspaces", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace", "workspace_id", "workspace_ids"].some(key => Object.hasOwn(input, key))) {
     throw new Error("Legacy workspace selection is no longer supported; use project or newProject.");
   }
 }
@@ -2012,6 +2012,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 export type DocSlurpClient = ReturnType<typeof createDocSlurpClient>;
 
 function jsonRequest(method: string, body: unknown): RequestInit {
+  if (body && typeof body === "object" && !Array.isArray(body)) rejectLegacyProjectOptions(body);
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 

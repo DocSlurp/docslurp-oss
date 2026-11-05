@@ -13,6 +13,7 @@ test("legacy per-call selectors cannot become the default project", async () => 
 });
 
 const selectorCalls = [
+  ["createCapability", (client,input) => client.createCapability(input)],
   ["fullIndex", (client,input) => client.fullIndex(input)],
   ["fullIndexEstimate", (client,input) => client.fullIndexEstimate(input)],
   ["setRetention", (client,input) => client.setRetention(input,1)],
@@ -24,7 +25,7 @@ const selectorCalls = [
 for (const [name,call] of selectorCalls) test(`${name} rejects stale or mixed selectors before network or billed work`, async () => {
   let requests=0;
   const client=createDocSlurpClient({project:"default-project",fetch:async()=>{requests++;throw new Error("network must not run");}});
-  for (const field of ["workspace","workspaceId","workspaceIds","workspaceName","newWorkspace"]) {
+  for (const field of ["workspace","workspaces","workspaceId","workspaceIds","workspaceName","newWorkspace","workspace_id","workspace_ids"]) {
     await assert.rejects(async()=>call(client,{[field]:"intended-project"}),/Legacy workspace selection/);
     await assert.rejects(async()=>call(client,{project:"mine",[field]:"intended-project"}),/Legacy workspace selection/);
   }
