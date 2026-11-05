@@ -121,6 +121,8 @@ export class WorkflowState {
   pendingParserEvaluations: ParserEvaluation[];
   vectorIndexes: VectorIndex[];
   contentHashes: Map<string, string> = new Map();
+  /** The document whose extraction registered each content hash (checkDedup never serves a document its own attempt). */
+  contentHashOwners: Map<string, string> = new Map();
   runStages: Map<string, StageState>;
   documentStages: Map<string, Map<string, StageState>>;
   store?: CheckpointStore;

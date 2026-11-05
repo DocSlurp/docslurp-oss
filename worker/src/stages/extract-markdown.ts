@@ -397,7 +397,7 @@ export class ExtractMarkdownStage implements Stage {
 
               try {
                 const contentHash = cachedSource.sha256;
-                const existingUri = checkDedup(state, contentHash, artifactSlot);
+                const existingUri = checkDedup(state, contentHash, artifactSlot, document.id);
                 if (existingUri) {
                   const inheritedFailures = state.artifactLedger.read(`${OCR_FAILED_PAGES_KEY}:${contentHash}`);
                   if (inheritedFailures) state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, inheritedFailures);
@@ -917,7 +917,7 @@ export class ExtractMarkdownStage implements Stage {
                     format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
                     sandboxedRoute: hostPdfProbes === "skipped-sandboxed-route",
                   }, signal);
-                  registerHash(state, contentHash, artifactUri);
+                  registerHash(state, contentHash, artifactUri, document.id);
 
                   for (const parserArtifact of parserArtifacts) {
                     state.artifactLedger.recordDocument(

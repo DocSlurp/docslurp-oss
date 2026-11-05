@@ -309,6 +309,8 @@ export async function runDocumentStage(
           plausibilityScore: plausibilityDecision.plausibilityScore,
         });
         recordRetryCount(state, document.id, attempt.attempt);
+        // The rejected attempt's output must not be served by dedup, to this document's retry or to a copy of it.
+        releaseDocumentHashes(state, document.id);
         continue;
       }
 
@@ -451,9 +453,12 @@ export function hashContent(content: string | Buffer): string {
 export function checkDedup(
   state: WorkflowState,
   contentHash: string,
-  artifactSlot: string
+  artifactSlot: string,
+  /** The document asking. An entry its own earlier attempt registered is never reused: a retry runs the next extractor. */
+  documentId?: string,
 ): string | undefined {
   const existing = state.contentHashes.get(contentHash);
+  if (existing && documentId !== undefined && state.contentHashOwners.get(contentHash) === documentId) return undefined;
   if (existing) {
     state.artifactLedger.record(artifactSlot, existing);
     return existing;
@@ -464,9 +469,24 @@ export function checkDedup(
 export function registerHash(
   state: WorkflowState,
   contentHash: string,
-  artifactUri: string
+  artifactUri: string,
+  documentId?: string,
 ): void {
   state.contentHashes.set(contentHash, artifactUri);
+  if (documentId !== undefined) state.contentHashOwners.set(contentHash, documentId);
+  else state.contentHashOwners.delete(contentHash);
+}
+
+/**
+ * Withdraw the content hashes a document's attempt registered: its output was rejected (low plausibility) and the stage
+ * retries, so no other document with the same bytes may reuse it either.
+ */
+export function releaseDocumentHashes(state: WorkflowState, documentId: string): void {
+  for (const [hash, owner] of state.contentHashOwners) {
+    if (owner !== documentId) continue;
+    state.contentHashes.delete(hash);
+    state.contentHashOwners.delete(hash);
+  }
 }
 
 export function skipCompletedPages(completedPages: Set<number>, pageNumbers: number[]): number[] {
