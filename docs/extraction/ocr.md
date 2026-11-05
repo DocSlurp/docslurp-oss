@@ -92,7 +92,9 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 - `DOCSLURP_OCR_ESCALATION=on` turns it on; it is off unless set. The model must be a hosted, priced route
   (DeepInfra, OpenRouter or OpenAI); a local or private one is refused.
 - It has its own per-document page budget (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`, default 25), its own ledger entries,
-  the run's cost cap, the workspace privacy mode and the run's vision attempt guard.
+  the run's cost cap, the workspace privacy mode and the run's vision attempt guard. The budget counts the document's
+  pages in the guard's durable attempt ledger (`vision_run_attempts`, purpose `ocr`), so an activity retry or a worker
+  restart does not reset it.
 - It reads the PNG the OCR boundary wrote. The host produces no image for it.
 - A skipped or failed escalation keeps the recogniser's text. Escalation never stands in for a missing VM.
 
@@ -100,12 +102,20 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 
 ## Billing and usage
 
-- Every page OCR read with words in it is one Rich page read, metric `page-ocr`, charged once per run, document and
-  page, so a retry or a second reader does not charge it twice.
+- An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
+  (owner decision, 2026-11-05). The VM costs the same for a blank frame.
+- A scanned PDF page: one Rich page read only when the read found words.
+- Each charge is keyed by run, document and page, so a retry or a second reader does not charge it twice.
+- A TIFF's frames are its pages: the frames read become `documents.page_count`. A TIFF with more than 64 frames (the
+  job's frame cap) is refused before anything is charged, with the public error `imageTooManyFrames`.
 - Each job records one compute event (`ocr-compute`) with the boundary's measured CPU, peak RSS and wall time. A VM
-  provider's own cost arrives separately, at provider cost.
+  provider's own cost arrives separately, at provider cost. Remote usage outside a stage context has no usage ledger:
+  it is logged as `[usage-unrecorded]` and counted on `docslurp.usage.unrecorded`, never dropped silently.
 - Escalation reads are recorded as `ocr-escalation`, and `hosted` mode reads as `hosted-ocr`, each with the provider's
-  actual input and output tokens and cost.
+  actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
+  (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
+  cost is still recorded.
+- Quotes price a TIFF at its frames, up to 64 ([Pricing and credits](../pricing-and-credits.md#quotes-for-tiff-files)).
 
 ## Host phases outside OCR
 

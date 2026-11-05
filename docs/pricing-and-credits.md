@@ -75,12 +75,20 @@ from the last hour. Runs longer than six hours are judged on their recent usage.
 | Quality | Billing | Per 1,000 pages |
 | --- | --- | --- |
 | `fast` | Text layer only. Pages without one keep their page image and are never OCR'd or read by a model. Billing comes from the usage ledger (`remainingFastPages` in `worker/src/db/page-base-fee.ts`), never from the best-effort page facts: a page bills Rich only when a vision or OCR model read it and that read was recorded for the run (charged as it was read), and every other page bills Fast. A workspace cannot combine Fast with visual indexing mode, which embeds page images and bills them Rich. | $0.05 |
-| `auto` (default) | A page bills Rich only when a vision or OCR model read that page's content: a scanned PDF page the extractor OCR'd, an uploaded image read by OCR, a page a vision model read. Each such page is recorded on the usage ledger once per run, and every other page, an unread scan or image included, bills Fast. A local caption of a photo on the page (the image labeler, metric `image-label`) does not read the page's text: it is recorded at its compute cost and the page stays Fast. | $0.05 to $2.50 |
+| `auto` (default) | A page bills Rich only when a vision or OCR model read that page's content: a scanned PDF page the extractor OCR'd and found words on, every frame of an uploaded image the OCR engine read (with or without text), a page a vision model read. Each such page is recorded on the usage ledger once per run, and every other page, an unread scan or image included, bills Fast. A local caption of a photo on the page (the image labeler, metric `image-label`) does not read the page's text: it is recorded at its compute cost and the page stays Fast. | $0.05 to $2.50 |
 | `good` | Vision reads every page (Good turns `visionFallback` on), so every page it reads bills Rich, plus `richPagesForOutputTokens` for long output (one more Rich page per 1,000 output tokens past the first 1,000, summed over the models that read the page: OCR then vision is one page plus the vision output's surcharge). A run cost cap can stop vision early; pages it did not read bill as in Auto. On-demand materialization reads every page with vision too. | $2.50 |
 
 `PIPELINE_PROFILES` (the `estimateIngest` page-class model) is keyed by the same ids, so estimator ranges match the
 catalog: `billing.test.ts` checks every mix stays inside its mode's range. A quality picker shows
 `qualityModePriceRange(mode)`. Parser playbooks are internal (`parserPlaybookForQuality`).
+
+## OCR reads
+
+- **Uploaded images:** every frame the OCR engine reads bills one Rich page (0.25 credits), whether or not it found text. A blank photo still costs the OCR VM's run. Before 2026-11-05 a frame without words billed nothing.
+- **Scanned PDF pages:** a page OCR read bills Rich only when the read found words; a blank page bills Fast at completion.
+- **Escalation** (`ocr-escalation`, a hosted second read of a page the recogniser read poorly): at most one Rich page per page, whatever its output length. Its output tokens never add Rich pages, and a page the recogniser already charged stays one page. An escalation that returns no text charges nothing. Its provider cost is recorded either way, for the loss alert.
+- **TIFF frames:** each frame is a page. The frames read become `documents.page_count`, so page rows, citations and the bill agree: a 7-frame fax is 7 Rich pages, 1.75 credits. Intake marks a TIFF's count `assumed` until then. A TIFF with more than 64 frames is refused before anything is charged (public error `imageTooManyFrames`); split it or upload a PDF.
+- **Runs in flight at a cutover:** `startRun` pins the run's page billing rules (`run:page-billing-rules`, the `PRICE_CARD_VERSION`). A run without the pin was started by an earlier release and keeps that release's completion rule: image files and pages the page facts show as scans bill Rich at completion (`rich-scan:<run>`), less the pages a per-read charge already covered.
 
 ## Which pages a document bills
 
@@ -103,7 +111,11 @@ The optional features that read text bill what their model read, not the page co
 
 ## Quotes for Word, slide and sheet files
 
-No model reads a Word, legacy Office, OpenDocument, RTF, slide or sheet page in any quality: their text is extracted, never rendered for vision. A quote (`quoteUpload`, and the offline estimator's port) prices their pages Fast at both ends, in Fast, Auto and Good alike (`FAST_ONLY_FORMATS`, `fastOnlyPages` in `estimateIngest`; estimate rules 5). A 300-page DOCX in a Good workspace was quoted at 75 credits; it is quoted, and bills, 1.5. EPUB is quoted as before. Structured fields and the knowledge graph bill at least the pages of text read; the quote knows characters only for text files, whose pages already count them (3,500 characters a page).
+No model reads a Word, legacy Office, OpenDocument, RTF, slide or sheet page in any quality: their text is extracted, never rendered for vision. A quote (`quoteUpload`, and the offline estimator's port) prices their pages Fast at both ends, in Fast, Auto and Good alike (`FAST_ONLY_FORMATS`, `fastOnlyPages` in `estimateIngest`). A 300-page DOCX in a Good workspace was quoted at 75 credits; it is quoted, and bills, 1.5. A page mix the client sends does not change this (estimate rules 6): a 30-page DOCX sent with an all-scanned mix was quoted 7.5 to 15 credits in Good; it is quoted 0.15, what it bills.
+
+## Quotes for TIFF files
+
+A TIFF is quoted at its frames, up to 64 (`IMAGE_MAX_FRAMES`, card `multiFrameImages`; estimate rules 6). The offline estimator reads a TIFF whole (up to 64 MB) and counts its frames from the image directory chain. A file over 64 frames is quoted at 64 and the quote's basis says it will be refused. An uncounted TIFF is quoted from 1 frame to its size at 16 KB a frame, at most 64. Each frame is priced as a scanned page. EPUB is quoted as before. Structured fields and the knowledge graph bill at least the pages of text read; the quote knows characters only for text files, whose pages already count them (3,500 characters a page).
 
 ## Aggregate search answers
 
