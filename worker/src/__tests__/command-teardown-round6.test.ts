@@ -197,7 +197,7 @@ describe("M1: a provider that cannot filter UNIX sockets refuses the commands th
   });
 
   it("socketless tools are denied UNIX sockets by default; audited socket clients are not", () => {
-    for (const binary of ["pdftoppm", "/usr/bin/pdfinfo", "qpdf", "tesseract", "pandoc", "unrtf", "catdoc", "tiffcp", "clamscan", "some-new-tool"]) {
+    for (const binary of ["pdftoppm", "/usr/bin/pdfinfo", "qpdf", "pdftotext", "pandoc", "unrtf", "catdoc", "tiffcp", "clamscan", "some-new-tool"]) {
       expect(deniesUnixSockets({ binary }), binary).toBe(true);
     }
     for (const binary of ["clamdscan", "soffice", "/opt/venv/bin/python3", "python3.13", "node", "docling", "kreuzberg"]) {

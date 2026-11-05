@@ -114,7 +114,7 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
       inputTokens: 900, outputTokens: 300, metadata: { documentId: "a-pdf", pageNumber: 2 },
     });
     // The image file was read by OCR (extract-markdown records it like any read).
-    reading.usageLedger.chargeRichPage({ documentId: "a-png", pageNumber: 1, readBy: "image-ocr" });
+    reading.usageLedger.chargeRichPage({ documentId: "a-png", pageNumber: 1, readBy: "page-ocr" });
     // A read recorded for a page the document does not have must not cancel a real page's Fast charge.
     reading.usageLedger.chargeRichPage({ documentId: "a-pdf", pageNumber: 99, readBy: "page-analysis" });
     const batch = reading.usageLedger.checkpoint();

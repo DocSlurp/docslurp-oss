@@ -1,42 +1,55 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { Writable } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES, defaultPipelineFeatures, publicDocumentError } from "@docslurp/shared";
+import { defaultPipelineFeatures, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
 
+import { documentExtractorRegistry } from "../extractors/registry.js";
+import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import type { Document, WorkspaceRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
-import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
+import { ExtractMarkdownStage, OCR_PDF_BATCH_PAGES } from "../stages/extract-markdown.js";
+import { fakeOcrRunner, type FakeFrame } from "../test/fake-ocr.js";
 import type { CommandRunner } from "../tools/runner.js";
 
-const KREUZBERG_OCR_CRASH =
-  "kreuzberg=Error: node (1): Error opening data file /home/runner/work/kreuzberg-lts/target/kreuzberg-tesseract-cache/tessdata/eng.traineddata";
+/*
+ * Images are read only by the OCR engine (the `ocr` extractor, in the configured boundary), and scanned PDF pages are
+ * filled by it. A refused or failed OCR read fails the document: hosted vision is never a stand-in, and Fast never OCRs.
+ */
 
-function createRun(pipeline: Record<string, unknown> = {}): WorkspaceRun {
+function createRun(pipeline: Record<string, unknown> = {}, pagesTotal = 1): WorkspaceRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
-    totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
+    totalDocuments: 1, processedDocuments: 0, pagesTotal, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, ...pipeline },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
   } as WorkspaceRun;
 }
 
-function createDocument(filename: string, mimeType: string): Document {
+function createDocument(filename: string, mimeType: string, pageCount: number): Document {
   return {
     id: "doc-1", userId: "user-1", runId: "run-1", filename, mimeType,
-    sourceKey: `raw/${filename}`, status: "processing", extractionMode: "hybrid", pageCount: 1,
+    sourceKey: `raw/${filename}`, status: "processing", extractionMode: "hybrid", pageCount,
     createdAt: new Date(), updatedAt: new Date(),
   } as Document;
 }
 
-/** The stage's real control flow, with storage in memory and each extractor replaced by `extract`. */
+/** Labels whose real executor runs (the in-process stand-in, and the OCR extractor against the fake boundary). */
+const REAL_EXECUTORS = new Set(["image-textless", "ocr"]);
+
+/** The stage's real control flow, with storage in memory, a fake OCR boundary, and other extractors replaced by `extract`. */
 async function harness(args: {
   format: "image" | "pdf";
   /** Overrides the document MIME type (default image/png or application/pdf by format). */
   mimeType?: string;
+  filename?: string;
+  pageCount?: number;
   pipeline?: Record<string, unknown>;
   extract?: (label: string) => Promise<{ text: string }>;
+  /** What the fake OCR boundary reads for a job. */
+  frames?: (job: SandboxedOcrJob) => FakeFrame[];
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-image-ocr-test-"));
   const attempted: string[] = [];
@@ -48,62 +61,261 @@ async function harness(args: {
     putBytes: async (key: string, data: Uint8Array) => { objects.set(key, Buffer.from(data)); },
     putJson: async (key: string, value: unknown) => { manifests.set(key, value); },
     streamText: async (key: string, text: string) => { objects.set(key, Buffer.from(text)); },
+    createMultipartUploadStream: (key: string) => {
+      const chunks: Buffer[] = [];
+      let resolveDone!: () => void;
+      const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+      return {
+        writable: new Writable({
+          write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk)); callback(); },
+          final(callback) { objects.set(key, Buffer.concat(chunks)); resolveDone(); callback(); },
+        }),
+        done,
+      };
+    },
   };
+  const ocr = fakeOcrRunner(args.frames ?? ((job) => (job.pages ?? [1]).map((frame) => ({ frame, text: `OCR page ${frame}` }))));
   const runner = {
+    ...ocr.runner,
     sandboxedPdfMarkdown: async () => ({ binary: "test-vm", args: [], available: true }),
-    kreuzbergMarkdown: async (_source: string, _output: string, configJson?: string) => {
+    kreuzbergMarkdown: vi.fn(async (_source: string, _output: string, configJson?: string) => {
       configs.kreuzberg = configJson;
       return { binary: "node", args: [], available: true };
-    },
+    }),
     dolphinMarkdown: async (_source: string, _output: string, configJson?: string) => {
       configs.dolphin = configJson;
       return { binary: "python", args: [], available: true };
     },
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
-  } as unknown as CommandRunner;
+  } as unknown as CommandRunner & typeof ocr.runner;
   const stage = new ExtractMarkdownStage(runner, storage as any, {} as any);
   const internals = stage as any;
-  const sourcePath = path.join(scratch, args.format === "image" ? "scanned-memo.png" : "scan.pdf");
+  const filename = args.filename ?? (args.format === "image" ? "scanned-memo.png" : "scan.pdf");
+  const sourcePath = path.join(scratch, filename);
   await writeFile(sourcePath, "bytes");
   internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-doc-1" }) };
   internals.recordSourcePageFacts = async () => undefined;
   internals.buildParserArtifacts = async () => [];
+  internals.recordPageImageEvidence = async () => null;
   internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;
   const realExtractCandidate = internals.extractCandidate.bind(stage);
   internals.extractCandidate = async (extractor: { label: string }, textKey: string, ...rest: unknown[]) => {
-    // The textless stand-in is the stage's own in-process code, not an external parser to fake.
-    if (extractor.label === "image-textless") return await realExtractCandidate(extractor, textKey, ...rest);
     attempted.push(extractor.label);
-    const { text } = await (args.extract ?? (async () => { throw new Error(KREUZBERG_OCR_CRASH); }))(extractor.label);
+    if (REAL_EXECUTORS.has(extractor.label)) return await realExtractCandidate(extractor, textKey, ...rest);
+    const { text } = await (args.extract ?? (async () => { throw new Error("no text-layer extractor expected"); }))(extractor.label);
     const tempTextPath = path.join(scratch, `${extractor.label}.md`);
     await writeFile(tempTextPath, text);
     return { label: extractor.label, plan: (extractor as any).plan, textKey, textUri: `s3://test/${textKey}`, tempTextPath };
   };
-  const document = args.mimeType
-    ? createDocument(args.format === "pdf" ? "scan.pdf" : "scan.png", args.mimeType)
-    : args.format === "image"
-      ? createDocument("scanned-memo.png", "image/png")
-      : createDocument("scan.pdf", "application/pdf");
-  const state = WorkflowState.create(createRun(args.pipeline), [document]);
+  const pageCount = args.pageCount ?? 1;
+  const mimeType = args.mimeType ?? (args.format === "image" ? "image/png" : "application/pdf");
+  const document = createDocument(filename, mimeType, pageCount);
+  const state = WorkflowState.create(createRun(args.pipeline, pageCount), [document]);
+  state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
+  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich");
   return {
-    stage, state, attempted, configs, objects, manifests,
+    stage, state, attempted, configs, objects, manifests, runner, jobs: ocr.jobs, richEvents,
+    richIds: () => richEvents().map((event) => event.id),
     checkpoint: () => state.documentStage("doc-1", "extract-markdown"),
+    text: () => [...objects.entries()].filter(([key]) => key.endsWith(".md")).map(([, bytes]) => bytes.toString("utf8")),
     cleanup: () => rm(scratch, { recursive: true, force: true }),
   };
 }
 
-describe("image documents whose OCR cannot run", () => {
-  afterEach(() => vi.unstubAllEnvs());
+beforeEach(() => {
+  // Escalation is a separate concern (ocr/__tests__); these cases read with the recogniser alone.
+  vi.stubEnv("DOCSLURP_OCR_ESCALATION", "off");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+
+describe("image documents are read by the OCR extractor", () => {
+  it("routes an image to the ocr extractor and bills page-ocr once for the frame with words", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "image", frames: () => [{ frame: 1, text: "Invoice total 4200" }] });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.attempted).toEqual(["ocr"]);
+      expect(h.runner.kreuzbergMarkdown).not.toHaveBeenCalled();
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]).toMatchObject({ kind: "image", recognisers: expect.any(Array) });
+      expect(h.jobs[0]!.pages).toBeUndefined();
+      expect(h.text()).toContain("Invoice total 4200");
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1"]);
+      expect(h.richEvents()[0]?.metadata).toMatchObject({ readBy: "page-ocr" });
+    } finally { await h.cleanup(); }
+  });
+
+  it("yields one page per frame of a multi-frame TIFF and charges only frames with words", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "image", filename: "fax.tiff", mimeType: "image/tiff", pageCount: 3,
+      frames: () => [{ frame: 1, text: "Cover sheet" }, { frame: 2, text: "   " }, { frame: 3, text: "Signed by Ada" }],
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs).toHaveLength(1);
+      expect(h.text()).toContain("Cover sheet\f   \fSigned by Ada");
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:3"]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("fails an image when OCR is off instead of routing it to vision", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "off");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const h = await harness({ format: "image" });
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.checkpoint();
+      expect(checkpoint?.status).toBe("failed");
+      expect(checkpoint?.error).toMatch(/no untried extractor remains for image/);
+      expect(h.attempted).not.toContain("image-textless");
+      expect(h.runner.run).not.toHaveBeenCalled();
+      expect(h.runner.sandboxedOcrRead).not.toHaveBeenCalled();
+      expect([...h.manifests.values()].some((value) => value?.needsVision === true)).toBe(false);
+      expect(error.mock.calls.flat().join(" ")).toMatch(/\[ocr\] image-unread document=doc-1 mode=off/);
+      // The stored diagnostic never reaches users.
+      expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.processing);
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("fails an image when the VM read fails, with no vision stand-in and nothing billed", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "image" });
+    h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.checkpoint();
+      expect(checkpoint?.status).toBe("failed");
+      expect(checkpoint?.error).toMatch(/no extractor produced output|no untried extractor remains/);
+      expect(h.attempted.every((label) => label === "ocr")).toBe(true);
+      expect(h.attempted).not.toContain("image-textless");
+      expect([...h.manifests.values()].some((value) => value?.needsVision === true)).toBe(false);
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("fails an image whose OCR result is malformed", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "image" });
+    h.runner.run.mockImplementation(async (plan: any) => {
+      await writeFile(plan.sandboxedOcr.output, "{not json");
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("failed");
+      expect(h.attempted).not.toContain("image-textless");
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("makes Kreuzberg's prepared plan unavailable for images", async () => {
+    const runner = { kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }) } as unknown as CommandRunner;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const byFormat = await documentExtractorRegistry.prepare("kreuzberg", runner, "/scratch/source.bin", undefined, { format: "image" } as any);
+    expect(byFormat.plan.available).toBe(false);
+    const byExtension = await documentExtractorRegistry.prepare("kreuzberg", runner, "/scratch/scan.TIFF");
+    expect(byExtension.plan.available).toBe(false);
+    const pdf = await documentExtractorRegistry.prepare("kreuzberg", runner, "/scratch/scan.pdf", undefined, { format: "pdf" } as any);
+    expect(pdf.plan.available).toBe(true);
+    expect(warn.mock.calls.flat().join(" ")).toContain("kreuzberg refused an image input");
+  });
+
+  it("makes the ocr extractor unavailable when OCR is off", async () => {
+    const off = await documentExtractorRegistry.prepare("ocr", {} as CommandRunner, "/scratch/scan.png", undefined, { format: "image", env: { DOCSLURP_OCR_MODE: "off" } } as any);
+    expect(off.plan.available).toBe(false);
+    const vm = await documentExtractorRegistry.prepare("ocr", {} as CommandRunner, "/scratch/scan.png", undefined, { format: "image", env: { DOCSLURP_OCR_MODE: "vm" } } as any);
+    expect(vm.plan.available).toBe(true);
+  });
+});
+
+describe("scanned PDF pages are filled by the OCR engine", () => {
+  it("reads exactly the empty pages in one pdf job and bills each once", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 4,
+      extract: async () => ({ text: "Native text layer page\f\fThird page native\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2, 4] });
+      expect(h.text().some((text) => text === "Native text layer page\fScanned words 2\fThird page native\fScanned words 4")).toBe(true);
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
+      expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
+    } finally { await h.cleanup(); }
+  });
+
+  it(`reads a long scan in batches of ${OCR_PDF_BATCH_PAGES} pages`, async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const pageCount = 41;
+    // Page 1 has a text layer; pages 2..41 (40 pages) are scans.
+    const h = await harness({
+      format: "pdf", pageCount,
+      extract: async () => ({ text: ["Native page", ...Array.from({ length: pageCount - 1 }, () => "")].join("\f") + "\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scan ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs.map((job) => job.pages)).toEqual([
+        Array.from({ length: 32 }, (_, i) => i + 2),
+        Array.from({ length: 8 }, (_, i) => i + 34),
+      ]);
+      expect(h.jobs.every((job) => job.kind === "pdf")).toBe(true);
+      const ids = h.richIds();
+      expect(ids).toHaveLength(40);
+      expect(new Set(ids).size).toBe(40);
+      expect(ids).not.toContain("rich:run-1:doc-1:1");
+    } finally { await h.cleanup(); }
+  });
+
+  it("fails the document when the VM read fails during scan fill", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
+    h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("failed");
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  for (const mode of ["off", "hosted"] as const) {
+    it(`leaves scanned pages unread with an error log and no OCR call when DOCSLURP_OCR_MODE=${mode}`, async () => {
+      vi.stubEnv("DOCSLURP_OCR_MODE", mode);
+      const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const h = await harness({ format: "pdf", pageCount: 3, extract: async () => ({ text: "Native\f\f\f" }) });
+      try {
+        await h.stage.run(h.state);
+        expect(h.checkpoint()?.status).toBe("completed");
+        expect(h.attempted).toEqual(["kreuzberg"]);
+        expect(h.runner.run).not.toHaveBeenCalled();
+        expect(h.runner.sandboxedOcrRead).not.toHaveBeenCalled();
+        expect(h.runner.localOcrRead).not.toHaveBeenCalled();
+        expect(error.mock.calls.flat().join(" ")).toMatch(new RegExp(`\\[ocr\\] scanned-pages-unread document=doc-1 pages=2 mode=${mode}`));
+        expect(h.richIds()).toEqual([]);
+      } finally { await h.cleanup(); }
+    });
+  }
 
   it("keeps an empty VM PDF scan healthy and skips implicit native enrichment", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_PDF_ENGINE", "shadow");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
     const h = await harness({ format: "pdf", extract: async () => ({ text: "" }) });
     const internals = h.stage as any;
     const payload = vi.fn(async () => { throw new Error("must not parse on host"); });
     internals.buildParserArtifacts = payload;
-    internals.recordPageImageEvidence = async () => null;
     try {
       await h.stage.run(h.state);
       expect(h.attempted).toEqual(["vm-pdf"]);
@@ -115,89 +327,44 @@ describe("image documents whose OCR cannot run", () => {
     } finally { await h.cleanup(); }
   });
 
-  it("continues to vision when Tesseract data is missing, without attempting Kreuzberg OCR", async () => {
-    vi.stubEnv("DOCSLURP_OCR", "off");
-    const h = await harness({ format: "image" });
-    try {
-      await h.stage.run(h.state);
-
-      expect(h.attempted).not.toContain("kreuzberg");
-      expect(h.checkpoint()?.status).toBe("completed");
-      const manifest = [...h.manifests.values()].find((value) => value?.needsVision !== undefined);
-      expect(manifest).toMatchObject({ needsVision: true, textlessFallback: expect.stringContaining("OCR") });
-      expect([...h.objects.values()].every((bytes) => bytes.length === 0)).toBe(true);
-    } finally { await h.cleanup(); }
-  });
-
-  it("does not fail the document when Kreuzberg's bundled OCR crashes on missing language data", async () => {
-    vi.stubEnv("DOCSLURP_OCR", "on");
-    const h = await harness({ format: "image" });
-    try {
-      await h.stage.run(h.state);
-
-      expect(h.attempted).toEqual(["kreuzberg"]);
-      expect(h.checkpoint()?.status).toBe("completed");
-      expect(h.checkpoint()?.status).not.toBe("failed");
-      const manifest = [...h.manifests.values()].find((value) => value?.needsVision !== undefined);
-      expect(manifest).toMatchObject({ needsVision: true, textlessFallback: expect.stringContaining("Error opening data file") });
-    } finally { await h.cleanup(); }
-  });
-
-  it("fails with a specific, user-facing cause when vision is turned off for the workspace", async () => {
-    vi.stubEnv("DOCSLURP_OCR", "off");
-    const h = await harness({ format: "image", pipeline: { visionFallback: false } });
-    try {
-      await h.stage.run(h.state);
-
-      const checkpoint = h.checkpoint();
-      expect(checkpoint?.status).toBe("failed");
-      expect(checkpoint?.error).toContain(DOCUMENT_FAILURE_MARKERS.imageNeedsVision);
-      expect(checkpoint?.error).not.toMatch(/^no extractor produced output/);
-      expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageNeedsVision);
-    } finally { await h.cleanup(); }
-  });
-
-  it("fails with the same cause, keeping the raw diagnostic, when privacy mode forbids the hosted vision route", async () => {
-    vi.stubEnv("DOCSLURP_OCR", "on");
-    const h = await harness({ format: "image", pipeline: { privacyMode: "strict-privacy" } });
-    try {
-      await h.stage.run(h.state);
-
-      const checkpoint = h.checkpoint();
-      expect(checkpoint?.status).toBe("failed");
-      expect(checkpoint?.error).toContain(DOCUMENT_FAILURE_MARKERS.imageNeedsVision);
-      expect(checkpoint?.error).toContain("Error opening data file");
-      expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageNeedsVision);
-    } finally { await h.cleanup(); }
-  });
-
   it("still reports other extractor failures for formats that have a text layer", async () => {
-    vi.stubEnv("DOCSLURP_OCR", "off");
     const h = await harness({ format: "pdf", extract: async () => { throw new Error("pdftotext: unreadable cross-reference table"); } });
     try {
       await h.stage.run(h.state);
-
       const checkpoint = h.checkpoint();
       expect(checkpoint?.status).toBe("failed");
       expect(checkpoint?.error).toMatch(/no extractor produced output|no untried extractor remains/);
-      expect(checkpoint?.error).not.toContain(DOCUMENT_FAILURE_MARKERS.imageNeedsVision);
-    } finally { await h.cleanup(); }
-  });
-
-  it("lets a scanned PDF through the text-layer path with OCR unavailable, since Kreuzberg only OCRs images unless asked", async () => {
-    vi.stubEnv("DOCSLURP_OCR", "off");
-    const h = await harness({ format: "pdf", extract: async () => ({ text: "" }) });
-    try {
-      await h.stage.run(h.state);
-
-      expect(h.attempted).toEqual(["kreuzberg"]);
-      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.runner.run).not.toHaveBeenCalled();
     } finally { await h.cleanup(); }
   });
 });
 
 describe("quality fast extraction is text-layer only", () => {
-  afterEach(() => vi.unstubAllEnvs());
+  it("keeps an image unread and never calls OCR", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ format: "image", pipeline: { quality: "fast" } });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.attempted).toEqual(["image-textless"]);
+      expect(h.runner.sandboxedOcrRead).not.toHaveBeenCalled();
+      expect(h.runner.run).not.toHaveBeenCalled();
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("never fills scanned PDF pages with OCR", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ format: "pdf", pageCount: 2, pipeline: { quality: "fast" }, extract: async () => ({ text: "Native\f\f" }) });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.runner.run).not.toHaveBeenCalled();
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
 
   it("drops request OCR options and model extractors, and passes Kreuzberg disableOcr", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -226,18 +393,20 @@ describe("quality fast extraction is text-layer only", () => {
   // An image/* MIME the format map does not know falls back to the filename: "scan.pdf" uploaded as image/gif
   // detects as pdf. Billing and render-images treat it as an image, so extraction must keep it unread too.
   it("keeps an image/* MIME the format map does not know unread instead of OCRing it", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const h = await harness({ format: "pdf", mimeType: "image/gif", pipeline: { quality: "fast" }, extract: async () => ({ text: "OCR TEXT" }) });
     try {
       await h.stage.run(h.state);
-      expect(h.attempted).toEqual([]);
+      expect(h.attempted).toEqual(["image-textless"]);
+      expect(h.runner.run).not.toHaveBeenCalled();
       expect(h.checkpoint()?.status).toBe("completed");
     } finally {
       await h.cleanup();
     }
   });
 
-  it("still OCRs that MIME under auto", async () => {
+  it("still extracts that MIME under auto", async () => {
     const h = await harness({ format: "pdf", mimeType: "image/gif", extract: async () => ({ text: "OCR TEXT" }) });
     try {
       await h.stage.run(h.state);

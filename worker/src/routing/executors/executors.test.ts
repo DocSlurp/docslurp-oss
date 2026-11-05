@@ -18,7 +18,7 @@ const hosted = catalog.filter((t) => t.kind === "hosted-vlm" && t.roles.includes
 const strong = hosted[0] as RoutingTarget;
 const cheap = catalog.find((t) => t.kind === "hosted-vlm" && !t.roles.includes("chart-data")) as RoutingTarget;
 const florence = byId("local:florence-2-small");
-const tesseract = byId("ocr:tesseract");
+const ppocr = byId("ocr:ppocr");
 const nativeText = byId("native:pdf-text");
 const kreuzberg = byId("native:kreuzberg");
 const accept = byId("native:accept-text-layer");
@@ -55,7 +55,7 @@ function fakeDeps(over: Partial<ExecutorDeps> = {}) {
       calls.push(`crop:${r.path}:${box.x},${box.y}`);
       return await fn({ path: `${r.path}.crop.png`, mimeType: "image/png" });
     }),
-    ocr: vi.fn(async (r) => ({ text: `ocr of ${r.path}`, latencyMs: 40, model: "tesseract" })),
+    ocr: vi.fn(async (r) => ({ text: `ocr of ${r.path}`, latencyMs: 40, model: "ppocr-v6-small" })),
     label: vi.fn(async (r) => ({ text: `a photo (${r.path})`, latencyMs: 90, model: "florence" })),
     vlm: vi.fn(async ({ target, role, raster, pageNumber }) => vlmOut(pageNumber, `${role} via ${target.id} on ${raster.path}`)),
     ...over,
@@ -65,10 +65,10 @@ function fakeDeps(over: Partial<ExecutorDeps> = {}) {
 
 describe("executor registry", () => {
   it("maps every seeded target kind to an executor and leaves unknown ids unexecutable", () => {
-    for (const t of [accept, nativeText, kreuzberg, tesseract, florence, strong, cheap, byId("skip")]) {
+    for (const t of [accept, nativeText, kreuzberg, ppocr, florence, strong, cheap, byId("skip")]) {
       expect(executorFor(t), t.id).not.toBeNull();
     }
-    expect(executorFor({ ...tesseract, id: "ocr:mystery", kind: "local-ocr" })).toBeNull();
+    expect(executorFor({ ...ppocr, id: "ocr:mystery", kind: "local-ocr" })).toBeNull();
     expect(executorFor(undefined)).toBeNull();
   });
 
@@ -92,7 +92,7 @@ describe("executor registry", () => {
     const res = await executeAssignments([
       { assignment: asg(2, strong.id, "chart-data", { kind: "image", imageIndex: 0, bbox }), index: 0, target: strong },
       { assignment: asg(2, florence.id, "image-label", { kind: "image", imageIndex: 1, bbox: { ...bbox, y: 100 } }), index: 1, target: florence },
-      { assignment: asg(2, tesseract.id, "ocr", { kind: "region", bbox }), index: 2, target: tesseract },
+      { assignment: asg(2, ppocr.id, "ocr", { kind: "region", bbox }), index: 2, target: ppocr },
       { assignment: asg(2, cheap.id, "extract-text"), index: 3, target: cheap },
     ], deps);
     expect(deps.withRaster).toHaveBeenCalledTimes(1);
@@ -101,20 +101,20 @@ describe("executor registry", () => {
       [strong.id, "chart-data", "/tmp/page-2.png.crop.png"],
       [cheap.id, "extract-text", "/tmp/page-2.png"],
     ]);
-    expect(res.outputs.map((o) => o.model)).toEqual(expect.arrayContaining(["tesseract", "florence", "m"]));
+    expect(res.outputs.map((o) => o.model)).toEqual(expect.arrayContaining(["ppocr-v6-small", "florence", "m"]));
     expect(res.failures).toEqual([]);
   });
 
   it("reports failures, missing rasters and cost-cap skips instead of throwing", async () => {
-    const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new Error("tesseract unavailable"); }) });
+    const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new Error("ocr unavailable"); }) });
     const res = await executeAssignments([
-      { assignment: asg(2, tesseract.id, "ocr"), index: 0, target: tesseract },
-      { assignment: asg(8, tesseract.id, "ocr"), index: 1, target: tesseract },
+      { assignment: asg(2, ppocr.id, "ocr"), index: 0, target: ppocr },
+      { assignment: asg(8, ppocr.id, "ocr"), index: 1, target: ppocr },
       { assignment: asg(2, strong.id, "chart-data", { kind: "image", imageIndex: 0 }), index: 2, target: strong },
-      { assignment: asg(2, "ocr:mystery", "ocr"), index: 3, target: { ...tesseract, id: "ocr:mystery" } },
+      { assignment: asg(2, "ocr:mystery", "ocr"), index: 3, target: { ...ppocr, id: "ocr:mystery" } },
     ], deps, { canContinue: () => false });
     expect(res.failures.map((f) => [f.assignmentIndex, f.reason]).sort()).toEqual([
-      [0, "tesseract unavailable"], [1, "no-raster"], [3, "no-executor"],
+      [0, "ocr unavailable"], [1, "no-raster"], [3, "no-executor"],
     ]);
     expect(res.skipped).toEqual([{ assignmentIndex: 2, pageNumber: 2, targetId: strong.id, reason: "cost-cap" }]);
   });
@@ -187,17 +187,17 @@ describe("runRoutedVision with executors", () => {
     const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new Error("boom"); }) });
     const { result, extract } = await run([
       asg(1, nativeText.id, "extract-text"),
-      asg(2, tesseract.id, "ocr"),
+      asg(2, ppocr.id, "ocr"),
     ], { deps });
     expect(extract).toHaveBeenCalledTimes(1);
     expect(vi.mocked(extract).mock.calls[0]![1]).toEqual([2]);
     expect(result.executorFailures).toHaveLength(1);
     expect(result.outputs.map((o) => [o.pageNumber, o.text.startsWith("native page 1") || o.text.startsWith("vlm page 2")])).toEqual([[1, true], [2, true]]);
-    expect(result.actuals.find((a) => a.servesTargetId === tesseract.id)?.costUsd).toBe(0.005);
+    expect(result.actuals.find((a) => a.servesTargetId === ppocr.id)?.costUsd).toBe(0.005);
   });
 
   it("without executor deps, executor-only extraction pages fall back to the workspace model", async () => {
-    const { result, extract } = await run([asg(2, tesseract.id, "ocr"), asg(2, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
+    const { result, extract } = await run([asg(2, ppocr.id, "ocr"), asg(2, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
     expect(vi.mocked(extract).mock.calls[0]![1]).toEqual([2]);
     expect(result.outputs).toHaveLength(1);
   });
@@ -242,7 +242,7 @@ describe("runRoutedVision with executors", () => {
   });
 
   it("assigns pixels only to model-or-image assignments", async () => {
-    const plan = await planOf([asg(1, accept.id, "accept-text"), asg(2, nativeText.id, "extract-text"), asg(3, tesseract.id, "ocr"), asg(4, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
+    const plan = await planOf([asg(1, accept.id, "accept-text"), asg(2, nativeText.id, "extract-text"), asg(3, ppocr.id, "ocr"), asg(4, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
     expect(pagesNeedingPixels(plan)).toEqual([3, 4]);
   });
 });
@@ -258,7 +258,7 @@ describe("native clip rendering (PDF_RASTER_ENGINE)", () => {
     }) as never;
     const res = await executeAssignments([
       { assignment: asg(2, strong.id, "chart-data", { kind: "image", imageIndex: 0, bbox }), index: 0, target: strong },
-      { assignment: asg(2, tesseract.id, "ocr", { kind: "region", bbox }), index: 1, target: tesseract },
+      { assignment: asg(2, ppocr.id, "ocr", { kind: "region", bbox }), index: 1, target: ppocr },
     ], deps);
     expect(deps.withRaster).not.toHaveBeenCalled();
     expect(deps.withCrop).not.toHaveBeenCalled();

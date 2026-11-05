@@ -596,8 +596,9 @@ describe("M1: every sandboxed command is denied namespaces and kernel attack sur
   );
 
   const has = (binary: string) => spawnSync("sh", ["-c", `command -v ${binary}`]).status === 0;
-  it.skipIf(!bwrapAvailable || !pidNamespace || !filterArch || !has("pdftoppm") || !has("qpdf") || !has("tesseract"))(
-    "poppler, qpdf, tesseract and python still run under the filters with real bwrap",
+  it.skipIf(!bwrapAvailable || !pidNamespace || !filterArch || !has("pdftoppm") || !has("qpdf"))(
+    // OCR no longer runs a host binary: the PP-OCR CLI is python under the same sandbox (ocr/__tests__/local-cli.integration.test.ts).
+    "poppler, qpdf and python still run under the filters with real bwrap",
     async () => {
       const root = scratch("docslurp-bwrap-tools-");
       const config = { scratchRoot: path.join(root, "sandbox"), writablePaths: [] };
@@ -614,8 +615,6 @@ describe("M1: every sandboxed command is denied namespaces and kernel attack sur
       expect(png).toBeTruthy();
       expect((await runner.run({ binary: bin("pdftotext"), args: [source, "-"], available: true })).stdout.length).toBeGreaterThan(20);
       expect((await runner.run({ binary: bin("qpdf"), args: ["--check", source], available: true })).stdout).toMatch(/No syntax or stream encoding errors/);
-      const ocr = await runner.run({ binary: bin("tesseract"), args: [path.join(outDir, png), "-", "--psm", "6"], available: true });
-      expect(ocr.stdout.trim().length).toBeGreaterThan(0);
       const py = await runner.run({ binary: python, args: ["-I", "-c", "import multiprocessing as m, concurrent.futures as f\nwith f.ThreadPoolExecutor(2) as e: print(sum(e.map(abs, [-1, -2])))"], available: true });
       expect(py.stdout.trim()).toBe("3");
     },

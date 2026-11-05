@@ -216,7 +216,8 @@ describe("Kreuzberg options allow-list", () => {
       quality: "auto",
       documentExtraction: { options: { kreuzberg: { forceOcr: true, ocr: { backend: "paddleocr", language: "deu" } } } } as never,
     });
-    expect(pipeline.documentExtraction.options.kreuzberg).toEqual({ forceOcr: true, ocr: { backend: "paddleocr", language: "deu" } });
+    // Kreuzberg never OCRs (worker/scripts/kreuzberg_extract.mjs strips these); any stored backend reads back as ppocr.
+    expect(pipeline.documentExtraction.options.kreuzberg).toEqual({ forceOcr: true, ocr: { backend: "ppocr", language: "deu" } });
   });
 
   it("rejects every key outside the allow-list, nested OCR keys included (fail closed)", () => {
@@ -233,7 +234,7 @@ describe("Kreuzberg options allow-list", () => {
     }
   });
 
-  it("constrains OCR languages to Tesseract codes (L2)", () => {
+  it("constrains OCR languages to three-letter language codes (L2)", () => {
     for (const language of ["eng", "deu", "chi_sim", "chi_sim_vert", "chi_tra_vert", "jpn_vert", "eng+deu", "eng+chi_tra+jpn", "eng+chi_sim_vert"]) {
       expect(documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } }, ocr: { language } }).ocr.language).toBe(language);
     }
@@ -301,7 +302,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
       expect(parsed.quality).toBe("fast");
       expect(parsed.documentExtraction.order.pdf).toEqual(["liteparse", "kreuzberg"]);
       expect(parsed.documentExtraction.options).toEqual({
-        kreuzberg: { forceOcr: false, ocr: { backend: "tesseract" } },
+        kreuzberg: { forceOcr: false, ocr: { backend: "ppocr" } },
         dolphin: { mode: "page" },
       });
       expect(JSON.stringify(parsed)).not.toContain("/tmp/attacker");
@@ -369,8 +370,13 @@ describe("Fast's Kreuzberg config (L1)", () => {
 });
 
 describe("Kreuzberg OCR backend", () => {
-  it("rejects an unknown OCR backend", () => {
-    expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: "vlm" } } } })).toThrow();
+  it("reads any stored OCR backend name as ppocr and rejects a non-string backend", () => {
+    for (const backend of ["vlm", "tesseract", "paddleocr", "ppocr"]) {
+      const parsed = documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend } } } });
+      expect((parsed.options.kreuzberg as { ocr: { backend: string } }).ocr.backend).toBe("ppocr");
+    }
+    expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: 5 } } } })).toThrow();
+    expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: { url: "http://169.254.169.254" } } } } })).toThrow();
   });
 });
 

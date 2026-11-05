@@ -1,3 +1,4 @@
+import { fakeOcrRunner } from "../../test/fake-ocr.js";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -64,40 +65,63 @@ describe("production executor deps", () => {
     expect(await none.withPageClip!(3, { x: 0, y: 0, width: 10, height: 10 }, async () => "x")).toBeNull();
   });
 
-  it("returns null text for unavailable canonical pages and non-pdf native extraction, and runs tesseract and the labeler through the runner", async () => {
+  it("returns null text for unavailable canonical pages and non-pdf native extraction, and runs OCR in its VM and the labeler through the runner", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
     const image = path.join(dir, "p.png");
     await writeFile(image, "x");
-    const tsv = [
-      "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
-      "5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96\tscanned",
-      "5\t1\t1\t1\t1\t2\t70\t10\t50\t20\t95\twords",
-    ].join("\n");
-    const run = vi.fn(async (plan: { args: string[] }) => {
-      if (plan.args.includes("--prompt")) {
-        await writeFile(plan.args[plan.args.indexOf("--output") + 1]!, JSON.stringify({ text: " a red bridge " }));
-        return { stdout: "", stderr: "" };
-      }
-      // Tesseract: script detection first (`-l osd`), then the page in the detected script's packs.
-      return { stdout: plan.args.includes("osd") ? "Script: Latin\nScript confidence: 9.5\n" : tsv, stderr: "" };
+    const ocr = fakeOcrRunner(() => [{ frame: 1, text: "scanned words" }]);
+    const run = vi.fn(async (plan: { args: string[]; sandboxedOcr?: unknown }) => {
+      if (plan.sandboxedOcr) return await ocr.runner.run(plan as never);
+      await writeFile(plan.args[plan.args.indexOf("--output") + 1]!, JSON.stringify({ text: " a red bridge " }));
+      return { stdout: "", stderr: "" };
     });
+    const plan = vi.fn(async (binary: string, ...args: string[]) => ({ binary, args, available: true }));
     const recordLocalUsage = vi.fn();
     const { deps } = make({
       recordLocalUsage,
       runner: {
         run,
-        plan: vi.fn(async (binary: string, ...args: string[]) => ({ binary, args, available: true })),
+        plan,
+        sandboxedOcrRead: ocr.runner.sandboxedOcrRead,
+        localOcrRead: ocr.runner.localOcrRead,
         florence2: vi.fn(async (src: string, out: string, prompt: string, model: string) => ({ binary: "python3", args: ["--input", src, "--output", out, "--prompt", prompt, "--model", model], available: true })),
-       
       },
     });
     expect(await deps.pageText(1)).toBeNull();
     expect(await deps.nativePageText("kreuzberg", 1)).toBeNull();
     expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 1 })).text).toBe("scanned words");
-    // Tesseract read page 1: a model read, recorded so the ledger bills the page Rich.
-    expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 1, metric: "tesseract-page-ocr", model: "tesseract" }));
+    // The page went to the VM provider as a job; no OCR command was planned on the host.
+    expect(ocr.runner.sandboxedOcrRead).toHaveBeenCalledTimes(1);
+    expect(ocr.runner.localOcrRead).not.toHaveBeenCalled();
+    expect(plan).not.toHaveBeenCalled();
+    // A model read of page 1, recorded so the ledger bills the page Rich.
+    expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 1, metric: "page-ocr", model: "ppocr-v6-small" }));
     const label = await deps.label({ path: image, mimeType: "image/png" }, { pageNumber: 3 });
     expect(label.text).toBe("a red bridge");
     expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 3, metric: "image-label", model: "microsoft/Florence-2-small-ft" }));
+    vi.unstubAllEnvs();
+  });
+
+  it("sends a low-confidence router OCR read to the route's next reader instead of billing it", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
+    const image = path.join(dir, "p.png");
+    await writeFile(image, "x");
+    const ocr = fakeOcrRunner(() => [{ frame: 1, text: "ZXQ Vvv", meanConfidence: 0.4 }]);
+    const recordLocalUsage = vi.fn();
+    const { deps } = make({ recordLocalUsage, runner: { ...ocr.runner, plan: vi.fn(), florence2: vi.fn() } as never });
+    expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 1 })).text).toBe("");
+    expect(recordLocalUsage).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it("treats OCR off as an empty read, never a host command", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "off");
+    const ocr = fakeOcrRunner(() => []);
+    const { deps } = make({ runner: { ...ocr.runner, plan: vi.fn(), florence2: vi.fn() } as never });
+    expect((await deps.ocr({ path: "/nonexistent.png", mimeType: "image/png" }, { pageNumber: 2 })).text).toBe("");
+    expect(ocr.runner.run).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 });

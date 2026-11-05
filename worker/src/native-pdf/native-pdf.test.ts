@@ -688,7 +688,7 @@ describe.skipIf(!realModule.ok)("native-pdf on the installed binding", () => {
     doc.close();
   });
 
-  it("reports OCR without models as NATIVE_PDF_UNSUPPORTED (the executor's tesseract fallback)", async () => {
+  it("reports OCR without models as NATIVE_PDF_UNSUPPORTED", async () => {
     const saved = process.env.PDFUST_OCR_MODEL_DIR;
     delete process.env.PDFUST_OCR_MODEL_DIR;
     try {

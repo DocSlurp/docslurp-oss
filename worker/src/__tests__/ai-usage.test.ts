@@ -107,7 +107,7 @@ describe("worker AI usage Module", () => {
     });
     // An uploaded image: OCR reads it (no output tokens) and charges the page as one Rich page; vision then reads it for
     // 2,500 output tokens, which the page's first charge did not cover (3 Rich pages in all).
-    ledger.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "image-ocr" });
+    ledger.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
     expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
     vision(2_500);
     const charges = () => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
@@ -123,7 +123,7 @@ describe("worker AI usage Module", () => {
     // A retry in a new ledger (a restarted activity) reading the same page emits the same ids, which insert nothing twice.
     const retry = new PipelineUsageEventLedger();
     retry.runId = "run-1";
-    retry.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "image-ocr" });
+    retry.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
     retry.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis", inputTokens: 1, outputTokens: 3_100, costCents: 0, metadata: { documentId: "img", pageNumber: 1 } });
     expect(retry.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(charges().map((event) => event.id));
   });
@@ -132,8 +132,8 @@ describe("worker AI usage Module", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const ledger = new PipelineUsageEventLedger();
     ledger.runId = "run-1";
-    for (const metric of ["image-ocr", "tesseract-page-ocr", "pdf-ocr", "ocr-native-pdf"]) {
-      ledger.record({ provider: "local", model: "tesseract", metric, amount: 1, unit: "image", costCents: 0, metadata: { documentId: metric, pageNumber: 1 } });
+    for (const metric of ["page-ocr", "ocr-escalation", "hosted-ocr", "pdf-ocr", "ocr-native-pdf"]) {
+      ledger.record({ provider: "local", model: "ppocr-v6-small", metric, amount: 1, unit: "image", costCents: 0, metadata: { documentId: metric, pageNumber: 1 } });
       expect(ledger.hasRichCharge(metric, 1)).toBe(true);
     }
   });
