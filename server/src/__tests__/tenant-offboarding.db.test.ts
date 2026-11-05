@@ -10,6 +10,7 @@ import {
   legacyOrgTable,
   type SupersededPurgeOptions,
 } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Tenant offboarding against a migrated Postgres (docs/data-deletion.md):
@@ -25,6 +26,7 @@ let deps: import("../services/tenant-offboarding.js").OffboardingDeps;
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
@@ -90,6 +92,7 @@ describe("organization deletion", () => {
     await seedWorkspace("ws", "team", "member");
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('key', 'member', 'team', 'h', 'CI key', 'server')`;
     await sql`insert into credit_ledger (id, user_id, org_id, delta, reason) values ('ledger', 'member', 'team', -5, 'usage')`;
+    await sql`insert into webhooks (id, user_id, org_id, url, secret) values ('team-hook', 'owner', 'team', 'https://example.test/team', 's')`;
     await sql`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents)
       values ('usage', 'member', 'ws-done', 'openai', 'm', 'embed', 1, 'tokens', 2)`;
   });
@@ -112,6 +115,7 @@ describe("organization deletion", () => {
     expect(await sql`select count(*)::int as count from workspaces`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from org_memberships where org_id = 'team'`).toEqual([{ count: 0 }]);
     expect(await sql`select revoked_at is not null as revoked, name from api_keys`).toEqual([{ revoked: true, name: "Deleted key" }]);
+    expect(await sql`select id from webhooks where org_id = 'team'`).toEqual([]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([{ document_id: "ws-doc" }]);
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },

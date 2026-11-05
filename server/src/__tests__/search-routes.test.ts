@@ -32,7 +32,6 @@ vi.mock("../services/workspace-chat.js", () => ({
 
 vi.mock("../services/aggregate-rag.js", () => ({
   aggregateWorkspaceRagSearch,
-  AggregateAnswerScopeError: class AggregateAnswerScopeError extends Error { constructor() { super("generateAnswer needs workspaces from one organization"); } },
 }));
 
 const getWorkspace = vi.fn();
@@ -45,6 +44,7 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
 // The response cache re-checks access and reads privacy per request; workspaces named "*strict*" are strict-privacy.
 vi.mock("../services/organizations.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/organizations.js")>(),
+  resolveDefaultOrganization: vi.fn(async () => ({ id: "org-1" })),
   getWorkspaceAccessWithPipeline: vi.fn(async (workspaceId: string) => ({
     workspaceId, orgId: "org-1", pipeline: workspaceId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
   })),
@@ -347,6 +347,8 @@ describe("searchRoutes", () => {
     });
     expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith({
       userId: "user-1",
+      // A session that names no organization searches its default one, never several.
+      orgId: "org-1",
       request: expect.objectContaining({
         q: "who is this for?",
         maxWorkspaces: 4,
@@ -390,14 +392,6 @@ describe("searchRoutes", () => {
       // Control flow follows the error's type, not its wording.
       aggregateWorkspaceRagSearch.mockRejectedValueOnce(new Error("Workspace not found: cache entry evicted"));
       expect((await aggregate(keyActor(["search"]), {})).status).toBe(500);
-    });
-
-    it("answers 400 when an answer would span organizations", async () => {
-      const { AggregateAnswerScopeError } = await import("../services/aggregate-rag.js");
-      aggregateWorkspaceRagSearch.mockRejectedValueOnce(new AggregateAnswerScopeError());
-      const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
-      expect(response.status).toBe(400);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });
     });
 
     it("runs a default request from a search-only key with every model-calling step off", async () => {

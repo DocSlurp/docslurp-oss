@@ -52,7 +52,11 @@ vi.mock("../services/document-review.js", () => ({
 }));
 vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingWorkspaceScopeError: class extends Error {}, CrossWorkspaceScopeError: class extends Error {}, WorkspaceNotFoundError: class extends Error { constructor() { super("Workspace not found"); } }, }));
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace: vi.fn() }));
-vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: mocks.aggregateWorkspaceRagSearch, AggregateAnswerScopeError: class extends Error {} }));
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  resolveDefaultOrganization: vi.fn(async () => ({ id: "org-1" })),
+}));
+vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: mocks.aggregateWorkspaceRagSearch }));
 vi.mock("../services/runs.js", () => ({
   getRunProcessingPreview: mocks.getRunProcessingPreview,
   isRunCreationBlockedError: () => false,

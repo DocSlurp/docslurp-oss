@@ -14,7 +14,7 @@ const { recordApiKeyRequest } = vi.hoisted(() => ({ recordApiKeyRequest: vi.fn()
 vi.mock("../services/api-key-usage.js", () => ({ recordApiKeyRequest }));
 
 vi.mock("../services/organizations.js", () => ({
-  ensurePersonalOrganization: vi.fn(),
+  resolveDefaultOrganization: vi.fn(),
   getOrganization: vi.fn(),
   withOrganizationLock: vi.fn(async (_orgId: string, _userId: string, operation: (tx: unknown, actor: { role: string }) => unknown) => operation(txMock, { role: "owner" })),
   OrganizationError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message); } }

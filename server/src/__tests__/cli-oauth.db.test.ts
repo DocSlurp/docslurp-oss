@@ -7,6 +7,7 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * The first-party CLI OAuth flows (docslurp login) against the real OAuth
@@ -69,6 +70,8 @@ beforeAll(async () => {
   sqlConnection.current = (await import("postgres")).default(pg.url, { max: 1 });
   const { Pool } = await import("pg");
   pool.current = new Pool({ connectionString: pg.url, max: process.env.CLI_OAUTH_TEST_DATABASE_URL ? 24 : 1 });
+  // Only in the throwaway database: never change an external one.
+  if (!process.env.CLI_OAUTH_TEST_DATABASE_URL) await q(LIFT_ONE_ORG_PER_USER_POLICY);
   for (const user of ["owner", "other"]) {
     await q(`insert into "user"(id, name, email) values ($1, $1, $1 || '@example.test') on conflict do nothing`, [user]);
     await q(`insert into "session"(id, "expiresAt", token, "userId") values ('sess-' || $1, now() + interval '1 day', 'tok-' || $1, $1) on conflict do nothing`, [user]);

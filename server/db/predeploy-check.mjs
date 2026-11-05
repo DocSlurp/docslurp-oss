@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Read-only pre-deploy report for the 0121-0125 rollout (docs/rollout-expand-contract-0121-0125.md):
+// Read-only pre-deploy report for the 0121-0127 release (docs/rollout-0121-0127.md):
 //
 //   DATABASE_URL=... node server/db/predeploy-check.mjs [--strict] [--json]
 //
@@ -7,7 +7,7 @@
 // migrations and the new code will meet in this database and prints what to fix or watch first:
 //   1. migrations still pending, and transactions old enough to make a migration lock wait time out;
 //   2. document_chunks rows and size, and the state of the folded keyword index (how long its CONCURRENTLY build will take);
-//   3. api_keys and webhooks without an organization, with the organizations their owners could be homed to;
+//   3. api_keys and webhooks 0125 deletes or homes, and the memberships 0127 removes (one organization per user);
 //   4. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts;
 //   5. recorded stage artifacts that are empty, which the fail-closed readers refuse (object-store existence is not checkable from SQL);
 //   6. runs in flight, by the routing version they are pinned to.
@@ -82,7 +82,7 @@ export async function collectReport(client, { journal, acceptedPiiPatterns }) {
     longTx.length > 0 && pending.length > 0 ? "warn" : "ok",
     longTx.length > 0
       ? [
-          "Transactions open for more than 30 s. 0122, 0123 and 0125 wait at most 10 s (3 s for api_keys) for their locks, so a long reader",
+          "Transactions open for more than 30 s. 0122, 0123, 0125 and 0127 wait at most 10 s (3 s for api_keys) for their locks, so a long reader",
           "makes the migration fail fast instead of queueing the site behind it; re-run it after these end:",
           ...longTx.map((row) => `pid ${row.pid} ${row.state} ${row.seconds}s: ${row.query}`),
         ]
@@ -119,48 +119,89 @@ export async function collectReport(client, { journal, acceptedPiiPatterns }) {
     ],
   ));
 
-  // 3. api_keys and webhooks without an organization.
-  const keyHasOrg = await columnExists(client, "api_keys", "org_id");
-  const keys = keyHasOrg
-    ? await q(
-        `select k.id, k.user_id, k.revoked_at is not null as revoked, p.id as personal_org
-         from api_keys k left join organizations p on p.is_personal and p.personal_owner_user_id = k.user_id
-         where k.org_id is null order by k.created_at limit 200`,
-      )
-    : [];
-  const liveKeys = keys.filter((key) => !key.revoked);
+  // 3. api_keys and webhooks without an organization (0125), and memberships beyond one per user (0127). Both migrations
+  // delete rows; this counts them as they will meet this database, before or after 0125 is applied.
+  // A user's "only organization": exactly one membership in a live organization.
+  const onlyOrg = `select om.user_id, min(om.org_id) as org_id, bool_and(om.role in ('owner', 'admin')) as administers
+    from org_memberships om join organizations o on o.id = om.org_id and o.deleted_at is null
+    group by om.user_id having count(*) = 1`;
+  const [keys] = await q(
+    `select count(*)::int as total, count(only_org.user_id)::int as homed, count(*) filter (where k.revoked_at is null)::int as live
+     from api_keys k left join (${onlyOrg}) only_org on only_org.user_id = k.user_id
+     where k.org_id is null`,
+  );
+  const keysDeleted = keys.total - keys.homed;
   sections.push(section(
-    `api_keys without an organization: ${keys.length} (${liveKeys.length} not yet revoked)`,
-    liveKeys.length > 0 ? "warn" : "ok",
-    keys.length === 0
+    `api_keys without an organization: ${keys.total} (${keys.live} not yet revoked)`,
+    keysDeleted > 0 ? "warn" : "ok",
+    keys.total === 0
       ? ["None. Every key has an org_id."]
       : [
-          "validateApiKey has never served these. 0125 revokes them (fail closed) and re-homes only to the owner's personal organization; nothing is deleted.",
-          `${keys.filter((key) => key.personal_org).length} have an owner with a personal organization; ${keys.filter((key) => !key.personal_org).length} stay unhomed (revoked) until the contract step deletes them.`,
+          "validateApiKey has never served these. 0125 moves a key, revoked, to its owner's only organization and deletes the rest.",
+          `${keys.homed} will be homed (revoked); ${keysDeleted} will be DELETED (owner in no organization or in several).`,
         ],
   ));
 
   const hookHasOrg = await columnExists(client, "webhooks", "org_id");
-  const hooks = await q(
-    `select w.id, w.user_id, ${hookHasOrg ? "w.org_id" : "null::text"} as org_id,
-            (select count(distinct r.org_id) from workspace_runs r where r.user_id = w.user_id and r.org_id is not null) as run_orgs,
-            (select p.id from organizations p where p.is_personal and p.personal_owner_user_id = w.user_id) as personal_org,
-            (select count(*) from org_memberships om where om.user_id = w.user_id and om.role in ('owner', 'admin')) as admin_orgs
-     from webhooks w ${hookHasOrg ? "where w.org_id is null" : ""} order by w.created_at limit 500`,
+  const [hooks] = await q(
+    `select count(*)::int as total, count(only_org.user_id) filter (where only_org.administers)::int as homed
+     from webhooks w left join (${onlyOrg}) only_org on only_org.user_id = w.user_id
+     ${hookHasOrg ? "where w.org_id is null" : ""}`,
   );
-  const unhomed = hooks.filter((hook) => !hook.personal_org && Number(hook.admin_orgs) === 0);
-  const multiOrg = hooks.filter((hook) => Number(hook.run_orgs) > 1);
+  const hooksDeleted = hooks.total - hooks.homed;
   sections.push(section(
-    `webhooks ${hookHasOrg ? "without an organization" : "to be homed by 0125"}: ${hooks.length}`,
-    unhomed.length > 0 || multiOrg.length > 0 ? "warn" : "ok",
-    hooks.length === 0
+    `webhooks ${hookHasOrg ? "without an organization" : "to be given an organization by 0125"}: ${hooks.total}`,
+    hooksDeleted > 0 ? "warn" : "ok",
+    hooks.total === 0
       ? ["None."]
       : [
-          `${unhomed.length} cannot be homed (no personal organization and no owned or administered one); they keep a NULL org_id, new code does not match them, and the contract step backs them up before removing them.`,
-          `${multiOrg.length} belong to a user with runs in more than one organization: before this change they fired for all of that user's runs, afterwards only for the one organization they are homed to (the one their own deliveries ran in, else personal). Recreate them per organization if that matters.`,
-          ...hooks.slice(0, 10).map((hook) => `webhook ${hook.id} user ${hook.user_id} runs-in-orgs=${hook.run_orgs} personal=${hook.personal_org ?? "-"} admin-orgs=${hook.admin_orgs}`),
+          `${hooks.homed} will be homed to their creator's only organization (the creator administers it).`,
+          `${hooksDeleted} will be DELETED with their delivery log (creator in several organizations, in none, or only a member). Recreate them per organization after the deploy.`,
         ],
   ));
+
+  // 0127: one organization per user (DOCSLURP_MAX_ORGS_PER_USER=1). Mirrors the migration's rules.
+  const [{ has_index: oneOrgIndex }] = await q("select to_regclass('public.org_memberships_one_org_per_user') is not null as has_index");
+  if (oneOrgIndex) {
+    sections.push(section("Memberships beyond one per user (0127): already applied", "ok", ["org_memberships_one_org_per_user exists."]));
+  } else {
+    const keysOf = hookHasOrg ? "or exists (select 1 from webhooks h where h.org_id = o.id)" : "";
+    const [members] = await q(
+      `with multi as (select user_id from org_memberships group by user_id having count(*) > 1),
+       candidates as (
+         select om.org_id, om.user_id,
+           case
+             when o.deleted_at is not null then 'deleted_organization'
+             when o.is_personal and o.personal_owner_user_id = om.user_id and o.funded_at is null
+               and not exists (select 1 from workspace_runs r where r.org_id = o.id)
+               and not exists (select 1 from documents d join workspaces w on w.id = d.workspace_id where w.org_id = o.id)
+               and not (exists (select 1 from api_keys k where k.org_id = o.id) ${keysOf})
+               then 'empty_personal_organization'
+           end as reason
+         from org_memberships om join organizations o on o.id = om.org_id
+         where om.user_id in (select user_id from multi)
+       ),
+       kept as (
+         select user_id, count(*) filter (where reason is null) as remaining from candidates group by user_id
+       )
+       select (select count(*) from multi)::int as users,
+         (select count(*) from candidates where reason = 'deleted_organization')::int as deleted_org,
+         (select count(*) from candidates where reason = 'empty_personal_organization')::int as empty_personal,
+         (select coalesce(sum(greatest(remaining - 1, 0)), 0) from kept)::int as not_kept`,
+    );
+    const removed = members.deleted_org + members.empty_personal + members.not_kept;
+    sections.push(section(
+      `Memberships beyond one per user (0127): ${members.users} user(s), ${removed} membership(s) to remove`,
+      removed > 0 ? "warn" : "ok",
+      members.users === 0
+        ? ["None. Every user belongs to at most one organization."]
+        : [
+            `${members.deleted_org} in tombstoned organizations; ${members.empty_personal} in empty personal organizations (DELETED with the organization);`,
+            `${members.not_kept} more removed by the keep rule (owner/admin first, then most recent run or document). Removed memberships are copied`,
+            "to org_memberships_removed_backup; the user loses access to that organization's data at once (keys and MCP grants revoked).",
+          ],
+    ));
+  }
 
   // 4. Stored pipelines naming detectors the build no longer accepts.
   const badPatterns = await q(

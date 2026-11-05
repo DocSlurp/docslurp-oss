@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ search: vi.fn(), chat: vi.fn(), access: vi.fn() }));
 vi.mock("../services/search.js", () => ({ hybridSearch: mocks.search, MissingWorkspaceScopeError: class extends Error {}, CrossWorkspaceScopeError: class extends Error {}, WorkspaceNotFoundError: class extends Error { constructor() { super("Workspace not found"); } }, }));
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace: mocks.chat, workspaceChatDisabledBody: async () => null }));
-vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: vi.fn(), AggregateAnswerScopeError: class extends Error {} }));
+vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("../lib/request-actor.js", () => ({
   assertApiKeyWorkspaceAccess: mocks.access, getRequestActor: vi.fn(), actorHasAnyApiKeyScope: vi.fn(),

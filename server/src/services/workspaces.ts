@@ -44,7 +44,7 @@ import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
 import {
   canEditWorkspace,
   canManageWorkspace,
-  ensurePersonalOrganization,
+  resolveDefaultOrganization,
   getWorkspaceAccess,
   listAccessibleWorkspaceIds,
 } from "./organizations.js";
@@ -379,7 +379,7 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
         where om.org_id = ${parsed.orgId} and om.user_id = ${parsed.userId}
         limit 1
       `.then((rows) => rows[0] ?? null)
-    : await ensurePersonalOrganization(parsed.userId);
+    : await resolveDefaultOrganization(parsed.userId);
 
   if (!organization) {
     throw new Error("Organization not found");
@@ -580,7 +580,7 @@ export async function ensureDefaultWorkspace(args: {
         where om.org_id = ${args.orgId} and om.user_id = ${args.userId}
         limit 1
       `.then((rows) => rows[0]?.id ?? null)
-    : (await ensurePersonalOrganization(args.userId)).id;
+    : (await resolveDefaultOrganization(args.userId)).id;
   if (!orgId) {
     // Unknown org and non-member org look the same, so membership is not leaked.
     throw new WorkspaceAccessError(404, "organization_not_found", "Organization not found");
@@ -621,7 +621,7 @@ export async function findDefaultWorkspace(args: { userId: string; orgId?: strin
  * not touched an org-scoped endpoint yet.
  */
 export async function ensurePersonalDefaultWorkspace(userId: string): Promise<void> {
-  const organization = await ensurePersonalOrganization(userId);
+  const organization = await resolveDefaultOrganization(userId);
   await insertDefaultWorkspace(sql, { orgId: organization.id, userId });
 }
 

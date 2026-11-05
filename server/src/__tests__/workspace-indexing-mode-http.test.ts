@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { withTestSession } from "./helpers/session-app.js";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /** HTTP-level behaviour of the indexing-mode routes against a migrated database. */
 let stop: () => Promise<void>;
@@ -17,6 +18,7 @@ const actor = { type: "session", userId: "u1", sessionId: "s", user: { id: "u1",
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, {
     max: 1, prepare: false, onnotice: () => {},

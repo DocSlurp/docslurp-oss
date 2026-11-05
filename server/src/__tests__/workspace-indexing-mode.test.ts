@@ -3,6 +3,7 @@ import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /** Indexing-mode API against a database built from db/migrations. */
 let stop: () => Promise<void>;
@@ -18,6 +19,7 @@ const serverPolicy = { maxPagesPerQuery: 40, maxCreditsPerQuery: 25, deadlineMs:
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, {
     max: 1, prepare: false, onnotice: () => {},

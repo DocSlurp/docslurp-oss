@@ -124,6 +124,8 @@ export async function purgeOrganization(
     await client`
       update mcp_oauth_grants set revoked_at = coalesce(revoked_at, now()) where org_id = ${orgId}
     `;
+    // The organization's webhooks (target URLs and signing secrets) go with it; their delivery log cascades.
+    await client`delete from webhooks where org_id = ${orgId}`;
     await client`delete from sso_auth_requests where org_id = ${orgId}`;
     await client`delete from sso_identity_links where org_id = ${orgId}`;
     await client`delete from sso_domains where org_id = ${orgId}`;
