@@ -17,13 +17,27 @@ export function resolvePdfExtractorSetting(env: Record<string, string | undefine
 }
 
 /**
- * True when the deployment uses the sandboxed PDF provider: DOCSLURP_PDF_EXTRACTOR=vm-pdf or
- * DOCSLURP_VM_PDF_INSTALLED=1. Throws on an unknown value of either, for the same reason.
+ * True when the deployment runs PDFs only in the sandboxed PDF provider: DOCSLURP_PDF_EXTRACTOR=vm-pdf,
+ * DOCSLURP_VM_PDF_INSTALLED=1, or DOCSLURP_SERVICE_PROFILE=service (a multi-tenant service never parses customer PDFs on
+ * the worker host; without a provider the worker refuses to start). Throws on an unknown value of the first two, for the
+ * same reason.
  */
 export function sandboxedPdfConfigured(env: Record<string, string | undefined> = process.env): boolean {
   const installed = env.DOCSLURP_VM_PDF_INSTALLED?.trim() ?? "";
   if (!["", "0", "1"].includes(installed)) throw new Error("DOCSLURP_VM_PDF_INSTALLED must be empty, 0 or 1");
-  return resolvePdfExtractorSetting(env) === "vm-pdf" || installed === "1";
+  const serviceProfile = env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service";
+  return resolvePdfExtractorSetting(env) === "vm-pdf" || installed === "1" || serviceProfile;
+}
+
+/**
+ * DOCSLURP_DOPPLER_HOST_PDF=1: the operator's explicit opt-in to parse customer PDFs on the worker host with Doppler's
+ * `pdftomarkdown` (the `doppler-md` extractor, in the parser sandbox: host parsing, not a VM boundary). Off by default: without
+ * it `doppler-md` is never planned, run or probed. Refused under a sandboxed PDF deployment. Throws on any value but empty, 0 or 1.
+ */
+export function dopplerHostPdfEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env.DOCSLURP_DOPPLER_HOST_PDF?.trim() ?? "";
+  if (!["", "0", "1"].includes(raw)) throw new Error("DOCSLURP_DOPPLER_HOST_PDF must be empty, 0 or 1");
+  return raw === "1";
 }
 
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
@@ -136,7 +150,7 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
   },
   {
     id: "doppler-md", kind: "document", label: "Doppler Markdown",
-    description: "Layout-aware PDF Markdown (headings, tables, reading order) from Doppler, the DocSlurp Poppler fork, run as a sandboxed executable; one page per form feed.",
+    description: "Layout-aware PDF Markdown (headings, tables, reading order) from Doppler, the DocSlurp Poppler fork, run as a separate executable in the worker's parser sandbox (host parsing); one page per form feed. Only where the operator opts in (DOCSLURP_DOPPLER_HOST_PDF=1).",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages", "tables", "headings"], costClass: "local-cpu" },
   },
@@ -205,9 +219,10 @@ export interface ExtractionArtifactRef {
  * hidden unless the deployment reports the engine as installed
  * (`DOCSLURP_NATIVE_PDF_INSTALLED=1`, or a configured module / vendored package).
  */
-export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; vmPdfInstalled?: boolean }): ExtractorDescriptor[] {
+export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; vmPdfInstalled?: boolean; dopplerHostPdf?: boolean }): ExtractorDescriptor[] {
   return builtInDocumentExtractorDescriptors.filter(
-    (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "vm-pdf" || options.vmPdfInstalled === true),
+    (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "vm-pdf" || options.vmPdfInstalled === true) &&
+      (entry.id !== "doppler-md" || (options.dopplerHostPdf === true && options.vmPdfInstalled !== true)),
   );
 }
 

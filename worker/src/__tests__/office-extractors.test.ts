@@ -71,7 +71,7 @@ afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await rm(scrat
 describe("default extractor order per format", () => {
   it("routes every format the retired parsers read to an extractor that links no OCR engine", () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "");
-    expect(documentExtractorRegistry.resolve("pdf")).toEqual(["doppler-md", "native-pdf", "poppler-text"]);
+    expect(documentExtractorRegistry.resolve("pdf")).toEqual(["native-pdf", "poppler-text"]);
     for (const format of ["office-word", "office-other", "epub", "html", "plain-text", "markdown", "structured-csv", "latex"]) {
       expect(documentExtractorRegistry.resolve(format), format).toEqual(["pandoc"]);
     }

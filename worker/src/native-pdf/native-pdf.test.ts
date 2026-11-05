@@ -298,12 +298,12 @@ describe("registry integration", () => {
     else process.env.DOCSLURP_PDF_ENGINE = prior;
   });
 
-  it("keeps native-pdf after doppler-md and before poppler-text in the default pdf order, in every mode", () => {
+  it("keeps native-pdf before poppler-text in the default pdf order, in every mode", () => {
     const registry = new ExtractorRegistry();
     for (const mode of [undefined, "off", "shadow", "native-pdf"]) {
       if (mode === undefined) delete process.env.DOCSLURP_PDF_ENGINE;
       else process.env.DOCSLURP_PDF_ENGINE = mode;
-      expect(registry.resolve("pdf"), mode).toEqual(["doppler-md", "native-pdf", "poppler-text"]);
+      expect(registry.resolve("pdf"), mode).toEqual(["native-pdf", "poppler-text"]);
     }
   });
 

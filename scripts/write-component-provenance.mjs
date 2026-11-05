@@ -2,7 +2,7 @@
 // Records where the third-party native components in a worker image come from, inside the image:
 //   /usr/share/licenses/<name>/   license texts and PROVENANCE.json (public repository, pinned commit, source, files)
 //   <sbom>                        an SPDX 2.3 document listing every component and its installed files with sha256
-// Doppler is always present in the images (worker/doppler.json). An optional native PDF engine is recorded when its
+// Doppler is recorded when the image was built with it (DOCSLURP_DOPPLER=1, worker/doppler.json). An optional native PDF engine is recorded when its
 // vendor manifest is installed; with DOCSLURP_NATIVE_PDF_INSTALLED=1 its manifest must name a public repository and a
 // commit, or the build fails (a component without provenance never ships).
 //

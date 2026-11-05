@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
-import { configureExtractorIdAliases, publicDocumentExtractorDescriptors, sandboxedPdfConfigured } from "@docslurp/shared";
+import { configureExtractorIdAliases, dopplerHostPdfEnabled, publicDocumentExtractorDescriptors, sandboxedPdfConfigured } from "@docslurp/shared";
 
 /** The optional native PDF engine is listed only where it is installed. */
 export function nativePdfInstalled(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): boolean {
@@ -13,7 +13,7 @@ export function nativePdfInstalled(env: NodeJS.ProcessEnv = process.env, cwd = p
 
 /** The extractor ids this API lists: the public catalog, with optional engines only where installed. */
 export function apiExtractorIds(env: NodeJS.ProcessEnv = process.env): string[] {
-  return publicDocumentExtractorDescriptors({ nativePdfInstalled: nativePdfInstalled(env), vmPdfInstalled: sandboxedPdfConfigured(env) }).map((entry) => entry.id);
+  return publicDocumentExtractorDescriptors({ nativePdfInstalled: nativePdfInstalled(env), vmPdfInstalled: sandboxedPdfConfigured(env), dopplerHostPdf: dopplerHostPdfEnabled(env) }).map((entry) => entry.id);
 }
 
 /**
@@ -27,5 +27,5 @@ export function configureApiExtractorIdAliases(env: NodeJS.ProcessEnv = process.
 
 /** Catalog metadata is shared with the worker. Availability is worker-local. */
 export const extractorRoutes = new Hono().get("/", (c) =>
-  c.json({ extractors: publicDocumentExtractorDescriptors({ nativePdfInstalled: nativePdfInstalled(), vmPdfInstalled: sandboxedPdfConfigured() }) }),
+  c.json({ extractors: publicDocumentExtractorDescriptors({ nativePdfInstalled: nativePdfInstalled(), vmPdfInstalled: sandboxedPdfConfigured(), dopplerHostPdf: dopplerHostPdfEnabled() }) }),
 );

@@ -8,7 +8,7 @@
  *
  * Rules the host enforces:
  * - Fail closed. A named plugin that cannot load is a startup error, and a deployment that asks for the VM extractor
- *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf or DOCSLURP_VM_PDF_INSTALLED=1) without a provider is a startup error. The VM route
+ *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service) without a provider is a startup error. The VM route
  *   never falls back to parsing on the worker host.
  * - A sandboxed PDF provider must isolate every job in a fresh VM or microVM. The worker holds secrets; providers
  *   receive file paths, not credentials, and return only bounded, validated output.
@@ -19,7 +19,7 @@
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import {
-  sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+  dopplerHostPdfEnabled, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
 } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
@@ -351,13 +351,20 @@ export async function loadExtractorPlugins(
 }
 
 /**
- * Refuse to start on a misconfigured deployment: an unknown DOCSLURP_PDF_EXTRACTOR (which would otherwise fall through
- * to host parsing) or a VM selection without a provider.
+ * Refuse to start on a misconfigured deployment: an unknown DOCSLURP_PDF_EXTRACTOR or DOCSLURP_DOPPLER_HOST_PDF (which
+ * would otherwise fall through to host parsing), a VM selection without a provider (the service profile always selects
+ * it), or Doppler host parsing asked for where PDFs run only in the VM.
  */
 export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env): void {
-  if (sandboxedPdfConfigured(env) && !sandboxedPdfProvider()) {
-    throw new Error(`DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID} or DOCSLURP_VM_PDF_INSTALLED=1 needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS`);
+  const sandboxed = sandboxedPdfConfigured(env);
+  const doppler = dopplerHostPdfEnabled(env);
+  if (sandboxed && !sandboxedPdfProvider()) {
+    throw new Error(`DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
   }
+  if (sandboxed && doppler) {
+    throw new Error(`DOCSLURP_DOPPLER_HOST_PDF=1 parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
+  }
+  if (doppler) console.warn("[extractors] DOCSLURP_DOPPLER_HOST_PDF=1: doppler-md parses customer PDFs on the worker host (parser sandbox, no VM boundary)");
 }
 
 /** Test hook. */

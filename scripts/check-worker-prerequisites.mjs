@@ -58,9 +58,9 @@ for (const name of profile === 'routing' ? [] : ['mammoth', '@lancedb/lancedb'])
     await import(require.resolve(name));
   } catch (error) { failures.push(`cannot load Node package ${name}: ${error.message}`); }
 }
-// Worker images build Doppler (worker/doppler.json) in place of poppler-utils and set DOCSLURP_DOPPLER_REQUIRED=1:
-// the converter must be present and pdftotext must be the fork, so an image never ships stock Poppler by mistake.
-if (process.env.DOCSLURP_DOPPLER_REQUIRED === '1') {
+// An image built with DOCSLURP_DOPPLER=1 sets DOCSLURP_DOPPLER_HOST_PDF=1 (doppler-md, host parsing opted in): the converter
+// must be present and pdftotext must be the fork, so an opted-in image never ships stock Poppler by mistake.
+if ((process.env.DOCSLURP_DOPPLER_HOST_PDF ?? '').trim() === '1') {
   for (const name of ['pdftomarkdown', 'doppler-md', 'pdfseparate', 'pdfunite']) {
     if (!await binaryPath(name)) failures.push(`missing Doppler executable: ${name}`);
   }

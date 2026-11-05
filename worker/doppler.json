@@ -8,5 +8,5 @@
     "sha256": "39a589f669e44f8e24136bef85c0d0705668f678fb14f21f65ac2f0aa1f4779d",
     "prefix": "doppler-827b3cc"
   },
-  "notes": "Built from this pinned public source in the worker images (worker/Dockerfile.lean, worker/Dockerfile.full) and installed under /usr/local as separate executables (the Poppler utilities, doppler-md, pdftomarkdown). Never linked or vendored into core packages or the SDKs (GPL-2.0-or-later)."
+  "notes": "Built from this pinned public source in worker images built with DOCSLURP_DOPPLER=1 (worker/Dockerfile.lean, worker/Dockerfile.full; host parsing, opt-in) and installed under /usr/local as separate executables (the Poppler utilities, doppler-md, pdftomarkdown). Never linked or vendored into core packages or the SDKs (GPL-2.0-or-later)."
 }

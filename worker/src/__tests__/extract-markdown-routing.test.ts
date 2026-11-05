@@ -110,7 +110,8 @@ describe("extract markdown PDF routing", () => {
     expect(planned.tableAware).toBe(true);
   });
 
-  it("prefers Doppler's Markdown for PDFs when it is installed, in the sandbox like other host tools", async () => {
+  it("prefers Doppler's Markdown for PDFs only where the operator opts in to Doppler host parsing", async () => {
+    vi.stubEnv("DOCSLURP_DOPPLER_HOST_PDF", "1");
     const stage = new ExtractMarkdownStage(
       {
         dopplerMarkdown: async (source: string) => ({ binary: "pdftomarkdown", args: ["--", source], available: true }),
@@ -128,15 +129,14 @@ describe("extract markdown PDF routing", () => {
     expect(planned.primary.plan.args).toEqual(["--", "/tmp/sample.pdf"]);
     expect(planned.secondary.label).toBe("native-pdf");
     expect(planned.tableAware).toBe(true);
+    vi.unstubAllEnvs();
   });
 
-  it("fails closed when an image requires Doppler and pdftomarkdown is missing", async () => {
+  it("fails closed when Doppler host parsing is opted in and pdftomarkdown is missing", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const runner = { dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }) } as any;
-    await expect(documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_DOPPLER_REQUIRED: "1" } }))
+    await expect(documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_DOPPLER_HOST_PDF: "1" } }))
       .rejects.toThrow(/doppler-md unavailable/);
-    const optional = await documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: {} });
-    expect(optional.plan.available).toBe(false);
   });
 
   it("reads Word documents with Pandoc through the office sidecar, and slides and sheets with their own sidecars", async () => {
@@ -196,8 +196,9 @@ describe("extract markdown PDF routing", () => {
       {} as any,
     );
     const attemptLedger = new ExtractorAttemptLedger();
+    // doppler-md is unavailable here (no DOCSLURP_DOPPLER_HOST_PDF opt-in), so it is recorded and never planned.
     const args = {
-      tempFile: "/tmp/sample.pdf", format: "pdf", order: {}, options: {},
+      tempFile: "/tmp/sample.pdf", format: "pdf", order: { pdf: ["doppler-md", "native-pdf", "poppler-text"] }, options: {},
       multiStrategyVoting: true, secondaryId: "next-in-order", attemptLedger,
     };
     setNativePdfEngineForTesting(fakeNativeEngine());

@@ -1,7 +1,7 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
 import { open, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, dopplerHostPdfEnabled, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
 import { availableLocalArtifactAdapters } from "./local-artifact-adapters.js";
@@ -166,14 +166,20 @@ const registered = [
       if (reader === "docx") return await runner.officeMarkdown("docx", source, `${source}.pandoc.md`);
       return await runner.extractMarkdown(source, reader);
     } }),
-  // Doppler's PDF Markdown. In images that build Doppler (DOCSLURP_DOPPLER_REQUIRED=1) a missing converter is an error,
-  // never a quiet step down to Poppler text.
+  // Doppler's PDF Markdown: a separate executable in the parser sandbox on the worker host, so host parsing of customer
+  // PDFs. It runs only where the operator opts in (DOCSLURP_DOPPLER_HOST_PDF=1); otherwise it plans as unavailable without
+  // touching the runner, even when a workspace order names it. Opted in, a missing converter is an error, never a quiet
+  // step down to Poppler text.
   definition({ id: "doppler-md", tableAware: true, execute: stream,
     prepare: async (runner, source, _config, context) => {
+      if (!dopplerHostPdfEnabled(context?.env ?? process.env)) {
+        console.warn("[extractors] doppler-md not run: it parses PDFs on the worker host and needs DOCSLURP_DOPPLER_HOST_PDF=1");
+        return { binary: "pdftomarkdown", args: [], available: false };
+      }
       const plan = await runner.dopplerMarkdown(source);
-      if (!plan.available && (context?.env ?? process.env).DOCSLURP_DOPPLER_REQUIRED === "1") {
-        console.error("[extractors] doppler-md required (DOCSLURP_DOPPLER_REQUIRED=1) but pdftomarkdown is not installed");
-        throw new Error("doppler-md unavailable: pdftomarkdown is not installed in an image that requires it");
+      if (!plan.available) {
+        console.error("[extractors] doppler-md opted in (DOCSLURP_DOPPLER_HOST_PDF=1) but pdftomarkdown is not installed");
+        throw new Error("doppler-md unavailable: DOCSLURP_DOPPLER_HOST_PDF=1 but pdftomarkdown is not installed");
       }
       return plan;
     } }),
@@ -198,13 +204,13 @@ const registered = [
 ];
 
 /**
- * Default order per format. PDFs: Doppler's Markdown (a sandboxed executable, unavailable where Doppler is not
- * installed), then the optional in-process native engine, then Poppler's text layer; a deployment with the sandboxed
- * PDF provider replaces this with `vm-pdf` alone (resolve). No extractor here
- * links an OCR engine: images go to the `ocr` extractor, which reads them in the configured OCR boundary.
+ * Default order per format. PDFs: the optional in-process native engine, then Poppler's text layer; `doppler-md` goes
+ * first only where the operator opts in to Doppler host parsing (DOCSLURP_DOPPLER_HOST_PDF=1), and a deployment with the
+ * sandboxed PDF provider (or DOCSLURP_SERVICE_PROFILE=service) replaces the order with `vm-pdf` alone (resolve). No
+ * extractor here links an OCR engine: images go to the `ocr` extractor, which reads them in the configured OCR boundary.
  */
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
-  pdf: ["doppler-md", "native-pdf", "poppler-text"],
+  pdf: ["native-pdf", "poppler-text"],
   image: ["ocr"],
   "structured-json": ["json"],
   "office-pptx": ["pptx"],
@@ -249,8 +255,10 @@ export class ExtractorRegistry {
   }
 
   resolve(format: string, configured?: string[]): string[] {
-    const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
-    // A sandboxed PDF deployment (DOCSLURP_PDF_EXTRACTOR=vm-pdf or DOCSLURP_VM_PDF_INSTALLED=1) runs PDFs only in vm-pdf.
+    const builtIn = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
+    const base = format === "pdf" && dopplerHostPdfEnabled() ? ["doppler-md", ...builtIn] : builtIn;
+    // A sandboxed PDF deployment (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or
+    // DOCSLURP_SERVICE_PROFILE=service) runs PDFs only in vm-pdf.
     const sandboxedPdf = format === "pdf" && (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured());
     const defaults = sandboxedPdf ? [VM_PDF_EXTRACTOR_ID] : base;
     // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; a retired id

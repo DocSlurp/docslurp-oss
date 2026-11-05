@@ -1,7 +1,7 @@
 # Dockerfile.lean - Production worker image (fly.worker.toml)
 #
 # Contents: Node 24 + the worker's production node_modules (pnpm deploy, pruned),
-# Doppler (the DocSlurp Poppler fork, built from worker/doppler.json; with poppler-data CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
+# poppler-utils (with poppler-data CMaps; Doppler, the DocSlurp Poppler fork, only with DOCSLURP_DOPPLER=1), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
 # with the base parsers (trafilatura, ebooklib, python-pptx,
 # openpyxl, xlsx2csv, Pillow; PDFs use Poppler, the optional native-pdf engine or the sandboxed PDF provider). No LibreOffice or ML stacks: Docling and
 # Unstructured come from sha256-pinned vendor bundles fetched on demand
@@ -12,8 +12,14 @@
 # Every build stage starts from the same pinned base so the venv (which links
 # /usr/bin/python3) and native addons match the runtime stage exactly.
 
+# Doppler host parsing is an operator opt-in (0 or 1; docs/worker-image.md). 0, the default, keeps Debian's poppler-utils and
+# builds nothing of Doppler. 1 installs Doppler's utilities over them and enables doppler-md (DOCSLURP_DOPPLER_HOST_PDF=1):
+# customer PDFs are then parsed by the fork on the worker host, in the parser sandbox, not a VM.
+ARG DOCSLURP_DOPPLER=0
+
 # Build stage: compile TypeScript, then produce a self-contained production
 # node_modules for the worker only (no pnpm store, no workspace-root deps).
+
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS builder
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
@@ -85,9 +91,9 @@ RUN node -e ' \
       }).catch((e) => { console.error(e.message); process.exit(1); });' "${TARGETARCH}" \
     && /usr/local/bin/landrun --version
 
-# Doppler (DocSlurp/doppler, GPL-2.0-or-later): the Poppler fork's command-line utilities and the doppler-md /
-# pdftomarkdown converter, built from the public source pinned in worker/doppler.json (sha256-verified). They replace
-# Debian's poppler-utils and run only as separate executables in the parser sandbox; nothing links them.
+# Doppler (DocSlurp/doppler, GPL-2.0-or-later), built only with DOCSLURP_DOPPLER=1: the Poppler fork's command-line utilities
+# and the doppler-md / pdftomarkdown converter, from the public source pinned in worker/doppler.json (sha256-verified). They
+# shadow Debian's poppler-utils on PATH and run only as separate executables in the parser sandbox; nothing links them.
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-src
 COPY worker/doppler.json /tmp/doppler.json
 RUN node -e ' \
@@ -130,6 +136,16 @@ RUN cargo build --release --locked --manifest-path /src/doppler-md/Cargo.toml \
     && install -D -m 0755 /src/doppler-md/target/release/doppler-md /out/usr/local/bin/doppler-md \
     && install -D -m 0755 /src/doppler-md/target/release/pdftomarkdown /out/usr/local/bin/pdftomarkdown
 
+# DOCSLURP_DOPPLER selects one of these; BuildKit builds only the Doppler stages the selected one needs.
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-0
+RUN mkdir -p /out/usr/local/bin
+
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-1
+COPY --from=doppler-utils /out/usr/local/ /out/usr/local/
+COPY --from=doppler-md /out/usr/local/bin/ /out/usr/local/bin/
+
+FROM doppler-${DOCSLURP_DOPPLER} AS doppler-selected
+
 # Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
@@ -151,6 +167,7 @@ RUN apt-get update \
        fonts-urw-base35 \
        pandoc \
        poppler-data \
+       poppler-utils \
        libfontconfig1 \
        libfreetype6 \
        libjpeg62-turbo \
@@ -191,12 +208,14 @@ RUN if grep -q '^#\?ConcurrentDatabaseReload' /etc/clamav/clamd.conf; then \
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY LICENSES ./LICENSES
 COPY --from=landrun /usr/local/bin/landrun /usr/local/bin/landrun
-# Doppler: Poppler-fork utilities (pdftotext, pdfinfo, pdfimages, pdftoppm, pdftohtml, pdfseparate, pdfunite) with
-# libpoppler, and doppler-md / pdftomarkdown, all under /usr/local (on PATH, inside the sandbox's read-only /usr).
-COPY --from=doppler-utils /out/usr/local/ /usr/local/
-COPY --from=doppler-md /out/usr/local/bin/ /usr/local/bin/
-RUN ldconfig && test -x /usr/local/bin/pdftomarkdown && pdftotext -v
-ENV DOCSLURP_DOPPLER_REQUIRED=1
+# Poppler utilities: Debian's poppler-utils by default. With DOCSLURP_DOPPLER=1, Doppler's (pdftotext, pdfinfo, pdfimages,
+# pdftoppm, pdftohtml, pdfseparate, pdfunite, with libpoppler) and doppler-md / pdftomarkdown under /usr/local, ahead of
+# /usr/bin on PATH and inside the sandbox's read-only /usr, and doppler-md enabled (host parsing; docs/worker-image.md).
+ARG DOCSLURP_DOPPLER
+COPY --from=doppler-selected /out/usr/local/ /usr/local/
+ENV DOCSLURP_DOPPLER_HOST_PDF=${DOCSLURP_DOPPLER}
+RUN ldconfig && pdftotext -v \
+    && if [ "$DOCSLURP_DOPPLER_HOST_PDF" = 1 ]; then test -x /usr/local/bin/pdftomarkdown; else test ! -e /usr/local/bin/pdftomarkdown; fi
 # Python base parsers (root-owned, read-only for the worker user).
 COPY --from=python-venv /app/.venv /app/.venv
 # Production node_modules, then compiled output (changes most often, so last).
@@ -245,14 +264,17 @@ ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
 
-# Provenance of the third-party native components (Doppler; the native PDF engine when installed): license texts and
+# Provenance of the third-party native components (Doppler and the native PDF engine, each when installed): license texts and
 # PROVENANCE.json under /usr/share/licenses/<name>/, and an SPDX document. A component without a public repository
 # and pinned commit fails the build.
 COPY scripts/write-component-provenance.mjs ./scripts/write-component-provenance.mjs
 COPY worker/doppler.json ./worker/doppler.json
-RUN node scripts/write-component-provenance.mjs --doppler worker/doppler.json --doppler-prefix /usr/local \
+RUN node scripts/write-component-provenance.mjs \
+      $( [ "$DOCSLURP_DOPPLER_HOST_PDF" = 1 ] && echo --doppler worker/doppler.json --doppler-prefix /usr/local ) \
       --engine-manifest /app/vendor-artifacts/native-pdf/manifest.json
-LABEL io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
+# io.docslurp.doppler.included: 1 when this image was built with DOCSLURP_DOPPLER=1; the other labels describe the pinned source.
+LABEL io.docslurp.doppler.included="${DOCSLURP_DOPPLER}" \
+      io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
       io.docslurp.doppler.commit="827b3cccecfdcfe61ad89335ec2fb5476df014da" \
       io.docslurp.doppler.license="GPL-2.0-or-later" \
       io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da" \
