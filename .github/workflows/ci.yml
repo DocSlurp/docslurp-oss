@@ -42,7 +42,7 @@ jobs:
             run: pnpm test:packages
     env:
       UV_NO_CACHE: '0'
-      PYTHON_VENV: ${{ github.project }}/.venv
+      PYTHON_VENV: ${{ github.workspace }}/.venv
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
