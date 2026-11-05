@@ -5,11 +5,8 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { recordMeasuredPageCount } from "../lib/office-page-count.js";
-import { sourceStorageKey } from "../tools/storage.js";
 import { planOcrLanguages } from "../ocr/languages.js";
 import { resolveOcrMode } from "../ocr/mode.js";
-import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 
 type CanonicalStrategy =
   | "already-pdf"
@@ -199,18 +196,8 @@ export class ToCanonicalStage implements Stage {
             };
           }
 
-          // Office, EPUB and spreadsheet files arrive counted as one page. Measure what the document really holds and record it as
-          // documents.billing_pages before the completion charge reads it (page-base-fee.ts). The page basis (page_count) stays what
-          // the text splits into: these formats' text has no page breaks.
-          const pages = await recordMeasuredPageCount(state, {
-            runner: this.runner,
-            signal,
-            downloadSource: (target) => this.storage.downloadSourceToTempFile(
-              sourceStorageKey(target.sourceKey),
-              trustedTempDownloadPattern("docslurp-pages-", target),
-            ),
-          }, document, normalizedFormat);
-          artifact.pageCount = { intake: pages.intakePages, measured: pages.pages, method: pages.method };
+          // Office, EPUB and spreadsheet pages are counted in extract-markdown from the extractor's own output
+          // (lib/office-page-count.ts); this stage reads nothing of the source.
 
           await this.storage.putJson(key, artifact);
 
@@ -219,10 +206,6 @@ export class ToCanonicalStage implements Stage {
             stats: {
               strategy,
               normalizedFormat,
-              pageCount: pages.pages ?? pages.intakePages,
-              // The pages the text splits into (citations, page rows); `pageCount` above is what the document bills.
-              pageBasis: document.pageCount,
-              pageCountMethod: pages.method,
             },
           };
         },

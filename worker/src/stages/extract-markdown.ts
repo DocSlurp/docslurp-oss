@@ -108,6 +108,7 @@ import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { authorizeImageFrames, authorizeImageRead } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
+import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -252,6 +253,21 @@ interface CandidateContext {
   mimeType?: string | null;
 }
 
+/** Run ledger slot holding a content hash's measured page count, so a deduplicated copy bills the same pages. */
+const MEASURED_PAGES_KEY = "measured-pages";
+
+function measuredPagesOf(value: string | undefined): PageCountResult | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<PageCountResult>;
+    return Number.isSafeInteger(parsed.pages) && parsed.pages! >= 1 && (parsed.method === "slides" || parsed.method === "sheet-rows" || parsed.method === "text-rule")
+      ? { pages: parsed.pages!, method: parsed.method }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export class ExtractMarkdownStage implements Stage {
   readonly name = "extract-markdown";
   private readonly rasters: PdfRasterCache;
@@ -384,6 +400,9 @@ export class ExtractMarkdownStage implements Stage {
                 if (existingUri) {
                   const inheritedFailures = state.artifactLedger.read(`${OCR_FAILED_PAGES_KEY}:${contentHash}`);
                   if (inheritedFailures) state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, inheritedFailures);
+                  // A copy of a measured Office, EPUB or spreadsheet file bills its original's count, never intake's one page.
+                  const inheritedPages = measuredPagesOf(state.artifactLedger.read(`${MEASURED_PAGES_KEY}:${contentHash}`));
+                  if (inheritedPages) await recordMeasuredPageCount(state, document, format, inheritedPages);
                   console.log(
                     `[extract-debug] document=${document.id} deduplicated=true existingUri=${existingUri}`,
                   );
@@ -591,6 +610,17 @@ export class ExtractMarkdownStage implements Stage {
                   );
 
                   let winningText = policyDecision.selectedMarkdown;
+                  // Office, EPUB and spreadsheet files arrive counted as one page. Count what the extractor read, from its own
+                  // output (no other parser runs and the source is not read again), and record it as documents.billing_pages
+                  // before features and the completion charge read it (page-base-fee.ts). The page basis (page_count) stays what
+                  // the text splits into: these formats' text has no page breaks.
+                  const measuredPages = await recordMeasuredPageCount(state, document, format, {
+                    extractor: winningCandidate.label,
+                    markdown: policyDecision.selectedMarkdown,
+                  });
+                  if (measuredPages.pages !== null && measuredPages.method !== null) {
+                    state.artifactLedger.record(`${MEASURED_PAGES_KEY}:${contentHash}`, JSON.stringify({ pages: measuredPages.pages, method: measuredPages.method }));
+                  }
                   // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; the
                   // text-layer extractors never OCR. The engine charges each page it reads.
                   const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
@@ -1071,6 +1101,9 @@ export class ExtractMarkdownStage implements Stage {
                       skippedPages: completedPages.size,
                       processedPages: processedPages.length,
                       pageCount: countedPages,
+                      // Office, EPUB and spreadsheet files: the pages they bill (counted from the extractor's output) and how.
+                      billingPages: measuredPages.pages,
+                      billingPagesMethod: measuredPages.method,
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,

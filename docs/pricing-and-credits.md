@@ -96,18 +96,20 @@ catalog: `billing.test.ts` checks every mix stays inside its mode's range. A qua
 
 ## Which pages a document bills
 
-`documents.page_count` is the page basis: the pages the extracted text splits into, which citations, page rows and the page index use. A PDF's count is its own. Word, OpenDocument, RTF, legacy Office, slide, sheet and EPUB files have no page breaks in their text and arrive counted as one page (`documents.page_count_source` is `assumed`), so the worker measures what they hold and records it as `documents.billing_pages` (`worker/src/lib/office-page-count.ts`); the completion fee and the optional features bill that count, and a forecast uses it only once it exists.
+`documents.page_count` is the page basis: the pages the extracted text splits into, which citations, page rows and the page index use. A PDF's count is its own. Word, OpenDocument, RTF, legacy Office, slide, sheet and EPUB files have no page breaks in their text and arrive counted as one page (`documents.page_count_source` is `assumed`), so the worker counts what their extractor read and records it as `documents.billing_pages` (`worker/src/lib/office-page-count.ts`); the completion fee and the optional features bill that count, and a forecast uses it only once it exists. The count is taken from the Markdown the document's extractor already produced in the parser sandbox: no other parser runs to count pages and the worker host never reads the file's bytes for it. A copy of the same file in the run bills its original's count.
 
 | Format | How `billing_pages` is counted |
 | --- | --- |
-| Word, OpenDocument, legacy Office | Pages of the file converted to PDF by LibreOffice. Where the worker has no LibreOffice (the lean production image) the text rule over the extracted text, then the file's size at the format's typical bytes per page (`size-estimate`, the quote's typical count). Never one page for a long document. No tool in the lean image reads a legacy `.ppt` or `.xls`, so those bill the size estimate: a 30 MB `.ppt` is 768 Fast pages, 3.84 credits, and no feature bills on that guess. |
-| PowerPoint | Slides. |
-| Spreadsheet | The text rule (60 lines or 3,500 characters a page) over the text each sheet's non-empty cells hold, never the CSV's separators: a stray cell far down or far across a sheet is a page, not thousands. A 12 KB sheet of 1,000 short rows with one cell at `XFD1` measures 17 pages, not 4,688. |
-| EPUB | The text rule over the chapters' text. |
+| Word, OpenDocument, RTF | The text rule (60 non-blank lines or 3,500 characters a page, HTML tags not counted) over the extractor's Markdown, including the headers, footers and comments it appends (`text-rule`). Never one page for a long document. Legacy `.doc`, `.ppt` and `.xls` have no reader and fail as unsupported, so they bill nothing. |
+| PowerPoint | Slides: the pages of the python-pptx extractor's output, one per slide (`slides`). |
+| Spreadsheet | The text rule over the text each sheet's non-empty table cells hold, summed per sheet, never separators, empty cells or the formula and source-context appendix (`sheet-rows`): a stray cell far down or far across a sheet is a page, not thousands. |
+| EPUB | The text rule over the extractor's Markdown of the whole book (`text-rule`). |
+
+Documents measured by an earlier release keep their method (`pdf-conversion`, `text-pages`, `size-estimate`) and bill as before.
 
 A measured count far above intake's one page owes credits admission never saw, so the worker re-checks the organization's balance after measuring and pauses the run when the extra fee and enabled features no longer fit. The Fast fee on measured pages is charged when the run completes, so the check adds the extra pages of every document of the run measured so far: ten 400-page DOCX files against 10 spendable credits pause the run at the sixth file (11.97 credits owed), where each alone (2 credits) would have passed.
 
-Features read text, so a measured count is capped by the text the document holds when features bill, whatever method measured it (layout conversion, sheet cells, EPUB chapters, the text rule): blank pages bill the base fee but not features. Slides are the exception: a slide is a page whatever it holds. A size estimate never prices a feature; the feature bills the text it read, or intake's count.
+Features read text, so a measured count is capped by the text the document holds when features bill, whatever method measured it (sheet cells, the text rule, or an earlier release's layout or chapter count): blank pages bill the base fee but not features. Slides are the exception: a slide is a page whatever it holds. A size estimate never prices a feature; the feature bills the text it read, or intake's count.
 
 A new version of a document (a reprocess, a configuration re-index, a full index) keeps the measured count, its method, intake's count source and the file facts, and re-index and full-index estimates price `coalesce(billing_pages, page_count)`: a 300-page DOCX re-indexes as 300 pages, not 1. Progress counts (`pages_total`) and page-image work stay on the page basis.
 

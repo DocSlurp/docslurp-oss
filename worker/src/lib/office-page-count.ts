@@ -1,63 +1,34 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import path from "node:path";
-
 import {
   DOCUMENT_FEATURES,
   estimateProfileFor,
   featureCredits,
-  listZipEntryNames,
   pageCredits,
-  pagesFromSize,
   speedBoostMultiplier,
   textPageCount,
-  workerCountedFormat,
   type PipelineFeatures,
-  type WorkerCountedFormat,
 } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
-import type { CommandRunner } from "../tools/runner.js";
 
 /**
  * Real page counts for formats whose page count the server cannot know at intake (it counts Office, EPUB and spreadsheet files
- * as one page). The worker measures them after converting, so billing and progress read the count of what is actually read:
+ * as one page). The worker counts them from the Markdown the document's extractor already produced, in the parser sandbox, for
+ * extract-markdown; counting runs no parser of its own and never reads the source file on the host:
  *
- *  - Word, OpenDocument, RTF and legacy Office files: pages of the file converted to PDF (LibreOffice, in the sandbox);
- *  - PowerPoint: slides;
- *  - spreadsheets: the pages of each sheet's non-empty CSV rows under the text rule (60 lines or 3,500 characters), summed;
- *  - EPUB: the text rule over the chapters' text.
+ *  - PowerPoint: slides, the form-feed-separated pages of the python-pptx extractor's output (`slides`);
+ *  - spreadsheets: each sheet's table cells under the text rule (60 lines or 3,500 characters), summed (`sheet-rows`);
+ *  - Word, OpenDocument, RTF, EPUB (and any other extractor's output): the text rule over the Markdown (`text-rule`).
  *
- * When LibreOffice is not on the worker (the lean production image has none) a Word, RTF or legacy .doc file is counted by the
- * same text rule over its extracted text (`text-rule`); a file no text tool reads falls back to its size at the format's typical
- * bytes per page (`size-estimate`). A long document is never left at the intake count of one page.
+ * A long document is never left at the intake count of one page. Earlier counts (`pdf-conversion`, `text-pages`,
+ * `size-estimate`) can still be on stored documents; features and billing read them as before.
  */
-export type PageCountMethod = "pdf-conversion" | "slides" | "sheet-rows" | "text-pages" | "text-rule" | "size-estimate";
+export type PageCountMethod = "slides" | "sheet-rows" | "text-rule";
 export interface PageCountResult { pages: number; method: PageCountMethod }
 
 /** Hard ceiling for a measured count: more than this is a parser fault, not a document. */
 export const MAX_COUNTED_PAGES = 100_000;
-const CONVERT_TIMEOUT_MS = 180_000;
-/** Extracted text is read from a sandboxed tool's stdout; counting stops reading past this many characters (a page is 3,500). */
+/** Counting reads at most this many characters of the extractor's Markdown (a page is 3,500). */
 const MAX_COUNTED_TEXT_CHARS = MAX_COUNTED_PAGES * 3_500;
-
-export interface PageCountDeps {
-  runner: Pick<CommandRunner, "run" | "officeToPdf" | "pdfInfo" | "pptxExtract" | "xlsxExtractPy" | "epubExtract" | "mammothMarkdown" | "docToText" | "rtfToHtml">;
-  /** Downloads the document's source to a local temp file and returns its path (callers delete it). */
-  downloadSource: (document: Document) => Promise<string>;
-  signal?: AbortSignal;
-}
-
-/** Bounds a sandboxed command; the caller's abort signal still applies. */
-function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
-  const timeout = AbortSignal.timeout(ms);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-export function parsePdfInfoPages(stdout: string): number | null {
-  const match = stdout.match(/^Pages:\s+(\d+)/m);
-  const pages = match ? Number.parseInt(match[1]!, 10) : NaN;
-  return Number.isSafeInteger(pages) && pages > 0 ? pages : null;
-}
 
 function bounded(pages: number): number | null {
   return Number.isFinite(pages) && pages >= 1 ? Math.min(MAX_COUNTED_PAGES, Math.floor(pages)) : null;
@@ -121,122 +92,74 @@ export function textBodyPages(bodies: readonly string[]): number {
   }, 0));
 }
 
-async function pdfPagesOfConversion(deps: PageCountDeps, sourcePath: string): Promise<number | null> {
-  const outdir = await mkdtemp(path.join(path.dirname(sourcePath), "pages-"));
-  try {
-    const signal = withTimeout(deps.signal, CONVERT_TIMEOUT_MS);
-    const convert = await deps.runner.officeToPdf(sourcePath, outdir);
-    if (!convert.available) return null;
-    await deps.runner.run(convert, signal);
-    const pdf = path.join(outdir, `${path.basename(sourcePath, path.extname(sourcePath))}.pdf`);
-    if (!(await stat(pdf).then((entry) => entry.isFile(), () => false))) return null;
-    const info = await deps.runner.pdfInfo(pdf);
-    if (!info.available) return null;
-    return parsePdfInfoPages((await deps.runner.run(info, signal)).stdout);
-  } finally {
-    await rm(outdir, { recursive: true, force: true });
+/**
+ * Where the spreadsheet extractor's appendix (office_markdown.py: formula source, then source context) starts. Each opens with a
+ * heading followed by a prose line; a sheet section is only its `## name` heading and table rows (`| ...`), so no sheet name or
+ * cell can produce these markers and move the cut.
+ */
+const SHEET_APPENDIX_MARKERS = [
+  "\n## Spreadsheet formula source\n\nFormulas are source expressions.",
+  "\n## Office source context\n\nSource-authored metadata",
+];
+
+/** The cells of one GFM table row (`| a | b\\|c |`), unescaped; null when the line is not a table row. */
+function gfmRowCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|")) return null;
+  const cells: string[] = [];
+  let cell = "";
+  for (let index = 1; index < trimmed.length; index += 1) {
+    const char = trimmed[index]!;
+    if (char === "\\" && index + 1 < trimmed.length) { cell += trimmed[index + 1]; index += 1; }
+    else if (char === "|") { cells.push(cell.trim()); cell = ""; }
+    else cell += char;
   }
+  if (cell.trim()) cells.push(cell.trim());
+  return cells;
 }
 
-async function sidecarJson(deps: PageCountDeps, sourcePath: string, suffix: string, plan: (output: string) => ReturnType<PageCountDeps["runner"]["pptxExtract"]>): Promise<unknown | null> {
-  const output = `${sourcePath}.${suffix}.json`;
-  try {
-    const command = await plan(output);
-    if (!command.available) return null;
-    await deps.runner.run(command, withTimeout(deps.signal, 120_000));
-    return JSON.parse(await readFile(output, "utf8"));
-  } finally {
-    await rm(output, { force: true });
+/**
+ * The text each sheet's table holds, one entry a sheet, from the spreadsheet extractor's Markdown: each row's non-empty cells joined
+ * by a space (a cell's line breaks, written `<br>`, stay line breaks), the header separator row and the appendix not read. The same
+ * text the CSV rule read (csvCellText), so a sheet bills by what its cells hold.
+ */
+export function sheetCellTexts(markdown: string): string[] {
+  const cut = Math.min(...SHEET_APPENDIX_MARKERS.map((marker) => {
+    const at = markdown.indexOf(marker);
+    return at < 0 ? markdown.length : at;
+  }));
+  const sheets: string[][] = [];
+  for (const line of markdown.slice(0, cut).split(/\r?\n/)) {
+    if (line.startsWith("## ") || sheets.length === 0) sheets.push([]);
+    const cells = gfmRowCells(line);
+    if (!cells || cells.every((cell) => /^:?-{3,}:?$/.test(cell) || cell === "")) continue;
+    const text = cells.filter(Boolean).join(" ").replace(/<br>/g, "\n");
+    if (text) sheets[sheets.length - 1]!.push(text);
   }
+  return sheets.map((rows) => rows.join("\n")).filter((text) => text.trim() !== "");
 }
 
-/** The text of a Word, RTF or legacy .doc file from the sandboxed text tools the lean worker image has, or null. */
-async function extractedTextForCounting(deps: PageCountDeps, document: Document, sourcePath: string, format: string): Promise<{ text: string; markup: boolean } | null> {
-  const extension = path.extname(document.filename).toLowerCase();
-  const attempt = async <T>(read: () => Promise<T | null>): Promise<T | null> => {
-    try {
-      return await read();
-    } catch (error) {
-      if (deps.signal?.aborted) throw error;
-      console.warn(`[page-count] text extraction unavailable document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
-    }
-  };
-  if (format === "office-word" && extension !== ".doc") {
-    const payload = await attempt(() => sidecarJson(deps, sourcePath, "mammoth", (output) => deps.runner.mammothMarkdown(sourcePath, output))) as { text?: unknown } | null;
-    if (typeof payload?.text === "string") return { text: payload.text.slice(0, MAX_COUNTED_TEXT_CHARS), markup: false };
-  }
-  if (extension === ".rtf") {
-    const html = await attempt(async () => {
-      const plan = await deps.runner.rtfToHtml(sourcePath);
-      return plan.available ? (await deps.runner.run(plan, withTimeout(deps.signal, 120_000))).stdout : null;
-    });
-    if (html !== null) return { text: html.slice(0, MAX_COUNTED_TEXT_CHARS), markup: true };
-  }
-  if (extension === ".doc") {
-    const text = await attempt(async () => {
-      const plan = await deps.runner.docToText(sourcePath);
-      return plan.available ? (await deps.runner.run(plan, withTimeout(deps.signal, 120_000))).stdout : null;
-    });
-    if (text !== null) return { text: text.slice(0, MAX_COUNTED_TEXT_CHARS), markup: false };
-  }
-  return null;
-}
-
-/** The measured page count of a converted document, or null when it could not be measured at all. */
-export async function measureDocumentPages(deps: PageCountDeps, document: Document, format: string): Promise<PageCountResult | null> {
+/**
+ * The measured page count of a document from its extractor's Markdown, or null when there is nothing to count (the document then
+ * bills its intake count). `extractor` is the winning extractor's id: only python-pptx's output marks slides, and only the
+ * spreadsheet extractor's output is sheet tables; any other output is counted by the text rule.
+ */
+export function measureExtractedPages(format: string, extractor: string, markdown: string): PageCountResult | null {
   if (!formatNeedsMeasuredPages(format)) return null;
-  const sourcePath = await deps.downloadSource(document);
-  try {
-    if (format === "office-pptx" && !/\.ppt$/i.test(document.filename)) {
-      // Slides: the container's own slide parts, read from the ZIP directory without inflating anything.
-      const bytes = await readFile(sourcePath);
-      const slides = listZipEntryNames(bytes)?.filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name)).length ?? 0;
-      const pages = bounded(slides);
-      if (pages) return { pages, method: "slides" };
-      const payload = await sidecarJson(deps, sourcePath, "pptx", (output) => deps.runner.pptxExtract(sourcePath, output)) as { slideCount?: number; slides?: unknown[] } | null;
-      const counted = bounded(Number(payload?.slideCount) || payload?.slides?.length || 0);
-      return counted ? { pages: counted, method: "slides" } : null;
-    }
-    if (format === "office-excel" && !/\.xls$/i.test(document.filename)) {
-      const payload = await sidecarJson(deps, sourcePath, "xlsx", (output) => deps.runner.xlsxExtractPy(sourcePath, output)) as { sheets?: Array<{ csv?: unknown }> } | null;
-      if (!payload || !Array.isArray(payload.sheets)) return null;
-      // Sheets bill by the text their cells hold, never by the characters of the CSV that carries them.
-      const pages = bounded(textBodyPages(payload.sheets.map((sheet) => (typeof sheet.csv === "string" ? csvCellText(sheet.csv) : ""))));
-      return pages ? { pages, method: "sheet-rows" } : null;
-    }
-    if (format === "epub") {
-      const payload = await sidecarJson(deps, sourcePath, "epub", (output) => deps.runner.epubExtract(sourcePath, output)) as { chapters?: Array<{ text?: unknown }> } | null;
-      if (!payload || !Array.isArray(payload.chapters)) return null;
-      const pages = bounded(textBodyPages(payload.chapters.map((chapter) => (typeof chapter.text === "string" ? chapter.text : ""))));
-      return pages ? { pages, method: "text-pages" } : null;
-    }
-    // Word, OpenDocument, RTF, legacy .doc/.ppt/.xls: the layout engine decides the pages.
-    let converted: number | null = null;
-    try {
-      converted = await pdfPagesOfConversion(deps, sourcePath);
-    } catch (error) {
-      if (deps.signal?.aborted) throw error;
-      console.warn(`[page-count] conversion unavailable document=${document.id} format=${format}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    const pages = bounded(converted ?? 0);
-    if (pages) return { pages, method: "pdf-conversion" };
-    // No layout engine (the lean worker image has no LibreOffice) or it failed: count the text the file holds, by the text rule.
-    const extracted = await extractedTextForCounting(deps, document, sourcePath, format);
-    if (extracted) {
-      const content = contentLines(extracted.text);
-      const textPages = bounded(content.trim() ? textPageCount(content, { markup: extracted.markup }) : 1);
-      if (textPages) return { pages: textPages, method: "text-rule" };
-    }
-    // No text tool read it either: its size at the format's typical bytes per page, never the one page intake assumed.
-    const size = await stat(sourcePath).then((entry) => entry.size, () => 0);
-    const counted = workerCountedFormat({ name: document.filename, type: document.mimeType }) ?? (format as WorkerCountedFormat);
-    const estimated = size > 0 ? bounded(pagesFromSize(counted, size)) : null;
-    return estimated ? { pages: estimated, method: "size-estimate" } : null;
-  } finally {
-    await rm(sourcePath, { force: true });
-    await rm(path.dirname(sourcePath), { recursive: true, force: true }).catch(() => undefined);
+  const text = markdown.length > MAX_COUNTED_TEXT_CHARS ? markdown.slice(0, MAX_COUNTED_TEXT_CHARS) : markdown;
+  if (!text.trim()) return null;
+  if (format === "office-pptx" && extractor === "pptx") {
+    const slides = bounded(text.replace(/\f\s*$/, "").split("\f").length);
+    return slides ? { pages: slides, method: "slides" } : null;
   }
+  if (format === "office-excel" && extractor === "xlsx") {
+    const sheets = sheetCellTexts(text);
+    const pages = sheets.length ? bounded(textBodyPages(sheets)) : null;
+    return pages ? { pages, method: "sheet-rows" } : null;
+  }
+  const content = contentLines(text);
+  const pages = content.trim() ? bounded(textPageCount(content, { markup: true })) : null;
+  return pages ? { pages, method: "text-rule" } : null;
 }
 
 /**
@@ -268,10 +191,10 @@ export function extraCreditsForMeasuredPages(
 export interface MeasuredRunDocument { pageCount: number; billingPages: number; method: string | null }
 
 /**
- * Measures the document's pages and records them as `documents.billing_pages` (and on the in-memory document) before billing reads
- * them. The page basis (`page_count`, what the text splits into) is left alone: these formats' text has no page breaks, so
- * replacing it would make the page index drop every page. Best effort: when the count cannot be measured at all the document bills
- * its intake count and the stage reports why.
+ * Measures the document's pages from its extractor's Markdown (measureExtractedPages) and records them as `documents.billing_pages`
+ * (and on the in-memory document) before billing reads them. The page basis (`page_count`, what the text splits into) is left
+ * alone: these formats' text has no page breaks, so replacing it would make the page index drop every page. When there is nothing
+ * to count the document bills its intake count.
  */
 export async function recordMeasuredPageCount(
   state: {
@@ -282,23 +205,16 @@ export async function recordMeasuredPageCount(
       measuredRunDocuments?(runId: string): Promise<MeasuredRunDocument[]>;
     } | null;
   },
-  deps: PageCountDeps,
   document: Document,
   format: string,
+  extracted: { extractor: string; markdown: string } | PageCountResult | null,
 ): Promise<{ pages: number | null; method: PageCountMethod | null; intakePages: number }> {
   const intakePages = document.pageCount;
   if (!formatNeedsMeasuredPages(format)) return { pages: null, method: null, intakePages };
-  let measured: PageCountResult | null = null;
-  try {
-    measured = await measureDocumentPages(deps, document, format);
-  } catch (error) {
-    if (deps.signal?.aborted) throw error;
-    console.warn(`[page-count] unavailable document=${document.id} format=${format}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  // A measured count is passed straight through (a deduplicated copy reuses its original's count).
+  const measured = extracted === null ? null : "pages" in extracted ? extracted : measureExtractedPages(format, extracted.extractor, extracted.markdown);
   if (!measured) return { pages: null, method: null, intakePages };
-  if (measured.method !== "pdf-conversion" && measured.method !== "slides") {
-    console.warn(`[page-count] document=${document.id} format=${format} counted by ${measured.method}: ${measured.pages} pages (intake ${intakePages})`);
-  }
+  console.log(`[page-count] document=${document.id} format=${format} counted by ${measured.method}: ${measured.pages} pages (intake ${intakePages})`);
   if (!state.store?.setDocumentBillingPages) throw new Error("page count measured but the store cannot persist it");
   await state.store.setDocumentBillingPages(state.run.id, document.id, measured.pages, measured.method);
   document.billingPages = measured.pages;

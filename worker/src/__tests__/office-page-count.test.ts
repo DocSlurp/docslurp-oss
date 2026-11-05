@@ -1,218 +1,244 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { Document } from "../models.js";
+import type { Document, WorkspaceRun } from "../models.js";
 import { defaultPipelineFeatures, normalizePipelineFeatures, pageCredits } from "@docslurp/shared";
 
-import { csvCellText, extraCreditsForMeasuredPages, measureDocumentPages, parsePdfInfoPages, recordMeasuredPageCount, type PageCountDeps } from "../lib/office-page-count.js";
+const reads = vi.hoisted(() => [] as unknown[]);
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: vi.fn((...args: Parameters<typeof actual.readFile>) => {
+      reads.push(args[0]);
+      return actual.readFile(...args);
+    }),
+  };
+});
+
+import { MAX_COUNTED_PAGES, csvCellText, extraCreditsForMeasuredPages, measureExtractedPages, recordMeasuredPageCount, sheetCellTexts } from "../lib/office-page-count.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
+import { ToCanonicalStage } from "../stages/to-canonical.js";
+import type { CommandRunner } from "../tools/runner.js";
+import type { ArtifactStore } from "../tools/storage.js";
 
 function document(filename: string, mimeType: string, pageCount = 1): Document {
   return { id: "doc-1", userId: "u", runId: "run-1", filename, mimeType, sourceKey: `u/run/raw/${filename}`, status: "queued", extractionMode: "hybrid", pageCount, createdAt: new Date(), updatedAt: new Date() };
 }
 
-/** A runner whose soffice "converts" by writing a PDF and whose pdfinfo reports `pdfPages`. */
-function fakeDeps(options: { pdfPages?: number; sidecar?: unknown; sofficeFails?: boolean; noSoffice?: boolean; bytes?: Buffer; mammothText?: string; catdocText?: string; unrtfHtml?: string }): PageCountDeps {
-  const available = (binary: string, ...args: string[]) => ({ binary, args, available: true });
-  const unavailable = (binary: string) => ({ binary, args: [], available: false });
-  return {
-    runner: {
-      officeToPdf: async (source: string, outdir: string) => options.noSoffice ? unavailable("soffice") : available("soffice", "--convert-to", "pdf", source, "--outdir", outdir),
-      mammothMarkdown: async (source: string, output: string) => options.mammothText === undefined ? unavailable("mammoth") : available("mammoth", source, output),
-      docToText: async (source: string) => options.catdocText === undefined ? unavailable("catdoc") : available("catdoc", source),
-      rtfToHtml: async (source: string) => options.unrtfHtml === undefined ? unavailable("unrtf") : available("unrtf", source),
-      pdfInfo: async (source: string) => available("pdfinfo", source),
-      pptxExtract: async (source: string, output: string) => available("pptx", source, output),
-      xlsxExtractPy: async (source: string, output: string) => available("xlsx", source, output),
-      epubExtract: async (source: string, output: string) => available("epub", source, output),
-      run: async (plan: { binary: string; args: string[] }) => {
-        if (plan.binary === "soffice") {
-          if (options.sofficeFails) throw new Error("soffice crashed");
-          const outdir = plan.args[plan.args.indexOf("--outdir") + 1]!;
-          const source = plan.args[plan.args.indexOf("pdf") + 1]!;
-          await writeFile(path.join(outdir, `${path.basename(source, path.extname(source))}.pdf`), "%PDF-1.4");
-          return { stdout: "", stderr: "" };
-        }
-        if (plan.binary === "catdoc") return { stdout: options.catdocText ?? "", stderr: "" };
-        if (plan.binary === "unrtf") return { stdout: options.unrtfHtml ?? "", stderr: "" };
-        if (plan.binary === "mammoth") {
-          await writeFile(plan.args[1]!, JSON.stringify({ text: options.mammothText ?? "" }));
-          return { stdout: "", stderr: "" };
-        }
-        if (plan.binary === "pdfinfo") return { stdout: `Title: report\nPages:          ${options.pdfPages}\nEncrypted:      no\n`, stderr: "" };
-        await writeFile(plan.args[1]!, JSON.stringify(options.sidecar ?? {}));
-        return { stdout: "", stderr: "" };
-      },
-    } as unknown as PageCountDeps["runner"],
-    downloadSource: async (target) => {
-      const dir = await mkdtemp(path.join(tmpdir(), "page-count-test-"));
-      const file = path.join(dir, target.filename);
-      await writeFile(file, options.bytes ?? Buffer.from("x"));
-      return file;
-    },
-  };
+const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/** `pages` pages of Markdown by the 3,500-character rule, paragraphs separated by blank lines as Pandoc writes them. */
+function markdownOfPages(pages: number): string {
+  return Array.from({ length: pages * 5 }, (_, index) => `Paragraph ${index}: ${"the supplier shall deliver the goods. ".repeat(18)}`.trim()).join("\n\n");
 }
 
-const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+/** A GFM sheet the way office_markdown.py writes it. */
+function sheet(name: string, rows: string[][]): string {
+  const width = Math.max(...rows.map((row) => row.length));
+  const pad = (row: string[]) => [...row, ...Array(width - row.length).fill("")];
+  return [`## ${name}`, "", `| ${pad(rows[0]!).join(" | ")} |`, `| ${Array(width).fill("---").join(" | ")} |`, ...rows.slice(1).map((row) => `| ${pad(row).join(" | ")} |`)].join("\n");
+}
 
-describe("recordMeasuredPageCount", () => {
-  it("records a 300-page DOCX's real page count as billing pages and leaves the page basis at the text's one page", async () => {
-    const doc = document("contract.docx", DOCX);
-    const setDocumentBillingPages = vi.fn(async () => true);
-    const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, fakeDeps({ pdfPages: 300 }), doc, "office-word");
-    expect(result).toEqual({ pages: 300, method: "pdf-conversion", intakePages: 1 });
-    expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", 300, "pdf-conversion");
-    expect(doc.billingPages).toBe(300);
-    expect(doc.pageCount).toBe(1); // the page basis: the extractor's text has no form feeds, so a 300-page basis would drop every page
+describe("measureExtractedPages: counts from the extractor's own output", () => {
+  it("counts a 300-page DOCX's Markdown by the text rule, never as one page", () => {
+    const counted = measureExtractedPages("office-word", "pandoc", markdownOfPages(300));
+    expect(counted?.method).toBe("text-rule");
+    expect(counted!.pages).toBeGreaterThanOrEqual(300);
+    expect(counted!.pages).toBeLessThanOrEqual(302);
   });
 
-  it("counts a 300-page DOCX by the text rule when the worker has no LibreOffice (the lean production image), never as one page", async () => {
+  it("does not bill blank lines between paragraphs as lines of reading", () => {
+    // 600 one-word paragraphs: 1,199 lines with the blank ones, 600 that hold something (10 pages by the 60-line rule, not 20).
+    const markdown = Array.from({ length: 600 }, (_, index) => `word${index}`).join("\n\n");
+    expect(measureExtractedPages("office-word", "pandoc", markdown)).toEqual({ pages: 10, method: "text-rule" });
+  });
+
+  it("strips HTML markup a Markdown writer leaves (a complex table) before counting: attributes do not bill", () => {
+    const table = (attributes: string) =>
+      `<table>${Array.from({ length: 50 }, (_, index) => `<tr><td${attributes}>cell ${index}</td></tr>`).join("")}</table>`;
+    const plain = measureExtractedPages("office-word", "pandoc", table(""));
+    const styled = measureExtractedPages("office-word", "pandoc", table(` style="${"border:1px solid #000;padding:4px;".repeat(20)}"`));
+    expect(styled).toEqual(plain);
+    expect(plain).toEqual({ pages: 1, method: "text-rule" });
+  });
+
+  it("counts ODT, RTF and EPUB Markdown by the same text rule", () => {
+    for (const format of ["office-other", "epub"]) {
+      expect(measureExtractedPages(format, "pandoc", markdownOfPages(40))).toMatchObject({ method: "text-rule", pages: 40 });
+    }
+  });
+
+  it("counts a PPTX's slides from the python-pptx extractor's form-feed pages, a slide a page however little it holds", () => {
+    const deck = Array.from({ length: 48 }, (_, index) => `## Slide ${index + 1}`).join("\n\f\n");
+    expect(measureExtractedPages("office-pptx", "pptx", `${deck}\n`)).toEqual({ pages: 48, method: "slides" });
+    expect(measureExtractedPages("office-pptx", "pptx", "## Title only\n")).toEqual({ pages: 1, method: "slides" });
+  });
+
+  it("counts a PPTX another extractor read by the text rule: only python-pptx's form feeds mark slides", () => {
+    expect(measureExtractedPages("office-pptx", "pandoc", "a\fb\fc")).toMatchObject({ method: "text-rule" });
+  });
+
+  it("counts a spreadsheet's sheets by the text their cells hold, summed per sheet", () => {
+    const rows = Array.from({ length: 600 }, (_, index) => [`row ${index}`, String(index * 3), "note"]);
+    const book = [sheet("Orders", [["Item", "Qty", "Note"], ...rows]), sheet("Tiny", [["a"]])].join("\n\n");
+    // 601 lines on the first sheet (11 pages by the 60-line rule) and one on the second (1 page).
+    expect(measureExtractedPages("office-excel", "xlsx", book)).toEqual({ pages: 12, method: "sheet-rows" });
+  });
+
+  it("does not read separator rows, empty cells or a row of empty cells as text", () => {
+    const book = sheet("Sparse", [["a", "", "", "", "b"], ["", "", "", "", ""], ["", "", "c"]]);
+    expect(sheetCellTexts(book)).toEqual(["a b\nc"]);
+  });
+
+  it("unescapes cells and keeps a cell's line breaks as lines, like the CSV rule", () => {
+    const book = sheet("Esc", [["pipe \\| inside", "two<br>lines"]]);
+    expect(sheetCellTexts(book)).toEqual(["pipe | inside two\nlines"]);
+    expect(csvCellText('"pipe | inside","two\nlines"')).toBe("pipe | inside two\nlines");
+  });
+
+  it("does not bill the formula and source-context appendix as sheet text", () => {
+    const appendix = "\n\n## Spreadsheet formula source\n\nFormulas are source expressions. Cached values were stored by the workbook author; they have not been recalculated.\n\n| Sheet | Cell | Formula | Cached value | XLSX value type |\n| --- | --- | --- | --- | --- |\n" +
+      Array.from({ length: 5_000 }, (_, index) => `| S | A${index} | =B${index}*2 | ${index} | n |`).join("\n");
+    expect(measureExtractedPages("office-excel", "xlsx", `${sheet("S", [["x"]])}${appendix}`)).toEqual({ pages: 1, method: "sheet-rows" });
+  });
+
+  it("cannot be cut short by a sheet named like the appendix heading (it bills every sheet after it)", () => {
+    const rows = Array.from({ length: 1_200 }, (_, index) => [`value ${index}`, String(index)]);
+    const book = [sheet("Spreadsheet formula source", [["a"]]), sheet("Office source context", [["b"]]), sheet("Data", [["k", "v"], ...rows])].join("\n\n");
+    expect(measureExtractedPages("office-excel", "xlsx", book)!.pages).toBeGreaterThanOrEqual(21);
+  });
+
+  it("reports nothing to count for empty output, and does not touch formats the server already counts", () => {
+    expect(measureExtractedPages("office-word", "pandoc", " \n\n ")).toBeNull();
+    expect(measureExtractedPages("pdf", "poppler-text", markdownOfPages(5))).toBeNull();
+    expect(measureExtractedPages("image", "ocr", markdownOfPages(5))).toBeNull();
+  });
+
+  it("caps a runaway count at the ceiling", () => {
+    const deck = Array.from({ length: MAX_COUNTED_PAGES + 50 }, () => "x").join("\f");
+    expect(measureExtractedPages("office-pptx", "pptx", deck)).toEqual({ pages: MAX_COUNTED_PAGES, method: "slides" });
+  });
+});
+
+describe("recordMeasuredPageCount", () => {
+  it("records a 300-page DOCX's count as billing pages and leaves the page basis at the text's one page", async () => {
     const doc = document("contract.docx", DOCX);
     const setDocumentBillingPages = vi.fn(async () => true);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    // 300 pages of 3,500 characters each, the way mammoth hands the text over.
-    const text = Array.from({ length: 300 * 60 }, (_, line) => `Line ${String(line).padStart(5, "0")} ${"clause ".repeat(8)}`.trim()).join("\n\n");
-    const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } },
-      fakeDeps({ noSoffice: true, mammothText: text }), doc, "office-word");
+    const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, doc, "office-word", { extractor: "pandoc", markdown: markdownOfPages(300) });
     expect(result.method).toBe("text-rule");
     expect(result.pages).toBeGreaterThanOrEqual(300);
     expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", result.pages, "text-rule");
     expect(doc.billingPages).toBe(result.pages);
-    expect(warn.mock.calls.flat().join(" ")).toContain("counted by text-rule");
-    warn.mockRestore();
+    expect(doc.pageCount).toBe(1); // the page basis: the extractor's text has no form feeds, so a 300-page basis would drop every page
   });
 
-  it("falls back to the text rule when LibreOffice crashes, and to the size estimate when no text tool reads the file", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const long = Array.from({ length: 1_200 }, (_, line) => `row ${line}`).join("\n"); // 20 pages by the 60-line rule
-    const rtf = await measureDocumentPages(fakeDeps({ sofficeFails: true, unrtfHtml: `<html><body>${long.replace(/\n/g, "<br>\n")}</body></html>` }), document("memo.rtf", "application/rtf"), "office-other");
-    expect(rtf).toMatchObject({ method: "text-rule" });
-    expect(rtf!.pages).toBeGreaterThanOrEqual(20);
-    const doc = await measureDocumentPages(fakeDeps({ noSoffice: true, catdocText: long }), document("memo.doc", "application/msword"), "office-other");
-    expect(doc).toEqual({ pages: 20, method: "text-rule" });
-    // An ODT with no text tool: 2.4 MB at the format's 24 KB per page.
-    const odt = await measureDocumentPages(fakeDeps({ noSoffice: true, bytes: Buffer.alloc(2_400_000) }), document("deck.odt", "application/vnd.oasis.opendocument.text"), "office-other");
-    expect(odt).toEqual({ pages: Math.ceil(2_400_000 / (24 * 1024)), method: "size-estimate" });
-    warn.mockRestore();
-  });
-
-  it("reports nothing measured only when there is nothing to count (an empty file)", async () => {
-    const doc = document("empty.odt", "application/vnd.oasis.opendocument.text", 1);
+  it("records a count passed through unchanged (a deduplicated copy reuses its original's)", async () => {
+    const doc = document("deck.pptx", PPTX);
     const setDocumentBillingPages = vi.fn(async () => true);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } },
-      fakeDeps({ noSoffice: true, bytes: Buffer.alloc(0) }), doc, "office-other");
-    expect(result).toEqual({ pages: null, method: null, intakePages: 1 });
-    expect(setDocumentBillingPages).not.toHaveBeenCalled();
-    warn.mockRestore();
+    expect(await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, doc, "office-pptx", { pages: 40, method: "slides" }))
+      .toEqual({ pages: 40, method: "slides", intakePages: 1 });
+    expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", 40, "slides");
   });
 
-  it("does not touch formats the server already counts (PDF, text, images)", async () => {
-    const doc = document("a.pdf", "application/pdf", 12);
+  it("records nothing when there is nothing to count, or the format is counted at intake", async () => {
     const setDocumentBillingPages = vi.fn(async () => true);
-    expect(await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, fakeDeps({}), doc, "pdf")).toMatchObject({ pages: null });
+    const state = { run: { id: "run-1" }, store: { setDocumentBillingPages } };
+    expect(await recordMeasuredPageCount(state, document("empty.odt", "application/vnd.oasis.opendocument.text"), "office-other", { extractor: "pandoc", markdown: "" }))
+      .toEqual({ pages: null, method: null, intakePages: 1 });
+    expect(await recordMeasuredPageCount(state, document("a.pdf", "application/pdf", 12), "pdf", { extractor: "poppler-text", markdown: markdownOfPages(3) }))
+      .toMatchObject({ pages: null });
+    expect(await recordMeasuredPageCount(state, document("b.docx", DOCX), "office-word", null)).toMatchObject({ pages: null });
     expect(setDocumentBillingPages).not.toHaveBeenCalled();
   });
-});
 
-describe("measureDocumentPages", () => {
-  it("counts a spreadsheet's sheets by the text rule, so a long sheet is many pages", async () => {
-    const longSheet = Array.from({ length: 600 }, (_, row) => `r${row},${row}`).join("\n");
-    const result = await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: longSheet }, { csv: "a,b\n1,2" }, { csv: "" }] } }), document("book.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), "office-excel");
-    expect(result).toEqual({ pages: 11, method: "sheet-rows" });
-  });
-
-  it("counts a spreadsheet with a stray cell at A100000 as a page, not 1,667: empty rows are not read", async () => {
-    // What the old sidecar wrote: a row of commas for each of the 99,999 empty rows above the note.
-    const commas = ",".repeat(10);
-    const csv = ["a,b,c", ...Array.from({ length: 99_998 }, () => commas), "a note"].join("\n");
-    expect(await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv }] } }), document("stray.xlsx", XLSX), "office-excel")).toEqual({ pages: 1, method: "sheet-rows" });
-    // The sidecar now writes one blank line for a run of empty rows; both are ignored.
-    expect(await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: "a,b,c\r\n\r\na note\r\n" }] } }), document("stray.xlsx", XLSX), "office-excel")).toEqual({ pages: 1, method: "sheet-rows" });
-  });
-
-  it("counts a sheet with a stray cell at XFD1 by what its cells hold, not the 16,383 commas each padded row carried", async () => {
-    // The council's shape: 1,000 short rows in column A and one "x" at XFD1. openpyxl pads every row to column XFD, so the old
-    // sidecar wrote 16 MB of CSV from a 12 KB file and the counter read it as 4,688 pages.
-    const pad = ",".repeat(16_383);
-    const padded = [`row 1${pad.slice(1)},x`, ...Array.from({ length: 999 }, (_, row) => `row ${row + 2}${pad}`)].join("\r\n");
-    expect(padded.length).toBeGreaterThan(16_000_000);
-    const result = await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: padded }] } }), document("far.xlsx", XLSX), "office-excel");
-    expect(result).toEqual({ pages: 17, method: "sheet-rows" }); // 1,000 lines of content by the 60-line rule
-    // A wide sheet whose far cells are real data still bills for them: 50 rows of 200 filled cells is 10,000 values of text.
-    const wide = Array.from({ length: 50 }, (_, row) => Array.from({ length: 200 }, (_, col) => `v${row}x${col}`).join(",")).join("\n");
-    expect((await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: wide }] } }), document("wide.xlsx", XLSX), "office-excel"))!.pages)
-      .toBeGreaterThanOrEqual(15);
-  });
-
-  it("reads quoted cells with commas, quotes and newlines as one cell, and skips empty cells between values", () => {
-    expect(csvCellText('a,,,"b, c",,\n,,\n"say ""hi""",\r\n"two\nlines",,z\n')).toBe('a b, c\nsay "hi"\ntwo\nlines z');
-    expect(csvCellText(",,,,\n\n , ,\n")).toBe("");
-  });
-
-  it("counts an EPUB by the text rule over its chapters", async () => {
-    const chapter = "word ".repeat(2_000); // 10,000 characters → 3 pages
-    const result = await measureDocumentPages(fakeDeps({ sidecar: { chapters: [{ text: chapter }, { text: chapter }] } }), document("book.epub", "application/epub+zip"), "epub");
-    expect(result).toEqual({ pages: 6, method: "text-pages" });
-  });
-
-  it("counts slides from the PPTX container without converting it", async () => {
-    const names = ["[Content_Types].xml", "ppt/slides/slide1.xml", "ppt/slides/slide2.xml", "ppt/slides/slide3.xml", "ppt/slides/_rels/slide1.xml.rels", "ppt/slideLayouts/slideLayout1.xml"];
-    const result = await measureDocumentPages(fakeDeps({ bytes: zipWithNames(names) }), document("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"), "office-pptx");
-    expect(result).toEqual({ pages: 3, method: "slides" });
-  });
-
-  it("bills a 30 MB legacy .ppt no tool reads at the quote's typical size estimate, and prices no feature on that guess", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const ppt = await measureDocumentPages(fakeDeps({ noSoffice: true, bytes: Buffer.alloc(30 * 1024 * 1024) }), document("deck.ppt", "application/vnd.ms-powerpoint"), "office-pptx");
-    expect(ppt).toEqual({ pages: 768, method: "size-estimate" }); // 30 MB at a slide's typical 40 KB: the quote's central count
-    warn.mockRestore();
-    const features = normalizePipelineFeatures({ ...defaultPipelineFeatures, graphRag: true, outputSchema: { type: "object", properties: { total: { type: "number" } } } });
-    // Fast pages only: 767 extra pages at 5 credits per 1,000. Measured by any other method, the features would add on top.
-    expect(extraCreditsForMeasuredPages(features, 1, 768, "size-estimate")).toBeCloseTo(pageCredits("fast", 767));
-    expect(extraCreditsForMeasuredPages(features, 1, 768, "text-rule")).toBeGreaterThan(pageCredits("fast", 767) * 10);
-  });
-
-  it("caps a runaway count at the ceiling", async () => {
-    const result = await measureDocumentPages(fakeDeps({ pdfPages: 99_999_999 }), document("x.docx", DOCX), "office-word");
-    expect(result?.pages).toBe(100_000);
+  it("prices a measured sheet's extra pages and features", () => {
+    const pipeline = normalizePipelineFeatures({ ...defaultPipelineFeatures, summarize: false });
+    expect(extraCreditsForMeasuredPages(pipeline, 1, 12, "sheet-rows", { features: false })).toBeCloseTo(pageCredits("fast", 11));
   });
 });
 
-describe("parsePdfInfoPages", () => {
-  it("reads the page count and rejects missing or hostile values", () => {
-    expect(parsePdfInfoPages("Pages: 7\n")).toBe(7);
-    expect(parsePdfInfoPages("Title: Pages: 99\nProducer: x\n")).toBeNull();
-    expect(parsePdfInfoPages("Pages: 0\n")).toBeNull();
-  });
-});
+/**
+ * Council B: counting must not run a parser on the worker host. With DOCSLURP_SERVICE_PROFILE unset and no opt-in, a DOCX, RTF,
+ * EPUB or PPTX goes through to-canonical and its page count without any parser running (no runner.run, no download of the
+ * source for counting, no in-process read of its bytes).
+ */
+describe("no host parser runs to count Office, RTF, EPUB or PPTX pages", () => {
+  const cases = [
+    { name: "DOCX (was Mammoth)", filename: "contract.docx", mimeType: DOCX, format: "office-word", extractor: "pandoc" },
+    { name: "RTF (was unrtf)", filename: "memo.rtf", mimeType: "application/rtf", format: "office-other", extractor: "pandoc" },
+    { name: "EPUB (was the ebooklib sidecar)", filename: "book.epub", mimeType: "application/epub+zip", format: "epub", extractor: "pandoc" },
+    { name: "PPTX (was an in-process ZIP read)", filename: "deck.pptx", mimeType: PPTX, format: "office-pptx", extractor: "pptx" },
+    { name: "XLSX", filename: "book.xlsx", mimeType: XLSX, format: "office-excel", extractor: "xlsx" },
+  ];
 
-function zipWithNames(names: string[]): Buffer {
-  const locals: Buffer[] = [];
-  const centrals: Buffer[] = [];
-  let offset = 0;
-  for (const name of names) {
-    const nameBytes = Buffer.from(name);
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(nameBytes.length, 26);
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(nameBytes.length, 28);
-    central.writeUInt32LE(offset, 42);
-    locals.push(local, nameBytes);
-    centrals.push(central, nameBytes);
-    offset += local.length + nameBytes.length;
+  function spyRunner() {
+    const calls: string[] = [];
+    const runner = new Proxy({}, {
+      get: (_target, property) => {
+        const name = String(property);
+        if (name === "then") return undefined;
+        return vi.fn(async (...args: unknown[]) => {
+          calls.push(name);
+          if (name === "run") throw new Error(`a parser ran: ${JSON.stringify(args[0])}`);
+          return { binary: name, args: [], available: true };
+        });
+      },
+    }) as unknown as CommandRunner;
+    return { runner, calls };
   }
-  const directory = Buffer.concat(centrals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(names.length, 8);
-  end.writeUInt16LE(names.length, 10);
-  end.writeUInt32LE(directory.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, directory, end]);
-}
+
+  function spyStorage() {
+    const downloads = vi.fn(async () => { throw new Error("the source was downloaded to count pages"); });
+    const storage = {
+      bucket: "test",
+      putJson: vi.fn(async () => undefined),
+      uri: (key: string) => `s3://test/${key}`,
+      downloadSourceToTempFile: downloads,
+      getBytes: downloads,
+    } as unknown as ArtifactStore;
+    return { storage, downloads };
+  }
+
+  function run(): WorkspaceRun {
+    return {
+      id: "run-1", orgId: "org-1", userId: "u", kind: "bulk-upload", status: "processing", stage: "to-canonical", totalDocuments: 1,
+      processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0, pipeline: { ...defaultPipelineFeatures }, error: null,
+      stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
+    } as WorkspaceRun;
+  }
+
+  for (const entry of cases) {
+    it(`${entry.name}: to-canonical plans only, and the count reads the extractor's Markdown`, async () => {
+      vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "");
+      reads.length = 0;
+      const { runner, calls } = spyRunner();
+      const { storage, downloads } = spyStorage();
+      const doc = document(entry.filename, entry.mimeType);
+      const state = WorkflowState.create(run(), [doc]);
+      state.artifactLedger.recordDocument(doc.id, "normalizedFormat", entry.format);
+      await new ToCanonicalStage(runner, storage).run(state);
+
+      expect(state.documentStage(doc.id, "to-canonical")).toMatchObject({ status: "completed" });
+      // to-canonical records command plans (as it did before counting existed); a plan only describes a command. Nothing runs.
+      expect(calls).not.toContain("run");
+      expect(downloads).not.toHaveBeenCalled();
+
+      const setDocumentBillingPages = vi.fn(async () => true);
+      const markdown = entry.extractor === "pptx" ? ["## One", "## Two", "## Three"].join("\n\f\n") : entry.extractor === "xlsx" ? sheet("S", [["a", "1"], ["b", "2"]]) : markdownOfPages(7);
+      const counted = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, doc, entry.format, { extractor: entry.extractor, markdown });
+      expect(counted.pages).toBeGreaterThanOrEqual(1);
+      expect(reads.filter((target) => String(target).includes(entry.filename))).toEqual([]);
+      vi.unstubAllEnvs();
+    });
+  }
+
+  it("the counting module imports no file system, ZIP reader or command runner", () => {
+    const source = readFileSync(path.resolve(import.meta.dirname, "../lib/office-page-count.ts"), "utf8");
+    expect(source).not.toMatch(/from "node:fs|listZipEntryNames|CommandRunner|downloadSource/);
+  });
+});
