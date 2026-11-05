@@ -23,7 +23,7 @@ jobs:
   test:
     name: ${{ matrix.suite }}
     timeout-minutes: 20
-    # Native Kreuzberg requires newer glibc; enable unprivileged namespaces only
+    # Ubuntu 24.04 runner; enable unprivileged namespaces only
     # on this disposable CI runner so the real parser sandbox remains exercised.
     runs-on: ubuntu-24.04
     strategy:

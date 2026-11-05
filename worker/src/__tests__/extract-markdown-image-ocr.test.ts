@@ -81,10 +81,6 @@ async function harness(args: {
   const runner = {
     ...ocr.runner,
     sandboxedPdfMarkdown: async () => ({ binary: "test-vm", args: [], available: true }),
-    kreuzbergMarkdown: vi.fn(async (_source: string, _output: string, configJson?: string) => {
-      configs.kreuzberg = configJson;
-      return { binary: "node", args: [], available: true };
-    }),
     dolphinMarkdown: async (_source: string, _output: string, configJson?: string) => {
       configs.dolphin = configJson;
       return { binary: "python", args: [], available: true };
@@ -143,7 +139,6 @@ describe("image documents are read by the OCR extractor", () => {
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.attempted).toEqual(["ocr"]);
-      expect(h.runner.kreuzbergMarkdown).not.toHaveBeenCalled();
       expect(h.jobs).toHaveLength(1);
       expect(h.jobs[0]).toMatchObject({ kind: "image", recognisers: expect.any(Array) });
       expect(h.jobs[0]!.pages).toBeUndefined();
@@ -231,16 +226,11 @@ describe("image documents are read by the OCR extractor", () => {
     } finally { await h.cleanup(); }
   });
 
-  it("makes Kreuzberg's prepared plan unavailable for images", async () => {
-    const runner = { kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }) } as unknown as CommandRunner;
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const byFormat = await documentExtractorRegistry.prepare("kreuzberg", runner, "/scratch/source.bin", undefined, { format: "image" } as any);
-    expect(byFormat.plan.available).toBe(false);
-    const byExtension = await documentExtractorRegistry.prepare("kreuzberg", runner, "/scratch/scan.TIFF");
-    expect(byExtension.plan.available).toBe(false);
-    const pdf = await documentExtractorRegistry.prepare("kreuzberg", runner, "/scratch/scan.pdf", undefined, { format: "pdf" } as any);
-    expect(pdf.plan.available).toBe(true);
-    expect(warn.mock.calls.flat().join(" ")).toContain("kreuzberg refused an image input");
+  it("reads an image order that still names a retired parser with the ocr extractor", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(documentExtractorRegistry.resolve("image", ["kreuzberg"])).toEqual(["ocr"]);
+    expect(documentExtractorRegistry.resolve("image", ["liteparse", "ocr"])).toEqual(["ocr"]);
+    await expect(documentExtractorRegistry.prepare("kreuzberg", {} as CommandRunner, "/scratch/scan.png")).rejects.toThrow(/unknown extractor/);
   });
 
   it("makes the ocr extractor unavailable when OCR is off", async () => {
@@ -408,7 +398,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       try {
         await h.stage.run(h.state);
         expect(h.checkpoint()?.status).toBe("completed");
-        expect(h.attempted).toEqual(["kreuzberg"]);
+        expect(h.attempted).toEqual(["poppler-text"]);
         expect(h.runner.run).not.toHaveBeenCalled();
         expect(h.runner.sandboxedOcrRead).not.toHaveBeenCalled();
         expect(h.runner.localOcrRead).not.toHaveBeenCalled();
@@ -476,7 +466,7 @@ describe("quality fast extraction is text-layer only", () => {
     } finally { await h.cleanup(); }
   });
 
-  it("drops request OCR options and model extractors, and passes Kreuzberg disableOcr", async () => {
+  it("drops request OCR options, model extractors and retired extractors", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const h = await harness({
       format: "pdf",
@@ -492,9 +482,8 @@ describe("quality fast extraction is text-layer only", () => {
     });
     try {
       await h.stage.run(h.state);
-      expect(h.attempted).toEqual(["kreuzberg"]);
+      expect(h.attempted).toEqual(["poppler-text"]);
       expect(h.configs.dolphin).toBeUndefined();
-      expect(JSON.parse(h.configs.kreuzberg!)).toEqual({ disableOcr: true });
     } finally {
       await h.cleanup();
     }

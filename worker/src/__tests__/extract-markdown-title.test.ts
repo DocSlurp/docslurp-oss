@@ -30,7 +30,7 @@ async function extractWithTitle(args: { filename: string; mimeType: string; form
       streamText: async () => undefined,
     };
     const runner = {
-      kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
+      officeMarkdown: async () => ({ binary: "python3", args: [], available: true }),
       extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
       extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
     } as unknown as CommandRunner;

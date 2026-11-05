@@ -41,11 +41,11 @@ afterAll(async () => {
 
 const sql = () => (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
 
-describe("scanned PDF pages OCR'd by Kreuzberg", () => {
+describe("scanned PDF pages OCR'd by the PDF engine", () => {
   it("bills 3 OCR'd pages Rich and the other 2 Fast, once, across a retry", async () => {
     const attempt = async () => {
       const state = WorkflowState.create(await store.loadRun("scan"), []);
-      for (const pageNumber of [2, 3, 5]) state.usageLedger.chargeRichPage({ documentId: "scan-pdf", pageNumber, readBy: "pdf-ocr", model: "kreuzberg" });
+      for (const pageNumber of [2, 3, 5]) state.usageLedger.chargeRichPage({ documentId: "scan-pdf", pageNumber, readBy: "pdf-ocr", model: "native-pdf" });
       const batch = state.usageLedger.checkpoint();
       await persistRunUsageEvents({ client: sql(), state, usageEvents: batch.events });
       batch.commit();

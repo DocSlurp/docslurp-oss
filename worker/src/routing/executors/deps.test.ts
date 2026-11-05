@@ -92,7 +92,7 @@ describe("production executor deps", () => {
       },
     });
     expect(await deps.pageText(1)).toBeNull();
-    expect(await deps.nativePageText("kreuzberg", 1)).toBeNull();
+    expect(await deps.nativePageText("native-pdf-markdown", 1)).toBeNull();
     expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 7 })).text).toBe("scanned words");
     // The page went to the VM provider as a job; no OCR command was planned on the host.
     expect(ocr.runner.sandboxedOcrRead).toHaveBeenCalledTimes(1);

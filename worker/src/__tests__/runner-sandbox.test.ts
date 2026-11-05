@@ -72,8 +72,8 @@ describe("sandbox command construction", () => {
     const sourcePath = path.join(tempWorkspace, "sample.pdf");
     const spec = command({
       plan: {
-        binary: "node",
-        args: ["kreuzberg_extract.mjs", "--input", sourcePath, "--output", `${sourcePath}.kreuzberg.md`],
+        binary: "python3",
+        args: ["office_markdown.py", "--kind", "pptx", "--input", sourcePath, "--output", `${sourcePath}.pptx.md`],
         available: true,
       },
     });

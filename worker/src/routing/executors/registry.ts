@@ -9,7 +9,7 @@ import { resolveTargetLicense, type RoutingTarget } from "@docslurp/shared";
 import { readRoutingFlags } from "../flags.js";
 
 import { baseOutput, type ExecutorDeps, type ExecutorOutput, type TargetExecutor } from "./types.js";
-import { nativeExtractor, nativePdfExecutors } from "./native-pdf.js";
+import { nativePdfExecutors } from "./native-pdf.js";
 
 const base = baseOutput;
 
@@ -84,7 +84,6 @@ const skip: TargetExecutor = {
 
 const BY_ID = new Map<string, TargetExecutor>([
   [acceptTextLayer.id, acceptTextLayer],
-  ["native:kreuzberg", nativeExtractor("native:kreuzberg", "kreuzberg")],
   ...nativePdfExecutors.map((e): [string, TargetExecutor] => [e.id, e]),
   [ppocr.id, ppocr],
   [florenceLabeler.id, florenceLabeler],

@@ -16,8 +16,8 @@ import type { CommandRunner } from "../tools/runner.js";
 /**
  * A page bills Rich only when a vision or OCR model read it (db/page-base-fee.ts). The OCR engine charges every page it read
  * with words as `page-ocr`, once per run, document and page; extractors that report their own OCR pages (graph-local, the
- * sandboxed PDF provider) are billed from that report; Dolphin and liteparse --ocr are inferred from an empty native layer.
- * Kreuzberg never OCRs, and Fast never reads a page.
+ * sandboxed PDF provider) are billed from that report; Dolphin is inferred from an empty native layer. Text-layer
+ * extractors never OCR, and Fast never reads a page.
  */
 function run(pipeline: Record<string, unknown> = {}): WorkspaceRun {
   return {
@@ -60,7 +60,6 @@ async function harness(args: {
   const ocr = fakeOcrRunner(args.frames ?? ((job) => (job.pages ?? [1]).map((frame) => ({ frame, text: `OCR words ${frame}` }))));
   const runner = {
     ...ocr.runner,
-    kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
     pageText: async () => ({ binary: "pdftotext", args: [], available: false }),
   } as unknown as CommandRunner & typeof ocr.runner;
@@ -142,8 +141,8 @@ describe("OCR reads on the usage ledger", () => {
       expect(h.jobs.map((job) => job.pages)).toEqual([[2, 3, 4]]);
       expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
       expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
-      // Kreuzberg won the text layer and never OCRs: the stage's own pass records nothing more.
-      expect(await h.record({ label: "kreuzberg", plan: { binary: "node", args: ["--config-json", "{}"] } }, "Native text layer page\fScanned page 2\f\fScanned page 4\f")).toEqual([]);
+      // A text-layer extractor won and never OCRs: the stage's own pass records nothing more.
+      expect(await h.record({ label: "poppler-text", plan: { binary: "pdftotext", args: [] } }, "Native text layer page\fScanned page 2\f\fScanned page 4\f")).toEqual([]);
       expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
     } finally { await h.cleanup(); }
   });
@@ -181,15 +180,11 @@ describe("OCR reads on the usage ledger", () => {
     } finally { await fast.cleanup(); }
   });
 
-  it("infers OCR reads only for a winner that ran OCR; Kreuzberg never does", async () => {
+  it("infers OCR reads only for a winner that ran OCR; text-layer extractors never do", async () => {
     const h = await harness({ format: "pdf", pageCount: 2, text: "x\fScanned words\f", nativePages: ["x", ""] });
     try {
-      for (const label of ["native-pdf", "poppler-text", "pandoc"]) expect(await h.record({ label, plan: { binary: "x", args: [] } }, "x\fScanned words\f")).toEqual([]);
-      expect(await h.record({ label: "liteparse", plan: { binary: "node", args: ["--input", "a"] } }, "x\fScanned words\f")).toEqual([]);
-      expect(await h.record({ label: "kreuzberg", plan: { binary: "node", args: ["--config-json", "{}"] } }, "x\fScanned words\f")).toEqual([]);
-      expect(await h.record({ label: "kreuzberg", plan: { binary: "node", args: [] } }, "x\fScanned words\f")).toEqual([]);
+      for (const label of ["native-pdf", "poppler-text", "pandoc", "pptx", "xlsx"]) expect(await h.record({ label, plan: { binary: "x", args: ["--ocr"] } }, "x\fScanned words\f")).toEqual([]);
       expect(h.richIds()).toEqual([]);
-      expect(await h.record({ label: "liteparse", plan: { binary: "node", args: ["--ocr"] } }, "x\fScanned words\f")).toEqual([2]);
       expect(await h.record({ label: "dolphin", plan: { binary: "python", args: [] } }, "x\fScanned words\f")).toEqual([2]);
       expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
       expect(h.richEvents()[0]?.metadata).toMatchObject({ readBy: "pdf-ocr" });

@@ -186,7 +186,7 @@ export interface NativePdfEngine {
 }
 
 /**
- * Adapter failure codes. Every failure leaves the document to the next extractor (kreuzberg by default);
+ * Adapter failure codes. Every failure leaves the document to the next extractor (poppler-text by default);
  * `NATIVE_PDF_FAILURE_KIND` says how loudly. `PDF_LOCKED` / `PDF_UNSUPPORTED_ENCRYPTION` / `PDF_LIMIT` are
  * engine-neutral PDF terms, the rest are adapter outcomes.
  */
@@ -209,7 +209,7 @@ export type NativePdfErrorCode =
   | "PDF_LIMIT";
 
 /**
- * - `locked`: a document state, not an error. The locked-PDF path (kreuzberg / the probe's locked row) reports it.
+ * - `locked`: a document state, not an error. The locked-PDF path (the next extractor / the probe's locked row) reports it.
  * - `expected`: a routine reason to fall back; logged at info.
  * - `unexpected`: falls back too, but warns: an engine defect, a damaged file or an adapter bug worth looking at.
  */

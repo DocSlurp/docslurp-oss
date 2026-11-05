@@ -21,7 +21,7 @@ const cheap = catalog.find((t) => t.kind === "hosted-vlm" && !t.roles.includes("
 const florence = byId("local:florence-2-small");
 const ppocr = byId("ocr:ppocr");
 const nativeText = byId("native:pdf-text");
-const kreuzberg = byId("native:kreuzberg");
+const nativeMarkdown = byId("native:pdf-markdown");
 const accept = byId("native:accept-text-layer");
 
 const estimate = { costUsd: 0.002, latencyMs: 1500, pPass: 0.9 };
@@ -66,7 +66,7 @@ function fakeDeps(over: Partial<ExecutorDeps> = {}) {
 
 describe("executor registry", () => {
   it("maps every seeded target kind to an executor and leaves unknown ids unexecutable", () => {
-    for (const t of [accept, nativeText, kreuzberg, ppocr, florence, strong, cheap, byId("skip")]) {
+    for (const t of [accept, nativeText, nativeMarkdown, ppocr, florence, strong, cheap, byId("skip")]) {
       expect(executorFor(t), t.id).not.toBeNull();
     }
     expect(executorFor({ ...ppocr, id: "ocr:mystery", kind: "local-ocr" })).toBeNull();
@@ -78,13 +78,13 @@ describe("executor registry", () => {
     const res = await executeAssignments([
       { assignment: asg(1, accept.id, "accept-text"), index: 0, target: accept },
       { assignment: asg(2, nativeText.id, "extract-text"), index: 1, target: nativeText },
-      { assignment: asg(3, kreuzberg.id, "table"), index: 2, target: kreuzberg },
+      { assignment: asg(3, nativeMarkdown.id, "table"), index: 2, target: nativeMarkdown },
     ], deps);
     expect(deps.withRaster).not.toHaveBeenCalled();
     const text = (i: number) => res.outputs.find((o) => o.assignmentIndex === i)!;
     expect(text(0).text).toContain("Paragraph one of page 1");
     expect(text(1).text).toBe("native page 2 text");
-    expect(text(2)).toMatchObject({ fallback: "canonical-page-slice", model: "kreuzberg" });
+    expect(text(2)).toMatchObject({ fallback: "canonical-page-slice", model: "native-pdf-markdown" });
     expect(text(2).text).toContain("page 3");
   });
 

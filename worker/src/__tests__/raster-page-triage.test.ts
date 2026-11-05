@@ -1,9 +1,7 @@
-import { execFile, execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -47,8 +45,6 @@ const hasPoppler = (() => {
   }
 })();
 
-const kreuzbergScript = fileURLToPath(new URL("../../scripts/kreuzberg_extract.mjs", import.meta.url));
-
 const textPage = (seed: number): TestPdfPage => ({ kind: "text", heading: `Section ${seed} harbor ledger review`, lines: proseLines(36, seed) });
 const scanPage = (lines?: string[]): TestPdfPage => ({ kind: "image", images: [{ image: scannedImage() }], ...(lines ? { lines } : {}) });
 const blankPage: TestPdfPage = { kind: "blank" };
@@ -67,20 +63,18 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
-  /** Kreuzberg extraction → raster evidence → classification → vision and render selection. */
+  /** Text-layer extraction (poppler-text, the default host PDF extractor) → raster evidence → classification → vision and render selection. */
   async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20, verifyTextLayer?: TextLayerVerifier): Promise<Triage> {
     const dir = await mkdtemp(path.join(tmpdir(), "raster-triage-"));
     dirs.push(dir);
     const input = path.join(dir, "doc.pdf");
-    const output = path.join(dir, "doc.md");
     await writeFile(input, buildTestPdf(pages));
-    await promisify(execFile)(process.execPath, [kreuzbergScript, "--input", input, "--output", output], { timeout: 60_000 });
-    const markdown = await readFile(output, "utf8");
+    const runner = new CommandRunner();
+    const markdown = (await runner.run(await runner.extractText(input, true))).stdout;
 
     const pageTexts = pageAlignedTexts(markdown, pages.length);
-    expect(pageTexts, "Kreuzberg Markdown should be page-aligned").not.toBeNull();
+    expect(pageTexts, "extracted text should be page-aligned").not.toBeNull();
     // The PDF's own text layer, as page facts record it (one pdftotext run, form-feed split).
-    const runner = new CommandRunner();
     const layerPlan = await runner.pageText(input, pages.length);
     const textLayerPages = splitFormFeedPages((await runner.run(layerPlan)).stdout, pages.length);
     const evidence = await collectPageImageEvidence({ runner, sourcePath: input, pageTexts: pageTexts!, textLayerPages, ...(verifyTextLayer ? { verifyTextLayer } : {}) });

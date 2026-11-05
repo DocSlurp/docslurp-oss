@@ -3,7 +3,7 @@
 # Contents: Node 24 + the worker's production node_modules (pnpm deploy, pruned),
 # poppler-utils (with poppler-data CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
 # with the base parsers (trafilatura, ebooklib, python-pptx,
-# openpyxl, xlsx2csv, Pillow; PDFs use Kreuzberg, Poppler and the optional native-pdf engine). No LibreOffice or ML stacks: Docling and
+# openpyxl, xlsx2csv, Pillow; PDFs use Poppler, the optional native-pdf engine or the sandboxed PDF provider). No LibreOffice or ML stacks: Docling and
 # Unstructured come from sha256-pinned vendor bundles fetched on demand
 # (worker/vendor-bundles.json, docs/worker-image.md). Runtime pip installs are off.
 # No OCR engine: lean workers OCR through an extractor plugin's VM provider
@@ -43,7 +43,7 @@ COPY scripts/build-worker-venv.sh /tmp/build-worker-venv.sh
 RUN bash /tmp/build-worker-venv.sh /app/.venv /tmp/req/requirements-base.lock.txt /tmp/req/requirements-base.txt
 
 # Optional private native PDF engine: pinned by vendor-artifacts/native-pdf/manifest.json,
-# tarball supplied in the build context (gitignored). Absent tarball = no-op (Kreuzberg path).
+# tarball supplied in the build context (gitignored). Absent tarball = no-op (Poppler path).
 # DOCSLURP_NATIVE_PDF=1 requires it (missing or unloadable binding fails the build).
 # Installed in its own stage so the tarball itself never lands in an image layer.
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS native-pdf
@@ -162,11 +162,9 @@ RUN rm -rf ./worker/scripts/__pycache__ \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \
     && PYTHON_VENV=/app/.venv node scripts/check-worker-prerequisites.mjs --profile=lean
 
-# No OCR package, binary or language data is installed. Kreuzberg's and LiteParse's native addons statically link
-# Tesseract (disabled, not removed: docs/extraction/ocr.md, "Tesseract"); it gets no language data (an empty, root-owned,
-# read-only directory), so it cannot OCR customer pixels on the worker host. OCR runs only in the configured boundary.
-RUN mkdir -p /opt/docslurp/empty-tessdata && chmod 0555 /opt/docslurp/empty-tessdata
-ENV TESSDATA_PREFIX=/opt/docslurp/empty-tessdata
+# No OCR engine, package, binary or language data is installed or linked: no native addon embeds Tesseract, Leptonica
+# or PaddleOCR (worker/src/__tests__/no-tesseract.test.ts and scripts/scan-ocr-engines.mjs check this). OCR runs only
+# in the configured boundary (docs/extraction/ocr.md).
 ENV HOME=/home/docslurp
 ENV PYTHON_VENV=/app/.venv
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav

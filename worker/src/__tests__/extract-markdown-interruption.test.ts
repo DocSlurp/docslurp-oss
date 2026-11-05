@@ -7,7 +7,7 @@ import type { Document, WorkspaceRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 
-const ORDER = ["kreuzberg", "poppler-text"];
+const ORDER = ["native-pdf", "poppler-text"];
 
 function createRun(): WorkspaceRun {
   return {
@@ -75,7 +75,7 @@ describe("extract-markdown interruptions", () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).name).toBe("AbortError");
     expect((failure as Error).message).not.toMatch(/no extractor produced output/);
-    expect(attempted).toEqual(["kreuzberg"]);
+    expect(attempted).toEqual(["native-pdf"]);
     expect(state.documentStage("doc-1", "extract-markdown")?.status).not.toBe("failed");
   });
 
@@ -83,14 +83,14 @@ describe("extract-markdown interruptions", () => {
     const controller = new AbortController();
     const { stage, state, attempted } = stageWith(async (label) => {
       // The extractor's derived per-tool timeout signal fired; the activity signal did not.
-      if (label === "kreuzberg") throw abortError();
+      if (label === "native-pdf") throw abortError();
       throw new Error("pdftotext: unreadable cross-reference table");
     });
 
     await stage.run(state, controller.signal);
 
     expect(controller.signal.aborted).toBe(false);
-    expect(attempted).toEqual(["kreuzberg", "poppler-text"]);
+    expect(attempted).toEqual(["native-pdf", "poppler-text"]);
     const checkpoint = state.documentStage("doc-1", "extract-markdown");
     expect(checkpoint?.status).toBe("failed");
     expect(checkpoint?.error).toMatch(/no extractor produced output: poppler-text=Error: pdftotext/);

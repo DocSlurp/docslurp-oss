@@ -53,10 +53,6 @@ export class ClassifyRouteStage implements Stage {
         "classification ready",
         async () => {
           const evidence = await this.loadEvidence(state, document);
-          const structured = await this.loadStructuredComplexity(
-            state,
-            document.id,
-          );
           const imageEvidence = await this.loadPageImageEvidence(state, document.id);
           const routingV2 = resolveRunRoutingV2(state);
           const surface = buildAdaptiveRoutingDecisionSurface({
@@ -69,18 +65,12 @@ export class ClassifyRouteStage implements Stage {
                   source: evidence.source,
                   artifactUri: evidence.artifactUri,
                 }
-              : structured
-                ? {
-                    source: "liteparse-structured",
-                    artifactUri: structured.artifactUri,
-                  }
-                : imageEvidence
+              : imageEvidence
                   ? {
                       source: "page-image-evidence",
                       artifactUri: imageEvidence.artifactUri,
                     }
                   : null,
-            structuredComplexity: structured?.pages,
             pageImageEvidence: imageEvidence?.pages,
             drawnBytesPerPage: imageEvidence?.drawnBytesPerPage ?? null,
             routingV2,
@@ -104,7 +94,7 @@ export class ClassifyRouteStage implements Stage {
 
           const decisions = summarizeRoutingDecisions(surface.pages, {
             intakePageCount: document.pageCount,
-            measuredPages: Math.max(imageEvidence?.pages.size ?? 0, structured?.pages.size ?? 0),
+            measuredPages: imageEvidence?.pages.size ?? 0,
             imageEvidence: imageEvidence?.pages,
           });
           console.log(
@@ -212,34 +202,6 @@ export class ClassifyRouteStage implements Stage {
     return null;
   }
 
-  private async loadStructuredComplexity(
-    state: import("../pipeline/pipeline.js").WorkflowState,
-    documentId: string,
-  ): Promise<{
-    pages: Map<number, StructuredPageComplexityEvidence>;
-    artifactUri: string;
-  } | null> {
-    const artifactUri = state.artifactLedger.readDocument(documentId, "liteparse-structured");
-    if (!artifactUri) return null;
-    try {
-      const key = keyFromStorageUri(artifactUri, this.storage.bucket);
-      if (!key) return null;
-      const payload = (await this.storage.getJson(key)) as {
-        pages?: Array<{ pageNumber?: number; complexity?: StructuredPageComplexityEvidence | null }>;
-      };
-      const pages = new Map(
-        (payload.pages ?? [])
-          .filter(
-            (page): page is { pageNumber: number; complexity: StructuredPageComplexityEvidence } =>
-              Number.isInteger(page.pageNumber) && Boolean(page.complexity),
-          )
-          .map((page) => [page.pageNumber, page.complexity]),
-      );
-      return pages.size > 0 ? { pages, artifactUri } : null;
-    } catch {
-      return null;
-    }
-  }
   private async loadPageImageEvidence(
     state: import("../pipeline/pipeline.js").WorkflowState,
     documentId: string,
@@ -327,10 +289,13 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
       | "canonical-document"
       | "markdown-manifest"
       | "extraction-contract"
-      | "liteparse-structured"
       | "page-image-evidence";
     artifactUri: string;
   } | null;
+  /**
+   * Per-page layout evidence from a structured PDF parser (text and image coverage, garbling). No shipped extractor
+   * produces it today (the parser that did was removed); routing then uses the raster evidence alone.
+   */
   structuredComplexity?: Map<number, StructuredPageComplexityEvidence>;
   /** Raster evidence for sparse-text PDF pages (lib/page-image-evidence.ts). */
   pageImageEvidence?: Map<number, PageImageEvidence>;

@@ -26,13 +26,11 @@
     "temporal:record-histories": "tsx src/test/temporal-replay/record-histories.ts",
     "fixtures:pdf": "node testdata/pdf-fixtures/generate-fixtures.mjs",
     "benchmark:vision": "tsx src/benchmarks/vision-benchmark-cli.ts",
-    "benchmark:kreuzberg": "tsx src/benchmarks/kreuzberg-benchmark-cli.ts",
     "benchmark:parsebench": "tsx src/benchmarks/parsebench-benchmark-cli.ts",
     "benchmark:pdf-fixtures": "tsx src/benchmarks/pdf-fixture-benchmark-cli.ts",
     "bench:sandbox": "tsx src/benchmarks/sandbox-overhead-cli.ts",
     "benchmark:extractors": "tsx src/benchmarks/extractor-benchmark-cli.ts",
     "benchmark:parser-policy-eval": "tsx src/benchmarks/parser-policy-eval-cli.ts",
-    "eval:document-routing": "pnpm --filter @docslurp/shared build && tsx src/benchmarks/document-routing-eval-cli.ts",
     "eval:local-vision": "tsx src/benchmarks/local-vision-model-eval-cli.ts",
     "media:watchdog": "node dist/media/capacity/watchdog.js",
     "media:reconcile": "node dist/media/reconcile-cli.js"
@@ -43,9 +41,7 @@
     "@aws-sdk/client-s3": "^3.1161.0",
     "@docslurp/shared": "workspace:*",
     "@huggingface/transformers": "^4.3.2",
-    "@kreuzberg/node": "^4.10.2",
     "@lancedb/lancedb": "^0.41.0",
-    "@llamaindex/liteparse": "2.17.0",
     "@streamparser/json": "0.0.26",
     "@temporalio/activity": "^1.25.0",
     "@temporalio/client": "^1.25.0",
@@ -63,8 +59,6 @@
     "sharp": "0.35.5"
   },
   "optionalDependencies": {
-    "@kreuzberg/node-linux-arm64-gnu": "4.10.2",
-    "@kreuzberg/node-linux-x64-gnu": "4.10.2",
     "modal": "0.11.1"
   },
   "devDependencies": {

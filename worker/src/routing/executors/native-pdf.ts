@@ -1,7 +1,6 @@
 /**
  * Executors for the neutral native-pdf targets (`native:pdf-markdown`, `native:pdf-text`,
- * `ocr:pdf-ocr-fill`, `ocr:pdf-ocr`) plus the generic per-page native extractor shared with
- * `native:kreuzberg`. The engine behind them is a swappable adapter
+ * `ocr:pdf-ocr-fill`, `ocr:pdf-ocr`) plus the generic per-page native extractor they share. The engine behind them is a swappable adapter
  * (worker/src/native-pdf); nothing here names it.
  */
 
@@ -37,7 +36,7 @@ export const NATIVE_PDF_TEXT_EXTRACTOR = "native-pdf-text";
 
 /**
  * Native extractors per page. The extractor runs per page when the adapter supports it; when
- * it does not (kreuzberg is document-level, or the native-pdf engine is absent), the canonical
+ * it does not (the native-pdf engine is absent), the canonical
  * document's text for the page is the slice.
  */
 export function nativeExtractor(id: string, extractorId: string): TargetExecutor {

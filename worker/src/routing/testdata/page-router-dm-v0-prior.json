@@ -88,55 +88,6 @@
       "n": 0
     },
     {
-      "targetId": "native:kreuzberg",
-      "pass": {
-        "text": {
-          "intercept": 3.6972,
-          "weights": {
-            "text_layer_ok": 1.2,
-            "degraded": -1.8,
-            "handwriting": -2.4
-          },
-          "baseRate": 0.9
-        },
-        "math": {
-          "intercept": 2.4493,
-          "weights": {
-            "needs_math_extraction": -2.5,
-            "has_math": -1,
-            "low_resolution": -0.8,
-            "degraded": -1
-          },
-          "baseRate": 0.45
-        },
-        "tables": {
-          "intercept": 1.0973,
-          "weights": {
-            "needs_table_structure": -1,
-            "text_layer_ok": 0.5
-          },
-          "baseRate": 0.7
-        },
-        "overall": {
-          "intercept": 1.7663,
-          "weights": {
-            "text_layer_ok": 1,
-            "degraded": -1.5
-          },
-          "baseRate": 0.82
-        }
-      },
-      "cost": {
-        "meanUsd": 0,
-        "p90Usd": 0
-      },
-      "latency": {
-        "p50Ms": 60,
-        "p95Ms": 132
-      },
-      "n": 0
-    },
-    {
       "targetId": "ocr:ppocr",
       "pass": {
         "text": {

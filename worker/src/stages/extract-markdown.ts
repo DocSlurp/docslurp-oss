@@ -76,11 +76,6 @@ import {
   type PageImageEvidence,
   type PageImageEvidenceArtifact,
 } from "../lib/page-image-evidence.js";
-import {
-  LiteParseDocumentExtractionAdapter,
-  type DocumentExtractionResult,
-} from "../lib/document-extraction-adapter.js";
-import { buildCanonicalDocumentFromStructuredExtraction } from "../lib/structured-canonical.js";
 export { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
 import type { CommandPlan } from "../tools/runner.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
@@ -228,15 +223,12 @@ export function ocrLedgerPageText(text: string | null | undefined): string {
 
 /**
  * Whether the winning candidate ran OCR, so empty-native pages holding words could only be OCR reads. Only these
- * candidates OCR without reporting pages: Dolphin (a page-reading model). Kreuzberg and LiteParse never OCR (their
- * addons link Tesseract, disabled: kreuzberg_extract.mjs strips its OCR options and liteparse --ocr is refused), and
- * text-layer extractors (native-pdf, poppler-text, pandoc, json) never OCR. The OCR engine reports and charges its own pages.
+ * candidates OCR without reporting pages: Dolphin (a page-reading model). Text-layer extractors (native-pdf,
+ * poppler-text, pandoc, pptx, xlsx, json) never OCR, and none of them links an OCR engine. The OCR engine reports and
+ * charges its own pages.
  */
-export function candidateRanUnreportedOcr(candidate: Pick<ExtractedCandidate, "label" | "plan">): boolean {
-  const args = candidate.plan?.args ?? [];
-  if (candidate.label === "dolphin") return true;
-  if (candidate.label === "liteparse") return args.includes("--ocr");
-  return false;
+export function candidateRanUnreportedOcr(candidate: Pick<ExtractedCandidate, "label">): boolean {
+  return candidate.label === "dolphin";
 }
 
 export function assertSupportedDocumentTarget(target: string): void {
@@ -302,7 +294,7 @@ export class ExtractMarkdownStage implements Stage {
           );
         }
         assertSupportedDocumentTarget(extractionConfig.target);
-        // Kreuzberg never OCRs, so the OCR language is not its concern: the OCR engine reads it (ocr/read-document.ts).
+        // Only the OCR engine reads the OCR language (ocr/read-document.ts); document extractors never OCR.
         const extractorOptions = extractionConfig.options;
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
@@ -577,8 +569,8 @@ export class ExtractMarkdownStage implements Stage {
                   );
 
                   let winningText = policyDecision.selectedMarkdown;
-                  // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; Kreuzberg and
-                  // the text-layer extractors never OCR. The engine charges each page it reads.
+                  // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; the
+                  // text-layer extractors never OCR. The engine charges each page it reads.
                   const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash }, signal)
                     : null;
@@ -625,25 +617,10 @@ export class ExtractMarkdownStage implements Stage {
                         `reviewed=${critique.reviewedPages.length} correctedUri=${critique.correctedTextUri ?? "none"}`,
                     );
                   }
-                  const normalizedStructuredPages =
-                    winningCandidate.structuredResult &&
-                    (critique?.acceptedPages.length ?? 0) === 0
-                      ? winningCandidate.structuredResult.pages.map((page) => ({
-                          ...page,
-                          markdown: normalizeExtractedMarkdown({
-                            markdown: page.markdown,
-                            preserveTables: state.run.pipeline.preserveTables,
-                          }),
-                        }))
-                      : null;
-                  const normalizedWinningText = normalizedStructuredPages
-                    ? normalizedStructuredPages
-                        .map((page) => page.markdown)
-                        .join("\f")
-                    : normalizeExtractedMarkdown({
-                        markdown: winningText,
-                        preserveTables: state.run.pipeline.preserveTables,
-                      });
+                  const normalizedWinningText = normalizeExtractedMarkdown({
+                    markdown: winningText,
+                    preserveTables: state.run.pipeline.preserveTables,
+                  });
                   if (normalizedWinningText !== winningText) {
                     winningText = normalizedWinningText;
                     strategy = `${strategy}+normalized`;
@@ -711,26 +688,15 @@ export class ExtractMarkdownStage implements Stage {
                   }
                   const sourceArtifactUri =
                     critique?.correctedTextUri ?? winningCandidate.textUri;
-                  const canUseStructuredCanonical =
-                    normalizedStructuredPages !== null;
-                  const canonicalDocument = canUseStructuredCanonical
-                    ? buildCanonicalDocumentFromStructuredExtraction({
-                        documentId: document.id,
-                        extractor: winningCandidate.label,
-                        pages: normalizedStructuredPages!,
-                        sourceArtifactUri,
-                        parserArtifactUri:
-                          winningCandidate.structuredArtifactUri ?? null,
-                      })
-                    : buildCanonicalDocumentFromMarkdown({
-                        documentId: document.id,
-                        text: winningText,
-                        pageCount: document.pageCount,
-                        sourceArtifactUri,
-                        extractor: winningCandidate.label,
-                      });
+                  const canonicalDocument = buildCanonicalDocumentFromMarkdown({
+                    documentId: document.id,
+                    text: winningText,
+                    pageCount: document.pageCount,
+                    sourceArtifactUri,
+                    extractor: winningCandidate.label,
+                  });
                   // The VM extractor already reconstructs Markdown; do not silently parse it again on the host.
-                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === VM_PDF_EXTRACTOR_ID
+                  const parserArtifacts = winningCandidate.label === VM_PDF_EXTRACTOR_ID
                     ? []
                     : await this.buildParserArtifacts(
                         document,
@@ -739,9 +705,6 @@ export class ExtractMarkdownStage implements Stage {
                         { hasTablePages, nativePayloadOutcome: nativePdfStats?.parserPayload },
                         signal,
                       );
-                  if (nativePdfStats && winningCandidate.structuredResult) {
-                    nativePdfStats.parserPayload = { status: "none", reason: `structured result from ${winningCandidate.label}` };
-                  }
                   const parserEnrichedCanonicalDocument =
                     parserArtifacts.length > 0
                       ? enrichCanonicalDocumentWithBestParser(
@@ -806,20 +769,10 @@ export class ExtractMarkdownStage implements Stage {
                     textArtifactUri: winningCandidate.textUri,
                     candidates: [
                       candidateA
-                        ? {
-                            label: candidateA.label,
-                            artifactUri: candidateA.textUri,
-                            structuredArtifactUri:
-                              candidateA.structuredArtifactUri ?? null,
-                          }
+                        ? { label: candidateA.label, artifactUri: candidateA.textUri }
                         : null,
                       candidateB
-                        ? {
-                            label: candidateB.label,
-                            artifactUri: candidateB.textUri,
-                            structuredArtifactUri:
-                              candidateB.structuredArtifactUri ?? null,
-                          }
+                        ? { label: candidateB.label, artifactUri: candidateB.textUri }
                         : null,
                     ].filter(Boolean),
                     policyObservations: policyDecision.observations,
@@ -933,13 +886,6 @@ export class ExtractMarkdownStage implements Stage {
                   state.artifactLedger.recordDocument(document.id, "heatmap", this.storage.uri(heatmapKey));
                   state.artifactLedger.recordDocument(document.id, "canonical-document", canonicalUri);
                   state.artifactLedger.recordDocument(document.id, "extraction-contract", contractUri);
-                  if (winningCandidate.structuredArtifactUri) {
-                    state.artifactLedger.recordDocument(
-                      document.id,
-                      "liteparse-structured",
-                      winningCandidate.structuredArtifactUri,
-                    );
-                  }
                   if (critique) {
                     state.artifactLedger.recordDocument(document.id, "markdown-critique", critique.critiqueArtifactUri);
                   }
@@ -1268,7 +1214,7 @@ export class ExtractMarkdownStage implements Stage {
     signal?: AbortSignal,
   ): Promise<{ text: string; textUri: string; pages: number[] } | null> {
     const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
-    // A fully scanned PDF often comes back as no text at all (Kreuzberg adds page breaks only around text): every page
+    // A fully scanned PDF often comes back as no text at all (some extractors add page breaks only around text): every page
     // is empty then.
     const split = splitFormFeedPages(args.text, pageCount)
       ?? (pageCount === 1 ? [args.text] : !/[\p{L}\p{N}]/u.test(ocrLedgerPageText(args.text)) ? Array<string>(pageCount).fill("") : null);
@@ -1365,7 +1311,6 @@ export class ExtractMarkdownStage implements Stage {
    * - The sandboxed route with no report: nothing. The host never probes the PDF for that route.
    * - Otherwise, only when the winner ran OCR (candidateRanUnreportedOcr) and its text has reliable form-feed page breaks: a page
    *   whose native text layer (poppler's `pdftotext`, from page facts or run here) has no words while the extracted page does.
-   *   Kreuzberg's own per-page flags describe the native layer only, so this is the one way to see its OCR reads.
    * Words exclude image references and page markers. Fast never reads a page with a model, so it records nothing. Never throws:
    * a failed probe is logged loudly (`[ocr-ledger] probe-failed`) and bills nothing.
    */
@@ -1620,7 +1565,6 @@ export class ExtractMarkdownStage implements Stage {
     return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
       file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort, graphContext?.documentId),
-      liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
       ocr: (candidate, key, source, abort) => this.extractOcrCandidate(candidate, key, source, graphContext, abort),
@@ -1804,46 +1748,6 @@ export class ExtractMarkdownStage implements Stage {
       await rm(scratchDir, { recursive: true, force: true });
       throw error;
     }
-  }
-
-  private async extractLiteParseCandidate(
-    extractor: PreparedExtractor,
-    textKey: string,
-    sourceTempFile: string,
-    signal?: AbortSignal,
-  ): Promise<ExtractedCandidate> {
-    const adapter = new LiteParseDocumentExtractionAdapter(this.runner, {
-      ocrEnabled: false,
-    });
-    const structuredResult = await adapter.extract({
-      inputPath: sourceTempFile,
-      outputPath: extractor.outputPath!,
-      signal,
-    });
-    const sanitized = sanitizeExtractedMarkdown(structuredResult.markdown);
-    const tempTextPath = `${extractor.outputPath!}.md`;
-    await writeFile(tempTextPath, sanitized.markdown, "utf8");
-    await this.storage.streamText(
-      textKey,
-      sanitized.markdown,
-      "text/markdown; charset=utf-8",
-    );
-    const structuredKey = `${textKey}.structured.json`;
-    const sanitizedResult = {
-      ...structuredResult,
-      markdown: sanitized.markdown,
-    };
-    await this.storage.putJson(structuredKey, sanitizedResult);
-
-    return {
-      label: extractor.label,
-      plan: extractor.plan,
-      textKey,
-      textUri: this.storage.uri(textKey),
-      tempTextPath,
-      structuredResult: sanitizedResult,
-      structuredArtifactUri: this.storage.uri(structuredKey),
-    };
   }
 
   private async extractFileCandidate(

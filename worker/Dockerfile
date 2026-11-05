@@ -75,7 +75,7 @@ COPY packages/shared/package.json packages/shared/tsconfig.json packages/shared/
 COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN pnpm install --filter @docslurp/worker... --prod --frozen-lockfile
 # Optional private native PDF engine: pinned by vendor-artifacts/native-pdf/manifest.json,
-# tarball supplied in the build context (gitignored). Absent tarball = no-op (Kreuzberg path).
+# tarball supplied in the build context (gitignored). Absent tarball = no-op (Poppler path).
 # DOCSLURP_NATIVE_PDF=1 requires it (missing or unloadable binding fails the build) and
 # sets DOCSLURP_NATIVE_PDF_INSTALLED=1. Without the flag, a tarball that installs and
 # loads is still used; vendor-artifacts/native-pdf/node_modules then marks it installed.
@@ -109,11 +109,9 @@ RUN groupadd --system --gid 10001 docslurp \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \
     && chown -R docslurp:docslurp /home/docslurp /tmp/docslurp-parser-sandbox /tmp/clamav /var/log/clamav /var/lib/clamav
 
-# No OCR package, binary or language data is installed. Kreuzberg's and LiteParse's native addons statically link
-# Tesseract (disabled, not removed: docs/extraction/ocr.md, "Tesseract"); it gets no language data (an empty, root-owned,
-# read-only directory), so it cannot OCR customer pixels on the worker host. OCR runs only in the configured boundary.
-RUN mkdir -p /opt/docslurp/empty-tessdata && chmod 0555 /opt/docslurp/empty-tessdata
-ENV TESSDATA_PREFIX=/opt/docslurp/empty-tessdata
+# No OCR engine, package, binary or language data is installed or linked: no native addon embeds Tesseract, Leptonica
+# or PaddleOCR (worker/src/__tests__/no-tesseract.test.ts and scripts/scan-ocr-engines.mjs check this). OCR runs only
+# in the configured boundary (docs/extraction/ocr.md).
 ENV HOME=/home/docslurp
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
 ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=

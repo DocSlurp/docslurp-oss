@@ -53,14 +53,9 @@ for (const name of profiles[profile]) {
   if (!await binaryPath(name)) failures.push(`missing executable: ${name}`);
 }
 const require = createRequire(path.join(root, 'worker/package.json'));
-for (const name of profile === 'routing' ? ['@llamaindex/liteparse'] : ['@kreuzberg/node', '@llamaindex/liteparse', 'mammoth', '@lancedb/lancedb']) {
+for (const name of profile === 'routing' ? [] : ['mammoth', '@lancedb/lancedb']) {
   try {
-    const module = await import(require.resolve(name));
-    // Kreuzberg loads native bindings lazily; import alone misses ABI failures.
-    if (name === '@kreuzberg/node') {
-      const result = await module.extractBytes(Buffer.from('Parser startup check.'), 'text/plain');
-      if (!result.content?.includes('Parser startup check.')) throw new Error('native extraction returned no text');
-    }
+    await import(require.resolve(name));
   } catch (error) { failures.push(`cannot load Node package ${name}: ${error.message}`); }
 }
 if (profile === 'full' || profile === 'test' || profile === 'lean') {
@@ -68,7 +63,8 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
   const python = existsSync(path.join(venv, 'bin/python3')) ? path.join(venv, 'bin/python3') : await binaryPath('python3');
   if (!python) failures.push('missing Python interpreter');
   else {
-    const result = spawnSync(python, ['-c', 'import PIL, ebooklib, pptx, openpyxl, trafilatura'], { encoding: 'utf8', timeout: 30000 });
+    // pptx, openpyxl and defusedxml serve the Office extractors (scripts/office_markdown.py).
+    const result = spawnSync(python, ['-c', 'import PIL, ebooklib, pptx, openpyxl, defusedxml, trafilatura'], { encoding: 'utf8', timeout: 30000 });
     if (result.status !== 0) failures.push(`Python parser imports failed (${python}): ${result.error?.message || result.stderr.trim()}`);
   }
   // Poppler needs poppler-data's predefined CMaps (UniGB-UCS2-H, UniCNS-UCS2-H, ...) to map CJK CID fonts
