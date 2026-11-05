@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createMigratedDatabase, applyRemainingMigrations } from "../../../worker/src/test/migrated-db.js";
+import { createMigratedDatabase, applyRemainingMigrations } from "@docslurp/worker/testing";
 
 describe("project terminology upgrade", () => {
   it("preserves tenant identity and split spend and denies a foreign project", async () => {
