@@ -41,7 +41,8 @@ describe("a PDF upload in the API: never parsed, only estimated", () => {
       const metadata = await resolveSourceMetadata(file);
       expect(metadata.pageCount).toBe(40);
       expect(metadata.fileFacts.mimeType).toBe("application/pdf");
-      expect(intakePageCountSource({ name: "report.pdf", type: metadata.fileFacts.mimeType })).toBe("assumed");
+      expect(metadata.pageEvidence).toBe("size-estimate");
+      expect(intakePageCountSource(metadata.pageEvidence)).toBe("assumed");
       expect(spawned).toEqual([]);
       expect(dlopen).not.toHaveBeenCalled();
     } finally {
@@ -116,5 +117,49 @@ describe("resolveSourceMetadata file facts", () => {
     const pages = estimateNonPdfPageCount("text/plain", bytes);
     expect(performance.now() - started).toBeLessThan(500);
     expect(pages).toBeGreaterThan(8_000);
+  });
+});
+
+describe("intake's page-count evidence: counted only from the bytes, never from a name or declared type", () => {
+  it("counts a whole text file by the text rule and labels a sampled one an estimate", async () => {
+    s3.bytes = new TextEncoder().encode("a,b\n1,2\n");
+    const small = await resolveSourceMetadata({ mimeType: "text/csv", sourceKey: "s/a.csv", filename: "a.csv" });
+    expect(small.pageEvidence).toBe("text-rule");
+    expect(intakePageCountSource(small.pageEvidence)).toBe("counted");
+    s3.bytes = new Uint8Array(2_000_001).fill(0x61);
+    const big = await resolveSourceMetadata({ mimeType: "text/plain", sourceKey: "s/b.txt", filename: "b.txt" });
+    expect(big.pageEvidence).toBe("text-sample");
+    expect(intakePageCountSource(big.pageEvidence)).toBe("assumed");
+  });
+
+  it("counts an image's one page only when its magic bytes are a single-frame format", async () => {
+    s3.bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+    const png = await resolveSourceMetadata({ mimeType: "image/png", sourceKey: "s/p.png", filename: "p.png" });
+    expect(png.pageEvidence).toBe("image-header");
+    expect(intakePageCountSource(png.pageEvidence)).toBe("counted");
+    s3.bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
+    const tiff = await resolveSourceMetadata({ mimeType: "image/tiff", sourceKey: "s/t.tif", filename: "t.tif" });
+    expect(tiff.pageEvidence).toBe("none");
+    expect(intakePageCountSource(tiff.pageEvidence)).toBe("assumed");
+    expect(spawned).toEqual([]);
+  });
+
+  it("assumes an empty file's page", async () => {
+    s3.bytes = new Uint8Array();
+    const empty = await resolveSourceMetadata({ mimeType: "text/plain", sourceKey: "s/e.txt", filename: "e.txt" });
+    expect(intakePageCountSource(empty.pageEvidence)).toBe("assumed");
+  });
+});
+
+describe("a document's pageCountSource", () => {
+  it("is measured only for a counted page count; an assumed, missing or unknown source is an estimate", async () => {
+    const { mapDocument } = await import("../services/run-records.js");
+    const row = (page_count_source: string | null | undefined) => mapDocument({
+      id: "d", user_id: "u", org_id: "o", workspace_id: "w", run_id: "r", filename: "a.pdf", mime_type: "application/pdf", source_key: "k",
+      status: "queued", extraction_mode: "fast", page_count: 40, page_count_source, version_number: 1, previous_version_id: null,
+      created_at: new Date(0), updated_at: new Date(0),
+    } as never).pageCountSource;
+    expect(row("counted")).toBe("measured");
+    for (const source of ["assumed", null, undefined, "estimated", "measured"]) expect(row(source)).toBe("estimated");
   });
 });

@@ -63,7 +63,7 @@ export type DocumentRow = {
   billing_pages?: number | null;
   /** How billing_pages was found (pdf-conversion, slides, sheet-rows, text-pages, text-rule, size-estimate). */
   billing_pages_method?: string | null;
-  /** `counted` or `assumed`: whether intake counted page_count or assumed one page for a format only the worker can count. */
+  /** `counted` (from the bytes or the worker's measurement) or `assumed` (an estimate the worker replaces); see PageCountSource. */
   page_count_source?: string | null;
   source_sha256?: string | null;
   deduped_from_document_id?: string | null;
@@ -158,7 +158,8 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
-    pageCountSource: row.page_count_source === "assumed" ? "estimated" : "measured",
+    // Describes pageCount: measured only when it was counted from the bytes or by the worker; any other source is an estimate.
+    pageCountSource: row.page_count_source === "counted" ? "measured" : "estimated",
     sourceSha256: row.source_sha256 ?? null,
     dedupedFromDocumentId: row.deduped_from_document_id ?? null,
     dedupScope: row.dedup_scope ?? null,

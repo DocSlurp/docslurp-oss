@@ -294,7 +294,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
             source_sha256, indexing_mode, reindex_of)
           values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.workspace_id}, ${runId}, ${doc.filename},
             ${doc.mime_type}, ${doc.source_key}, 'queued', ${doc.extraction_mode}, ${doc.page_count},
-            ${doc.billing_pages ?? null}, ${doc.billing_pages_method ?? null}, ${doc.page_count_source ?? "counted"},
+            ${doc.billing_pages ?? null}, ${doc.billing_pages_method ?? null}, ${doc.page_count_source ?? "assumed"},
             ${doc.file_facts ? tx.json(doc.file_facts as never) : null},
             ${canonicalId}, ${versionNumber}, ${doc.id},
             ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode}, ${doc.id})

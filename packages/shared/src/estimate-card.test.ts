@@ -10,7 +10,7 @@ import { buildEstimateCard, ESTIMATE_RULES } from "./estimate-card.js";
 import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golden.js";
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
 import { pageCredits, speedBoostMultiplier } from "./billing.js";
-import { countedPagesForForecast, estimateProfileFor, IMAGE_MAX_FRAMES, intakePageCountSource, isMultiFrameImageFile, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, workerCountedFormat, type QuoteFile } from "./upload-quote.js";
+import { ASSUMED_BYTES_PER_PAGE, countedPagesForForecast, estimatedPdfPages, estimateProfileFor, IMAGE_MAX_FRAMES, intakePageCountSource, isMultiFrameImageFile, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, workerCountedFormat, type QuoteFile } from "./upload-quote.js";
 import { isUploadImageFile, isUploadTextFile, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
 const estimateDir = join(dirname(fileURLToPath(import.meta.url)), "../../estimate");
@@ -147,8 +147,8 @@ describe("quoteUpload", () => {
     const uncounted = quoteUpload({ files: [{ name: "scan", size: 300_000, type: "image/tiff" }], profile }).estimate;
     expect(uncounted.pagesRange).toEqual({ low: 1, high: Math.ceil(300_000 / (16 * 1024)) });
     expect(quoteFilePageRange({ name: "big.tiff", size: 90_000_000 })).toMatchObject({ low: 1, high: IMAGE_MAX_FRAMES, measured: false });
-    expect(intakePageCountSource({ name: "fax.tiff" })).toBe("assumed");
-    expect(intakePageCountSource({ name: "photo.png" })).toBe("counted");
+    // A TIFF's frames are counted only by the OCR boundary: intake has no evidence (server source-metadata.ts gives `none`).
+    expect(intakePageCountSource("none")).toBe("assumed");
     expect(isMultiFrameImageFile({ name: "x.pdf", type: "image/tiff" })).toBe(true);
     expect(isMultiFrameImageFile({ name: "x.tiff", type: "image/png" })).toBe(false);
   });
@@ -316,15 +316,37 @@ describe("quoteUpload with uncounted pages", () => {
     expect(fast.basis).not.toContain("Rich pages");
   });
 
-  it("passes a forecast pages only when they were counted", () => {
-    expect(intakePageCountSource({ name: "a.pdf", type: "application/pdf" })).toBe("counted");
-    expect(intakePageCountSource({ name: "a.csv", type: "text/csv" })).toBe("counted");
-    expect(intakePageCountSource({ name: "photo.png", type: "image/png" })).toBe("counted");
-    expect(intakePageCountSource({ name: "a.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })).toBe("assumed");
-    expect(intakePageCountSource({ name: "n.rtf", type: "text/rtf" })).toBe("counted");
-    expect(countedPagesForForecast({ pageCount: 1, pageCountSource: "assumed" })).toBeUndefined();
+  it("labels a page count counted only on evidence from the bytes, never on a name or declared type", () => {
+    // Evidence the API took from the bytes in full.
+    expect(intakePageCountSource("text-rule")).toBe("counted");
+    expect(intakePageCountSource("image-header")).toBe("counted");
+    // Estimates and absences: a PDF's size estimate (the API never parses one), a sampled text count, a format only the worker counts.
+    for (const evidence of ["size-estimate", "text-sample", "none", null, undefined] as const) {
+      expect(intakePageCountSource(evidence)).toBe("assumed");
+    }
+    // A MIME type or filename is not evidence: the old type-based call shape cannot reach `counted`.
+    for (const file of [{ name: "a.pdf", type: "application/pdf" }, { name: "a.csv", type: "text/csv" }, { name: "photo.png", type: "image/png" }]) {
+      expect(intakePageCountSource(file as never)).toBe("assumed");
+    }
+  });
+
+  it("passes a forecast pages only when they were counted or the worker measured them; an estimate is priced over the size", () => {
+    // Intake's estimate (assumed) is never passed as pages; nor is a count of unknown or missing provenance.
+    expect(countedPagesForForecast({ pageCount: 40, pageCountSource: "assumed" })).toBeUndefined();
+    expect(countedPagesForForecast({ pageCount: 40, pageCountSource: null })).toBeUndefined();
+    expect(countedPagesForForecast({ pageCount: 40 })).toBeUndefined();
+    expect(countedPagesForForecast({ pageCount: 40, pageCountSource: "estimated" })).toBeUndefined();
+    // The worker's measurement wins, whatever intake recorded.
     expect(countedPagesForForecast({ pageCount: 1, billingPages: 300, pageCountSource: "assumed" })).toBe(300);
     expect(countedPagesForForecast({ pageCount: 40, pageCountSource: "counted" })).toBe(40);
     expect(countedPagesForForecast({ pageCount: 0, pageCountSource: "counted" })).toBeUndefined();
+    // Without pages a PDF is quoted as a labelled estimate (a range, measured: false) from its size, and the size estimate intake
+    // stores is not what the quote uses; only a client's count makes the quote measured.
+    const size = 40 * ASSUMED_BYTES_PER_PAGE;
+    expect(estimatedPdfPages(size)).toBe(40);
+    const estimated = quoteFilePageRange({ name: "contract.pdf", size });
+    expect(estimated.measured).toBe(false);
+    expect(estimated.low).toBeLessThan(estimated.high);
+    expect(quoteFilePageRange({ name: "contract.pdf", size, pages: 40 })).toEqual({ low: 40, central: 40, high: 40, measured: true });
   });
 });

@@ -121,20 +121,26 @@ export function workerCountedFormat(file: { name: string; type?: string | null }
 }
 
 /**
- * Where intake's page count came from: `counted` (the text rule over a text file, a single-frame image's one page)
- * or `assumed` (a PDF's size estimate, which the worker measures in the VM; one page for a format only the worker can count; and a
- * multi-frame image, whose frames the OCR engine counts).
- * Stored as documents.page_count_source (migration 0126).
+ * Where a stored page count came from (documents.page_count_source, migration 0126): `counted` only on real evidence, a count
+ * taken from the file's bytes; `assumed` for everything else, which the worker replaces with its own measurement (a PDF's count
+ * from its VM or sandboxed page facts, a TIFF's frames from the OCR boundary, an Office file's pages from its extractor).
+ * Shown on documents as `measured` / `estimated`.
  */
 export type PageCountSource = "counted" | "assumed";
-export function intakePageCountSource(file: { name: string; type?: string | null }): PageCountSource {
-  // PDFs too: the API never parses a PDF (no pdfinfo in the API process), so intake only estimates its pages from its size;
-  // the worker measures them in its boundary (quarantine) before anything bills.
-  return workerCountedFormat(file) || isMultiFrameImageFile(file) || isPdfFile(file) ? "assumed" : "counted";
-}
 
-function isPdfFile(file: { name: string; type?: string | null }): boolean {
-  return (file.type ?? "").toLowerCase() === "application/pdf" || (!file.type && /\.pdf$/i.test(file.name));
+/**
+ * The evidence behind intake's page count (server source-metadata.ts), never the file's name or declared type:
+ * - `text-rule`: the text rule over the whole decoded text file.
+ * - `image-header`: the bytes' magic is a single-frame raster format (one page by definition).
+ * - `text-sample`: the text rule over a sample, scaled by size (an estimate).
+ * - `size-estimate`: pages from the size alone (a PDF: the API never parses one).
+ * - `none`: no count at all (a format only the worker counts, a multi-frame image, an empty or unrecognised file).
+ */
+export type IntakePageEvidence = "text-rule" | "image-header" | "text-sample" | "size-estimate" | "none";
+
+/** `counted` only for evidence taken from the bytes in full; an estimate, a sample or a MIME type alone is `assumed`. */
+export function intakePageCountSource(evidence: IntakePageEvidence | null | undefined): PageCountSource {
+  return evidence === "text-rule" || evidence === "image-header" ? "counted" : "assumed";
 }
 
 /** Intake's estimate of a PDF's pages from its size (ASSUMED_BYTES_PER_PAGE), never parsed; labelled `estimated`. */
@@ -144,11 +150,12 @@ export function estimatedPdfPages(bytes: number): number {
 
 /**
  * The pages a cost forecast may pass as counted for a stored document: the worker's measured billing pages, else intake's page count
- * when intake counted it. An assumed count is left out so the forecast prices the file's size instead of one page.
+ * when intake counted it. Any other count is left out so the forecast prices the file's size instead.
  */
 export function countedPagesForForecast(document: { pageCount: number; billingPages?: number | null; pageCountSource?: string | null }): number | undefined {
   if (Number(document.billingPages) > 0) return Number(document.billingPages);
-  return document.pageCountSource !== "assumed" && Number(document.pageCount) > 0 ? Number(document.pageCount) : undefined;
+  // Only an explicitly counted page count: an assumed, missing or unknown source is priced over the file's size.
+  return document.pageCountSource === "counted" && Number(document.pageCount) > 0 ? Number(document.pageCount) : undefined;
 }
 
 /** Pages of a file of `format` from its size alone, at the format's typical bytes per page (at least 1). */

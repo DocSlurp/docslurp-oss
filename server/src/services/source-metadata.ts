@@ -12,6 +12,7 @@ import {
   TEXT_PAGE_MIME_PREFIXES,
   textPageCount,
   type FileEncoding,
+  type IntakePageEvidence,
   type FileFacts,
 } from "@docslurp/shared";
 
@@ -20,6 +21,8 @@ export type SourceMetadata = {
   sourceSha256: string;
   /** What the bytes are, sniffed once here; the document is stored (and routed and billed) under `fileFacts.mimeType`. */
   fileFacts: FileFacts;
+  /** How `pageCount` was obtained; intakePageCountSource turns it into documents.page_count_source. */
+  pageEvidence: IntakePageEvidence;
 };
 
 /** The uploaded file cannot be read as the format it claims (corrupt, truncated or password-protected). A client error, not a server fault. */
@@ -52,22 +55,39 @@ export function estimateNonPdfPageCount(
   bytes: Uint8Array,
   encoding?: FileEncoding | null,
 ): number {
-  if (bytes.length === 0) {
-    return 1;
-  }
+  return nonPdfPageCount(contentType, bytes, encoding).pageCount;
+}
+
+/** Single-frame raster formats whose magic bytes make the file one page (a TIFF's frames are counted by the OCR boundary). */
+const SINGLE_FRAME_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]);
+
+/**
+ * Intake's page count of a non-PDF file and the evidence behind it. Only the text rule over the whole text, or an image format
+ * the magic bytes confirm, is counted evidence; a declared type alone never is.
+ */
+export function nonPdfPageCount(
+  contentType: string,
+  bytes: Uint8Array,
+  encoding?: FileEncoding | null,
+  sniffedMimeType?: string | null,
+): { pageCount: number; pageEvidence: IntakePageEvidence } {
+  if (bytes.length === 0) return { pageCount: 1, pageEvidence: "none" };
 
   // The quote rules (isUploadTextFile, quoteFilePages) and the offline estimator count text pages the same way.
   if (!TEXT_PAGE_MIME_PREFIXES.some((prefix) => contentType.startsWith(prefix))) {
-    return 1;
+    const image = sniffedMimeType != null && sniffedMimeType === contentType && SINGLE_FRAME_IMAGE_TYPES.has(sniffedMimeType);
+    return { pageCount: 1, pageEvidence: image ? "image-header" : "none" };
   }
 
   // Decoded by the file's own encoding (a UTF-16 CSV is not UTF-8), with HTML markup removed. Only the first
   // TEXT_MEASURE_SAMPLE_BYTES are decoded and the count is scaled by the file's size, so a large or hostile file costs
-  // the API a bounded amount of work.
+  // the API a bounded amount of work; that scaled count is an estimate.
   const markup = contentType.startsWith("text/html");
-  if (bytes.length <= TEXT_MEASURE_SAMPLE_BYTES) return textPageCount(decodeTextBytes(bytes, encoding), { markup });
+  if (bytes.length <= TEXT_MEASURE_SAMPLE_BYTES) {
+    return { pageCount: textPageCount(decodeTextBytes(bytes, encoding), { markup }), pageEvidence: "text-rule" };
+  }
   const sampled = textPageCount(decodeTextBytes(bytes.subarray(0, TEXT_MEASURE_SAMPLE_BYTES), encoding), { markup });
-  return Math.max(1, Math.ceil(sampled * (bytes.length / TEXT_MEASURE_SAMPLE_BYTES)));
+  return { pageCount: Math.max(1, Math.ceil(sampled * (bytes.length / TEXT_MEASURE_SAMPLE_BYTES))), pageEvidence: "text-sample" };
 }
 
 /** Bytes of a text file the API decodes to count its pages. */
@@ -109,12 +129,8 @@ export async function resolveSourceMetadata(file: {
     // The API never parses customer PDF bytes (no pdfinfo or other native parser in this process): the page count is an
     // estimate from the size, stored as `assumed` (shown as `estimated`). The worker measures the real count in its boundary
     // before any stage uses it or anything bills; an unreadable PDF fails there.
-    return { pageCount: estimatedPdfPages(bytes.length), sourceSha256, fileFacts };
+    return { pageCount: estimatedPdfPages(bytes.length), pageEvidence: "size-estimate", sourceSha256, fileFacts };
   }
 
-  return {
-    pageCount: estimateNonPdfPageCount(mimeType, bytes, fileFacts.encoding),
-    sourceSha256,
-    fileFacts,
-  };
+  return { ...nonPdfPageCount(mimeType, bytes, fileFacts.encoding, fileFacts.sniffedMimeType), sourceSha256, fileFacts };
 }
