@@ -4,7 +4,7 @@
   "policyVersion": "page-router-baseline-v1",
   "trainingDataSha256": "cc78669afb1abd2f4cd9970d7b079e9053db197fd2f879dd056213833ea762a9",
   "fitDate": "2026-10-12",
-  "splitPolicy": "fit=development+calibration; test held out; hyperparameters by leave-one-sourceFamily-out CV",
+  "splitPolicy": "fit=development+calibration; test held out; hyperparameters by leave-one-sourceFamily-out CV OCR targets (ocr:*) carry no fitted mapping or stats: their earlier fit measured a retired recogniser, so they stay unmeasured until PP-OCR is fit; the router has no estimate for them and promotion cannot use one.",
   "passThreshold": 0.85
  },
  "decisionModels": [
@@ -46,38 +46,6 @@
    }
   ],
   "stats": [
-   {
-    "cellId": "cell-0",
-    "targetId": "ocr:ppocr",
-    "pass": {
-     "text": {
-      "alpha": 30.0,
-      "beta": 42.0
-     },
-     "math": {
-      "alpha": 1.0,
-      "beta": 29.0
-     },
-     "tables": {
-      "alpha": 1.0,
-      "beta": 25.0
-     },
-     "overall": {
-      "alpha": 24.0,
-      "beta": 59.0
-     }
-    },
-    "cost": {
-     "meanUsd": 0.0,
-     "p90Usd": 0.0
-    },
-    "latency": {
-     "p50Ms": 2678.9,
-     "p95Ms": 6330.4
-    },
-    "n": 81,
-    "qualityMean": 0.4866
-   },
    {
     "cellId": "cell-0",
     "targetId": "vlm:openrouter/google/gemini-3.5-flash",
@@ -272,38 +240,6 @@
    },
    {
     "cellId": "cell-1",
-    "targetId": "ocr:ppocr",
-    "pass": {
-     "text": {
-      "alpha": 9.83333,
-      "beta": 31.16667
-     },
-     "math": {
-      "alpha": 0.06667,
-      "beta": 23.93333
-     },
-     "tables": {
-      "alpha": 0.07692,
-      "beta": 19.92308
-     },
-     "overall": {
-      "alpha": 6.57831,
-      "beta": 45.42169
-     }
-    },
-    "cost": {
-     "meanUsd": 0.0,
-     "p90Usd": 0.0
-    },
-    "latency": {
-     "p50Ms": 1685.6,
-     "p95Ms": 6330.4
-    },
-    "n": 50,
-    "qualityMean": 0.3271
-   },
-   {
-    "cellId": "cell-1",
     "targetId": "vlm:openrouter/google/gemini-3.5-flash",
     "pass": {
      "text": {
@@ -493,38 +429,6 @@
     },
     "n": 50,
     "qualityMean": 0.7631
-   },
-   {
-    "cellId": "cell-2",
-    "targetId": "ocr:ppocr",
-    "pass": {
-     "text": {
-      "alpha": 20.83333,
-      "beta": 12.16667
-     },
-     "math": {
-      "alpha": 0.06667,
-      "beta": 7.93333
-     },
-     "tables": {
-      "alpha": 0.07692,
-      "beta": 7.92308
-     },
-     "overall": {
-      "alpha": 17.57831,
-      "beta": 15.42169
-     }
-    },
-    "cost": {
-     "meanUsd": 0.0,
-     "p90Usd": 0.0
-    },
-    "latency": {
-     "p50Ms": 3716.3,
-     "p95Ms": 7972.6
-    },
-    "n": 31,
-    "qualityMean": 0.744
    },
    {
     "cellId": "cell-2",

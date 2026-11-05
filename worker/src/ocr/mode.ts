@@ -100,6 +100,19 @@ export function ocrFailedPages(ledger: { readDocument(documentId: string, key: s
   }
 }
 
+/** Add pages to the document's OCR-failed list in the run's artifact ledger. */
+export function recordOcrFailedPages(
+  state: { artifactLedger: { readDocument(documentId: string, key: string): string | null | undefined; recordDocument(documentId: string, key: string, value: string): void } },
+  documentId: string,
+  pages: readonly number[],
+): string {
+  const known = ocrFailedPages(state.artifactLedger, documentId);
+  for (const page of pages) if (Number.isSafeInteger(page) && page > 0) known.add(page);
+  const list = JSON.stringify([...known].sort((a, b) => a - b));
+  state.artifactLedger.recordDocument(documentId, OCR_FAILED_PAGES_KEY, list);
+  return list;
+}
+
 /** `DOCSLURP_OCR_MODE`, or the default: `vm` under the service profile, `off` elsewhere. Throws on an unknown value. */
 export function resolveOcrMode(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const raw = env.DOCSLURP_OCR_MODE?.trim().toLowerCase();

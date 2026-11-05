@@ -107,7 +107,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
+import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
 interface PageHeatmapEntry {
@@ -1338,10 +1338,7 @@ export class ExtractMarkdownStage implements Stage {
     }
     if (failed.length > 0) {
       // Vision must not read these pages in OCR's place (vision-extract excludes them).
-      const known = ocrFailedPages(state.artifactLedger, document.id);
-      for (const page of failed) known.add(page);
-      const list = JSON.stringify([...known].sort((a, b) => a - b));
-      state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, list);
+      const list = recordOcrFailedPages(state, document.id, failed);
       // A later document with the same bytes reuses this Markdown (checkDedup): it inherits the failed pages too.
       state.artifactLedger.record(`${OCR_FAILED_PAGES_KEY}:${args.contentHash}`, list);
     }

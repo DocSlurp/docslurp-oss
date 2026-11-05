@@ -268,6 +268,14 @@ describe("runRoutedVision with executors", () => {
     expect(untouched.escalations).toEqual([]);
   });
 
+  it("never cascades an empty or poor OCR read to a hosted model: its handoff is the OCR escalation reader", async () => {
+    const cascade = [{ targetId: strong.id, trigger: "empty-output" as const }];
+    const { deps } = fakeDeps({ ocr: vi.fn(async () => ({ text: "", latencyMs: 40, model: "ppocr-v6-small" })) });
+    const { result, extract } = await run([asg(2, ppocr.id, "ocr", { kind: "page" }, cascade)], { deps });
+    expect(extract).not.toHaveBeenCalled();
+    expect(result.escalations).toEqual([]);
+  });
+
   it("assigns pixels only to model-or-image assignments", async () => {
     const plan = await planOf([asg(1, accept.id, "accept-text"), asg(2, nativeText.id, "extract-text"), asg(3, ppocr.id, "ocr"), asg(4, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
     expect(pagesNeedingPixels(plan)).toEqual([3, 4]);
