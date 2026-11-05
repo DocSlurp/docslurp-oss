@@ -228,9 +228,9 @@ export function ocrLedgerPageText(text: string | null | undefined): string {
 
 /**
  * Whether the winning candidate ran OCR, so empty-native pages holding words could only be OCR reads. Only these
- * candidates OCR without reporting pages: Dolphin (a page-reading model) and liteparse with --ocr. Kreuzberg never OCRs
- * (kreuzberg_extract.mjs strips its OCR options), and text-layer extractors (native-pdf, poppler-text, pandoc, json)
- * never OCR. The OCR engine reports and charges its own pages.
+ * candidates OCR without reporting pages: Dolphin (a page-reading model). Kreuzberg and LiteParse never OCR (their
+ * addons link Tesseract, disabled: kreuzberg_extract.mjs strips its OCR options and liteparse --ocr is refused), and
+ * text-layer extractors (native-pdf, poppler-text, pandoc, json) never OCR. The OCR engine reports and charges its own pages.
  */
 export function candidateRanUnreportedOcr(candidate: Pick<ExtractedCandidate, "label" | "plan">): boolean {
   const args = candidate.plan?.args ?? [];
