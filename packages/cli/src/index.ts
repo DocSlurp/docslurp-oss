@@ -892,6 +892,12 @@ function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}m${String(secs).padStart(2, "0")}s` : `${secs}s`;
 }
 
+/** An AbortSignal.timeout abort (TimeoutError), as fetch rejects with it directly or as its cause. */
+function isTimeoutAbort(error: unknown): boolean {
+  const named = (value: unknown) => value instanceof Error && (value.name === "TimeoutError" || value.name === "AbortError");
+  return named(error) || (error instanceof Error && named((error as Error & { cause?: unknown }).cause));
+}
+
 /** What a spend-paused run is waiting for, so "paused" is not read as stuck. */
 function spendPausedNote(run: { controlState?: string | null; pauseReason?: string | null }): string {
   if (run.controlState !== "paused" || !run.pauseReason) return "";
@@ -915,8 +921,18 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
   const printStatus = async (): Promise<boolean> => {
     const remainingMs = expiresAt - Date.now();
-    if (watch && remainingMs <= 0) throw new Error(`Run ${runId} did not complete within ${timeoutSeconds}s; it may still be queued or processing.`);
-    const response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000));
+    const deadlineError = () => new Error(`Run ${runId} did not complete within ${timeoutSeconds}s; it may still be queued or processing.`);
+    if (watch && remainingMs <= 0) throw deadlineError();
+    const requestTimeoutMs = watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000);
+    let response: Response;
+    try {
+      response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, requestTimeoutMs);
+    } catch (error) {
+      // The request's timeout was the watch's remaining time: it aborted because the watch deadline arrived, so report
+      // that, not the transport's generic "aborted due to timeout". A request that timed out early keeps its own error.
+      if (watch && isTimeoutAbort(error) && expiresAt - Date.now() <= 0) throw deadlineError();
+      throw error;
+    }
 
     if (!response.ok) {
       throw await responseFailure(response);

@@ -78,18 +78,23 @@ describe("stripHtmlMarkup and textPageCount on hostile input", () => {
 
   for (const [name, build] of Object.entries(floods)) {
     it(`strips ${name} in linear time at 5 MB`, () => {
-      // Scaling, not wall time: a loaded machine slows both sizes alike, while a quadratic pass makes 4x the input
-      // cost ~16x. Best of three runs per size; the absolute cap only catches a pass that never finishes.
+      // Compared with one plain pass over the same text, measured back to back, so machine load slows both alike.
+      // Linear stripping costs a small multiple of that pass (~10-30x); a quadratic one costs thousands of times more
+      // at 5 MB. Best of three per measurement; the absolute cap only catches a pass that never finishes.
+      const input = build(MEGABYTES(5));
       const best = (fn: () => void) => Math.min(timed(fn), timed(fn), timed(fn));
-      for (const run of [(text: string) => stripHtmlMarkup(text), (text: string) => textPageCount(text, { markup: true })]) {
-        const small = build(MEGABYTES(1.25));
-        const large = build(MEGABYTES(5));
-        const smallMs = Math.max(5, best(() => run(small)));
-        const largeMs = best(() => run(large));
-        expect(largeMs / smallMs).toBeLessThan(9);
-        expect(largeMs).toBeLessThan(10_000);
+      const scan = () => {
+        let sum = 0;
+        for (let index = 0; index < input.length; index++) sum = (sum + input.charCodeAt(index)) | 0;
+        return sum;
+      };
+      for (const run of [() => stripHtmlMarkup(input), () => textPageCount(input, { markup: true })]) {
+        const scanMs = Math.max(1, best(scan));
+        const runMs = best(run);
+        expect(runMs / scanMs).toBeLessThan(400);
+        expect(runMs).toBeLessThan(10_000);
       }
-    });
+    }, 30_000);
   }
 
   it("still removes tags, comments, scripts and styles", () => {

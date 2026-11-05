@@ -244,11 +244,16 @@ describe("header-only inspection (what the API does with customer bytes)", () =>
     const hugeZip = Buffer.alloc(64 * 1024 * 1024);
     hugeZip.writeUInt32LE(0x04034b50, 0);
     hugeZip.writeUInt32LE(0x06054b50, hugeZip.length - 22);
-    const started = performance.now();
-    expect(fileFactsFor(hugeZip, { filename: "a.docx", declaredMimeType: DOCX }, header)).toMatchObject({ mimeType: DOCX, container: "zip", inspection: "header" });
     const hugeText = Buffer.alloc(64 * 1024 * 1024, "line of text\n");
-    expect(fileFactsFor(hugeText, { filename: "a.txt", declaredMimeType: "text/plain" }, header)).toMatchObject({ mimeType: "text/plain", encoding: "utf-8" });
-    expect(performance.now() - started).toBeLessThan(250);
+    // Only the inspection is timed (allocating 128 MB is not): header-only work is ~1 ms, while scanning or decoding
+    // 64 MB takes hundreds, so the limit holds on a loaded machine and still fails a full read.
+    const started = performance.now();
+    const zipFacts = fileFactsFor(hugeZip, { filename: "a.docx", declaredMimeType: DOCX }, header);
+    const textFacts = fileFactsFor(hugeText, { filename: "a.txt", declaredMimeType: "text/plain" }, header);
+    const elapsed = performance.now() - started;
+    expect(zipFacts).toMatchObject({ mimeType: DOCX, container: "zip", inspection: "header" });
+    expect(textFacts).toMatchObject({ mimeType: "text/plain", encoding: "utf-8" });
+    expect(elapsed).toBeLessThan(250);
   });
 
   it("keeps a declared container type as provisional and marks it header-inspected", () => {
