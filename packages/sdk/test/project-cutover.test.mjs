@@ -119,3 +119,30 @@ for (const method of ["upload", "extract"]) test(`${method} refuses scope fields
   assert.equal(requests, 0);
   assert.equal(reads, 0);
 });
+
+for (const method of ["upload", "extract"]) test(`${method} rejects arrays masquerading as scope envelopes`, async () => {
+  let requests = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const envelope of [{ files: [] }, { urls: ["https://example.test/a.pdf"] }, { files: [], urls: [] }]) {
+    for (const directUpload of [false, true]) {
+      const input = Object.assign([new Blob(["secret"])], envelope, { project: "intended", orgId: "intended-org", newProject: true, templateKey: "intended-template" });
+      await assert.rejects(() => client[method](input, { directUpload }), /arrays cannot also be/);
+    }
+  }
+  assert.equal(requests, 0);
+});
+
+test("all public intake entrypoints refuse organization scope erased by copying", async () => {
+  let requests = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const style of ["inherited", "non-enumerable"]) {
+    const selected = (base) => style === "inherited"
+      ? Object.assign(Object.create({ orgId: "intended-org" }), base)
+      : Object.defineProperty(base, "orgId", { value: "intended-org", enumerable: false });
+    await assert.rejects(async () => client.createUploadSession(selected({ files: [{ filename: "x", sizeBytes: 1, mimeType: "text/plain" }] })), /must be an enumerable own property/);
+    await assert.rejects(async () => client.uploadUrls(selected({ urls: ["https://example.test/a.pdf"] })), /must be an enumerable own property/);
+    await assert.rejects(async () => client.ingestUrls(selected({ urls: ["https://example.test/a.pdf"] })), /must be an enumerable own property/);
+  }
+  await assert.rejects(async () => client.createUploadSession({ files: [{ filename: "x", sizeBytes: 1, mimeType: "text/plain", project: "misplaced" }] }), /Pass intake selection/);
+  assert.equal(requests, 0);
+});

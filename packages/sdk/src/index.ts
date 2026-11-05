@@ -1374,6 +1374,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    */
   function intakeTarget(input: { newProject?: boolean; templateKey?: string; project?: string }): { newProject: boolean; project?: string } {
     rejectLegacyProjectOptions(input);
+    rejectUncopyableIntakeSelection(input);
     const explicit = input.project?.trim();
     if (explicit) return { newProject: false, project: explicit };
     if (input.newProject || input.templateKey) return { newProject: true };
@@ -1383,6 +1384,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   /** Per-call project, else the client project ("default" unless configured). */
   function inProject<T extends { project?: string }>(input: T): T {
     rejectLegacyProjectOptions(input);
+    rejectUncopyableIntakeSelection(input);
     return { ...input, project: input.project?.trim() || clientProject };
   }
 
@@ -1441,7 +1443,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     rejectLegacyProjectOptions(options);
     rejectUncopyableIntakeSelection(input);
     rejectUncopyableIntakeSelection(options);
-    if (!("urls" in input) && !("files" in input)) rejectDirectFileSelection(input);
+    if (Array.isArray(input) && ("urls" in input || "files" in input)) {
+      throw new TypeError("Upload arrays cannot also be URL/file-list envelopes.");
+    }
+    if (Array.isArray(input) || (!("urls" in input) && !("files" in input))) rejectDirectFileSelection(input);
     const inputFiles = Array.isArray(input) ? input : "files" in input ? input.files : [];
     for (const file of inputFiles) rejectDirectFileSelection(file);
     assertClientCanonicalIds(canonicalIdsOf(input, options));
@@ -1960,6 +1965,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request(`/v1/projects/${encodeURIComponent(id)}`, {}, options, true);
     },
     createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+      rejectLegacyProjectOptions(input);
+      rejectUncopyableIntakeSelection(input);
+      for (const file of input.files) rejectDirectFileSelection(file);
       assertClientCanonicalIds(canonicalIdsOf(input, undefined));
       return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
     },
