@@ -3,14 +3,15 @@
  * every refusal is loud: the worker never moves OCR to a weaker boundary, and never substitutes another reader for an
  * OCR path that is missing.
  *
- * - `vm`: an extractor plugin's `sandboxedOcr` provider reads each job in a fresh VM or microVM. The production default.
- *   Without a provider the worker refuses to start; a failed VM read fails the page.
+ * - `vm`: an extractor plugin's `sandboxedOcr` provider reads each job in a fresh VM or microVM. The default under
+ *   `DOCSLURP_SERVICE_PROFILE=service`. Without a provider the worker refuses to start; a failed VM read fails the page.
  * - `local`: the fixed `docslurp_ocr.py` CLI under the worker's parser sandbox. Only for customer-owned execution, where the
  *   operator owns both the bytes and the machine: it needs `DOCSLURP_SERVICE_PROFILE=self-hosted` and is refused at startup
  *   under `service` (or when the profile is unset).
  * - `hosted`: a hosted vision model reads stored image bytes as they are. Nothing is decoded, rasterised or resized on the
  *   host, so inputs that would need it (PDF pages, TIFF, unknown formats) are refused and the page fails.
- * - `off`: no OCR. The default outside production.
+ * - `off`: no OCR. The default everywhere else (a stock self-hosted install runs with NODE_ENV=production and no plugin;
+ *   it reads no OCR rather than refusing to start).
  */
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
 
@@ -28,10 +29,10 @@ export class OcrRefusedError extends Error {
   }
 }
 
-/** `DOCSLURP_OCR_MODE`, or the default: `vm` in production, `off` elsewhere. Throws on an unknown value. */
+/** `DOCSLURP_OCR_MODE`, or the default: `vm` under the service profile, `off` elsewhere. Throws on an unknown value. */
 export function resolveOcrMode(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const raw = env.DOCSLURP_OCR_MODE?.trim().toLowerCase();
-  if (!raw) return env.NODE_ENV === "production" ? "vm" : "off";
+  if (!raw) return resolveServiceProfile(env) === "service" ? "vm" : "off";
   if (!(OCR_MODES as readonly string[]).includes(raw)) {
     throw new Error(`DOCSLURP_OCR_MODE must be one of ${OCR_MODES.join(", ")}; got ${JSON.stringify(raw)}`);
   }

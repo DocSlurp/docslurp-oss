@@ -4,6 +4,7 @@
  * bounded JSON result and, for pages that need a second opinion, a bounded PNG the boundary produced. Nothing here falls
  * back: a refused or failed read throws, and the caller fails the page or document.
  */
+import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -86,9 +87,23 @@ export function ocrMaxConcurrent(env: NodeJS.ProcessEnv = process.env): number {
 
 let active = 0;
 const waiting: Array<() => void> = [];
-async function withOcrSlot<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>): Promise<T> {
-  if (active >= ocrMaxConcurrent(env)) await new Promise<void>((resolve) => waiting.push(resolve));
-  else active += 1;
+async function withOcrSlot<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  if (active >= ocrMaxConcurrent(env)) {
+    // A cancelled job leaves the queue instead of starting a VM or process once a slot frees.
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const index = waiting.indexOf(grant);
+        if (index >= 0) waiting.splice(index, 1);
+        reject(signal!.reason instanceof Error ? signal!.reason : new Error("aborted"));
+      };
+      const grant = () => { signal?.removeEventListener("abort", onAbort); resolve(); };
+      waiting.push(grant);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  } else {
+    active += 1;
+  }
   try {
     return await fn();
   } finally {
@@ -128,6 +143,7 @@ export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcr
     seen.add(frame.frame);
     if (allowed ? !allowed.has(frame.frame) : frame.frame > job.maxFrames) throw new Error(`OCR result has unrequested frame ${frame.frame}`);
     if (frame.recogniser !== null && !job.recognisers.includes(frame.recogniser)) throw new Error(`OCR result used an unrequested recogniser ${frame.recogniser}`);
+    if (frame.chars !== [...frame.text].length && frame.chars !== frame.text.length) throw new Error(`OCR frame ${frame.frame} reports ${frame.chars} chars for different text`);
     if (frame.image !== null && frame.image !== `frame-${String(frame.frame).padStart(4, "0")}.png`) throw new Error(`OCR frame ${frame.frame} names another frame's image`);
     if (frame.width > job.maxLongEdge || frame.height > job.maxLongEdge) throw new Error(`OCR frame ${frame.frame} exceeds the long-edge cap`);
   }
@@ -141,7 +157,7 @@ export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcr
 async function pngDimensions(file: string): Promise<{ width: number; height: number } | null> {
   const info = await lstat(file).catch(() => null);
   if (!info?.isFile() || info.size < 33 || info.size > OCR_ESCALATION_IMAGE_MAX_BYTES) return null;
-  const handle = await open(file, "r");
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const head = Buffer.alloc(24);
     await handle.read(head, 0, 24, 0);
@@ -157,7 +173,9 @@ async function pngDimensions(file: string): Promise<{ width: number; height: num
 export function escalationReason(frame: { recogniser: string | null; meanConfidence: number | null; chars: number }, language: OcrLanguagePlan, belowConfidence = OCR_ESCALATE_BELOW): OcrEscalationReason | null {
   if (frame.recogniser !== null && (ESCALATE_RECOGNISERS as readonly string[]).includes(frame.recogniser)) return "script";
   if (language.unsupportedScript) return "unsupported-script";
-  if (frame.chars === 0) return "empty";
+  // Nothing detected at all (a blank or picture-only frame): no second read. Text regions the recogniser could not read
+  // are what escalation is for.
+  if (frame.chars === 0) return frame.recogniser === null || frame.recogniser === "none" ? null : "empty";
   if (frame.meanConfidence !== null && frame.meanConfidence < belowConfidence) return "low-confidence";
   return null;
 }
@@ -202,7 +220,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       if (!plan.available) throw new OcrRefusedError(`OCR runtime unavailable for DOCSLURP_OCR_MODE=${mode}`, "unavailable");
       await runner.run(plan, input.signal);
       return await readResult(job.output);
-    });
+    }, input.signal);
     checkResultAgainstJob(result, job, pinnedOcrModels());
     const pages: OcrPageRead[] = [];
     for (const frame of result.frames) {

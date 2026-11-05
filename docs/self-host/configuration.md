@@ -226,8 +226,8 @@ Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DOCSLURP_OCR_MODE` | `vm` when `NODE_ENV=production`; `off` elsewhere | Where OCR runs: `vm` (extractor plugin's VM provider), `local` (the local CLI under the parser sandbox), `hosted` (a hosted model reads stored image bytes) or `off`. |
-| `DOCSLURP_SERVICE_PROFILE` | unset | `self-hosted` when you own the files and the machine. `local` OCR is refused at start unless it is `self-hosted`. |
+| `DOCSLURP_OCR_MODE` | `vm` when `DOCSLURP_SERVICE_PROFILE=service`; `off` elsewhere (a stock self-hosted install reads no OCR until you choose a mode) | Where OCR runs: `vm` (extractor plugin's VM provider), `local` (the local CLI under the parser sandbox), `hosted` (a hosted model reads stored image bytes) or `off`. |
+| `DOCSLURP_SERVICE_PROFILE` | unset | `self-hosted` when you own the files and the machine; `service` for a multi-tenant service (makes `vm` the default and refuses `local`). `local` OCR is refused at start unless it is `self-hosted`. |
 | `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
 
 The other OCR settings (escalation, attempts, language, size and concurrency limits) are in `.env.example` and

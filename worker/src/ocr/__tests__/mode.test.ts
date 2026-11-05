@@ -34,12 +34,15 @@ afterEach(() => {
 });
 
 describe("resolveOcrMode", () => {
-  it("defaults to vm in production and off elsewhere", () => {
-    expect(resolveOcrMode({ NODE_ENV: "production" })).toBe("vm");
+  it("defaults to vm under the service profile and off elsewhere, production included", () => {
+    expect(resolveOcrMode({ NODE_ENV: "production", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("vm");
+    // A stock self-hosted install (NODE_ENV=production, no plugin) must start: it reads no OCR.
+    expect(resolveOcrMode({ NODE_ENV: "production" })).toBe("off");
+    expect(resolveOcrMode({ NODE_ENV: "production", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe("off");
     expect(resolveOcrMode({ NODE_ENV: "development" })).toBe("off");
     expect(resolveOcrMode({ NODE_ENV: "test" })).toBe("off");
     expect(resolveOcrMode({})).toBe("off");
-    expect(resolveOcrMode({ NODE_ENV: "production", DOCSLURP_OCR_MODE: "  " })).toBe("vm");
+    expect(resolveOcrMode({ NODE_ENV: "production", DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_OCR_MODE: "  " })).toBe("vm");
   });
 
   it("accepts each mode, case-insensitively", () => {
@@ -120,8 +123,8 @@ describe("production refusal reaches no local OCR command", () => {
     return { runner, spies };
   }
 
-  it("NODE_ENV=production with no mode and no provider: startup throws, and a read is refused without planning or spawning", async () => {
-    const env = { NODE_ENV: "production", DOCSLURP_OCR_SCRATCH_DIR: scratch } as NodeJS.ProcessEnv;
+  it("the service profile with no mode and no provider: startup throws, and a read is refused without planning or spawning", async () => {
+    const env = { NODE_ENV: "production", DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_OCR_SCRATCH_DIR: scratch } as NodeJS.ProcessEnv;
     expect(() => assertOcrConfiguration(env)).toThrow(/refusing to start/);
     const { runner, spies } = spiedRunner();
     await expect(readWithOcr(runner, { source, kind: "image", escalation: false, env })).rejects.toThrow(/sandboxed OCR provider/);

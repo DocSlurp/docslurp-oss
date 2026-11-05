@@ -279,9 +279,22 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
     } finally { await h.cleanup(); }
   });
 
-  it("fails the document when the VM read fails during scan fill", async () => {
+  it("fails only the scanned pages, loudly, when the VM read fails during scan fill; the text pages stand", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
+    h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(error.mock.calls.flat().join(" ")).toMatch(/\[ocr\] scanned-pages-failed document=doc-1 pages=2/);
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); error.mockRestore(); }
+  });
+
+  it("fails the document when every page is a scan and the VM read fails", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "" }) });
     h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
     try {
       await h.stage.run(h.state);

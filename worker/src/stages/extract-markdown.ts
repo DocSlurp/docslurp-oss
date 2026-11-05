@@ -1221,9 +1221,13 @@ export class ExtractMarkdownStage implements Stage {
     signal?: AbortSignal,
   ): Promise<{ text: string; textUri: string; pages: number[] } | null> {
     const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
-    const split = splitFormFeedPages(args.text, pageCount) ?? (pageCount === 1 ? [args.text] : null);
+    // A fully scanned PDF often comes back as no text at all (Kreuzberg adds page breaks only around text): every page
+    // is empty then.
+    const split = splitFormFeedPages(args.text, pageCount)
+      ?? (pageCount === 1 ? [args.text] : !/[\p{L}\p{N}]/u.test(ocrLedgerPageText(args.text)) ? Array<string>(pageCount).fill("") : null);
     if (!split) {
-      console.log(`[ocr] document=${document.id} scanned-page OCR skipped: extracted text has no reliable page breaks`);
+      console.error(`[ocr] scanned-pages-unread document=${document.id} reason=no-page-breaks: the extracted text has no reliable page breaks`);
+      pushPerfMetric({ metric: "ocr-pages-refused", value: 1, unit: "count", tags: ["ocr", "no-page-breaks"], metadata: { documentId: document.id } });
       return null;
     }
     const hasWords = (text: string | undefined) => /[\p{L}\p{N}]/u.test(ocrLedgerPageText(text ?? ""));
@@ -1238,13 +1242,26 @@ export class ExtractMarkdownStage implements Stage {
     const pages = [...split];
     const read: number[] = [];
     const hostedReader = createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner });
+    const failed: number[] = [];
     for (let start = 0; start < empty.length; start += OCR_PDF_BATCH_PAGES) {
       const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
-      const result = await ocrDocument({
-        runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
-        ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
-        hostedReader, stage: this.name, ...(signal ? { signal } : {}),
-      });
+      let result: Awaited<ReturnType<typeof ocrDocument>>;
+      try {
+        result = await ocrDocument({
+          runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
+          ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
+          hostedReader, stage: this.name, ...(signal ? { signal } : {}),
+        });
+      } catch (error) {
+        rethrowIfTeardown(error);
+        if (signal?.aborted) throw error;
+        // The OCR read of these pages failed or was refused: those pages fail (stay unread, loudly); the document's text
+        // pages stand. Nothing else reads them in OCR's place.
+        failed.push(...batch);
+        console.error(`[ocr] scanned-pages-failed document=${document.id} pages=${batch.join(",")} reason=${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+        pushPerfMetric({ metric: "ocr-pages-failed", value: batch.length, unit: "count", tags: ["ocr"], metadata: { documentId: document.id } });
+        continue;
+      }
       for (const page of result.pages) {
         if (page.pageNumber >= 1 && page.pageNumber <= pageCount && hasWords(page.text)) {
           pages[page.pageNumber - 1] = page.text;
@@ -1252,6 +1269,8 @@ export class ExtractMarkdownStage implements Stage {
         }
       }
     }
+    // Every page is a scan and none could be read: the document has no text, so it fails rather than publishing nothing.
+    if (failed.length > 0 && failed.length === pageCount) throw new Error(`OCR failed for every page (${pageCount}) of a scanned document`);
     if (read.length === 0) return null;
     const text = pages.join("\f");
     const key = `${args.textKey}.ocr.md`;

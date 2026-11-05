@@ -116,16 +116,17 @@ export const extractionJsonOptionsSchema = z
   .default(null);
 
 /**
- * An OCR language list as Tesseract names it (`eng`, `chi_sim`, `chi_sim_vert`, `eng+deu`): a three-letter code with
+ * An OCR language list as three-letter codes (`eng`, `chi_sim`, `chi_sim_vert`, `eng+deu`; the vocabulary Tesseract
+ * introduced, kept as the public API and mapped to PP-OCR recognisers in worker/src/ocr/languages.ts): a code with
  * up to two `_suffix` parts, joined by `+`. No paths, flags or other characters.
  */
 export const ocrLanguageSchema = z.string().trim()
-  .regex(/^[a-z]{3}(_[a-z]{2,5}){0,2}(\+[a-z]{3}(_[a-z]{2,5}){0,2})*$/, "OCR language must be Tesseract codes such as eng, chi_sim_vert or eng+deu")
+  .regex(/^[a-z]{3}(_[a-z]{2,5}){0,2}(\+[a-z]{3}(_[a-z]{2,5}){0,2})*$/, "OCR language must be language codes such as eng, chi_sim_vert or eng+deu")
   .max(64);
 
 /**
  * Workspace OCR language: `auto` detects each page's script and runs the matching installed packs; anything else
- * is Tesseract codes. English was the only language before, which turned Arabic, Chinese and Hindi scans into junk.
+ * is language codes. English was the only language before, which turned Arabic, Chinese and Hindi scans into junk.
  */
 export const ocrLanguageSettingSchema = z.union([z.literal("auto"), ocrLanguageSchema]);
 
