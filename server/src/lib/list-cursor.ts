@@ -23,13 +23,17 @@ export function encodeListCursor(kind: ListCursorKind, values: Record<string, st
   return Buffer.from(JSON.stringify({ v: 1, k: kind, ...values }), "utf8").toString("base64url");
 }
 
-const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::?\d{2})?)?$/;
+const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-](\d{2})(?::?(\d{2}))?)?$/;
+/** Postgres refuses a zone offset beyond ±15:59 ("time zone displacement out of range"). */
+const MAX_OFFSET_HOURS = 15;
 
-/** A timestamp Postgres will accept as `::timestamptz` (a Postgres `created_at::text`, or ISO 8601): real calendar date and time, else the cast would fail the query. */
+/** A timestamp Postgres will accept as `::timestamptz` (a Postgres `created_at::text`, or ISO 8601): real calendar date and time and an offset within ±15:59, else the cast would fail the query. */
 function isTimestampText(value: string): boolean {
   const match = TIMESTAMP.exec(value);
   if (!match) return false;
   const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const [offsetHours, offsetMinutes] = [Number(match[7] ?? 0), Number(match[8] ?? 0)];
+  if (offsetHours > MAX_OFFSET_HOURS || offsetMinutes >= 60) return false;
   const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day && hour < 24 && minute < 60 && second < 60;
 }
