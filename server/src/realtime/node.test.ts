@@ -83,12 +83,22 @@ describe("real Node realtime Upgrade", () => {
     expect(f.backend.project).not.toHaveBeenCalled();
   });
   it("closes revoked sessions and removes revoked resources while idle", async () => {
-    const f = await fixture(); const { ws, frames } = await connect(f.url); subscribe(ws);
+    // This tests the idle sweep's revocation, so the recheck window must leave room for one sweep to finish. With the
+    // 100 ms fixture window a loaded runner can see the watchdog close the socket (1011 authorization_timeout) first,
+    // which is correct fail-closed behaviour but not what this case asserts. The watchdog has its own coverage.
+    const f = await fixture({ authorizationRecheckMs: 1_000 }); const { ws, frames } = await connect(f.url); subscribe(ws);
+    const closed = new Promise<{ code: number; reason: string }>(resolve => ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
     await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
+    const beforeDeny = frames.length;
     f.deny();
-    await vi.waitFor(() => expect(frames.some(frame => frame.code === "access_revoked")).toBe(true));
+    await vi.waitFor(() => {
+      expect(ws.readyState, "socket still open while revoking").toBe(WebSocket.OPEN);
+      expect(frames.some(frame => frame.code === "access_revoked")).toBe(true);
+    }, { timeout: 5_000 });
+    // Nothing reaches the client for a resource after its access was revoked.
+    expect(frames.slice(beforeDeny).filter(frame => frame.type === "snapshot" || frame.type === "upsert")).toEqual([]);
     f.revoke();
-    await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED));
+    expect(await closed).toEqual({ code: 1008, reason: "access_revoked" });
   });
   it.each(["{", JSON.stringify({ v: 2, type: "heartbeat" }), "x".repeat(9_000)])("rejects malformed, incompatible and oversized frames", async raw => {
     const f = await fixture(); const { ws } = await connect(f.url); ws.send(raw);
