@@ -936,6 +936,16 @@ function isStreamBody(body: unknown): boolean {
   return typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
 }
 
+// Intake merges only enumerable own properties. Reject selectors that a copy
+// would erase rather than silently ingesting into a different project or org.
+function rejectUncopyableIntakeSelection(input: object): void {
+  for (const key of ["project", "newProject", "templateKey", "orgId"]) {
+    if (key in input && !Object.prototype.propertyIsEnumerable.call(input, key)) {
+      throw new TypeError(`Intake selection ${key} must be an enumerable own property.`);
+    }
+  }
+}
+
 function rejectLegacyProjectOptions(input: object): void {
   if (["workspace", "workspaces", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace", "workspace_id", "workspace_ids"].some(key => key in input)) {
     throw new Error("Legacy workspace selection is no longer supported; use project or newProject.");
@@ -1421,6 +1431,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
     rejectLegacyProjectOptions(input);
     rejectLegacyProjectOptions(options);
+    rejectUncopyableIntakeSelection(input);
+    rejectUncopyableIntakeSelection(options);
     assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
@@ -1500,6 +1512,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   async function extract(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions & ExtractOptions = {}): Promise<ExtractResponse> {
     rejectLegacyProjectOptions(input);
     rejectLegacyProjectOptions(options);
+    rejectUncopyableIntakeSelection(input);
+    rejectUncopyableIntakeSelection(options);
     const { retentionDays, notifyEmail, download, ...rest } = options;
     if (retentionDays !== undefined && (!Number.isInteger(retentionDays) || retentionDays < 1)) throw new RangeError("retentionDays must be a positive whole number of days.");
     const marked = { ...rest, [EXTRACT_MODE]: { retentionDays, notifyEmail, download } } as UploadOptions;

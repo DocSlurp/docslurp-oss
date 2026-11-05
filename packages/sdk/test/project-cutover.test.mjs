@@ -73,3 +73,22 @@ test("activity streaming does not discard a legacy project filter", async () => 
   await assert.rejects(()=>client.streamActivity(Object.create({workspaceId:"intended"})).next(),/Legacy workspace selection/);
   assert.equal(requests,0);
 });
+
+for (const method of ["upload", "extract"]) test(`${method} rejects intake selectors that copying would erase`, async () => {
+  let requests = 0, reads = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const key of ["project", "newProject", "templateKey", "orgId"]) {
+    for (const style of ["inherited", "non-enumerable"]) {
+      const selected = (base) => style === "inherited"
+        ? Object.assign(Object.create({ [key]: key === "newProject" ? true : "intended" }), base)
+        : Object.defineProperty(base, key, { value: key === "newProject" ? true : "intended", enumerable: false });
+      await assert.rejects(() => client[method](selected({ urls: ["https://example.test/a.pdf"] })), /must be an enumerable own property/);
+      await assert.rejects(() => client[method](selected({ files: [new Blob(["test"])] })), /must be an enumerable own property/);
+      await assert.rejects(() => client[method]({ urls: ["https://example.test/a.pdf"] }, selected({})), /must be an enumerable own property/);
+      const source = { async *[Symbol.asyncIterator]() { reads++; yield new Uint8Array([1]); } };
+      await assert.rejects(() => client[method](source, selected({})), /must be an enumerable own property/);
+    }
+  }
+  assert.equal(requests, 0);
+  assert.equal(reads, 0);
+});
