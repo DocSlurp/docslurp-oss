@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { pinRunPageBillingRules, recordPageBaseFee } from "../db/page-base-fee.js";
 import { Store } from "../db/store.js";
 import { persistRunUsageEvents } from "../db/usage-event-store.js";
+import type { OcrReadOutcome } from "../ocr/engine.js";
+import { recordOcrReads } from "../ocr/ledger.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -149,6 +151,41 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     `);
     const charges = await recordPageBaseFee(sql(), await pinnedState("auto-unread"));
     expect(charges).toMatchObject({ fastPages: 4, richPages: 0 });
+  });
+
+  it("bills a blank uploaded image's OCR read Rich, and a blank scanned PDF page Fast, from read to completion", { timeout: 60_000 }, async () => {
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('auto-blank', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 3);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
+        ('b-pdf', 'o1', 'u1', 'w', 'auto-blank', 'scan.pdf', 'application/pdf', 'raw/b1', 'completed', 2),
+        ('b-png', 'o1', 'u1', 'w', 'auto-blank', 'blank.png', 'image/png', 'raw/b2', 'completed', 1);
+    `);
+    const read = (pages: Array<{ pageNumber: number; text: string }>): OcrReadOutcome => ({
+      mode: "vm", engine: "test-vm-ocr", language: { recognisers: ["multi"], unsupportedScript: false, setting: "auto" },
+      pages: pages.map((page) => ({ ...page, meanConfidence: 0.9, recogniser: "multi", chars: page.text.length, elapsedMs: 3, escalation: null })),
+      truncatedFrames: false, unreadPages: [], wallMs: 1_000, cpuMs: 800, peakRssKb: 500_000, dispose: async () => undefined,
+    });
+    const reading = WorkflowState.create(await store.loadRun("auto-blank"), []);
+    // The engine read the blank image and both scanned PDF pages; only PDF page 1 had words.
+    expect(recordOcrReads(reading.usageLedger, "b-png", read([{ pageNumber: 1, text: "  " }]), { stage: "extract-markdown", kind: "image" })).toEqual([1]);
+    expect(recordOcrReads(reading.usageLedger, "b-pdf", read([{ pageNumber: 1, text: "Invoice 4200" }, { pageNumber: 2, text: "" }]), { stage: "extract-markdown", kind: "pdf" })).toEqual([1]);
+    // A retried read of the same blank image charges nothing more.
+    expect(recordOcrReads(reading.usageLedger, "b-png", read([{ pageNumber: 1, text: "" }]), { stage: "extract-markdown", kind: "image" })).toEqual([1]);
+    const batch = reading.usageLedger.checkpoint();
+    await persistRunUsageEvents({ client: sql(), state: reading, usageEvents: batch.events });
+    batch.commit();
+    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.richPage)).toBe(2);
+
+    const charges = await recordPageBaseFee(sql(), await pinnedState("auto-blank"));
+    // b-png's one frame and b-pdf page 1 were Rich reads; b-pdf's blank page 2 bills Fast.
+    expect(charges).toMatchObject({ fastPages: 1, richPages: 2 });
+    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.fastPage)).toBe(1);
+    expect(await chargedPages("auto-blank", BILLABLE_UNIT_METRICS.richPage)).toBe(2);
+    const { rows } = await db.query<{ documents: Record<string, { fast: number; rich: number }> }>(
+      `select metadata -> 'documents' as documents from usage_events where id = 'fast:auto-blank'`,
+    );
+    expect(rows[0]?.documents).toEqual({ "b-pdf": { fast: 1, rich: 0 } });
   });
 
   it("keeps the earlier release's completion rule for a run it started (no pin): unread images and scans bill Rich", { timeout: 60_000 }, async () => {
