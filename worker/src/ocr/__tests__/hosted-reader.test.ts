@@ -108,12 +108,30 @@ describe("OCR escalation reads", () => {
     const outcome = await outcomeWith([1, 2, 3].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
     expect(summary).toMatchObject({ attempted: 3, replaced: 2, skipped: { budget: 1 } });
-    expect(execute).toHaveBeenCalledTimes(2);
+    // The third read is refused at its first request's admission: nothing was sent and nothing is recorded for it.
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ocr-escalation")).toHaveLength(2);
     expect(outcome.pages.map((page) => page.text)).toEqual(["Hosted transcription", "Hosted transcription", "ocr 3"]);
     // The budget is per document: another document of the run still gets its reads, and a re-read of a page already read is free.
     await expect(reader.read({ documentId: "doc-2", pageNumber: 1, imagePath: outcome.pages[0]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toMatchObject({ text: "Hosted transcription" });
     await expect(reader.read({ documentId: "doc-1", pageNumber: 2, imagePath: outcome.pages[1]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toBeDefined();
     await expect(reader.read({ documentId: "doc-1", pageNumber: 3, imagePath: outcome.pages[2]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).rejects.toMatchObject({ reason: "budget" });
+  });
+
+  it("keeps the per-document budget across an activity retry or a worker restart (a new state on the same attempt ledger)", async () => {
+    const backend = new MemoryVisionAttemptBackend();
+    const env = { ...ON, DOCSLURP_OCR_ESCALATION_MAX_PAGES: "2" };
+    const first = runState();
+    first.visionAttempts = backend;
+    const outcome = await outcomeWith([1, 2, 3].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
+    const firstReader = createHostedOcrReader({ state: first, cfg: CFG, runner: {} as CommandRunner, env, execute: stubExecute() });
+    for (const pageNumber of [1, 2]) await firstReader.read({ documentId: "doc-1", pageNumber, imagePath: outcome.pages[pageNumber - 1]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation");
+    // The retried activity rebuilds its state; the in-process state is gone, the durable ledger is not.
+    const retry = runState();
+    retry.visionAttempts = backend;
+    const retryReader = createHostedOcrReader({ state: retry, cfg: CFG, runner: {} as CommandRunner, env, execute: stubExecute() });
+    await expect(retryReader.read({ documentId: "doc-1", pageNumber: 3, imagePath: outcome.pages[2]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).rejects.toMatchObject({ reason: "budget" });
+    await expect(retryReader.read({ documentId: "doc-1", pageNumber: 1, imagePath: outcome.pages[0]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toBeDefined();
   });
 
   it("skips for the run cost cap without calling the provider", async () => {
