@@ -10,7 +10,7 @@ import { documentExtractorRegistry } from "../extractors/registry.js";
 import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import type { Document, WorkspaceRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
-import { ExtractMarkdownStage, OCR_PDF_BATCH_PAGES } from "../stages/extract-markdown.js";
+import { ExtractMarkdownStage, OCR_MAX_CONSECUTIVE_FAILED_BATCHES, OCR_PDF_BATCH_PAGES } from "../stages/extract-markdown.js";
 import { fakeOcrRunner, type FakeFrame } from "../test/fake-ocr.js";
 import type { CommandRunner } from "../tools/runner.js";
 
@@ -35,6 +35,9 @@ function createDocument(filename: string, mimeType: string, pageCount: number): 
     createdAt: new Date(), updatedAt: new Date(),
   } as Document;
 }
+
+/** What a provider throws when the CLI refused the job or its input: deterministic, the page fails without a retry. */
+const refused = (message = "vm ocr: input refused (decode-failed)") => Object.assign(new Error(message), { ocrRefused: true });
 
 /** Labels whose real executor runs (the in-process stand-in, and the OCR extractor against the fake boundary). */
 const REAL_EXECUTORS = new Set(["image-textless", "ocr"]);
@@ -188,7 +191,7 @@ describe("image documents are read by the OCR extractor", () => {
   it("fails an image when the VM read fails, with no vision stand-in and nothing billed", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const h = await harness({ format: "image" });
-    h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
+    h.runner.run.mockRejectedValue(refused());
     try {
       await h.stage.run(h.state);
       const checkpoint = h.checkpoint();
@@ -199,6 +202,18 @@ describe("image documents are read by the OCR extractor", () => {
       expect([...h.manifests.values()].some((value) => value?.needsVision === true)).toBe(false);
       expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); }
+  });
+
+  it("fails the activity retryably when the image's OCR boundary cannot run, instead of failing the document", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const h = await harness({ format: "image" });
+    h.runner.run.mockRejectedValue(new Error("vm create failed: capacity"));
+    try {
+      await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "OcrInfrastructureError" });
+      expect(h.checkpoint()?.status).not.toBe("failed");
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); error.mockRestore(); }
   });
 
   it("fails an image whose OCR result is malformed", async () => {
@@ -283,7 +298,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
-    h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
+    h.runner.run.mockRejectedValue(refused());
     try {
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
@@ -294,24 +309,90 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
     } finally { await h.cleanup(); error.mockRestore(); }
   });
 
-  it("retries a transient VM failure once before failing the scanned pages", async () => {
+  it("fails a refused batch without an in-process retry", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
-    h.runner.run.mockRejectedValueOnce(new Error("vm capacity"));
+    h.runner.run.mockRejectedValue(refused());
+    try {
+      await h.stage.run(h.state);
+      expect(h.runner.run).toHaveBeenCalledTimes(1);
+      expect(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages")).toBe("[2]");
+    } finally { await h.cleanup(); error.mockRestore(); }
+  });
+
+  it("fails a batch whose result fails validation without an in-process retry", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
+    h.runner.run.mockImplementation(async (plan: any) => {
+      await writeFile(plan.sandboxedOcr.output, "{not json");
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.runner.run).toHaveBeenCalledTimes(1);
+      expect(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages")).toBe("[2]");
+    } finally { await h.cleanup(); error.mockRestore(); }
+  });
+
+  for (const [name, failure] of [
+    ["VM creation", new Error("vm create failed: capacity")],
+    ["a deadline", Object.assign(new Error("Document VM deadline exceeded"), { name: "SandboxRunError" })],
+  ] as const) {
+    it(`fails the activity retryably on an infrastructure failure (${name}) instead of failing the pages`, async () => {
+      vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+      const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
+      h.runner.run.mockRejectedValue(failure);
+      try {
+        await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "OcrInfrastructureError" });
+        expect(h.runner.run).toHaveBeenCalledTimes(1);
+        expect(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages")).toBeFalsy();
+        expect(h.checkpoint()?.status).not.toBe("completed");
+      } finally { await h.cleanup(); error.mockRestore(); }
+    });
+  }
+
+  it(`stops after ${OCR_MAX_CONSECUTIVE_FAILED_BATCHES} consecutive refused batches and fails the remaining pages unread`, async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const pageCount = OCR_PDF_BATCH_PAGES * 5 + 1;
+    const h = await harness({
+      format: "pdf", pageCount,
+      extract: async () => ({ text: ["Native page", ...Array.from({ length: pageCount - 1 }, () => "")].join("\f") + "\f" }),
+    });
+    h.runner.run.mockRejectedValue(refused());
+    try {
+      await h.stage.run(h.state);
+      expect(h.runner.run).toHaveBeenCalledTimes(OCR_MAX_CONSECUTIVE_FAILED_BATCHES);
+      const failed = JSON.parse(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages") ?? "[]");
+      expect(failed).toEqual(Array.from({ length: pageCount - 1 }, (_, i) => i + 2));
+      expect(error.mock.calls.flat().join(" ")).toMatch(/scanned-pages-stopped document=doc-1/);
+      expect(h.checkpoint()?.stats).toMatchObject({ ocrFailedPages: pageCount - 1, scanFilledPages: 0 });
+    } finally { await h.cleanup(); error.mockRestore(); }
+  });
+
+  it("reports scan-filled pages in ocrReadPages, ocrReadSource and scanFilledPages", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 3,
+      extract: async () => ({ text: "Native\f\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: frame === 3 ? "" : `Scan ${frame}`, ...(frame === 3 ? { recogniser: null, meanConfidence: null } : {}) })),
+    });
     try {
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
-      expect(h.runner.run).toHaveBeenCalledTimes(2);
-      expect(warn.mock.calls.flat().join(" ")).toMatch(/scanned-pages-retry document=doc-1 pages=2/);
-      expect(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages")).toBeFalsy();
-    } finally { await h.cleanup(); warn.mockRestore(); }
+      // Page 3 is blank: read (no failure), no words, no Rich charge.
+      expect(h.checkpoint()?.stats).toMatchObject({ ocrReadPages: 1, ocrReadSource: "scan-fill", scanFilledPages: 1, ocrFailedPages: 0 });
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+    } finally { await h.cleanup(); }
   });
 
   it("fails the document when every page is a scan and the VM read fails", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "" }) });
-    h.runner.run.mockRejectedValue(new Error("vm ocr: guest crashed"));
+    h.runner.run.mockRejectedValue(refused());
     try {
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("failed");

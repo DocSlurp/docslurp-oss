@@ -21,7 +21,9 @@ import type { VisionPageOutput } from "../../stages/vision-extract.js";
 import type { CommandRunner } from "../../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } from "../../tools/storage.js";
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
-import { escalationReason, readWithOcr } from "../../ocr/engine.js";
+import { readWithOcr, type OcrReadOutcome } from "../../ocr/engine.js";
+import { escalateOcrPages } from "../../ocr/escalation.js";
+import { ocrEscalationEnabled, type HostedOcrReader } from "../../ocr/hosted-reader.js";
 import { OcrBoundaryFailure, OcrRefusedError, resolveOcrMode } from "../../ocr/mode.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
@@ -48,8 +50,15 @@ export interface ProductionExecutorDepsInput {
   allow: (vision: VisionConfig) => Promise<boolean>;
   /** Runs one image through a vision config, recording usage like any vision call. */
   callVision: (vision: VisionConfig, image: { imagePath: string; mimeType: string; pageNumber: number }, signal?: AbortSignal) => Promise<VisionPageOutput>;
-  /** Cost-only usage row for a local model (labeler / OCR). */
+  /** Cost-only usage row for a local model (the labeler). */
   recordLocalUsage: (event: { model: string; metric: string; pageNumber: number; latencyMs: number; outputChars: number }) => void;
+  /**
+   * Bills one router OCR read like every other OCR read (ocr/ledger.ts `recordOcrReads`): a Rich page for a page with
+   * words, plus the job's compute event. `outcome.pages` carry the document page number.
+   */
+  recordOcrRead: (outcome: OcrReadOutcome) => void;
+  /** The hosted escalation reader (ocr/hosted-reader.ts) for a page OCR read poorly; null disables escalation. */
+  hostedReader?: HostedOcrReader | null;
   labelerModel?: string;
 }
 
@@ -248,13 +257,14 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       const started = Date.now();
       // The router's raster (already rendered for routing) is read in the OCR boundary; OCR itself renders and decodes
       // nothing on the host. In vm/local mode a failed or refused read throws OcrBoundaryFailure, which the executor
-      // loop propagates: neither the workspace-model fallback nor a cascade reads the page in OCR's place. With OCR off
-      // or hosted (operator choices with no recogniser) the read is empty and the route moves on.
+      // loop records as a failed page: neither the workspace-model fallback nor a cascade reads the page in OCR's place.
+      // With OCR off or hosted (operator choices with no recogniser) the read is empty.
       const mode = resolveOcrMode();
-      let outcome: Awaited<ReturnType<typeof readWithOcr>>;
+      const hostedReader = input.hostedReader ?? null;
+      let outcome: OcrReadOutcome;
       try {
         outcome = await readWithOcr(input.runner, {
-          source: raster.path, kind: "image", pages: [1], escalation: false,
+          source: raster.path, kind: "image", pages: [1], escalation: Boolean(hostedReader) && ocrEscalationEnabled(),
           ...(input.ocrLanguage ? { languageSetting: input.ocrLanguage } : {}),
           ...(signal ? { signal } : {}),
         });
@@ -269,18 +279,16 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
         return { text: "", latencyMs: Date.now() - started, model: OCR_MODEL };
       }
       try {
-        const page = outcome.pages[0];
+        // The raster is one frame; ledger rows and escalation name the document page.
+        const read: OcrReadOutcome = { ...outcome, pages: outcome.pages.map((page) => Object.assign(page, { pageNumber })) };
+        input.recordOcrRead(read);
+        const page = read.pages[0];
+        // A degraded or empty read goes to the hosted escalation reader, which applies the escalation opt-in and its
+        // budget; never to the route's cascade or the workspace model. Without escalation the recogniser's read stands.
+        if (page?.escalation && hostedReader) await escalateOcrPages(read, hostedReader, input.document.id, signal);
         const text = page?.text.trim() ?? "";
-        const latencyMs = Date.now() - started;
-        // A degraded or empty read goes to the route's next, stronger reader instead of indexing junk.
-        const reason = page ? escalationReason(page, outcome.language) : "empty";
-        if (reason === "low-confidence" || reason === "empty") {
-          console.warn(`[ocr] page=${pageNumber} router OCR read ${reason}; next reader`);
-          return { text: "", latencyMs, model: OCR_MODEL };
-        }
-        // The engine read this page (or a crop of it): a model read, billed as a Rich page once per page per run.
-        if (/[\p{L}\p{N}]/u.test(text)) input.recordLocalUsage({ model: OCR_MODEL, metric: "page-ocr", pageNumber, latencyMs, outputChars: text.length });
-        return { text, latencyMs, model: OCR_MODEL };
+        const model = page?.recogniser.startsWith("escalated:") ? page.recogniser.slice("escalated:".length) : OCR_MODEL;
+        return { text, latencyMs: Date.now() - started, model };
       } finally {
         await outcome.dispose();
       }

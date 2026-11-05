@@ -306,3 +306,79 @@ describe("multilingual routing reaches the boundary", () => {
     expect(outcome.pages[0]!.escalation?.reason).toBe("unsupported-script");
   });
 });
+
+describe("blank pages and truncation", () => {
+  const DET = { id: "pp-ocrv6-det-small", sha256: "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f" };
+  const REC_MULTI = { id: "pp-ocrv6-rec-small", sha256: "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884" };
+  const blank = (frame: number): FakeFrame => ({ frame, text: "", recogniser: null, meanConfidence: null });
+
+  it("accepts a detector-only result for a blank page as a read with no text", async () => {
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(ocrResultFor(job, [blank(1)]))));
+    const outcome = await readWithOcr(runner, { source, kind: "image", escalation: true, env });
+    await outcome.dispose();
+    expect(outcome.pages).toEqual([expect.objectContaining({ pageNumber: 1, text: "", recogniser: "none", chars: 0, escalation: null })]);
+    expect(outcome.unreadPages).toEqual([]);
+  });
+
+  it("accepts a blank PDF page among read ones, still naming the recogniser that read the others", async () => {
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(ocrResultFor(job, [{ frame: 1, text: "Words" }, blank(2)]))));
+    const outcome = await readWithOcr(runner, { source, kind: "pdf", pages: [1, 2], escalation: false, env });
+    await outcome.dispose();
+    expect(outcome.pages.map((page) => [page.pageNumber, page.text])).toEqual([[1, "Words"], [2, ""]]);
+  });
+
+  const refusals: Array<[string, (job: SandboxedOcrJob) => Record<string, unknown>, RegExp]> = [
+    ["a blank result naming no model", (job) => ({ ...ocrResultFor(job, [blank(1)]), models: [] }), /failed validation: models/],
+    ["a blank result naming only a recogniser", (job) => ({ ...ocrResultFor(job, [blank(1)]), models: [REC_MULTI] }), /exactly one detector/],
+    ["a result naming the detector twice", (job) => ({ ...ocrResultFor(job, [{ frame: 1, text: "a" }]), models: [DET, DET, REC_MULTI] }), /names model pp-ocrv6-det-small twice|exactly one detector/],
+    ["text read with no recogniser model named", (job) => ({ ...ocrResultFor(job, [{ frame: 1, text: "a" }]), models: [DET] }), /no model for recogniser multi/],
+    ["a blank frame that carries text", (job) => {
+      const result = ocrResultFor(job, [blank(1)]) as { frames: Array<Record<string, unknown>> };
+      result.frames[0]!.text = "smuggled";
+      result.frames[0]!.chars = 8;
+      return result;
+    }, /has text but no recogniser/],
+    ["an unpinned sha256 on a detector-only result", (job) => ({ ...ocrResultFor(job, [blank(1)]), models: [{ id: DET.id, sha256: "c".repeat(64) }] }), /unpinned model/],
+  ];
+  it.each(refusals)("refuses %s", async (_name, result, message) => {
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(result(job))));
+    await expect(readWithOcr(runner, { source, kind: "image", escalation: false, env })).rejects.toThrow(message);
+    expect(await leftovers()).toEqual([]);
+  });
+
+  it("refuses a result that claims truncation for pages within the frame cap (missing pages would hide)", async () => {
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(ocrResultFor(job, [{ frame: 1, text: "a" }], { truncatedFrames: true }))));
+    await expect(readWithOcr(runner, { source, kind: "pdf", pages: [1, 2, 3], escalation: false, env })).rejects.toThrow(/claims truncation for a job within its frame cap/);
+  });
+
+  it("refuses a frame-cap truncation claim that did not fill the cap", async () => {
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(ocrResultFor(job, [{ frame: 1, text: "a" }], { truncatedFrames: true }))));
+    await expect(readWithOcr(runner, { source, kind: "image", escalation: false, env })).rejects.toThrow(/before reaching its frame cap/);
+  });
+
+  it("reports the requested pages past the frame cap as unread, never as silently missing", async () => {
+    const pages = Array.from({ length: 70 }, (_, index) => index + 1);
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(ocrResultFor(job, job.pages!.slice(0, job.maxFrames).map((frame) => ({ frame, text: `p${frame}` })), { truncatedFrames: true }))));
+    const outcome = await readWithOcr(runner, { source, kind: "pdf", pages, escalation: false, env });
+    await outcome.dispose();
+    expect(outcome.pages).toHaveLength(64);
+    expect(outcome.truncatedFrames).toBe(true);
+    expect(outcome.unreadPages).toEqual([65, 66, 67, 68, 69, 70]);
+  });
+
+  it("reports frame truncation of a multi-frame image without pages", async () => {
+    const { runner } = runnerWriting(async (job) => writeFile(job.output, JSON.stringify(ocrResultFor(job, Array.from({ length: 64 }, (_, index) => ({ frame: index + 1, text: "t" })), { truncatedFrames: true }))));
+    const outcome = await readWithOcr(runner, { source, kind: "image", escalation: false, env });
+    await outcome.dispose();
+    expect(outcome).toMatchObject({ truncatedFrames: true, unreadPages: [] });
+    expect(outcome.pages).toHaveLength(64);
+  });
+
+  it("accepts PDF pages above the image frame-walk bound", async () => {
+    const { runner, jobs } = fakeOcrRunner((job) => job.pages!.map((frame) => ({ frame, text: `page ${frame}` })));
+    const outcome = await readWithOcr(runner, { source, kind: "pdf", pages: [2049, 5000], escalation: false, env });
+    await outcome.dispose();
+    expect(jobs[0]!.pages).toEqual([2049, 5000]);
+    expect(outcome.pages.map((page) => page.pageNumber)).toEqual([2049, 5000]);
+  });
+});

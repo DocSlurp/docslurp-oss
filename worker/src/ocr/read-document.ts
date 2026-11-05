@@ -43,6 +43,8 @@ export interface OcrDocumentResult {
   /** Pages charged as Rich reads by this call. */
   chargedPages: number[];
   truncatedFrames: boolean;
+  /** Requested pages the boundary did not reach (past its frame cap); the caller fails them. */
+  unreadPages: number[];
   escalation: EscalationSummary | null;
 }
 
@@ -77,6 +79,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       pages: outcome.pages.map((page) => ({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser })),
       chargedPages,
       truncatedFrames: outcome.truncatedFrames,
+      unreadPages: outcome.unreadPages,
       escalation,
     };
   } finally {
@@ -96,7 +99,7 @@ async function hostedDocument(input: OcrDocumentInput): Promise<OcrDocumentResul
   if (!input.hostedReader) throw new OcrRefusedError("DOCSLURP_OCR_MODE=hosted has no hosted reader here", "hosted-unavailable");
   try {
     const read = await input.hostedReader.read({ documentId: input.documentId, pageNumber: 1, imagePath: input.source, mimeType }, "hosted-ocr", input.signal);
-    return { mode: "hosted", pages: [{ pageNumber: 1, text: read.text, reader: `hosted:${read.model}` }], chargedPages: [1], truncatedFrames: false, escalation: null };
+    return { mode: "hosted", pages: [{ pageNumber: 1, text: read.text, reader: `hosted:${read.model}` }], chargedPages: [1], truncatedFrames: false, unreadPages: [], escalation: null };
   } catch (error) {
     if (error instanceof HostedOcrSkipped) throw new OcrRefusedError(`hosted OCR refused: ${error.message}`, `hosted-${error.reason}`);
     throw error;

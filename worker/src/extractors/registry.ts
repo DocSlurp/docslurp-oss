@@ -58,6 +58,8 @@ export interface PrepareContext {
   format?: string;
   /** Environment used for capability probes; defaults to the worker's. */
   env?: NodeJS.ProcessEnv;
+  /** The bytes' sniffed MIME type (quarantine's file facts); extractors that detect formats get it explicitly. */
+  mimeType?: string | null;
 }
 
 type Preparation = (runner: CommandRunner, sourcePath: string, configJson?: string, context?: PrepareContext) => Promise<CommandPlan>;
@@ -143,7 +145,9 @@ const registered = [
     prepare: (runner, source) => runner.sandboxedPdfMarkdown(source, `${source}.vm-pdf.md`) }),
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
     prepare: async (runner, source, config, context) => {
-      const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
+      // The sniffed MIME type goes to Kreuzberg explicitly, so it never re-detects the bytes as another (image) format.
+      const mimeType = KREUZBERG_MIME.test(context?.mimeType ?? "") ? context!.mimeType! : undefined;
+      const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config, mimeType);
       // Kreuzberg never OCRs (its built-in OCR would read customer pixels on the worker host). @kreuzberg/node 4.10.2
       // OCRs every image whatever its options say, so an image never reaches it: images go to the `ocr` extractor.
       if (kreuzbergImageInput(source, context)) {
@@ -238,9 +242,15 @@ export class ExtractorRegistry {
       ? [VM_PDF_EXTRACTOR_ID]
       : format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
     // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; unknown ids still throw.
-    const ids = configured?.map(canonicalExtractorId) ?? defaults.filter((id) =>
+    let ids = configured?.map(canonicalExtractorId) ?? defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );
+    // Kreuzberg no longer reads images (its OCR would run on the worker host). A stored or in-flight image order that
+    // still names it is read by the OCR extractor in its place, rather than failing the document on an old setting.
+    if (format === "image" && ids.includes("kreuzberg")) {
+      console.warn("[extractors] image extractor order names kreuzberg; using the ocr extractor in its place");
+      ids = ids.map((id) => (id === "kreuzberg" ? "ocr" : id));
+    }
     if (ids.length === 0) throw new Error(`no extractor configured for ${format}`);
     for (const id of ids) {
       const entry = this.entries.get(id);
@@ -285,8 +295,12 @@ export function serializeExtractorOptions(options: Record<string, unknown>, id: 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".heif", ".avif", ".jp2", ".jpx", ".pnm", ".pbm", ".pgm", ".ppm"]);
 
 /** True when Kreuzberg would read `source` as an image (format id or file extension). */
+/** A plain MIME type (no parameters) that is safe to pass on a command line. */
+const KREUZBERG_MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}$/;
+
 function kreuzbergImageInput(source: string, context?: PrepareContext): boolean {
-  return context?.format === "image" || IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase());
+  return context?.format === "image" || IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase()) ||
+    /^image\//i.test(context?.mimeType ?? "");
 }
 
 export const documentExtractorRegistry = new ExtractorRegistry();

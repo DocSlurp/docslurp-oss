@@ -159,6 +159,21 @@ export interface ClamDatabaseHealth {
   source: string | null;
 }
 
+/**
+ * An empty, read-only directory (created in the worker images). The OCR engine linked into Kreuzberg's and LiteParse's
+ * native addons looks for language data here and finds none, so it fails closed instead of reading customer pixels on
+ * the worker host. The engine itself is still linked (docs/extraction/ocr.md, "Tesseract").
+ */
+export const EMPTY_TESSDATA_DIR = "/opt/docslurp/empty-tessdata";
+
+/** A command that ran to completion and exited non-zero (local or remote). The message keeps its historical shape. */
+export class CommandExitError extends Error {
+  constructor(message: string, readonly exitCode: number | null) {
+    super(message);
+    this.name = "CommandExitError";
+  }
+}
+
 export class CommandRunner {
   private readonly scriptsDir: string;
   private readonly venvBin: string;
@@ -262,7 +277,7 @@ export class CommandRunner {
           if ("remote" in launched) {
             const result = await this.settleRemote(plan, launched);
             if (result.exitCode === 0) return { stdout: result.stdout, stderr: result.stderr };
-            throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim());
+            throw new CommandExitError(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim(), result.exitCode);
           }
           const { child, supervised } = launched;
           return await new Promise<CommandResult>((resolve, reject) => {
@@ -320,8 +335,9 @@ export class CommandRunner {
             }
 
             reject(
-              new Error(
+              new CommandExitError(
                 `${plan.binary} (${code ?? "unknown"}): ${stderr || stdout}`.trim(),
+                code ?? null,
               ),
             );
           }, (error: Error) => reject(commandFailure(error, monitor.finish())));
@@ -767,12 +783,16 @@ export class CommandRunner {
     source: string,
     output: string,
     configJson?: string,
+    mimeType?: string,
   ): Promise<CommandPlan> {
     const args = ["--input", source, "--output", output];
     if (configJson) {
       args.push("--config-json", configJson);
     }
-    return await this.planScript("node", "kreuzberg_extract.mjs", ...args);
+    if (mimeType) args.push("--mime-type", mimeType);
+    const plan = await this.planScript("node", "kreuzberg_extract.mjs", ...args);
+    // Kreuzberg links an OCR engine; with no language data it cannot read pixels, whatever its options say.
+    return { ...plan, bundleEnv: { ...(plan.bundleEnv ?? {}), TESSDATA_PREFIX: EMPTY_TESSDATA_DIR } };
   }
 
   async liteParseExtract(
@@ -780,9 +800,10 @@ export class CommandRunner {
     output: string,
     ocrEnabled = false,
   ): Promise<CommandPlan> {
-    const args = ["--input", source, "--output", output];
-    if (ocrEnabled) args.push("--ocr");
-    return await this.planScript("node", "liteparse_extract.mjs", ...args);
+    // LiteParse's native addon carries an OCR engine. It never OCRs here: OCR runs only in the configured OCR boundary.
+    if (ocrEnabled) throw new Error("LiteParse OCR is refused: OCR runs only in the configured OCR boundary (docs/extraction/ocr.md)");
+    const plan = await this.planScript("node", "liteparse_extract.mjs", "--input", source, "--output", output);
+    return { ...plan, bundleEnv: { ...(plan.bundleEnv ?? {}), TESSDATA_PREFIX: EMPTY_TESSDATA_DIR } };
   }
 
   async dolphinMarkdown(

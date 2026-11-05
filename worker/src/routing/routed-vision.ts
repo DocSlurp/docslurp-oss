@@ -388,7 +388,9 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
           refusalFallback: true,
         });
       }
-      if (placement === "prose") candidates.push({ assignment, index: output.assignmentIndex, fromTargetId: output.targetId, part });
+      // An OCR read's handoff for a poor or empty page is the hosted escalation reader inside the OCR executor (with its
+      // own opt-in and budget), never the route's cascade.
+      if (placement === "prose" && output.runtime !== "ppocr") candidates.push({ assignment, index: output.assignmentIndex, fromTargetId: output.targetId, part });
     }
     await escalate(candidates);
     // A failed page-scope extraction with no other prose falls back to the workspace model.

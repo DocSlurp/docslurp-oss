@@ -1,8 +1,10 @@
 # Mixed PDF extraction-yield experiment
 
 > Historical plan, kept as written. Its local OCR arms used an OCR engine DocSlurp no longer ships or installs; the
-> worker now OCRs with PP-OCR ([OCR](../../extraction/ocr.md)). Re-running this experiment needs that engine installed
-> separately, outside the worker images, and its results do not describe current OCR.
+> worker now OCRs with PP-OCR ([OCR](../../extraction/ocr.md)). Since 2026-11-05 the harness
+> (`worker/test/mixed-pdf-eval/measure.py`) runs both OCR arms with the worker's PP-OCR CLI under the parser sandbox
+> (`scripts/install-ocr-runtime.sh`, then `DOCSLURP_OCR_PYTHON` and `DOCSLURP_OCR_MODEL_DIR`); the arms differ by render
+> resolution only. Results recorded before then describe the retired engine and are not comparable with new runs.
 
 ## Decision
 

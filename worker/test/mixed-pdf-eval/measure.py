@@ -24,13 +24,22 @@ import time
 import unicodedata
 
 import fitz
+from execution_guard import assert_eval_execution
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
 VERSION = "mixed-page-preservation@v2"
 MEASURE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-OCR_BINARY_HASH = hashlib.sha256(Path(shutil.which("tesseract")).read_bytes()).hexdigest()
-OCR_LANGUAGE_HASH = hashlib.sha256(Path(os.environ.get("TESSDATA_PREFIX","/usr/share/tessdata"),"eng.traineddata").read_bytes()).hexdigest()
+# OCR is the worker's PP-OCR CLI (worker/scripts/docslurp_ocr.py) with its pinned models, run under the worker's parser
+# sandbox (bubblewrap, no network). The engine identity is the CLI and its model manifest. Results measured with the
+# retired Tesseract CLI before 2026-11-05 keep their own evaluation identity and are not comparable with these.
+WORKER_DIR = Path(__file__).resolve().parents[2]
+OCR_SCRIPT = WORKER_DIR/"scripts"/"docslurp_ocr.py"
+OCR_MANIFEST = WORKER_DIR/"ocr-models.json"
+OCR_SANDBOX = WORKER_DIR/"scripts"/"parser-sandbox.sh"
+OCR_BINARY_HASH = hashlib.sha256(OCR_SCRIPT.read_bytes()).hexdigest()
+OCR_LANGUAGE_HASH = hashlib.sha256(OCR_MANIFEST.read_bytes()).hexdigest()
+OCR_LOW_CONFIDENCE = 0.6
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -108,21 +117,49 @@ def invoke(argv):
         raise RuntimeError(f"command-failed:{argv[0]}:{completed.returncode}:{completed.stderr[-500:]!r}")
     return completed.stdout,elapsed
 
+def ocr_runtime():
+    """The OCR venv interpreter and pinned models (scripts/install-ocr-runtime.sh); refuses to run without them."""
+    python, models = os.environ.get("DOCSLURP_OCR_PYTHON",""), os.environ.get("DOCSLURP_OCR_MODEL_DIR","")
+    if not (python and os.path.isabs(python) and os.path.isfile(python) and models and os.path.isdir(models)):
+        raise RuntimeError("ocr-runtime-missing: set DOCSLURP_OCR_PYTHON and DOCSLURP_OCR_MODEL_DIR (scripts/install-ocr-runtime.sh)")
+    if shutil.which("bwrap") is None:
+        raise RuntimeError("ocr-sandbox-missing: the OCR CLI runs only under the parser sandbox (bubblewrap)")
+    return python, models
+
+def run_ocr_cli(argv, env):
+    started=time.perf_counter()
+    completed=subprocess.run(argv,capture_output=True,timeout=180,env=env)
+    elapsed=time.perf_counter()-started
+    if completed.returncode:
+        raise RuntimeError(f"command-failed:docslurp_ocr:{completed.returncode}:{completed.stderr[-500:]!r}")
+    return elapsed
+
 def ocr(image, cache, dpi, psm, use_cache=True):
-    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-txt-tsv-v2".encode())
+    """PP-OCR of one rendered page. `dpi` is the page's render resolution; `psm` is kept for the arm's identity only."""
+    assert_eval_execution()
+    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-ppocr-v3".encode())
     output=cache/f"{key}.json"
     if use_cache and output.exists():
         return {**json.loads(output.read_text()), "cacheHit":True}
-    # Atomic replace supports concurrent identical pages without corrupting the cache.
-    with tempfile.TemporaryDirectory(prefix="mixed-ocr-",dir=os.environ["TMPDIR"]) as tmp:
+    python, models = ocr_runtime()
+    # The venv's interpreter is a symlink chain into a Python install outside the venv (uv, pyenv): bind every prefix.
+    roots, hop = {Path(python).parent.parent, Path(os.path.realpath(python)).parent.parent}, Path(python)
+    for _ in range(16):
+        if not hop.is_symlink(): break
+        hop = (hop.parent/os.readlink(hop)); roots.add(hop.parent.parent)
+    # The sandbox binds only a docslurp-* scratch directory writable, and the runtime read-only.
+    with tempfile.TemporaryDirectory(prefix="docslurp-mixed-ocr-",dir=os.environ["TMPDIR"]) as tmp:
         path=Path(tmp)/"page.png"; path.write_bytes(image)
-        base=Path(tmp)/"output"
-        _,elapsed=invoke(["tesseract",str(path),str(base),"-l","eng","--psm",str(psm),"--dpi",str(dpi),"txt","tsv"])
-        words=[r for r in csv.DictReader(base.with_suffix(".tsv").read_text().splitlines(),delimiter="\t") if float(r['conf'])>=0 and r['text'].strip()]
-        weight=sum(len(r['text']) for r in words)
-        confidence=sum(float(r['conf'])*len(r['text']) for r in words)/max(1,weight)
-        result={"text":base.with_suffix(".txt").read_text(),"seconds":elapsed,"confidence":confidence,
-                "lowConfidenceWordShare":sum(float(r['conf'])<60 for r in words)/max(1,len(words)),
+        result_path=Path(tmp)/"result.json"
+        env={"PATH":"/usr/bin:/bin","TMPDIR":os.environ["TMPDIR"],"OMP_THREAD_LIMIT":"1","OMP_NUM_THREADS":"1",
+             "DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS":tmp,
+             "DOCSLURP_PARSER_SANDBOX_READABLE_PATHS":",".join(str(p) for p in [*sorted(roots),models,OCR_SCRIPT.parent,OCR_MANIFEST])}
+        elapsed=run_ocr_cli([str(OCR_SANDBOX),python,"-I",str(OCR_SCRIPT),"--input",str(path),"--kind","image","--output",str(result_path),
+                             "--models",models,"--manifest",str(OCR_MANIFEST),"--recognisers","multi","--max-long-edge","4000"],env)
+        frame=json.loads(result_path.read_text())["frames"][0]
+        lines=frame["lines"]
+        result={"text":frame["text"],"seconds":elapsed,"confidence":100*(frame["meanConfidence"] or 0.0),
+                "lowConfidenceWordShare":sum(line["confidence"]<OCR_LOW_CONFIDENCE for line in lines)/max(1,len(lines)),
                 "cacheHit":False,"imageHash":sha(image),"execution":{"capturedAt":datetime.now(timezone.utc).isoformat(),"host":socket.gethostname(),"workers":os.environ.get("MIXED_EVAL_WORKERS"),"attempt":os.environ.get("MIXED_EVAL_ATTEMPT")}}
         temp=cache/f"{key}.{os.getpid()}.new"
         temp.write_text(json.dumps(result)); temp.replace(output)
@@ -183,6 +220,7 @@ def measure_case(args):
     destination=out/"cases"/case['split']/f"{case['id']}.json"
     case_identity={'sourceHash':case['sha256'],'labelHash':case['labelHash'],'evaluationIdentityHash':identity_hash(identity),'policyHash':policy_hash}
     source=root/case["pdf"]
+    assert_eval_execution(source)  # a dataset entry may not be a link out of the data roots
     labels_path=root/case['labels']
     if not source.resolve().is_relative_to(root.resolve()) or not labels_path.resolve().is_relative_to(root.resolve()):raise RuntimeError('artifact-escaped-dataset')
     if file_hash(source)!=case['sha256'] or file_hash(labels_path)!=case['labelHash']:raise RuntimeError('artifact-hash-mismatch')
@@ -194,6 +232,7 @@ def measure_case(args):
     sys.path.insert(0,scorers)
     import tolerant_markdown
     source=root/case["pdf"]
+    assert_eval_execution(source)  # a dataset entry may not be a link out of the data roots
     if sha(source.read_bytes()) != case["sha256"]: raise RuntimeError("input-hash-mismatch")
     if file_hash(root/case['labels'])!=case['labelHash']:raise RuntimeError('label-hash-mismatch')
     doc=fitz.open(source)
@@ -263,7 +302,7 @@ if __name__ == "__main__":
     p.add_argument("--scorers",type=Path,required=True); p.add_argument("--split",choices=["train","tune","heldout"],required=True)
     p.add_argument("--workers",type=int,default=3); p.add_argument("--frozen-policy",type=Path)
     p.add_argument("--families",help="Predeclared complete source families, comma-separated numbers")
-    a=p.parse_args();os.environ["MIXED_EVAL_WORKERS"]=str(a.workers);os.environ["MIXED_EVAL_ATTEMPT"]=str(uuid.uuid4());os.environ.setdefault("TMPDIR","/home/dan/tmp/agents")
+    a=p.parse_args();assert_eval_execution(a.dataset);os.environ["MIXED_EVAL_WORKERS"]=str(a.workers);os.environ["MIXED_EVAL_ATTEMPT"]=str(uuid.uuid4());os.environ.setdefault("TMPDIR","/home/dan/tmp/agents")
     manifest=json.loads((a.dataset/"manifest.json").read_text())
     all_cases=validate_manifest(manifest)
     identity=evaluation_identity(a.dataset,a.scorers,Path(__file__),OCR_BINARY_HASH,OCR_LANGUAGE_HASH,fitz.VersionBind)

@@ -22,6 +22,7 @@ function make(overrides: Record<string, unknown> = {}) {
     allow: async () => true,
     callVision: vi.fn() as never,
     recordLocalUsage: vi.fn(),
+    recordOcrRead: vi.fn(),
     ...overrides,
   });
   return { deps };
@@ -78,8 +79,10 @@ describe("production executor deps", () => {
     });
     const plan = vi.fn(async (binary: string, ...args: string[]) => ({ binary, args, available: true }));
     const recordLocalUsage = vi.fn();
+    const recordOcrRead = vi.fn();
     const { deps } = make({
       recordLocalUsage,
+      recordOcrRead,
       runner: {
         run,
         plan,
@@ -90,29 +93,65 @@ describe("production executor deps", () => {
     });
     expect(await deps.pageText(1)).toBeNull();
     expect(await deps.nativePageText("kreuzberg", 1)).toBeNull();
-    expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 1 })).text).toBe("scanned words");
+    expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 7 })).text).toBe("scanned words");
     // The page went to the VM provider as a job; no OCR command was planned on the host.
     expect(ocr.runner.sandboxedOcrRead).toHaveBeenCalledTimes(1);
     expect(ocr.runner.localOcrRead).not.toHaveBeenCalled();
     expect(plan).not.toHaveBeenCalled();
-    // A model read of page 1, recorded so the ledger bills the page Rich.
-    expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 1, metric: "page-ocr", model: "ppocr-v6-small" }));
+    // Billed like every OCR read (recordOcrReads), under the document page, not as a local vision-runtime model.
+    expect(recordOcrRead).toHaveBeenCalledTimes(1);
+    expect(recordOcrRead.mock.calls[0]![0].pages.map((page: { pageNumber: number; text: string }) => [page.pageNumber, page.text])).toEqual([[7, "scanned words"]]);
+    expect(recordLocalUsage).not.toHaveBeenCalledWith(expect.objectContaining({ metric: "page-ocr" }));
     const label = await deps.label({ path: image, mimeType: "image/png" }, { pageNumber: 3 });
     expect(label.text).toBe("a red bridge");
     expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 3, metric: "image-label", model: "microsoft/Florence-2-small-ft" }));
     vi.unstubAllEnvs();
   });
 
-  it("sends a low-confidence router OCR read to the route's next reader instead of billing it", async () => {
+  it("keeps a low-confidence router OCR read when escalation is off, billed as the OCR read it was", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
     const image = path.join(dir, "p.png");
     await writeFile(image, "x");
-    const ocr = fakeOcrRunner(() => [{ frame: 1, text: "ZXQ Vvv", meanConfidence: 0.4 }]);
-    const recordLocalUsage = vi.fn();
-    const { deps } = make({ recordLocalUsage, runner: { ...ocr.runner, plan: vi.fn(), florence2: vi.fn() } as never });
-    expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 1 })).text).toBe("");
-    expect(recordLocalUsage).not.toHaveBeenCalled();
+    const ocr = fakeOcrRunner(() => [{ frame: 1, text: "ZXQ Vvv", meanConfidence: 0.4, image: true }]);
+    const recordOcrRead = vi.fn();
+    const read = vi.fn();
+    const { deps } = make({ recordOcrRead, hostedReader: { read }, runner: { ...ocr.runner, plan: vi.fn(), florence2: vi.fn() } as never });
+    expect(await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 4 })).toMatchObject({ text: "ZXQ Vvv", model: "ppocr-v6-small" });
+    expect(recordOcrRead).toHaveBeenCalledTimes(1);
+    // DOCSLURP_OCR_ESCALATION is not on: no hosted read, and no handoff to another reader.
+    expect(read).not.toHaveBeenCalled();
+    expect(ocr.jobs[0]!.escalation).toBeNull();
+    vi.unstubAllEnvs();
+  });
+
+  it("sends a low-confidence router OCR read to the hosted escalation reader when escalation is on", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.stubEnv("DOCSLURP_OCR_ESCALATION", "on");
+    const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
+    const image = path.join(dir, "p.png");
+    await writeFile(image, "x");
+    const ocr = fakeOcrRunner(() => [{ frame: 1, text: "ZXQ Vvv", meanConfidence: 0.4, image: true }]);
+    const read = vi.fn(async (page: { pageNumber: number }) => ({ text: `Clear text of page ${page.pageNumber}`, model: "hosted-ocr-model" }));
+    const { deps } = make({ hostedReader: { read }, runner: { ...ocr.runner, plan: vi.fn(), florence2: vi.fn() } as never });
+    expect(await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 4 })).toMatchObject({ text: "Clear text of page 4", model: "hosted-ocr-model" });
+    expect(read).toHaveBeenCalledWith(expect.objectContaining({ documentId: "d", pageNumber: 4, mimeType: "image/png" }), "ocr-escalation", undefined);
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps the recogniser's read when the escalation reader skips the page (budget, refusal)", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.stubEnv("DOCSLURP_OCR_ESCALATION", "on");
+    const { HostedOcrSkipped } = await import("../../ocr/hosted-reader.js");
+    const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
+    const image = path.join(dir, "p.png");
+    await writeFile(image, "x");
+    const ocr = fakeOcrRunner(() => [{ frame: 1, text: "ZXQ Vvv", meanConfidence: 0.4, image: true }]);
+    const read = vi.fn(async () => { throw new HostedOcrSkipped("budget", "over budget"); });
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { deps } = make({ hostedReader: { read }, runner: { ...ocr.runner, plan: vi.fn(), florence2: vi.fn() } as never });
+    expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 4 })).text).toBe("ZXQ Vvv");
+    expect(read).toHaveBeenCalledTimes(1);
     vi.unstubAllEnvs();
   });
 

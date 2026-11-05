@@ -59,7 +59,11 @@ export const ocrResultSchema = z.strictObject({
     version: z.string().regex(/^[0-9][0-9A-Za-z.+-]{0,31}$/),
     onnxruntime: z.string().regex(/^[0-9][0-9A-Za-z.+-]{0,31}$/),
   }),
-  models: z.array(z.strictObject({ id: modelId, sha256 })).min(2).max(16),
+  /**
+   * The models the job used: the detector, plus each recogniser that ran. A job whose frames are all blank names only the
+   * detector (no recognition ran), which is a valid "no text" read; the host checks roles against the pinned manifest.
+   */
+  models: z.array(z.strictObject({ id: modelId, sha256 })).min(1).max(16),
   truncatedFrames: z.boolean(),
   frames: z.array(ocrFrameSchema).max(OCR_MAX_FRAMES),
   peakRssKb: int(0, 1_000_000_000),

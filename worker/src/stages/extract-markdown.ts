@@ -107,7 +107,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { OCR_FAILED_PAGES_KEY, OcrRefusedError, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
+import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
 interface PageHeatmapEntry {
@@ -181,6 +181,42 @@ export async function assertSandboxedPdfMarkdownBounded(outputPath: string): Pro
 
 /** Scanned PDF pages one OCR job reads; a long scan runs as several jobs. */
 export const OCR_PDF_BATCH_PAGES = 32;
+/**
+ * OCR read stats for a document: every page OCR read (the winner's, reported or inferred, plus the scan-fill engine's),
+ * where the reads came from, how many pages scan-fill read, and how many pages' OCR failed.
+ */
+export function ocrReadStats(
+  winnerPages: readonly number[],
+  winnerSource: "extractor-reported" | "inferred",
+  scanFilledPages: readonly number[],
+  failedPages: number,
+): { ocrReadPages: number; ocrReadSource: string; scanFilledPages: number; ocrFailedPages: number } {
+  const scanFilled = new Set(scanFilledPages);
+  const winnerOnly = winnerPages.filter((page) => !scanFilled.has(page));
+  const sources = [
+    ...(winnerSource === "extractor-reported" || winnerOnly.length ? [winnerSource] : []),
+    ...(scanFilled.size ? ["scan-fill"] : []),
+  ];
+  return {
+    ocrReadPages: new Set([...winnerPages, ...scanFilledPages]).size,
+    ocrReadSource: sources.length ? sources.join("+") : "none",
+    scanFilledPages: scanFilled.size,
+    ocrFailedPages: failedPages,
+  };
+}
+
+/** The OcrInfrastructureError in an error's cause chain, if any. */
+function findOcrInfrastructureError(error: unknown): OcrInfrastructureError | null {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    if (current instanceof OcrInfrastructureError) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** Scan-fill stops after this many OCR batches in a row failed deterministically; the remaining pages fail unread. */
+export const OCR_MAX_CONSECUTIVE_FAILED_BATCHES = 3;
 /** Bound on the OCR ledger's own `pdftotext` probe (the text layer is light work; a slow one is a hostile file). */
 export const OCR_LEDGER_PROBE_TIMEOUT_MS = 20_000;
 
@@ -192,9 +228,9 @@ export function ocrLedgerPageText(text: string | null | undefined): string {
 
 /**
  * Whether the winning candidate ran OCR, so empty-native pages holding words could only be OCR reads. Only these
- * candidates OCR without reporting pages: Dolphin (a page-reading model) and liteparse with --ocr. Kreuzberg never OCRs
- * (kreuzberg_extract.mjs strips its OCR options), and text-layer extractors (native-pdf, poppler-text, pandoc, json)
- * never OCR. The OCR engine reports and charges its own pages.
+ * candidates OCR without reporting pages: Dolphin (a page-reading model). Kreuzberg and LiteParse never OCR (their
+ * addons link Tesseract, disabled: kreuzberg_extract.mjs strips its OCR options and liteparse --ocr is refused), and
+ * text-layer extractors (native-pdf, poppler-text, pandoc, json) never OCR. The OCR engine reports and charges its own pages.
  */
 export function candidateRanUnreportedOcr(candidate: Pick<ExtractedCandidate, "label" | "plan">): boolean {
   const args = candidate.plan?.args ?? [];
@@ -370,6 +406,7 @@ export class ExtractMarkdownStage implements Stage {
                 const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
                   !qualityAllowsPageReading(state.run.pipeline.quality);
                 let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
+                  mimeType: document.fileFacts?.sniffedMimeType ?? null,
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -409,6 +446,7 @@ export class ExtractMarkdownStage implements Stage {
                 attemptLedger.reserve(plannedExtractors.primary.label);
                 if (plannedExtractors.secondary) attemptLedger.reserve(plannedExtractors.secondary.label);
                 const isolated = await this.isolateConcurrentCandidates({
+                  mimeType: document.fileFacts?.sniffedMimeType ?? null,
                   primary: plannedExtractors.primary,
                   secondary: plannedExtractors.secondary,
                   sourcePath: tempFile,
@@ -436,6 +474,11 @@ export class ExtractMarkdownStage implements Stage {
                 // other candidate (possibly the in-process engine) take over as a fallback.
                 for (const result of [resultA, resultB]) {
                   if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                }
+                // Neither may a candidate whose OCR boundary could not run: the activity retries instead of another
+                // extractor (or a failed document) standing in for an OCR read that was never tried.
+                for (const result of [resultA, resultB]) {
+                  if (result?.status === "rejected" && findOcrInfrastructureError(result.reason)) throw findOcrInfrastructureError(result.reason);
                 }
 
                 for (const [planned, result] of [
@@ -1065,8 +1108,7 @@ export class ExtractMarkdownStage implements Stage {
                       nativePdf: nativePdfStats,
                       // Host poppler probes (page facts, page-image evidence, OCR-ledger text layer) for this PDF.
                       hostPdfProbes,
-                      ocrReadPages: ocrReadPages.length,
-                      ocrReadSource: winningCandidate.ocrPages ? "extractor-reported" : ocrReadPages.length ? "inferred" : "none",
+                      ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };
                   const attemptsSnapshot = attemptLedger.snapshot();
@@ -1097,6 +1139,9 @@ export class ExtractMarkdownStage implements Stage {
                     `partialStats=${JSON.stringify(partialStats)}`,
                 );
                 // Rethrow interruptions untouched so they keep their AbortError/cancellation identity.
+                // OCR could not run (VM creation, capacity, a deadline): the activity retries; the document is not at fault.
+                const ocrInfrastructure = findOcrInfrastructureError(error);
+                if (ocrInfrastructure) throw ocrInfrastructure;
                 if (!partialArtifactUri && !signal?.aborted && isDocumentLevelFailure(error, signal)) {
                   // Every extractor failed: keep what was planned and tried, and say so in telemetry.
                   const attempts = attemptLedger.snapshot();
@@ -1245,33 +1290,46 @@ export class ExtractMarkdownStage implements Stage {
     const read: number[] = [];
     const hostedReader = createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner });
     const failed: number[] = [];
+    let consecutiveFailedBatches = 0;
     for (let start = 0; start < empty.length; start += OCR_PDF_BATCH_PAGES) {
       const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
       let result: Awaited<ReturnType<typeof ocrDocument>>;
-      const readBatch = () => ocrDocument({
-        runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
-        ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
-        hostedReader, stage: this.name, ...(signal ? { signal } : {}),
-      });
       try {
-        try {
-          result = await readBatch();
-        } catch (first) {
-          // One more try for a transient boundary failure (VM capacity, a dropped connection); a refusal is final.
-          rethrowIfTeardown(first);
-          if (signal?.aborted || first instanceof OcrRefusedError) throw first;
-          console.warn(`[ocr] scanned-pages-retry document=${document.id} pages=${batch.join(",")} reason=${(first instanceof Error ? first.message : String(first)).slice(0, 200)}`);
-          result = await readBatch();
-        }
+        result = await ocrDocument({
+          runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
+          ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
+          hostedReader, stage: this.name, ...(signal ? { signal } : {}),
+        });
       } catch (error) {
         rethrowIfTeardown(error);
         if (signal?.aborted) throw error;
-        // The OCR read of these pages failed or was refused: those pages fail (stay unread, loudly); the document's text
-        // pages stand. Nothing else reads them in OCR's place.
+        // The boundary could not run (VM creation, capacity, a deadline): the activity fails retryably and Temporal backs
+        // off, rather than failing pages that were never tried. Pages already read are charged once per page per run.
+        if (error instanceof OcrInfrastructureError) {
+          console.error(`[ocr] scanned-pages-infrastructure document=${document.id} pages=${batch.join(",")} reason=${error.message.slice(0, 300)}`);
+          throw error;
+        }
+        // A deterministic refusal (validation, model pin, hostile input, OCR refused by configuration): those pages fail,
+        // loudly, without another read of the same bytes; the document's text pages stand. Nothing else reads them.
         failed.push(...batch);
+        consecutiveFailedBatches += 1;
         console.error(`[ocr] scanned-pages-failed document=${document.id} pages=${batch.join(",")} reason=${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
         pushPerfMetric({ metric: "ocr-pages-failed", value: batch.length, unit: "count", tags: ["ocr"], metadata: { documentId: document.id } });
+        if (consecutiveFailedBatches >= OCR_MAX_CONSECUTIVE_FAILED_BATCHES) {
+          // The same refusal is coming back batch after batch (a refused document, a broken pin): stop spending VMs on it.
+          const rest = empty.slice(start + OCR_PDF_BATCH_PAGES);
+          failed.push(...rest);
+          console.error(`[ocr] scanned-pages-stopped document=${document.id} after=${consecutiveFailedBatches} failed batches; ${rest.length} remaining pages failed unread`);
+          if (rest.length) pushPerfMetric({ metric: "ocr-pages-failed", value: rest.length, unit: "count", tags: ["ocr", "stopped"], metadata: { documentId: document.id } });
+          break;
+        }
         continue;
+      }
+      consecutiveFailedBatches = 0;
+      // Pages the boundary did not reach (past its frame cap) fail; none is left neither read nor failed.
+      if (result.unreadPages.length) {
+        failed.push(...result.unreadPages);
+        console.error(`[ocr] scanned-pages-unreached document=${document.id} pages=${result.unreadPages.join(",")}`);
       }
       for (const page of result.pages) {
         if (page.pageNumber >= 1 && page.pageNumber <= pageCount && hasWords(page.text)) {
@@ -1282,10 +1340,7 @@ export class ExtractMarkdownStage implements Stage {
     }
     if (failed.length > 0) {
       // Vision must not read these pages in OCR's place (vision-extract excludes them).
-      const known = ocrFailedPages(state.artifactLedger, document.id);
-      for (const page of failed) known.add(page);
-      const list = JSON.stringify([...known].sort((a, b) => a - b));
-      state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, list);
+      const list = recordOcrFailedPages(state, document.id, failed);
       // A later document with the same bytes reuses this Markdown (checkDedup): it inherits the failed pages too.
       state.artifactLedger.record(`${OCR_FAILED_PAGES_KEY}:${args.contentHash}`, list);
     }
@@ -1873,6 +1928,7 @@ export class ExtractMarkdownStage implements Stage {
    * directories for the caller to remove.
    */
   private async isolateConcurrentCandidates(args: {
+    mimeType?: string | null;
     primary: PreparedExtractor;
     secondary: PreparedExtractor | null;
     sourcePath: string;
@@ -1899,7 +1955,7 @@ export class ExtractMarkdownStage implements Stage {
         this.runner,
         source,
         serializeExtractorOptions(args.options, extractor.label),
-        { format: args.format },
+        { format: args.format, mimeType: args.mimeType ?? null },
       );
       return { extractor: prepared, source };
     };
@@ -2885,6 +2941,8 @@ export class ExtractMarkdownStage implements Stage {
 
   private async planExtractors(args: {
     tempFile: string;
+    /** The bytes' sniffed MIME type (quarantine's file facts), handed to extractors that take one. */
+    mimeType?: string | null;
     multiStrategyVoting: boolean;
     secondaryId: string;
     order: Partial<Record<string, string[]>>;
@@ -2906,7 +2964,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, id),
-          { format: args.format },
+          { format: args.format, mimeType: args.mimeType ?? null },
         ),
       ),
     );
@@ -2930,7 +2988,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, args.secondaryId),
-          { format: args.format },
+          { format: args.format, mimeType: args.mimeType ?? null },
         );
         if (!explicit.plan.available) args.attemptLedger.markUnavailable(explicit.label);
         secondary = explicit.plan.available ? explicit : null;

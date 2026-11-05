@@ -14,7 +14,8 @@ to a weaker boundary or to another reader.
 - The eight model files are pinned by sha256 in `worker/ocr-models.json` (RapidOCR's v3.10.0 ONNX exports, Apache-2.0,
   84 MB in total). The CLI loads models only by explicit path and refuses a missing or mismatched file (exit 3).
   Nothing downloads a model at runtime: images bake them read-only, and `--self-test` checks them.
-- Kreuzberg never OCRs. Its built-in OCR is disabled on every path.
+- Kreuzberg and LiteParse never OCR. Each one's native addon statically links Tesseract, which is disabled on every
+  path, not removed (see [Tesseract](#tesseract)).
 
 ## Modes
 
@@ -59,10 +60,20 @@ self-test whenever the runtime is present, and fails when `local` is set without
 
 - `vm` without a provider, or with one whose `assertConfigured()` throws: the worker does not start.
 - `local` under `DOCSLURP_SERVICE_PROFILE=service` or with the profile unset: the worker does not start.
-- A failed, refused or invalid OCR read: the page fails, and is recorded as such (`ocr-failed-pages`). Vision page
-  selection and the page router skip it, and in the router a failed boundary read stops the document's routed run rather
-  than reaching the workspace-model fallback or a cascade. It is not read by a hosted model instead, and an escalation
-  read is never a substitute for a read that did not happen.
+- A `sandboxedOcr` provider plugin loaded with `DOCSLURP_SERVICE_PROFILE` unset, or with `DOCSLURP_OCR_MODE=local` under
+  any profile: the worker does not start, and the local runner refuses every job.
+- A refused or invalid OCR read (a CLI refusal, a model-pin mismatch, hostile input, a result that fails validation):
+  the page fails, without another read of the same bytes, and is recorded as such (`ocr-failed-pages`). Vision page
+  selection and the page router skip it; in the router the assignment fails as `ocr-boundary-failed` and never reaches
+  the workspace-model fallback or a cascade. It is not read by a hosted model instead, and an escalation read is never a
+  substitute for a read that did not happen. Scan fill stops after three refused batches in a row and fails the
+  remaining scanned pages unread.
+- An OCR read that could not run (VM creation, capacity, a deadline, a provider that is not ready) is not the page's
+  fault: scan fill fails the activity with a retryable `OcrInfrastructureError`, and Temporal retries it with back-off.
+  A VM provider marks a deterministic refusal by throwing an error with `ocrRefused: true`; any other error retries.
+- A job that names more pages than its frame cap returns the rest as unread pages, which fail; a result that claims
+  truncation for a job within its cap is refused. No requested page is left neither read nor failed.
+- A blank page is a read with no text: the result names only the detector model, and nothing is charged for it.
 - Output from the boundary is untrusted. The host validates the JSON result against the shared schema (bounded fields,
   unknown keys refused) and checks frame numbers, image names and text sizes again. Escalation PNGs are checked by
   signature and size; the host does not decode them.
@@ -122,6 +133,45 @@ PDF job, also runs under the parser sandbox on the worker host.
 Two checks that used OCR are off until they are re-tuned for the PP-OCR recogniser: the page router's OCR-layer
 agreement probe ([Page router](../page-router.md)) and the text-layer OCR cross-check ([Text-layer
 quality](../page-text-layer-quality.md)). Pages they would have checked stay unverified.
+
+## Tesseract
+
+PP-OCR above is the only OCR DocSlurp runs. Tesseract still appears in three different forms, and they are not the
+same thing:
+
+**1. Tesseract binaries, packages and language data: removed.** No worker image installs a `tesseract` or Leptonica
+package, binary, shared library (`libtesseract*`, `liblept*`) or `*.traineddata`; `/usr/share/tesseract-ocr` and
+`/usr/share/tessdata` do not exist. Checked by `worker/src/__tests__/no-tesseract.test.ts` (Dockerfiles) and by
+inspecting a built `worker/Dockerfile.lean` image (`dpkg -l`, `find` for the libraries, data and `tesseract` on `PATH`).
+The mixed-PDF evaluation harness uses the PP-OCR CLI. This covers DocSlurp's images only: a developer machine may have
+Tesseract installed by its own package manager (on Arch, `libmupdf` depends on it).
+
+**2. Tesseract statically linked into two native addons: present, disabled.** `@kreuzberg/node` 4.10.2
+(`kreuzberg-node.linux-x64-gnu.node`) and `@llamaindex/liteparse` 2.17.0 (`liteparse.linux-x64-gnu.node`) compile
+Tesseract 5 and Leptonica into the addon itself. `ldd` shows no Tesseract or Leptonica library, but the binaries carry
+the Tesseract C++ API and its source paths (`third_party/tesseract/src/...`), and Kreuzberg's also carries a PaddleOCR
+backend. The npm prebuilds offer no OCR-free variant: the upstream Node bindings enable the `full` feature set, which
+includes `ocr` (Kreuzberg 4.x `crates/kreuzberg-node`, `crates/kreuzberg-ffi`; the renamed xberg 1.x binding does the
+same). The engine is disabled, not absent:
+
+- Kreuzberg: its OCR options are dropped and `disableOcr` set; image inputs are refused by extension, format and sniffed
+  MIME type, which the worker passes to Kreuzberg explicitly.
+- LiteParse: `ocrEnabled` is always false, `--ocr` is refused by the runner and the script, and no OCR server is set.
+- Both: the engine's language data points at an empty, read-only directory (`/opt/docslurp/empty-tessdata`, through
+  `TESSDATA_PREFIX` in the image, each command's sandbox environment and each script, and LiteParse's `tessdataPath`),
+  so an OCR call that slipped past those options fails ("Traineddata file does not exist") instead of reading pixels.
+
+`worker/src/__tests__/no-tesseract.test.ts` lists the native addons that embed Tesseract and fails when that list
+changes, so a new dependency cannot bring another copy in unnoticed. Removing the linked engine would mean replacing
+these extractors for the formats they handle, or building and maintaining OCR-free bindings from source.
+
+**3. A pure-Python wrapper with no binary: `unstructured-pytesseract`.** It stays in the Python lock because
+`unstructured[pdf]` requires it. Its wheel (`unstructured.pytesseract-0.3.15-py3-none-any.whl`, sha256 `a3f505c5…13d1`,
+pinned by hash) is two Python files that shell out to a `tesseract` binary on `PATH`; it ships no binary, library or
+language data, and no image has the binary (case 1). DocSlurp calls unstructured only through
+`worker/scripts/unstructured_partition.py`, whose only strategy is `fast` (the PDF's own text layer). The lean image does
+not install unstructured at all; it comes with the `unstructured` vendor bundle. Removing the pin would mean dropping the
+`[pdf]` extra unstructured needs.
 
 ## Configuration
 

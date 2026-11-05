@@ -40,6 +40,53 @@ export class OcrBoundaryFailure extends Error {
   }
 }
 
+/**
+ * OCR could not run for a reason that is not the input's: the VM could not be created, capacity, a deadline, a dropped
+ * transfer, a provider that is not ready. Retrying later (Temporal backs off and retries the activity, possibly on another
+ * worker) can succeed, so stages rethrow it instead of failing the page.
+ */
+export class OcrInfrastructureError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "OcrInfrastructureError";
+  }
+}
+
+/**
+ * The boundary refused or rejected this input deterministically: a usage or model-pin refusal, hostile or undecodable
+ * input, an internal CLI crash on these bytes, or a result that failed validation. Reading the same bytes again gives the
+ * same answer, so the page fails without an in-process retry.
+ */
+export class OcrDeterministicFailure extends Error {
+  constructor(message: string, readonly reason: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "OcrDeterministicFailure";
+  }
+}
+
+/** Exit codes of `docslurp_ocr.py` that refuse the job or its input (usage, model, input, internal). */
+const OCR_CLI_REFUSAL_EXIT_CODES = new Set([2, 3, 4, 5]);
+
+/**
+ * Classify a failed boundary run. Aborts and command-teardown failures pass through unchanged (their callers handle
+ * them). A provider marks a deterministic refusal by throwing an error with `ocrRefused: true` (SandboxedOcrProvider);
+ * the local CLI by its refusal exit codes. Everything else is infrastructure.
+ */
+export function classifyOcrRunError(error: unknown, signal?: AbortSignal): unknown {
+  if (signal?.aborted) return error;
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "CommandTeardownError" || error.name === "WorkerQuarantinedError")) return error;
+  if (error instanceof OcrRefusedError || error instanceof OcrDeterministicFailure || error instanceof OcrInfrastructureError) return error;
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+  if ((error as { ocrRefused?: unknown } | null)?.ocrRefused === true) {
+    return new OcrDeterministicFailure(`OCR boundary refused the job: ${message}`, "boundary-refused", { cause: error });
+  }
+  const exitCode = (error as { name?: unknown; exitCode?: unknown } | null);
+  if (exitCode?.name === "CommandExitError" && typeof exitCode.exitCode === "number" && OCR_CLI_REFUSAL_EXIT_CODES.has(exitCode.exitCode)) {
+    return new OcrDeterministicFailure(`OCR CLI refused the job: ${message}`, "cli-refused", { cause: error });
+  }
+  return new OcrInfrastructureError(`OCR boundary failed to run: ${message}`, { cause: error });
+}
+
 /** Artifact-ledger key listing (JSON) the pages of a document whose OCR read failed; vision never reads them instead. */
 export const OCR_FAILED_PAGES_KEY = "ocr-failed-pages";
 
@@ -51,6 +98,19 @@ export function ocrFailedPages(ledger: { readDocument(documentId: string, key: s
   } catch {
     return new Set();
   }
+}
+
+/** Add pages to the document's OCR-failed list in the run's artifact ledger. */
+export function recordOcrFailedPages(
+  state: { artifactLedger: { readDocument(documentId: string, key: string): string | null | undefined; recordDocument(documentId: string, key: string, value: string): void } },
+  documentId: string,
+  pages: readonly number[],
+): string {
+  const known = ocrFailedPages(state.artifactLedger, documentId);
+  for (const page of pages) if (Number.isSafeInteger(page) && page > 0) known.add(page);
+  const list = JSON.stringify([...known].sort((a, b) => a - b));
+  state.artifactLedger.recordDocument(documentId, OCR_FAILED_PAGES_KEY, list);
+  return list;
 }
 
 /** `DOCSLURP_OCR_MODE`, or the default: `vm` under the service profile, `off` elsewhere. Throws on an unknown value. */
@@ -75,6 +135,9 @@ export function resolveServiceProfile(env: NodeJS.ProcessEnv = process.env): Ser
 
 /** Why `local` mode is refused under this environment, or null when it is allowed. */
 export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | null {
+  // With a VM OCR provider loaded the deployment reads customer files in VMs; nothing OCRs on the worker host.
+  const provider = sandboxedOcrProvider();
+  if (provider) return `DOCSLURP_OCR_MODE=local runs OCR on the worker host, and the ${provider.id} VM OCR provider is loaded`;
   const profile = resolveServiceProfile(env);
   if (profile === "self-hosted") return null;
   return profile === "service"
@@ -88,9 +151,17 @@ export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | 
  */
 export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const mode = resolveOcrMode(env);
-  resolveServiceProfile(env);
+  const profile = resolveServiceProfile(env);
+  const provider = sandboxedOcrProvider();
+  // A loaded VM OCR provider means a deployment that reads customer files in VMs: it must say which profile it is, and it
+  // never runs OCR on the worker host instead.
+  if (provider && profile === null) {
+    throw new Error("a sandboxedOcr provider plugin is loaded but DOCSLURP_SERVICE_PROFILE is unset; set it (service) rather than let the OCR boundary depend on a default; refusing to start");
+  }
+  if (provider && mode === "local") {
+    throw new Error(`DOCSLURP_OCR_MODE=local would run OCR on the worker host while the ${provider.id} VM provider is loaded; use vm; refusing to start`);
+  }
   if (mode === "vm") {
-    const provider = sandboxedOcrProvider();
     if (!provider) {
       throw new Error("DOCSLURP_OCR_MODE=vm needs an OCR provider plugin (sandboxedOcr in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than run OCR anywhere else");
     }
@@ -100,6 +171,6 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
     const refusal = localOcrRefusal(env);
     if (refusal) throw new Error(`${refusal}; refusing to start`);
   }
-  console.log(`[ocr] mode=${mode} profile=${resolveServiceProfile(env) ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
+  console.log(`[ocr] mode=${mode} profile=${profile ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
   return mode;
 }

@@ -1,4 +1,7 @@
-import { ocrFailedPages } from "../ocr/mode.js";
+import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { recordOcrReads } from "../ocr/ledger.js";
+import { ocrFailedPages, recordOcrFailedPages } from "../ocr/mode.js";
+import { OCR_BOUNDARY_FAILED } from "../routing/executors/run.js";
 import { imageOrientationEnabled, normalizeImageOrientation, withOrientationAdmission, reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { rm } from "node:fs/promises";
 import {
@@ -895,6 +898,9 @@ export class VisionExtractStage implements Stage {
               throw error;
             }
           },
+          // Router OCR is billed like every OCR read (Rich page with words + the job's compute), not as a local model.
+          recordOcrRead: (outcome) => { recordOcrReads(state.usageLedger, document.id, outcome, { stage: this.name }); },
+          hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
           recordLocalUsage: (event) => {
             state.usageLedger.record({
                 provider: "vision-runtime",
@@ -936,6 +942,9 @@ export class VisionExtractStage implements Stage {
         },
       });
       for (const warning of result.executorWarnings) console.warn(`[page-router] document=${document.id} ${warning}`);
+      // Pages whose router OCR failed in its boundary are OCR-failed pages, like scan fill's: no reader serves them.
+      const ocrFailed = result.executorFailures.filter((failure) => failure.reason === OCR_BOUNDARY_FAILED).map((failure) => failure.pageNumber);
+      if (ocrFailed.length) recordOcrFailedPages(state, document.id, ocrFailed);
       // Executor pages that failed for a reason other than a vision call (no raster, crop, local tool).
       for (const failure of result.executorFailures) {
         if (!executorOutcomes.has(failure.pageNumber)) {

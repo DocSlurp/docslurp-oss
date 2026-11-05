@@ -229,8 +229,9 @@ export class RoutePagesStage implements Stage {
         routing,
         documentFormat: "pdf",
         // TL1: OCR-layer agreement is off until its threshold is re-tuned for the PP-OCR recogniser
-        // (routing/probe/ocr-layer.ts); without a recogniser OCR-layer pages stay unverified.
-        verifyOcrLayer: true,
+        // (routing/probe/ocr-layer.ts). With no recogniser the probe would only render pages on the host for nothing,
+        // so OCR-layer pages stay unverified and nothing is rendered for it.
+        verifyOcrLayer: false,
         recognise: undefined,
         probe: this.deps.probe ?? createProbeRunner(),
         signal,
