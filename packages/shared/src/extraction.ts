@@ -245,7 +245,8 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
       }
     }
     if (isPlainObject(next.voting) && hostPdf.some((entry) => entry.path[0] === "voting")) {
-      delete next.voting.secondary;
+      // Explicitly the next extractor of the (now vm-pdf-only) order, never a host parser.
+      next.voting.secondary = "next-in-order";
       dropped.push("documentExtraction.voting.secondary");
     }
   }

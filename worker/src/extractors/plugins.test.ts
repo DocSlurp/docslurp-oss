@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultPipelineFeatures, hostPdfExtractorsUnderSandbox, normalizeStoredPipelineFeatures } from "@docslurp/shared";
 import {
   VM_PDF_EXTRACTOR_ID, assertExtractorPluginConfiguration, extractorPluginSpecifiers, loadExtractorPlugins, registerExtractorPlugin,
   requireSandboxedPdfProvider, resetExtractorPluginsForTest, sandboxedPdfProvider, type ExtractorPlugin, type SandboxedPdfExtractorProvider,
@@ -54,6 +55,36 @@ describe("extractor plugin registration", () => {
     expect(() => registry.resolve("pdf", [VM_PDF_EXTRACTOR_ID, "poppler-text"])).toThrow(/poppler-text refused for pdf/);
     // Other formats keep their own order.
     expect(registry.resolve("image", ["ocr"])).toEqual(["ocr"]);
+  });
+
+  it.each([
+    ["DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1"],
+  ])("under %s=%s a stored config emptied of host parsers resolves to vm-pdf only, and an empty order fails closed", (name, value) => {
+    vi.stubEnv(name, value);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const registry = new ExtractorRegistry();
+    const stored = {
+      ...defaultPipelineFeatures,
+      documentExtraction: { ...defaultPipelineFeatures.documentExtraction, order: { pdf: ["kreuzberg", "native-pdf", "poppler-text"] },
+        pages: ["ocr"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "native-pdf" } },
+    };
+    const extraction = normalizeStoredPipelineFeatures(stored as never, "run test").documentExtraction;
+    expect(extraction.order.pdf).toBeUndefined();
+    expect(extraction.pages).toEqual([]);
+    expect(extraction.enrich).toEqual([]);
+    expect(extraction.voting.secondary).toBe("next-in-order");
+    expect(hostPdfExtractorsUnderSandbox(extraction)).toEqual([]);
+    // No order: the deployment's default, which is vm-pdf alone; never the built-in host order.
+    expect(registry.resolve("pdf", extraction.order.pdf)).toEqual([VM_PDF_EXTRACTOR_ID]);
+    // An explicitly empty order is not a request for the default: it fails closed.
+    expect(() => registry.resolve("pdf", [])).toThrow(/no extractor configured for pdf/);
+    // A stored empty list alone never parses into a run (fail closed) ...
+    const emptyOnly = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction, order: { pdf: [] } } };
+    expect(() => normalizeStoredPipelineFeatures(emptyOnly as never, "run test")).toThrow();
+    // ... and beside host ids elsewhere it is dropped with them, which again leaves vm-pdf alone.
+    const emptied = normalizeStoredPipelineFeatures({ ...stored, documentExtraction: { ...stored.documentExtraction, order: { pdf: [] } } } as never, "run test");
+    expect(registry.resolve("pdf", emptied.documentExtraction.order.pdf)).toEqual([VM_PDF_EXTRACTOR_ID]);
   });
 
   it("refuses a provider that is not ready instead of running anything", async () => {

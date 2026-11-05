@@ -4,7 +4,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, normalizeStoredPipelineFeatures } from "@docslurp/shared";
 
 import { acceptSandboxedPdfResult, type SandboxedPdfJob } from "../extractors/plugins.js";
 import type { Document, WorkspaceRun } from "../models.js";
@@ -124,6 +124,29 @@ describe("the sandboxed PDF route on the worker host", () => {
       expect(h.hostPdf()).toEqual([]);
       expect(h.upsertPageFacts).not.toHaveBeenCalled();
     } finally { await h.cleanup(); }
+  });
+
+  it.each([
+    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf"],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1"],
+  ])("under %s=%s runs a stored config emptied of host parsers in vm-pdf alone, never a default host parser", async (name, value) => {
+    vi.stubEnv(name, value);
+    vi.stubEnv("WORKER_PAGE_FACTS", "true");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // What the worker's store hands the stage for a run whose stored pipeline named only host parsers.
+    const stored = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction,
+      order: { pdf: ["kreuzberg", "native-pdf"] }, pages: ["ocr"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "kreuzberg" } } };
+    const extraction = normalizeStoredPipelineFeatures(stored as never, "run run-1").documentExtraction;
+    const h = await harness({ markdown: "Text\f\f\f" }, extraction as never);
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.state.documentStage("doc-1", "extract-markdown");
+      expect(checkpoint?.status).toBe("completed");
+      expect(checkpoint?.stats).toMatchObject({ extractor: "vm-pdf" });
+      expect(h.commands.map((command) => command.binary)).toEqual(["test-vm"]);
+      expect(h.hostPdf()).toEqual([]);
+      expect(h.upsertPageFacts).not.toHaveBeenCalled();
+    } finally { await h.cleanup(); vi.restoreAllMocks(); }
   });
 
   it("bills nothing when the provider does not report OCR pages, still without probing the host", async () => {

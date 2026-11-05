@@ -76,7 +76,7 @@ describe("a stored host PDF extractor under a sandboxed PDF deployment", () => {
     const stored = { order: { pdf: ["kreuzberg"], image: ["ocr"] }, pages: ["ocr", "vm-pdf"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "native-pdf" } };
     const { value, dropped } = sanitizeStoredDocumentExtraction(stored);
     expect(dropped).toEqual(["documentExtraction.order.pdf", "documentExtraction.pages", "documentExtraction.enrich", "documentExtraction.voting.secondary"]);
-    expect(value).toMatchObject({ order: { image: ["ocr"] }, pages: ["vm-pdf"], enrich: [], voting: { enabled: true } });
+    expect(value).toMatchObject({ order: { image: ["ocr"] }, pages: ["vm-pdf"], enrich: [], voting: { enabled: true, secondary: "next-in-order" } });
     expect(hostPdfExtractorsUnderSandbox(value)).toEqual([]);
     const refused = documentExtractionConfigSchema.safeParse(stored);
     expect(refused.success).toBe(false);
